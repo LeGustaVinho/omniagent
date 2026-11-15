@@ -46,6 +46,12 @@ export function openFixtureList(api: DockviewApi) {
   api.addPanel({ id: "fixture:list", title: "Fixture runs", component: "fixtures" });
 }
 
+export function openProviderSettings(api: DockviewApi) {
+  const panel = api.getPanel("provider-settings");
+  if (panel) return panel.api.setActive();
+  api.addPanel({ id: "provider-settings", title: "Provider settings", component: "providerSettings" });
+}
+
 export function openFixtureRun(api: DockviewApi, runId: string) {
   const id = `fixture:${runId}`;
   const panel = api.getPanel(id);

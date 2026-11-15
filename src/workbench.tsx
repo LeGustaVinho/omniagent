@@ -9,11 +9,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
 import { FixtureListPanel, FixtureRunPanel } from "@/fixture-panels";
+import { ProviderSettingsPanel } from "@/provider-settings";
 import { useRunSubscription } from "@/run-projection";
-import { openFixtureList, persistFixtureLayout, restoreFixtureLayout } from "@/workspace-tabs";
+import { openFixtureList, openProviderSettings, persistFixtureLayout, restoreFixtureLayout } from "@/workspace-tabs";
 import "dockview/dist/styles/dockview.css";
 
-const panels = { fixtures: FixtureListPanel, run: FixtureRunPanel };
+const panels = { fixtures: FixtureListPanel, run: FixtureRunPanel, providerSettings: ProviderSettingsPanel };
 
 function TabActions({ activePanel, panels, group }: IDockviewHeaderActionsProps) {
   if (!activePanel || panels.length < 2) return null;
@@ -88,6 +89,10 @@ export default function Workbench({ checkout }: { checkout: ProjectCheckout }) {
       <aside aria-label="Workspace" className="w-35 shrink-0 border-r border-border bg-card p-2.5">
         <Button className="w-full justify-start" variant="outline" disabled={!layoutReady} onClick={() => { if (view) openFixtureList(view); }}>
           Fixture runs
+        </Button>
+        <Button className="mt-2 w-full justify-start px-2" variant="outline" disabled={!layoutReady}
+          onClick={() => { if (view) openProviderSettings(view); }}>
+          Provider settings
         </Button>
       </aside>
       <section aria-label="Workspace tabs" className="flex min-w-0 flex-1 flex-col">

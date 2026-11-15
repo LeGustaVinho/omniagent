@@ -1,10 +1,15 @@
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
 use omniagent::{
     evidence::FixtureInputEvidence,
+    providers::{
+        Provider,
+        profiles::{CliProbe, ConfiguredExecutable, probe_cli},
+    },
     repository::ProjectCheckout,
     runs::{RunSnapshot, SubscriptionUpdate},
     store::Store,
@@ -15,6 +20,47 @@ use uuid::Uuid;
 
 #[derive(Default)]
 pub struct EventSubscriptions(Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>);
+
+#[tauri::command]
+pub async fn cli_executables(store: State<'_, Store>) -> Result<Vec<ConfiguredExecutable>, String> {
+    let mut paths = Vec::new();
+    for provider in Provider::ALL {
+        paths.push(
+            store
+                .configured_executable(provider)
+                .await
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(paths)
+}
+
+#[tauri::command]
+pub async fn set_cli_executable(
+    store: State<'_, Store>,
+    provider: Provider,
+    executable: Option<PathBuf>,
+) -> Result<ConfiguredExecutable, String> {
+    store
+        .set_cli_executable(provider, executable)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn probe_cli_executable(
+    store: State<'_, Store>,
+    provider: Provider,
+) -> Result<CliProbe, String> {
+    let configured = store
+        .configured_executable(provider)
+        .await
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || probe_cli(configured))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
 
 #[tauri::command]
 pub async fn active_checkout(store: State<'_, Store>) -> Result<Option<ProjectCheckout>, String> {

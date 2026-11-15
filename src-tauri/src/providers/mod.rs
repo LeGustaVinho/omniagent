@@ -22,6 +22,24 @@ pub enum Provider {
 }
 
 impl Provider {
+    pub const ALL: [Self; 3] = [Self::Codex, Self::Claude, Self::Antigravity];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Antigravity => "antigravity",
+        }
+    }
+
+    pub fn adapter(self) -> &'static dyn CliAdapter {
+        match self {
+            Self::Codex => &codex::CodexAdapter,
+            Self::Claude => &claude::ClaudeAdapter,
+            Self::Antigravity => &antigravity::AntigravityAdapter,
+        }
+    }
+
     pub fn executable(self) -> &'static str {
         match self {
             Self::Codex => "codex.exe",
@@ -49,7 +67,9 @@ pub enum ProbeKind {
     SessionHandshake,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum Authentication {
     Authenticated,
     Required,
@@ -413,5 +433,6 @@ pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod goal;
+pub mod profiles;
 mod rpc;
 pub mod runtime;

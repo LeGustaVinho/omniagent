@@ -49,6 +49,7 @@ async function startSession(application) {
     capabilities: { browserName: "webview2", "tauri:options": { application } },
   });
   await browser.setTimeout({ script: 8_000 });
+  await browser.waitUntil(() => browser.execute(() => typeof window.__TAURI_INTERNALS__?.invoke === "function"));
   return browser;
 }
 
@@ -131,7 +132,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     await browser.$('button[aria-label="Move tab left"]').click();
     const firstHeading = await browser.$(".dv-content-container h1").getText();
     assert.deepEqual((await readTabs(browser)).groups, [[firstHeading, "Fixture runs"]]);
-    await browser.$('aside[aria-label="Workspace"] button').click();
+    await browser.$('aside[aria-label="Workspace"]').$("button=Fixture runs").click();
     await browser.$("button=Start fixture").click();
     await browser.$("button=Cancel run").waitForDisplayed();
     const secondHeading = await browser.$(".dv-content-container h1").getText();
@@ -154,7 +155,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     assert.deepEqual(await readTabs(browser), expectedTabs);
     assert.equal(await browser.$("header span[title]").getAttribute("title"), checkout.checkoutRoot);
 
-    await browser.$('aside[aria-label="Workspace"] button').click();
+    await browser.$('aside[aria-label="Workspace"]').$("button=Fixture runs").click();
     await browser.$("button=Start fixture").click();
     await browser.$("form input").waitForDisplayed();
     const scope = { checkoutId: checkout.checkoutId };
@@ -188,6 +189,22 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     assert.equal(new Set(history.map((event) => event.seq)).size, history.length);
     assert.ok(history.every((event, index) => index === 0 || BigInt(history[index - 1].seq) < BigInt(event.seq)));
     assert.equal((await runRows(browser, runId)).length, history.length);
+
+    await browser.$("button=Provider settings").click();
+    const executable = browser.$('input[name="codex"]');
+    await executable.waitForDisplayed();
+    await executable.setValue(application);
+    const form = browser.$('form:has(input[name="codex"])');
+    await form.$("button=Save").click();
+    await browser.waitUntil(async () => {
+      const providers = await invoke(browser, "cli_executables");
+      return providers.find((provider) => provider.provider === "codex")?.executable === application;
+    });
+    await form.$("button=Use PATH").click();
+    await browser.waitUntil(async () => {
+      const providers = await invoke(browser, "cli_executables");
+      return providers.find((provider) => provider.provider === "codex")?.executable === null;
+    });
   } finally {
     try {
       await browser?.deleteSession();
