@@ -495,40 +495,14 @@ async fn scheduled_writer_records_worktree_identity_and_git_state_before_launch(
     Ok(())
 }
 
-#[tokio::test]
-async fn native_writer_captures_immutable_binary_and_git_changes_per_attempt() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let database = temp.path().join("store.sqlite");
-    let store = Store::open(database.clone())?;
-    let source = temp.path().join("source");
-    let project = repository(&store, &source).await?;
-    let other = repository(&store, &temp.path().join("other")).await?;
-    let task = store
-        .create_project_task(project.project_id.clone(), "Evidence".into())
-        .await?;
-    let managed = provision_task_worktree(
-        &store,
-        temp.path().join("worktrees"),
-        project.project_id.clone(),
-        task.id.clone(),
-        project.checkout_id.clone(),
-    )
-    .await?;
-    fs::create_dir_all(source.join(".git/info"))?;
-    fs::write(source.join(".git/info/exclude"), "ignored.txt\n")?;
-    fs::write(
-        managed.root.join("previous.txt"),
-        "Existing untracked data\n",
-    )?;
-    fs::write(
-        managed.root.join("file.sample"),
-        "Preexisting unstaged line\n",
-    )?;
-
+async fn candidate_parent(
+    store: &Store,
+    checkout: &ProjectCheckout,
+    runner: &CandidateWriter,
+) -> Result<String> {
     let conversation = store
-        .create_conversation(project.checkout_id, "Parent".into())
+        .create_conversation(checkout.checkout_id.clone(), "Parent".into())
         .await?;
-    let runner = Arc::new(CandidateWriter);
     let parent = store
         .prepare_agent_attempt(
             conversation.id,
@@ -537,7 +511,7 @@ async fn native_writer_captures_immutable_binary_and_git_changes_per_attempt() -
                 provider: Provider::Codex,
                 profile_id: "writer".into(),
                 account_binding: None,
-                checkout: dunce::canonicalize(&source)?,
+                checkout: checkout.checkout_root.clone().into(),
                 executable: std::env::current_exe()?,
                 cli_version: "0.169.0-alpha.11.1".into(),
                 runner: runner.identity().into(),
@@ -550,19 +524,84 @@ async fn native_writer_captures_immutable_binary_and_git_changes_per_attempt() -
         )
         .await?;
     store.mark_agent_running(parent.run.id.clone()).await?;
+    Ok(parent.run.id)
+}
+
+#[tokio::test]
+async fn same_agent_and_branch_keep_worktree_evidence_scoped_to_project_and_attempt() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("store.sqlite");
+    let store = Store::open(database.clone())?;
+    let source = temp.path().join("source");
+    let project = repository(&store, &source).await?;
+    let other = repository(&store, &temp.path().join("other")).await?;
+    let task = store
+        .create_project_task(project.project_id.clone(), "Evidence".into())
+        .await?;
+    // Task IDs are project-scoped. Reuse the ID to give both worktrees the
+    // same generated branch name without changing the production provisioner.
+    rusqlite::Connection::open(&database)?.execute(
+        "INSERT INTO project_tasks (project_id, id, title) VALUES (?1, ?2, 'Sibling evidence')",
+        [&other.project_id, &task.id],
+    )?;
+    let managed = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project.project_id.clone(),
+        task.id.clone(),
+        project.checkout_id.clone(),
+    )
+    .await?;
+    let sibling = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        other.project_id.clone(),
+        task.id.clone(),
+        other.checkout_id.clone(),
+    )
+    .await?;
+    assert_eq!(managed.branch, sibling.branch);
+    assert_ne!(managed.checkout_id, sibling.checkout_id);
+    assert_ne!(managed.root, sibling.root);
+    for project_root in [&project.repository_root, &other.repository_root] {
+        let info = Path::new(project_root).join(".git/info");
+        fs::create_dir_all(&info)?;
+        fs::write(info.join("exclude"), "ignored.txt\n")?;
+    }
+    fs::write(
+        sibling.root.join("sibling-only.txt"),
+        "Sibling worktree data\n",
+    )?;
+    fs::write(
+        managed.root.join("previous.txt"),
+        "Existing untracked data\n",
+    )?;
+    fs::write(
+        managed.root.join("file.sample"),
+        "Preexisting unstaged line\n",
+    )?;
+
+    let runner = Arc::new(CandidateWriter);
+    let parent = candidate_parent(&store, &project, &runner).await?;
+    let other_parent = candidate_parent(&store, &other, &runner).await?;
     let env = AdmissionEnvironment {
         runner: runner.identity().into(),
         bridge_available: false,
     };
     let mut ids = Vec::new();
     let mut artifacts = Vec::new();
-    for key in ["earlier", "later"] {
+    for (target, origin, key) in [
+        (&managed, &parent, "earlier"),
+        (&sibling, &other_parent, "earlier"),
+        (&managed, &parent, "later"),
+    ] {
         let job = store
             .submit_agent_job(
-                parent.run.id.clone(),
+                origin.clone(),
                 key.into(),
                 JobRequest {
-                    checkout_id: Some(managed.checkout_id.clone()),
+                    checkout_id: Some(target.checkout_id.clone()),
                     task_id: Some(task.id.clone()),
                     mode: SessionMode::ApprovedWrite,
                     instructions: "Edit the fixture".into(),
@@ -572,7 +611,7 @@ async fn native_writer_captures_immutable_binary_and_git_changes_per_attempt() -
             )
             .await?;
         let inspection = store
-            .inspect_job(project.project_id.clone(), job.id, env.clone())
+            .inspect_job(target.project_id.clone(), job.id, env.clone())
             .await?
             .context("job not persisted")?;
         let [AdmissionBlocker::Approval { approval_id }] = inspection.blockers.as_slice() else {
@@ -582,7 +621,7 @@ async fn native_writer_captures_immutable_binary_and_git_changes_per_attempt() -
             );
         };
         store
-            .decide_job_approval(project.project_id.clone(), approval_id.clone(), true)
+            .decide_job_approval(target.project_id.clone(), approval_id.clone(), true)
             .await?;
         let attempt = store
             .claim_next_job(env.clone())
@@ -593,13 +632,14 @@ async fn native_writer_captures_immutable_binary_and_git_changes_per_attempt() -
             .wait()
             .await?;
         let evidence = store
-            .attempt_worktree_evidence(project.project_id.clone(), run_id.clone())
+            .attempt_worktree_evidence(target.project_id.clone(), run_id.clone())
             .await?
             .context("attempt was not found")?;
         let AttemptWorktreeEvidence::Saved { artifact } = evidence else {
             anyhow::bail!("candidate was not saved for {key} ({status:?}): {evidence:?}");
         };
         assert_eq!(status, RunStatus::Succeeded);
+        assert_eq!(&artifact.start.worktree, target);
         ids.push(run_id);
         artifacts.push(artifact);
     }
@@ -646,7 +686,37 @@ async fn native_writer_captures_immutable_binary_and_git_changes_per_attempt() -
         STANDARD.decode(changes.untracked[0].content_base64.as_deref().unwrap())?,
         [0, 255, 68, 13, 10]
     );
-    assert_ne!(first.revision, artifacts[1].revision);
+    let second_project = &artifacts[1];
+    assert!(
+        second_project
+            .candidate
+            .changes
+            .as_ref()
+            .context("sibling changes missing")?
+            .untracked
+            .iter()
+            .any(|file| file.path == "sibling-only.txt")
+    );
+    assert!(
+        !changes
+            .untracked
+            .iter()
+            .any(|file| file.path == "sibling-only.txt")
+    );
+    let later = &artifacts[2];
+    assert_ne!(first.revision, later.revision);
+    let later_files = &later
+        .candidate
+        .changes
+        .as_ref()
+        .context("later changes missing")?
+        .untracked;
+    let later_binary = later_files
+        .iter()
+        .find(|file| file.path == "candidate.bin")
+        .and_then(|file| file.content_base64.as_deref())
+        .context("later bytes missing")?;
+    assert_eq!(STANDARD.decode(later_binary)?, b"Later file revision\n");
     let reopened = Store::open(database)?;
     assert_eq!(
         reopened
@@ -664,9 +734,20 @@ async fn native_writer_captures_immutable_binary_and_git_changes_per_attempt() -
     );
     assert!(
         reopened
-            .live_managed_worktree(other.project_id, task.id.clone())
+            .attempt_worktree_evidence(project.project_id.clone(), ids[1].clone())
             .await?
             .is_none()
+    );
+    let sibling_live = reopened
+        .live_managed_worktree(other.project_id, task.id.clone())
+        .await?
+        .context("sibling live checkout missing")?;
+    assert_eq!(sibling_live.worktree, sibling);
+    assert!(
+        sibling_live
+            .status
+            .iter()
+            .any(|entry| entry == "? sibling-only.txt")
     );
     fs::write(managed.root.join("live-only.txt"), "Live checkout only\n")?;
     let live = reopened
