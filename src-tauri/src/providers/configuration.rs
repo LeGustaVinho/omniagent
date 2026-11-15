@@ -284,7 +284,7 @@ impl Discovery {
             unresolved: self.unresolved,
             provider_revision: reported_revision.map(str::to_owned),
             effective_revision: None,
-            attachment_revision: None,
+            scoped_launch_revision: None,
             environment_revision: None,
             tool_revisions: Default::default(),
         }

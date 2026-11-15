@@ -87,6 +87,8 @@ struct ClaudeSession {
 struct Turn {
     interrupted: bool,
     saw_final_message: bool,
+    last_parent_text: Option<String>,
+    plan_review: Option<ProviderLocation>,
     message_ids: HashMap<Option<String>, String>,
     tool_evidence: HashMap<(Option<String>, String), ProviderEventData>,
 }
@@ -245,6 +247,14 @@ impl ClaudeSession {
                 capabilities,
             },
         )];
+        if self.request.mode == SessionMode::Plan && status["current_permission_mode"] == "plan" {
+            announced.push(self.event(
+                frame,
+                ProviderEventData::PlanningModeConfirmed {
+                    mode: super::planning::PlanningMode::ClaudePermissionMode,
+                },
+            ));
+        }
         if let Some(models) = models {
             announced.push(self.event(frame, ProviderEventData::ModelInventory { models }));
         }
@@ -302,6 +312,7 @@ impl ClaudeSession {
             .collect::<String>();
         if !text.is_empty() && parent.is_none() {
             turn.saw_final_message = true;
+            turn.last_parent_text = Some(text.clone());
         }
         for block in content.iter().filter(|block| block["type"] == "tool_use") {
             let evidence = match block["name"].as_str() {
@@ -400,6 +411,35 @@ impl ClaudeSession {
         );
         let input = request["input"].clone();
         let name = field(request, "tool_name")?;
+        if name == "ExitPlanMode" && self.request.mode == SessionMode::Plan {
+            let mut event = self.event(
+                frame,
+                ProviderEventData::PlanReviewRequested {
+                    request_id: id.clone(),
+                },
+            );
+            event.location.item_id = string(request, "tool_use_id").or(event.location.item_id);
+            event.location.parent_item_id =
+                string(request, "parent_tool_use_id").or(event.location.parent_item_id);
+            if event.location.parent_item_id.is_none() {
+                self.turn.as_mut().expect("checked active turn").plan_review =
+                    Some(event.location.clone());
+            }
+            let response = control_success(
+                &id,
+                json!({
+                    "behavior":"deny",
+                "message":format!(
+                    "This turn stays in Plan Mode. Return the complete proposed plan in your response without editing files. {}",
+                    super::planning::PROPOSAL_FORMAT
+                ),
+                }),
+            )?;
+            return Ok(AdapterUpdate {
+                outbound: vec![response],
+                events: vec![event],
+            });
+        }
         let data = if name == "AskUserQuestion" {
             let form = input["questions"].clone();
             let normalized = match super::questions::QuestionForm::claude(&form) {
@@ -463,11 +503,34 @@ impl ClaudeSession {
                 },
             ));
         }
-        if outcome == TurnOutcome::Completed
-            && !turn.saw_final_message
-            && let Some(text) = string(frame, "result").filter(|text| !text.is_empty())
-        {
-            reported.push(self.event(frame, ProviderEventData::AssistantMessage { text }));
+        if outcome == TurnOutcome::Completed {
+            let final_text = string(frame, "result").filter(|text| !text.trim().is_empty());
+            if !turn.saw_final_message
+                && let Some(text) = &final_text
+            {
+                reported.push(self.event(
+                    frame,
+                    ProviderEventData::AssistantMessage { text: text.clone() },
+                ));
+            }
+            if let Some(location) = turn.plan_review
+                && let Some(text) = final_text
+                    .as_deref()
+                    .and_then(super::planning::marked_proposal)
+                    .or_else(|| {
+                        turn.last_parent_text
+                            .as_deref()
+                            .and_then(super::planning::marked_proposal)
+                    })
+            {
+                reported.push(ProviderEvent {
+                    location,
+                    data: ProviderEventData::PlanProposed {
+                        text,
+                        source: super::planning::PlanSource::ClaudeExitPlanMode,
+                    },
+                });
+            }
         }
         reported.push(self.event(frame, ProviderEventData::TurnFinished { outcome }));
         events(reported)
@@ -489,7 +552,7 @@ impl CliSession for ClaudeSession {
     fn arguments(&self) -> Vec<OsString> {
         let tools = match self.request.mode {
             SessionMode::ApprovedWrite => "Read,Glob,Grep,Edit,Write",
-            SessionMode::Plan => "Read,Glob,Grep,AskUserQuestion",
+            SessionMode::Plan => "Read,Glob,Grep,AskUserQuestion,ExitPlanMode",
             SessionMode::ReadOnly => "Read,Glob,Grep",
         };
         let mut arguments = args([

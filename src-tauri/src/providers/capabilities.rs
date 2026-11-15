@@ -208,8 +208,12 @@ pub struct ConfigurationEvidence {
     /// Provider configuration plus detected source revisions. An unknown
     /// provider configuration cannot qualify for evidence reuse.
     pub effective_revision: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) attachment_revision: Option<String>,
+    #[serde(
+        default,
+        alias = "attachmentRevision",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) scoped_launch_revision: Option<String>,
     #[serde(default)]
     pub environment_revision: Option<String>,
     #[serde(default)]
@@ -285,7 +289,12 @@ impl CapabilityScope {
             CapabilitySubject::NativeAttachment { .. }
         );
         let attachment_limits = descriptor.subject == CapabilitySubject::AttachmentLimits;
-        if !native_attachment && !attachment_limits && !self.configuration.unresolved.is_empty() {
+        let planning = matches!(descriptor.subject, CapabilitySubject::Protocol { capability } if capability.is_planning());
+        if !native_attachment
+            && !attachment_limits
+            && !planning
+            && !self.configuration.unresolved.is_empty()
+        {
             return None;
         }
         let (configuration, tool_revision) = match &descriptor.subject {
@@ -300,7 +309,7 @@ impl CapabilityScope {
             CapabilitySubject::AttachmentLimits
                 if descriptor.boundary == EvidenceBoundary::ExactCheckout =>
             {
-                (self.configuration.attachment_revision.as_deref()?, None)
+                (self.configuration.scoped_launch_revision.as_deref()?, None)
             }
             CapabilitySubject::AttachmentLimits => return None,
             CapabilitySubject::Tool { id, .. } => (
@@ -321,6 +330,12 @@ impl CapabilityScope {
             CapabilitySubject::Protocol {
                 capability: Capability::WorkspaceWrite | Capability::ToolApprovals,
             } => (self.configuration.effective_revision.as_deref()?, None),
+            CapabilitySubject::Protocol { capability } if capability.is_planning() => {
+                if descriptor.boundary != EvidenceBoundary::ExactCheckout {
+                    return None;
+                }
+                (self.configuration.scoped_launch_revision.as_deref()?, None)
+            }
             CapabilitySubject::Protocol { .. } => {
                 (self.configuration.environment_revision.as_deref()?, None)
             }
@@ -336,7 +351,9 @@ impl CapabilityScope {
             requested_model: self.requested_model.as_deref(),
             reported_model: self.reported_model.as_deref().or_else(|| {
                 // Claude establishes the selected model when the first input arrives.
-                if (native_attachment || attachment_limits) && self.provider == Provider::Claude {
+                if (native_attachment || attachment_limits || planning)
+                    && self.provider == Provider::Claude
+                {
                     self.requested_model.as_deref()
                 } else {
                     None
@@ -447,7 +464,8 @@ impl ReportedCapabilities {
                     self.effort = Some(effort.clone());
                 }
                 if changed {
-                    self.observed.clear();
+                    self.observed
+                        .retain(|capability| *capability == Capability::NativePlanMode);
                     self.context_usage = None;
                 }
                 changed
@@ -464,6 +482,15 @@ impl ReportedCapabilities {
             ProviderEventData::Approval { .. } => self.observed.insert(Capability::ToolApprovals),
             ProviderEventData::Question { .. } => {
                 self.observed.insert(Capability::PlanningQuestions)
+            }
+            ProviderEventData::QuestionAnswerSubmitted { .. } => {
+                self.observed.insert(Capability::PlanningAnswers)
+            }
+            ProviderEventData::PlanningModeConfirmed { .. } => {
+                self.observed.insert(Capability::NativePlanMode)
+            }
+            ProviderEventData::PlanProposed { .. } => {
+                self.observed.insert(Capability::NativePlanOutput)
             }
             ProviderEventData::ChildActivity { .. } => {
                 self.observed.insert(Capability::SubagentEvents)
@@ -536,7 +563,9 @@ impl ReportedCapabilities {
                     },
                     observed: observed.then_some(ObservedResult::Succeeded),
                     blocker: blocked.then_some(PolicyBlocker::ReadOnlyProfile),
-                    boundary: if capability == Capability::WorkspaceWrite {
+                    boundary: if capability == Capability::WorkspaceWrite
+                        || capability.is_planning()
+                    {
                         EvidenceBoundary::ExactCheckout
                     } else {
                         EvidenceBoundary::EquivalentConfiguration
@@ -807,7 +836,7 @@ mod tests {
                 unresolved: Vec::new(),
                 provider_revision: Some("provider-config".into()),
                 effective_revision: Some("config-1".into()),
-                attachment_revision: Some("attachment-config-1".into()),
+                scoped_launch_revision: Some("scoped-config-1".into()),
                 environment_revision: Some("environment-1".into()),
                 tool_revisions: BTreeMap::from([(
                     "fixture/read_file".into(),

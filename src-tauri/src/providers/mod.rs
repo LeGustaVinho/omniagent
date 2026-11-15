@@ -83,7 +83,10 @@ pub enum Capability {
     Resume,
     Reasoning,
     ToolApprovals,
+    NativePlanMode,
     PlanningQuestions,
+    PlanningAnswers,
+    NativePlanOutput,
     CancelTurn,
     SubagentEvents,
     NativeCompaction,
@@ -94,12 +97,15 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 15] = [
         Self::ModelInventory,
         Self::Resume,
         Self::Reasoning,
         Self::ToolApprovals,
+        Self::NativePlanMode,
         Self::PlanningQuestions,
+        Self::PlanningAnswers,
+        Self::NativePlanOutput,
         Self::CancelTurn,
         Self::SubagentEvents,
         Self::NativeCompaction,
@@ -108,6 +114,16 @@ impl Capability {
         Self::WorkspaceWrite,
         Self::RunScopedMcp,
     ];
+
+    pub(crate) fn is_planning(self) -> bool {
+        matches!(
+            self,
+            Self::NativePlanMode
+                | Self::PlanningQuestions
+                | Self::PlanningAnswers
+                | Self::NativePlanOutput
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -367,6 +383,25 @@ pub enum ProviderEventData {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         normalized: Option<questions::QuestionForm>,
     },
+    QuestionAnswerSubmitted {
+        request_id: RequestId,
+    },
+    PlanningModeConfirmed {
+        mode: planning::PlanningMode,
+    },
+    PlanReviewRequested {
+        request_id: RequestId,
+    },
+    PlanDelta {
+        text: String,
+    },
+    PlanProgress {
+        steps: Vec<planning::PlanStep>,
+    },
+    PlanProposed {
+        text: String,
+        source: planning::PlanSource,
+    },
     Compacted,
     GoalObserved {
         observation: goal::NativeGoalObservation,
@@ -542,6 +577,7 @@ pub mod codex;
 pub mod configuration;
 pub mod goal;
 pub mod launch_scope;
+pub mod planning;
 pub mod plugins;
 pub mod profiles;
 pub mod questions;

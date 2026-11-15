@@ -1,36 +1,94 @@
 use std::{
-    ffi::OsString,
+    fs, io,
+    path::{Path, PathBuf},
     process::Command,
-    time::{Duration, Instant},
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use omniagent::{
-    process_io::CapturedProcess,
+    conversations::SessionScope,
+    process_io::{CapturedProcess, ProcessInput},
     providers::{
-        AdapterUpdate, ApprovalDecision, Provider, ProviderEventData, RequestId, SessionIntent,
-        SessionMode, SessionRequest, TurnInput, TurnOutcome,
+        ApprovalDecision, Capability, Provider, ProviderEventData, RequestId, SessionMode,
+        TurnOutcome,
+        capabilities::{CapabilityStatus, CapabilitySubject, EvidenceOrigin, ObservedResult},
+        planning::{PlanSource, PlanningMode},
+        profiles::{ConfiguredExecutable, probe_cli},
         questions::{QuestionForm, QuestionInput},
+        runtime::start_managed_turn,
     },
-    runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
+    repository,
+    runner::{DirectWindowsRunner, ExecutionPlatform, LaunchRequest, Runner},
+    runs::RunStatus,
+    store::Store,
 };
 use serde_json::{Value, json};
 
-fn send(process: &mut CapturedProcess, update: &AdapterUpdate) -> Result<()> {
-    for message in &update.outbound {
-        process.input.send(message.as_bytes())?;
+#[derive(Default)]
+struct RecordingRunner(Arc<Mutex<Vec<Vec<u8>>>>);
+
+impl Runner for RecordingRunner {
+    fn identity(&self) -> &str {
+        DirectWindowsRunner.identity()
     }
-    Ok(())
+    fn execution_platform(&self) -> Option<ExecutionPlatform> {
+        DirectWindowsRunner.execution_platform()
+    }
+    fn executable_revision(&self, path: &Path) -> Option<String> {
+        DirectWindowsRunner.executable_revision(path)
+    }
+    fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
+        let CapturedProcess {
+            input,
+            output,
+            control,
+        } = DirectWindowsRunner.launch(request)?;
+        Ok(CapturedProcess {
+            input: ProcessInput::new(RecordedPipe {
+                input,
+                frames: self.0.clone(),
+            }),
+            output,
+            control,
+        })
+    }
 }
 
-fn exchange(
+struct RecordedPipe {
+    input: ProcessInput,
+    frames: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl io::Write for RecordedPipe {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.input.send(bytes)?;
+        self.frames.lock().unwrap().push(bytes.to_vec());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct Exchange {
+    mode: PlanningMode,
+    proposal: (PlanSource, String),
+    review_requested: bool,
+}
+
+async fn exchange(
     provider: Provider,
     model: &str,
     prompt: &str,
     reply: impl Fn(&QuestionForm) -> Result<(Value, Value)>,
-) -> Result<String> {
-    let checkout = tempfile::tempdir()?;
-    let checkout_path = dunce::canonicalize(checkout.path())?;
+) -> Result<Exchange> {
+    let sandbox = tempfile::tempdir()?;
+    let checkout_path = sandbox.path().join("checkout");
+    fs::create_dir(&checkout_path)?;
+    let checkout_path = dunce::canonicalize(checkout_path)?;
     ensure!(
         Command::new("git.exe")
             .args(["init", "--quiet"])
@@ -39,136 +97,228 @@ fn exchange(
             .success(),
         "fixture Git repository did not initialize"
     );
-    let adapter = provider.adapter();
-    let executable = adapter.discover(None)?;
-    let mut session = adapter.create_session(SessionRequest {
-        checkout: checkout_path.clone(),
-        intent: SessionIntent::Start,
-        mode: SessionMode::Plan,
-        model: Some(model.into()),
-        effort: None,
+    let store = Store::open(sandbox.path().join("fixture.sqlite"))?;
+    let project = repository::register(&store, checkout_path.clone()).await?;
+    let chat = store
+        .create_conversation(project.checkout_id.clone(), "Planning qualification".into())
+        .await?;
+    let probe = probe_cli(ConfiguredExecutable {
+        provider,
+        executable: None,
     })?;
-    let mut arguments = session.arguments();
-    if provider == Provider::Claude {
-        arguments.retain(|arg| arg != "--safe-mode");
-        arguments.extend(
-            [
-                "--restricted",
-                "--system-prompt-snapshot",
-                "off",
-                "--settings",
-                r#"{"hooks":{},"autoMemoryEnabled":false}"#,
-            ]
-            .map(OsString::from),
-        );
-    } else if provider == Provider::Codex {
-        arguments.splice(
-            ..0,
-            ["-c", "mcp_servers={}", "-c", "project_doc_max_bytes=0"].map(OsString::from),
-        );
-    }
-    let mut process = DirectWindowsRunner.launch(LaunchRequest {
-        version: CONTRACT_VERSION,
-        executable: &executable,
-        checkout: &checkout_path,
-        arguments: &arguments
-            .iter()
-            .map(OsString::as_os_str)
-            .collect::<Vec<_>>(),
-    })?;
-    send(&mut process, &session.start()?)?;
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut sent = false;
-    let mut answered = false;
+    let runner = Arc::new(RecordingRunner::default());
+    let attempt = store
+        .prepare_agent_attempt(
+            chat.id.clone(),
+            chat.context_id,
+            SessionScope {
+                provider,
+                profile_id: "planning-qualification".into(),
+                account_binding: Some("authenticated-vendor-fixture".into()),
+                checkout: checkout_path.clone(),
+                executable: PathBuf::from(probe.executable.context("missing CLI executable")?),
+                cli_version: probe.version.context("missing CLI version")?,
+                runner: runner.identity().into(),
+                permission_revision: "read-only-planning-fixture".into(),
+                mode: SessionMode::Plan,
+                model: Some(model.into()),
+                effort: None,
+            },
+            prompt.into(),
+        )
+        .await?;
+    let run_id = attempt.run.id.clone();
+    let worker = start_managed_turn(store.clone(), runner.clone(), attempt, None);
+    let mut cursor = 0;
+    let mut answered = None;
     let mut output = String::new();
-    loop {
-        let frame = process
-            .output
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .context("planning question fixture stopped or timed out")??;
-        let update = session.receive(frame)?;
-        send(&mut process, &update)?;
-        for event in update.events {
-            let ready = matches!(event.data, ProviderEventData::SessionReady { .. })
-                || (provider == Provider::Claude
-                    && matches!(event.data, ProviderEventData::Handshake { .. }));
-            if ready && !sent {
-                send(
-                    &mut process,
-                    &session.send(TurnInput {
-                        message_id: "planning-question-fixture".into(),
-                        text: prompt.into(),
-                        attachments: Vec::new(),
-                    })?,
-                )?;
-                sent = true;
-            }
-            match event.data {
-                ProviderEventData::Question {
-                    request_id,
-                    form,
-                    normalized: Some(normalized),
-                } => {
-                    ensure!(!answered, "fixture asked an unexpected extra question");
-                    let (reply, expected) = reply(&normalized)?;
-                    let update = session.respond_question(&request_id, reply)?;
-                    let frame: Value = serde_json::from_slice(update.outbound[0].as_bytes())?;
-                    if provider == Provider::Claude {
-                        let RequestId::Text(id) = request_id else {
-                            bail!("Claude returned a non-text request ID")
-                        };
-                        assert_eq!(frame["response"]["request_id"], id);
-                        assert_eq!(
-                            frame["response"]["response"]["updatedInput"]["questions"],
-                            form
-                        );
-                        assert_eq!(
-                            frame["response"]["response"]["updatedInput"]["answers"],
-                            expected
-                        );
-                    } else {
-                        assert_eq!(frame["id"], serde_json::to_value(request_id)?);
-                        assert_eq!(frame["result"], expected);
+    let mut mode = None;
+    let mut proposal = None;
+    let mut review = None;
+    let mut submitted = None;
+    tokio::time::timeout(Duration::from_secs(75), async {
+        loop {
+            let mut outcome = None;
+            for entry in store
+                .agent_observations(chat.id.clone(), run_id.clone(), cursor)
+                .await?
+            {
+                cursor = entry.seq;
+                match entry.event.data {
+                    ProviderEventData::PlanningModeConfirmed { mode: observed } => {
+                        mode = Some(observed)
                     }
-                    send(&mut process, &update)?;
-                    answered = true;
+                    ProviderEventData::PlanReviewRequested { request_id } => {
+                        review = Some(request_id)
+                    }
+                    ProviderEventData::PlanProposed { text, source } => {
+                        proposal = Some((source, text))
+                    }
+                    ProviderEventData::QuestionAnswerSubmitted { request_id } => {
+                        submitted = Some(request_id)
+                    }
+                    ProviderEventData::Question {
+                        request_id,
+                        form,
+                        normalized: Some(normalized),
+                    } => {
+                        ensure!(
+                            answered.is_none(),
+                            "fixture asked an unexpected extra question"
+                        );
+                        let (reply, expected) = reply(&normalized)?;
+                        worker.answer(request_id.clone(), reply).await?;
+                        answered = Some((request_id, form, expected));
+                    }
+                    ProviderEventData::AssistantMessage { text } => output.push_str(&text),
+                    ProviderEventData::Approval { request_id, .. } => {
+                        worker.approve(request_id, ApprovalDecision::Deny).await?
+                    }
+                    ProviderEventData::Error { message } => {
+                        bail!("planning question fixture failed: {message}")
+                    }
+                    ProviderEventData::TurnFinished { outcome: observed } => {
+                        outcome = Some(observed)
+                    }
+                    _ => {}
                 }
-                ProviderEventData::AssistantMessage { text } => output.push_str(&text),
-                ProviderEventData::Approval { request_id, .. } => {
-                    send(
-                        &mut process,
-                        &session.respond_approval(&request_id, ApprovalDecision::Deny)?,
-                    )?;
-                }
-                ProviderEventData::Error { message } => {
-                    bail!("planning question fixture failed: {message}")
-                }
-                ProviderEventData::TurnFinished { outcome } => {
-                    process.control.cancel()?;
-                    process.control.wait()?;
-                    ensure!(
-                        answered,
-                        "{provider:?} did not send a native question. Output: {output}"
-                    );
-                    ensure!(
-                        outcome == TurnOutcome::Completed,
-                        "planning question turn did not complete"
-                    );
-                    return Ok(output);
-                }
-                _ => {}
             }
+            if let Some(outcome) = outcome {
+                ensure!(
+                    outcome == TurnOutcome::Completed,
+                    "planning question turn did not complete"
+                );
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
         }
+    })
+    .await
+    .context("planning question fixture timed out")??;
+    assert_eq!(worker.wait().await?, RunStatus::Succeeded);
+    let (id, raw_form, expected) = answered.with_context(|| {
+        format!("{provider:?} did not deliver a native question. Output: {output}")
+    })?;
+    assert_eq!(submitted, Some(id.clone()));
+    let frames = runner
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|frame| serde_json::from_slice::<Value>(frame))
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    verify_response(provider, &frames, &id, &raw_form, &expected)?;
+    if let Some(id) = &review {
+        let denial = frames
+            .iter()
+            .find(|frame| claude_response_matches(frame, id))
+            .context("Claude plan review response was not delivered")?;
+        assert_eq!(denial["response"]["response"]["behavior"], "deny");
     }
+    let status = Command::new("git.exe")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(&checkout_path)
+        .output()?;
+    ensure!(
+        status.status.success() && status.stdout.is_empty(),
+        "native planning modified the disposable checkout"
+    );
+    let result = Exchange {
+        mode: mode.context("the native planning mode was not confirmed")?,
+        proposal: proposal.with_context(|| {
+            format!("{provider:?} turn finished without a plan proposal. Output: {output}")
+        })?,
+        review_requested: review.is_some(),
+    };
+
+    let evidence = store
+        .agent_dispatch(chat.id, run_id)
+        .await?
+        .context("missing actual planning dispatch evidence")?;
+    let assessment = evidence
+        .snapshot
+        .capabilities
+        .context("missing planning capability assessment")?;
+    let mut descriptors = Vec::new();
+    for capability in [
+        Capability::NativePlanMode,
+        Capability::PlanningQuestions,
+        Capability::PlanningAnswers,
+        Capability::NativePlanOutput,
+    ] {
+        let descriptor = assessment
+            .entries
+            .iter()
+            .find(|entry| entry.descriptor.subject == CapabilitySubject::Protocol { capability })
+            .context("missing planning capability descriptor")?
+            .descriptor
+            .clone();
+        store
+            .record_capability_evidence(
+                assessment.scope.clone(),
+                descriptor.clone(),
+                EvidenceOrigin::AuthenticatedFixture,
+                ObservedResult::Succeeded,
+                evidence.id.clone(),
+            )
+            .await?;
+        descriptors.push(descriptor);
+    }
+    let verified = store
+        .resolve_capability_assessment(assessment.scope, descriptors)
+        .await?;
+    assert_eq!(verified.entries.len(), 4);
+    assert!(
+        verified
+            .entries
+            .iter()
+            .all(|entry| entry.status() == CapabilityStatus::Verified)
+    );
+    Ok(result)
 }
 
-#[test]
+fn claude_response_matches(frame: &Value, id: &RequestId) -> bool {
+    matches!(id, RequestId::Text(id) if frame["type"] == "control_response" && frame["response"]["request_id"] == *id)
+}
+
+fn verify_response(
+    provider: Provider,
+    frames: &[Value],
+    id: &RequestId,
+    form: &Value,
+    expected: &Value,
+) -> Result<()> {
+    if provider == Provider::Claude {
+        let frame = frames
+            .iter()
+            .find(|frame| claude_response_matches(frame, id))
+            .context("missing Claude answer frame")?;
+        assert_eq!(
+            &frame["response"]["response"]["updatedInput"]["questions"],
+            form
+        );
+        assert_eq!(
+            &frame["response"]["response"]["updatedInput"]["answers"],
+            expected
+        );
+    } else {
+        let id = serde_json::to_value(id)?;
+        let frame = frames
+            .iter()
+            .find(|frame| frame["id"] == id && frame.get("result").is_some())
+            .context("missing JSON-RPC question response")?;
+        assert_eq!(&frame["result"], expected);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires authenticated Claude Code with Haiku 5.5"]
-fn claude_plan_transmits_the_verified_multiselect_encoding() -> Result<()> {
+async fn claude_plan_transmits_the_verified_multiselect_encoding() -> Result<()> {
     let answer = exchange(
         Provider::Claude,
         "claude-haiku-5-5",
-        "Do not guess my selection. Use the native AskUserQuestion tool now with exactly one question and multiSelect true to choose which nuts to include in a plan. Offer options named Cashew, Walnut, Almond, and Pecan. After the user answers, reply only with the choices selected. Do not edit any files.",
+        "Do not guess my selection. Use the native AskUserQuestion tool now with exactly one question and multiSelect true to choose which nuts to include in a plan. Offer options named Cashew, Walnut, Almond, and Pecan. After I answer, call ExitPlanMode to offer the plan for review. Put the complete proposed plan in the reply, using the selected names. Do not write any files.",
         |form| {
             ensure!(form.fields.len() == 1, "expected one Claude question");
             let field = &form.fields[0];
@@ -191,17 +341,20 @@ fn claude_plan_transmits_the_verified_multiselect_encoding() -> Result<()> {
                 json!({field.id.clone():selected.join(", ")}),
             ))
         },
-    )?;
+    ).await?;
+    assert_eq!(answer.mode, PlanningMode::ClaudePermissionMode);
+    assert!(answer.review_requested);
+    assert_eq!(answer.proposal.0, PlanSource::ClaudeExitPlanMode);
     ensure!(
-        answer.contains("Walnut") && answer.contains("Pecan"),
+        answer.proposal.1.contains("Walnut") && answer.proposal.1.contains("Pecan"),
         "Claude did not use both selected labels"
     );
     Ok(())
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "requires authenticated Antigravity with Gemini 3.8 Flash"]
-fn antigravity_plan_uses_an_opaque_acp_choice_value() -> Result<()> {
+async fn antigravity_plan_uses_an_opaque_acp_choice_value() -> Result<()> {
     let answer = exchange(
         Provider::Antigravity,
         "gemini-3.8-flash",
@@ -234,10 +387,55 @@ fn antigravity_plan_uses_an_opaque_acp_choice_value() -> Result<()> {
                 json!({"action":"accept","content":values}),
             ))
         },
-    )?;
+    ).await?;
+    assert_eq!(answer.mode, PlanningMode::AcpSessionMode);
+    assert_eq!(answer.proposal.0, PlanSource::AntigravityPlanCommand);
     ensure!(
-        answer.to_ascii_lowercase().contains("walnut"),
+        answer.proposal.1.to_ascii_lowercase().contains("walnut"),
         "Antigravity did not use the selected option"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Codex with gpt-6-luna"]
+async fn codex_plan_delivers_a_native_question_and_authoritative_plan_item() -> Result<()> {
+    let answer = exchange(
+        Provider::Codex,
+        "gpt-6-luna",
+        "Create a short plan for naming a file without editing the repository. Before suggesting a plan, use the native request_user_input tool with one question asking which name to use. Offer Cashew, Walnut, and Almond. Do not guess my answer. After I select a name, emit the final plan with the selected name using the proposed_plan block.",
+        |form| {
+            let (field, choice) = form
+                .fields
+                .iter()
+                .find_map(|field| {
+                    let QuestionInput::Choice {
+                        options,
+                        multiple: false,
+                        ..
+                    } = &field.input
+                    else {
+                        return None;
+                    };
+                    Some((
+                        field,
+                        options
+                            .iter()
+                            .find(|option| option.label.contains("Walnut"))?,
+                    ))
+                })
+                .context("Codex did not publish the requested named choices")?;
+            Ok((
+                json!({"action":"accept","values":{field.id.clone():choice.id}}),
+                json!({"answers":{field.id.clone():{"answers":[choice.id]}}}),
+            ))
+        },
+    ).await?;
+    assert_eq!(answer.mode, PlanningMode::CodexCollaboration);
+    assert_eq!(answer.proposal.0, PlanSource::CodexPlanItem);
+    ensure!(
+        answer.proposal.1.to_ascii_lowercase().contains("walnut"),
+        "Codex did not use the selected option"
     );
     Ok(())
 }

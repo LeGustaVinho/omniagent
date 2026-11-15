@@ -144,6 +144,12 @@ enum Command {
     Question(RequestId, Value, oneshot::Sender<Result<()>>),
 }
 
+enum Decision {
+    Permission(RequestId, ApprovalDecision),
+    QuestionAnswer(RequestId),
+    QuestionDismissal,
+}
+
 pub struct ManagedTurn {
     pub run_id: String,
     commands: mpsc::SyncSender<Command>,
@@ -205,6 +211,7 @@ pub fn start_managed_turn(
             plan,
             final_answer: String::new(),
             streamed_answer: String::new(),
+            proposed_plan: None,
             reported: ReportedCapabilities::default(),
             reported_skills: None,
             plugin_inventory: None,
@@ -229,11 +236,13 @@ pub fn start_managed_turn(
                 RunStatus::Failed
             }
         };
-        let answer = if execution.final_answer.is_empty() {
-            execution.streamed_answer
-        } else {
-            execution.final_answer
-        };
+        let answer = execution.proposed_plan.unwrap_or_else(|| {
+            if execution.final_answer.is_empty() {
+                execution.streamed_answer
+            } else {
+                execution.final_answer
+            }
+        });
         execution
             .app
             .block_on(execution.store.finish_agent_attempt(
@@ -256,6 +265,7 @@ struct TurnExecution {
     plan: AttemptPlan,
     final_answer: String,
     streamed_answer: String,
+    proposed_plan: Option<String>,
     reported: ReportedCapabilities,
     reported_skills: Option<SkillCatalog>,
     plugin_inventory: Option<PluginInventory>,
@@ -272,7 +282,11 @@ impl TurnExecution {
         // Child traffic belongs to the run timeline, not the parent transcript.
         if event.location.parent_item_id.is_none() {
             if source == EventSource::Provider
-                || matches!(event.data, ProviderEventData::BridgeRegistration { .. })
+                || matches!(
+                    event.data,
+                    ProviderEventData::BridgeRegistration { .. }
+                        | ProviderEventData::QuestionAnswerSubmitted { .. }
+                )
             {
                 scope_changed = self.reported.observe(&event.data);
             }
@@ -285,6 +299,9 @@ impl TurnExecution {
             match &event.data {
                 ProviderEventData::AssistantDelta { text } => self.streamed_answer.push_str(text),
                 ProviderEventData::AssistantMessage { text } => self.final_answer.push_str(text),
+                ProviderEventData::PlanProposed { text, .. } => {
+                    self.proposed_plan = Some(text.clone())
+                }
                 _ => {}
             }
         }
@@ -536,15 +553,20 @@ impl TurnExecution {
                     self.deliver_decision(
                         process,
                         session.respond_approval(&id, answer),
-                        Some((id, answer)),
+                        Decision::Permission(id, answer),
                         reply,
                     )?;
                 }
                 Ok(Command::Question(id, answer, reply)) => {
+                    let decision = if answer.get("action").is_none_or(|action| action == "accept") {
+                        Decision::QuestionAnswer(id.clone())
+                    } else {
+                        Decision::QuestionDismissal
+                    };
                     self.deliver_decision(
                         process,
                         session.respond_question(&id, answer),
-                        None,
+                        decision,
                         reply,
                     )?;
                 }
@@ -915,23 +937,23 @@ impl TurnExecution {
         &mut self,
         process: &mut CapturedProcess,
         update: Result<AdapterUpdate>,
-        approval: Option<(RequestId, ApprovalDecision)>,
+        decision: Decision,
         reply: oneshot::Sender<Result<()>>,
     ) -> Result<()> {
         match update {
             Ok(update) => {
-                let applied = (|| {
-                    let request_event_seq = approval
-                        .map(|(id, decision)| {
-                            self.app.block_on(self.store.prepare_permission_decision(
-                                self.plan.run.id.clone(),
-                                self.plan.run.turn_id.clone(),
-                                id,
-                                decision,
-                                PermissionRoute::Native,
-                            ))
-                        })
-                        .transpose()?;
+                let applied: Result<()> = (|| {
+                    let request_event_seq = if let Decision::Permission(id, approval) = &decision {
+                        Some(self.app.block_on(self.store.prepare_permission_decision(
+                            self.plan.run.id.clone(),
+                            self.plan.run.turn_id.clone(),
+                            id.clone(),
+                            *approval,
+                            PermissionRoute::Native,
+                        ))?)
+                    } else {
+                        None
+                    };
                     let applied = self.record_update(process, update, EventSource::Application);
                     let settled = if let Some(seq) = request_event_seq {
                         let delivery = if applied.is_ok() {
@@ -945,7 +967,17 @@ impl TurnExecution {
                         Ok(())
                     };
                     applied?;
-                    settled
+                    settled?;
+                    if let Decision::QuestionAnswer(request_id) = decision {
+                        self.record(
+                            ProviderEvent {
+                                location: ProviderLocation::default(),
+                                data: ProviderEventData::QuestionAnswerSubmitted { request_id },
+                            },
+                            EventSource::Application,
+                        )?;
+                    }
+                    Ok(())
                 })();
                 let _ = reply.send(
                     applied

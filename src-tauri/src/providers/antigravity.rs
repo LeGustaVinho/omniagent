@@ -67,6 +67,7 @@ impl CliAdapter for AntigravityAdapter {
             permissions: HashMap::new(),
             questions: HashMap::new(),
             available_commands: None,
+            plan_command_available: false,
             bridge: None,
             prompt_capabilities: Value::Null,
         }))
@@ -215,6 +216,7 @@ struct Turn {
     text: String,
     cancel_requested: bool,
     tools: HashMap<String, ReportedTool>,
+    asked_for_plan: bool,
 }
 
 #[derive(Default)]
@@ -236,6 +238,7 @@ struct AcpSession {
     permissions: HashMap<RequestId, Vec<PermissionOption>>,
     questions: HashMap<RequestId, super::questions::QuestionForm>,
     available_commands: Option<(String, Vec<String>)>,
+    plan_command_available: bool,
     bridge: Option<crate::mcp_bridge::BridgeLaunch>,
     prompt_capabilities: Value,
 }
@@ -438,7 +441,15 @@ impl AcpSession {
         if let Some((session, names)) = self.available_commands.take()
             && session == id
         {
+            self.plan_command_available = names.iter().any(|name| name == "plan");
             announced.push(self.event(ProviderEventData::AvailableCommands { names }));
+        }
+        if self.request.mode == SessionMode::Plan
+            && self.configuration.current(Setting::Mode) == Some("plan")
+        {
+            announced.push(self.event(ProviderEventData::PlanningModeConfirmed {
+                mode: super::planning::PlanningMode::AcpSessionMode,
+            }));
         }
         announced.push(
             self.event(ProviderEventData::SessionReady {
@@ -533,6 +544,16 @@ impl AcpSession {
         self.questions.clear();
         let mut result = Vec::new();
         if !turn.text.is_empty() {
+            if outcome == TurnOutcome::Completed
+                && turn.asked_for_plan
+                && self.plan_command_available
+                && let Some(text) = super::planning::marked_proposal(&turn.text)
+            {
+                result.push(self.event(ProviderEventData::PlanProposed {
+                    text,
+                    source: super::planning::PlanSource::AntigravityPlanCommand,
+                }));
+            }
             result.push(self.event(ProviderEventData::AssistantMessage { text: turn.text }));
         }
         result.push(self.event(ProviderEventData::TurnFinished { outcome }));
@@ -562,7 +583,7 @@ impl AcpSession {
             })]));
         }
         if update["sessionUpdate"] == "available_commands_update" {
-            let names = choices(&update["availableCommands"])
+            let names: Vec<_> = choices(&update["availableCommands"])
                 .filter_map(|command| string(command, "name"))
                 .collect();
             if !self.ready {
@@ -570,6 +591,7 @@ impl AcpSession {
                 return Ok(AdapterUpdate::default());
             }
             if self.session_id.as_deref() == Some(session_id) {
+                self.plan_command_available = names.iter().any(|name| name == "plan");
                 return Ok(events([
                     self.event(ProviderEventData::AvailableCommands { names })
                 ]));
@@ -689,7 +711,16 @@ impl AcpSession {
                     summary: false,
                 }
             }
-            Some("user_message_chunk" | "plan" | "session_info_update") => {
+            Some("plan") => {
+                let Ok(steps) = serde_json::from_value(update["entries"].clone()) else {
+                    return Ok(self.update_diagnostic(
+                        update,
+                        "ACP plan update did not contain supported steps",
+                    ));
+                };
+                ProviderEventData::PlanProgress { steps }
+            }
+            Some("user_message_chunk" | "session_info_update") => {
                 return Ok(AdapterUpdate::default());
             }
             _ => {
@@ -822,9 +853,22 @@ impl CliSession for AcpSession {
             .session_id
             .as_deref()
             .context("missing ACP session ID")?;
+        let explicit_plan = input.text.split_whitespace().next() == Some("/plan");
+        let asked_for_plan = self.request.mode == SessionMode::Plan
+            && (explicit_plan || self.plan_command_available);
+        let text = if asked_for_plan {
+            let prefix = if explicit_plan { "" } else { "/plan " };
+            format!(
+                "{prefix}{}\n\n{}",
+                input.text,
+                super::planning::PROPOSAL_FORMAT
+            )
+        } else {
+            input.text
+        };
         let mut prompt = Vec::new();
-        if !input.text.is_empty() || input.attachments.is_empty() {
-            prompt.push(json!({"type":"text", "text": input.text}));
+        if !text.is_empty() || input.attachments.is_empty() {
+            prompt.push(json!({"type":"text", "text":text}));
         }
         for attachment in &input.attachments {
             if let Some(native) = attachment.native() {
@@ -846,6 +890,7 @@ impl CliSession for AcpSession {
             text: String::new(),
             cancel_requested: false,
             tools: HashMap::new(),
+            asked_for_plan,
         });
         Ok(AdapterUpdate {
             outbound: vec![frame],

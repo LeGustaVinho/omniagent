@@ -334,7 +334,12 @@ impl CodexSession {
             Request::ModelPage => self.model_page(result),
             Request::StartTurn => {
                 let id = required_string(&result["turn"], "id")?;
-                let events = self.learn_turn(id)?;
+                let mut events = self.learn_turn(id)?;
+                if self.request.mode == SessionMode::Plan && self.active.is_some() {
+                    events.push(self.event(ProviderEventData::PlanningModeConfirmed {
+                        mode: super::planning::PlanningMode::CodexCollaboration,
+                    }));
+                }
                 Ok(self.events(events))
             }
             Request::Interrupt => Ok(AdapterUpdate::default()),
@@ -537,6 +542,7 @@ impl CodexSession {
                 }
             }
             "item/agentMessage/delta" => ProviderEventData::AssistantDelta { text: delta()? },
+            "item/plan/delta" => ProviderEventData::PlanDelta { text: delta()? },
             "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
                 ProviderEventData::Reasoning {
                     text: delta()?,
@@ -614,6 +620,11 @@ impl CodexSession {
             ("agentMessage", true) => ProviderEventData::AssistantMessage {
                 text: required_string(item, "text")?.to_owned(),
             },
+            ("plan", true) => ProviderEventData::PlanProposed {
+                text: required_string(item, "text")?.to_owned(),
+                source: super::planning::PlanSource::CodexPlanItem,
+            },
+            ("plan", false) => return Ok(AdapterUpdate::default()),
             ("contextCompaction", true) => ProviderEventData::Compacted,
             (
                 "commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall" | "webSearch",
@@ -1167,13 +1178,14 @@ mod tests {
             }}),
         )?;
         assert_eq!(start.events[0].location.turn_id.as_deref(), Some("turn"));
+        let accepted = inbound(
+            &mut *session,
+            json!({"id":4,"result":{"turn":{"id":"turn"}}}),
+        )?;
         assert!(
-            inbound(
-                &mut *session,
-                json!({"id":4,"result":{"turn":{"id":"turn"}}})
-            )?
-            .events
-            .is_empty()
+            matches!(accepted.events.as_slice(), [event] if event.data == ProviderEventData::PlanningModeConfirmed {
+                mode: crate::providers::planning::PlanningMode::CodexCollaboration
+            })
         );
         let unrelated = inbound(
             &mut *session,
