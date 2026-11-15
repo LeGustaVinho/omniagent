@@ -6,6 +6,7 @@ import type { Conversation } from "@/bindings/Conversation";
 import type { AdmissionBlocker } from "@/bindings/AdmissionBlocker";
 import type { Job } from "@/bindings/Job";
 import type { JobInspection } from "@/bindings/JobInspection";
+import type { RecoveryAction } from "@/bindings/RecoveryAction";
 import type { MessageRevision } from "@/bindings/MessageRevision";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
@@ -21,7 +22,7 @@ const draftWrites = new Map<string, Promise<void>>();
 const historyOffsets = new Map<string, number>();
 
 function pendingJob(inspection: JobInspection | null | undefined) {
-  return Boolean(inspection && !inspection.job.latestAttempt && inspection.job.queueState !== "cancelled");
+  return Boolean(inspection && (!inspection.job.latestAttempt || inspection.job.queuedRecovery) && inspection.job.queueState !== "cancelled");
 }
 
 function waitReason(blocker: AdmissionBlocker | undefined): string {
@@ -184,13 +185,21 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
       queryClient.setQueryData<string>(draftKey, (current) => current === submitted ? "" : current);
       setDraftStatus("");
       setDraftError("");
-      queryClient.setQueryData<JobInspection>(jobKey, { job: queuedJob, blockers: [] });
+      queryClient.setQueryData<JobInspection>(jobKey, { job: queuedJob, blockers: [], recoveryActions: [] });
       void queryClient.invalidateQueries({ queryKey: jobKey });
     },
   });
   const cancelQueued = useMutation({
     mutationFn: (jobId: string) => invoke("cancel_conversation_job", { conversationId, jobId }),
     onSettled: () => queryClient.invalidateQueries({ queryKey: jobKey }),
+  });
+  const recover = useMutation({
+    mutationFn: ({ jobId, runId, action }: { jobId: string; runId: string; action: RecoveryAction }) =>
+      invoke<Job>("recover_conversation_job", { conversationId, jobId, runId, action }),
+    onSuccess: (recoveryJob) => {
+      queryClient.setQueryData<JobInspection>(jobKey, { job: recoveryJob, blockers: [], recoveryActions: [] });
+      void queryClient.invalidateQueries({ queryKey: jobKey });
+    },
   });
 
   function editDraft(text: string) {
@@ -210,7 +219,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!busy && text.trim() && selected?.option.selectable && !send.isPending) send.mutate(text);
+    if (!busy && text.trim() && selected?.option.selectable && !send.isPending && !recover.isPending) send.mutate(text);
   }
 
   return (
@@ -236,9 +245,17 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           <p role="status" className="text-sm text-muted-foreground">{waitReason(job.blockers[0])}</p>
           <Button variant="outline" disabled={cancelQueued.isPending} onClick={() => cancelQueued.mutate(job.job.id)}>Cancel queued message</Button>
         </div>}
-        {(latestJob.error || cancelQueued.error) && <p role="alert" className="text-sm text-red-300">{String(latestJob.error || cancelQueued.error)}</p>}
+        {(latestJob.error || cancelQueued.error || recover.error) && <p role="alert" className="text-sm text-red-300">{String(latestJob.error || cancelQueued.error || recover.error)}</p>}
         {latest.error && <p role="alert" className="text-sm text-red-300">{String(latest.error)}</p>}
         {run && <ConversationRun key={run.id} conversationId={conversationId} run={run} cancelRequested={attempt?.runId === run.id && attempt.cancelRequested} />}
+        {job && attempt && !busy && job.recoveryActions.length > 0 && (
+          <div className="mx-auto mt-3 flex max-w-3xl flex-wrap gap-2" aria-label="Recover job">
+            {job.recoveryActions.map((action) => <Button key={action} variant="outline" disabled={recover.isPending || send.isPending}
+              onClick={() => recover.mutate({ jobId: job.job.id, runId: attempt.runId, action })}>
+              {action === "retry" ? "Retry saved input" : "Resume from checkpoint"}
+            </Button>)}
+          </div>
+        )}
       </div>
       <form onSubmit={submit} className="max-h-[55%] overflow-auto border-t border-border p-4">
         <div className="mx-auto grid max-w-3xl gap-2">
@@ -278,7 +295,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           <textarea id={`draft-${conversationId}`} className="min-h-24 rounded-md border border-input bg-background p-3 text-sm focus-visible:outline-ring"
             value={text} onChange={(event) => editDraft(event.target.value)} disabled={draft.isPending || Boolean(draft.error) || send.isPending} />
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <Button type="submit" disabled={!text.trim() || busy || latest.isPending || latestJob.isPending || !selected?.option.selectable || send.isPending}>
+            <Button type="submit" disabled={!text.trim() || busy || latest.isPending || latestJob.isPending || !selected?.option.selectable || send.isPending || recover.isPending}>
               {send.isPending ? "Starting…" : "Send"}
             </Button>
             {draftStatus && <p role="status" className="text-xs text-muted-foreground">{draftStatus}</p>}

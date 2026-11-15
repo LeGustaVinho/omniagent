@@ -62,6 +62,12 @@ pub enum NativeHistory {
         session_id: String,
         context_id: String,
     },
+    ProviderRecovery {
+        session_id: String,
+        source_run_id: String,
+        source_turn_id: Option<String>,
+        context_id: String,
+    },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Deserialize, Serialize)]

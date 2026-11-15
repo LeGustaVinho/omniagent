@@ -426,6 +426,25 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
         const run = await invoke(browser, "latest_conversation_run", { conversationId: conversation.id });
         return ["cancelled", "interrupted"].includes(run?.status);
       }, { timeout: 15_000 });
+      const userMessages = (await invoke(browser, "conversation_messages", { conversationId: conversation.id }))
+        .filter(({ role }) => role === "user").map(({ revisionId }) => revisionId);
+      const retryButton = panel.$("button=Retry saved input");
+      await retryButton.waitForDisplayed();
+      await retryButton.click();
+      let retry;
+      await browser.waitUntil(async () => {
+        const inspection = await invoke(browser, "latest_conversation_job", { conversationId: conversation.id });
+        retry = inspection.job.latestAttempt;
+        return retry?.previousRunId === activeRun && retry?.recovery === "retry";
+      });
+      assert.equal(retry.ordinal, 2);
+      assert.deepEqual((await invoke(browser, "conversation_messages", { conversationId: conversation.id }))
+        .filter(({ role }) => role === "user").map(({ revisionId }) => revisionId), userMessages);
+      await invoke(browser, "stop_conversation_turn", { conversationId: conversation.id, runId: retry.runId });
+      await browser.waitUntil(async () => {
+        const run = await invoke(browser, "latest_conversation_run", { conversationId: conversation.id });
+        return run?.id === retry.runId && ["cancelled", "interrupted"].includes(run.status);
+      }, { timeout: 15_000 });
     }
   } finally {
     try {

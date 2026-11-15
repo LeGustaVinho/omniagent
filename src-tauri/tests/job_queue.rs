@@ -2,12 +2,12 @@ use std::{fs, path::Path, process::Command};
 
 use anyhow::{Context, Result, ensure};
 use omniagent::{
-    conversations::{AttemptPlan, SessionScope},
+    conversations::{AttemptPlan, Conversation, SessionScope},
     jobs::{
         AdmissionBlocker, AdmissionEnvironment, Job, JobContext, JobOrigin, JobRequest,
-        JobRequestConflict, QueueSettings, QueueState,
+        JobRequestConflict, QueueSettings, QueueState, RecoveryAction,
     },
-    providers::{Capability, Provider, SessionMode},
+    providers::{Capability, Provider, SessionIntent, SessionMode},
     repository,
     runner::{DirectWindowsRunner, Runner},
     runs::RunStatus,
@@ -693,9 +693,22 @@ async fn an_occupied_managed_worktree_and_a_declined_approval_block_the_same_job
             .run_id,
         next.run.id
     );
+    store.mark_agent_running(next.run.id.clone()).await?;
     store
-        .finish_agent_attempt(next.run.id, RunStatus::Cancelled, None)
+        .finish_agent_attempt(next.run.id.clone(), RunStatus::Cancelled, None)
         .await?;
+    assert!(inspect(&second).await?.unwrap().recovery_actions.is_empty());
+    assert!(
+        store
+            .queue_job_recovery(
+                second.project_id,
+                second.id,
+                next.run.id,
+                RecoveryAction::Retry
+            )
+            .await
+            .is_err()
+    );
     assert!(store.claim_next_job(environment(false)).await?.is_none());
     assert_eq!(
         inspect(&declined).await?.unwrap().blockers,
@@ -703,5 +716,211 @@ async fn an_occupied_managed_worktree_and_a_declined_approval_block_the_same_job
             reason: "An operator declined this job"
         }]
     );
+    Ok(())
+}
+
+async fn conversation_job(
+    store: &Store,
+    checkout: &Path,
+) -> Result<(Conversation, Job, AttemptPlan)> {
+    let parent = origin(store, checkout).await?;
+    let chat = store
+        .create_conversation(parent.run.checkout_id, "Recoverable job".into())
+        .await?;
+    store
+        .save_conversation_draft(chat.id.clone(), request().instructions.clone())
+        .await?;
+    let job = store
+        .enqueue_conversation_turn(
+            JobContext {
+                conversation_id: chat.id.clone(),
+                context_id: chat.context_id.clone(),
+            },
+            parent.scope,
+            request().instructions,
+        )
+        .await?;
+    let plan = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("missing first attempt")?;
+    Ok((chat, job, plan))
+}
+
+#[tokio::test]
+async fn restart_keeps_inflight_and_queued_recovery_distinct_then_links_only_one_retry()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("queue.sqlite3");
+    let store = Store::open(database.clone())?;
+    let (conversation, job, first) = conversation_job(&store, &temp.path().join("project")).await?;
+    store.mark_agent_running(first.run.id.clone()).await?;
+    drop(store);
+
+    let store = Store::open(database.clone())?;
+    store.recover_agent_attempts_after_restart().await?;
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    let interrupted = store
+        .inspect_job(job.project_id.clone(), job.id.clone(), environment(false))
+        .await?
+        .unwrap();
+    assert_eq!(
+        interrupted.job.latest_attempt.unwrap().status,
+        RunStatus::Interrupted
+    );
+    assert_eq!(interrupted.recovery_actions, [RecoveryAction::Retry]);
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: true,
+            capacity: 1,
+        })
+        .await?;
+    let (one, two) = tokio::join!(
+        store.queue_job_recovery(
+            job.project_id.clone(),
+            job.id.clone(),
+            first.run.id.clone(),
+            RecoveryAction::Retry
+        ),
+        store.queue_job_recovery(
+            job.project_id.clone(),
+            job.id.clone(),
+            first.run.id.clone(),
+            RecoveryAction::Retry
+        ),
+    );
+    assert_eq!(one?, two?);
+    drop(store);
+
+    let reopened = Store::open(database.clone())?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    let saved = reopened
+        .inspect_job(job.project_id.clone(), job.id.clone(), environment(false))
+        .await?
+        .unwrap();
+    assert_eq!(saved.job.queued_recovery, Some(RecoveryAction::Retry));
+    assert_eq!(saved.blockers, [AdmissionBlocker::QueuePaused]);
+    assert!(reopened.claim_next_job(environment(false)).await?.is_none());
+    reopened
+        .set_job_queue_settings(QueueSettings {
+            paused: false,
+            capacity: 1,
+        })
+        .await?;
+    let competing_connection = Store::open(database.clone())?;
+    let (one, two) = tokio::join!(
+        reopened.claim_next_job(environment(false)),
+        competing_connection.claim_next_job(environment(false))
+    );
+    let claims = [one?, two?].into_iter().flatten().collect::<Vec<_>>();
+    assert_eq!(claims.len(), 1);
+    let retry = &claims[0];
+    assert_eq!(retry.conversation_id, conversation.id);
+    assert_eq!(
+        retry.previous_run_id.as_deref(),
+        Some(first.run.id.as_str())
+    );
+    assert_eq!(retry.input, first.input);
+    assert_eq!(retry.context_id, first.context_id);
+    assert!(matches!(retry.intent, SessionIntent::Start));
+    assert_ne!(retry.agent_session_id, first.agent_session_id);
+    let record = reopened.job(job.project_id, job.id).await?.unwrap();
+    assert!(record.queued_recovery.is_none());
+    let latest = record.latest_attempt.unwrap();
+    assert_eq!(latest.ordinal, 2);
+    assert_eq!(
+        latest.previous_run_id.as_deref(),
+        Some(first.run.id.as_str())
+    );
+    assert_eq!(latest.recovery, Some(RecoveryAction::Retry));
+    let db = rusqlite::Connection::open(database)?;
+    let events: i64 = db.query_row("SELECT count(*) FROM run_events WHERE turn_id = ?1 AND json_extract(payload, '$.status') = 'interrupted'", [&first.run.turn_id], |row| row.get(0))?;
+    assert_eq!(events, 1);
+    reopened
+        .finish_agent_attempt(retry.run.id.clone(), RunStatus::Cancelled, None)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resume_uses_the_recorded_partial_result_and_blocks_when_the_context_changes() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("queue.sqlite3"))?;
+    let (conversation, job, first) = conversation_job(&store, &temp.path().join("project")).await?;
+    store.mark_agent_running(first.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(
+            first.run.id.clone(),
+            RunStatus::Failed,
+            Some("Retained partial answer".into()),
+        )
+        .await?;
+    let checkpoint = store
+        .conversation(conversation.id.clone())
+        .await?
+        .context_id;
+    store
+        .queue_job_recovery(
+            job.project_id.clone(),
+            job.id.clone(),
+            first.run.id.clone(),
+            RecoveryAction::Resume,
+        )
+        .await?;
+    let resumed = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("missing resume attempt")?;
+    assert!(matches!(resumed.intent, SessionIntent::Start));
+    assert_eq!(resumed.previous_run_id, Some(first.run.id));
+    assert_eq!(resumed.input[0], first.input[0]);
+    assert_eq!(resumed.input[1].text, "Retained partial answer");
+    assert!(
+        resumed.input[2]
+            .text
+            .starts_with("Continue the interrupted task")
+    );
+    store.mark_agent_running(resumed.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(resumed.run.id.clone(), RunStatus::Failed, None)
+        .await?;
+    store
+        .queue_job_recovery(
+            job.project_id.clone(),
+            job.id.clone(),
+            resumed.run.id,
+            RecoveryAction::Retry,
+        )
+        .await?;
+    store
+        .replace_conversation_message(
+            conversation.id,
+            resumed.context_id.clone(),
+            first.input[0].message_id.clone(),
+            "Edited after queueing".into(),
+        )
+        .await?;
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    let blocked = store
+        .inspect_job(job.project_id.clone(), job.id.clone(), environment(false))
+        .await?
+        .unwrap();
+    assert_eq!(
+        blocked.blockers,
+        [AdmissionBlocker::ContextChanged {
+            context_id: resumed.context_id
+        }]
+    );
+    store
+        .set_pending_job_state(job.project_id, job.id, QueueState::Cancelled)
+        .await?;
+    let db = rusqlite::Connection::open(temp.path().join("queue.sqlite3"))?;
+    let saved: String = db.query_row(
+        "SELECT result_context_id FROM agent_attempts WHERE run_id = ?1",
+        [resumed.previous_run_id.unwrap()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(saved, checkpoint);
     Ok(())
 }

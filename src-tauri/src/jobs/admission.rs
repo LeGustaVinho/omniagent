@@ -7,8 +7,8 @@ use ts_rs::TS;
 
 use crate::{
     conversations::{
-        AttemptPlan, SessionScope, consume_matching_draft, insert_conversation, insert_job_attempt,
-        load_conversation,
+        AttemptHistory, AttemptPlan, SessionScope, consume_matching_draft, insert_conversation,
+        insert_job_attempt, insert_job_recovery_attempt, load_conversation,
     },
     protection,
     providers::{Capability, SessionMode},
@@ -16,7 +16,10 @@ use crate::{
     store::Store,
 };
 
-use super::{Job, JobContext, JobOrigin, JobRequest, QueueState, insert_job, load_job};
+use super::{
+    Job, JobContext, JobOrigin, JobRequest, QueueState, RecoveryAction, insert_job, load_job,
+    recovery::{pending_recovery, recovery_source},
+};
 
 #[derive(Debug, Clone)]
 pub struct AdmissionEnvironment {
@@ -78,6 +81,7 @@ pub enum AdmissionBlocker {
 pub struct JobInspection {
     pub job: Job,
     pub blockers: Vec<AdmissionBlocker>,
+    pub recovery_actions: Vec<RecoveryAction>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -124,7 +128,8 @@ impl Store {
                 let already_pending: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.conversation_id = ?1
                  AND j.origin_run_id IS NULL AND j.queue_state IN ('queued', 'paused')
-                 AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id))",
+                 AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
+                      OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id)))",
                     [&context.conversation_id],
                     |row| row.get(0),
                 )?;
@@ -264,7 +269,8 @@ impl Store {
             let candidates = {
                 let mut query = tx.prepare(
                     "SELECT project_id, id FROM jobs j WHERE queue_state = 'queued'
-                    AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
+                    AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
+                         OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id))
                     ORDER BY priority DESC, sequence",
                 )?;
                 query
@@ -282,23 +288,57 @@ impl Store {
                 let scope = inputs
                     .scope
                     .context("admitted job has no effective CLI profile")?;
-                let conversation = match (&job.origin, job.context) {
-                    (JobOrigin::Operator, Some(context)) => {
-                        load_conversation(&tx, &context.conversation_id)?
-                    }
-                    _ => insert_conversation(
-                        &tx,
-                        job.checkout_id.clone(),
-                        "Background job".into(),
-                        true,
-                    )?,
+                let (mut plan, previous_run, ordinal, kind) = if let Some(action) =
+                    job.queued_recovery
+                {
+                    let checkpoint = recovery_source(&tx, &job)?
+                        .context("The recovery checkpoint is no longer current")?;
+                    let conversation = load_conversation(&tx, &checkpoint.conversation_id)?;
+                    let history = match action {
+                        RecoveryAction::Retry => AttemptHistory::Retry {
+                            input_context_id: checkpoint.input_context_id.clone(),
+                        },
+                        RecoveryAction::Resume => AttemptHistory::Resume {
+                            native: checkpoint.native_resume(&tx, &scope)?,
+                        },
+                    };
+                    let plan = insert_job_recovery_attempt(&tx, conversation, scope, history)?;
+                    ensure!(
+                        plan.previous_run_id.as_ref() == Some(&checkpoint.source_run_id),
+                        "The recovered attempt lost its lineage"
+                    );
+                    let ordinal = job
+                        .latest_attempt
+                        .as_ref()
+                        .context("missing previous job attempt")?
+                        .ordinal
+                        + 1;
+                    tx.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [&job.id])?;
+                    (plan, Some(checkpoint.source_run_id), ordinal, action.key())
+                } else {
+                    let conversation = match (&job.origin, job.context) {
+                        (JobOrigin::Operator, Some(context)) => {
+                            load_conversation(&tx, &context.conversation_id)?
+                        }
+                        _ => insert_conversation(
+                            &tx,
+                            job.checkout_id.clone(),
+                            "Background job".into(),
+                            true,
+                        )?,
+                    };
+                    (
+                        insert_job_attempt(&tx, conversation, scope, &inputs.request.instructions)?,
+                        None,
+                        1,
+                        "initial",
+                    )
                 };
-                let mut plan =
-                    insert_job_attempt(&tx, conversation, scope, &inputs.request.instructions)?;
                 plan.requires_bridge = inputs.request.requires_bridge;
                 tx.execute(
-                    "INSERT INTO job_attempts(job_id, ordinal, run_id) VALUES (?1, 1, ?2)",
-                    params![job.id, plan.run.id],
+                    "INSERT INTO job_attempts(job_id, ordinal, run_id, previous_run_id, kind)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![job.id, ordinal, plan.run.id, previous_run, kind],
                 )?;
                 if job.mode == SessionMode::ApprovedWrite {
                     tx.execute(
@@ -401,12 +441,24 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
 }
 
 fn inspect(db: &Connection, job: Job, env: &AdmissionEnvironment) -> Result<JobInspection> {
-    let blockers = if job.latest_attempt.is_some() {
+    let awaiting_recovery = job.queued_recovery.is_some();
+    let blockers = if job.latest_attempt.is_some() && !awaiting_recovery {
         Vec::new()
     } else {
         evaluate(db, &job, &load_inputs(db, &job)?, env)?
     };
-    Ok(JobInspection { job, blockers })
+    let recovery_actions = if awaiting_recovery {
+        Vec::new()
+    } else {
+        recovery_source(db, &job)?
+            .map(|source| source.actions(job.mode))
+            .unwrap_or_default()
+    };
+    Ok(JobInspection {
+        job,
+        blockers,
+        recovery_actions,
+    })
 }
 
 fn evaluate(
@@ -465,7 +517,18 @@ fn evaluate(
         }
         _ => {}
     }
-    if let (JobOrigin::Operator, Some(context)) = (&job.origin, &job.context) {
+    if let Some(action) = job.queued_recovery {
+        let (source_run, context_id) =
+            pending_recovery(db, job)?.context("Missing queued recovery")?;
+        let matching = recovery_source(db, job)?.is_some_and(|source| {
+            source.source_run_id == source_run
+                && source.result_context_id == context_id
+                && source.actions(job.mode).contains(&action)
+        });
+        if !matching {
+            blockers.push(ContextChanged { context_id });
+        }
+    } else if let (JobOrigin::Operator, Some(context)) = (&job.origin, &job.context) {
         let conversation = load_conversation(db, &context.conversation_id)?;
         if conversation.context_id != context.context_id {
             blockers.push(ContextChanged {

@@ -7,10 +7,12 @@ use uuid::Uuid;
 use crate::{protection, providers::SessionMode, runs::RunStatus, store::Store};
 
 mod admission;
+mod recovery;
 mod scheduler;
 pub use admission::{
     AdmissionBlocker, AdmissionEnvironment, JobInspection, ProjectQueue, QueueSettings,
 };
+pub use recovery::RecoveryAction;
 pub use scheduler::JobScheduler;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +104,7 @@ pub struct Job {
     pub priority: i32,
     pub queue_state: QueueState,
     pub latest_attempt: Option<JobAttempt>,
+    pub queued_recovery: Option<RecoveryAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -112,6 +115,8 @@ pub struct JobAttempt {
     pub run_id: String,
     pub status: RunStatus,
     pub cancel_requested: bool,
+    pub previous_run_id: Option<String>,
+    pub recovery: Option<RecoveryAction>,
 }
 
 #[derive(Debug)]
@@ -233,10 +238,14 @@ impl Store {
                 let changed = tx.execute(
                     "UPDATE jobs SET queue_state = ?3 WHERE project_id = ?1 AND id = ?2
                  AND queue_state IN ('queued', 'paused')
-                 AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = ?2)",
+                 AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = ?2)
+                      OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = ?2))",
                     params![project_id, id, state.as_sql()],
                 )?;
                 ensure!(changed == 1, "job is not pending in this project");
+                if state == QueueState::Cancelled {
+                    tx.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [&id])?;
+                }
                 let job = load_job(&tx, &project_id, &id)?.context("job no longer exists")?;
                 tx.commit()?;
                 Ok(job)
@@ -338,12 +347,14 @@ fn insert_job(
 fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> {
     let mut query = db.prepare(
         "SELECT j.checkout_id, j.task_id, j.conversation_id, j.context_id, j.origin_run_id, j.request_id,
-                j.mode, j.priority, j.queue_state, a.ordinal, a.run_id, r.status, a.cancel_requested
+                j.mode, j.priority, j.queue_state, a.ordinal, a.run_id, r.status, a.cancel_requested,
+                a.previous_run_id, a.kind, recovery.action
          FROM jobs j
          LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (
              SELECT max(ordinal) FROM job_attempts WHERE job_id = j.id
          )
          LEFT JOIN runs r ON r.id = a.run_id
+         LEFT JOIN job_recoveries recovery ON recovery.job_id = j.id
          WHERE j.project_id = ?1 AND j.id = ?2",
     )?;
     let mut rows = query.query(params![project_id, id])?;
@@ -372,6 +383,8 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
                 run_id: row.get(10)?,
                 status,
                 cancel_requested: row.get::<_, bool>(12)? && !status.is_terminal(),
+                previous_run_id: row.get(13)?,
+                recovery: RecoveryAction::from_attempt_kind(row.get_ref(14)?.as_str()?)?,
             })
         }
         None => None,
@@ -387,12 +400,25 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
         priority: row.get(7)?,
         queue_state: QueueState::from_sql(row.get_ref(8)?.as_str()?)?,
         latest_attempt,
+        queued_recovery: row
+            .get::<_, Option<String>>(15)?
+            .as_deref()
+            .map(RecoveryAction::from_key)
+            .transpose()?,
     }))
 }
 
 pub(crate) fn release_writer(db: &Connection, run_id: &str) -> Result<()> {
     db.execute(
         "DELETE FROM job_writer_reservations WHERE run_id = ?1",
+        [run_id],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn record_process_launch(db: &Connection, run_id: &str) -> Result<()> {
+    db.execute(
+        "UPDATE job_attempts SET process_launch_requested = 1 WHERE run_id = ?1",
         [run_id],
     )?;
     Ok(())

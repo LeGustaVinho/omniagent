@@ -2,7 +2,9 @@ use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::SessionScope,
     diagnostics,
-    jobs::{Job, JobContext, JobInspection, JobScheduler, ProjectQueue, QueueState},
+    jobs::{
+        Job, JobContext, JobInspection, JobScheduler, ProjectQueue, QueueState, RecoveryAction,
+    },
     model_catalog::ModelSelection,
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionMode,
@@ -137,6 +139,29 @@ pub async fn cancel_conversation_job(
             .set_pending_job_state(inspection.job.project_id, job_id, QueueState::Cancelled)
             .await?;
         Ok(())
+    }
+    .await
+    .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn recover_conversation_job(
+    store: State<'_, Store>,
+    scheduler: State<'_, JobScheduler>,
+    conversation_id: String,
+    job_id: String,
+    run_id: String,
+    action: RecoveryAction,
+) -> Result<Job, String> {
+    async {
+        let inspection = store
+            .latest_conversation_job(conversation_id, scheduler.environment())
+            .await?
+            .filter(|entry| entry.job.id == job_id)
+            .context("This job is no longer current in the conversation")?;
+        store
+            .queue_job_recovery(inspection.job.project_id, job_id, run_id, action)
+            .await
     }
     .await
     .map_err(ui_error)

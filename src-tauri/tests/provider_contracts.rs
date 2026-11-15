@@ -12,8 +12,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use omniagent::{
     conversations::{Conversation, SessionScope},
-    dispatch::{Delivery, EventSource},
-    jobs::{AdmissionBlocker, JobContext, JobScheduler, QueueSettings},
+    dispatch::{Delivery, EventSource, NativeHistory},
+    jobs::{AdmissionBlocker, JobContext, JobScheduler, QueueSettings, RecoveryAction},
     process::TerminalOutcome,
     process_io::{CapturedProcess, OutputFrame, ProcessInput, Stream},
     providers::{
@@ -75,12 +75,17 @@ fn protocol_fixture_worker() -> Result<()> {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     let mut bytes = Vec::new();
+    let mut turn_id = "wire-turn";
     let prompt = loop {
         assert!(stdin.read_until(b'\n', &mut bytes)? > 0);
         let frame: Value = serde_json::from_slice(&bytes)?;
         if is_prompt(provider, &frame) {
             fs::write(checkout.join("received-prompt.ndjson"), &bytes)?;
             break frame;
+        }
+        if frame["method"] == "thread/resume" {
+            fs::write(checkout.join("received-resume.ndjson"), &bytes)?;
+            turn_id = "recovered-turn";
         }
         if let Some(reply) = handshake(provider, &frame, &checkout)? {
             writeln!(stdout, "{reply}")?;
@@ -90,7 +95,7 @@ fn protocol_fixture_worker() -> Result<()> {
     };
 
     writeln!(stdout, "{{malformed-fixture")?;
-    for line in transcript(provider, &prompt, "wire-turn") {
+    for line in transcript(provider, &prompt, turn_id) {
         if let Some(index) = line.find('☕') {
             // Deliberately split the UTF-8 codepoint and the enclosing frame.
             let split = index + 1;
@@ -108,7 +113,7 @@ fn protocol_fixture_worker() -> Result<()> {
             assert!(stdin.read_until(b'\n', &mut bytes)? > 0);
             let reply: Value = serde_json::from_slice(&bytes)?;
             if provider == Provider::Codex && reply["method"] == "turn/interrupt" {
-                assert_eq!(reply["params"]["turnId"], "wire-turn");
+                assert_eq!(reply["params"]["turnId"], turn_id);
                 fs::write(checkout.join("received-interrupt.ndjson"), &bytes)?;
                 let deadline = std::time::Instant::now() + Duration::from_secs(4);
                 while !checkout.join("settle-interrupt").exists() {
@@ -119,7 +124,7 @@ fn protocol_fixture_worker() -> Result<()> {
                     thread::sleep(Duration::from_millis(25));
                 }
                 let terminal = json!({"method":"turn/completed", "params":{
-                    "threadId":SESSION,"turn":{"id":"wire-turn","status":"interrupted"}
+                    "threadId":SESSION,"turn":{"id":turn_id,"status":"interrupted"}
                 }});
                 writeln!(stdout, "{terminal}")?;
                 stdout.flush()?;
@@ -152,6 +157,10 @@ impl RunControl for FinishedProbe {
 impl Runner for FixtureRunner {
     fn identity(&self) -> &str {
         "windows-provider-wire-fixture"
+    }
+
+    fn executable_revision(&self, path: &Path) -> Option<String> {
+        DirectWindowsRunner.executable_revision(path)
     }
 
     fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
@@ -335,7 +344,9 @@ async fn all_managed_adapters_deliver_protected_dispatch_over_native_pipes() -> 
 async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confirms_stop()
 -> Result<()> {
     let sandbox = tempfile::tempdir()?;
-    let (store, chat, runner, scope) = open_wire_fixture(Provider::Codex, sandbox.path()).await?;
+    let (store, chat, runner, mut scope) =
+        open_wire_fixture(Provider::Codex, sandbox.path()).await?;
+    scope.account_binding = Some("fixture-account".into());
     let checkout = scope.checkout.clone();
     store
         .set_job_queue_settings(QueueSettings {
@@ -461,6 +472,87 @@ async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confir
         |row| row.get(0),
     )?;
     assert_eq!(delivery, "closed");
+    drop(connection);
+    let original = store
+        .agent_dispatch(chat.id.clone(), run.id.clone())
+        .await?
+        .context("missing original wire evidence")?;
+    let queued = store
+        .queue_job_recovery(
+            job.project_id.clone(),
+            job.id.clone(),
+            run.id.clone(),
+            RecoveryAction::Resume,
+        )
+        .await?;
+    assert_eq!(queued.queued_recovery, Some(RecoveryAction::Resume));
+    let resumed = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(current) = store.latest_conversation_run(chat.id.clone()).await?
+                && current.id != run.id
+            {
+                assert!(
+                    !current.status.is_terminal(),
+                    "resumed run ended before approval: {current:?}"
+                );
+                if !store
+                    .pending_conversation_inputs(chat.id.clone(), current.id.clone())
+                    .await?
+                    .is_empty()
+                {
+                    scheduler
+                        .active_turn(&chat.id, &current.id)?
+                        .approve(RequestId::Text(APPROVAL.into()), ApprovalDecision::Deny)
+                        .await?;
+                    return Ok::<_, anyhow::Error>(current);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .context("resumed provider did not reach approval")??;
+    let complete = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let latest = store
+                .job(job.project_id.clone(), job.id.clone())
+                .await?
+                .context("job disappeared")?
+                .latest_attempt
+                .context("attempt disappeared")?;
+            if latest.run_id == resumed.id && latest.status.is_terminal() {
+                return Ok::<_, anyhow::Error>(latest);
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .context("resumed provider did not finish")??;
+    assert_eq!(complete.status, RunStatus::Succeeded);
+    assert_eq!(complete.ordinal, 2);
+    assert_eq!(complete.previous_run_id.as_deref(), Some(run.id.as_str()));
+    assert_eq!(complete.recovery, Some(RecoveryAction::Resume));
+    let resume_wire: Value =
+        serde_json::from_slice(&fs::read(checkout.join("received-resume.ndjson"))?)?;
+    assert_eq!(resume_wire["params"]["threadId"], SESSION);
+    let resumed_wire = store
+        .agent_dispatch(chat.id.clone(), resumed.id)
+        .await?
+        .context("missing recovered dispatch")?;
+    assert_eq!(
+        resumed_wire.snapshot.native_history,
+        NativeHistory::ProviderRecovery {
+            session_id: SESSION.into(),
+            source_run_id: run.id.clone(),
+            source_turn_id: Some("wire-turn".into()),
+            context_id: original.snapshot.context_id,
+        }
+    );
+    assert_eq!(resumed_wire.snapshot.submitted_messages.len(), 1);
+    assert_eq!(
+        original.frames,
+        store.agent_dispatch(chat.id, run.id).await?.unwrap().frames
+    );
     scheduler.shutdown().await?;
     Ok(())
 }
@@ -476,7 +568,7 @@ fn handshake(provider: Provider, request: &Value, checkout: &Path) -> Result<Opt
     let result = match (provider, request["method"].as_str()) {
         (Provider::Codex, Some("initialize")) => json!({"userAgent":"fixture"}),
         (Provider::Codex, Some("initialized")) => return Ok(None),
-        (Provider::Codex, Some("thread/start")) => json!({
+        (Provider::Codex, Some("thread/start" | "thread/resume")) => json!({
             "thread":{"id":SESSION},"cwd":checkout,"model":"fixture-model",
             "sandbox":{"type":"readOnly"}
         }),
