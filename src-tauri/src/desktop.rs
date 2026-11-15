@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use tauri::{
     App, AppHandle, Manager, WindowEvent,
@@ -6,9 +6,13 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_notification::NotificationExt;
 
 use crate::fixture_runtime::FixtureRuns;
-use omniagent::jobs::JobScheduler;
+use omniagent::{
+    diagnostics,
+    jobs::{JobNoticeKind, JobNotices, JobScheduler},
+};
 
 pub fn show(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -58,6 +62,49 @@ pub fn create_tray(app: &App) -> tauri::Result<()> {
         tray = tray.icon(icon.clone());
     }
     tray.build(app)?;
+    Ok(())
+}
+
+pub fn notify_job_activity(
+    app: AppHandle,
+    mut notices: JobNotices,
+) -> tauri_plugin_notification::Result<()> {
+    let on_click = app.clone();
+    app.notification().on_action(move |action| {
+        if action.action_id() == "tap" {
+            let window = on_click.clone();
+            let _ = on_click.run_on_main_thread(move || show(&window));
+        }
+    })?;
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let result = async {
+                let notice = notices.next().await?;
+                let body = match notice.kind {
+                    JobNoticeKind::JobApproval => "A queued job needs your approval.",
+                    JobNoticeKind::Permission => "A running job needs a permission decision.",
+                    JobNoticeKind::Question => "A job is waiting for your answer.",
+                    JobNoticeKind::Succeeded => "A job completed.",
+                    JobNoticeKind::Failed => "A job failed.",
+                    JobNoticeKind::Interrupted => "An interrupted job needs review.",
+                };
+                app.notification()
+                    .builder()
+                    .title("OmniAgent")
+                    .body(body)
+                    .show()?;
+                notices.acknowledge(&notice).await
+            }
+            .await;
+            if let Err(error) = result {
+                eprintln!(
+                    "Job notification: {}",
+                    diagnostics::preview(&error.to_string())
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    });
     Ok(())
 }
 

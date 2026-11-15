@@ -13,7 +13,9 @@ use anyhow::{Context, Result, bail};
 use omniagent::{
     conversations::{Conversation, SessionScope},
     dispatch::{Delivery, EventSource, NativeHistory},
-    jobs::{AdmissionBlocker, JobContext, JobScheduler, QueueSettings, RecoveryAction},
+    jobs::{
+        AdmissionBlocker, JobContext, JobNoticeKind, JobScheduler, QueueSettings, RecoveryAction,
+    },
     process::TerminalOutcome,
     process_io::{CapturedProcess, OutputFrame, ProcessInput, Stream},
     providers::{
@@ -385,6 +387,7 @@ async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confir
             PROMPT.into(),
         )
         .await?;
+    let mut notices = store.job_notices();
     let scheduler = JobScheduler::start(store.clone(), runner, None);
     let inspector = store
         .inspect_job(
@@ -403,7 +406,14 @@ async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confir
         })
         .await?;
 
+    let approval = tokio::time::timeout(Duration::from_secs(15), notices.next()).await??;
+    assert_eq!(approval.kind, JobNoticeKind::Permission);
+    assert_eq!(approval.project_id, job.project_id);
+    assert_eq!(approval.job_id, job.id);
+    assert!(approval.request_event_seq.is_some());
     let run = fixture_approval(&store, &chat.id).await?;
+    assert_eq!(approval.run_id.as_ref(), Some(&run.id));
+    notices.acknowledge(&approval).await?;
     assert_eq!(run.status, RunStatus::Running);
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let quiet = store
@@ -536,6 +546,11 @@ async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confir
     assert_eq!(complete.ordinal, 2);
     assert_eq!(complete.previous_run_id.as_deref(), Some(run.id.as_str()));
     assert_eq!(complete.recovery, Some(RecoveryAction::Resume));
+    let completed = tokio::time::timeout(Duration::from_secs(3), notices.next()).await??;
+    assert_eq!(completed.kind, JobNoticeKind::Succeeded);
+    assert_eq!(completed.job_id, job.id);
+    assert_eq!(completed.run_id.as_ref(), Some(&resumed.id));
+    notices.acknowledge(&completed).await?;
     let resume_wire: Value =
         serde_json::from_slice(&fs::read(checkout.join("received-resume.ndjson"))?)?;
     assert_eq!(resume_wire["params"]["threadId"], SESSION);

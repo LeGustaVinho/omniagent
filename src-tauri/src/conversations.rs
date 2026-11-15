@@ -596,6 +596,10 @@ impl Store {
         source: EventSource,
         event: ProviderEvent,
     ) -> Result<()> {
+        let wakes_notices = matches!(
+            event.data,
+            ProviderEventData::Approval { .. } | ProviderEventData::Question { .. }
+        );
         let payload = protection::protect(&serde_json::to_vec(&event)?)?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -696,7 +700,11 @@ impl Store {
             }
             tx.commit()?;
             Ok(())
-        }).await
+        }).await?;
+        if wakes_notices {
+            self.job_signal.send_replace(());
+        }
+        Ok(())
     }
 
     pub(crate) async fn prepare_permission_decision(

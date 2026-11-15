@@ -119,6 +119,7 @@ fn main() {
             let path = app.path().app_local_data_dir()?.join("omniagent.sqlite3");
             let store = Store::open(path)?;
             tauri::async_runtime::block_on(store.recover_agent_attempts_after_restart())?;
+            let notices = store.job_notices();
             let scheduler = tauri::async_runtime::block_on(async {
                 JobScheduler::start(
                     store.clone(),
@@ -131,6 +132,7 @@ fn main() {
             app.manage(ipc::EventSubscriptions::default());
             app.manage(fixture_runtime::FixtureRuns::default());
             desktop::create_tray(app)?;
+            desktop::notify_job_activity(app.handle().clone(), notices)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
