@@ -303,14 +303,16 @@ impl Store {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let active = active_attempt(&tx, &run_id)?;
-            if let Some(id) = &event.location.session_id {
+            let primary = source == EventSource::Provider && event.location.parent_item_id.is_none()
+                && !matches!(event.data, ProviderEventData::Diagnostic { .. });
+            if primary && let Some(id) = &event.location.session_id {
                 let old: Option<String> = tx.query_row(
                     "SELECT provider_session_id FROM agent_sessions WHERE id = ?1", [&active.session_id], |row| row.get(0),
                 )?;
                 ensure!(old.as_ref().is_none_or(|old| old == id), "provider session changed during the attempt");
                 tx.execute("UPDATE agent_sessions SET provider_session_id = ?1 WHERE id = ?2", params![id, active.session_id])?;
             }
-            if let Some(id) = &event.location.turn_id {
+            if primary && let Some(id) = &event.location.turn_id {
                 let old: Option<String> = tx.query_row(
                     "SELECT provider_turn_id FROM agent_attempts WHERE run_id = ?1", [&run_id], |row| row.get(0),
                 )?;
@@ -318,11 +320,11 @@ impl Store {
                 tx.execute("UPDATE agent_attempts SET provider_turn_id = ?1 WHERE run_id = ?2", params![id, run_id])?;
             }
             match event.data {
-                ProviderEventData::SessionReady { model, effort } | ProviderEventData::ModelObserved { model, effort } => {
+                ProviderEventData::SessionReady { model, effort } | ProviderEventData::ModelObserved { model, effort } if primary => {
                     tx.execute("UPDATE agent_attempts SET reported_model = coalesce(?1, reported_model), reported_effort = coalesce(?2, reported_effort) WHERE run_id = ?3",
                         params![model, effort, run_id])?;
                 }
-                ProviderEventData::TurnFinished { outcome } if source == EventSource::Provider => {
+                ProviderEventData::TurnFinished { outcome } if primary => {
                     let state = match outcome {
                         TurnOutcome::Completed => "completed",
                         TurnOutcome::Failed => "failed",
@@ -961,6 +963,7 @@ mod tests {
                     "sandbox":{"type":"readOnly"}}}),
                 json!({"id":3,"result":{"data":[]}}),
                 json!({"id":4,"result":{"config":{"approval_policy":"never","sandbox_mode":"read-only"}}}),
+                json!({"method":"item/agentMessage/delta","params":{"threadId":"native-session","turnId":"diagnostic-only","itemId":"bad","delta":15}}),
                 json!({"id":5,"result":{"turn":{"id":"native-turn"}}}),
                 json!({"method":"thread/settings/updated","params":{"threadId":"native-session",
                     "threadSettings":{"model":"observed-later","effort":"high"}}}),
@@ -1060,6 +1063,11 @@ mod tests {
             observation.source == EventSource::Application
                 && matches!(&observation.event.data, ProviderEventData::CapabilityAssessmentUpdated { assessment }
                     if assessment.scope.reported_model.as_deref() == Some("observed-later"))
+        }));
+        assert!(observations.iter().any(|observation| {
+            observation.source == EventSource::Provider
+                && observation.event.location.item_id.as_deref() == Some("bad")
+                && matches!(observation.event.data, ProviderEventData::Diagnostic { .. })
         }));
         for expected in [
             ProviderEventData::HistoryReported {

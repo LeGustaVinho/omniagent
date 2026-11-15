@@ -256,6 +256,15 @@ impl AcpSession {
         })])
     }
 
+    fn update_diagnostic(&self, update: &Value, message: &str) -> AdapterUpdate {
+        let mut event = self.event(ProviderEventData::Diagnostic {
+            message: diagnostics::preview(message),
+        });
+        event.location.item_id =
+            string(update, "toolCallId").or_else(|| string(update, "messageId"));
+        events([event])
+    }
+
     fn open_session(&mut self, result: &Value) -> Result<AdapterUpdate> {
         ensure!(
             result["protocolVersion"].as_u64() == Some(ACP_VERSION),
@@ -485,12 +494,23 @@ impl AcpSession {
                 self.configure()
             }
             Request::Prompt => {
-                let outcome = match result["stopReason"].as_str() {
+                let reason = result["stopReason"].as_str();
+                let outcome = match reason {
                     Some("end_turn") => TurnOutcome::Completed,
                     Some("cancelled") => TurnOutcome::Interrupted,
                     _ => TurnOutcome::Failed,
                 };
-                Ok(self.finish(outcome))
+                let mut finished = self.finish(outcome);
+                if outcome == TurnOutcome::Failed {
+                    let reason = reason.unwrap_or("missing stop reason");
+                    finished.events.insert(
+                        0,
+                        self.event(ProviderEventData::Error {
+                            message: diagnostics::preview(&format!("ACP prompt stopped: {reason}")),
+                        }),
+                    );
+                }
+                Ok(finished)
             }
         }
     }
@@ -509,8 +529,10 @@ impl AcpSession {
     }
 
     fn update(&mut self, params: &Value) -> Result<AdapterUpdate> {
-        let session_id = field(params, "sessionId")?;
         let update = &params["update"];
+        let Some(session_id) = params["sessionId"].as_str() else {
+            return Ok(self.diagnostic("Malformed ACP session update"));
+        };
         if !self.ready
             && let SessionIntent::Resume {
                 provider_session_id,
@@ -585,7 +607,9 @@ impl AcpSession {
             Some("tool_call" | "tool_call_update")
         ) {
             let Some(id) = string(update, "toolCallId") else {
-                return Ok(AdapterUpdate::default());
+                return Ok(
+                    self.update_diagnostic(update, "ACP tool update omitted its tool call ID")
+                );
             };
             let tool = turn.tools.entry(id.clone()).or_default();
             if let Some(kind) = string(update, "kind") {
@@ -636,21 +660,32 @@ impl AcpSession {
         let data = match update["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => {
                 let Some(text) = string(&update["content"], "text") else {
-                    return Ok(AdapterUpdate::default());
+                    return Ok(
+                        self.update_diagnostic(update, "ACP message update omitted its text")
+                    );
                 };
                 turn.text.push_str(&text);
                 ProviderEventData::AssistantDelta { text }
             }
             Some("agent_thought_chunk") => {
                 let Some(text) = string(&update["content"], "text") else {
-                    return Ok(AdapterUpdate::default());
+                    return Ok(
+                        self.update_diagnostic(update, "ACP thought update omitted its text")
+                    );
                 };
                 ProviderEventData::Reasoning {
                     text,
                     summary: false,
                 }
             }
-            _ => return Ok(AdapterUpdate::default()),
+            Some("user_message_chunk" | "plan" | "session_info_update") => {
+                return Ok(AdapterUpdate::default());
+            }
+            _ => {
+                return Ok(
+                    self.update_diagnostic(update, "Malformed or unsupported ACP session update")
+                );
+            }
         };
         let mut event = self.event(data);
         event.location.item_id =
@@ -755,7 +790,7 @@ impl CliSession for AcpSession {
                 "ACP client method is unavailable",
             )?),
             (None, Some(id)) => self.response(&id, &frame),
-            _ => Ok(AdapterUpdate::default()),
+            _ => Ok(self.diagnostic("Unrecognized ACP protocol frame")),
         }
     }
 
@@ -1029,6 +1064,17 @@ mod tests {
                 .is_err()
         );
 
+        let malformed = receive(
+            &mut *session,
+            json!({"method":"session/update","params":{
+                "sessionId":"acp-session","update":{"sessionUpdate":"agent_message_chunk","messageId":"bad"}
+            }}),
+        )?;
+        assert_eq!(malformed.events[0].location.item_id.as_deref(), Some("bad"));
+        assert!(matches!(
+            malformed.events[0].data,
+            ProviderEventData::Diagnostic { .. }
+        ));
         let update = receive(
             &mut *session,
             json!({"method":"session/update","params":{

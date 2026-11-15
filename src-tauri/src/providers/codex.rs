@@ -165,6 +165,15 @@ impl CodexSession {
         })])
     }
 
+    fn notification_diagnostic(&self, params: &Value, message: &str) -> AdapterUpdate {
+        let mut event = self.event(ProviderEventData::Diagnostic {
+            message: diagnostics::preview(message),
+        });
+        event.location.turn_id = string(params, "turnId").or(event.location.turn_id);
+        event.location.item_id = string(params, "itemId").or_else(|| string(&params["item"], "id"));
+        self.events(vec![event])
+    }
+
     fn events(&self, events: Vec<ProviderEvent>) -> AdapterUpdate {
         AdapterUpdate {
             outbound: Vec::new(),
@@ -393,7 +402,12 @@ impl CodexSession {
                     Some("completed") => TurnOutcome::Completed,
                     Some("interrupted") => TurnOutcome::Interrupted,
                     Some("failed") => TurnOutcome::Failed,
-                    _ => return Ok(self.diagnostic("Codex sent an unknown terminal turn status")),
+                    _ => {
+                        return Ok(self.notification_diagnostic(
+                            params,
+                            "Codex sent an unknown terminal turn status",
+                        ));
+                    }
                 };
                 events.extend(self.finish_turn(outcome));
             }
@@ -433,7 +447,21 @@ impl CodexSession {
                         .unwrap_or("Codex reported an error"),
                 ),
             },
-            _ => return Ok(AdapterUpdate::default()),
+            "thread/status/changed"
+            | "turn/diff/updated"
+            | "turn/plan/updated"
+            | "item/reasoning/summaryPartAdded"
+            | "item/commandExecution/outputDelta"
+            | "item/fileChange/outputDelta"
+            | "account/rateLimits/updated" => {
+                return Ok(AdapterUpdate::default());
+            }
+            _ => {
+                return Ok(self.notification_diagnostic(
+                    params,
+                    &format!("Unsupported Codex notification {method}"),
+                ));
+            }
         };
         let mut event = self.event(data);
         event.location.turn_id = string(params, "turnId").or(event.location.turn_id);
@@ -662,7 +690,12 @@ impl CliSession for CodexSession {
         let params = &body["params"];
         match (body["method"].as_str(), id) {
             (Some(method), Some(id)) => self.server_request(id, method, params),
-            (Some(method), None) => self.notification(method, params),
+            (Some(method), None) => Ok(self.notification(method, params).unwrap_or_else(|_| {
+                self.notification_diagnostic(
+                    params,
+                    &format!("Malformed Codex notification {method}"),
+                )
+            })),
             (None, Some(id)) => self.response(&id, &body),
             _ => Ok(self.diagnostic("Unrecognized Codex protocol frame")),
         }

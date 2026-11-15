@@ -110,8 +110,12 @@ impl ClaudeSession {
     }
 
     fn diagnostic(&self, message: &str) -> AdapterUpdate {
+        self.frame_diagnostic(&Value::Null, message)
+    }
+
+    fn frame_diagnostic(&self, frame: &Value, message: &str) -> AdapterUpdate {
         events([self.event(
-            &Value::Null,
+            frame,
             ProviderEventData::Diagnostic {
                 message: diagnostics::preview(message),
             },
@@ -236,16 +240,24 @@ impl ClaudeSession {
             return Ok(AdapterUpdate::default());
         }
         let message_id = turn.message_ids.get(&parent).cloned();
-        let data = match stream["delta"]["type"].as_str() {
-            Some("text_delta") => ProviderEventData::AssistantDelta {
-                text: field(&stream["delta"], "text")?.to_owned(),
-            },
-            Some("thinking_delta") => ProviderEventData::Reasoning {
-                text: field(&stream["delta"], "thinking")?.to_owned(),
-                summary: false,
-            },
+        let delta = &stream["delta"];
+        let data = match delta["type"].as_str() {
+            Some("text_delta") => {
+                string(delta, "text").map(|text| ProviderEventData::AssistantDelta { text })
+            }
+            Some("thinking_delta") => {
+                string(delta, "thinking").map(|text| ProviderEventData::Reasoning {
+                    text,
+                    summary: false,
+                })
+            }
+            Some("input_json_delta" | "signature_delta") => return Ok(AdapterUpdate::default()),
+            _ if stream["type"] == "content_block_delta" => None,
             _ => return Ok(AdapterUpdate::default()),
-        };
+        }
+        .unwrap_or_else(|| ProviderEventData::Diagnostic {
+            message: "Malformed or unsupported Claude content delta".into(),
+        });
         let mut event = self.event(frame, data);
         event.location.item_id = message_id.or(event.location.item_id);
         Ok(events([event]))
@@ -523,7 +535,9 @@ impl CliSession for ClaudeSession {
                 Ok(events([event]))
             }
             Some("stream_event") => self.stream(&frame),
-            Some("assistant") => self.assistant(&frame),
+            Some("assistant") => Ok(self.assistant(&frame).unwrap_or_else(|_| {
+                self.frame_diagnostic(&frame, "Malformed Claude assistant message")
+            })),
             Some("user") if self.turn.is_some() => Ok(self.tool_results(&frame)),
             Some("prompt_suggestion") if self.completed_turn => Ok(frame["suggestion"]
                 .as_str()
@@ -537,6 +551,9 @@ impl CliSession for ClaudeSession {
                     )])
                 })
                 .unwrap_or_default()),
+            Some("result") if string(&frame, "parent_tool_use_id").is_some() => {
+                Ok(AdapterUpdate::default())
+            }
             Some("result") => {
                 let outcome = if self.turn.as_ref().is_some_and(|turn| turn.interrupted) {
                     TurnOutcome::Interrupted
@@ -567,7 +584,7 @@ impl CliSession for ClaudeSession {
             Some("system" | "user" | "keep_alive" | "rate_limit_event") => {
                 Ok(AdapterUpdate::default())
             }
-            _ => Ok(self.diagnostic("Unrecognized Claude protocol frame")),
+            _ => Ok(self.frame_diagnostic(&frame, "Unrecognized Claude protocol frame")),
         }
     }
 
@@ -755,6 +772,21 @@ mod tests {
                 "event":{"type":"message_start","message":{"id":"child-message"}}
             }),
         )?;
+        let malformed = receive(
+            &mut *adapter,
+            json!({
+                "type":"stream_event", "session_id":"session", "parent_tool_use_id":"task-tool",
+                "event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":false}}
+            }),
+        )?;
+        assert_eq!(
+            malformed.events[0].location.item_id.as_deref(),
+            Some("child-message")
+        );
+        assert!(matches!(
+            malformed.events[0].data,
+            ProviderEventData::Diagnostic { .. }
+        ));
         let delta = receive(
             &mut *adapter,
             json!({
