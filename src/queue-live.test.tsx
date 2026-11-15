@@ -88,6 +88,25 @@ describe("project queue", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
+  it("links an unmet skill to the attempt that checked it", async () => {
+    const rejected: JobInspection = {
+      ...runningJob,
+      job: { ...runningJob.job, latestAttempt: { ...runningJob.job.latestAttempt!, status: "failed" } },
+      blockers: [{ type: "dispatch_rejected", rejection: {
+        type: "requirements", capabilities: [], customizations: [{ type: "skill", id: "declared-skill" }],
+      } }],
+    };
+    vi.mocked(invoke).mockImplementation(async (command) =>
+      command === "job_failure" ? null : { settings: { paused: false, capacity: 2 }, active: 0, jobs: [rejected] });
+    const user = userEvent.setup();
+    const { openActivity } = renderQueue();
+    await user.click(await screen.findByRole("button", { name: "Agent job" }));
+    const blockers = screen.getByRole("region", { name: "Admission blockers" });
+    expect(within(blockers).getByText(/declared-skill/)).toBeDefined();
+    await user.click(within(blockers).getByRole("button", { name: "Inspect unmet requirements" }));
+    expect(openActivity).toHaveBeenCalledWith("run-1", "attempt-conversation");
+  });
+
   it("shows a queued recovery in Waiting while retaining its previous attempt", async () => {
     const recovery: JobInspection = {
       ...runningJob,

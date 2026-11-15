@@ -4,6 +4,7 @@ import type { FailureCause } from "@/bindings/FailureCause";
 import type { FailurePhase } from "@/bindings/FailurePhase";
 import type { JobFailure } from "@/bindings/JobFailure";
 import { Button } from "@/components/ui/button";
+import { queueBlockerReason } from "@/queue-model";
 import { WorktreeEvidence } from "@/worktree-evidence";
 
 const phases: Record<FailurePhase, string> = {
@@ -56,6 +57,9 @@ export function JobFailurePanel({ projectId, runId, openLogs }: {
         <dt>Phase</dt><dd>{phases[phase]}</dd>
         <dt>Worktree</dt><dd className="break-all font-mono text-xs">{failure.checkoutRoot}</dd>
         {cause && <><dt>Cause</dt><dd>{causes[cause]}</dd></>}
+        {!openLogs && failure.dispatchRejection && <><dt>Dispatch</dt>
+          <dd className="break-words">{queueBlockerReason({ type: "dispatch_rejected", rejection: failure.dispatchRejection })}</dd>
+        </>}
         {process && <><dt>Process</dt><dd>{process.cancelled ? "Cancelled" : "Exited"} (code {process.code})</dd></>}
         {failure.providerOutcome && <><dt>Provider outcome</dt><dd>{failure.providerOutcome}</dd></>}
       </dl>

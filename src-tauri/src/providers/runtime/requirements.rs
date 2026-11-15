@@ -16,6 +16,7 @@ use super::{
         configuration::{InstructionInventory, InstructionSelection},
         plugins::PluginInventoryStatus,
         profiles::{DESKTOP_PERMISSION_REVISION, command_probe_with_limits, published_version},
+        skills::SkillEntry,
     },
     TurnExecution,
 };
@@ -85,6 +86,7 @@ impl TurnExecution {
         &self,
         assessment: &CapabilityAssessment,
         instructions: &InstructionInventory,
+        filesystem_skills: &[SkillEntry],
         checkout: &CheckoutLayout,
     ) -> Result<()> {
         let requirements = self.app.block_on(
@@ -154,7 +156,10 @@ impl TurnExecution {
                             && catalog.entries.iter().any(|entry| {
                                 entry.id == *id
                                     && entry.enabled == Some(true)
-                                    && entry.revision.is_some()
+                                    && (entry.revision.is_some()
+                                        || filesystem_skills.iter().any(|source| {
+                                            source.id == entry.id && source.revision.is_some()
+                                        }))
                             })
                     })
                 }

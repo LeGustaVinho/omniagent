@@ -1366,7 +1366,12 @@ impl TurnExecution {
                 );
             }
         }
-        self.check_dispatch_requirements(&capabilities, &instructions, checkout)?;
+        self.check_dispatch_requirements(
+            &capabilities,
+            &instructions,
+            &filesystem_skills,
+            checkout,
+        )?;
         let native_seed = self.plan.native_goal_seed.as_ref();
         let mut input = if let Some(seed) = native_seed {
             let mut projected = self.plan.input.clone();

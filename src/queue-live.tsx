@@ -157,6 +157,9 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
           <ul className="divide-y divide-border rounded border border-border">
             {blockers.map((blocker, index) => <li key={`${blocker.type}-${index}`} className="grid gap-1.5 p-2 text-xs leading-5">
               <p className="break-words">{queueBlockerReason(blocker)}</p>
+              {attempt && blocker.type === "dispatch_rejected" && blocker.rejection.type === "requirements" &&
+                <button type="button" className="justify-self-start text-primary hover:underline"
+                  onClick={() => openActivity(attempt.runId, conversationId)}>Inspect unmet requirements</button>}
               {blocker.type === "approval" && <ApprovalReview projectId={job.projectId} approvalId={blocker.approvalId} busy={busy} onAction={onAction} />}
               {blocker.type === "dependency" && <button type="button" className="justify-self-start text-primary hover:underline" onClick={() => onDependency(blocker.jobId)}>Inspect dependency</button>}
               {blocker.type === "instruction_order" && <button type="button" className="justify-self-start text-primary hover:underline" onClick={() => onDependency(blocker.jobId)}>Inspect earlier instruction</button>}

@@ -5,6 +5,8 @@ use ts_rs::TS;
 
 use crate::{process::TerminalOutcome, runs::RunStatus, store::Store};
 
+use super::{DispatchRejection, policy::dispatch_rejection};
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -84,6 +86,9 @@ pub struct JobFailure {
     pub provider_outcome: Option<String>,
     pub logs_available: bool,
     pub saved_diff_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dispatch_rejection: Option<DispatchRejection>,
 }
 
 pub(crate) fn record_job_failure(
@@ -128,6 +133,7 @@ impl Store {
                 provider_outcome,
                 logs_available,
                 saved_diff_available,
+                dispatch_rejection: dispatch_rejection(db, &run)?,
             })).transpose()
         }).await
     }

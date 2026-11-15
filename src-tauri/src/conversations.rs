@@ -7019,6 +7019,244 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduled_roles_recheck_required_skill_evidence_before_sending_a_prompt() -> Result<()>
+    {
+        use crate::jobs::{
+            AdmissionBlocker, AdmissionEnvironment, DispatchRejection, JobContext, JobPermission,
+            JobRequest, JobRequirements, JobRole, JobRule, JobWorkspace, PipelineDispatch,
+            PipelineNodeKind, RequiredCustomization,
+        };
+        use crate::providers::skills::SkillEntry;
+
+        let (_dir, store, conversation, scope) = setup().await?;
+        std::fs::write(&scope.executable, b"fixture")?;
+        let skill = scope.checkout.join(".agents/skills/fixture/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap())?;
+        std::fs::write(&skill, "Inspect this checkout.")?;
+        let eligible = RequiredCustomization::Skill {
+            id: SkillEntry::identity(scope.provider, &skill)?,
+        };
+        let disabled = RequiredCustomization::Skill {
+            id: SkillEntry::identity(
+                scope.provider,
+                &scope.checkout.join("other-profile/skills/fixture/SKILL.md"),
+            )?,
+        };
+        let layout = crate::repository::register(&store, scope.checkout.clone()).await?;
+        let project = layout.project_id;
+        let env = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: false,
+        };
+        store.set_job_queue_capacity(1).await?;
+        let rule = |role, requirement| JobRule {
+            role,
+            operation: SessionMode::ReadOnly,
+            workspace: JobWorkspace::Project,
+            permission: JobPermission::Allow,
+            requirements: JobRequirements {
+                capabilities: vec![],
+                customizations: vec![requirement],
+            },
+        };
+        store
+            .set_project_job_rules(
+                project.clone(),
+                vec![],
+                vec![
+                    rule(JobRole::Operator, eligible.clone()),
+                    rule(JobRole::Pipeline, disabled.clone()),
+                ],
+            )
+            .await?;
+
+        let enqueue = |context_id, text: &'static str| {
+            let (store, scope, conversation_id) =
+                (store.clone(), scope.clone(), conversation.id.clone());
+            async move {
+                store
+                    .save_conversation_draft(conversation_id.clone(), text.into())
+                    .await?;
+                store
+                    .enqueue_conversation_turn(
+                        JobContext {
+                            conversation_id,
+                            context_id,
+                        },
+                        scope,
+                        text.into(),
+                    )
+                    .await
+            }
+        };
+        let accepted = enqueue(conversation.context_id, "Inspect with the verified skill").await?;
+        let stage = store
+            .create_conversation(
+                layout.checkout_id.clone(),
+                "Stage with an unavailable skill".into(),
+            )
+            .await?;
+        let pipeline = "fixture-requirements".to_owned();
+        let revision = "fixture-plan".to_owned();
+        store
+            .register_job_pipeline(project.clone(), pipeline.clone())
+            .await?;
+        store
+            .register_job_pipeline_node(
+                project.clone(),
+                pipeline.clone(),
+                "stage".into(),
+                PipelineNodeKind::Execution,
+            )
+            .await?;
+        store
+            .set_job_pipeline_plan(project.clone(), pipeline.clone(), None, revision.clone())
+            .await?;
+        let missing = store
+            .submit_pinned_pipeline_agent_job(
+                PipelineDispatch {
+                    pipeline_run_id: pipeline,
+                    node_instance_id: "stage".into(),
+                    plan_revision: Some(revision),
+                    release_id: None,
+                },
+                scope.clone(),
+                JobRequest {
+                    checkout_id: Some(layout.checkout_id),
+                    task_id: None,
+                    mode: SessionMode::ReadOnly,
+                    instructions: "Inspect with the disabled skill".into(),
+                    requires_bridge: false,
+                    dependencies: vec![],
+                },
+                JobContext {
+                    conversation_id: stage.id.clone(),
+                    context_id: stage.context_id,
+                },
+                QuestionRoute::Native,
+            )
+            .await?;
+
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let runner = |conversation: &str| {
+            Arc::new(FixtureRunner(WireLog {
+                store: store.clone(),
+                runtime: tokio::runtime::Handle::current(),
+                conversation: conversation.into(),
+                frames: frames.clone(),
+            }))
+        };
+        let first = store
+            .claim_next_job(env.clone())
+            .await?
+            .context("the eligible job was not claimed")?;
+        assert_eq!(first.conversation_id, conversation.id);
+        let run = first.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), runner(&conversation.id), first, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        let record = store
+            .inspect_job(project.clone(), accepted.id, env.clone())
+            .await?
+            .unwrap();
+        assert!(record.blockers.is_empty());
+        let dispatch = store
+            .agent_dispatch(conversation.id.clone(), run)
+            .await?
+            .context("the verified skill did not dispatch")?;
+        assert_eq!(dispatch.delivery, Delivery::Submitted);
+        assert!(
+            dispatch
+                .snapshot
+                .filesystem_skills
+                .iter()
+                .any(|entry| entry.path == skill && entry.revision.is_some())
+        );
+
+        let blocked = store
+            .claim_next_job(env.clone())
+            .await?
+            .context("missing requirement was not checked")?;
+        assert_eq!(blocked.conversation_id, stage.id);
+        let run = blocked.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), runner(&stage.id), blocked, None)
+                .wait()
+                .await?,
+            RunStatus::Failed
+        );
+        let rejection = DispatchRejection::Requirements {
+            capabilities: vec![],
+            customizations: vec![disabled],
+        };
+        let detail = store
+            .inspect_job(project.clone(), missing.id, env.clone())
+            .await?
+            .unwrap();
+        assert_eq!(
+            detail.blockers,
+            [AdmissionBlocker::DispatchRejected {
+                rejection: rejection.clone()
+            }]
+        );
+        assert_eq!(
+            store
+                .job_failure(project.clone(), run.clone())
+                .await?
+                .unwrap()
+                .dispatch_rejection,
+            Some(rejection)
+        );
+        assert!(store.agent_dispatch(stage.id, run).await?.is_none());
+
+        let context = store
+            .conversation(conversation.id.clone())
+            .await?
+            .context_id;
+        let changed = enqueue(context, "Inspect again after changing the checkout").await?;
+        let second = store
+            .claim_next_job(env.clone())
+            .await?
+            .context("the second operator job was not claimed")?;
+        std::fs::remove_file(&skill)?;
+        let run = second.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), runner(&conversation.id), second, None)
+                .wait()
+                .await?,
+            RunStatus::Failed
+        );
+        let rejection = DispatchRejection::Requirements {
+            capabilities: vec![],
+            customizations: vec![eligible],
+        };
+        let detail = store
+            .inspect_job(project.clone(), changed.id, env.clone())
+            .await?
+            .unwrap();
+        assert_eq!(
+            detail.blockers,
+            [AdmissionBlocker::DispatchRejected { rejection }]
+        );
+        assert!(store.agent_dispatch(conversation.id, run).await?.is_none());
+        assert_eq!(store.inspect_project_queue(project, env).await?.active, 0);
+        assert_eq!(
+            frames
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|frame| serde_json::from_slice::<Value>(frame)
+                    .is_ok_and(|frame| frame["method"] == "turn/start"))
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn managed_worker_reuses_only_native_suffix_and_records_selected_and_observed_models()
     -> Result<()> {
         let (_dir, store, conversation, scope) = setup().await?;
