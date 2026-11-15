@@ -1036,7 +1036,7 @@ impl CodexSession {
         }
         let result = &params["result"];
         prediction.outcome = Some(match result["type"].as_str() {
-            Some("completed") => SuggestionOutcome::from_text(result["text"].as_str()),
+            Some("completed") => SuggestionOutcome::from_text(&result["text"]),
             _ => SuggestionOutcome::Failed,
         });
         self.settle_prediction()
@@ -1461,6 +1461,9 @@ impl CliSession for CodexSession {
     }
 
     fn request_side(&mut self, input: SideInput) -> Result<AdapterUpdate> {
+        if self.sample_ids.contains(&input.request_id) {
+            return Ok(AdapterUpdate::default());
+        }
         let unavailable = |input: SideInput, reason| {
             Ok(input.reply(SideOutcome::Unavailable { reason }).update())
         };
@@ -1479,7 +1482,7 @@ impl CliSession for CodexSession {
         {
             return unavailable(input, SideUnavailable::SourceBoundaryUnavailable);
         }
-        if self.pending_sample.is_some() || self.sample_ids.contains(&input.request_id) {
+        if self.pending_sample.is_some() {
             return unavailable(input, SideUnavailable::Busy);
         }
         let message = self.rpc.request("thread/sample", json!({
@@ -2054,6 +2057,78 @@ mod tests {
         let replay = inbound(&mut *session, update("session", "completed"))?;
         assert!(replay.events.is_empty() && replay.outbound.is_empty());
         assert!(session.request_suggestion()?.outbound.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn prediction_settles_empty_failure_and_timeout_independently_of_the_turn() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate_configured(
+            SessionMode::ReadOnly,
+            SessionIntent::Start,
+            checkout.path(),
+            |session| session.enable_native_suggestions(),
+        )?;
+        for (turn_id, provider_outcome, expected) in [
+            (
+                "empty",
+                Some(json!({"type":"completed","text":"   "})),
+                SuggestionOutcome::Empty,
+            ),
+            (
+                "failed",
+                Some(json!({"type":"failed"})),
+                SuggestionOutcome::Failed,
+            ),
+            ("timeout", None, SuggestionOutcome::TimedOut),
+        ] {
+            session.send(TurnInput {
+                message_id: turn_id.into(),
+                text: "Fixture".into(),
+                attachments: Vec::new(),
+            })?;
+            let terminal = inbound(
+                &mut *session,
+                json!({"method":"turn/completed","params":{
+                    "threadId":"session","turn":{"id":turn_id,"status":"completed"}
+                }}),
+            )?;
+            assert!(terminal.events.iter().any(|event| matches!(
+                event.data,
+                ProviderEventData::TurnFinished {
+                    outcome: TurnOutcome::Completed
+                }
+            )));
+            let request = outbound(&session.request_suggestion()?, 0)?;
+            assert!(
+                inbound(&mut *session, json!({"id":request["id"],"result":{}}))?
+                    .events
+                    .is_empty()
+            );
+            assert!(session.suggestion_pending());
+            let result = if let Some(provider_outcome) = provider_outcome {
+                inbound(
+                    &mut *session,
+                    json!({"method":"thread/prediction/updated","params":{
+                        "threadId":"session","sourceTurnId":turn_id,"result":provider_outcome,
+                    }}),
+                )?
+                .events
+            } else {
+                session
+                    .abandon_suggestion(SuggestionOutcome::TimedOut)
+                    .into_iter()
+                    .collect()
+            };
+            assert!(!session.suggestion_pending());
+            assert!(matches!(result.as_slice(), [ProviderEvent {
+                data: ProviderEventData::PromptSuggestion { suggestion }, ..
+            }] if suggestion.outcome == expected && suggestion.source.provider_turn_id.as_deref() == Some(turn_id)));
+            assert!(inbound(&mut *session, json!({"method":"thread/prediction/updated","params":{
+                "threadId":"session","sourceTurnId":turn_id,"result":{"type":"completed","text":"Replay"}
+            }}))?.events.is_empty());
+            assert!(session.request_suggestion()?.outbound.is_empty());
+        }
         Ok(())
     }
 

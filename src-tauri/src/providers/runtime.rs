@@ -684,7 +684,7 @@ impl TurnExecution {
             if let Some(status) = self.record_update(process, update, EventSource::Provider)? {
                 ensure!(sent, "CLI finished before prompt dispatch");
                 if status == RunStatus::Succeeded && self.native_suggestions {
-                    self.collect_suggestion(process, session)?;
+                    self.collect_suggestion(process, session, commands)?;
                 }
                 return Ok(status);
             }
@@ -1096,6 +1096,7 @@ impl TurnExecution {
         &mut self,
         process: &mut CapturedProcess,
         session: &mut dyn CliSession,
+        commands: &mpsc::Receiver<Command>,
     ) -> Result<()> {
         if let Ok(update) = session.request_suggestion() {
             if bounded_write(process, update.outbound).is_err() {
@@ -1105,14 +1106,28 @@ impl TurnExecution {
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         while session.suggestion_pending() {
+            match commands.try_recv() {
+                Ok(Command::Interrupt) | Err(mpsc::TryRecvError::Disconnected) => {
+                    return self.finish_suggestion(session, SuggestionOutcome::Cancelled);
+                }
+                Ok(
+                    Command::Approval(_, _, reply)
+                    | Command::Question(_, _, reply)
+                    | Command::Steer(_, _, reply),
+                ) => {
+                    let _ = reply.send(Err(anyhow::anyhow!("the main turn has already ended")));
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return self.finish_suggestion(session, SuggestionOutcome::TimedOut);
             };
-            let update = match process.output.recv_timeout(remaining) {
+            let update = match process
+                .output
+                .recv_timeout(remaining.min(Duration::from_millis(50)))
+            {
                 Ok(Ok(frame)) => session.receive(frame),
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return self.finish_suggestion(session, SuggestionOutcome::TimedOut);
-                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 _ => return self.finish_suggestion(session, SuggestionOutcome::Failed),
             };
             match update {

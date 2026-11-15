@@ -827,7 +827,7 @@ impl CliSession for ClaudeSession {
                     return Ok(AdapterUpdate::default());
                 }
                 let outcome =
-                    super::suggestions::SuggestionOutcome::from_text(frame["suggestion"].as_str());
+                    super::suggestions::SuggestionOutcome::from_text(&frame["suggestion"]);
                 Ok(events(self.abandon_suggestion(outcome)))
             }
             Some("result") if string(&frame, "parent_tool_use_id").is_some() => {

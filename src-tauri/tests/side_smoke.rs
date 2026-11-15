@@ -170,11 +170,7 @@ fn codex_side_sample_uses_the_pinned_turn_without_tools_or_transcript_entries() 
         }
     }
     let repeat = session.request_side(input("side", Some(source.clone()), "Replay"))?;
-    assert!(repeat.outbound.is_empty());
-    assert!(matches!(repeat.events.as_slice(), [event] if matches!(
-        &event.data, ProviderEventData::SideResponse { response }
-        if response.outcome == (SideOutcome::Unavailable { reason: side::SideUnavailable::Busy })
-    )));
+    assert!(repeat.outbound.is_empty() && repeat.events.is_empty());
     let query = omniagent::providers::WireMessage::json(&json!({
         "id":9999, "method":"thread/turns/list", "params":{"threadId":source.session_id,"itemsView":"full","limit":10}
     }))?;

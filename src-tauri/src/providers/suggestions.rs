@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::{ProviderEvent, ProviderEventData, ProviderLocation};
 
@@ -19,13 +20,17 @@ pub enum SuggestionOutcome {
     Failed,
     Unavailable,
     TimedOut,
+    Cancelled,
 }
 
 impl SuggestionOutcome {
-    pub(super) fn from_text(text: Option<&str>) -> Self {
-        match text.map(str::trim).filter(|text| !text.is_empty()) {
-            Some(text) => Self::Available { text: text.into() },
-            None => Self::Empty,
+    pub(super) fn from_text(text: &Value) -> Self {
+        match text {
+            Value::String(text) if !text.trim().is_empty() => Self::Available {
+                text: text.trim().into(),
+            },
+            Value::String(_) | Value::Null => Self::Empty,
+            _ => Self::Failed,
         }
     }
 }
