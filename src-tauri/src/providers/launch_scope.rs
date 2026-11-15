@@ -339,6 +339,8 @@ impl ScopedLaunch {
             format!("projects={}", toml::Value::Table(projects)),
             format!("mcp_servers={}", toml::Value::Table(servers)),
             "project_doc_max_bytes=0".into(),
+            // A restored active goal can start a turn before the managed scheduler dispatches.
+            "features.goals=false".into(),
         ];
         let mut arguments: Vec<_> = flags
             .iter()
