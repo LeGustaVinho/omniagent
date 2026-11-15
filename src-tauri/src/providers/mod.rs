@@ -96,6 +96,7 @@ pub enum Capability {
     LiveSteering,
     SubagentEvents,
     PerChildEvents,
+    NativeSubagentAudit,
     NativeDelegationControls,
     NativeCompaction,
     ManualNativeCompaction,
@@ -106,7 +107,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::ModelInventory,
         Self::FreshSession,
         Self::Resume,
@@ -123,6 +124,7 @@ impl Capability {
         Self::LiveSteering,
         Self::SubagentEvents,
         Self::PerChildEvents,
+        Self::NativeSubagentAudit,
         Self::NativeDelegationControls,
         Self::NativeCompaction,
         Self::ManualNativeCompaction,
@@ -311,6 +313,34 @@ pub struct ChildDetails {
     pub prompt: Option<String>,
     pub requested_model: Option<String>,
     pub reported_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_provenance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
+}
+
+impl ProviderEventData {
+    pub(crate) fn observed_native_subagent(&self) -> bool {
+        match self {
+            Self::ChildActivity {
+                child_id, status, ..
+            } => {
+                (child_id.as_ref().is_some_and(|id| !id.trim().is_empty())
+                    && status.as_deref() != Some("notFound"))
+                    || matches!(
+                        status.as_deref(),
+                        Some(
+                            "running"
+                                | "started"
+                                | "task_started"
+                                | "task_progress"
+                                | "pendingInit"
+                        )
+                    )
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -450,6 +480,9 @@ pub enum ProviderEventData {
         status: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<ChildDetails>,
+    },
+    SubagentAuditGap {
+        report: crate::jobs::SubagentAuditGap,
     },
     Approval {
         request_id: RequestId,

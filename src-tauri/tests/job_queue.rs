@@ -7,7 +7,8 @@ use omniagent::{
         AdmissionBlocker, AdmissionEnvironment, Job, JobContext, JobNoticeKind, JobOrigin,
         JobPermission, JobRequest, JobRequestConflict, JobRole, JobRule, JobWorkspace,
         PipelineDispatch, PipelineNodeKind, ProjectSubagentPolicy, QueueHistoryPolicy,
-        QueueSettings, QueueState, RecoveryAction, SubagentCounts, SubagentLimitMode,
+        QueueSettings, QueueState, RecoveryAction, SubagentAuditField, SubagentAuditPolicy,
+        SubagentAuditSource, SubagentCounts, SubagentLimitMode,
     },
     providers::{Capability, Provider, SessionIntent, SessionMode},
     repository,
@@ -885,6 +886,232 @@ async fn strict_quota_reserves_native_sessions_and_managed_children_in_one_budge
 }
 
 #[tokio::test]
+async fn subagent_audit_overrides_are_independent_and_a_pipeline_stage_can_require_more()
+-> Result<()> {
+    use omniagent::{
+        dispatch::EventSource,
+        providers::{
+            ChildDetails, ProviderEvent, ProviderEventData, ProviderLocation,
+            questions::QuestionRoute,
+        },
+    };
+
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("subagent-audit.sqlite");
+    let store = Store::open(database.clone())?;
+    let initial = origin(&store, &temp.path().join("project")).await?;
+    let chat = initial.conversation_id;
+    let project = initial.run.project_id;
+    let scope = initial.scope;
+    let checkout = initial.run.checkout_id;
+    store
+        .finish_agent_attempt(initial.run.id, RunStatus::Cancelled, None)
+        .await?;
+    let quota = store.conversation_subagent_quota(chat.clone()).await?;
+    assert_eq!(
+        store.project_subagent_audit(project.clone()).await?,
+        SubagentAuditPolicy::Available
+    );
+    store
+        .set_project_subagent_audit(project.clone(), SubagentAuditPolicy::Complete)
+        .await?;
+    store
+        .set_conversation_subagent_audit(chat.clone(), Some(SubagentAuditPolicy::Available))
+        .await?;
+    let reopened = Store::open(database)?;
+    let persisted = reopened.conversation_subagent_audit(chat.clone()).await?;
+    assert_eq!(persisted.project_default, SubagentAuditPolicy::Complete);
+    assert_eq!(
+        persisted.conversation_override,
+        Some(SubagentAuditPolicy::Available)
+    );
+    assert_eq!(
+        reopened.conversation_subagent_quota(chat.clone()).await?,
+        quota
+    );
+
+    let context = store.conversation(chat.clone()).await?;
+    let unsupported = SessionScope {
+        provider: Provider::Antigravity,
+        ..scope.clone()
+    };
+    let inherited = store
+        .create_conversation(checkout.clone(), "Inherited audit requirement".into())
+        .await?;
+    assert!(
+        store
+            .prepare_agent_attempt(
+                inherited.id,
+                inherited.context_id,
+                unsupported.clone(),
+                "Project audit applies here".into()
+            )
+            .await
+            .is_err()
+    );
+    let baseline = store
+        .prepare_agent_attempt(
+            chat.clone(),
+            context.context_id,
+            unsupported.clone(),
+            "Available evidence".into(),
+        )
+        .await?;
+    store.mark_agent_running(baseline.run.id.clone()).await?;
+    let observe_partial = |run: String| {
+        store.record_agent_observation(
+            run,
+            EventSource::Provider,
+            ProviderEvent {
+                location: ProviderLocation {
+                    session_id: Some("fixture-session".into()),
+                    ..Default::default()
+                },
+                data: ProviderEventData::ChildActivity {
+                    child_id: Some("child".into()),
+                    status: Some("completed".into()),
+                    details: Some(ChildDetails {
+                        prompt: Some("Child input".into()),
+                        ..Default::default()
+                    }),
+                },
+            },
+        )
+    };
+    observe_partial(baseline.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(
+            baseline.run.id.clone(),
+            RunStatus::Succeeded,
+            Some("Root response".into()),
+        )
+        .await?;
+    assert_eq!(
+        store
+            .latest_conversation_run(chat.clone())
+            .await?
+            .unwrap()
+            .status,
+        RunStatus::Succeeded
+    );
+    let reports = store
+        .agent_observations(chat.clone(), baseline.run.id, 0)
+        .await?;
+    assert!(reports.iter().any(|event| matches!(
+        &event.event.data, ProviderEventData::SubagentAuditGap { report }
+        if report.source == SubagentAuditSource::Native
+            && report.missing == [SubagentAuditField::ContextProvenance, SubagentAuditField::Response]
+    )));
+
+    let pipeline = "audit-pipeline".to_owned();
+    store
+        .register_job_pipeline(project.clone(), pipeline.clone())
+        .await?;
+    store
+        .register_job_pipeline_node_with_audit(
+            project.clone(),
+            pipeline.clone(),
+            "audited".into(),
+            PipelineNodeKind::Execution,
+            SubagentAuditPolicy::Complete,
+        )
+        .await?;
+    store
+        .set_job_pipeline_plan(project.clone(), pipeline.clone(), None, "plan-a".into())
+        .await?;
+    let binding = PipelineDispatch {
+        pipeline_run_id: pipeline,
+        node_instance_id: "audited".into(),
+        plan_revision: Some("plan-a".into()),
+        release_id: None,
+    };
+    let context = JobContext {
+        conversation_id: chat.clone(),
+        context_id: store.conversation(chat.clone()).await?.context_id,
+    };
+    let request = || JobRequest {
+        checkout_id: Some(checkout.clone()),
+        mode: SessionMode::ReadOnly,
+        ..request()
+    };
+    let blocked = store
+        .submit_pinned_pipeline_agent_job(
+            binding.clone(),
+            unsupported,
+            request(),
+            context.clone(),
+            QuestionRoute::Native,
+        )
+        .await?;
+    let blocked = store
+        .inspect_job(project.clone(), blocked.id, environment(false))
+        .await?
+        .unwrap();
+    assert!(matches!(blocked.blockers.as_slice(),
+        [AdmissionBlocker::SubagentAudit { missing }] if missing.len() == 4
+    ));
+    let stage = store
+        .submit_pinned_pipeline_agent_job(binding, scope, request(), context, QuestionRoute::Native)
+        .await?;
+    let parent = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("Audit did not select managed-only fallback")?;
+    let quota = store.conversation_subagent_quota(chat.clone()).await?;
+    assert_eq!(quota.native_sessions.len(), 1);
+    assert_eq!(quota.native_sessions[0].allowance, 0);
+    assert!(!quota.native_sessions[0].strict_total);
+    assert!(!quota.configuration_pending);
+    store.mark_agent_running(parent.run.id.clone()).await?;
+    let delegated = store
+        .submit_agent_job(parent.run.id.clone(), "owned-child".into(), request())
+        .await?;
+    approve(&store, &delegated).await?;
+    let child = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("Audit-only reservation blocked managed delegation")?;
+    store.mark_agent_running(child.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(
+            child.run.id,
+            RunStatus::Succeeded,
+            Some("Missing exact dispatch".into()),
+        )
+        .await?;
+    let failed_child = store
+        .job(project.clone(), delegated.id)
+        .await?
+        .unwrap()
+        .latest_attempt
+        .unwrap();
+    assert_eq!(failed_child.status, RunStatus::Failed);
+
+    observe_partial(parent.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(
+            parent.run.id.clone(),
+            RunStatus::Succeeded,
+            Some("Unexpected native delegation".into()),
+        )
+        .await?;
+    assert_eq!(
+        store
+            .job(project, stage.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap()
+            .status,
+        RunStatus::Failed
+    );
+    assert!(store.agent_observations(chat, parent.run.id, 0).await?.iter().any(|event| matches!(
+        &event.event.data, ProviderEventData::SubagentAuditGap { report } if report.native_delegation_detected
+    )));
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -> Result<()> {
     use omniagent::{
         dispatch::EventSource,
@@ -957,7 +1184,12 @@ async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -
     // Recreate the previous schema with history intact and verify the upgrade.
     let db = rusqlite::Connection::open(&path)?;
     db.execute_batch(
-        "DROP VIEW managed_subagent_states;
+        "DROP TABLE attempt_subagent_audit;
+         DROP TABLE native_subagent_audit_candidates;
+         DROP TABLE project_subagent_audit;
+         DROP TABLE conversation_subagent_audit;
+         ALTER TABLE job_pipeline_nodes DROP COLUMN subagent_audit;
+         DROP VIEW managed_subagent_states;
          DROP TABLE native_subagent_reservations;
          DROP INDEX agent_attempts_by_subagent_conversation;
          ALTER TABLE agent_attempts DROP COLUMN subagent_conversation_id;

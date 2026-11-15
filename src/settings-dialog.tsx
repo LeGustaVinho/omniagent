@@ -13,6 +13,7 @@ import { PolicyForm, policyFields } from "@/settings-policies";
 import { ProviderProfiles, useProviderExamples } from "@/settings-provider-profiles";
 import { SystemSettings, useMaintenanceSimulation } from "@/settings-system";
 import { ProjectSubagentControls } from "@/subagent-quota";
+import { ProjectSubagentAuditControl } from "@/subagent-audit-controls";
 import type { WorkspaceProps } from "@/workbench-contract";
 import "./settings-dialog.css";
 
@@ -219,7 +220,8 @@ function SettingsSession({
         if (simulation || !checkout) return policy("execution");
         return <>
           <ProjectSubagentControls key={checkout.projectId} projectId={checkout.projectId} />
-          <PolicyForm fields={policyFields.execution.filter(({ id }) => id !== "subagent-policy" && id !== "subagent-cap")}
+          <ProjectSubagentAuditControl key={`audit-${checkout.projectId}`} projectId={checkout.projectId} />
+          <PolicyForm fields={policyFields.execution.filter(({ id }) => id !== "subagent-policy" && id !== "subagent-cap" && id !== "subagent-audit")}
             stored={undefined} simulate={simulate} />
         </>;
       default:

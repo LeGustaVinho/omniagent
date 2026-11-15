@@ -10,6 +10,7 @@ import type { SubagentCounts } from "@/bindings/SubagentCounts";
 import type { SubagentLimitMode } from "@/bindings/SubagentLimitMode";
 import { Button } from "@/components/ui/button";
 import { SettingRow } from "@/settings-controls";
+import { ConversationSubagentAuditControl } from "@/subagent-audit-controls";
 
 const modeLabels: Record<SubagentLimitMode, string> = { managed: "Managed limit", strict: "Strict total limit" };
 const providerNames: Record<Provider, string> = { codex: "Codex", claude: "Claude Code", antigravity: "Antigravity" };
@@ -139,6 +140,7 @@ export function ConversationSubagentControls({ conversationId }: { conversationI
             });
           }
         }}>
+          <ConversationSubagentAuditControl conversationId={conversationId} open={open} />
           <label>
             Limit mode
             <select value={resolvedMode ?? ""} disabled={disabled}

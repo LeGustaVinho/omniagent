@@ -20,6 +20,7 @@ mod pipeline;
 mod policy;
 mod recovery;
 mod scheduler;
+mod subagent_audit;
 mod subagents;
 pub use admission::{
     AdmissionBlocker, AdmissionEnvironment, JobInspection, ProjectQueue, QueueSettings,
@@ -48,6 +49,13 @@ pub use recovery::RecoveryAction;
 pub(crate) use recovery::requeue_unlaunched_job;
 pub use scheduler::JobScheduler;
 pub(crate) use scheduler::LaunchGate;
+pub use subagent_audit::{
+    ConversationSubagentAudit, SubagentAuditField, SubagentAuditGap, SubagentAuditPolicy,
+    SubagentAuditSource,
+};
+pub(crate) use subagent_audit::{
+    SubagentAuditRoute, native_audit_fixture_key, pin_attempt_audit, settle_subagent_audit,
+};
 pub use subagents::{
     ConversationSubagentQuota, NativeSubagentCounts, NativeSubagentSession, ProjectSubagentPolicy,
     SubagentCounts, SubagentLimitMode,

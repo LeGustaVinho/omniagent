@@ -845,6 +845,13 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     await projectSubagentLimit.setValue("2");
     await click(browser, "button=Save subagent policy");
     await browser.waitUntil(async () => (await invoke(browser, "project_subagent_policy", { projectId: main.projectId })).maximum === 2);
+    const projectAudit = browser.$('select[id="subagent-audit"]');
+    await projectAudit.waitForEnabled();
+    await projectAudit.selectByAttribute("value", "complete");
+    await browser.waitUntil(async () => (await invoke(browser, "project_subagent_audit", { projectId: main.projectId })) === "complete");
+    await projectAudit.waitForEnabled();
+    await projectAudit.selectByAttribute("value", "available");
+    await browser.waitUntil(async () => (await invoke(browser, "project_subagent_audit", { projectId: main.projectId })) === "available");
     await browser.keys("Escape");
     await click(browser, 'button[aria-label="Subagent limits"]');
     const subagentDialog = browser.$('.conv-dialog[role="dialog"]');
@@ -856,13 +863,19 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     const authorized = subagentDialog.$('.//dt[normalize-space()="Authorized simultaneous subagents"]/following-sibling::dd[1]');
     assert.equal(await authorized.getText(), "2");
     assert.ok((await subagentDialog.getText()).includes("No native subagent activity has been reported."));
-    const limitMode = subagentDialog.$("select");
+    const limitMode = subagentDialog.$('.//label[contains(., "Limit mode")]/select');
     await limitMode.waitForEnabled();
     await limitMode.selectByAttribute("value", "strict");
     const nativeAllowance = subagentDialog.$('.//label[contains(., "Requested native allowance per CLI session")]/input');
     await nativeAllowance.waitForEnabled();
     await nativeAllowance.setValue("1");
     await click(browser, "button=Save limit");
+    const auditPolicy = subagentDialog.$('.//label[contains(., "Subagent audit policy")]/select');
+    await auditPolicy.waitForEnabled();
+    await auditPolicy.selectByAttribute("value", "complete");
+    await browser.waitUntil(async () => (await invoke(browser, "conversation_subagent_audit", {
+      conversationId: conversation.id,
+    })).conversationOverride === "complete");
     await browser.waitUntil(async () => {
       const quota = await invoke(browser, "conversation_subagent_quota", { conversationId: conversation.id });
       return quota.modeOverride === "strict" && quota.nativeRequested === 1;
@@ -905,6 +918,10 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     assert.equal(persistedQuota.authorized, 2);
     assert.equal(persistedQuota.modeOverride, null);
     assert.equal(persistedQuota.nativeRequested, 1);
+    assert.deepEqual(await invoke(browser, "conversation_subagent_audit", { conversationId: conversation.id }), {
+      projectDefault: "available", conversationOverride: "complete",
+    });
+    await invoke(browser, "set_conversation_subagent_audit", { conversationId: conversation.id, policy: null });
     assert.deepEqual(persistedQuota.managed, { active: 0, queued: 0, historical: 0 });
     const mode = browser.$(`section[aria-label="${conversation.title}"] select[aria-label="Conversation mode"]`);
     await mode.selectByAttribute("value", "goal");

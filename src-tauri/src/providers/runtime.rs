@@ -19,7 +19,10 @@ use crate::{
     conversations::{AttemptPlan, MessageRevision, MessageRole, PermissionRoute},
     diagnostics,
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
-    jobs::{DispatchRejection, FailureCause, FailureObservation, FailurePhase, LaunchGate},
+    jobs::{
+        DispatchRejection, FailureCause, FailureObservation, FailurePhase, LaunchGate,
+        SubagentAuditRoute,
+    },
     mcp_bridge::{PERMISSION_PREFIX, Registration, RunBridge},
     process::TerminalOutcome,
     process_io::CapturedProcess,
@@ -355,7 +358,7 @@ fn start_turn(
                 execution.final_answer
             }
         });
-        execution
+        let status = execution
             .app
             .block_on(execution.store.finish_observed_agent_attempt(
                 execution.plan.run.id,
@@ -398,6 +401,9 @@ struct TurnExecution {
 
 impl TurnExecution {
     fn record(&mut self, event: ProviderEvent, source: EventSource) -> Result<()> {
+        let delegation_violation = source == EventSource::Provider
+            && self.plan.native_subagent_limit == Some(0)
+            && event.data.observed_native_subagent();
         let mut scope_changed = event.location.parent_item_id.is_some()
             && source == EventSource::Provider
             && matches!(event.data, ProviderEventData::ChildActivity { .. })
@@ -440,6 +446,10 @@ impl TurnExecution {
             source,
             event,
         ))?;
+        ensure!(
+            !delegation_violation,
+            "The CLI started a native child while native delegation was disabled"
+        );
         if scope_changed && let Some((scope, checkout)) = &mut self.capability_scope {
             scope.reported_model = self.reported.model.clone();
             scope.reported_effort = self.reported.effort.clone();
@@ -1045,6 +1055,27 @@ impl TurnExecution {
             self.store
                 .resolve_capability_assessment(scope.clone(), descriptors),
         )?;
+        if let SubagentAuditRoute::Native { evidence_id } = &self.plan.subagent_audit {
+            let subject = CapabilitySubject::Protocol {
+                capability: super::Capability::NativeSubagentAudit,
+            };
+            let verified = capabilities.entries.iter().any(|entry| {
+                entry.descriptor.subject == subject
+                    && entry.evidence.as_ref().is_some_and(|verification| {
+                        &verification.id == evidence_id && verification.verified()
+                    })
+            });
+            if !verified {
+                self.app.block_on(
+                    self.store
+                        .invalidate_native_subagent_audit(evidence_id.clone()),
+                )?;
+                self.reject_dispatch(DispatchRejection::SubagentAuditUnverified)?;
+                anyhow::bail!(
+                    "The effective CLI profile changed after its native subagent audit was verified"
+                );
+            }
+        }
         self.check_dispatch_requirements(&capabilities, &instructions, checkout)?;
         let mut input = format_input(&self.plan.input)?;
         if !self.plan.question_route.is_native() {

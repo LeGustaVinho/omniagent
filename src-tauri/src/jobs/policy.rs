@@ -96,6 +96,7 @@ pub enum DispatchRejection {
     ProfileUnavailable,
     WorktreeUnavailable,
     NativeDelegationUnverified,
+    SubagentAuditUnverified,
     Requirements {
         capabilities: Vec<Capability>,
         customizations: Vec<RequiredCustomization>,

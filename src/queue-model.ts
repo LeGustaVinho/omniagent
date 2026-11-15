@@ -77,6 +77,7 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
         case "profile_unavailable": return "The selected CLI profile changed or could not be verified.";
         case "worktree_unavailable": return "The worktree identity could not be verified.";
         case "native_delegation_unverified": return "The CLI did not confirm its reserved native subagent limit.";
+        case "subagent_audit_unverified": return "The effective CLI profile changed after its native subagent audit was verified.";
         case "requirements": {
           const missing = [
             ...rejection.capabilities.map((capability) => capability.replaceAll("_", " ")),
@@ -91,5 +92,6 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
     case "pending_worktree_changes": return `The worktree has pending changes for task scope ${blocker.scopeTaskId}.`;
     case "capacity": return `Waiting for an execution slot (${blocker.active} of ${blocker.limit} in use).`;
     case "subagent_quota": return `Conversation subagent limit reached (${blocker.active} of ${blocker.limit} in use).`;
+    case "subagent_audit": return `Complete subagent audit requires verified evidence for ${blocker.missing.map((field) => field.replaceAll("_", " ")).join(", ")} or verified native delegation disablement.`;
   }
 }

@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -284,6 +284,14 @@ impl CapabilityScope {
     }
 
     fn key(&self, descriptor: &CapabilityDescriptor) -> Option<QualificationKey<'_>> {
+        if descriptor.subject
+            == (CapabilitySubject::Protocol {
+                capability: Capability::NativeSubagentAudit,
+            })
+            && descriptor.boundary != EvidenceBoundary::ExactCheckout
+        {
+            return None;
+        }
         let native_attachment = matches!(
             descriptor.subject,
             CapabilitySubject::NativeAttachment { .. }
@@ -328,7 +336,10 @@ impl CapabilityScope {
                 ),
             ),
             CapabilitySubject::Protocol {
-                capability: Capability::WorkspaceWrite | Capability::ToolApprovals,
+                capability:
+                    Capability::WorkspaceWrite
+                    | Capability::ToolApprovals
+                    | Capability::NativeSubagentAudit,
             } => (self.configuration.effective_revision.as_deref()?, None),
             CapabilitySubject::Protocol { capability } if capability.is_planning() => {
                 if descriptor.boundary != EvidenceBoundary::ExactCheckout {
@@ -666,6 +677,7 @@ impl ReportedCapabilities {
                             capability,
                             Capability::NativeTurnFork
                                 | Capability::NativeDelegationControls
+                                | Capability::NativeSubagentAudit
                                 | Capability::NativeGoalEvents
                         ) {
                         EvidenceBoundary::ExactCheckout
@@ -793,6 +805,14 @@ impl Store {
             .key(&descriptor)
             .context("qualification scope is incomplete")?;
         let hash = revision(&key)?;
+        let native_audit = descriptor.subject
+            == (CapabilitySubject::Protocol {
+                capability: Capability::NativeSubagentAudit,
+            });
+        let native_fixture = (native_audit
+            && origin == EvidenceOrigin::AuthenticatedFixture
+            && result == ObservedResult::Succeeded)
+            .then(|| artifact_id.clone());
         let evidence = if let Some(limits) = attachment_limits {
             serde_json::to_vec(&(key, result, artifact_id, limits))?
         } else {
@@ -801,7 +821,10 @@ impl Store {
         let evidence = protection::protect(&evidence)?;
         let id = Uuid::new_v4().to_string();
         self.execute(move |db| {
-            db.execute(
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let launch_key = native_fixture.as_deref()
+                .map(|run| crate::jobs::native_audit_fixture_key(&tx, &scope, run)).transpose()?;
+            tx.execute(
                 "INSERT INTO capability_evidence(id, version, qualification_key, origin, payload)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
@@ -812,6 +835,21 @@ impl Store {
                     evidence
                 ],
             )?;
+            if let Some(launch_key) = launch_key {
+                tx.execute(
+                    "INSERT INTO native_subagent_audit_candidates(launch_key, evidence_id) VALUES (?1, ?2)
+                     ON CONFLICT(launch_key) DO UPDATE SET evidence_id = excluded.evidence_id",
+                    params![launch_key, id],
+                )?;
+            }
+            if native_audit && origin == EvidenceOrigin::AuthenticatedFixture && result == ObservedResult::Failed {
+                tx.execute(
+                    "DELETE FROM native_subagent_audit_candidates WHERE evidence_id IN (
+                       SELECT id FROM capability_evidence WHERE qualification_key = ?1 AND version = ?2)",
+                    params![hash, CAPABILITY_SCHEMA_VERSION],
+                )?;
+            }
+            tx.commit()?;
             Ok(id)
         })
         .await

@@ -1101,7 +1101,7 @@ impl CodexSession {
                     parent_id: string(item, "senderThreadId"),
                     prompt: spawned.then(|| string(item, "prompt")).flatten(),
                     requested_model: spawned.then(|| string(item, "model")).flatten(),
-                    reported_model: None,
+                    ..Default::default()
                 };
                 let children = item["receiverThreadIds"]
                     .as_array()
@@ -1115,10 +1115,15 @@ impl CodexSession {
                         children
                             .into_iter()
                             .map(|child| {
+                                let reported = &item["agentsStates"][child];
+                                let mut details = details.clone();
+                                if reported["status"] == "completed" {
+                                    details.response = string(reported, "message");
+                                }
                                 event(ProviderEventData::ChildActivity {
                                     child_id: Some(child.to_owned()),
-                                    status: string(&item["agentsStates"][child], "status"),
-                                    details: Some(details.clone()),
+                                    status: string(reported, "status"),
+                                    details: Some(details),
                                 })
                             })
                             .collect(),
@@ -2321,7 +2326,7 @@ mod tests {
                     parent_id: Some("session".into()),
                     prompt: Some("Inspect the fixture".into()),
                     requested_model: Some("gpt-6-luna".into()),
-                    reported_model: None,
+                    ..Default::default()
                 }),
             }
         );

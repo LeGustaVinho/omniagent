@@ -109,6 +109,9 @@ pub enum AdmissionBlocker {
         active: u32,
         limit: u32,
     },
+    SubagentAudit {
+        missing: Vec<super::SubagentAuditField>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]

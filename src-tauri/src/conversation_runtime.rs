@@ -284,6 +284,7 @@ pub async fn conversation_events(
                     | ProviderEventData::DownstreamWaitRequested { .. }
                     | ProviderEventData::DownstreamContinuation { .. }
                     | ProviderEventData::ChildActivity { .. }
+                    | ProviderEventData::SubagentAuditGap { .. }
             )
         })
         .collect();

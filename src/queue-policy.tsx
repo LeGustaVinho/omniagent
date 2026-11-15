@@ -13,7 +13,7 @@ const field = "rounded border border-border bg-background px-2 py-1 text-sm";
 const capabilityOptions: Capability[] = [
   "model_inventory", "fresh_session", "resume", "native_turn_fork", "reasoning", "tool_approvals",
   "native_plan_mode", "planning_questions", "planning_answers", "native_plan_output", "native_goal_command",
-  "native_goal_events", "cancel_turn", "live_steering", "subagent_events", "per_child_events",
+  "native_goal_events", "cancel_turn", "live_steering", "subagent_events", "per_child_events", "native_subagent_audit",
   "native_delegation_controls", "native_compaction", "manual_native_compaction", "native_suggestions",
   "side_request", "workspace_write", "run_scoped_mcp",
 ];

@@ -10,8 +10,8 @@ use omniagent::{
     customizations::CustomizationInventory,
     evidence::FixtureInputEvidence,
     jobs::{
-        ConversationSubagentQuota, ProjectSubagentPolicy, QueueHistoryPolicy, QueueHistorySettings,
-        SubagentLimitMode,
+        ConversationSubagentAudit, ConversationSubagentQuota, ProjectSubagentPolicy,
+        QueueHistoryPolicy, QueueHistorySettings, SubagentAuditPolicy, SubagentLimitMode,
     },
     providers::{
         Provider,
@@ -218,6 +218,52 @@ pub async fn set_conversation_subagent_quota(
             requested,
             native_requested,
         )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn project_subagent_audit(
+    store: State<'_, Store>,
+    project_id: String,
+) -> Result<SubagentAuditPolicy, String> {
+    store
+        .project_subagent_audit(project_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_project_subagent_audit(
+    store: State<'_, Store>,
+    project_id: String,
+    policy: SubagentAuditPolicy,
+) -> Result<(), String> {
+    store
+        .set_project_subagent_audit(project_id, policy)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn conversation_subagent_audit(
+    store: State<'_, Store>,
+    conversation_id: String,
+) -> Result<ConversationSubagentAudit, String> {
+    store
+        .conversation_subagent_audit(conversation_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_conversation_subagent_audit(
+    store: State<'_, Store>,
+    conversation_id: String,
+    policy: Option<SubagentAuditPolicy>,
+) -> Result<ConversationSubagentAudit, String> {
+    store
+        .set_conversation_subagent_audit(conversation_id, policy)
         .await
         .map_err(|error| error.to_string())
 }

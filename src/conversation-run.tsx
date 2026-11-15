@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Activity, Square, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { RunRecord } from "@/bindings/RunRecord";
+import type { SubagentAuditGap } from "@/bindings/SubagentAuditGap";
 import { Button } from "@/components/ui/button";
 import { ConversationChildren, recordChildActivity, type ChildActivity, type ChildLocation, type Delegation } from "@/conversation-children";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
@@ -17,6 +18,7 @@ type EventData =
   | { type: "reasoning"; text: string; summary: boolean }
   | { type: "usage"; input: number | null; output: number | null; cached_input: number | null }
   | { type: "context_window_usage"; used: number; size: number }
+  | { type: "subagent_audit_gap"; report: SubagentAuditGap }
   | ChildActivity;
 type Page = {
   cursor: string;
@@ -30,6 +32,7 @@ type Projection = {
   plan: string;
   error: string;
   delegation: Delegation;
+  auditGaps: SubagentAuditGap[];
   reasoning: Extract<EventData, { type: "reasoning" }>[];
   tools: Extract<EventData, { type: "tool" }>[];
   usage?: Extract<EventData, { type: "usage" }>;
@@ -37,7 +40,7 @@ type Projection = {
 };
 const emptyProjection: Projection = {
   cursor: "0", streamed: "", final: "", plan: "", error: "", reasoning: [], tools: [],
-  delegation: { children: {}, parentActivity: {} },
+  delegation: { children: {}, parentActivity: {} }, auditGaps: [],
 };
 const labels = {
   starting: "Starting", running: "Running", waiting_for_input: "Waiting for input",
@@ -70,6 +73,7 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
         reasoning: [...prior.reasoning],
         tools: [...prior.tools],
         delegation: { children: { ...prior.delegation.children }, parentActivity: { ...prior.delegation.parentActivity } },
+        auditGaps: [...prior.auditGaps],
       };
       let page: Page;
       do {
@@ -78,6 +82,7 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
         for (const event of page.events) {
           const data = event.data;
           if (data.type === "child_activity") recordChildActivity(current.delegation, data, event.location);
+          if (data.type === "subagent_audit_gap") current.auditGaps.push(data.report);
           if (event.location.parentItemId !== null) continue;
           if (data.type === "assistant_delta") current.streamed += data.text;
           if (data.type === "assistant_message") current.final += data.text;
@@ -191,6 +196,16 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
         </>}
       </dl>
       {projection && <ConversationChildren delegation={projection.delegation} />}
+      {Boolean(projection?.auditGaps.length) && <section aria-label="Subagent audit gaps" className="grid gap-2">
+        <h2 className="text-sm font-medium">Subagent audit gaps</h2>
+        {projection?.auditGaps.map((gap) => <div key={gap.source} className="grid gap-1 text-xs text-muted-foreground">
+          {gap.nativeDelegationDetected && <p role="alert">The CLI reported a native child after native delegation was disabled.</p>}
+          {gap.missing.length > 0 && <p>
+            {gap.source === "native" ? "Native delegation" : "Managed child"} · Missing {gap.missing.map((field) => field.replaceAll("_", " ")).join(", ")}
+            {gap.source === "native" && ` · ${gap.affectedChildren} identified with gaps · ${gap.unidentified} without confirmed identity`}
+          </p>}
+        </div>)}
+      </section>}
       {Boolean(projection?.tools.length) && <details>
         <summary>Tool activity</summary>
         <ol>{projection?.tools.map((tool, index) => <li key={index}>{tool.name} · {tool.phase}</li>)}</ol>

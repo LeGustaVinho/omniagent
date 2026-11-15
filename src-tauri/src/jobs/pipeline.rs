@@ -12,7 +12,9 @@ use crate::{
     store::Store,
 };
 
-use super::{Job, JobContext, JobOrigin, JobRequest, history, insert_job, load_job};
+use super::{
+    Job, JobContext, JobOrigin, JobRequest, SubagentAuditPolicy, history, insert_job, load_job,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineNodeKind {
@@ -202,14 +204,32 @@ impl Store {
         instance: String,
         kind: PipelineNodeKind,
     ) -> Result<()> {
+        self.register_job_pipeline_node_with_audit(
+            project,
+            pipeline_run,
+            instance,
+            kind,
+            SubagentAuditPolicy::Available,
+        )
+        .await
+    }
+
+    pub async fn register_job_pipeline_node_with_audit(
+        &self,
+        project: String,
+        pipeline_run: String,
+        instance: String,
+        kind: PipelineNodeKind,
+        audit: SubagentAuditPolicy,
+    ) -> Result<()> {
         ensure!(
             !instance.trim().is_empty(),
             "A pipeline node needs an instance identifier"
         );
         self.execute(move |db| {
             let changed = db.execute(
-                "INSERT INTO job_pipeline_nodes (pipeline_run_id, instance_id, kind)
-                 SELECT id, ?3, ?4 FROM job_pipeline_runs WHERE id = ?1 AND project_id = ?2",
+                "INSERT INTO job_pipeline_nodes (pipeline_run_id, instance_id, kind, subagent_audit)
+                 SELECT id, ?3, ?4, ?5 FROM job_pipeline_runs WHERE id = ?1 AND project_id = ?2",
                 params![
                     pipeline_run,
                     project,
@@ -217,7 +237,8 @@ impl Store {
                     match kind {
                         PipelineNodeKind::Execution => "execution",
                         PipelineNodeKind::ImplementationApproval => "implementation_approval",
-                    }
+                    },
+                    audit.key()
                 ],
             )?;
             ensure!(changed == 1, "The pipeline run is outside this project");

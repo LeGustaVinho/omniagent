@@ -80,6 +80,7 @@ impl From<AdmissionBlocker> for QueueBlockerKind {
             | AdmissionBlocker::ConversationBusy { .. }
             | AdmissionBlocker::Downstream { .. } => Self::Context,
             AdmissionBlocker::MissingCapability { .. } => Self::Capability,
+            AdmissionBlocker::SubagentAudit { .. } => Self::Capability,
             AdmissionBlocker::DispatchRejected { .. } => Self::Dispatch,
             AdmissionBlocker::PipelineRelease { .. } => Self::ImplementationRelease,
             AdmissionBlocker::Writer { .. }

@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     attachments::{self, AttachmentPreview, CapturedAttachment},
     dispatch::{Delivery, EventSource},
-    jobs::SubagentAllocation,
+    jobs::{SubagentAllocation, SubagentAuditRoute},
     protection,
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionIntent,
@@ -104,6 +104,7 @@ pub struct AttemptPlan {
     pub(crate) requires_bridge: bool,
     pub(crate) native_job_recovery: Option<NativeJobRecovery>,
     pub(crate) native_subagent_limit: Option<u32>,
+    pub(crate) subagent_audit: SubagentAuditRoute,
 }
 
 pub(crate) struct NativeJobRecovery {
@@ -874,6 +875,7 @@ impl Store {
     ) -> Result<()> {
         self.finish_observed_agent_attempt(run_id, outcome, response, None, false)
             .await
+            .map(|_| ())
     }
 
     pub(crate) async fn finish_observed_agent_attempt(
@@ -883,16 +885,29 @@ impl Store {
         response: Option<String>,
         failure: Option<crate::jobs::FailureObservation>,
         quiescence_confirmed: bool,
-    ) -> Result<()> {
+    ) -> Result<RunStatus> {
         ensure!(outcome.is_terminal(), "attempt outcome must be terminal");
+        let has_response = response
+            .as_ref()
+            .is_some_and(|text| !text.trim().is_empty());
         let encrypted = response
             .filter(|text| !text.is_empty())
             .map(|text| protection::protect(text.as_bytes()))
             .transpose()?;
-        self.execute(move |db| {
+        let outcome = self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let active = active_attempt(&tx, &run_id)?;
             let run = runs::load_run(&tx, &run_id)?;
+            let incomplete = crate::jobs::settle_subagent_audit(&tx, &run_id, has_response)?;
+            let (outcome, failure) = if incomplete && outcome == RunStatus::Succeeded {
+                (RunStatus::Failed, Some(crate::jobs::FailureObservation {
+                    phase: crate::jobs::FailurePhase::EvidenceCapture,
+                    cause: Some(crate::jobs::FailureCause::EvidenceUnavailable),
+                    process: failure.and_then(|observed| observed.process),
+                }))
+            } else {
+                (outcome, failure)
+            };
             runs::advance_run(&tx, &run, outcome)?;
             crate::jobs::record_job_failure(&tx, &run_id, outcome, failure)?;
             let context_id = if let Some(encrypted) = encrypted {
@@ -932,10 +947,10 @@ impl Store {
             }
             crate::jobs::observe_child_run(&tx, &run_id)?;
             tx.commit()?;
-            Ok(())
+            Ok(outcome)
         }).await?;
         self.job_signal.send_replace(());
-        Ok(())
+        Ok(outcome)
     }
 
     pub async fn recover_agent_attempts_after_restart(&self) -> Result<()> {
@@ -963,6 +978,7 @@ impl Store {
                 close_permissions(&tx, &id)?;
                 close_native_questions(&tx, &id)?;
                 close_unfinished_structured_questions(&tx, &id)?;
+                crate::jobs::settle_subagent_audit(&tx, &id, false)?;
                 tx.execute(
                     "UPDATE agent_attempts SET result_context_id = context_id WHERE run_id = ?1",
                     [&id],
@@ -1225,6 +1241,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
     let eligible = previous.as_ref().filter(|prior| {
         !prior.native_scope_reserved && prior.native_subagent_limit == allocation.native_allowance
     });
+    let eligible = eligible.filter(|prior| allocation.audit == prior.audit);
     let continuity = match (&history, eligible, &recorded) {
         (AttemptHistory::Automatic, Some(prior), None)
             if prior.scope == serialized
@@ -1382,8 +1399,10 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             &run.id,
             &agent_session_id,
             allocation.native_requested,
+            allocation.strict_total,
         )?;
     }
+    crate::jobs::pin_attempt_audit(db, &run.id, &allocation.audit)?;
     let mut answered_question = None;
     if let (Some((origin, reply)), Some((request_event_seq, _))) = (answer, answered_request) {
         let event = ProviderEvent {
@@ -1440,6 +1459,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         requires_bridge: false,
         native_job_recovery,
         native_subagent_limit: allocation.native_allowance,
+        subagent_audit: allocation.audit,
     })
 }
 
@@ -1688,14 +1708,17 @@ struct PreviousAttempt {
     cursor: Option<String>,
     native_subagent_limit: Option<u32>,
     native_scope_reserved: bool,
+    audit: SubagentAuditRoute,
 }
 
 fn previous_attempt(db: &Connection, conversation: &str) -> Result<Option<PreviousAttempt>> {
     Ok(db
         .query_row(
             "SELECT a.run_id, s.id, s.scope, s.provider_session_id, s.cursor_context_id, s.native_subagent_limit,
-                EXISTS (SELECT 1 FROM native_subagent_reservations WHERE session_id = s.id AND state <> 'released')
+                EXISTS (SELECT 1 FROM native_subagent_reservations WHERE session_id = s.id AND state <> 'released'),
+                audit.route, audit.native_evidence_id
          FROM agent_attempts a JOIN agent_sessions s ON s.id = a.agent_session_id
+         LEFT JOIN attempt_subagent_audit audit ON audit.run_id = a.run_id
          WHERE a.conversation_id = ?1 AND a.detached_context = 0 ORDER BY a.ordinal DESC LIMIT 1",
             [conversation],
             |row| {
@@ -1707,6 +1730,11 @@ fn previous_attempt(db: &Connection, conversation: &str) -> Result<Option<Previo
                     cursor: row.get(4)?,
                     native_subagent_limit: row.get(5)?,
                     native_scope_reserved: row.get(6)?,
+                    audit: match row.get::<_, Option<String>>(7)?.as_deref() {
+                        Some("managed") => SubagentAuditRoute::Managed,
+                        Some("native") => SubagentAuditRoute::Native { evidence_id: row.get(8)? },
+                        _ => SubagentAuditRoute::Available,
+                    },
                 })
             },
         )
@@ -2808,6 +2836,227 @@ mod tests {
                     .is_empty()
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_subagent_audit_requires_a_complete_authenticated_fixture_and_rechecks_the_scope()
+    -> Result<()> {
+        use crate::{jobs::SubagentAuditPolicy, providers::ChildDetails};
+
+        let (_dir, store, conversation, scope) = setup().await?;
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(FixtureRunner(WireLog {
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            conversation: conversation.id.clone(),
+            frames: log,
+        }));
+        let baseline = prepare(
+            &store,
+            &conversation.id,
+            scope.clone(),
+            "Read effective CLI scope",
+        )
+        .await?;
+        let baseline_id = baseline.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), runner.clone(), baseline, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        let evidence = store
+            .agent_dispatch(conversation.id.clone(), baseline_id.clone())
+            .await?
+            .unwrap();
+        let mut snapshot = evidence.snapshot;
+        let assessment = snapshot
+            .capabilities
+            .as_ref()
+            .context("Fixture had no capability scope")?;
+        let effective = assessment.scope.clone();
+        let descriptor = assessment
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.descriptor.subject
+                    == CapabilitySubject::Protocol {
+                        capability: Capability::NativeSubagentAudit,
+                    }
+            })
+            .context("Missing audit capability subject")?
+            .descriptor
+            .clone();
+        assert!(
+            store
+                .record_capability_evidence(
+                    effective.clone(),
+                    descriptor.clone(),
+                    EvidenceOrigin::AuthenticatedFixture,
+                    ObservedResult::Succeeded,
+                    baseline_id,
+                )
+                .await
+                .is_err()
+        );
+
+        // Feed the normalized frames a capable adapter would report in an authenticated fixture.
+        let qualified = prepare(
+            &store,
+            &conversation.id,
+            scope.clone(),
+            "Observe a native child",
+        )
+        .await?;
+        let qualified_id = qualified.run.id;
+        store.mark_agent_running(qualified_id.clone()).await?;
+        snapshot.context_id = qualified.context_id;
+        snapshot.submitted_messages = qualified.input;
+        snapshot.native_history = NativeHistory::Fresh;
+        let sent = store
+            .prepare_dispatch(qualified_id.clone(), snapshot, vec![b"fixture".to_vec()])
+            .await?;
+        store.settle_dispatch(sent, Delivery::Submitted).await?;
+        let observe = |run: String, complete: bool| {
+            store.record_agent_observation(
+                run,
+                EventSource::Provider,
+                ProviderEvent {
+                    location: ProviderLocation {
+                        session_id: Some("native-session".into()),
+                        ..Default::default()
+                    },
+                    data: ProviderEventData::ChildActivity {
+                        child_id: Some("child-a".into()),
+                        status: Some("completed".into()),
+                        details: Some(ChildDetails {
+                            prompt: Some("Submitted child prompt".into()),
+                            context_provenance: complete.then(|| "context:fixture-revision".into()),
+                            response: complete.then(|| "Recorded child answer".into()),
+                            ..Default::default()
+                        }),
+                    },
+                },
+            )
+        };
+        observe(qualified_id.clone(), true).await?;
+        store
+            .finish_agent_attempt(
+                qualified_id.clone(),
+                RunStatus::Succeeded,
+                Some("Fixture response".into()),
+            )
+            .await?;
+        let evidence_id = store
+            .record_capability_evidence(
+                effective.clone(),
+                descriptor.clone(),
+                EvidenceOrigin::AuthenticatedFixture,
+                ObservedResult::Succeeded,
+                qualified_id.clone(),
+            )
+            .await?;
+
+        store
+            .set_conversation_subagent_audit(
+                conversation.id.clone(),
+                Some(SubagentAuditPolicy::Complete),
+            )
+            .await?;
+        let admitted = prepare(
+            &store,
+            &conversation.id,
+            scope.clone(),
+            "Use the qualified native profile",
+        )
+        .await?;
+        assert!(
+            matches!(&admitted.subagent_audit, SubagentAuditRoute::Native { evidence_id: id } if id == &evidence_id)
+        );
+        assert!(admitted.native_subagent_limit.is_none());
+        let verified_id = admitted.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), runner.clone(), admitted, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        assert!(
+            store
+                .agent_dispatch(conversation.id.clone(), verified_id)
+                .await?
+                .is_some()
+        );
+        let guide = scope.checkout.join("AGENTS.md");
+        std::fs::write(&guide, "Changed instructions in disposable audit fixture.")?;
+        let stale = prepare(
+            &store,
+            &conversation.id,
+            scope.clone(),
+            "Recheck the fixture scope",
+        )
+        .await?;
+        let stale_id = stale.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), runner, stale, None)
+                .wait()
+                .await?,
+            RunStatus::Failed
+        );
+        assert!(
+            store
+                .agent_dispatch(conversation.id.clone(), stale_id)
+                .await?
+                .is_none()
+        );
+        assert!(
+            prepare(
+                &store,
+                &conversation.id,
+                scope.clone(),
+                "A stale candidate should be unavailable"
+            )
+            .await
+            .is_err()
+        );
+        std::fs::remove_file(guide)?;
+        store
+            .record_capability_evidence(
+                effective,
+                descriptor,
+                EvidenceOrigin::AuthenticatedFixture,
+                ObservedResult::Succeeded,
+                qualified_id,
+            )
+            .await?;
+
+        let partial = prepare(
+            &store,
+            &conversation.id,
+            scope.clone(),
+            "A provider drops some evidence",
+        )
+        .await?;
+        store.mark_agent_running(partial.run.id.clone()).await?;
+        observe(partial.run.id.clone(), false).await?;
+        assert_eq!(
+            store
+                .finish_observed_agent_attempt(
+                    partial.run.id,
+                    RunStatus::Succeeded,
+                    Some("Partial answer".into()),
+                    None,
+                    true
+                )
+                .await?,
+            RunStatus::Failed
+        );
+        assert!(
+            prepare(&store, &conversation.id, scope, "Unverified native route")
+                .await
+                .is_err()
+        );
         Ok(())
     }
 

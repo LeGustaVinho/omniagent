@@ -14,7 +14,10 @@ it("scopes stable children by provider session and parent and retains unidentifi
   recordChildActivity(delegation, started, location);
   recordChildActivity(delegation, { ...started, details: undefined }, { ...location, parentItemId: "parent-b" });
   recordChildActivity(delegation, { ...started, details: undefined }, { ...location, sessionId: "session-b" });
-  recordChildActivity(delegation, { type: "child_activity", child_id: "child", status: "completed" }, location);
+  recordChildActivity(delegation, {
+    ...started, status: "completed",
+    details: { ...started.details!, response: "Fixture child answer" },
+  }, location);
   recordChildActivity(delegation, { type: "child_activity", child_id: null, status: "delegating" }, location);
   render(<ConversationChildren delegation={delegation} />);
   expect(screen.getAllByText(/^Child child · /)).toHaveLength(3);
@@ -27,5 +30,7 @@ it("scopes stable children by provider session and parent and retains unidentifi
   expect(details.getByText("Inspect the fixture")).toBeDefined();
   expect(details.getByText("Requested model")).toBeDefined();
   expect(details.getByText("requested-model")).toBeDefined();
+  expect(details.getByText("Fixture child answer")).toBeDefined();
+  expect(details.getByText("Context provenance")).toBeDefined();
   expect(details.getAllByText("Unavailable")).toHaveLength(2);
 });

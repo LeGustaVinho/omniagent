@@ -7,6 +7,8 @@ export type ChildActivity = {
     prompt: string | null;
     requestedModel: string | null;
     reportedModel: string | null;
+    contextProvenance?: string;
+    response?: string;
   };
 };
 
@@ -25,6 +27,8 @@ type ChildEntry = {
   prompt: string | null;
   requestedModel: string | null;
   reportedModel: string | null;
+  contextProvenance: string | null;
+  response: string | null;
 };
 
 export type Delegation = {
@@ -59,6 +63,8 @@ export function recordChildActivity(delegation: Delegation, activity: ChildActiv
     prompt: details?.prompt ?? previous?.prompt ?? null,
     requestedModel: details?.requestedModel ?? previous?.requestedModel ?? null,
     reportedModel: details?.reportedModel ?? previous?.reportedModel ?? null,
+    contextProvenance: details?.contextProvenance ?? previous?.contextProvenance ?? null,
+    response: details?.response ?? previous?.response ?? null,
   };
 }
 
@@ -76,7 +82,8 @@ export function ConversationChildren({ delegation }: { delegation: Delegation })
             <dt>Provider session</dt><dd>{child.sessionId}</dd>
             <dt>Parent</dt><dd>{child.parentId ?? "Unavailable"}</dd>
             <dt>Prompt</dt><dd className="whitespace-pre-wrap">{child.prompt ?? "Unavailable"}</dd>
-            <dt>Context</dt><dd>Unavailable</dd>
+            <dt>Context provenance</dt><dd>{child.contextProvenance ?? "Unavailable"}</dd>
+            <dt>Reported response</dt><dd className="whitespace-pre-wrap">{child.response ?? "Unavailable"}</dd>
             <dt>{child.reportedModel ? "Model" : child.requestedModel ? "Requested model" : "Model"}</dt>
             <dd>{child.reportedModel ?? child.requestedModel ?? "Unavailable"}</dd>
             <dt>Controls</dt><dd>Unavailable</dd>
