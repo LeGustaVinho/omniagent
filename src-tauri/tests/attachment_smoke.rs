@@ -557,13 +557,13 @@ async fn codex_reads_a_scoped_local_image() -> Result<()> {
             path: media[0].path.clone(),
         },
     )?;
-    let attached = store.prepare_agent_attempt_with_attachments(chat.id.clone(), chat.context_id, scope,
+    let attached = store.prepare_agent_attempt_with_attachments(chat.id.clone(), chat.context_id, scope.clone(),
         "Use only the supplied image. List all six colors left to right and repeat colors when needed. Do not use tools.".into(), vec![preview]).await?;
     let run = attached.run.id.clone();
     assert_eq!(
         tokio::time::timeout(
             Duration::from_secs(65),
-            start_managed_turn(store.clone(), runner, attached, None).wait()
+            start_managed_turn(store.clone(), runner.clone(), attached, None).wait()
         )
         .await??,
         RunStatus::Succeeded
@@ -594,6 +594,51 @@ async fn codex_reads_a_scoped_local_image() -> Result<()> {
             .context("missing managed image result")?
             .text
     ));
+
+    let candidate = store
+        .create_conversation(chat.checkout_id, "Different profile".into())
+        .await?;
+    let mut switched = scope;
+    switched.profile_id = "unqualified-native-image-fixture".into();
+    let preview = store
+        .preview_attachment(
+            candidate.checkout_id.clone(),
+            AttachmentSource::SelectedFile {
+                path: media[0].path.clone(),
+            },
+            AttachmentDelivery::Native,
+        )
+        .await?;
+    let plan = store
+        .prepare_agent_attempt_with_attachments(
+            candidate.id.clone(),
+            candidate.context_id,
+            switched,
+            "Inspect the same image.".into(),
+            vec![preview],
+        )
+        .await?;
+    let run = plan.run.id.clone();
+    assert_eq!(
+        start_managed_turn(store.clone(), runner, plan, None)
+            .wait()
+            .await?,
+        RunStatus::Failed
+    );
+    assert!(
+        store
+            .agent_dispatch(candidate.id.clone(), run.clone())
+            .await?
+            .is_none()
+    );
+    let events = store.agent_observations(candidate.id, run, 0).await?;
+    assert!(events.iter().any(|entry| match &entry.event.data {
+        ProviderEventData::AttachmentBlocked { blockers } =>
+            blockers.len() == 1
+                && blockers[0].delivery == AttachmentDelivery::Native
+                && blockers[0].reason.contains("unverified for this profile"),
+        _ => false,
+    }));
     Ok(())
 }
 
@@ -682,6 +727,23 @@ async fn verify_fallback_routes(provider: Provider, model: &str) -> Result<()> {
     let chat = store
         .create_conversation(repo.checkout_id, "Attachment fallback fixture".into())
         .await?;
+    let oversized_path = "oversized.bin";
+    File::create(checkout.join(oversized_path))?.set_len(20 * 1024 * 1024 + 1)?;
+    let oversized = store
+        .preview_attachment(
+            chat.checkout_id.clone(),
+            AttachmentSource::Checkout {
+                relative_path: oversized_path.into(),
+            },
+            AttachmentDelivery::Native,
+        )
+        .await
+        .err()
+        .context("oversized native attachment was previewed as eligible")?;
+    assert!(
+        oversized.to_string().contains("oversized.bin")
+            && oversized.to_string().contains("20971520 bytes")
+    );
     let probe = probe_cli(ConfiguredExecutable {
         provider,
         executable: None,
@@ -735,13 +797,16 @@ async fn verify_fallback_routes(provider: Provider, model: &str) -> Result<()> {
     )?;
     let plan = store.prepare_agent_attempt_with_attachments(
         chat.id.clone(), chat.context_id, scope.clone(),
-        "Reply with the two exact codes. Read the attached file reference with a file read tool if needed. The other code is in the attached excerpt.".into(),
+        "Reply with the two exact codes. If the attached file reference needs opening, use the built-in file reader. The other code is in the attached excerpt.".into(),
         vec![excerpt, selected_reference],
     ).await?;
     let run = plan.run.id.clone();
-    let result = start_managed_turn(store.clone(), Arc::new(DirectWindowsRunner), plan, None)
-        .wait()
-        .await?;
+    let result = tokio::time::timeout(
+        Duration::from_secs(65),
+        start_managed_turn(store.clone(), Arc::new(DirectWindowsRunner), plan, None).wait(),
+    )
+    .await
+    .context("fallback attachment prompt did not settle")??;
     let saved = store
         .agent_dispatch(chat.id.clone(), run.clone())
         .await?
@@ -808,10 +873,15 @@ async fn verify_fallback_routes(provider: Provider, model: &str) -> Result<()> {
         .capabilities
         .context("missing capability assessment")?
         .scope;
+    let prior_plugin_status = saved
+        .snapshot
+        .plugin_inventory
+        .as_ref()
+        .map(|inventory| inventory.report.status);
     // Qualify the envelope actually exercised by the authenticated fixture.
     let evidence = store
         .record_attachment_limit_evidence(
-            capability_scope,
+            capability_scope.clone(),
             saved.id,
             QualifiedAttachmentLimits {
                 files_per_turn: Some(2),
@@ -848,13 +918,47 @@ async fn verify_fallback_routes(provider: Provider, model: &str) -> Result<()> {
         )
         .await?;
     let blocked_run = blocked.run.id.clone();
-    assert_eq!(
-        start_managed_turn(store.clone(), Arc::new(DirectWindowsRunner), blocked, None)
-            .wait()
-            .await?,
-        RunStatus::Failed,
-        "{provider:?} did not apply the qualified request envelope"
-    );
+    let run_status = tokio::time::timeout(
+        Duration::from_secs(35),
+        start_managed_turn(store.clone(), Arc::new(DirectWindowsRunner), blocked, None).wait(),
+    )
+    .await
+    .context("qualified request limit did not settle")??;
+    if let Some(unexpected) = store
+        .agent_dispatch(checked.id.clone(), blocked_run.clone())
+        .await?
+    {
+        let plugin_status = unexpected
+            .snapshot
+            .plugin_inventory
+            .as_ref()
+            .map(|inventory| inventory.report.status);
+        let observed = unexpected
+            .snapshot
+            .capabilities
+            .context("missing unexpected capability assessment")?
+            .scope;
+        let changed_sources: Vec<_> = capability_scope
+            .configuration
+            .detected
+            .iter()
+            .chain(&observed.configuration.detected)
+            .filter(|entry| {
+                !capability_scope.configuration.detected.contains(entry)
+                    || !observed.configuration.detected.contains(entry)
+            })
+            .filter_map(|entry| entry.path.file_name())
+            .collect();
+        bail!(
+            "{provider:?} did not apply the qualified request envelope ({run_status:?}). Matching scope: {}, observed model: {:?} -> {:?}, matching configuration: {}, changed sources: {changed_sources:?}, matching unresolved paths: {}, plugin inventory: {prior_plugin_status:?} -> {plugin_status:?}",
+            capability_scope == observed,
+            capability_scope.reported_model,
+            observed.reported_model,
+            capability_scope.configuration == observed.configuration,
+            capability_scope.configuration.unresolved == observed.configuration.unresolved,
+        );
+    }
+    assert_eq!(run_status, RunStatus::Failed);
     assert!(
         store
             .agent_dispatch(checked.id.clone(), blocked_run.clone())

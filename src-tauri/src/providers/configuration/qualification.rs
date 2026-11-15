@@ -119,7 +119,21 @@ pub(crate) fn resolve_effective_configuration(
     configuration.effective_revision = None;
     configuration.attachment_revision = None;
     configuration.tool_revisions.clear();
-    if configuration.unresolved.is_empty() {
+    // In restricted Claude launches the projected settings and strict MCP config
+    // define the tools. The global state file also contains counters rewritten
+    // during normal turns, so its raw hash cannot identify the attachment scope.
+    let affects_attachment_launch =
+        |path: &Path| launch.strategy != "claude_restricted" || !path.ends_with(".claude.json");
+    if !configuration
+        .unresolved
+        .iter()
+        .any(|path| affects_attachment_launch(path))
+    {
+        let sources: Vec<_> = configuration
+            .detected
+            .iter()
+            .filter(|source| affects_attachment_launch(&source.path))
+            .collect();
         // A transport-specific attachment test can qualify the exact checkout even
         // when its CLI cannot enumerate all environment capabilities.
         let bridge_present = launch
@@ -127,7 +141,7 @@ pub(crate) fn resolve_effective_configuration(
             .iter()
             .any(|input| input.contents.contains(SERVER_NAME));
         configuration.attachment_revision = Some(revision(&(
-            &configuration.detected,
+            sources,
             &configuration.provider_revision,
             &launch.strategy,
             &launch.approved,

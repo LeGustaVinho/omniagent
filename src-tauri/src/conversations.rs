@@ -1351,7 +1351,8 @@ mod tests {
     #[tokio::test]
     async fn native_attachments_submit_qualified_frozen_bytes_and_a_read_only_path() -> Result<()> {
         use crate::attachments::{
-            AttachmentFormat, AttachmentPreview, AttachmentSource, NativeAttachmentEncoding,
+            AttachmentDelivery, AttachmentFormat, AttachmentInput, AttachmentPreview,
+            AttachmentSource, NativeAttachmentEncoding,
         };
         use crate::providers::capabilities::CapabilityStatus;
         use base64::{Engine, engine::general_purpose::STANDARD};
@@ -1446,7 +1447,7 @@ mod tests {
         let run = admitted.run.id.clone();
         std::fs::write(&file, b"saved after admission")?;
         assert_eq!(
-            start_managed_turn(store.clone(), runner, admitted, None)
+            start_managed_turn(store.clone(), runner.clone(), admitted, None)
                 .wait()
                 .await?,
             RunStatus::Succeeded
@@ -1478,10 +1479,76 @@ mod tests {
             .await?;
         let mut different = scope;
         different.account_binding = Some("another-account".into());
-        let fresh = prepare(&store, &chat.id, different, "Read the retained input").await?;
+        let fresh = prepare(
+            &store,
+            &chat.id,
+            different.clone(),
+            "Read the retained input",
+        )
+        .await?;
         assert!(matches!(fresh.intent, SessionIntent::Start));
         assert_eq!(fresh.attachments.len(), 1);
         assert_eq!(fresh.attachments[0].1.metadata, expected);
+        let switched_run = fresh.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), runner.clone(), fresh, None)
+                .wait()
+                .await?,
+            RunStatus::Failed
+        );
+        assert!(
+            store
+                .agent_dispatch(chat.id.clone(), switched_run.clone())
+                .await?
+                .is_none()
+        );
+        let blockers = store.agent_observations(chat.id, switched_run, 0).await?;
+        assert!(blockers.iter().any(|entry| match &entry.event.data {
+            ProviderEventData::AttachmentBlocked { blockers } =>
+                blockers.len() == 1
+                    && blockers[0].source == expected.source
+                    && blockers[0].delivery == AttachmentDelivery::Native
+                    && blockers[0].reason.contains("unverified for this profile"),
+            _ => false,
+        }));
+
+        std::fs::write(&file, STANDARD.decode(PNG)?)?;
+        let branch = store
+            .create_conversation(chat.checkout_id, "Switched attachment route".into())
+            .await?;
+        let runner = Arc::new(FixtureRunner(WireLog {
+            conversation: branch.id.clone(),
+            ..runner.0.clone()
+        }));
+        let reference = AttachmentPreview::read_with_delivery(
+            &different.checkout,
+            expected.source.clone(),
+            AttachmentDelivery::Reference,
+        )?;
+        let plan = store
+            .prepare_agent_attempt_with_attachments(
+                branch.id.clone(),
+                branch.context_id,
+                different,
+                "Use the reference".into(),
+                vec![reference],
+            )
+            .await?;
+        let reference_run = plan.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), runner, plan, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        let reference_dispatch = store
+            .agent_dispatch(branch.id, reference_run)
+            .await?
+            .unwrap();
+        let sent = &reference_dispatch.snapshot.attachments[0];
+        assert_eq!(sent.metadata, expected);
+        assert!(matches!(sent.input, AttachmentInput::Reference(_)));
+        assert!(sent.qualification_id.is_none());
         Ok(())
     }
 

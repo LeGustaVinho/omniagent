@@ -285,7 +285,7 @@ impl CapabilityScope {
             CapabilitySubject::NativeAttachment { .. }
         );
         let attachment_limits = descriptor.subject == CapabilitySubject::AttachmentLimits;
-        if !native_attachment && !self.configuration.unresolved.is_empty() {
+        if !native_attachment && !attachment_limits && !self.configuration.unresolved.is_empty() {
             return None;
         }
         let (configuration, tool_revision) = match &descriptor.subject {
