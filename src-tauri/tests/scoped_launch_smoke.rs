@@ -11,7 +11,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     conversations::{Conversation, SessionScope},
     customizations::{CustomizationInventory, CustomizationKind},
-    dispatch::NativeHistory,
+    dispatch::{NativeHistory, RecordedAgentEvent},
+    jobs::{JobOrigin, JobRequest, QueueState},
     mcp_bridge::Registration,
     providers::{
         ApprovalDecision, Capability, Provider, ProviderEventData, SessionMode,
@@ -336,6 +337,80 @@ async fn verify_answer(store: &Store, conversation: &Conversation, marker: &str)
     Ok(())
 }
 
+async fn recorded_events(
+    store: &Store,
+    conversation: &str,
+    run: &str,
+) -> Result<Vec<RecordedAgentEvent>> {
+    let mut events = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let page = store
+            .agent_observations(conversation.into(), run.into(), cursor)
+            .await?;
+        let Some(last) = page.last() else {
+            return Ok(events);
+        };
+        cursor = last.seq;
+        events.extend(page);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Codex App Server with gpt-6-luna"]
+async fn codex_submits_and_inspects_its_job_through_mcp() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let (store, checkout) = fixture.register().await?;
+    let conversation = store
+        .create_conversation(checkout.checkout_id, "Job bridge qualification".into())
+        .await?;
+    let profile = scope(Provider::Codex, "gpt-6-luna", &fixture.path)?;
+    let (run, status) = turn_with_prompt(&store, &conversation, profile, r#"
+Use only the omniagent_runtime MCP tools. Call submit_job with these exact arguments:
+{"requestId":"live-job-fixture","request":{"mode":"plan","instructions":"Plan how to test this disposable repository."}}
+Call submit_job again with exactly the same arguments to test retry. Both calls must return the same jobId.
+Call get_job_status with that jobId. Reply with its exact jobId and queueState from the tool.
+"#).await?;
+    assert_eq!(status, RunStatus::Succeeded);
+    let events = recorded_events(&store, &conversation.id, &run).await?;
+    let completed_tools = events
+        .iter()
+        .filter_map(|entry| match &entry.event.data {
+            ProviderEventData::Tool { name, phase } if phase == "completed" => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        completed_tools == ["submit_job", "submit_job", "get_job_status"],
+        "unexpected MCP tool completion sequence: {completed_tools:?}"
+    );
+    let queued = store
+        .submit_agent_job(
+            run.clone(),
+            "live-job-fixture".into(),
+            JobRequest {
+                checkout_id: None,
+                task_id: None,
+                mode: SessionMode::Plan,
+                instructions: "Plan how to test this disposable repository.".into(),
+                dependencies: Vec::new(),
+                requires_bridge: false,
+            },
+        )
+        .await?;
+    assert_eq!(queued.queue_state, QueueState::Queued);
+    assert_eq!(
+        queued.origin,
+        JobOrigin::Agent {
+            run_id: run,
+            request_id: "live-job-fixture".into()
+        }
+    );
+    assert!(events.iter().any(|entry| matches!(&entry.event.data,
+        ProviderEventData::AssistantMessage { text } if text.contains(&queued.id) && text.contains("queued"))));
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires authenticated Claude Code with the restricted print profile"]
 async fn claude_loads_only_the_approved_launch_entries_and_projects_instructions() -> Result<()> {
@@ -536,16 +611,7 @@ args = ["./generate-tone.cjs"]
         "Call the fixture_media MCP tool generate_tone with no arguments. Use only that tool. Copy its exact text result into your final answer, including the producer name and base64, as plain text.",
     ).await?;
     assert_eq!(status, RunStatus::Succeeded);
-    let mut events = Vec::new();
-    let mut cursor = 0;
-    loop {
-        let page = store
-            .agent_observations(conversation.id.clone(), run.clone(), cursor)
-            .await?;
-        let Some(last) = page.last() else { break };
-        cursor = last.seq;
-        events.extend(page);
-    }
+    let events = recorded_events(&store, &conversation.id, &run).await?;
     const PRODUCER: &str = "omniagent-phase02-tone/1";
     ensure!(events.iter().any(|entry| matches!(&entry.event.data,
         ProviderEventData::Tool { name, phase } if name == "generate_tone" && phase == "completed")),

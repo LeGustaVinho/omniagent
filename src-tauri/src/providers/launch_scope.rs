@@ -11,7 +11,9 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     customizations::{CustomizationKind, LaunchReview, ReviewState},
-    mcp_bridge::{BridgeLaunch, INSPECT_SCOPE, REQUEST_PERMISSION, SERVER_NAME},
+    mcp_bridge::{
+        BridgeLaunch, GET_JOB_STATUS, INSPECT_SCOPE, REQUEST_PERMISSION, SERVER_NAME, SUBMIT_JOB,
+    },
     repository::CheckoutLayout,
     runner::Runner,
 };
@@ -162,7 +164,9 @@ impl ScopedLaunch {
             mcp.insert(SERVER_NAME.into(), serde_json::to_value(bridge)?);
             self.record_argument(
                 "--allowedTools",
-                format!("mcp__{SERVER_NAME}__{INSPECT_SCOPE}"),
+                [INSPECT_SCOPE, SUBMIT_JOB, GET_JOB_STATUS]
+                    .map(|tool| format!("mcp__{SERVER_NAME}__{tool}"))
+                    .join(","),
             );
             if bridge.permission_prompt {
                 self.record_argument(
@@ -296,7 +300,11 @@ impl ScopedLaunch {
                 toml::Value::try_from(json!({
                     "command": bridge.command,
                     "args": bridge.args,
-                    "tools": { INSPECT_SCOPE: {"approval_mode": "approve"} },
+                    "tools": {
+                        INSPECT_SCOPE: {"approval_mode": "approve"},
+                        SUBMIT_JOB: {"approval_mode": "approve"},
+                        GET_JOB_STATUS: {"approval_mode": "approve"},
+                    },
                 }))?,
             );
         }

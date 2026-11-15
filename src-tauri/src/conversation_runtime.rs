@@ -108,6 +108,7 @@ pub async fn start_conversation_turn(
             model: Some(selection.model_id),
             effort,
         };
+        let bridge = std::env::current_exe().ok();
         let plan = store
             .prepare_conversation_draft_attempt(
                 conversation_id.clone(),
@@ -121,7 +122,7 @@ pub async fn start_conversation_turn(
             store.inner().clone(),
             Arc::new(DirectWindowsRunner),
             plan,
-            None,
+            bridge,
         );
         let handles = runs.0.clone();
         handles

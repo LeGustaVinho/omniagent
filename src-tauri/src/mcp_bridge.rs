@@ -33,6 +33,7 @@ use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 use crate::{
     diagnostics,
     dispatch::{Delivery, EventSource},
+    jobs::{Job, JobRequest, JobRequestConflict},
     protection,
     providers::{ApprovalDecision, ProviderEvent, ProviderEventData, ProviderLocation, RequestId},
     runs,
@@ -43,6 +44,8 @@ pub const HELPER_FLAG: &str = "--mcp-bridge";
 pub(crate) const SERVER_NAME: &str = "omniagent_runtime";
 const PIPE_PREFIX: &str = r"\\.\pipe\omniagent-run-";
 pub(crate) const INSPECT_SCOPE: &str = "inspect_run_scope";
+pub(crate) const SUBMIT_JOB: &str = "submit_job";
+pub(crate) const GET_JOB_STATUS: &str = "get_job_status";
 pub(crate) const REQUEST_PERMISSION: &str = "request_permission";
 pub(crate) const PERMISSION_PREFIX: &str = "omniagent-permission:";
 pub(crate) const VERSION: u8 = 1;
@@ -79,10 +82,25 @@ pub struct PermissionPrompt {
 }
 
 #[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubmitJob {
+    request_id: String,
+    request: JobRequest,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JobStatusRequest {
+    job_id: String,
+}
+
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Operation {
     ListTools,
     InspectScope,
+    SubmitJob(SubmitJob),
+    GetJobStatus(JobStatusRequest),
     RequestPermission(PermissionPrompt),
     PollPermission { id: String },
 }
@@ -99,6 +117,10 @@ struct Request {
 #[serde(tag = "status", content = "payload", rename_all = "snake_case")]
 enum Response {
     Scope(RunScope),
+    JobSubmitted { job_id: String },
+    JobStatus(Box<Job>),
+    JobRejected,
+    JobRequestConflict,
     PermissionRequested(String),
     PermissionPending,
     PermissionDecided(ApprovalDecision),
@@ -272,6 +294,29 @@ async fn serve_pipe(
                     Operation::InspectScope => {
                         observed.fetch_max(2, Ordering::Release);
                         (Response::Scope(scope.clone()), None)
+                    }
+                    Operation::SubmitJob(input) => {
+                        let response = match store
+                            .submit_agent_job(scope.run_id.clone(), input.request_id, input.request)
+                            .await
+                        {
+                            Ok(job) => Response::JobSubmitted { job_id: job.id },
+                            Err(error) if error.is::<JobRequestConflict>() => {
+                                Response::JobRequestConflict
+                            }
+                            Err(_) => Response::JobRejected,
+                        };
+                        (response, None)
+                    }
+                    Operation::GetJobStatus(input) => {
+                        let response = match store
+                            .active_run_child_job(scope.run_id.clone(), input.job_id)
+                            .await?
+                        {
+                            Some(job) => Response::JobStatus(Box::new(job)),
+                            None => Response::JobRejected,
+                        };
+                        (response, None)
                     }
                     Operation::RequestPermission(prompt) if ticket.permission_prompt => {
                         (record_permission(&store, &scope, prompt).await?, None)
@@ -479,6 +524,27 @@ impl ServerHandler for StdioBridge {
                     .idempotent(true)
                     .open_world(false),
             ),
+            Tool::new(
+                SUBMIT_JOB,
+                "Queues work in OmniAgent under this run and returns its job ID. Use a stable requestId when retrying the same request.",
+                json!({"type":"object", "required":["requestId","request"], "additionalProperties":false, "properties":{
+                    "requestId":{"type":"string","minLength":1,"maxLength":256},
+                    "request":{"type":"object", "required":["mode","instructions"], "additionalProperties":false, "properties":{
+                        "checkoutId":{"type":"string","description":"Checkout ID in this project. Omit to inherit the origin checkout."},
+                        "taskId":{"type":"string","description":"Task ID in this project. Required for repository writes unless inherited from the parent job."},
+                        "mode":{"enum":["read_only","plan","approved_write"]},
+                        "instructions":{"type":"string","minLength":1},
+                        "dependencies":{"type":"array","items":{"type":"string"}},
+                        "requiresBridge":{"type":"boolean","description":"Whether the job requires the OmniAgent MCP tools to run."}
+                    }}
+                }}).as_object().unwrap().clone(),
+            ).with_annotations(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
+            Tool::new(
+                GET_JOB_STATUS,
+                "Returns the current queue state and latest attempt for a job submitted by this run.",
+                json!({"type":"object", "required":["jobId"], "additionalProperties":false,
+                    "properties":{"jobId":{"type":"string"}}}).as_object().unwrap().clone(),
+            ).with_annotations(ToolAnnotations::new().read_only(true).destructive(false).idempotent(true).open_world(false)),
         ];
         if self.0.permission_prompt {
             tools.push(Tool::new(
@@ -497,6 +563,36 @@ impl ServerHandler for StdioBridge {
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if matches!(request.name.as_ref(), SUBMIT_JOB | GET_JOB_STATUS) {
+            let arguments = Value::Object(request.arguments.unwrap_or_default());
+            let invalid = |_| ErrorData::invalid_params("Invalid job tool arguments", None);
+            let operation = if request.name == SUBMIT_JOB {
+                Operation::SubmitJob(serde_json::from_value(arguments).map_err(invalid)?)
+            } else {
+                Operation::GetJobStatus(serde_json::from_value(arguments).map_err(invalid)?)
+            };
+            let result = match exchange(&self.0, operation)
+                .await
+                .map_err(|_| bridge_unavailable())?
+            {
+                Response::JobSubmitted { job_id } => json!({"jobId": job_id}),
+                Response::JobStatus(job) => json!(job),
+                Response::JobRequestConflict => {
+                    return Err(ErrorData::invalid_params(
+                        "This run already used that request ID for a different job",
+                        None,
+                    ));
+                }
+                Response::JobRejected => {
+                    return Err(ErrorData::invalid_params(
+                        "The job or its requested scope is unavailable to this run",
+                        None,
+                    ));
+                }
+                _ => return Err(bridge_unavailable()),
+            };
+            return Ok(CallToolResult::structured(result).into());
+        }
         if request.name == REQUEST_PERMISSION && self.0.permission_prompt {
             let prompt =
                 serde_json::from_value(Value::Object(request.arguments.unwrap_or_default()))

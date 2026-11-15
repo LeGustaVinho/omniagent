@@ -187,6 +187,26 @@ impl Store {
         self.execute(move |db| load_job(db, &project_id, &id)).await
     }
 
+    pub(crate) async fn active_run_child_job(
+        &self,
+        run_id: String,
+        id: String,
+    ) -> Result<Option<Job>> {
+        self.execute(move |db| {
+            let tx = db.transaction()?;
+            let project: Option<String> = tx.query_row(
+                "SELECT j.project_id FROM jobs j JOIN active_agent_attempts a ON a.run_id = j.origin_run_id
+                 WHERE j.id = ?1 AND a.run_id = ?2",
+                params![id, run_id],
+                |row| row.get(0),
+            ).optional()?;
+            match project {
+                Some(project) => load_job(&tx, &project, &id),
+                None => Ok(None),
+            }
+        }).await
+    }
+
     pub async fn set_pending_job_state(
         &self,
         project_id: String,
