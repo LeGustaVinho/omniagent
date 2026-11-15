@@ -293,7 +293,8 @@ impl NativeAttachmentEncoding {
     pub fn supports(self, format: AttachmentFormat) -> bool {
         match self {
             Self::CodexLocalImage | Self::ClaudeImage | Self::AcpImage => format.is_image(),
-            Self::ClaudeDocument | Self::AcpResource => format == AttachmentFormat::Pdf,
+            Self::ClaudeDocument => format == AttachmentFormat::Pdf,
+            Self::AcpResource => matches!(format, AttachmentFormat::Pdf | AttachmentFormat::Text),
             Self::AcpAudio => format.is_audio(),
         }
     }
@@ -362,7 +363,12 @@ impl TurnAttachment {
                     .resource_uri
                     .as_ref()
                     .context("ACP resource needs an attachment URI")?;
-                json!({"type":"resource","resource":{"uri":uri,"mimeType":mime,"blob":self.content}})
+                let resource = if self.format == AttachmentFormat::Text {
+                    json!({"uri":uri,"mimeType":mime,"text":String::from_utf8(STANDARD.decode(&self.content)?)?})
+                } else {
+                    json!({"uri":uri,"mimeType":mime,"blob":self.content})
+                };
+                json!({"type":"resource","resource":resource})
             }
             _ => anyhow::bail!("attachment delivery does not match the provider transport"),
         })

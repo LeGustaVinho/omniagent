@@ -745,7 +745,7 @@ impl CliSession for AcpSession {
             Some(NativeAttachmentEncoding::AcpImage)
         } else if format.is_audio() && self.prompt_capabilities["audio"] == true {
             Some(NativeAttachmentEncoding::AcpAudio)
-        } else if format == AttachmentFormat::Pdf
+        } else if matches!(format, AttachmentFormat::Pdf | AttachmentFormat::Text)
             && self.prompt_capabilities["embeddedContext"] == true
         {
             Some(NativeAttachmentEncoding::AcpResource)
