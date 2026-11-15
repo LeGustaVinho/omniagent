@@ -487,7 +487,7 @@ impl InstructionInventory {
     }
 }
 
-fn claude_supports_agents(version: &str) -> bool {
+pub(super) fn claude_supports_agents(version: &str) -> bool {
     let mut parts = version
         .split(['-', '+'])
         .next()

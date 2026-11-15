@@ -233,6 +233,12 @@ pub struct SessionChoice {
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SessionPlugin {
+    pub name: String,
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderEventData {
     DispatchSubmitted {
@@ -245,6 +251,19 @@ pub enum ProviderEventData {
     },
     SkillsReported {
         catalog: skills::SkillCatalog,
+    },
+    SessionCustomizationsReported {
+        skills: Option<Vec<String>>,
+        plugins: Option<Vec<SessionPlugin>>,
+    },
+    SkillUsed {
+        name: String,
+    },
+    HookObserved {
+        trigger: String,
+        name: Option<String>,
+        source_path: Option<PathBuf>,
+        status: String,
     },
     ScopedLaunchPrepared {
         evidence: Box<launch_scope::ScopedLaunchEvidence>,

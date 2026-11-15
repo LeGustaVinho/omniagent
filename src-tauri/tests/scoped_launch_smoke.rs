@@ -401,6 +401,13 @@ async fn claude_loads_only_the_approved_launch_entries_and_projects_instructions
     assert!(fixture.path.join("approved-mcp").is_file());
     assert!(!fixture.path.join("pending-hook").exists());
     assert!(!fixture.path.join("pending-mcp").exists());
+    let observed = store
+        .agent_observations(conversation.id.clone(), run.clone(), 0)
+        .await?;
+    assert!(observed.iter().any(
+        |entry| matches!(&entry.event.data, ProviderEventData::HookObserved { trigger, status, .. }
+        if trigger == "SessionStart" && status == "success")
+    ));
     let dispatch = store
         .agent_dispatch(conversation.id.clone(), run)
         .await?

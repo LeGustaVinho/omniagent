@@ -7,7 +7,14 @@ use serde_json::Value;
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::{diagnostics, process::TerminalOutcome, protection, store::Store};
+use crate::{
+    conversations::SessionScope,
+    diagnostics,
+    process::TerminalOutcome,
+    protection,
+    runner::{DirectWindowsRunner, Runner},
+    store::Store,
+};
 
 use super::{
     Provider,
@@ -57,7 +64,7 @@ pub struct PluginReport {
     pub load_telemetry_reported: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct PluginInventory {
@@ -98,12 +105,52 @@ pub fn probe_plugins(configured: ConfiguredExecutable) -> Result<PluginReport> {
         report.version = published_version(provider, &output.stdout)
             .or_else(|| published_version(provider, &output.stderr));
     }
+    read_inventory(
+        &mut report,
+        &DirectWindowsRunner,
+        &path,
+        cwd,
+        Duration::from_secs(25),
+    );
+    Ok(report)
+}
+
+pub(crate) fn probe_run_plugins(scope: &SessionScope, runner: &dyn Runner) -> PluginReport {
+    let mut report = PluginReport {
+        provider: scope.provider,
+        executable: scope.executable.to_str().map(str::to_owned),
+        version: Some(scope.cli_version.clone()),
+        status: PluginInventoryStatus::ProbeFailed,
+        plugins: Vec::new(),
+        load_telemetry_reported: false,
+    };
+    if let Ok(directory) = tempfile::Builder::new()
+        .prefix("omniagent-plugins-")
+        .tempdir()
+    {
+        read_inventory(
+            &mut report,
+            runner,
+            &scope.executable,
+            directory.path(),
+            Duration::from_secs(5),
+        );
+    }
+    report
+}
+
+fn read_inventory(
+    report: &mut PluginReport,
+    runner: &dyn Runner,
+    executable: &Path,
+    cwd: &Path,
+    timeout: Duration,
+) {
     let args = ["plugin", "list", "--json"].map(Into::into).to_vec();
-    let output =
-        command_probe_with_limits(&path, cwd, args, Duration::from_secs(25), 2 * 1024 * 1024);
+    let output = command_probe_with_limits(runner, executable, cwd, args, timeout, 2 * 1024 * 1024);
     match output {
         Ok(output) if output.status == TerminalOutcome::Exited(0) => {
-            (report.status, report.plugins) = decode_plugins(provider, &output.stdout);
+            (report.status, report.plugins) = decode_plugins(report.provider, &output.stdout);
         }
         Ok(output)
             if command_unsupported(&output.stderr) || command_unsupported(&output.stdout) =>
@@ -112,7 +159,6 @@ pub fn probe_plugins(configured: ConfiguredExecutable) -> Result<PluginReport> {
         }
         _ => report.status = PluginInventoryStatus::ProbeFailed,
     }
-    Ok(report)
 }
 
 fn command_unsupported(output: &str) -> bool {

@@ -87,6 +87,15 @@ pub(crate) fn inspect(
             for directory in &directories {
                 discovery.skills(directory, ".claude/skills");
             }
+            if layout.root != layout.primary_root
+                && instructions::claude_supports_agents(&scope.cli_version)
+                && matches!(
+                    plain_metadata(&layout.root.join(".claude/skills")),
+                    Ok(None)
+                )
+            {
+                discovery.skills(&layout.primary_root, ".claude/skills");
+            }
             if let Some(profile) = profile {
                 discovery.files(
                     &profile,
@@ -133,6 +142,8 @@ pub(crate) fn inspect(
                     scope: Some(
                         if file.path.starts_with(checkout) {
                             "repo"
+                        } else if file.path.starts_with(&layout.primary_root) {
+                            "primary_checkout"
                         } else {
                             "user"
                         }
@@ -155,10 +166,8 @@ pub(crate) fn claude_workspace_projection(
     let mut inventory = InstructionInventory::new(layout);
     inventory.claude(&mut Discovery::default(), None, None, version);
     let belongs = |source: &InstructionSource| {
-        matches!(
-            source.scope,
-            InstructionScope::Checkout | InstructionScope::PrimaryCheckout
-        ) && source.selection == InstructionSelection::DisabledByProfile
+        source.scope == InstructionScope::Checkout
+            && source.selection == InstructionSelection::DisabledByProfile
     };
     let has_claude = inventory
         .sources

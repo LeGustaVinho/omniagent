@@ -957,6 +957,8 @@ mod tests {
                     reported_skills: None,
                     instructions: None,
                     scoped_launch: None,
+                    requested_skill: None,
+                    plugin_inventory: None,
                 },
                 vec![b"{\"fixture\":true}\n".to_vec()],
             )
@@ -1200,6 +1202,17 @@ mod tests {
         }
         fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
             let (write, output) = mpsc::channel();
+            if request.arguments == ["plugin", "list", "--json"].map(std::ffi::OsStr::new) {
+                write.send(Ok(OutputFrame {
+                    stream: Stream::Stdout,
+                    data: json!({"installed":[{"pluginId":"fixture@local","enabled":false,"version":"1.0"}]}).to_string(),
+                })).unwrap();
+                return Ok(CapturedProcess {
+                    input: ProcessInput::new(io::sink()),
+                    output,
+                    control: Arc::new(CompletedProcess),
+                });
+            }
             for data in [
                 json!({"id":1,"result":{"userAgent":"fixture"}}),
                 json!({"id":2,"result":{"thread":{"id":"native-session","turns":[{"id":"history"}]},"model":"observed","cwd":request.checkout,
@@ -1215,6 +1228,8 @@ mod tests {
                 json!({"id":6,"result":{"turn":{"id":"native-turn"}}}),
                 json!({"method":"thread/settings/updated","params":{"threadId":"native-session",
                     "threadSettings":{"model":"observed-later","effort":"high"}}}),
+                json!({"method":"hook/completed","params":{"threadId":"native-session","turnId":"native-turn",
+                    "run":{"id":"fixture-hook-run","eventName":"preToolUse","status":"completed","sourcePath":request.checkout.join("hooks.json")}}}),
                 json!({"method":"item/completed","params":{"threadId":"native-session","turnId":"native-turn",
                     "item":{"type":"commandExecution","id":"read","status":"completed","exitCode":0,
                       "commandActions":[{"type":"read","path":"test.txt"}]}}}),
@@ -1253,7 +1268,7 @@ mod tests {
             conversation: conversation.id.clone(),
             frames: log.clone(),
         }));
-        let first_prompt = "Primeira mensagem ☕\nsegunda linha";
+        let first_prompt = "$fixture Primeira mensagem ☕\nsegunda linha";
         let guide = scope.checkout.join("AGENTS.md");
         std::fs::write(&guide, "Fixture repository instructions")?;
         let fixture_skill = scope
@@ -1271,6 +1286,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), running.wait()).await??,
             RunStatus::Succeeded
         );
+        std::fs::write(&guide, "Revised fixture repository instructions")?;
         let resumed = prepare(&store, &conversation.id, scope, "Second prompt").await?;
         assert_eq!(resumed.agent_session_id, first_session);
         assert_eq!(resumed.previous_run_id.as_deref(), Some(first_run.as_str()));
@@ -1317,6 +1333,13 @@ mod tests {
             .unwrap();
         assert_eq!(local_skill.id, skills.entries[0].id);
         assert_ne!(local_skill.source, skills.entries[0].source);
+        let requested = first_dispatch.snapshot.requested_skill.as_ref().unwrap();
+        assert_eq!(requested.name, "fixture");
+        assert_eq!(requested.matching_ids.len(), 2);
+        assert!(requested.matching_ids.contains(&local_skill.id));
+        let first_plugins = first_dispatch.snapshot.plugin_inventory.as_ref().unwrap();
+        assert_eq!(first_plugins.report.plugins[0].enabled, Some(false));
+        assert!(!first_plugins.report.load_telemetry_reported);
         assert_eq!(assessment.scope.checkout.id, conversation.checkout_id);
         assert_eq!(assessment.scope.reported_model.as_deref(), Some("observed"));
         assert!(assessment.scope.configuration.provider_revision.is_some());
@@ -1327,6 +1350,11 @@ mod tests {
         assert!(
             matches!(second_dispatch.snapshot.native_history, NativeHistory::ProviderCursor { session_id, .. } if session_id == "native-session")
         );
+        let second_plugins = second_dispatch.snapshot.plugin_inventory.as_ref().unwrap();
+        assert_ne!(first_plugins.id, second_plugins.id);
+        assert!(second_dispatch.snapshot.requested_skill.is_none());
+        let second_instructions = second_dispatch.snapshot.instructions.as_ref().unwrap();
+        assert_ne!(instructions.sources, second_instructions.sources);
         assert!(
             store
                 .agent_dispatch("unrelated".into(), first_run.clone())
@@ -1336,6 +1364,16 @@ mod tests {
         let observations = store
             .agent_observations(conversation.id.clone(), resumed_run, 0)
             .await?;
+        assert!(observations.iter().any(|observation| {
+            observation.source == EventSource::Provider
+                && observation.event.location.item_id.as_deref() == Some("fixture-hook-run")
+                && matches!(&observation.event.data, ProviderEventData::HookObserved { trigger, .. } if trigger == "preToolUse")
+        }));
+        assert!(!observations.iter().any(|observation| matches!(
+            observation.event.data,
+            ProviderEventData::SkillUsed { .. }
+                | ProviderEventData::SessionCustomizationsReported { .. }
+        )));
         assert!(observations.iter().any(|observation| {
             observation.source == EventSource::Application
                 && matches!(&observation.event.data, ProviderEventData::CapabilityAssessmentUpdated { assessment }

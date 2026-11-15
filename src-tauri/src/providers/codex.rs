@@ -540,6 +540,18 @@ impl CodexSession {
             "item/started" | "item/completed" => {
                 return self.item(params, method.ends_with("/completed"));
             }
+            "hook/started" | "hook/completed" => {
+                let run = &params["run"];
+                let mut event = self.event(ProviderEventData::HookObserved {
+                    trigger: required_string(run, "eventName")?.into(),
+                    name: None,
+                    source_path: string(run, "sourcePath").map(Into::into),
+                    status: required_string(run, "status")?.into(),
+                });
+                event.location.turn_id = string(params, "turnId").or(event.location.turn_id);
+                event.location.item_id = string(run, "id");
+                return Ok(self.events(vec![event]));
+            }
             "error" => ProviderEventData::Error {
                 message: diagnostics::preview(
                     params["error"]["message"]

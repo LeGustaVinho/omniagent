@@ -212,48 +212,63 @@ pub(super) fn command_probe(
     cwd: &Path,
     args: Vec<OsString>,
 ) -> Result<CommandOutput> {
-    command_probe_with_limits(executable, cwd, args, PROBE_TIME, MAX_PROBE_OUTPUT)
+    command_probe_with_limits(
+        &DirectWindowsRunner,
+        executable,
+        cwd,
+        args,
+        PROBE_TIME,
+        MAX_PROBE_OUTPUT,
+    )
 }
 
 pub(super) fn command_probe_with_limits(
+    runner: &dyn Runner,
     executable: &Path,
     cwd: &Path,
     args: Vec<OsString>,
     time_limit: Duration,
     output_limit: usize,
 ) -> Result<CommandOutput> {
-    run_probe(executable, cwd, &args, time_limit, |process, deadline| {
-        let CapturedProcess {
-            input,
-            output,
-            control,
-        } = process;
-        drop(input);
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        loop {
-            match output.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(Ok(frame)) => {
-                    ensure!(
-                        stdout.len() + stderr.len() + frame.data.len() <= output_limit,
-                        "CLI probe output exceeded its limit"
-                    );
-                    match frame.stream {
-                        Stream::Stdout => stdout.push_str(&frame.data),
-                        Stream::Stderr => stderr.push_str(&frame.data),
+    run_probe(
+        runner,
+        executable,
+        cwd,
+        &args,
+        time_limit,
+        |process, deadline| {
+            let CapturedProcess {
+                input,
+                output,
+                control,
+            } = process;
+            drop(input);
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            loop {
+                match output.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(Ok(frame)) => {
+                        ensure!(
+                            stdout.len() + stderr.len() + frame.data.len() <= output_limit,
+                            "CLI probe output exceeded its limit"
+                        );
+                        match frame.stream {
+                            Stream::Stdout => stdout.push_str(&frame.data),
+                            Stream::Stderr => stderr.push_str(&frame.data),
+                        }
                     }
+                    Ok(Err(error)) => return Err(error.into()),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => bail!("CLI probe timed out"),
                 }
-                Ok(Err(error)) => return Err(error.into()),
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => bail!("CLI probe timed out"),
             }
-        }
-        Ok(CommandOutput {
-            status: control.wait()?,
-            stdout,
-            stderr,
-        })
-    })
+            Ok(CommandOutput {
+                status: control.wait()?,
+                stdout,
+                stderr,
+            })
+        },
+    )
 }
 
 fn handshake_probe(
@@ -270,6 +285,7 @@ fn handshake_probe(
         effort: None,
     })?;
     run_probe(
+        &DirectWindowsRunner,
         executable,
         cwd,
         &session.arguments(),
@@ -307,6 +323,7 @@ fn handshake_probe(
 }
 
 fn run_probe<T>(
+    runner: &dyn Runner,
     executable: &Path,
     cwd: &Path,
     args: &[OsString],
@@ -317,7 +334,7 @@ fn run_probe<T>(
         .iter()
         .map(|value| value.as_os_str())
         .collect::<Vec<_>>();
-    let process = DirectWindowsRunner.launch(LaunchRequest {
+    let process = runner.launch(LaunchRequest {
         version: CONTRACT_VERSION,
         executable,
         checkout: cwd,

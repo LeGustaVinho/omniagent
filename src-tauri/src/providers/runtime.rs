@@ -29,7 +29,8 @@ use super::{
     capabilities::{CapabilityScope, ReportedCapabilities},
     configuration,
     launch_scope::{ScopedLaunch, ScopedLaunchEvidence},
-    skills::SkillCatalog,
+    plugins::{PluginInventory, probe_run_plugins},
+    skills::{SkillCatalog, explicit_skill_request},
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -198,6 +199,7 @@ pub fn start_managed_turn(
             streamed_answer: String::new(),
             reported: ReportedCapabilities::default(),
             reported_skills: None,
+            plugin_inventory: None,
             scoped_launch: None,
             capability_scope: None,
             executable_revision: None,
@@ -247,6 +249,7 @@ struct TurnExecution {
     streamed_answer: String,
     reported: ReportedCapabilities,
     reported_skills: Option<SkillCatalog>,
+    plugin_inventory: Option<PluginInventory>,
     scoped_launch: Option<ScopedLaunchEvidence>,
     capability_scope: Option<CapabilityScope>,
     executable_revision: Option<String>,
@@ -404,6 +407,11 @@ impl TurnExecution {
             .collect::<Vec<_>>();
         self.executable_revision = runner.executable_revision(&scope.executable);
         self.platform = runner.execution_platform();
+        let plugins = probe_run_plugins(&scope, runner);
+        self.plugin_inventory = Some(
+            self.app
+                .block_on(self.store.save_plugin_inventory(plugins))?,
+        );
         let mut process = runner.launch(LaunchRequest {
             version: CONTRACT_VERSION,
             executable: &scope.executable,
@@ -609,8 +617,15 @@ impl TurnExecution {
                 }
             })
         });
+        let requested_skill = self.plan.input.last().and_then(|message| {
+            explicit_skill_request(
+                self.plan.scope.provider,
+                &message.text,
+                reported_skills.entries.iter().chain(&filesystem_skills),
+            )
+        });
         let snapshot = ContextSnapshot {
-            version: 5,
+            version: 6,
             context_id: self.plan.context_id.clone(),
             scope: self.plan.scope.clone(),
             base_commit: repository::base_commit(&self.plan.scope.checkout)?,
@@ -621,6 +636,8 @@ impl TurnExecution {
             reported_skills: Some(reported_skills),
             instructions: Some(instructions),
             scoped_launch: self.scoped_launch.clone(),
+            requested_skill,
+            plugin_inventory: self.plugin_inventory.clone(),
         };
         let frames = update
             .outbound

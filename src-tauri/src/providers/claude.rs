@@ -13,8 +13,8 @@ use crate::{
 use super::{
     AdapterUpdate, ApprovalDecision, AuthProbe, Authentication, Capability, CliAdapter, CliSession,
     Interrupt, ProbeKind, Provider, ProviderEvent, ProviderEventData, ProviderLocation,
-    ReportedModel, RequestId, SessionIntent, SessionMode, SessionRequest, Transport, TurnInput,
-    TurnOutcome, WireMessage,
+    ReportedModel, RequestId, SessionIntent, SessionMode, SessionPlugin, SessionRequest, Transport,
+    TurnInput, TurnOutcome, WireMessage,
 };
 
 const INITIALIZE: &str = "omniagent-initialize";
@@ -88,7 +88,7 @@ struct Turn {
     interrupted: bool,
     saw_final_message: bool,
     message_ids: HashMap<Option<String>, String>,
-    read_paths: HashMap<(Option<String>, String), String>,
+    tool_evidence: HashMap<(Option<String>, String), ProviderEventData>,
 }
 
 enum PendingInput {
@@ -147,13 +147,32 @@ impl ClaudeSession {
             );
         }
         self.session_id = Some(id.to_owned());
-        Ok(events([self.event(
+        let mut observations = vec![self.event(
             frame,
             ProviderEventData::SessionReady {
                 model: string(frame, "model"),
                 effort: string(frame, "effort"),
             },
-        )]))
+        )];
+        let skills = strings(frame, "skills");
+        let plugins = frame["plugins"].as_array().map(|plugins| {
+            plugins
+                .iter()
+                .filter_map(|plugin| {
+                    Some(SessionPlugin {
+                        name: string(plugin, "name")?,
+                        path: string(plugin, "path").map(Into::into),
+                    })
+                })
+                .collect()
+        });
+        if skills.is_some() || plugins.is_some() {
+            observations.push(self.event(
+                frame,
+                ProviderEventData::SessionCustomizationsReported { skills, plugins },
+            ));
+        }
+        Ok(events(observations))
     }
 
     fn permission_mode(&self) -> &'static str {
@@ -279,13 +298,20 @@ impl ClaudeSession {
         if !text.is_empty() && parent.is_none() {
             turn.saw_final_message = true;
         }
-        for block in content {
-            if block["type"] == "tool_use"
-                && block["name"] == "Read"
-                && let (Some(id), Some(path)) =
-                    (string(block, "id"), string(&block["input"], "file_path"))
-            {
-                turn.read_paths.insert((parent.clone(), id), path);
+        for block in content.iter().filter(|block| block["type"] == "tool_use") {
+            let evidence = match block["name"].as_str() {
+                Some("Read") => string(&block["input"], "file_path").map(|path| {
+                    ProviderEventData::ContextRead {
+                        path,
+                        tool: "Read".into(),
+                    }
+                }),
+                Some("Skill") => string(&block["input"], "skill")
+                    .map(|name| ProviderEventData::SkillUsed { name }),
+                _ => None,
+            };
+            if let (Some(id), Some(evidence)) = (string(block, "id"), evidence) {
+                turn.tool_evidence.insert((parent.clone(), id), evidence);
             }
         }
         let mut result = Vec::new();
@@ -333,8 +359,8 @@ impl ClaudeSession {
             let Some(id) = string(block, "tool_use_id") else {
                 continue;
             };
-            let path = self.turn.as_mut().and_then(|turn| {
-                turn.read_paths
+            let evidence = self.turn.as_mut().and_then(|turn| {
+                turn.tool_evidence
                     .remove(&(string(frame, "parent_tool_use_id"), id.clone()))
             });
             let failed = block["is_error"] == true;
@@ -347,11 +373,8 @@ impl ClaudeSession {
                 name: "tool_result".into(),
                 phase: if failed { "failed" } else { "completed" }.into(),
             }));
-            if let Some(path) = path.filter(|_| !failed) {
-                results.push(event(ProviderEventData::ContextRead {
-                    path,
-                    tool: "Read".into(),
-                }));
+            if let Some(evidence) = evidence.filter(|_| !failed) {
+                results.push(event(evidence));
             }
         }
         events(results)
@@ -446,6 +469,7 @@ impl CliSession for ClaudeSession {
             "--verbose",
             "--include-partial-messages",
             "--forward-subagent-text",
+            "--include-hook-events",
             "--safe-mode",
             "--setting-sources",
             "",
@@ -513,6 +537,37 @@ impl CliSession for ClaudeSession {
             Some("control_response") => self.start_handshake(&frame),
             Some("control_request") => self.request_input(&frame),
             Some("system") if frame["subtype"] == "init" => self.session_init(&frame),
+            Some("system")
+                if matches!(
+                    frame["subtype"].as_str(),
+                    Some("hook_started" | "hook_progress" | "hook_response")
+                ) =>
+            {
+                if let Some(session) = &self.session_id
+                    && frame["session_id"].as_str() != Some(session)
+                {
+                    return Ok(AdapterUpdate::default());
+                }
+                let Some(trigger) = string(&frame, "hook_event") else {
+                    return Ok(AdapterUpdate::default());
+                };
+                let status = match frame["subtype"].as_str() {
+                    Some("hook_started") => "started".into(),
+                    Some("hook_progress") => "in_progress".into(),
+                    _ => string(&frame, "outcome").unwrap_or_else(|| "finished".into()),
+                };
+                let mut event = self.event(
+                    &frame,
+                    ProviderEventData::HookObserved {
+                        trigger,
+                        name: string(&frame, "hook_name"),
+                        source_path: None,
+                        status,
+                    },
+                );
+                event.location.item_id = string(&frame, "hook_id");
+                Ok(events([event]))
+            }
             Some("system") if frame["subtype"] == "compact_boundary" => {
                 Ok(events([self.event(&frame, ProviderEventData::Compacted)]))
             }
@@ -841,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_successful_reads_in_the_original_parent_scope() -> Result<()> {
+    fn reports_successful_reads_and_skill_calls_in_the_original_parent_scope() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let mut adapter = session(temp.path())?;
         let started = receive(
@@ -849,15 +904,19 @@ mod tests {
             json!({"type":"assistant","session_id":"session",
             "parent_tool_use_id":"child","message":{"content":[
                 {"type":"tool_use","id":"okay","name":"Read","input":{"file_path":"first.txt"}},
-                {"type":"tool_use","id":"failed","name":"Read","input":{"file_path":"second.txt"}}
+                {"type":"tool_use","id":"failed","name":"Read","input":{"file_path":"second.txt"}},
+                {"type":"tool_use","id":"skill","name":"Skill","input":{"skill":"example:format"}},
+                {"type":"tool_use","id":"failed-skill","name":"Skill","input":{"skill":"unknown"}}
             ]}}),
         )?;
-        assert_eq!(started.events.len(), 2);
+        assert_eq!(started.events.len(), 4);
         let done = receive(
             &mut *adapter,
             json!({"type":"user","session_id":"session","parent_tool_use_id":"child",
             "message":{"content":[{"type":"tool_result","tool_use_id":"okay","content":"ok"},
-            {"type":"tool_result","tool_use_id":"failed","is_error":true}]}}),
+            {"type":"tool_result","tool_use_id":"failed","is_error":true},
+            {"type":"tool_result","tool_use_id":"skill","content":"ok"},
+            {"type":"tool_result","tool_use_id":"failed-skill","is_error":true}]}}),
         )?;
         let reads = done
             .events
@@ -873,6 +932,17 @@ mod tests {
                 tool: "Read".into()
             }
         );
+        let used: Vec<_> = done
+            .events
+            .iter()
+            .filter_map(|event| match &event.data {
+                ProviderEventData::SkillUsed { name } => {
+                    Some((name.as_str(), event.location.parent_item_id.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(used, [("example:format", Some("child"))]);
         Ok(())
     }
 

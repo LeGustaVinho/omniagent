@@ -11,7 +11,8 @@ use crate::{
         capabilities::CapabilityAssessment,
         configuration::InstructionInventory,
         launch_scope::ScopedLaunchEvidence,
-        skills::{SkillCatalog, SkillEntry},
+        plugins::PluginInventory,
+        skills::{SkillCatalog, SkillEntry, SkillRequest},
     },
     store::Store,
 };
@@ -35,6 +36,10 @@ pub struct ContextSnapshot {
     pub instructions: Option<InstructionInventory>,
     #[serde(default)]
     pub scoped_launch: Option<ScopedLaunchEvidence>,
+    #[serde(default)]
+    pub requested_skill: Option<SkillRequest>,
+    #[serde(default)]
+    pub plugin_inventory: Option<PluginInventory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

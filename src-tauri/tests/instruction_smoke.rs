@@ -3,18 +3,28 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use omniagent::{
+    conversations::SessionScope,
+    dispatch::NativeHistory,
     providers::{
         ApprovalDecision, Provider, ProviderEventData, SessionIntent, SessionMode, SessionRequest,
         TurnInput, TurnOutcome,
+        profiles::{ConfiguredExecutable, probe_cli},
+        runtime::start_managed_turn,
     },
+    repository,
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
+    runs::RunStatus,
+    store::Store,
 };
 use uuid::Uuid;
+
+mod support;
 
 struct Worktree {
     _temporary: tempfile::TempDir,
@@ -270,6 +280,143 @@ fn claude_safe_mode_excludes_linked_worktree_imports() -> Result<()> {
         assert!(
             !output.contains(&forbidden),
             "Claude loaded implicit instructions in safe mode"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Claude Code with the restricted Haiku 5.5 profile"]
+async fn managed_linked_worktree_records_inherited_skill_candidates_and_refreshes_on_resume()
+-> Result<()> {
+    let worktree = Worktree::new()?;
+    let inherited_marker = support::write_skill(&worktree.primary, ".claude/skills")?;
+    let primary_skill = worktree
+        .primary
+        .join(".claude/skills/omniagent-skill-fixture/SKILL.md");
+    let primary_markdown = worktree.primary.join("CLAUDE.md");
+    let primary_marker = marker(&primary_markdown)?;
+    let imported = worktree.linked.join("AGENTS.md");
+    let imported_marker = marker(&imported)?;
+    fs::write(worktree.linked.join("CLAUDE.md"), "@AGENTS.md")?;
+
+    let store = Store::open(worktree._temporary.path().join("fixture.sqlite"))?;
+    let checkout = repository::register(&store, worktree.cwd.clone()).await?;
+    let conversation = store
+        .create_conversation(checkout.checkout_id, "Linked sources".into())
+        .await?;
+    let cli = probe_cli(ConfiguredExecutable {
+        provider: Provider::Claude,
+        executable: None,
+    })?;
+    let scope = SessionScope {
+        provider: Provider::Claude,
+        profile_id: "linked-instructions-fixture".into(),
+        account_binding: Some("vendor-test-account".into()),
+        checkout: worktree.cwd.clone(),
+        executable: cli.executable.context("no Claude executable")?.into(),
+        cli_version: cli.version.context("no Claude CLI version")?,
+        runner: DirectWindowsRunner.identity().into(),
+        permission_revision: "read-only".into(),
+        mode: SessionMode::ReadOnly,
+        model: Some("claude-haiku-5-5".into()),
+        effort: None,
+    };
+    let mut previous_inventory = None;
+    for resumed in [false, true] {
+        let candidate = if resumed {
+            support::write_skill(&worktree.linked, ".claude/skills")?;
+            worktree
+                .linked
+                .join(".claude/skills/omniagent-skill-fixture/SKILL.md")
+        } else {
+            primary_skill.clone()
+        };
+        let current = store.conversation(conversation.id.clone()).await?;
+        let turn = store.prepare_agent_attempt(current.id, current.context_id, scope.clone(),
+            "/omniagent-skill-fixture\nInstruction audit. Include all markers from the supplied repository instructions. Do not use tools.".into()).await?;
+        let run_id = turn.run.id.clone();
+        let status = tokio::time::timeout(
+            Duration::from_secs(60),
+            start_managed_turn(store.clone(), Arc::new(DirectWindowsRunner), turn, None).wait(),
+        )
+        .await??;
+        assert_eq!(status, RunStatus::Succeeded);
+        let dispatch = store
+            .agent_dispatch(conversation.id.clone(), run_id.clone())
+            .await?
+            .context("missing dispatch")?;
+        let snapshot = dispatch.snapshot;
+        assert_eq!(
+            matches!(
+                snapshot.native_history,
+                NativeHistory::ProviderCursor { .. }
+            ),
+            resumed
+        );
+        let skills: Vec<_> = snapshot
+            .filesystem_skills
+            .iter()
+            .filter(|entry| entry.name == "omniagent-skill-fixture")
+            .collect();
+        assert_eq!(skills.len(), 1);
+        let skill = skills[0];
+        assert_eq!(skill.path, candidate);
+        assert_eq!(
+            skill.scope.as_deref(),
+            Some(if resumed { "repo" } else { "primary_checkout" })
+        );
+        assert!(skill.revision.is_some());
+        assert_eq!(
+            snapshot
+                .requested_skill
+                .context("missing skill request")?
+                .matching_ids,
+            [skill.id.clone()]
+        );
+        assert!(!snapshot.reported_skills.unwrap().reported);
+        let plugins = snapshot
+            .plugin_inventory
+            .context("missing plugin inventory")?;
+        assert_ne!(
+            previous_inventory.replace(plugins.id.clone()),
+            Some(plugins.id)
+        );
+        let instructions = snapshot.instructions.context("missing instructions")?;
+        assert_eq!(instructions.primary_root, worktree.primary);
+        assert!(
+            instructions
+                .sources
+                .iter()
+                .any(|source| source.path == imported
+                    && source.imported_from.is_some()
+                    && source.revision.is_some())
+        );
+        let projected = snapshot.scoped_launch.context("missing scoped launch")?;
+        assert!(
+            projected
+                .instruction_sources
+                .iter()
+                .all(|source| source.path.starts_with(&worktree.linked))
+        );
+        let messages = store.conversation_messages(conversation.id.clone()).await?;
+        let answer = &messages.last().context("missing answer")?.text;
+        assert!(answer.contains(&imported_marker));
+        assert!(!answer.contains(&primary_marker) && !answer.contains(&inherited_marker));
+        let events = store
+            .agent_observations(conversation.id.clone(), run_id, 0)
+            .await?;
+        assert!(events.iter().any(|entry| matches!(
+            &entry.event.data,
+            ProviderEventData::SessionCustomizationsReported {
+                plugins: Some(_),
+                ..
+            }
+        )));
+        assert!(
+            events
+                .iter()
+                .all(|entry| !matches!(entry.event.data, ProviderEventData::SkillUsed { .. }))
         );
     }
     Ok(())
