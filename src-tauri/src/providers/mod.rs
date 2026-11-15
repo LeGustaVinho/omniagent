@@ -210,6 +210,9 @@ pub enum ProviderEventData {
         form: Value,
     },
     Compacted,
+    GoalObserved {
+        observation: goal::NativeGoalObservation,
+    },
     Suggestion {
         text: String,
     },
@@ -256,6 +259,19 @@ pub trait CliSession: Send {
     fn respond_question(&mut self, id: &RequestId, answer: Value) -> anyhow::Result<AdapterUpdate>;
     fn interrupt(&mut self) -> anyhow::Result<Interrupt>;
     fn process_finished(&mut self, outcome: TerminalOutcome) -> AdapterUpdate;
+
+    fn native_goal_support(&self) -> goal::NativeGoalSupport {
+        goal::NativeGoalSupport::Managed {
+            reason: goal::ManagedGoalReason::Unqualified,
+        }
+    }
+
+    fn control_native_goal(
+        &mut self,
+        _command: goal::NativeGoalCommand,
+    ) -> anyhow::Result<AdapterUpdate> {
+        anyhow::bail!("the native goal lifecycle is unqualified for this session")
+    }
 }
 
 fn discover_executable(
@@ -345,4 +361,5 @@ mod tests {
     }
 }
 pub mod codex;
+pub mod goal;
 mod rpc;
