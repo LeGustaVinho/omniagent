@@ -10,14 +10,16 @@ use std::{
 use anyhow::{Context, Result, bail};
 use rusqlite::{TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::store::Store;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct ProjectCheckout {
     pub project_id: String,
     pub repository_root: String,

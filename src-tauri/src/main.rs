@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod fixture;
+mod ipc;
 
 use std::path::PathBuf;
 
@@ -34,9 +35,16 @@ fn main() {
         .setup(|app| {
             let path = app.path().app_local_data_dir()?.join("omniagent.sqlite3");
             app.manage(Store::open(path)?);
+            app.manage(ipc::EventSubscriptions::default());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![runtime_status, register_project])
+        .invoke_handler(tauri::generate_handler![
+            runtime_status,
+            register_project,
+            ipc::run_snapshot,
+            ipc::subscribe_events,
+            ipc::unsubscribe_events,
+        ])
         .run(tauri::generate_context!())
         .expect("failed to start OmniAgent");
 }

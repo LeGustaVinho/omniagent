@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::protection;
 
@@ -24,6 +24,7 @@ type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
 #[derive(Clone)]
 pub struct Store {
     writer: mpsc::Sender<DatabaseJob>,
+    pub(crate) event_signal: watch::Sender<()>,
 }
 
 pub enum DraftKey {
@@ -67,7 +68,10 @@ impl Store {
         ready_rx
             .recv()
             .context("database writer stopped during initialization")??;
-        Ok(Self { writer })
+        Ok(Self {
+            writer,
+            event_signal: watch::channel(()).0,
+        })
     }
 
     pub(crate) async fn execute<T: Send + 'static>(
