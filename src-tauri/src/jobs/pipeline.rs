@@ -10,6 +10,7 @@ use crate::{
     providers::{SessionMode, questions::QuestionRoute},
     repository::writers::writer_owner,
     store::Store,
+    tasks::{TaskRunScope, bind_task_run_scope},
 };
 
 use super::{
@@ -337,7 +338,18 @@ impl Store {
         scope: SessionScope,
         request: JobRequest,
     ) -> Result<Job> {
-        self.submit_pipeline_agent_job_with_context(binding, scope, request, None)
+        self.submit_pipeline_agent_job_with_context(binding, scope, request, None, None)
+            .await
+    }
+
+    pub async fn submit_pipeline_task_agent_job(
+        &self,
+        binding: PipelineDispatch,
+        scope: SessionScope,
+        request: JobRequest,
+        target: TaskRunScope,
+    ) -> Result<Job> {
+        self.submit_pipeline_agent_job_with_context(binding, scope, request, None, Some(target))
             .await
     }
 
@@ -358,6 +370,7 @@ impl Store {
             scope,
             request,
             Some((context, question_route)),
+            None,
         )
         .await
     }
@@ -368,6 +381,7 @@ impl Store {
         scope: SessionScope,
         mut request: JobRequest,
         pinned: Option<(JobContext, QuestionRoute)>,
+        target: Option<TaskRunScope>,
     ) -> Result<Job> {
         ensure!(
             scope.mode == request.mode
@@ -409,6 +423,15 @@ impl Store {
                     0,
                     Some(&binding),
                 )?;
+                if let Some(target) = &target {
+                    bind_task_run_scope(
+                        &tx,
+                        &job.project_id,
+                        &job.id,
+                        job.task_id.as_deref(),
+                        target,
+                    )?;
+                }
                 if let Some((context, route)) = &pinned {
                     history::bind_pipeline_context(&tx, &job.id, &context.context_id, *route)?;
                 }

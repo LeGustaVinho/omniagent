@@ -3,13 +3,17 @@ use std::{path::Path, process::Command};
 use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::SessionScope,
-    jobs::JobRequest,
-    providers::{Provider, SessionMode},
+    dispatch::EventSource,
+    jobs::{AdmissionEnvironment, JobRequest, PipelineDispatch, PipelineNodeKind, RecoveryAction},
+    providers::{Provider, ProviderEvent, ProviderEventData, SessionMode},
     repository::{self, provision_task_worktree},
     runner::{DirectWindowsRunner, Runner},
     runs::RunStatus,
     store::Store,
-    tasks::{ProjectWork, TaskPlacement},
+    tasks::{
+        PlannedAssignment, ProjectWork, TaskDetails, TaskPlacement, TaskRunRole, TaskRunScope,
+        TaskWorkflowState,
+    },
 };
 
 fn git(checkout: &Path, args: &[&str]) -> Result<()> {
@@ -107,7 +111,13 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
 
     let legacy = rusqlite::Connection::open(&database)?;
     legacy.execute_batch(
-        "DROP TABLE project_checklists;
+        "DROP VIEW task_runs;
+         DROP TABLE job_task_run_scopes;
+         DROP TABLE project_checklist_item_revisions;
+         DROP TABLE project_checklist_items;
+         DROP TABLE project_task_prerequisites;
+         DROP TABLE project_task_details;
+         DROP TABLE project_checklists;
          DROP TABLE project_task_memberships;
          DROP TABLE project_epics;
          PRAGMA user_version = 51;",
@@ -280,5 +290,263 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
         ungrouped.work[1].placement,
         TaskPlacement::Task { epic_id: None }
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn checklist_attempt_retains_its_role_and_actual_profile_after_reassignment_and_restart()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let checkout = temp.path().join("source");
+    std::fs::create_dir(&checkout)?;
+    git(&checkout, &["init", "--quiet"])?;
+    let database = temp.path().join("omniagent.sqlite3");
+    let store = Store::open(database.clone())?;
+    let repository = repository::register(&store, checkout.clone()).await?;
+    let project = repository.project_id;
+    let parent = store
+        .create_project_task(project.clone(), "Parent".into())
+        .await?;
+    let child = store
+        .create_project_subtask(project.clone(), parent.id.clone(), "Child".into())
+        .await?;
+    assert_eq!(
+        store
+            .project_task_details(project.clone(), child.id.clone())
+            .await?,
+        Some(TaskDetails::default())
+    );
+    let mut details = TaskDetails {
+        priority: 3,
+        workflow_state: TaskWorkflowState::Blocked,
+        prerequisites: vec![parent.id.clone()],
+        acceptance_criteria: vec!["Check each changed endpoint".into()],
+        blockers: vec!["Waiting for fixtures".into()],
+        planned_assignments: vec![PlannedAssignment {
+            role: "reviewer".into(),
+            provider: Provider::Codex,
+            profile_id: "initial-profile".into(),
+            model: Some("requested-model".into()),
+        }],
+    };
+    store
+        .set_project_task_details(project.clone(), child.id.clone(), details.clone())
+        .await?;
+    assert!(
+        store
+            .set_project_task_details(
+                project.clone(),
+                parent.id.clone(),
+                TaskDetails {
+                    prerequisites: vec![child.id.clone()],
+                    priority: 12,
+                    ..TaskDetails::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .project_task_details(project.clone(), parent.id.clone())
+            .await?,
+        Some(TaskDetails::default())
+    );
+    assert!(
+        store
+            .set_project_task_details(
+                project.clone(),
+                child.id.clone(),
+                TaskDetails {
+                    prerequisites: vec!["missing-task".into()],
+                    ..TaskDetails::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .project_task_details(project.clone(), child.id.clone())
+            .await?,
+        Some(details.clone())
+    );
+
+    store
+        .ensure_project_checklist(project.clone(), child.id.clone())
+        .await?;
+    let item = store
+        .append_project_checklist_item(
+            project.clone(),
+            child.id.clone(),
+            "Review the API changes".into(),
+        )
+        .await?;
+    let next_item = store
+        .append_project_checklist_item(
+            project.clone(),
+            child.id.clone(),
+            "Review the UI changes".into(),
+        )
+        .await?;
+    assert_eq!(item.revision, 1);
+    assert!(!item.checked);
+    assert_eq!(next_item.position, item.position + 1);
+
+    let pipeline = "review-pipeline".to_owned();
+    store
+        .register_job_pipeline(project.clone(), pipeline.clone())
+        .await?;
+    store
+        .register_job_pipeline_node(
+            project.clone(),
+            pipeline.clone(),
+            "review".into(),
+            PipelineNodeKind::Execution,
+        )
+        .await?;
+    let binding = PipelineDispatch {
+        pipeline_run_id: pipeline,
+        node_instance_id: "review".into(),
+        plan_revision: None,
+        release_id: None,
+    };
+    let profile = SessionScope {
+        provider: Provider::Codex,
+        profile_id: "initial-profile".into(),
+        account_binding: None,
+        checkout: dunce::canonicalize(checkout)?,
+        executable: std::env::current_exe()?,
+        cli_version: "fixture".into(),
+        runner: DirectWindowsRunner.identity().into(),
+        permission_revision: "read-only-fixture".into(),
+        mode: SessionMode::ReadOnly,
+        model: Some("requested-model".into()),
+        effort: None,
+    };
+    let request = JobRequest {
+        checkout_id: Some(repository.checkout_id),
+        task_id: Some(child.id.clone()),
+        mode: SessionMode::ReadOnly,
+        instructions: "Review the selected checklist item".into(),
+        dependencies: Vec::new(),
+        requires_bridge: false,
+    };
+    let target = TaskRunScope {
+        role: "reviewer".into(),
+        checklist_item_id: Some(item.id.clone()),
+    };
+    assert!(
+        store
+            .submit_pipeline_task_agent_job(
+                binding.clone(),
+                profile.clone(),
+                JobRequest {
+                    task_id: Some(parent.id.clone()),
+                    ..request.clone()
+                },
+                target.clone()
+            )
+            .await
+            .is_err()
+    );
+    let env = AdmissionEnvironment {
+        runner: DirectWindowsRunner.identity().into(),
+        bridge_available: false,
+    };
+    assert!(store.claim_next_job(env.clone()).await?.is_none());
+    let job = store
+        .submit_pipeline_task_agent_job(binding, profile, request, target)
+        .await?;
+    let attempt = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("missing scheduled job")?;
+    let run_id = attempt.run.id;
+    let starting = store
+        .project_task_runs(project.clone(), child.id.clone())
+        .await?;
+    assert_eq!(starting.len(), 1);
+    assert_eq!(starting[0].job_id, job.id);
+    assert_eq!(starting[0].run_id, run_id);
+    assert_eq!(starting[0].turn_id, attempt.run.turn_id);
+    assert_eq!(starting[0].status, RunStatus::Starting);
+    assert_eq!(starting[0].started_at, None);
+    assert_eq!(starting[0].reported_model, None);
+    store.mark_agent_running(run_id.clone()).await?;
+    store
+        .record_agent_observation(
+            run_id.clone(),
+            EventSource::Provider,
+            ProviderEvent {
+                location: Default::default(),
+                data: ProviderEventData::ModelObserved {
+                    model: Some("observed-model".into()),
+                    effort: None,
+                },
+            },
+        )
+        .await?;
+    store
+        .finish_agent_attempt(run_id.clone(), RunStatus::Failed, None)
+        .await?;
+
+    details.planned_assignments[0].provider = Provider::Claude;
+    details.planned_assignments[0].profile_id = "reassigned-profile".into();
+    details.planned_assignments[0].model = None;
+    store
+        .set_project_task_details(project.clone(), child.id.clone(), details.clone())
+        .await?;
+    drop(store);
+    let store = Store::open(database)?;
+    assert_eq!(
+        store
+            .project_task_details(project.clone(), child.id.clone())
+            .await?,
+        Some(details)
+    );
+    let saved = store
+        .project_task_runs(project.clone(), child.id.clone())
+        .await?;
+    assert_eq!(saved.len(), 1);
+    let first = &saved[0];
+    assert_eq!(first.role, TaskRunRole::Workflow("reviewer".into()));
+    assert_eq!(first.checklist_item_id.as_ref(), Some(&item.id));
+    assert_eq!(first.provider, Provider::Codex);
+    assert_eq!(first.profile_id, "initial-profile");
+    assert_eq!(first.requested_model.as_deref(), Some("requested-model"));
+    assert_eq!(first.reported_model.as_deref(), Some("observed-model"));
+    assert_eq!(first.status, RunStatus::Failed);
+    let start = first.started_at.context("missing start time")?;
+    let end = first.finished_at.context("missing terminal time")?;
+    assert!(first.created_at <= start && start <= end);
+    assert!(
+        store
+            .project_task_runs(project.clone(), parent.id)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        store
+            .project_task_runs("other-project".into(), child.id.clone())
+            .await?
+            .is_empty()
+    );
+
+    store
+        .queue_job_recovery(project.clone(), job.id, run_id, RecoveryAction::Retry)
+        .await?;
+    let retry = store
+        .claim_next_job(env)
+        .await?
+        .context("missing retried job")?;
+    let history = store.project_task_runs(project, child.id).await?;
+    assert_eq!(history.len(), 2);
+    assert_eq!(&history[0], first);
+    assert_eq!(history[1].ordinal, 2);
+    assert_eq!(history[1].run_id, retry.run.id);
+    assert_eq!(history[1].role, first.role);
+    assert_eq!(history[1].checklist_item_id, first.checklist_item_id);
+    assert_eq!(history[1].reported_model, None);
     Ok(())
 }
