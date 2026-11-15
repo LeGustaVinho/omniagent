@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 
 async fn attempt(store: &Store, checkout: PathBuf) -> Result<AttemptPlan> {
     fs::create_dir(&checkout)?;
+    let checkout = dunce::canonicalize(checkout)?;
     ensure!(
         Command::new("git.exe")
             .args(["init", "-q"])
