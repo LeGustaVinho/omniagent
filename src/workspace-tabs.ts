@@ -1,5 +1,6 @@
 import type { DockviewApi, SerializedDockview } from "dockview-react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
+import type { Conversation } from "@/bindings/Conversation";
 
 function layoutKey({ projectId, checkoutId }: ProjectCheckout) {
   return `omniagent-layout-v1:${projectId}:${checkoutId}:fixtures`;
@@ -63,4 +64,22 @@ export function openFixtureRun(api: DockviewApi, runId: string) {
   const panel = api.getPanel(id);
   if (panel) return panel.api.setActive();
   api.addPanel({ id, title: `Run ${runId.slice(0, 8)}`, component: "run", params: { runId } });
+}
+
+export function openConversations(api: DockviewApi) {
+  const panel = api.getPanel("conversation:list");
+  if (panel) return panel.api.setActive();
+  api.addPanel({ id: "conversation:list", title: "Conversations", component: "conversations" });
+}
+
+export function openConversation(api: DockviewApi, conversation: Conversation) {
+  const id = `conversation:${conversation.id}`;
+  const panel = api.getPanel(id);
+  if (panel) return panel.api.setActive();
+  api.addPanel({
+    id,
+    title: conversation.title,
+    component: "conversation",
+    params: { conversationId: conversation.id, title: conversation.title },
+  });
 }

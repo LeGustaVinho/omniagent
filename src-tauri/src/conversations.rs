@@ -20,7 +20,7 @@ use crate::{
         questions::{QuestionAction, QuestionOrigin, QuestionReply, QuestionRoute},
     },
     runs::{self, RunRecord, RunStatus},
-    store::Store,
+    store::{DraftKey, Store},
 };
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]
@@ -124,6 +124,47 @@ impl Store {
     pub async fn conversation(&self, id: String) -> Result<Conversation> {
         self.execute(move |db| load_conversation(db, &id)).await
     }
+    pub async fn list_conversations(&self, checkout_id: String) -> Result<Vec<Conversation>> {
+        self.execute(move |db| {
+            let mut statement = db.prepare(
+                "SELECT id, checkout_id, title, active_context_id FROM conversations
+                 WHERE checkout_id = ?1 ORDER BY title COLLATE NOCASE, id",
+            )?;
+            let rows = statement.query_map([checkout_id], |row| {
+                Ok(Conversation {
+                    id: row.get(0)?,
+                    checkout_id: row.get(1)?,
+                    title: row.get(2)?,
+                    context_id: row.get(3)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .await
+    }
+
+    pub async fn conversation_draft(&self, conversation_id: String) -> Result<String> {
+        self.conversation(conversation_id.clone()).await?;
+        let saved = self
+            .load_draft(DraftKey::Conversation(conversation_id))
+            .await?;
+        String::from_utf8(saved.unwrap_or_default()).context("conversation draft is not UTF-8")
+    }
+
+    pub async fn save_conversation_draft(
+        &self,
+        conversation_id: String,
+        text: String,
+    ) -> Result<()> {
+        self.conversation(conversation_id.clone()).await?;
+        let key = DraftKey::Conversation(conversation_id);
+        if text.is_empty() {
+            self.delete_draft(key).await
+        } else {
+            self.save_draft(key, text.into_bytes()).await
+        }
+    }
+
     pub async fn create_conversation(
         &self,
         checkout_id: String,

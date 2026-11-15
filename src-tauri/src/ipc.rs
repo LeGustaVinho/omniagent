@@ -6,6 +6,7 @@ use std::{
 
 use omniagent::{
     attachments::AttachmentLimits,
+    conversations::{Conversation, MessageRevision},
     customizations::CustomizationInventory,
     evidence::FixtureInputEvidence,
     providers::{
@@ -23,6 +24,63 @@ use uuid::Uuid;
 
 #[derive(Default)]
 pub struct EventSubscriptions(Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>);
+
+#[tauri::command]
+pub async fn list_conversations(
+    store: State<'_, Store>,
+    checkout_id: String,
+) -> Result<Vec<Conversation>, String> {
+    store
+        .list_conversations(checkout_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn create_conversation(
+    store: State<'_, Store>,
+    checkout_id: String,
+    title: String,
+) -> Result<Conversation, String> {
+    store
+        .create_conversation(checkout_id, title)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn conversation_messages(
+    store: State<'_, Store>,
+    conversation_id: String,
+) -> Result<Vec<MessageRevision>, String> {
+    store
+        .conversation_messages(conversation_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn conversation_draft(
+    store: State<'_, Store>,
+    conversation_id: String,
+) -> Result<String, String> {
+    store
+        .conversation_draft(conversation_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_conversation_draft(
+    store: State<'_, Store>,
+    conversation_id: String,
+    text: String,
+) -> Result<(), String> {
+    store
+        .save_conversation_draft(conversation_id, text)
+        .await
+        .map_err(|error| error.to_string())
+}
 
 #[tauri::command]
 pub async fn cli_executables(store: State<'_, Store>) -> Result<Vec<ConfiguredExecutable>, String> {

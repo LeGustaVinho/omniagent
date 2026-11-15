@@ -8,14 +8,18 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
+import { ConversationListPanel, ConversationPanel } from "@/conversation-panels";
 import { CustomizationsPanel, useCustomizationInventory } from "@/customizations-panel";
 import { FixtureListPanel, FixtureRunPanel } from "@/fixture-panels";
 import { ProviderSettingsPanel } from "@/provider-settings";
 import { useRunSubscription } from "@/run-projection";
-import { openCustomizations, openFixtureList, openProviderSettings, persistFixtureLayout, restoreFixtureLayout } from "@/workspace-tabs";
+import { openConversations, openCustomizations, openFixtureList, openProviderSettings, persistFixtureLayout, restoreFixtureLayout } from "@/workspace-tabs";
 import "dockview/dist/styles/dockview.css";
 
-const panels = { fixtures: FixtureListPanel, run: FixtureRunPanel, providerSettings: ProviderSettingsPanel, customizations: CustomizationsPanel };
+const panels = {
+  fixtures: FixtureListPanel, run: FixtureRunPanel, providerSettings: ProviderSettingsPanel,
+  customizations: CustomizationsPanel, conversations: ConversationListPanel, conversation: ConversationPanel,
+};
 
 function TabActions({ activePanel, panels, group }: IDockviewHeaderActionsProps) {
   if (!activePanel || panels.length < 2) return null;
@@ -91,6 +95,10 @@ export default function Workbench({ checkout }: { checkout: ProjectCheckout }) {
   return (
     <div className="flex min-h-0 flex-1">
       <aside aria-label="Workspace" className="w-35 shrink-0 border-r border-border bg-card p-2.5">
+        <Button className="mb-2 w-full justify-start px-2" variant="outline" disabled={!layoutReady}
+          onClick={() => { if (view) openConversations(view); }}>
+          Conversations
+        </Button>
         <Button className="w-full justify-start" variant="outline" disabled={!layoutReady} onClick={() => { if (view) openFixtureList(view); }}>
           Fixture runs
         </Button>

@@ -69,6 +69,22 @@ function readTabs(browser) {
   }));
 }
 
+function killTestApplication(application) {
+  const stopped = spawnSync("powershell.exe", [
+    "-NoProfile", "-NonInteractive", "-Command",
+    `$app = Get-CimInstance Win32_Process -Filter "Name = 'omniagent.exe'" |
+      Where-Object { $_.ExecutablePath -eq $env:OMNIAGENT_TEST_RESTART_EXE };
+      if (@($app).Count -ne 1) { throw 'Expected exactly one desktop test process' };
+      Stop-Process -Id $app.ProcessId -Force -ErrorAction Stop`,
+  ], {
+    windowsHide: true,
+    encoding: "utf8",
+    env: { ...process.env, OMNIAGENT_TEST_RESTART_EXE: application },
+  });
+  if (stopped.error) throw stopped.error;
+  assert.equal(stopped.status, 0, stopped.stderr);
+}
+
 function runRows(browser, runId) {
   return browser.execute((prefix) => {
     const timeline = Array.from(document.querySelectorAll('ol[aria-label="Run events"]')).find(
@@ -251,6 +267,32 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       await summary.click();
       await browser.$("p*=In-session plugin loads are unconfirmed").waitForDisplayed();
     }
+
+    await browser.$("button=Conversations").click();
+    await browser.$("button=New conversation").click();
+    const draft = browser.$('textarea[id^="draft-"]');
+    await draft.waitForEnabled();
+    const unsent = "Rascunho — revisar depois ☕";
+    await draft.setValue(unsent);
+    await browser.$("p=Draft saved").waitForDisplayed();
+    const [conversation] = await invoke(browser, "list_conversations", { checkoutId: main.checkoutId });
+    assert.equal(await invoke(browser, "conversation_draft", { conversationId: conversation.id }), unsent);
+    assert.deepEqual(await invoke(browser, "conversation_messages", { conversationId: conversation.id }), []);
+    await invoke(browser, "create_conversation", { checkoutId: main.checkoutId, title: "Other conversation" });
+
+    killTestApplication(application);
+    await browser.deleteSession().catch(() => undefined);
+    browser = await startSession(application);
+    await browser.$("button=Conversations").waitForEnabled();
+    await browser.$("button=Conversations").click();
+    await browser.$("button=Other conversation").click();
+    await browser.$('textarea[id^="draft-"]').waitForEnabled();
+    assert.equal(await browser.$('textarea[id^="draft-"]').getValue(), "");
+    await browser.$("button=Conversations").click();
+    await browser.$(`button=${conversation.title}`).click();
+    await browser.$('textarea[id^="draft-"]').waitForEnabled();
+    assert.equal(await browser.$('textarea[id^="draft-"]').getValue(), unsent);
+    assert.deepEqual(await invoke(browser, "conversation_messages", { conversationId: conversation.id }), []);
   } finally {
     try {
       await browser?.deleteSession();
