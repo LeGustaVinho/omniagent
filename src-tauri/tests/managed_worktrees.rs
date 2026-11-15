@@ -498,9 +498,14 @@ fn candidate_fixture_worker() -> Result<()> {
                 if root.join("fixture-expire-question").exists() {
                     fs::write(root.join("fixture-interrupted"), [])?;
                 }
+                let status = if root.join("fixture-complete-on-interrupt").exists() {
+                    "completed"
+                } else {
+                    "interrupted"
+                };
                 let reply = json!({"id":frame["id"],"result":{}});
                 let terminal = json!({"method":"turn/completed", "params":{
-                    "threadId":"fixture", "turn":{"id":"turn","status":"interrupted"}
+                    "threadId":"fixture", "turn":{"id":"turn","status":status}
                 }});
                 writeln!(output, "{reply}\n{terminal}")?;
                 output.flush()?;
@@ -2218,6 +2223,159 @@ async fn same_agent_and_branch_keep_worktree_evidence_scoped_to_project_and_atte
             .iter()
             .any(|entry| entry.contains("live-only"))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn writer_cancellation_and_completion_preserve_the_first_terminal_outcome() -> Result<()> {
+    for (complete_on_interrupt, expected, late_outcome) in [
+        (true, RunStatus::Succeeded, RunStatus::Cancelled),
+        (false, RunStatus::Cancelled, RunStatus::Succeeded),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let database = temp.path().join("store.sqlite");
+        let store = Store::open(database.clone())?;
+        let observer = Store::open(database)?;
+        let source = temp.path().join("source");
+        let project = repository(&store, &source).await?;
+        let project_id = project.project_id.clone();
+        let task = store
+            .create_project_task(project_id.clone(), "Writer race".into())
+            .await?;
+        let tree = provision_task_worktree(
+            &store,
+            temp.path().join("worktrees"),
+            project_id.clone(),
+            task.id.clone(),
+            project.checkout_id.clone(),
+        )
+        .await?;
+        let info = source.join(".git/info");
+        fs::create_dir_all(&info)?;
+        fs::write(
+            info.join("exclude"),
+            "ignored.txt\nfixture-hold-open\nfixture-ready\nfixture-complete-on-interrupt\n",
+        )?;
+        fs::write(tree.root.join("fixture-hold-open"), [])?;
+        if complete_on_interrupt {
+            fs::write(tree.root.join("fixture-complete-on-interrupt"), [])?;
+        }
+
+        let runner = Arc::new(CandidateWriter);
+        let parent = candidate_parent(&store, &project, &runner).await?;
+        let environment = AdmissionEnvironment {
+            runner: runner.identity().into(),
+            bridge_available: false,
+        };
+        let job =
+            queue_approved_writer(&store, &environment, &tree, &parent, &task.id, "race").await?;
+        let scheduler = JobScheduler::start(store.clone(), runner, None);
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while !tree.root.join("fixture-ready").is_file() {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .context("writer did not reach the interrupt boundary")?;
+        let running = observer
+            .job(project_id.clone(), job.id.clone())
+            .await?
+            .and_then(|job| job.latest_attempt)
+            .context("writer attempt missing at the interrupt boundary")?;
+        assert_eq!(running.status, RunStatus::Running);
+        assert!(
+            with_managed_worktree_writer(
+                &observer,
+                project_id.clone(),
+                tree.checkout_id.clone(),
+                task.id.clone(),
+                |_| Ok(())
+            )
+            .await
+            .is_err()
+        );
+        let run_id = running.run_id;
+        observer
+            .request_project_job_interrupt(project_id.clone(), job.id.clone(), run_id.clone())
+            .await?;
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let attempt = observer
+                    .job(project_id.clone(), job.id.clone())
+                    .await?
+                    .and_then(|job| job.latest_attempt)
+                    .context("writer attempt missing during settlement")?;
+                if attempt.status.is_terminal() {
+                    break Ok::<_, anyhow::Error>(attempt);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .context("writer did not finish after interrupt")??;
+        assert_eq!(finished.run_id, run_id);
+        assert_eq!(finished.status, expected);
+        assert!(!finished.cancel_requested);
+        let evidence = observer
+            .attempt_worktree_evidence(project_id.clone(), run_id.clone())
+            .await?;
+        let Some(AttemptWorktreeEvidence::Saved { artifact }) = &evidence else {
+            anyhow::bail!("terminal writer attempt has no saved candidate");
+        };
+        assert_eq!(artifact.start.worktree, tree);
+        let changes = artifact
+            .candidate
+            .changes
+            .as_ref()
+            .context("no candidate changes")?;
+        let binary = changes
+            .untracked
+            .iter()
+            .find(|file| file.path == "candidate.bin")
+            .and_then(|file| file.content_base64.as_deref())
+            .context("missing candidate bytes")?;
+        assert_eq!(STANDARD.decode(binary)?, [0, 255, 68, 13, 10]);
+
+        assert!(
+            observer
+                .request_project_job_interrupt(project_id.clone(), job.id.clone(), run_id.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .finish_agent_attempt(run_id.clone(), late_outcome, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            observer
+                .job(project_id.clone(), job.id)
+                .await?
+                .and_then(|job| job.latest_attempt),
+            Some(finished)
+        );
+        with_managed_worktree_writer(
+            &observer,
+            project_id.clone(),
+            tree.checkout_id,
+            task.id,
+            |worktree| {
+                Ok(fs::write(
+                    worktree.root.join("candidate.bin"),
+                    b"later writer",
+                )?)
+            },
+        )
+        .await?;
+        assert_eq!(
+            observer
+                .attempt_worktree_evidence(project_id, run_id)
+                .await?,
+            evidence
+        );
+        scheduler.shutdown().await?;
+    }
     Ok(())
 }
 
