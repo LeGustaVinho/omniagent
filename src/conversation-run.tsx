@@ -3,19 +3,24 @@ import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
 import type { RunRecord } from "@/bindings/RunRecord";
 import { Button } from "@/components/ui/button";
+import { ConversationChildren, recordChildActivity, type ChildActivity, type ChildLocation, type Delegation } from "@/conversation-children";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
 
 type EventData =
   | { type: "assistant_delta" | "assistant_message" | "plan_proposed"; text: string }
   | { type: "error"; message: string }
-  | { type: "tool" | "child_activity" };
+  | { type: "tool" }
+  | ChildActivity;
 type Page = {
   cursor: string;
   more: boolean;
-  events: { data: EventData; location: { parentItemId: string | null } }[];
+  events: { data: EventData; location: ChildLocation }[];
 };
-type Projection = { cursor: string; streamed: string; final: string; plan: string; error: string };
-const emptyProjection: Projection = { cursor: "0", streamed: "", final: "", plan: "", error: "" };
+type Projection = { cursor: string; streamed: string; final: string; plan: string; error: string; delegation: Delegation };
+const emptyProjection: Projection = {
+  cursor: "0", streamed: "", final: "", plan: "", error: "",
+  delegation: { children: {}, parentActivity: {} },
+};
 const labels = {
   starting: "Starting", running: "Running", waiting_for_input: "Waiting for input",
   succeeded: "Completed", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted",
@@ -43,14 +48,18 @@ export function ConversationRun({ conversationId, run }: { conversationId: strin
       const prior = queryClient.getQueryData<Projection>(projectionKey)
         ?? queryClient.getQueryData<Projection>(["conversation-run", runId, "output", true])
         ?? emptyProjection;
-      const current = { ...prior };
+      const current = {
+        ...prior,
+        delegation: { children: { ...prior.delegation.children }, parentActivity: { ...prior.delegation.parentActivity } },
+      };
       let page: Page;
       do {
         page = await invoke<Page>("conversation_events", { ...target, after: current.cursor });
         current.cursor = page.cursor;
         for (const event of page.events) {
-          if (event.location.parentItemId !== null) continue;
           const data = event.data;
+          if (data.type === "child_activity") recordChildActivity(current.delegation, data, event.location);
+          if (event.location.parentItemId !== null) continue;
           if (data.type === "assistant_delta") current.streamed += data.text;
           if (data.type === "assistant_message") current.final += data.text;
           if (data.type === "plan_proposed") current.plan = data.text;
@@ -100,6 +109,7 @@ export function ConversationRun({ conversationId, run }: { conversationId: strin
           <p className="whitespace-pre-wrap break-words text-sm">{output}</p>
         </div>
       )}
+      {result.data && <ConversationChildren delegation={result.data.delegation} />}
       {live && inputs.data?.map((request) => <PendingInput key={JSON.stringify(request.data.request_id)}
         input={request} conversationId={conversationId} runId={runId} onResolved={() => void inputs.refetch()} />)}
       {showInput && (

@@ -300,6 +300,15 @@ pub struct SessionPlugin {
     pub path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildDetails {
+    pub parent_id: Option<String>,
+    pub prompt: Option<String>,
+    pub requested_model: Option<String>,
+    pub reported_model: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderEventData {
@@ -422,6 +431,8 @@ pub enum ProviderEventData {
     ChildActivity {
         child_id: Option<String>,
         status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<ChildDetails>,
     },
     Approval {
         request_id: RequestId,

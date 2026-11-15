@@ -807,6 +807,7 @@ impl CliSession for ClaudeSession {
                     ProviderEventData::ChildActivity {
                         child_id: string(&frame, "task_id"),
                         status: string(&frame, "status").or_else(|| string(&frame, "subtype")),
+                        details: None,
                     },
                 );
                 event.location.parent_item_id = event

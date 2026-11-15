@@ -342,7 +342,10 @@ struct TurnExecution {
 
 impl TurnExecution {
     fn record(&mut self, event: ProviderEvent, source: EventSource) -> Result<()> {
-        let mut scope_changed = false;
+        let mut scope_changed = event.location.parent_item_id.is_some()
+            && source == EventSource::Provider
+            && matches!(event.data, ProviderEventData::ChildActivity { .. })
+            && self.reported.observe(&event.data);
         // Child traffic belongs to the run timeline, not the parent transcript.
         if event.location.parent_item_id.is_none() {
             if source == EventSource::Provider

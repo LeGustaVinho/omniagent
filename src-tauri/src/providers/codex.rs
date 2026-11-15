@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
 use super::{
-    AdapterUpdate, ApprovalDecision, AuthProbe, Authentication, CliAdapter, CliSession,
-    DelegationControls, ForkBoundary, Interrupt, ProbeKind, Provider, ProviderEvent,
+    AdapterUpdate, ApprovalDecision, AuthProbe, Authentication, ChildDetails, CliAdapter,
+    CliSession, DelegationControls, ForkBoundary, Interrupt, ProbeKind, Provider, ProviderEvent,
     ProviderEventData, ProviderLocation, ReportedModel, RequestId, SessionIntent, SessionMode,
     SessionRequest, Transport, TurnInput, TurnOutcome, WireMessage, capabilities,
     goal::{NativeGoalObservation, NativeGoalState, NativeGoalSupport},
@@ -1089,11 +1089,19 @@ impl CodexSession {
                     .unwrap_or_else(|| if completed { "completed" } else { "started" }.to_owned()),
             },
             ("collabAgentToolCall", _) => {
+                let spawned = item["tool"] == "spawnAgent";
+                let details = ChildDetails {
+                    parent_id: string(item, "senderThreadId"),
+                    prompt: spawned.then(|| string(item, "prompt")).flatten(),
+                    requested_model: spawned.then(|| string(item, "model")).flatten(),
+                    reported_model: None,
+                };
                 let children = item["receiverThreadIds"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .filter_map(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
                     .collect::<Vec<_>>();
                 if !children.is_empty() {
                     return Ok(self.events(
@@ -1103,6 +1111,7 @@ impl CodexSession {
                                 event(ProviderEventData::ChildActivity {
                                     child_id: Some(child.to_owned()),
                                     status: string(&item["agentsStates"][child], "status"),
+                                    details: Some(details.clone()),
                                 })
                             })
                             .collect(),
@@ -1111,8 +1120,17 @@ impl CodexSession {
                 ProviderEventData::ChildActivity {
                     child_id: None,
                     status: string(item, "status"),
+                    details: Some(details),
                 }
             }
+            ("subAgentActivity", true) => ProviderEventData::ChildActivity {
+                child_id: string(item, "agentThreadId").filter(|id| !id.trim().is_empty()),
+                status: string(item, "kind"),
+                details: Some(ChildDetails {
+                    reported_model: string(item, "model"),
+                    ..Default::default()
+                }),
+            },
             _ => return Ok(AdapterUpdate::default()),
         };
         let mut events = vec![event(data)];
@@ -2283,15 +2301,35 @@ mod tests {
             &mut *session,
             json!({"method":"item/completed","params":{
                 "threadId":"session", "turnId":"turn", "item":{"id":"call","type":"collabAgentToolCall",
-                    "receiverThreadIds":["child"],"agentsStates":{"child":{"status":"completed"}}}
+                    "receiverThreadIds":["child"],"agentsStates":{"child":{"status":"completed"}},
+                    "senderThreadId":"session","tool":"spawnAgent","prompt":"Inspect the fixture","model":"gpt-6-luna"}
             }}),
         )?;
         assert_eq!(
             children.events[0].data,
             ProviderEventData::ChildActivity {
                 child_id: Some("child".into()),
-                status: Some("completed".into())
+                status: Some("completed".into()),
+                details: Some(ChildDetails {
+                    parent_id: Some("session".into()),
+                    prompt: Some("Inspect the fixture".into()),
+                    requested_model: Some("gpt-6-luna".into()),
+                    reported_model: None,
+                }),
             }
+        );
+        let child_started = inbound(
+            &mut *session,
+            json!({"method":"item/completed","params":{
+                "threadId":"session","turnId":"turn","item":{"id":"native-start","type":"subAgentActivity",
+                    "agentThreadId":"child","agentPath":"/fixture","kind":"started","model":"gpt-6.1-sol"}
+            }}),
+        )?;
+        assert!(
+            matches!(&child_started.events[0].data, ProviderEventData::ChildActivity {
+            child_id: Some(id), details: Some(details), ..
+        } if id == "child" && details.reported_model.as_deref() == Some("gpt-6.1-sol")
+            && details.requested_model.is_none() && details.prompt.is_none())
         );
         let interrupt = session.interrupt()?;
         let wire: Value = serde_json::from_slice(interrupt.outbound[0].as_bytes())?;
