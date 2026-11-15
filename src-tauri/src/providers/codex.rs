@@ -16,6 +16,7 @@ use super::{
     goal::{NativeGoalObservation, NativeGoalState, NativeGoalSupport},
     rpc::{self, Rpc},
     skills::{SkillCatalog, SkillCatalogIssue, SkillEntry, SkillSource},
+    steering::{SteerOutcome, SteerTarget},
 };
 use crate::{
     diagnostics,
@@ -79,6 +80,7 @@ impl CliAdapter for CodexAdapter {
             pending_fork: None,
             goal_command: None,
             active: None,
+            pending_steer: None,
             model_pages: Vec::new(),
             workspace_instructions: None,
             model_cursors: HashSet::new(),
@@ -98,6 +100,7 @@ enum Request {
     ListSkills,
     ModelPage,
     StartTurn,
+    Steer,
     StartCompaction,
     Interrupt,
 }
@@ -112,6 +115,12 @@ struct ActiveTurn {
     id: Option<String>,
     interrupt_requested: bool,
     compaction: Option<Compaction>,
+}
+
+struct PendingSteer {
+    request_id: RequestId,
+    message_id: String,
+    target: SteerTarget,
 }
 
 #[derive(Default)]
@@ -136,6 +145,7 @@ struct CodexSession {
     pending_fork: Option<Session>,
     goal_command: Option<bool>,
     active: Option<ActiveTurn>,
+    pending_steer: Option<PendingSteer>,
     model_pages: Vec<ReportedModel>,
     workspace_instructions: Option<String>,
     model_cursors: HashSet<String>,
@@ -236,6 +246,17 @@ impl CodexSession {
         let Some(request) = self.rpc.take_request(id) else {
             return Ok(self.diagnostic("Codex sent a response for an unknown request"));
         };
+        if request == Request::Steer {
+            if self
+                .pending_steer
+                .as_ref()
+                .is_none_or(|pending| pending.request_id != *id)
+            {
+                return Ok(AdapterUpdate::default());
+            }
+            let events = self.finish_steering(response);
+            return Ok(self.events(events));
+        }
         if let Some(error) = response.get("error") {
             if request == Request::ReadConfiguration {
                 return Ok(self.events(vec![self.event(
@@ -441,6 +462,7 @@ impl CodexSession {
                 }
                 Ok(self.events(events))
             }
+            Request::Steer => unreachable!("steering replies are handled before other responses"),
             Request::StartCompaction => {
                 if let Some(progress) = self
                     .active
@@ -616,7 +638,30 @@ impl CodexSession {
         self.active = None;
         self.approvals.clear();
         self.questions.clear();
-        vec![finished]
+        let mut events = self.finish_steering(&Value::Null);
+        events.push(finished);
+        events
+    }
+
+    fn finish_steering(&mut self, response: &Value) -> Vec<ProviderEvent> {
+        let Some(pending) = self.pending_steer.take() else {
+            return Vec::new();
+        };
+        self.rpc.take_request(&pending.request_id);
+        let outcome = if let Some(error) = response.get("error") {
+            match error["code"].as_i64() {
+                Some(-32601) => SteerOutcome::Unavailable,
+                Some(-32600 | -32602) => SteerOutcome::ProviderRejected,
+                _ => SteerOutcome::Unconfirmed,
+            }
+        } else if response.pointer("/result/turnId").and_then(Value::as_str)
+            == Some(&pending.target.turn_id)
+        {
+            SteerOutcome::Accepted
+        } else {
+            SteerOutcome::Unconfirmed
+        };
+        vec![pending.target.settlement(pending.message_id, outcome)]
     }
 
     fn finish_compaction(&mut self, outcome: TurnOutcome) -> Vec<ProviderEvent> {
@@ -1168,6 +1213,54 @@ impl CliSession for CodexSession {
         })
     }
 
+    fn steer(&mut self, target: SteerTarget, input: TurnInput) -> Result<AdapterUpdate> {
+        let Some((session, active)) = self.session.as_ref().zip(self.active.as_ref()) else {
+            return Ok(target.rejected(input.message_id, SteerOutcome::StaleTurn));
+        };
+        if target.session_id != session.id
+            || active.id.as_deref() != Some(&target.turn_id)
+            || active.interrupt_requested
+            || active.compaction.is_some()
+        {
+            return Ok(target.rejected(input.message_id, SteerOutcome::StaleTurn));
+        }
+        if input.text.trim().is_empty()
+            || !input.attachments.is_empty()
+            || input.message_id.trim().is_empty()
+        {
+            return Ok(target.rejected(input.message_id, SteerOutcome::UnsupportedInput));
+        }
+        if self.pending_steer.is_some() {
+            return Ok(target.rejected(input.message_id, SteerOutcome::Busy));
+        }
+        let (request_id, wire) = self.rpc.request_with_id(
+            "turn/steer",
+            json!({
+                "threadId": target.session_id,
+                "expectedTurnId": target.turn_id,
+                "input": [{"type": "text", "text": input.text}],
+            }),
+            Request::Steer,
+        )?;
+        let event = ProviderEvent {
+            location: target.location(),
+            data: ProviderEventData::SteeringPrepared {
+                message_id: input.message_id.clone(),
+                target: target.clone(),
+                frame: wire.as_bytes().to_vec(),
+            },
+        };
+        self.pending_steer = Some(PendingSteer {
+            request_id,
+            message_id: input.message_id,
+            target,
+        });
+        Ok(AdapterUpdate {
+            outbound: vec![wire],
+            events: vec![event],
+        })
+    }
+
     fn receive(&mut self, frame: OutputFrame) -> Result<AdapterUpdate> {
         if frame.stream == Stream::Stderr {
             return Ok(self.diagnostic(&frame.data));
@@ -1331,6 +1424,76 @@ mod tests {
 
     fn outbound(update: &AdapterUpdate, index: usize) -> Result<Value> {
         Ok(serde_json::from_slice(update.outbound[index].as_bytes())?)
+    }
+
+    #[test]
+    fn steering_uses_the_active_provider_turn_and_retains_ambiguous_delivery() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate(SessionMode::ReadOnly, SessionIntent::Start, checkout.path())?;
+        let target = SteerTarget {
+            session_id: "session".into(),
+            turn_id: "turn".into(),
+        };
+        let input = |id: &str| TurnInput {
+            message_id: id.to_owned(),
+            text: "Instructions for this turn.".into(),
+            attachments: Vec::new(),
+        };
+        let outcome = |update: &AdapterUpdate| match update.events.as_slice() {
+            [
+                ProviderEvent {
+                    data: ProviderEventData::SteeringSettled { outcome, .. },
+                    ..
+                },
+            ] => *outcome,
+            _ => panic!("expected a steering settlement"),
+        };
+        let stale = session.steer(target.clone(), input("stale"))?;
+        assert_eq!(outcome(&stale), SteerOutcome::StaleTurn);
+        assert!(stale.outbound.is_empty());
+
+        session.send(input("original"))?;
+        inbound(
+            &mut *session,
+            json!({
+                "method":"turn/started", "params":{"threadId":"session","turn":{"id":"turn"}}
+            }),
+        )?;
+        let prepared = session.steer(target.clone(), input("first"))?;
+        let encoded = outbound(&prepared, 0)?;
+        assert_eq!(encoded["method"], "turn/steer");
+        assert_eq!(encoded["params"]["expectedTurnId"], "turn");
+        assert!(matches!(prepared.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::SteeringPrepared { message_id, frame, .. }, ..
+        }] if message_id == "first" && frame == prepared.outbound[0].as_bytes()));
+        let accepted = inbound(
+            &mut *session,
+            json!({"id":encoded["id"],"result":{"turnId":"turn"}}),
+        )?;
+        assert_eq!(outcome(&accepted), SteerOutcome::Accepted);
+        assert_eq!(accepted.events[0].location.turn_id.as_deref(), Some("turn"));
+
+        let next = outbound(&session.steer(target, input("late"))?, 0)?;
+        let terminal = inbound(
+            &mut *session,
+            json!({
+                "method":"turn/completed", "params":{"threadId":"session","turn":{"id":"turn","status":"completed"}}
+            }),
+        )?;
+        assert!(matches!(&terminal.events[0].data,
+            ProviderEventData::SteeringSettled { message_id, outcome: SteerOutcome::Unconfirmed, .. }
+                if message_id == "late"
+        ));
+        let late = inbound(
+            &mut *session,
+            json!({"id":next["id"],"result":{"turnId":"turn"}}),
+        )?;
+        assert!(
+            late.events
+                .iter()
+                .all(|event| !matches!(event.data, ProviderEventData::SteeringSettled { .. }))
+        );
+        Ok(())
     }
 
     #[test]

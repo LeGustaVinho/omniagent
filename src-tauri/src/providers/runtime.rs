@@ -40,6 +40,7 @@ use super::{
     planning::{PlanSource, STRUCTURED_PLANNING_PROMPT, StructuredPlan},
     plugins::{PluginInventory, probe_run_plugins},
     skills::{SkillCatalog, explicit_skill_request},
+    steering::{SteerOutcome, SteerTarget},
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -143,6 +144,7 @@ enum Command {
     Interrupt,
     Approval(RequestId, ApprovalDecision, oneshot::Sender<Result<()>>),
     Question(RequestId, Value, oneshot::Sender<Result<()>>),
+    Steer(SteerTarget, TurnInput, oneshot::Sender<Result<()>>),
 }
 
 enum Decision {
@@ -181,6 +183,17 @@ impl ManagedTurn {
         result
             .await
             .context("attempt stopped before acknowledging answer")?
+    }
+
+    /// Submission records an attempt or a local rejection. Provider delivery settles in run events.
+    pub async fn steer(&self, target: SteerTarget, input: TurnInput) -> Result<()> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .try_send(Command::Steer(target, input, reply))
+            .map_err(|_| anyhow::anyhow!("attempt command queue is closed or busy"))?;
+        result
+            .await
+            .context("attempt stopped before recording steering")?
     }
 
     pub async fn wait(self) -> Result<RunStatus> {
@@ -581,6 +594,21 @@ impl TurnExecution {
                         Decision::Question(id),
                         reply,
                     )?;
+                }
+                Ok(Command::Steer(target, input, reply)) => {
+                    let update = session.steer(target, input);
+                    if let Ok(update) = update {
+                        let applied = self.write_steering(process, update);
+                        let _ = reply.send(
+                            applied
+                                .as_ref()
+                                .map(|_| ())
+                                .map_err(|error| anyhow::anyhow!("{error}")),
+                        );
+                        applied?;
+                    } else {
+                        let _ = reply.send(update.map(|_| ()));
+                    }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -989,6 +1017,50 @@ impl TurnExecution {
         }
         bounded_write(process, update.outbound)?;
         Ok(finished)
+    }
+
+    fn write_steering(
+        &mut self,
+        process: &mut CapturedProcess,
+        update: AdapterUpdate,
+    ) -> Result<()> {
+        let AdapterUpdate { outbound, events } = update;
+        match (events.as_slice(), outbound.as_slice()) {
+            (
+                [
+                    event @ ProviderEvent {
+                        data: ProviderEventData::SteeringSettled { .. },
+                        ..
+                    },
+                ],
+                [],
+            ) => self.record(event.clone(), EventSource::Application),
+            (
+                [
+                    event @ ProviderEvent {
+                        data:
+                            ProviderEventData::SteeringPrepared {
+                                message_id,
+                                target,
+                                frame,
+                            },
+                        ..
+                    },
+                ],
+                [wire],
+            ) if frame == wire.as_bytes() => {
+                self.record(event.clone(), EventSource::Application)?;
+                let delivery = bounded_write(process, outbound);
+                if delivery.is_err() {
+                    self.record(
+                        target.settlement(message_id.clone(), SteerOutcome::Unconfirmed),
+                        EventSource::Application,
+                    )?;
+                }
+                delivery
+            }
+            _ => anyhow::bail!("adapter omitted steering evidence or supplied a mismatched frame"),
+        }
     }
 
     fn deliver_decision(

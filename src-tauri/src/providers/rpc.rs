@@ -25,14 +25,24 @@ impl<T> Rpc<T> {
         params: Value,
         kind: T,
     ) -> anyhow::Result<WireMessage> {
+        let (_, frame) = self.request_with_id(method, params, kind)?;
+        Ok(frame)
+    }
+
+    pub(crate) fn request_with_id(
+        &mut self,
+        method: &str,
+        params: Value,
+        kind: T,
+    ) -> anyhow::Result<(RequestId, WireMessage)> {
         let id = RequestId::Number(self.next);
         let frame = self.encode(json!({ "id": id, "method": method, "params": params }))?;
-        self.pending.insert(id, kind);
         self.next = self
             .next
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("JSON-RPC request IDs exhausted"))?;
-        Ok(frame)
+        self.pending.insert(id.clone(), kind);
+        Ok((id, frame))
     }
 
     pub(crate) fn notify(

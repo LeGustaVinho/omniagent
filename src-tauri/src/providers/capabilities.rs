@@ -508,6 +508,10 @@ impl ReportedCapabilities {
             ProviderEventData::GoalObserved { .. } => {
                 self.observed.insert(Capability::NativeGoalEvents)
             }
+            ProviderEventData::SteeringSettled {
+                outcome: super::steering::SteerOutcome::Accepted,
+                ..
+            } => self.observed.insert(Capability::LiveSteering),
             ProviderEventData::FreshSessionOpened => self.observed.insert(Capability::FreshSession),
             ProviderEventData::NativeForkVerified { .. } => {
                 self.observed.insert(Capability::NativeTurnFork)
@@ -595,12 +599,15 @@ impl ReportedCapabilities {
                     Provider::Codex => false,
                     Provider::Claude => matches!(
                         capability,
-                        Capability::NativeTurnFork | Capability::ManualNativeCompaction
+                        Capability::NativeTurnFork
+                            | Capability::ManualNativeCompaction
+                            | Capability::LiveSteering
                     ),
                     Provider::Antigravity => matches!(
                         capability,
                         Capability::NativeTurnFork
                             | Capability::ManualNativeCompaction
+                            | Capability::LiveSteering
                             | Capability::NativeDelegationControls
                     ),
                 };

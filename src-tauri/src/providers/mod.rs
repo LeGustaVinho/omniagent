@@ -92,6 +92,7 @@ pub enum Capability {
     NativeGoalCommand,
     NativeGoalEvents,
     CancelTurn,
+    LiveSteering,
     SubagentEvents,
     PerChildEvents,
     NativeDelegationControls,
@@ -104,7 +105,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::ModelInventory,
         Self::FreshSession,
         Self::Resume,
@@ -118,6 +119,7 @@ impl Capability {
         Self::NativeGoalCommand,
         Self::NativeGoalEvents,
         Self::CancelTurn,
+        Self::LiveSteering,
         Self::SubagentEvents,
         Self::PerChildEvents,
         Self::NativeDelegationControls,
@@ -491,6 +493,16 @@ pub enum ProviderEventData {
     NativeGoalCommandReported {
         available: bool,
     },
+    SteeringPrepared {
+        message_id: String,
+        target: steering::SteerTarget,
+        frame: Vec<u8>,
+    },
+    SteeringSettled {
+        message_id: String,
+        target: steering::SteerTarget,
+        outcome: steering::SteerOutcome,
+    },
     Suggestion {
         text: String,
     },
@@ -546,6 +558,13 @@ pub trait CliSession: Send {
         Ok(None)
     }
     fn send(&mut self, input: TurnInput) -> anyhow::Result<AdapterUpdate>;
+    fn steer(
+        &mut self,
+        target: steering::SteerTarget,
+        input: TurnInput,
+    ) -> anyhow::Result<AdapterUpdate> {
+        Ok(target.rejected(input.message_id, steering::SteerOutcome::Unavailable))
+    }
     fn compact_native(&mut self) -> anyhow::Result<AdapterUpdate> {
         anyhow::bail!("this adapter has no qualified manual native compaction route")
     }
@@ -673,3 +692,4 @@ pub mod questions;
 mod rpc;
 pub mod runtime;
 pub mod skills;
+pub mod steering;
