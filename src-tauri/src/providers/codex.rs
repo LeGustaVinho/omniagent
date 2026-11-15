@@ -228,16 +228,26 @@ impl CodexSession {
                     model: model.to_owned(),
                     effort: effort.clone(),
                 });
+                let mut events = Vec::new();
+                if matches!(self.request.intent, SessionIntent::Resume { .. })
+                    && let Some(turns) = result["thread"]["turns"].as_array()
+                {
+                    events.push(self.event(ProviderEventData::HistoryReported {
+                        turns: Some(turns.len() as u64),
+                        item_kind: None,
+                    }));
+                }
+                events.push(self.event(ProviderEventData::SessionReady {
+                    model: Some(model.to_owned()),
+                    effort,
+                }));
                 Ok(AdapterUpdate {
                     outbound: vec![self.rpc.request(
                         "model/list",
                         json!({"limit":100}),
                         Request::ModelPage,
                     )?],
-                    events: vec![self.event(ProviderEventData::SessionReady {
-                        model: Some(model.to_owned()),
-                        effort,
-                    })],
+                    events,
                 })
             }
             Request::ModelPage => self.model_page(result),
@@ -464,7 +474,28 @@ impl CodexSession {
             }
             _ => return Ok(AdapterUpdate::default()),
         };
-        Ok(self.events(vec![event(data)]))
+        let mut events = vec![event(data)];
+        if kind == "commandExecution"
+            && completed
+            && item["status"] == "completed"
+            && item["exitCode"].as_i64() == Some(0)
+        {
+            events.extend(
+                item["commandActions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|action| action["type"] == "read")
+                    .filter_map(|action| string(action, "path"))
+                    .map(|path| {
+                        event(ProviderEventData::ContextRead {
+                            path,
+                            tool: "commandExecution".into(),
+                        })
+                    }),
+            );
+        }
+        Ok(self.events(events))
     }
 
     fn server_request(

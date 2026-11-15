@@ -216,6 +216,9 @@ pub struct SessionChoice {
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderEventData {
+    DispatchSubmitted {
+        dispatch_id: String,
+    },
     Handshake {
         protocol: String,
         capabilities: Vec<Capability>,
@@ -260,6 +263,18 @@ pub enum ProviderEventData {
         input: Option<u64>,
         output: Option<u64>,
         cached_input: Option<u64>,
+    },
+    ContextWindowUsage {
+        used: u64,
+        size: u64,
+    },
+    HistoryReported {
+        turns: Option<u64>,
+        item_kind: Option<String>,
+    },
+    ContextRead {
+        path: String,
+        tool: String,
     },
     Tool {
         name: String,

@@ -88,6 +88,7 @@ struct Turn {
     interrupted: bool,
     saw_final_message: bool,
     message_ids: HashMap<Option<String>, String>,
+    read_paths: HashMap<(Option<String>, String), String>,
 }
 
 enum PendingInput {
@@ -266,6 +267,15 @@ impl ClaudeSession {
         if !text.is_empty() && parent.is_none() {
             turn.saw_final_message = true;
         }
+        for block in content {
+            if block["type"] == "tool_use"
+                && block["name"] == "Read"
+                && let (Some(id), Some(path)) =
+                    (string(block, "id"), string(&block["input"], "file_path"))
+            {
+                turn.read_paths.insert((parent.clone(), id), path);
+            }
+        }
         let mut result = Vec::new();
         if parent.is_none()
             && let Some(model) = string(&frame["message"], "model")
@@ -300,29 +310,38 @@ impl ClaudeSession {
         Ok(events(result))
     }
 
-    fn tool_results(&self, frame: &Value) -> AdapterUpdate {
-        let results = frame["message"]["content"]
+    fn tool_results(&mut self, frame: &Value) -> AdapterUpdate {
+        let mut results = Vec::new();
+        let blocks = frame["message"]["content"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|block| block["type"] == "tool_result")
-            .filter_map(|block| {
-                let id = string(block, "tool_use_id")?;
-                let mut event = self.event(
-                    frame,
-                    ProviderEventData::Tool {
-                        name: "tool_result".into(),
-                        phase: if block["is_error"] == true {
-                            "failed"
-                        } else {
-                            "completed"
-                        }
-                        .into(),
-                    },
-                );
-                event.location.item_id = Some(id);
-                Some(event)
+            .filter(|block| block["type"] == "tool_result");
+        for block in blocks {
+            let Some(id) = string(block, "tool_use_id") else {
+                continue;
+            };
+            let path = self.turn.as_mut().and_then(|turn| {
+                turn.read_paths
+                    .remove(&(string(frame, "parent_tool_use_id"), id.clone()))
             });
+            let failed = block["is_error"] == true;
+            let event = |data| {
+                let mut event = self.event(frame, data);
+                event.location.item_id = Some(id.clone());
+                event
+            };
+            results.push(event(ProviderEventData::Tool {
+                name: "tool_result".into(),
+                phase: if failed { "failed" } else { "completed" }.into(),
+            }));
+            if let Some(path) = path.filter(|_| !failed) {
+                results.push(event(ProviderEventData::ContextRead {
+                    path,
+                    tool: "Read".into(),
+                }));
+            }
+        }
         events(results)
     }
 
@@ -784,6 +803,42 @@ mod tests {
                 .process_finished(TerminalOutcome::Exited(0))
                 .events
                 .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reports_successful_reads_in_the_original_parent_scope() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut adapter = session(temp.path())?;
+        let started = receive(
+            &mut *adapter,
+            json!({"type":"assistant","session_id":"session",
+            "parent_tool_use_id":"child","message":{"content":[
+                {"type":"tool_use","id":"okay","name":"Read","input":{"file_path":"first.txt"}},
+                {"type":"tool_use","id":"failed","name":"Read","input":{"file_path":"second.txt"}}
+            ]}}),
+        )?;
+        assert_eq!(started.events.len(), 2);
+        let done = receive(
+            &mut *adapter,
+            json!({"type":"user","session_id":"session","parent_tool_use_id":"child",
+            "message":{"content":[{"type":"tool_result","tool_use_id":"okay","content":"ok"},
+            {"type":"tool_result","tool_use_id":"failed","is_error":true}]}}),
+        )?;
+        let reads = done
+            .events
+            .iter()
+            .filter(|event| matches!(event.data, ProviderEventData::ContextRead { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].location.parent_item_id.as_deref(), Some("child"));
+        assert_eq!(
+            reads[0].data,
+            ProviderEventData::ContextRead {
+                path: "first.txt".into(),
+                tool: "Read".into()
+            }
         );
         Ok(())
     }

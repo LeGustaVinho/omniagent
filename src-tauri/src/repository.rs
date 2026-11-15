@@ -7,7 +7,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -165,7 +165,36 @@ fn git_path() -> io::Result<PathBuf> {
 }
 
 fn git_query(git: &Path, directory: &Path, args: &[impl AsRef<OsStr>]) -> Result<String> {
-    let output = Command::new(git)
+    let output = git_command(git, directory).args(args).output()?;
+    if !output.status.success() {
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+pub fn base_commit(directory: &Path) -> Result<Option<String>> {
+    let output = git_command(&git_path()?, directory)
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .output()?;
+    if output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty() {
+        return Ok(None);
+    }
+    ensure!(
+        output.status.success(),
+        "Git could not resolve the checkout HEAD"
+    );
+    let hash = String::from_utf8(output.stdout)?;
+    let hash = hash.trim();
+    ensure!(
+        matches!(hash.len(), 40 | 64) && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "Git returned an invalid HEAD object ID"
+    );
+    Ok(Some(hash.to_owned()))
+}
+
+fn git_command(git: &Path, directory: &Path) -> Command {
+    let mut command = Command::new(git);
+    command
         .creation_flags(CREATE_NO_WINDOW)
         // Inherited repository overrides would misidentify the selected checkout.
         .env_remove("GIT_DIR")
@@ -178,13 +207,8 @@ fn git_query(git: &Path, directory: &Path, args: &[impl AsRef<OsStr>]) -> Result
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .arg("-C")
-        .arg(directory)
-        .args(args)
-        .output()?;
-    if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(String::from_utf8(output.stdout)?)
+        .arg(directory);
+    command
 }
 
 #[cfg(test)]
@@ -202,6 +226,7 @@ mod tests {
         fs::create_dir(&root)?;
         let git = git_path()?;
         git_query(&git, &root, &["init", "--quiet"])?;
+        assert_eq!(base_commit(&root)?, None);
         git_query(
             &git,
             &root,
@@ -231,6 +256,8 @@ mod tests {
             ],
         )?;
         fs::create_dir(&nested)?;
+        assert_eq!(base_commit(&root)?, base_commit(&linked)?);
+        assert!(base_commit(&root)?.is_some());
 
         let store = Store::open(temp.path().join("db.sqlite"))?;
         assert!(register(&store, temp.path().to_path_buf()).await.is_err());

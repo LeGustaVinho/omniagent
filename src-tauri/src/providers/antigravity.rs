@@ -211,6 +211,14 @@ impl Configuration {
 struct Turn {
     text: String,
     cancel_requested: bool,
+    tools: HashMap<String, ReportedTool>,
+}
+
+#[derive(Default)]
+struct ReportedTool {
+    kind: Option<String>,
+    name: Option<String>,
+    paths: Vec<String>,
 }
 
 struct AcpSession {
@@ -503,6 +511,23 @@ impl AcpSession {
     fn update(&mut self, params: &Value) -> Result<AdapterUpdate> {
         let session_id = field(params, "sessionId")?;
         let update = &params["update"];
+        if !self.ready
+            && let SessionIntent::Resume {
+                provider_session_id,
+            } = &self.request.intent
+            && session_id == provider_session_id
+            && let Some(
+                kind @ ("user_message_chunk"
+                | "agent_message_chunk"
+                | "tool_call"
+                | "tool_call_update"),
+            ) = update["sessionUpdate"].as_str()
+        {
+            return Ok(events([self.event(ProviderEventData::HistoryReported {
+                turns: None,
+                item_kind: Some(kind.into()),
+            })]));
+        }
         if update["sessionUpdate"] == "available_commands_update" {
             let names = choices(&update["availableCommands"])
                 .filter_map(|command| string(command, "name"))
@@ -544,9 +569,70 @@ impl AcpSession {
                     .map(str::to_owned),
             })]));
         }
+        if update["sessionUpdate"] == "usage_update" {
+            return Ok(match (update["used"].as_u64(), update["size"].as_u64()) {
+                (Some(used), Some(size)) => {
+                    events([self.event(ProviderEventData::ContextWindowUsage { used, size })])
+                }
+                _ => AdapterUpdate::default(),
+            });
+        }
         let Some(turn) = self.turn.as_mut() else {
             return Ok(AdapterUpdate::default());
         };
+        if matches!(
+            update["sessionUpdate"].as_str(),
+            Some("tool_call" | "tool_call_update")
+        ) {
+            let Some(id) = string(update, "toolCallId") else {
+                return Ok(AdapterUpdate::default());
+            };
+            let tool = turn.tools.entry(id.clone()).or_default();
+            if let Some(kind) = string(update, "kind") {
+                tool.kind = Some(kind);
+            }
+            if let Some(name) = string(update, "name") {
+                tool.name = Some(name);
+            }
+            if let Some(locations) = update["locations"].as_array() {
+                tool.paths = locations
+                    .iter()
+                    .filter_map(|location| string(location, "path"))
+                    .collect();
+            }
+            let name = tool
+                .name
+                .clone()
+                .or_else(|| string(update, "title"))
+                .or_else(|| tool.kind.clone())
+                .unwrap_or_else(|| "tool".into());
+            let phase = string(update, "status").unwrap_or_else(|| "updated".into());
+            let terminal = matches!(phase.as_str(), "completed" | "failed");
+            let paths = if phase == "completed" && tool.kind.as_deref() == Some("read") {
+                std::mem::take(&mut tool.paths)
+            } else {
+                Vec::new()
+            };
+            if terminal {
+                turn.tools.remove(&id);
+            }
+            let event = |data| {
+                let mut event = self.event(data);
+                event.location.item_id = Some(id.clone());
+                event
+            };
+            let mut observations = vec![event(ProviderEventData::Tool {
+                name: name.clone(),
+                phase,
+            })];
+            observations.extend(paths.into_iter().map(|path| {
+                event(ProviderEventData::ContextRead {
+                    path,
+                    tool: name.clone(),
+                })
+            }));
+            return Ok(events(observations));
+        }
         let data = match update["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => {
                 let Some(text) = string(&update["content"], "text") else {
@@ -564,12 +650,6 @@ impl AcpSession {
                     summary: false,
                 }
             }
-            Some("tool_call" | "tool_call_update") => ProviderEventData::Tool {
-                name: string(update, "title")
-                    .or_else(|| string(update, "kind"))
-                    .unwrap_or_else(|| "tool".into()),
-                phase: string(update, "status").unwrap_or_else(|| "updated".into()),
-            },
             _ => return Ok(AdapterUpdate::default()),
         };
         let mut event = self.event(data);
@@ -646,6 +726,7 @@ impl CliSession for AcpSession {
         self.turn = Some(Turn {
             text: String::new(),
             cancel_requested: false,
+            tools: HashMap::new(),
         });
         Ok(AdapterUpdate {
             outbound: vec![frame],
@@ -832,6 +913,20 @@ mod tests {
         )?;
         assert_eq!(message(&opening)?["method"], "session/resume");
         assert_eq!(message(&opening)?["params"]["sessionId"], "acp-session");
+        let replay = receive(
+            &mut *session,
+            json!({"method":"session/update","params":{
+                "sessionId":"acp-session","update":{"sessionUpdate":"agent_message_chunk",
+                    "content":{"type":"text","text":"previous answer"}}
+            }}),
+        )?;
+        assert_eq!(
+            replay.events[0].data,
+            ProviderEventData::HistoryReported {
+                turns: None,
+                item_kind: Some("agent_message_chunk".into()),
+            }
+        );
         let option = receive(
             &mut *session,
             json!({"id":2,"result":results("argon","medium","default")}),
@@ -871,6 +966,41 @@ mod tests {
         assert_eq!(
             message(&request)?["params"]["prompt"][0]["text"],
             "Olá ☕\nline"
+        );
+        let read = receive(
+            &mut *session,
+            json!({"method":"session/update","params":{
+                "sessionId":"acp-session","update":{"sessionUpdate":"tool_call","toolCallId":"read",
+                    "name":"read_file","kind":"read","status":"in_progress","locations":[{"path":"checked.txt"}]}
+            }}),
+        )?;
+        assert_eq!(read.events.len(), 1);
+        let read = receive(
+            &mut *session,
+            json!({"method":"session/update","params":{
+                "sessionId":"acp-session","update":{"sessionUpdate":"tool_call_update",
+                    "toolCallId":"read","status":"completed"}
+            }}),
+        )?;
+        assert_eq!(
+            read.events[1].data,
+            ProviderEventData::ContextRead {
+                path: "checked.txt".into(),
+                tool: "read_file".into(),
+            }
+        );
+        let usage = receive(
+            &mut *session,
+            json!({"method":"session/update","params":{
+                "sessionId":"acp-session","update":{"sessionUpdate":"usage_update","used":12,"size":256}
+            }}),
+        )?;
+        assert_eq!(
+            usage.events[0].data,
+            ProviderEventData::ContextWindowUsage {
+                used: 12,
+                size: 256
+            }
         );
 
         let permission = receive(

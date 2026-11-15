@@ -7,6 +7,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{
+    dispatch::EventSource,
     protection,
     providers::{
         Provider, ProviderEvent, ProviderEventData, SessionIntent, SessionMode, TurnOutcome,
@@ -25,7 +26,7 @@ pub struct Conversation {
     pub context_id: String,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum MessageRole {
@@ -33,7 +34,7 @@ pub enum MessageRole {
     Assistant,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct MessageRevision {
@@ -237,7 +238,12 @@ impl Store {
         }).await
     }
 
-    pub async fn observe_agent_event(&self, run_id: String, event: ProviderEvent) -> Result<()> {
+    pub async fn record_agent_observation(
+        &self,
+        run_id: String,
+        source: EventSource,
+        event: ProviderEvent,
+    ) -> Result<()> {
         let payload = protection::protect(&serde_json::to_vec(&event)?)?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -261,7 +267,7 @@ impl Store {
                     tx.execute("UPDATE agent_attempts SET reported_model = coalesce(?1, reported_model), reported_effort = coalesce(?2, reported_effort) WHERE run_id = ?3",
                         params![model, effort, run_id])?;
                 }
-                ProviderEventData::TurnFinished { outcome } => {
+                ProviderEventData::TurnFinished { outcome } if source == EventSource::Provider => {
                     let state = match outcome {
                         TurnOutcome::Completed => "completed",
                         TurnOutcome::Failed => "failed",
@@ -271,22 +277,10 @@ impl Store {
                 }
                 _ => {}
             }
-            tx.execute("INSERT INTO agent_events(run_id, payload) VALUES (?1, ?2)", params![run_id, payload])?;
+            tx.execute("INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)", params![run_id, source.as_sql(), payload])?;
             tx.commit()?;
             Ok(())
         }).await
-    }
-
-    pub(crate) async fn mark_agent_input_started(&self, run_id: String) -> Result<()> {
-        self.execute(move |db| {
-            let active = active_attempt(db, &run_id)?;
-            db.execute(
-                "UPDATE agent_sessions SET cursor_context_id = NULL WHERE id = ?1",
-                [&active.session_id],
-            )?;
-            Ok(())
-        })
-        .await
     }
 
     pub async fn mark_agent_running(&self, run_id: String) -> Result<()> {
@@ -326,7 +320,10 @@ impl Store {
             };
             if outcome == RunStatus::Succeeded {
                 tx.execute("UPDATE agent_sessions SET cursor_context_id = ?1 WHERE id = ?2 AND provider_session_id IS NOT NULL
-                    AND EXISTS(SELECT 1 FROM agent_attempts WHERE run_id = ?3 AND provider_terminal = 'completed')",
+                    AND EXISTS(SELECT 1 FROM agent_attempts a
+                        JOIN context_snapshots s ON s.run_id = a.run_id
+                        JOIN dispatches d ON d.snapshot_id = s.id
+                        WHERE a.run_id = ?3 AND a.provider_terminal = 'completed' AND d.delivery = 'submitted')",
                     params![context_id, active.session_id, run_id])?;
             }
             tx.execute("DELETE FROM active_agent_attempts WHERE run_id = ?1", [&run_id])?;
@@ -348,6 +345,10 @@ impl Store {
                 let run = runs::load_run(&tx, &id)?;
                 runs::advance_run(&tx, &run, RunStatus::Interrupted)?;
             }
+            tx.execute(
+                "UPDATE dispatches SET delivery = 'unconfirmed' WHERE delivery = 'prepared'",
+                [],
+            )?;
             tx.execute("DELETE FROM active_agent_attempts", [])?;
             tx.commit()?;
             Ok(())
@@ -532,6 +533,7 @@ fn active_attempt(db: &Connection, id: &str) -> Result<ActiveAttempt> {
 mod tests {
     use super::*;
     use crate::{
+        dispatch::{ContextSnapshot, Delivery, NativeHistory},
         process::TerminalOutcome,
         process_io::{CapturedProcess, OutputFrame, ProcessInput, Stream},
         providers::{ProviderLocation, runtime::start_managed_turn},
@@ -591,9 +593,12 @@ mod tests {
 
     async fn confirm(store: &Store, attempt: &AttemptPlan) -> Result<()> {
         store.mark_agent_running(attempt.run.id.clone()).await?;
+        let dispatch = prepare_fixture_dispatch(store, attempt).await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
         store
-            .observe_agent_event(
+            .record_agent_observation(
                 attempt.run.id.clone(),
+                EventSource::Provider,
                 ProviderEvent {
                     location: ProviderLocation {
                         session_id: Some("native-thread".into()),
@@ -608,8 +613,9 @@ mod tests {
             )
             .await?;
         store
-            .observe_agent_event(
+            .record_agent_observation(
                 attempt.run.id.clone(),
+                EventSource::Provider,
                 ProviderEvent {
                     location: ProviderLocation::default(),
                     data: ProviderEventData::TurnFinished {
@@ -623,6 +629,35 @@ mod tests {
                 attempt.run.id.clone(),
                 RunStatus::Succeeded,
                 Some("answer".into()),
+            )
+            .await
+    }
+
+    async fn prepare_fixture_dispatch(store: &Store, attempt: &AttemptPlan) -> Result<String> {
+        let native_history = match (&attempt.intent, &attempt.resume_cursor_id) {
+            (
+                SessionIntent::Resume {
+                    provider_session_id,
+                },
+                Some(context_id),
+            ) => NativeHistory::ProviderCursor {
+                session_id: provider_session_id.clone(),
+                context_id: context_id.clone(),
+            },
+            _ => NativeHistory::Fresh,
+        };
+        store
+            .prepare_dispatch(
+                attempt.run.id.clone(),
+                ContextSnapshot {
+                    version: 1,
+                    context_id: attempt.context_id.clone(),
+                    scope: attempt.scope.clone(),
+                    base_commit: None,
+                    submitted_messages: attempt.input.clone(),
+                    native_history,
+                },
+                vec![b"{\"fixture\":true}\n".to_vec()],
             )
             .await
     }
@@ -752,6 +787,27 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn restart_marks_a_prepared_dispatch_unconfirmed_and_invalidates_resume() -> Result<()> {
+        let (_dir, store, conversation, scope) = setup().await?;
+        let first = prepare(&store, &conversation.id, scope.clone(), "confirmed").await?;
+        confirm(&store, &first).await?;
+        let lost = prepare(&store, &conversation.id, scope.clone(), "possibly sent").await?;
+        assert!(matches!(lost.intent, SessionIntent::Resume { .. }));
+        store.mark_agent_running(lost.run.id.clone()).await?;
+        prepare_fixture_dispatch(&store, &lost).await?;
+
+        store.recover_agent_attempts_after_restart().await?;
+        let dispatch = store
+            .agent_dispatch(conversation.id.clone(), lost.run.id)
+            .await?
+            .unwrap();
+        assert_eq!(dispatch.delivery, Delivery::Unconfirmed);
+        let next = prepare(&store, &conversation.id, scope, "continue").await?;
+        assert!(matches!(next.intent, SessionIntent::Start));
+        Ok(())
+    }
+
     struct CompletedProcess;
 
     impl RunControl for CompletedProcess {
@@ -763,12 +819,29 @@ mod tests {
         }
     }
 
-    struct WireLog(Arc<Mutex<Vec<Value>>>);
+    #[derive(Clone)]
+    struct WireLog {
+        store: Store,
+        runtime: tokio::runtime::Handle,
+        conversation: String,
+        frames: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
 
     impl io::Write for WireLog {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            let frame = serde_json::from_slice(bytes).map_err(io::Error::other)?;
-            self.0.lock().unwrap().push(frame);
+            let frame: Value = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+            if frame["method"] == "turn/start" {
+                let evidence = self.runtime.block_on(async {
+                    let owner = self.conversation.clone();
+                    let run_id = self.store.execute(move |db| Ok(db.query_row(
+                        "SELECT run_id FROM active_agent_attempts WHERE conversation_id = ?1", [owner], |row| row.get::<_, String>(0),
+                    )?)).await?;
+                    self.store.agent_dispatch(self.conversation.clone(), run_id).await
+                }).map_err(io::Error::other)?.ok_or_else(|| io::Error::other("turn wrote before dispatch evidence was committed"))?;
+                assert_eq!(evidence.delivery, Delivery::Prepared);
+                assert_eq!(evidence.frames, [bytes]);
+            }
+            self.frames.lock().unwrap().push(bytes.to_vec());
             Ok(bytes.len())
         }
         fn flush(&mut self) -> io::Result<()> {
@@ -776,7 +849,7 @@ mod tests {
         }
     }
 
-    struct FixtureRunner(Arc<Mutex<Vec<Value>>>);
+    struct FixtureRunner(WireLog);
 
     impl Runner for FixtureRunner {
         fn identity(&self) -> &str {
@@ -786,12 +859,19 @@ mod tests {
             let (write, output) = mpsc::channel();
             for data in [
                 json!({"id":1,"result":{"userAgent":"fixture"}}),
-                json!({"id":2,"result":{"thread":{"id":"native-session"},"model":"observed","cwd":request.checkout,
+                json!({"id":2,"result":{"thread":{"id":"native-session","turns":[{"id":"history"}]},"model":"observed","cwd":request.checkout,
                     "sandbox":{"type":"readOnly"}}}),
                 json!({"id":3,"result":{"data":[]}}),
                 json!({"id":4,"result":{"turn":{"id":"native-turn"}}}),
                 json!({"method":"thread/settings/updated","params":{"threadId":"native-session",
                     "threadSettings":{"model":"observed-later","effort":"high"}}}),
+                json!({"method":"item/completed","params":{"threadId":"native-session","turnId":"native-turn",
+                    "item":{"type":"commandExecution","id":"read","status":"completed","exitCode":0,
+                      "commandActions":[{"type":"read","path":"test.txt"}]}}}),
+                json!({"method":"item/completed","params":{"threadId":"native-session","turnId":"native-turn",
+                    "item":{"type":"contextCompaction","id":"compaction"}}}),
+                json!({"method":"thread/tokenUsage/updated","params":{"threadId":"native-session","turnId":"native-turn",
+                    "tokenUsage":{"last":{"inputTokens":5,"outputTokens":3,"cachedInputTokens":1}}}}),
                 json!({"method":"item/completed","params":{"threadId":"native-session","turnId":"native-turn",
                     "item":{"type":"agentMessage","id":"output","text":"Fixture answer"}}}),
                 json!({"method":"turn/completed","params":{"threadId":"native-session",
@@ -805,7 +885,7 @@ mod tests {
                     .unwrap();
             }
             Ok(CapturedProcess {
-                input: ProcessInput::new(WireLog(self.0.clone())),
+                input: ProcessInput::new(self.0.clone()),
                 output,
                 control: Arc::new(CompletedProcess),
             })
@@ -817,8 +897,14 @@ mod tests {
     -> Result<()> {
         let (_dir, store, conversation, scope) = setup().await?;
         let log = Arc::new(Mutex::new(Vec::new()));
-        let runner = Arc::new(FixtureRunner(log.clone()));
-        let first = prepare(&store, &conversation.id, scope.clone(), "First prompt").await?;
+        let runner = Arc::new(FixtureRunner(WireLog {
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            conversation: conversation.id.clone(),
+            frames: log.clone(),
+        }));
+        let first_prompt = "Primeira mensagem ☕\nsegunda linha";
+        let first = prepare(&store, &conversation.id, scope.clone(), first_prompt).await?;
         let first_session = first.agent_session_id.clone();
         let first_run = first.run.id.clone();
         let running = start_managed_turn(store.clone(), runner.clone(), first);
@@ -834,13 +920,92 @@ mod tests {
         );
         assert_eq!(resumed.input.len(), 1);
         assert_eq!(resumed.input[0].text, "Second prompt");
+        let resumed_run = resumed.run.id.clone();
         assert_eq!(
             start_managed_turn(store.clone(), runner, resumed)
                 .wait()
                 .await?,
             RunStatus::Succeeded
         );
+        let first_dispatch = store
+            .agent_dispatch(conversation.id.clone(), first_run.clone())
+            .await?
+            .unwrap();
+        assert_eq!(first_dispatch.delivery, Delivery::Submitted);
+        assert_eq!(first_dispatch.snapshot.native_history, NativeHistory::Fresh);
+        assert_eq!(
+            first_dispatch.snapshot.submitted_messages[0].text,
+            first_prompt
+        );
+        let second_dispatch = store
+            .agent_dispatch(conversation.id.clone(), resumed_run.clone())
+            .await?
+            .unwrap();
+        assert!(
+            matches!(second_dispatch.snapshot.native_history, NativeHistory::ProviderCursor { session_id, .. } if session_id == "native-session")
+        );
+        assert!(
+            store
+                .agent_dispatch("unrelated".into(), first_run.clone())
+                .await?
+                .is_none()
+        );
+        let observations = store
+            .agent_observations(conversation.id.clone(), resumed_run, 0)
+            .await?;
+        for expected in [
+            ProviderEventData::HistoryReported {
+                turns: Some(1),
+                item_kind: None,
+            },
+            ProviderEventData::ContextRead {
+                path: "test.txt".into(),
+                tool: "commandExecution".into(),
+            },
+            ProviderEventData::Compacted,
+            ProviderEventData::Usage {
+                input: Some(5),
+                output: Some(3),
+                cached_input: Some(1),
+            },
+        ] {
+            assert!(
+                observations
+                    .iter()
+                    .any(|observation| observation.source == EventSource::Provider
+                        && observation.event.data == expected)
+            );
+        }
+        assert!(observations.iter().any(|observation| observation.source
+            == EventSource::Application
+            && observation.event.data
+                == ProviderEventData::DispatchSubmitted {
+                    dispatch_id: second_dispatch.id.clone()
+                }));
+        let active = store.conversation(conversation.id.clone()).await?;
+        store
+            .replace_conversation_message(
+                active.id,
+                active.context_id,
+                first_dispatch.snapshot.submitted_messages[0]
+                    .message_id
+                    .clone(),
+                "revised".into(),
+            )
+            .await?;
+        let original = store
+            .agent_dispatch(conversation.id.clone(), first_run.clone())
+            .await?
+            .unwrap();
+        assert_eq!(original.snapshot.submitted_messages[0].text, first_prompt);
+        assert_eq!(original.frames, first_dispatch.frames);
         let state = store.execute(move |db| {
+            let (snapshot, frames): (Vec<u8>, Vec<u8>) = db.query_row(
+                "SELECT s.payload, d.frames FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id WHERE s.run_id = ?1",
+                [&first_run], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert!(serde_json::from_slice::<Value>(&snapshot).is_err());
+            assert!(serde_json::from_slice::<Value>(&frames).is_err());
             let values: (String, String, String) = db.query_row(
                 "SELECT json_extract(s.scope, '$.model'), a.reported_model, a.provider_turn_id
                  FROM agent_attempts a JOIN agent_sessions s ON s.id = a.agent_session_id WHERE a.run_id = ?1",
@@ -857,14 +1022,18 @@ mod tests {
             )
         );
         let attached = log.lock().unwrap();
-        let prompts = attached
+        let frames = attached
+            .iter()
+            .map(|bytes| serde_json::from_slice::<Value>(bytes))
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        let prompts = frames
             .iter()
             .filter(|frame| frame["method"] == "turn/start")
             .map(|frame| frame["params"]["input"][0]["text"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(prompts, ["First prompt", "Second prompt"]);
+        assert_eq!(prompts, [first_prompt, "Second prompt"]);
         assert!(
-            attached
+            frames
                 .iter()
                 .any(|frame| frame["method"] == "thread/resume")
         );

@@ -185,7 +185,7 @@ fn antigravity_confirms_cancellation_on_the_outstanding_prompt() -> Result<()> {
             bail!("ACP completed without streaming the cancellation fixture");
         }
     }
-    let outcome = interrupt_to_completion(&mut process, &mut *session, |_| Ok(()))?;
+    let outcome = interrupt_to_completion(&mut process, &mut *session, |_, _| Ok(()))?;
     assert_eq!(
         outcome,
         Interruption::PromptReturned(TurnOutcome::Interrupted)
@@ -226,7 +226,7 @@ fn unresponsive_acp_prompt_is_stopped_by_the_job_supervisor() -> Result<()> {
         arguments: &[OsStr::new("--fixture-grandchild")],
     })?;
     let mut observed = Vec::new();
-    let outcome = interrupt_to_completion(&mut quiet, &mut *session, |event| {
+    let outcome = interrupt_to_completion(&mut quiet, &mut *session, |event, _| {
         observed.push(event.data);
         Ok(())
     })?;

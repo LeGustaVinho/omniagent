@@ -11,6 +11,7 @@ use tokio::{runtime::Handle, sync::oneshot, task::JoinHandle};
 use crate::{
     conversations::{AttemptPlan, MessageRevision, MessageRole},
     diagnostics,
+    dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
     process::TerminalOutcome,
     process_io::CapturedProcess,
     repository,
@@ -21,7 +22,8 @@ use crate::{
 
 use super::{
     AdapterUpdate, ApprovalDecision, CliSession, Provider, ProviderEvent, ProviderEventData,
-    ProviderLocation, RequestId, SessionRequest, TurnInput, TurnOutcome, WireMessage,
+    ProviderLocation, RequestId, SessionIntent, SessionRequest, TurnInput, TurnOutcome,
+    WireMessage,
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -36,7 +38,7 @@ pub enum Interruption {
 pub fn interrupt_to_completion(
     process: &mut CapturedProcess,
     session: &mut dyn CliSession,
-    mut publish: impl FnMut(ProviderEvent) -> Result<()>,
+    mut publish: impl FnMut(ProviderEvent, EventSource) -> Result<()>,
 ) -> Result<Interruption> {
     let interruption = session.interrupt()?;
     let deadline = Instant::now() + interruption.grace;
@@ -64,7 +66,9 @@ pub fn interrupt_to_completion(
                     Err(_) => break,
                 };
                 let response = session.receive(frame)?;
-                if let Some(outcome) = deliver_update(process, response, &mut publish)? {
+                if let Some(outcome) =
+                    deliver_update(process, response, EventSource::Provider, &mut publish)?
+                {
                     return Ok::<_, anyhow::Error>(Some(outcome));
                 }
             }
@@ -84,7 +88,12 @@ pub fn interrupt_to_completion(
             return Err(error).context("could not stop the CLI job");
         }
         let exit = process.control.wait()?;
-        deliver_update(process, session.process_finished(exit), &mut publish)?;
+        deliver_update(
+            process,
+            session.process_finished(exit),
+            EventSource::Supervisor,
+            &mut publish,
+        )?;
         observed?;
         Ok(Interruption::ProcessStopped(exit))
     })
@@ -93,7 +102,8 @@ pub fn interrupt_to_completion(
 fn deliver_update(
     process: &mut CapturedProcess,
     update: AdapterUpdate,
-    publish: &mut impl FnMut(ProviderEvent) -> Result<()>,
+    source: EventSource,
+    publish: &mut impl FnMut(ProviderEvent, EventSource) -> Result<()>,
 ) -> Result<Option<TurnOutcome>> {
     write_frames(process, update.outbound)?;
     let mut terminal = None;
@@ -101,7 +111,7 @@ fn deliver_update(
         if let ProviderEventData::TurnFinished { outcome } = event.data {
             terminal = Some(outcome);
         }
-        publish(event)?;
+        publish(event, source)?;
     }
     Ok(terminal)
 }
@@ -181,10 +191,13 @@ pub fn start_managed_turn(store: Store, runner: Arc<dyn Runner>, plan: AttemptPl
             Ok(status) => status,
             Err(error) => {
                 let message = diagnostics::preview(&error.to_string());
-                let _ = execution.record(ProviderEvent {
-                    location: ProviderLocation::default(),
-                    data: ProviderEventData::Error { message },
-                });
+                let _ = execution.record(
+                    ProviderEvent {
+                        location: ProviderLocation::default(),
+                        data: ProviderEventData::Error { message },
+                    },
+                    EventSource::Supervisor,
+                );
                 RunStatus::Failed
             }
         };
@@ -218,7 +231,7 @@ struct TurnExecution {
 }
 
 impl TurnExecution {
-    fn record(&mut self, event: ProviderEvent) -> Result<()> {
+    fn record(&mut self, event: ProviderEvent, source: EventSource) -> Result<()> {
         // Child traffic belongs to the run timeline, not the parent transcript.
         if event.location.parent_item_id.is_none() {
             match &event.data {
@@ -227,10 +240,11 @@ impl TurnExecution {
                 _ => {}
             }
         }
-        self.app.block_on(
-            self.store
-                .observe_agent_event(self.plan.run.id.clone(), event),
-        )
+        self.app.block_on(self.store.record_agent_observation(
+            self.plan.run.id.clone(),
+            source,
+            event,
+        ))
     }
 
     fn run(
@@ -297,8 +311,9 @@ impl TurnExecution {
                     if !sent {
                         return Ok(RunStatus::Cancelled);
                     }
-                    let result =
-                        interrupt_to_completion(process, session, |event| self.record(event))?;
+                    let result = interrupt_to_completion(process, session, |event, source| {
+                        self.record(event, source)
+                    })?;
                     return Ok(match result {
                         Interruption::PromptReturned(outcome) => status(outcome),
                         Interruption::ProcessStopped(_) => RunStatus::Cancelled,
@@ -324,8 +339,11 @@ impl TurnExecution {
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     process.control.cancel()?;
                     let terminal = process.control.wait()?;
-                    let terminal =
-                        self.record_update(process, session.process_finished(terminal))?;
+                    let terminal = self.record_update(
+                        process,
+                        session.process_finished(terminal),
+                        EventSource::Supervisor,
+                    )?;
                     return Ok(terminal.unwrap_or(RunStatus::Failed));
                 }
             };
@@ -341,35 +359,91 @@ impl TurnExecution {
                     .events
                     .iter()
                     .any(|event| matches!(event.data, ProviderEventData::Error { .. }));
-            if let Some(status) = self.record_update(process, update)? {
+            if let Some(status) = self.record_update(process, update, EventSource::Provider)? {
+                ensure!(sent, "CLI finished before prompt dispatch");
                 return Ok(status);
             }
             if failed_start {
                 return Ok(RunStatus::Failed);
             }
             if should_send {
-                let input = format_input(&self.plan.input)?;
-                self.app.block_on(
-                    self.store
-                        .mark_agent_input_started(self.plan.run.id.clone()),
-                )?;
-                self.record_update(process, session.send(input)?)?;
+                self.dispatch(process, session)?;
                 sent = true;
             }
         }
+    }
+
+    fn dispatch(
+        &mut self,
+        process: &mut CapturedProcess,
+        session: &mut dyn CliSession,
+    ) -> Result<()> {
+        let update = session.send(format_input(&self.plan.input)?)?;
+        let native_history = match (&self.plan.intent, &self.plan.resume_cursor_id) {
+            (SessionIntent::Start, None) => NativeHistory::Fresh,
+            (
+                SessionIntent::Resume {
+                    provider_session_id,
+                },
+                Some(context_id),
+            ) => NativeHistory::ProviderCursor {
+                session_id: provider_session_id.clone(),
+                context_id: context_id.clone(),
+            },
+            _ => anyhow::bail!("inconsistent resume cursor"),
+        };
+        let snapshot = ContextSnapshot {
+            version: 1,
+            context_id: self.plan.context_id.clone(),
+            scope: self.plan.scope.clone(),
+            base_commit: repository::base_commit(&self.plan.scope.checkout)?,
+            submitted_messages: self.plan.input.clone(),
+            native_history,
+        };
+        let frames = update
+            .outbound
+            .iter()
+            .map(|frame| frame.as_bytes().to_vec())
+            .collect();
+        let dispatch_id = self.app.block_on(self.store.prepare_dispatch(
+            self.plan.run.id.clone(),
+            snapshot,
+            frames,
+        ))?;
+        let result = bounded_write(process, update.outbound);
+        let delivery = if result.is_ok() {
+            Delivery::Submitted
+        } else {
+            Delivery::Unconfirmed
+        };
+        self.app
+            .block_on(self.store.settle_dispatch(dispatch_id.clone(), delivery))?;
+        result?;
+        self.record(
+            ProviderEvent {
+                location: ProviderLocation::default(),
+                data: ProviderEventData::DispatchSubmitted { dispatch_id },
+            },
+            EventSource::Application,
+        )?;
+        for event in update.events {
+            self.record(event, EventSource::Application)?;
+        }
+        Ok(())
     }
 
     fn record_update(
         &mut self,
         process: &mut CapturedProcess,
         update: AdapterUpdate,
+        source: EventSource,
     ) -> Result<Option<RunStatus>> {
         let mut finished = None;
         for event in update.events {
             if let ProviderEventData::TurnFinished { outcome } = event.data {
                 finished = Some(status(outcome));
             }
-            self.record(event)?;
+            self.record(event, source)?;
         }
         bounded_write(process, update.outbound)?;
         Ok(finished)
@@ -383,7 +457,7 @@ impl TurnExecution {
     ) -> Result<()> {
         match update {
             Ok(update) => {
-                let applied = self.record_update(process, update);
+                let applied = self.record_update(process, update, EventSource::Application);
                 let _ = reply.send(
                     applied
                         .as_ref()
