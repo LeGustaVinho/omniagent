@@ -29,6 +29,9 @@ async fn register_project(
 }
 
 fn main() {
+    if let Some(code) = omniagent::mcp_bridge::run_from_args() {
+        std::process::exit(code);
+    }
     if let Some(code) = fixture::run_from_args() {
         std::process::exit(code);
     }

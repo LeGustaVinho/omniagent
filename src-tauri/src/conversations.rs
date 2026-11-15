@@ -6,14 +6,16 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{
-    dispatch::EventSource,
+    dispatch::{Delivery, EventSource},
     protection,
     providers::{
-        Provider, ProviderEvent, ProviderEventData, SessionIntent, SessionMode, TurnOutcome,
+        ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionIntent,
+        SessionMode, TurnOutcome,
     },
     runs::{self, RunRecord, RunStatus},
     store::Store,
@@ -322,7 +324,7 @@ impl Store {
                 ensure!(old.as_ref().is_none_or(|old| old == id), "provider turn changed during the attempt");
                 tx.execute("UPDATE agent_attempts SET provider_turn_id = ?1 WHERE run_id = ?2", params![id, run_id])?;
             }
-            match event.data {
+            match &event.data {
                 ProviderEventData::SessionReady { model, effort } | ProviderEventData::ModelObserved { model, effort } if primary => {
                     tx.execute("UPDATE agent_attempts SET reported_model = coalesce(?1, reported_model), reported_effort = coalesce(?2, reported_effort) WHERE run_id = ?3",
                         params![model, effort, run_id])?;
@@ -338,7 +340,58 @@ impl Store {
                 _ => {}
             }
             tx.execute("INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)", params![run_id, source.as_sql(), payload])?;
+            if source == EventSource::Provider && let ProviderEventData::Approval { request_id, .. } = &event.data {
+                tx.execute("INSERT INTO agent_permissions(request_event_seq, run_id, turn_id, request_key, delivery)
+                    VALUES (?1, ?2, ?3, ?4, 'pending')",
+                    params![tx.last_insert_rowid(), run_id, active.turn_id, permission_key(request_id)?])?;
+            }
             tx.commit()?;
+            Ok(())
+        }).await
+    }
+
+    pub(crate) async fn prepare_permission_decision(
+        &self,
+        run_id: String,
+        turn_id: String,
+        request_id: RequestId,
+        decision: ApprovalDecision,
+    ) -> Result<i64> {
+        let key = permission_key(&request_id)?;
+        let decision = match decision {
+            ApprovalDecision::AllowOnce => "allow_once",
+            ApprovalDecision::Deny => "deny",
+            ApprovalDecision::Cancel => "cancel",
+        };
+        self.execute(move |db| {
+            db.query_row(
+                "UPDATE agent_permissions SET delivery = 'prepared', decision = ?1
+                 WHERE run_id = ?2 AND turn_id = ?3 AND request_key = ?4 AND delivery = 'pending'
+                   AND EXISTS (SELECT 1 FROM active_agent_attempts WHERE run_id = ?2)
+                 RETURNING request_event_seq",
+                params![decision, run_id, turn_id, key],
+                |row| row.get(0),
+            )
+            .context("permission request is absent or stale for this turn")
+        })
+        .await
+    }
+
+    pub(crate) async fn settle_permission_decision(
+        &self,
+        request_event_seq: i64,
+        delivery: Delivery,
+    ) -> Result<()> {
+        ensure!(
+            delivery != Delivery::Prepared,
+            "decision must have a delivery result"
+        );
+        self.execute(move |db| {
+            let updated = db.execute(
+                "UPDATE agent_permissions SET delivery = ?1 WHERE request_event_seq = ?2 AND delivery = 'prepared'",
+                params![delivery.as_sql(), request_event_seq],
+            )?;
+            ensure!(updated == 1, "permission decision is no longer prepared");
             Ok(())
         }).await
     }
@@ -386,6 +439,7 @@ impl Store {
                         WHERE a.run_id = ?3 AND a.provider_terminal = 'completed' AND d.delivery = 'submitted')",
                     params![context_id, active.session_id, run_id])?;
             }
+            close_permissions(&tx, &run_id)?;
             tx.execute("DELETE FROM active_agent_attempts WHERE run_id = ?1", [&run_id])?;
             tx.commit()?;
             Ok(())
@@ -404,6 +458,7 @@ impl Store {
             for id in active {
                 let run = runs::load_run(&tx, &id)?;
                 runs::advance_run(&tx, &run, RunStatus::Interrupted)?;
+                close_permissions(&tx, &id)?;
             }
             tx.execute(
                 "UPDATE dispatches SET delivery = 'unconfirmed' WHERE delivery = 'prepared'",
@@ -579,14 +634,28 @@ struct ActiveAttempt {
     conversation_id: String,
     session_id: String,
     context_id: String,
+    turn_id: String,
 }
 
 fn active_attempt(db: &Connection, id: &str) -> Result<ActiveAttempt> {
     db.query_row(
-        "SELECT a.conversation_id, a.agent_session_id, a.context_id
+        "SELECT a.conversation_id, a.agent_session_id, a.context_id, a.turn_id
          FROM agent_attempts a JOIN active_agent_attempts l ON l.run_id = a.run_id WHERE a.run_id = ?1",
-        [id], |row| Ok(ActiveAttempt { conversation_id:row.get(0)?, session_id:row.get(1)?, context_id:row.get(2)? }),
+        [id], |row| Ok(ActiveAttempt { conversation_id:row.get(0)?, session_id:row.get(1)?, context_id:row.get(2)?, turn_id:row.get(3)? }),
     ).context("agent attempt is no longer active")
+}
+
+fn permission_key(id: &RequestId) -> Result<[u8; 32]> {
+    Ok(Sha256::digest(serde_json::to_vec(id)?).into())
+}
+
+fn close_permissions(db: &Connection, run_id: &str) -> Result<()> {
+    db.execute(
+        "UPDATE agent_permissions SET delivery = CASE delivery WHEN 'pending' THEN 'closed' ELSE 'unconfirmed' END
+         WHERE run_id = ?1 AND delivery IN ('pending', 'prepared')",
+        [run_id],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -649,6 +718,122 @@ mod tests {
         store
             .prepare_agent_attempt(current.id, current.context_id, scope, text.into())
             .await
+    }
+
+    #[tokio::test]
+    async fn permission_decisions_are_linked_to_the_request_and_its_active_turn() -> Result<()> {
+        let (_directory, store, chat, scope) = setup().await?;
+        let other = store
+            .create_conversation(chat.checkout_id, "Other turn".into())
+            .await?;
+        let first = prepare(&store, &chat.id, scope.clone(), "first").await?.run;
+        let second = prepare(&store, &other.id, scope, "second").await?.run;
+        let request = RequestId::Number(3);
+        for run in [&first, &second] {
+            store.mark_agent_running(run.id.clone()).await?;
+            store
+                .record_agent_observation(
+                    run.id.clone(),
+                    EventSource::Provider,
+                    ProviderEvent {
+                        location: ProviderLocation::default(),
+                        data: ProviderEventData::Approval {
+                            request_id: request.clone(),
+                            operation: "shell".into(),
+                            description: None,
+                        },
+                    },
+                )
+                .await?;
+        }
+        assert!(
+            store
+                .prepare_permission_decision(
+                    first.id.clone(),
+                    second.turn_id.clone(),
+                    request.clone(),
+                    ApprovalDecision::AllowOnce
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .prepare_permission_decision(
+                    first.id.clone(),
+                    first.turn_id.clone(),
+                    RequestId::Text("3".into()),
+                    ApprovalDecision::AllowOnce
+                )
+                .await
+                .is_err()
+        );
+        let first_seq = store
+            .prepare_permission_decision(
+                first.id.clone(),
+                first.turn_id.clone(),
+                request.clone(),
+                ApprovalDecision::Deny,
+            )
+            .await?;
+        store
+            .settle_permission_decision(first_seq, Delivery::Submitted)
+            .await?;
+        assert!(
+            store
+                .prepare_permission_decision(
+                    first.id.clone(),
+                    first.turn_id.clone(),
+                    request.clone(),
+                    ApprovalDecision::AllowOnce
+                )
+                .await
+                .is_err()
+        );
+        let second_seq = store
+            .prepare_permission_decision(
+                second.id.clone(),
+                second.turn_id.clone(),
+                request.clone(),
+                ApprovalDecision::Cancel,
+            )
+            .await?;
+        store.recover_agent_attempts_after_restart().await?;
+        assert!(
+            store
+                .prepare_permission_decision(
+                    second.id.clone(),
+                    second.turn_id.clone(),
+                    request,
+                    ApprovalDecision::AllowOnce
+                )
+                .await
+                .is_err()
+        );
+
+        for (seq, run, expected_decision, expected_delivery) in [
+            (first_seq, first, "deny", "submitted"),
+            (second_seq, second, "cancel", "unconfirmed"),
+        ] {
+            let linked = store.execute(move |db| {
+                Ok(db.query_row(
+                    "SELECT e.run_id, p.turn_id, p.decision, p.delivery FROM agent_permissions p
+                     JOIN agent_events e ON e.seq = p.request_event_seq AND e.run_id = p.run_id
+                     WHERE e.seq = ?1 AND e.source = 'provider'",
+                    [seq], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
+                )?)
+            }).await?;
+            assert_eq!(
+                linked,
+                (
+                    run.id,
+                    run.turn_id,
+                    expected_decision.into(),
+                    expected_delivery.into()
+                )
+            );
+        }
+        Ok(())
     }
 
     async fn confirm(store: &Store, attempt: &AttemptPlan) -> Result<()> {

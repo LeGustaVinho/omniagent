@@ -392,10 +392,20 @@ impl TurnExecution {
                     });
                 }
                 Ok(Command::Approval(id, answer, reply)) => {
-                    self.deliver_decision(process, session.respond_approval(&id, answer), reply)?;
+                    self.deliver_decision(
+                        process,
+                        session.respond_approval(&id, answer),
+                        Some((id, answer)),
+                        reply,
+                    )?;
                 }
                 Ok(Command::Question(id, answer, reply)) => {
-                    self.deliver_decision(process, session.respond_question(&id, answer), reply)?;
+                    self.deliver_decision(
+                        process,
+                        session.respond_question(&id, answer),
+                        None,
+                        reply,
+                    )?;
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -573,11 +583,37 @@ impl TurnExecution {
         &mut self,
         process: &mut CapturedProcess,
         update: Result<AdapterUpdate>,
+        approval: Option<(RequestId, ApprovalDecision)>,
         reply: oneshot::Sender<Result<()>>,
     ) -> Result<()> {
         match update {
             Ok(update) => {
-                let applied = self.record_update(process, update, EventSource::Application);
+                let applied = (|| {
+                    let request_event_seq = approval
+                        .map(|(id, decision)| {
+                            self.app.block_on(self.store.prepare_permission_decision(
+                                self.plan.run.id.clone(),
+                                self.plan.run.turn_id.clone(),
+                                id,
+                                decision,
+                            ))
+                        })
+                        .transpose()?;
+                    let applied = self.record_update(process, update, EventSource::Application);
+                    let settled = if let Some(seq) = request_event_seq {
+                        let delivery = if applied.is_ok() {
+                            Delivery::Submitted
+                        } else {
+                            Delivery::Unconfirmed
+                        };
+                        self.app
+                            .block_on(self.store.settle_permission_decision(seq, delivery))
+                    } else {
+                        Ok(())
+                    };
+                    applied?;
+                    settled
+                })();
                 let _ = reply.send(
                     applied
                         .as_ref()

@@ -60,7 +60,7 @@ pub enum Delivery {
 }
 
 impl Delivery {
-    fn as_sql(self) -> &'static str {
+    pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Prepared => "prepared",
             Self::Submitted => "submitted",
