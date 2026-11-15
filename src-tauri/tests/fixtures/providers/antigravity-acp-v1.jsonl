@@ -1,0 +1,5 @@
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Inspect the fixture"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"tool_call","toolCallId":"delegation","title":"Delegate review","kind":"other","status":"pending"}}}
+{"jsonrpc":"2.0","method":"session/request_permission","id":"fixture-approval","params":{"sessionId":"fixture-session","toolCall":{"toolCallId":"read","title":"Read fixture","kind":"read"},"options":[{"optionId":"reject","kind":"reject_once","name":"Reject"}]}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Answer ☕"}}}}
+{"jsonrpc":"2.0","id":"$prompt_id","result":{"stopReason":"end_turn"}}

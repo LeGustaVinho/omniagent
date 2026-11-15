@@ -1,0 +1,8 @@
+{"method":"turn/started","params":{"threadId":"fixture-session","turn":{"id":"fixture-turn","status":"inProgress"}}}
+{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"fixture-session","turnId":"fixture-turn","itemId":"thought","summaryIndex":0,"delta":"Inspect the fixture"}}
+{"method":"item/started","params":{"threadId":"fixture-session","turnId":"fixture-turn","item":{"type":"collabAgentToolCall","id":"delegation","tool":"spawnAgent","status":"inProgress","senderThreadId":"fixture-session","receiverThreadIds":[],"agentsStates":{}}}}
+{"method":"item/commandExecution/requestApproval","id":"fixture-approval","params":{"threadId":"fixture-session","turnId":"fixture-turn","itemId":"command","command":"git status --short"}}
+{"method":"item/agentMessage/delta","params":{"threadId":"fixture-session","turnId":"fixture-turn","itemId":"answer","delta":"Answer ☕"}}
+{"method":"item/completed","params":{"threadId":"fixture-session","turnId":"fixture-turn","item":{"type":"agentMessage","id":"answer","text":"Answer ☕"}}}
+{"method":"thread/tokenUsage/updated","params":{"threadId":"fixture-session","turnId":"fixture-turn","tokenUsage":{"last":{"inputTokens":12,"outputTokens":4,"cachedInputTokens":2}}}}
+{"method":"turn/completed","params":{"threadId":"fixture-session","turn":{"id":"fixture-turn","status":"completed"}}}
