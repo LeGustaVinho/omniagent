@@ -31,6 +31,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/016-project-attachment-limits.sql"),
     include_str!("../migrations/017-agent-questions.sql"),
     include_str!("../migrations/018-structured-question-continuations.sql"),
+    include_str!("../migrations/019-project-tasks.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

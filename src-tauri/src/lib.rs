@@ -14,4 +14,5 @@ pub mod repository;
 pub mod runner;
 pub mod runs;
 pub mod store;
+pub mod tasks;
 pub mod workbench;
