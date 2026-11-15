@@ -111,7 +111,7 @@ struct CodexSession {
     workspace_instructions: Option<String>,
     model_cursors: HashSet<String>,
     approvals: HashMap<RequestId, Approval>,
-    questions: HashMap<RequestId, Vec<String>>,
+    questions: HashMap<RequestId, super::questions::QuestionForm>,
 }
 
 impl CodexSession {
@@ -706,18 +706,30 @@ impl CodexSession {
         );
         let approval = match method {
             "item/tool/requestUserInput" => {
-                let questions = params["questions"]
-                    .as_array()
-                    .context("Codex planning request has no questions")?;
-                let ids = questions
-                    .iter()
-                    .map(|question| required_string(question, "id").map(str::to_owned))
-                    .collect::<Result<Vec<_>>>()?;
-                self.questions.insert(id.clone(), ids);
-                return Ok(self.events(vec![self.event(ProviderEventData::Question {
+                let normalized = match super::questions::QuestionForm::codex(&params["questions"]) {
+                    Ok(form) => form,
+                    Err(error) => {
+                        return Ok(AdapterUpdate {
+                            outbound: vec![self.rpc.error(
+                                &id,
+                                -32602,
+                                "unsupported Codex question form",
+                            )?],
+                            events: vec![self.event(ProviderEventData::Diagnostic {
+                                message: diagnostics::preview(&error.to_string()),
+                            })],
+                        });
+                    }
+                };
+                self.questions.insert(id.clone(), normalized.clone());
+                let mut event = self.event(ProviderEventData::Question {
                     request_id: id,
                     form: params["questions"].clone(),
-                })]));
+                    normalized: Some(normalized),
+                });
+                event.location.item_id = string(params, "itemId");
+                event.location.turn_id = string(params, "turnId");
+                return Ok(self.events(vec![event]));
             }
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
                 Approval::Decision
@@ -896,24 +908,41 @@ impl CliSession for CodexSession {
     }
 
     fn respond_question(&mut self, id: &RequestId, answer: Value) -> Result<AdapterUpdate> {
+        use super::questions::{QuestionAction, QuestionReply};
         let questions = self
             .questions
             .get(id)
             .context("Codex question is stale or unknown")?;
-        let answers = answer["answers"]
-            .as_object()
-            .context("Codex question response requires answers")?;
-        ensure!(
-            answers.len() == questions.len()
-                && questions.iter().all(|question| {
-                    answers
-                        .get(question)
-                        .and_then(|value| value["answers"].as_array())
-                        .is_some_and(|choices| choices.iter().all(Value::is_string))
-                }),
-            "Codex question response does not match the active form"
-        );
-        let result = self.rpc.result(id, answer)?;
+        let reply: QuestionReply = if answer.get("action").is_some() {
+            serde_json::from_value(answer)?
+        } else {
+            let values = answer["answers"]
+                .as_object()
+                .context("Codex response requires answers")?
+                .iter()
+                .map(|(field, item)| {
+                    let answers = item["answers"]
+                        .as_array()
+                        .context("Codex answer requires a selection")?;
+                    ensure!(
+                        answers.len() == 1,
+                        "Codex questions accept one answer per field"
+                    );
+                    Ok((field.clone(), answers[0].clone()))
+                })
+                .collect::<Result<_>>()?;
+            QuestionReply {
+                action: QuestionAction::Accept,
+                values,
+            }
+        };
+        questions.validate(&reply)?;
+        let answers: serde_json::Map<_, _> = reply
+            .values
+            .into_iter()
+            .map(|(field, value)| (field, json!({"answers":[value]})))
+            .collect();
+        let result = self.rpc.result(id, json!({"answers": answers}))?;
         self.questions.remove(id);
         Ok(AdapterUpdate {
             outbound: vec![result],
@@ -1252,15 +1281,27 @@ mod tests {
         let prompts = inbound(
             &mut *session,
             json!({"id":91,"method":"item/tool/requestUserInput",
-            "params":{"threadId":"session","turnId":"turn","questions":[{"id":"q-1","question":"Which?"}]}}),
+            "params":{"threadId":"session","turnId":"turn","itemId":"ask-item",
+                "questions":[{"id":"q-1","question":"Which?","isOther":true,"options":[
+                    {"label":"Plan A","description":"First approach"},{"label":"Plan B","description":"Second approach"}
+                ]}]}}),
         )?;
         assert!(matches!(
             &prompts.events[0].data,
             ProviderEventData::Question {
                 request_id: RequestId::Number(91),
+                normalized: Some(form),
                 ..
-            }
+            } if form.fields[0].id == "q-1" && matches!(
+                &form.fields[0].input,
+                crate::providers::questions::QuestionInput::Choice { options, allow_custom: true, .. }
+                    if options[0].id == "Plan A" && options[0].description.as_deref() == Some("First approach")
+            )
         ));
+        assert_eq!(
+            prompts.events[0].location.item_id.as_deref(),
+            Some("ask-item")
+        );
         assert!(
             session
                 .respond_question(

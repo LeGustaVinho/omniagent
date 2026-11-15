@@ -65,6 +65,7 @@ impl CliAdapter for AntigravityAdapter {
             settings: [Setting::Model, Setting::Effort, Setting::Mode].into_iter(),
             turn: None,
             permissions: HashMap::new(),
+            questions: HashMap::new(),
             available_commands: None,
             bridge: None,
             prompt_capabilities: Value::Null,
@@ -233,6 +234,7 @@ struct AcpSession {
     settings: std::array::IntoIter<Setting, 3>,
     turn: Option<Turn>,
     permissions: HashMap<RequestId, Vec<PermissionOption>>,
+    questions: HashMap<RequestId, super::questions::QuestionForm>,
     available_commands: Option<(String, Vec<String>)>,
     bridge: Option<crate::mcp_bridge::BridgeLaunch>,
     prompt_capabilities: Value,
@@ -528,6 +530,7 @@ impl AcpSession {
             return AdapterUpdate::default();
         };
         self.permissions.clear();
+        self.questions.clear();
         let mut result = Vec::new();
         if !turn.text.is_empty() {
             result.push(self.event(ProviderEventData::AssistantMessage { text: turn.text }));
@@ -708,7 +711,7 @@ impl AcpSession {
             return outbound(self.rpc.result(&id, cancelled_permission())?);
         }
         ensure!(
-            !self.permissions.contains_key(&id),
+            !self.permissions.contains_key(&id) && !self.questions.contains_key(&id),
             "duplicate ACP permission request"
         );
         let options = choices(&params["options"])
@@ -731,6 +734,44 @@ impl AcpSession {
         });
         event.location.item_id = string(tool, "toolCallId");
         self.permissions.insert(id, options);
+        Ok(events([event]))
+    }
+
+    fn question(&mut self, id: RequestId, params: &Value) -> Result<AdapterUpdate> {
+        if self.turn.as_ref().is_none_or(|turn| turn.cancel_requested)
+            || params["sessionId"].as_str().is_none()
+            || self.session_id.as_deref() != params["sessionId"].as_str()
+            || !params["requestId"].is_null()
+        {
+            return outbound(self.rpc.error(
+                &id,
+                -32602,
+                "ACP form does not belong to the active prompt",
+            )?);
+        }
+        ensure!(
+            !self.questions.contains_key(&id) && !self.permissions.contains_key(&id),
+            "duplicate ACP request"
+        );
+        let normalized = match super::questions::QuestionForm::acp(params) {
+            Ok(form) => form,
+            Err(error) => {
+                return Ok(AdapterUpdate {
+                    outbound: vec![
+                        self.rpc
+                            .error(&id, -32602, "unsupported ACP question form")?,
+                    ],
+                    events: self.diagnostic(&error.to_string()).events,
+                });
+            }
+        };
+        self.questions.insert(id.clone(), normalized.clone());
+        let mut event = self.event(ProviderEventData::Question {
+            request_id: id,
+            form: params.clone(),
+            normalized: Some(normalized),
+        });
+        event.location.item_id = string(params, "toolCallId");
         Ok(events([event]))
     }
 }
@@ -767,7 +808,7 @@ impl CliSession for AcpSession {
         outbound(self.rpc.request(
             "initialize",
             json!({
-                "protocolVersion": ACP_VERSION, "clientCapabilities": {},
+                "protocolVersion": ACP_VERSION, "clientCapabilities": {"elicitation": {"form": {}}},
                 "clientInfo": {"name":"omniagent", "version":env!("CARGO_PKG_VERSION")},
             }),
             Request::Initialize,
@@ -826,6 +867,7 @@ impl CliSession for AcpSession {
         let params = &frame["params"];
         match (frame["method"].as_str(), rpc::id(&frame)) {
             (Some("session/request_permission"), Some(id)) => self.permission(id, params),
+            (Some("elicitation/create"), Some(id)) => self.question(id, params),
             (Some("session/update"), None) => self.update(params),
             (Some(_), Some(id)) => outbound(self.rpc.error(
                 &id,
@@ -872,8 +914,22 @@ impl CliSession for AcpSession {
         outbound(frame)
     }
 
-    fn respond_question(&mut self, _id: &RequestId, _answer: Value) -> Result<AdapterUpdate> {
-        bail!("structured ACP elicitation has not been negotiated")
+    fn respond_question(&mut self, id: &RequestId, answer: Value) -> Result<AdapterUpdate> {
+        use super::questions::{QuestionAction, QuestionReply};
+        let form = self
+            .questions
+            .get(id)
+            .context("ACP question is stale or unknown")?;
+        let reply: QuestionReply = serde_json::from_value(answer)?;
+        form.validate(&reply)?;
+        let result = if reply.action == QuestionAction::Accept {
+            json!({"action": reply.action, "content": reply.values})
+        } else {
+            json!({"action": reply.action})
+        };
+        let response = self.rpc.result(id, result)?;
+        self.questions.remove(id);
+        outbound(response)
     }
 
     fn interrupt(&mut self) -> Result<Interrupt> {
@@ -891,6 +947,10 @@ impl CliSession for AcpSession {
             outbound.push(self.rpc.result(id, cancelled_permission())?);
         }
         self.permissions.clear();
+        for id in self.questions.keys() {
+            outbound.push(self.rpc.result(id, json!({"action":"cancel"}))?);
+        }
+        self.questions.clear();
         turn.cancel_requested = true;
         Ok(Interrupt {
             outbound,
@@ -1202,6 +1262,104 @@ mod tests {
                 })
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn answers_opaque_acp_form_values_and_rejects_an_invalid_or_stale_reply() -> Result<()> {
+        use crate::providers::questions::QuestionInput;
+
+        let checkout = tempfile::tempdir()?;
+        let mut session = AntigravityAdapter.create_session(SessionRequest {
+            checkout: checkout.path().into(),
+            intent: SessionIntent::Start,
+            mode: SessionMode::Plan,
+            model: None,
+            effort: None,
+        })?;
+        let init = message(&session.start()?)?;
+        assert_eq!(
+            init["params"]["clientCapabilities"]["elicitation"],
+            json!({"form":{}})
+        );
+        receive(
+            &mut *session,
+            json!({"id":1,"result":{"protocolVersion":1}}),
+        )?;
+        receive(
+            &mut *session,
+            json!({"id":2,"result":results("argon","medium","plan")}),
+        )?;
+        session.send(TurnInput {
+            attachments: Vec::new(),
+            message_id: "form-turn".into(),
+            text: "Plan with a structured question".into(),
+        })?;
+        let request = json!({
+            "id":134, "method":"elicitation/create",
+            "params":{"sessionId":"acp-session","toolCallId":"ask-1","mode":"form","message":"Choose inputs",
+                "requestedSchema":{"type":"object","required":["plan_id","tests","include_note"],
+                    "properties":{
+                        "plan_id":{"type":"string","oneOf":[{"const":"1","title":"Small"},{"const":"2","title":"Expanded"}],"default":"2"},
+                        "tests":{"type":"array","items":{"anyOf":[{"const":"core","title":"Core"},{"const":"ui","title":"UI"}]},"minItems":1,"maxItems":2},
+                        "include_note":{"type":"boolean","default":false},
+                        "owner":{"type":"string","maxLength":6},
+                        "depth":{"type":"integer","minimum":1,"maximum":3}
+                    }
+                }
+            }
+        });
+        let mut wrong = request.clone();
+        wrong["params"]["sessionId"] = json!("other-session");
+        assert_eq!(
+            message(&receive(&mut *session, wrong)?)?["error"]["code"],
+            -32602
+        );
+        let mut unsupported = request.clone();
+        unsupported["params"]["requestedSchema"]["properties"]["owner"] = json!({"type":"object"});
+        assert_eq!(
+            message(&receive(&mut *session, unsupported)?)?["error"]["code"],
+            -32602
+        );
+        let delivered = receive(&mut *session, request.clone())?;
+        let event = &delivered.events[0];
+        let ProviderEventData::Question {
+            request_id,
+            form,
+            normalized: Some(normalized),
+        } = &event.data
+        else {
+            panic!("missing normalized ACP question");
+        };
+        assert_eq!(event.location.item_id.as_deref(), Some("ask-1"));
+        assert_eq!(form, &request["params"]);
+        let plan = normalized
+            .fields
+            .iter()
+            .find(|field| field.id == "plan_id")
+            .unwrap();
+        assert_eq!(plan.default, Some(json!("2")));
+        assert!(
+            matches!(&plan.input, QuestionInput::Choice { options, .. } if options[1].id == "2" && options[1].label == "Expanded")
+        );
+        let answer = json!({"action":"accept","values":{"plan_id":"2","tests":["ui","core"],"include_note":false,"owner":"Ana","depth":2}});
+        for (key, malformed) in [
+            ("plan_id", json!("Expanded")),
+            ("tests", json!(["core", "core"])),
+            ("include_note", json!("false")),
+            ("owner", json!("overlong")),
+            ("depth", json!(2.5)),
+        ] {
+            let mut rejected = answer.clone();
+            rejected["values"][key] = malformed;
+            assert!(session.respond_question(request_id, rejected).is_err());
+        }
+        let reply = session.respond_question(request_id, answer.clone())?;
+        assert_eq!(
+            message(&reply)?,
+            json!({"jsonrpc":"2.0","id":134,"result":{"action":"accept","content":answer["values"]}})
+        );
+        assert!(session.respond_question(request_id, answer).is_err());
         Ok(())
     }
 

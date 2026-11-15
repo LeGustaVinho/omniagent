@@ -2516,6 +2516,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
  "tempfile",
+ "time",
  "tokio",
  "toml 1.2.1+spec-1.1.0",
  "ts-rs",

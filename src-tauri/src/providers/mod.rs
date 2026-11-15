@@ -364,6 +364,8 @@ pub enum ProviderEventData {
     Question {
         request_id: RequestId,
         form: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        normalized: Option<questions::QuestionForm>,
     },
     Compacted,
     GoalObserved {
@@ -542,6 +544,7 @@ pub mod goal;
 pub mod launch_scope;
 pub mod plugins;
 pub mod profiles;
+pub mod questions;
 mod rpc;
 pub mod runtime;
 pub mod skills;

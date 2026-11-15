@@ -92,8 +92,13 @@ struct Turn {
 }
 
 enum PendingInput {
-    Tool { input: Value },
-    Question { input: Value },
+    Tool {
+        input: Value,
+    },
+    Question {
+        input: Value,
+        form: super::questions::QuestionForm,
+    },
 }
 
 impl ClaudeSession {
@@ -397,15 +402,31 @@ impl ClaudeSession {
         let name = field(request, "tool_name")?;
         let data = if name == "AskUserQuestion" {
             let form = input["questions"].clone();
-            ensure!(
-                form.is_array(),
-                "Claude AskUserQuestion request has no questions"
+            let normalized = match super::questions::QuestionForm::claude(&form) {
+                Ok(normalized) => normalized,
+                Err(error) => {
+                    return Ok(AdapterUpdate {
+                        outbound: vec![control_error(id, "unsupported Claude question form")?],
+                        events: vec![self.event(
+                            frame,
+                            ProviderEventData::Diagnostic {
+                                message: diagnostics::preview(&error.to_string()),
+                            },
+                        )],
+                    });
+                }
+            };
+            self.pending.insert(
+                id.clone(),
+                PendingInput::Question {
+                    input,
+                    form: normalized.clone(),
+                },
             );
-            self.pending
-                .insert(id.clone(), PendingInput::Question { input });
             ProviderEventData::Question {
                 request_id: id,
                 form,
+                normalized: Some(normalized),
             }
         } else {
             self.pending
@@ -466,10 +487,10 @@ impl CliSession for ClaudeSession {
         }
     }
     fn arguments(&self) -> Vec<OsString> {
-        let tools = if self.request.mode == SessionMode::ApprovedWrite {
-            "Read,Glob,Grep,Edit,Write"
-        } else {
-            "Read,Glob,Grep"
+        let tools = match self.request.mode {
+            SessionMode::ApprovedWrite => "Read,Glob,Grep,Edit,Write",
+            SessionMode::Plan => "Read,Glob,Grep,AskUserQuestion",
+            SessionMode::ReadOnly => "Read,Glob,Grep",
         };
         let mut arguments = args([
             "-p",
@@ -494,6 +515,9 @@ impl CliSession for ClaudeSession {
             "--tools",
             tools,
         ]);
+        if self.request.mode == SessionMode::Plan {
+            arguments.extend(args(["--permission-prompt-tool", "stdio"]));
+        }
         if let Some(model) = &self.request.model {
             arguments.extend(args(["--model", model]));
         }
@@ -692,28 +716,48 @@ impl CliSession for ClaudeSession {
     }
 
     fn respond_question(&mut self, id: &RequestId, answer: Value) -> Result<AdapterUpdate> {
-        let Some(PendingInput::Question { input }) = self.pending.get(id) else {
+        use super::questions::{QuestionAction, QuestionReply};
+        let Some(PendingInput::Question { input, form }) = self.pending.get(id) else {
             anyhow::bail!("Claude question is stale or absent");
         };
-        let answers = answer["answers"]
-            .as_object()
-            .context("Claude question response requires answers")?;
-        let forms = input["questions"]
-            .as_array()
-            .context("invalid saved Claude question")?;
-        ensure!(
-            answers.len() == forms.len()
-                && forms.iter().all(|question| {
-                    question["question"]
-                        .as_str()
-                        .and_then(|key| answers.get(key))
-                        .is_some_and(Value::is_string)
-                }),
-            "Claude question response does not match the active form"
-        );
-        let mut updated = input.clone();
-        updated["answers"] = answer["answers"].clone();
-        let message = control_success(id, json!({ "behavior": "allow", "updatedInput": updated }))?;
+        let reply: QuestionReply = if answer.get("action").is_some() {
+            serde_json::from_value(answer)?
+        } else {
+            QuestionReply {
+                action: QuestionAction::Accept,
+                values: answer["answers"]
+                    .as_object()
+                    .context("Claude response requires answers")?
+                    .clone(),
+            }
+        };
+        form.validate(&reply)?;
+        let response = if reply.action == QuestionAction::Accept {
+            let answers: serde_json::Map<_, _> = reply
+                .values
+                .into_iter()
+                .map(|(field, value)| {
+                    if let Value::Array(selected) = value {
+                        let labels = selected
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>();
+                        (field, Value::String(labels.join(", ")))
+                    } else {
+                        (field, value)
+                    }
+                })
+                .collect();
+            let mut updated = input.clone();
+            updated["answers"] = Value::Object(answers);
+            json!({ "behavior": "allow", "updatedInput": updated })
+        } else {
+            json!({
+                "behavior": "deny",
+                "message": if reply.action == QuestionAction::Decline { "The user declined the question" } else { "The user cancelled the question" },
+            })
+        };
+        let message = control_success(id, response)?;
         self.pending.remove(id);
         outbound(message)
     }
@@ -994,19 +1038,27 @@ mod tests {
                 .respond_approval(&id, ApprovalDecision::Deny)
                 .is_err()
         );
-        let answers = json!({"answers":{"Which checks?":"Unit, Desktop"}});
-        let reply = adapter.respond_question(&id, answers.clone())?;
+        let answer = json!({"action":"accept","values":{"Which checks?":["Unit","Desktop"]}});
+        assert!(
+            adapter
+                .respond_question(
+                    &id,
+                    json!({"action":"accept","values":{"Which checks?":["Unit","Unit"]}})
+                )
+                .is_err()
+        );
+        let reply = adapter.respond_question(&id, answer.clone())?;
         let reply: Value = serde_json::from_slice(reply.outbound[0].as_bytes())?;
         assert_eq!(reply["response"]["request_id"], "question-1");
         assert_eq!(
             reply["response"]["response"]["updatedInput"]["answers"],
-            answers["answers"]
+            json!({"Which checks?":"Unit, Desktop"})
         );
         assert_eq!(
             reply["response"]["response"]["updatedInput"]["questions"],
             form
         );
-        assert!(adapter.respond_question(&id, answers).is_err());
+        assert!(adapter.respond_question(&id, answer).is_err());
         Ok(())
     }
 }
