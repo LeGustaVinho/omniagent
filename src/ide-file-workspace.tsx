@@ -259,7 +259,7 @@ export function FileSearch({ query, setQuery, results, onOpen, placeholder, unav
 export function FileUnavailable({ title, detail, onSimulate }: { title: string; detail: string; onSimulate?: () => void }) {
   return (
     <section className="file-unavailable">
-      <FileText size={27} strokeWidth={1.5} />
+      <span className="work-empty-icon"><FileText size={23} aria-hidden="true" /></span>
       <h2>{title}</h2>
       <p>{detail}</p>
       {onSimulate && <button type="button" className="fw-btn fw-primary" onClick={onSimulate}>Simulate</button>}

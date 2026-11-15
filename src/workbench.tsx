@@ -1,8 +1,8 @@
 import {
   Activity, Blocks, BookOpen, ClipboardList, Code2, FlaskConical, GitBranch, ListChecks, MessageSquare,
-  PanelLeft, RotateCcw, Settings,
+  PanelLeft, RotateCcw, Settings, type LucideIcon,
 } from "lucide-react";
-import { Dialog } from "radix-ui";
+import { Dialog, Tooltip } from "radix-ui";
 import { lazy, Suspense, useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { CheckoutSelector } from "@/checkout-selector";
@@ -73,6 +73,22 @@ function useCompact() {
 }
 
 const loading = <p className="work-progress" role="status">Loading workspace…</p>;
+
+function RailButton({ label, icon: Icon, current, pressed, onClick }: {
+  label: string;
+  icon: LucideIcon;
+  current?: boolean;
+  pressed?: boolean;
+  onClick: () => void;
+}) {
+  return <Tooltip.Root>
+    <Tooltip.Trigger asChild>
+      <button type="button" className="work-rail-button" aria-label={label} aria-current={current ? "page" : undefined}
+        aria-pressed={pressed} onClick={onClick}><Icon size={18} aria-hidden="true" /></button>
+    </Tooltip.Trigger>
+    <Tooltip.Portal><Tooltip.Content className="work-tooltip" side="right" sideOffset={8}>{label}</Tooltip.Content></Tooltip.Portal>
+  </Tooltip.Root>;
+}
 
 export default function Workbench({ checkout, openRepository, onSelectCheckout }: {
   checkout: ProjectCheckout;
@@ -181,12 +197,12 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
   return (
     <div className="work-shell flex min-h-0 flex-1 flex-col">
       <header className="work-titlebar">
-        <div className="work-wordmark"><span className="work-mark" aria-hidden="true"><Blocks size={15} /></span>OmniAgent</div>
+        <div className="work-wordmark"><span className="work-mark" aria-hidden="true"><Blocks size={15} /></span><span className="work-brand-name">OmniAgent</span></div>
         <div className="work-breadcrumb">
           {nav.active === "conversations" && !preview && <Button ref={sidebarTrigger} variant="ghost" className="p-1.5" aria-label="Toggle conversation navigation" aria-expanded={sidebar}
             onClick={() => changeSidebar(!sidebar)} title="Toggle conversation navigation"><PanelLeft size={17} /></Button>}
           {preview ? <span className="truncate font-medium">Example repository</span> : <CheckoutSelector checkout={checkout} onSelect={onSelectCheckout} />}
-          <span aria-hidden="true">/</span><span className="work-current-area">{currentArea}</span>
+          <span className="work-crumb-divider" aria-hidden="true">/</span><span className="work-current-area">{currentArea}</span>
         </div>
         {!preview && <div className="flex shrink-0 items-center gap-2">
           <Button variant="ghost" className="px-2.5" onClick={() => startSimulation()} title="Try a workflow with example data"><FlaskConical size={15} />Simulate</Button>
@@ -201,7 +217,7 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
             {Object.entries(scenarios).map(([id, entry]) => <option key={id} value={id}>{entry.name}</option>)}
           </select>
         </label>
-        <Button variant="ghost" className="ml-auto" onClick={() => startSimulation(preview.scenario)}><RotateCcw size={14} />Reset simulation</Button>
+        <Button variant="ghost" className="work-reset ml-auto" aria-label="Reset simulation" onClick={() => startSimulation(preview.scenario)}><RotateCcw size={14} /><span>Reset simulation</span></Button>
         <Button variant="outline" onClick={leaveSimulation}>Exit simulation</Button>
       </div>}
       {!preview && error && (
@@ -210,18 +226,17 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
       <GitSimulationProvider epoch={preview?.epoch}>
       <div className="work-body">
         <aside aria-label="Workspace" className="work-rail">
+          <Tooltip.Provider delayDuration={350} skipDelayDuration={200}>
           <nav aria-label="Workspaces" className="grid gap-1">
-            {areas.map(({ id, icon: Icon, label }) => (
-              <button key={id} type="button" className="work-rail-button" aria-label={label} title={label}
-                aria-current={nav.active === id ? "page" : undefined} onClick={() => current.openWorkspace(id)}><Icon size={18} /></button>
-            ))}
+            {areas.map(({ id, icon, label }) => <RailButton key={id} label={label} icon={icon} current={nav.active === id}
+              onClick={() => current.openWorkspace(id)} />)}
           </nav>
           <div className="work-rail-end">
-            <button type="button" className="work-rail-button" aria-label="Queue" title="Queue" aria-pressed={queue} onClick={() => changeQueue(queue ? "closed" : "open")}><ListChecks size={18} /></button>
-            <button type="button" className="work-rail-button" aria-label="Diagnostics" title="Diagnostics"
-              aria-current={nav.active === "diagnostics" ? "page" : undefined} onClick={() => current.openWorkspace("diagnostics")}><Activity size={18} /></button>
-            <button type="button" className="work-rail-button" aria-label="Settings" title="Settings" onClick={() => showSettings("appearance")}><Settings size={18} /></button>
+            <RailButton label="Queue" icon={ListChecks} pressed={queue} onClick={() => changeQueue(queue ? "closed" : "open")} />
+            <RailButton label="Diagnostics" icon={Activity} current={nav.active === "diagnostics"} onClick={() => current.openWorkspace("diagnostics")} />
+            <RailButton label="Settings" icon={Settings} onClick={() => showSettings("appearance")} />
           </div>
+          </Tooltip.Provider>
         </aside>
         <div className="work-decks">
           <div className="work-deck" hidden={Boolean(preview)}>
@@ -270,7 +285,7 @@ function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, openS
         {workspace === "conversations" ? context.simulation
           ? <ConversationsPreview {...context} target={target} />
           : <RealConversations checkout={context.checkout} target={target} sidebar={visible && sidebar} onSidebarChange={onSidebarChange}
-            compact={compact} onSimulate={() => context.startSimulation()} />
+            compact={compact} />
           : workspace === "diagnostics" ? context.simulation
             ? <SimulationDiagnostics {...context} openSystem={openSystem} />
             : <RealDiagnostics checkout={context.checkout} />

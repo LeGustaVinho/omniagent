@@ -19,14 +19,14 @@
   color-scheme: dark;
   --background: #191919;
   --foreground: #f1f1f1;
-  --card: #1f1f1f;
-  --chrome: #141414;
+  --card: #1e1e20;
+  --chrome: #151516;
   --muted: #2b2b2b;
-  --elevated: #303030;
+  --elevated: #29292c;
   --muted-foreground: #ababae;
   --primary: #a7a3ff;
   --primary-foreground: #151424;
-  --border: #343434;
+  --border: #353538;
   --input: #808080;
   --ring: #b4afff;
   --success: #72d6a4;
@@ -59,9 +59,12 @@
 body {
   background: var(--background);
   color: var(--foreground);
+  scrollbar-color: color-mix(in srgb, var(--muted-foreground) 40%, var(--background)) transparent;
+  scrollbar-width: thin;
 }
 
 button:enabled { cursor: pointer; }
+button:disabled { cursor: default; }
 
 :where(button, input, select, textarea, summary, [tabindex]):focus-visible {
   outline: 2px solid var(--ring);
@@ -100,6 +103,17 @@ button:enabled { cursor: pointer; }
 .work-wordmark { flex: none; font-weight: 650; letter-spacing: -.02em; }
 .work-breadcrumb { flex: 1; min-width: 0; color: var(--muted-foreground); }
 .work-current-area { color: var(--foreground); white-space: nowrap; }
+.work-crumb-divider { color: var(--muted-foreground); }
+.work-tooltip {
+  z-index: 90;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--elevated);
+  box-shadow: 0 4px 12px #0003;
+  color: var(--foreground);
+  font-size: 12px;
+}
 .work-project-button { min-width: 0; padding: 4px 7px; }
 .work-project-popover {
   position: relative;
@@ -160,6 +174,7 @@ button:enabled { cursor: pointer; }
 }
 
 .work-rail-end { display: grid; gap: 4px; margin-top: auto; }
+.work-rail nav + .work-rail-end { padding-top: 6px; border-top: 1px solid var(--border); }
 
 .work-rail-button {
   width: 36px;
@@ -216,7 +231,7 @@ button:enabled { cursor: pointer; }
 }
 
 .work-shade { position: fixed; inset: 0; z-index: 59; background: #0008; }
-.work-queue-panel { flex: 0 1 min(44%, 400px); min-height: 140px; display: flex; flex-direction: column; overflow: auto; border-top: 1px solid var(--border); }
+.work-queue-panel { flex: 0 0 min(56%, 480px); min-height: 140px; display: flex; flex-direction: column; overflow: hidden; border-top: 1px solid var(--border); }
 .work-inspector { display: flex; flex-direction: column; width: 320px; flex: none; border-left: 1px solid var(--border); background: var(--card); }
 .work-inspector[data-kind="changes"] { width: clamp(390px, 51vw, 1000px); }
 .work-inspector[data-expanded="true"] { width: calc(100vw - 48px); }
@@ -261,7 +276,19 @@ button:enabled { cursor: pointer; }
 .work-start h1 { font-weight: 650; font-size: 22px; letter-spacing: -.03em; }
 .work-start p, .work-dock-empty p, .work-empty p { color: var(--muted-foreground); font-size: 14px; line-height: 22px; }
 .work-start button { margin-top: 6px; }
-.work-dock-empty { position: absolute; inset: 0; min-height: 140px; gap: 8px; padding: 20px; }
+.work-dock-empty { position: absolute; inset: 0; min-height: 0; gap: 9px; padding: 18px; overflow: auto; }
+.work-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 4px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--card);
+  color: var(--primary);
+}
+.work-empty-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .work-empty { gap: 8px; margin: auto; padding: 24px; min-height: 140px; }
 .work-dock-empty svg, .work-empty svg { color: var(--primary); }
 .work-dock-empty h2, .work-empty h2 { font-size: 17px; font-weight: 620; }
@@ -329,7 +356,14 @@ button:enabled { cursor: pointer; }
 }
 @media (max-width: 720px) {
   .work-titlebar { gap: 8px; }
-  .work-breadcrumb .work-current-area { display: none; }
+  .work-breadcrumb :is(.work-crumb-divider, .work-current-area) { display: none; }
+  .work-reset span { display: none; }
+  .work-queue-panel { flex-basis: 70%; }
+}
+@media (max-width: 510px) {
+  .work-titlebar .work-brand-name { display: none; }
+  .work-simulation { flex-wrap: wrap; column-gap: 7px; row-gap: 3px; }
+  .work-simulation select { max-width: 100%; }
 }
 @media (forced-colors: active) {
   .work-rail-button[aria-current], .work-rail-button[aria-pressed="true"] { border: 1px solid Highlight; }

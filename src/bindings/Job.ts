@@ -3,6 +3,7 @@ import type { JobAttempt } from "./JobAttempt";
 import type { JobContext } from "./JobContext";
 import type { JobOrigin } from "./JobOrigin";
 import type { QueueState } from "./QueueState";
+import type { RecoveryAction } from "./RecoveryAction";
 import type { SessionMode } from "./SessionMode";
 
-export type Job = { id: string, projectId: string, checkoutId: string, taskId: string | null, origin: JobOrigin, context: JobContext | null, mode: SessionMode, priority: number, queueState: QueueState, latestAttempt: JobAttempt | null, };
+export type Job = { id: string, projectId: string, checkoutId: string, taskId: string | null, origin: JobOrigin, context: JobContext | null, mode: SessionMode, priority: number, queueState: QueueState, latestAttempt: JobAttempt | null, queuedRecovery: RecoveryAction | null, };

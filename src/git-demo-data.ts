@@ -1,5 +1,7 @@
 import { exampleNotes, exampleSources } from "@/ide-knowledge-data";
 
+export const revisionMessage = "Add verified release readiness checklist";
+
 export type ChangeKind = "Added" | "Modified" | "Deleted" | "Renamed" | "Binary" | "Untracked";
 export type ChangesSource = "working" | "staged" | "branch" | "saved";
 

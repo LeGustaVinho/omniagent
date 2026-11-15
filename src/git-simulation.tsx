@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
-import { savedCandidate } from "@/git-demo-data";
+import { revisionMessage, savedCandidate } from "@/git-demo-data";
 
 export const exampleWorktrees = [
   { id: "release", branch: "agent/release-checklist", path: "worktrees/release-checklist", base: "1ba6dc2" },
@@ -30,10 +30,12 @@ interface GitSession {
   worktrees: readonly GitWorktree[];
   drift: false | "advanced" | "conflict";
   gitMode: GitMode;
+  mergeRequired: boolean;
+  candidateCommitted: boolean;
 }
 
 function initialGitSession(epoch: number | undefined): GitSession {
-  return { epoch, checkout: "release", trees: {}, worktrees: exampleWorktrees, drift: false, gitMode: "manual" };
+  return { epoch, checkout: "release", trees: {}, worktrees: exampleWorktrees, drift: false, gitMode: "manual", mergeRequired: false, candidateCommitted: false };
 }
 
 function useGitState(epoch?: number) {
@@ -44,7 +46,7 @@ function useGitState(epoch?: number) {
     setSession(session);
   }
 
-  const { checkout, trees, worktrees, drift, gitMode } = session;
+  const { checkout, trees, worktrees, drift, gitMode, mergeRequired } = session;
 
   function toggleStage(path: string) {
     setSession((current) => {
@@ -57,12 +59,12 @@ function useGitState(epoch?: number) {
     });
   }
 
-  function commit(paths: Iterable<string>, message: string, worktree: WorktreeId = checkout) {
+  function commit(paths: Iterable<string>, message: string, worktree: WorktreeId, candidate: boolean) {
     const captured = new Set(paths);
     if (!captured.size || !message.trim()) return;
     setSession((current) => {
       const tree = current.trees[worktree] ?? emptyChanges;
-      return { ...current, trees: { ...current.trees, [worktree]: {
+      return { ...current, candidateCommitted: current.candidateCommitted || candidate, trees: { ...current.trees, [worktree]: {
         committed: new Set([...tree.committed, ...captured]),
         staged: new Set([...tree.staged].filter((path) => !captured.has(path))),
         commitMessage: message.trim(),
@@ -82,16 +84,17 @@ function useGitState(epoch?: number) {
     staged: trees[checkout]?.staged ?? emptyChanges.staged,
     committed: trees[checkout]?.committed ?? emptyChanges.committed,
     commitMessage: trees[checkout]?.commitMessage ?? emptyChanges.commitMessage,
-    candidateCommitted: savedCandidateIsCommitted(trees.release),
-    drift, gitMode, toggleStage, commit,
+    candidateCommitted: session.candidateCommitted,
+    drift, gitMode, mergeRequired, toggleStage,
+    commit: (paths: Iterable<string>, message: string) => commit(paths, message, checkout, false),
+    commitCandidate: () => commit(savedCandidate.map(({ path }) => path), revisionMessage, "release", true),
     setCheckout: (value: WorktreeId) => setSession((current) => ({ ...current, checkout: value })),
-    setDrift: (value: GitSession["drift"]) => setSession((current) => ({ ...current, drift: value })),
+    setDrift: (value: GitSession["drift"]) => setSession((current) => ({
+      ...current, drift: value, candidateCommitted: value ? false : current.candidateCommitted,
+    })),
     setGitMode: (value: GitMode) => setSession((current) => ({ ...current, gitMode: value })),
+    setMergeRequired: (value: boolean) => setSession((current) => ({ ...current, mergeRequired: value })),
   };
-}
-
-function savedCandidateIsCommitted(tree: WorktreeChanges | undefined) {
-  return savedCandidate.every(({ path }) => tree?.committed.has(path));
 }
 
 type GitState = ReturnType<typeof useGitState>;

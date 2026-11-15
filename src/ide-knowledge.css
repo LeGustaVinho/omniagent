@@ -81,6 +81,7 @@
 .fw-icon { padding: 4px; width: 30px; }
 .fw-btn:hover:not(:disabled), .fw-icon:hover:not(:disabled) { background: var(--muted); }
 .fw-btn[aria-pressed=true] { background: var(--muted); border-color: var(--border); }
+.fw-icon[aria-pressed=true] { background: var(--muted); color: var(--primary); }
 .fw-btn.fw-primary, .fw-btn.fw-primary:hover:not(:disabled) {
   background: var(--primary);
   color: var(--primary-foreground);
@@ -204,7 +205,9 @@
 }
 
 .ide-file-view, .code-editor { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; flex: 1; }
-.ide-file-caption { display: flex; justify-content: space-between; padding: 6px 13px; color: var(--muted-foreground); font-size: 11px; min-height: 27px; border-bottom: 1px solid var(--border); }
+.ide-file-caption { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: 6px 13px; color: var(--muted-foreground); font-size: 11px; min-height: 27px; border-bottom: 1px solid var(--border); }
+.ide-file-caption > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ide-file-caption > :last-child { flex: none; }
 .code-editor-target { flex: 1; min-height: 0; min-width: 0; }
 .code-editor > p { position: absolute; top: 16px; left: 16px; margin: 0; }
 .ide-bottom { min-height: 100px; display: flex; flex-direction: column; border-top: 1px solid var(--border); background: var(--background); }

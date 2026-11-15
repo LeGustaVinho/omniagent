@@ -89,10 +89,10 @@ async function chooseConversations(browser) {
   await create.waitForDisplayed();
 }
 
-async function click(browser, selector) {
+async function click(browser, selector, wait) {
   const control = browser.$(selector);
-  await control.waitForDisplayed();
-  await control.waitForEnabled();
+  await control.waitForDisplayed(wait);
+  await control.waitForEnabled(wait);
   await control.click();
 }
 
@@ -136,6 +136,7 @@ async function checkSimulation(browser, checkout) {
   const conversationScope = { checkoutId: checkout.checkoutId };
   const before = await invoke(browser, "list_conversations", conversationScope);
   const settingsBefore = await invoke(browser, "appearance_settings");
+  await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 1440, height: 900 } } });
   for (const area of ["IDE", "Tasks", "Pipelines", "Knowledge", "Git"]) {
     await click(browser, 'button[aria-label="' + area + '"]');
     assert.equal(await browser.$('button[aria-label="' + area + '"]').getAttribute("aria-current"), "page");
@@ -145,6 +146,15 @@ async function checkSimulation(browser, checkout) {
   const simulation = browser.$('[aria-label="Simulation controls"]');
   await simulation.waitForDisplayed();
 
+  const shown = ".work-deck:not([hidden]) .work-view:not([hidden])";
+  const knowledge = browser.$(shown);
+  await click(knowledge, "button=Reading");
+  await knowledge.$(".note-reading article").waitForDisplayed();
+  await capture(browser, "08-knowledge-reading");
+  await click(knowledge, "button=Graph");
+  await knowledge.$(".note-graph-canvas canvas:first-child").waitForDisplayed();
+  await capture(browser, "08-knowledge-graph");
+  await click(knowledge, "button=Graph");
   await click(browser, "button=Plan from note");
   await browser.$("strong=Who should the recovery instructions address?").waitForDisplayed();
   await capture(browser, "01-conversations");
@@ -156,7 +166,22 @@ async function checkSimulation(browser, checkout) {
   await click(browser, "button=Reply");
   await click(browser, "button=Approve implementation");
   await click(browser, "button=Open release task");
+  await capture(browser, "09-agile-kanban");
+  await click(browser.$(shown), "button=Table");
+  const agile = browser.$(shown).$(".agile-table");
+  await click(agile, 'button[aria-label="Expand Windows release readiness"]');
+  await click(agile, 'button[aria-label="Expand Add release readiness checklist"]');
+  const checklistItem = agile.$('label=Review the candidate diff').$('input[type="checkbox"]');
+  assert.equal(await checklistItem.isSelected(), false);
+  await checklistItem.click();
+  assert.equal(await checklistItem.isSelected(), true);
+  await click(agile, 'button[aria-label="Expand Document the rollback exercise"]');
+  await agile.$('label=List the backup and restore requirements').waitForDisplayed();
+  await capture(browser, "09-agile-table");
+  await click(browser.$(shown), "button=Kanban");
   await click(browser, 'button[aria-label="Queue"]');
+  await browser.$('[aria-label="Execution queue"]').waitForDisplayed();
+  await capture(browser, "10-queue");
   await click(browser, "button=Start attempt");
   await click(browser, "button=Capture candidate");
   await click(browser, 'button[aria-label="Close queue"]');
@@ -164,12 +189,26 @@ async function checkSimulation(browser, checkout) {
   await click(browser, "button=Review saved diff");
   await browser.$('[aria-label^="Diff editor for"] .monaco-diff-editor').waitForDisplayed();
   await click(browser, 'button[aria-label="Expand side panel"]');
+  await browser.$('select[aria-label="Diff layout"]').selectByAttribute("value", "split");
   await capture(browser, "02-saved-changes");
+  await browser.$('select[aria-label="Diff layout"]').selectByAttribute("value", "unified");
+  await capture(browser, "02-unified-changes");
   await click(browser, 'button[aria-label="Close changes"]');
   await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent === "Review saved diff"));
   await click(browser, "button=Review saved diff");
   await click(browser, "button=Accept diff");
   await click(browser, 'button[aria-label="Close changes"]');
+  await browser.$(shown).$('[aria-label="Task details"] [role="alert"]').waitForDisplayed();
+  assert.equal(await browser.$(shown).$('[aria-label="Task details"] [role="alert"]').getText(), "Waiting for commit");
+
+  await click(browser, 'button[aria-label="IDE"]');
+  const ide = browser.$(shown);
+  await click(ide, "button=index.ts");
+  await ide.$(".monaco-editor").waitForDisplayed();
+  const bottom = ide.$('button[aria-label="Toggle bottom panel"]');
+  if ((await bottom.getAttribute("aria-expanded")) === "false") await bottom.click();
+  await ide.$(".xterm").waitForDisplayed();
+  await capture(browser, "11-editor-and-terminal");
 
   const scenario = simulation.$("select");
   await scenario.selectByAttribute("value", "recovery");
@@ -179,6 +218,40 @@ async function checkSimulation(browser, checkout) {
   await scenario.selectByAttribute("value", "pipelines");
   await browser.$(".react-flow").waitForDisplayed();
   await capture(browser, "03-pipelines");
+  await click(browser.$(shown), "button=Library");
+  const catalog = browser.$(shown).$(".pipeline-view:not([hidden])");
+  await catalog.$('input[aria-label="Search pipeline nodes"]').setValue("verified source commit");
+  await catalog.$("h4=Commit").waitForDisplayed();
+  await catalog.$("h4=Merge").waitForDisplayed();
+  await capture(browser, "03-node-library");
+  await click(browser.$(shown).$('[aria-label="Pipelines views"]'), "button=Builder");
+  await click(browser.$(shown), "button=Add node");
+  const nodePicker = browser.$('.pipeline-catalog-dialog');
+  await nodePicker.$('input[aria-label="Search pipeline nodes"]').setValue("result artifact");
+  await nodePicker.$("h4=Result").waitForDisplayed();
+  assert.equal(await nodePicker.$("button=Add").isExisting(), false);
+  await click(nodePicker, 'button[aria-label="Close node catalog"]');
+  const pipeline = browser.$(shown);
+  const stageWait = { timeout: 15_000 };
+  await click(pipeline, "button=Run pipeline");
+  await click(pipeline, "button=View waiting stage", stageWait);
+  await click(pipeline, "button=Answer question");
+  await click(pipeline, "button=View waiting stage", stageWait);
+  await click(pipeline, "button=Approve implementation");
+  await click(pipeline, "button=View failed stage", stageWait);
+  await click(pipeline, "button=Retry stage");
+  await click(pipeline, "button=View waiting stage", stageWait);
+  await click(pipeline, "button=Accept diff");
+  await click(pipeline, "button=View waiting stage", stageWait);
+  const gitWait = pipeline.$(".pipeline-inspector > .pipeline-stack > p");
+  await gitWait.waitForDisplayed();
+  assert.equal(await gitWait.getText(), "Waiting for commit");
+  await capture(browser, "03-pipeline-waiting-commit");
+  await click(pipeline, "button=Open Git delivery");
+  await click(browser.$(shown), "button=Commit accepted candidate");
+  await capture(browser, "12-git-delivery");
+  await click(browser, 'button[aria-label="Pipelines"]');
+  await browser.$(shown).$(".pipeline-toolbar .pipeline-status[data-status='succeeded']").waitForDisplayed();
   await scenario.selectByAttribute("value", "windows");
   await click(browser, "button=Create backup");
   await click(browser, "button=Continue");
@@ -188,6 +261,18 @@ async function checkSimulation(browser, checkout) {
   await click(browser, "button=Appearance");
   await capture(browser, "04-appearance-settings");
   await click(browser, 'button[aria-label="Close settings"]');
+  await scenario.selectByAttribute("value", "pipelines");
+  await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 640, height: 440 } } });
+  for (const area of ["Pipelines", "Git", "Tasks", "IDE", "Knowledge", "Conversations", "Diagnostics"]) {
+    await click(browser, 'button[aria-label="' + area + '"]');
+    assert.equal(await browser.execute(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true);
+  }
+  await click(browser, 'button[aria-label="Settings"]');
+  await click(browser, "button=Appearance");
+  await browser.$('[data-setting="theme"]').waitForDisplayed();
+  await capture(browser, "04-settings-compact");
+  await browser.keys("Escape");
+  await browser.waitUntil(() => browser.execute(() => document.activeElement?.getAttribute("aria-label") === "Settings"));
   await click(browser, "button=Exit simulation");
   await simulation.waitForExist({ reverse: true });
   assert.equal(await browser.$('button[aria-label="Knowledge"]').getAttribute("aria-current"), "page");
@@ -568,6 +653,25 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       await browser.waitUntil(async () => {
         const run = await invoke(browser, "latest_conversation_run", { conversationId: conversation.id });
         return ["cancelled", "interrupted"].includes(run?.status);
+      }, { timeout: 15_000 });
+      const userMessages = (await invoke(browser, "conversation_messages", { conversationId: conversation.id }))
+        .filter(({ role }) => role === "user").map(({ revisionId }) => revisionId);
+      const retryButton = panel.$("button=Retry saved input");
+      await retryButton.waitForDisplayed();
+      await retryButton.click();
+      let retry;
+      await browser.waitUntil(async () => {
+        const inspection = await invoke(browser, "latest_conversation_job", { conversationId: conversation.id });
+        retry = inspection.job.latestAttempt;
+        return retry?.previousRunId === activeRun && retry?.recovery === "retry";
+      });
+      assert.equal(retry.ordinal, 2);
+      assert.deepEqual((await invoke(browser, "conversation_messages", { conversationId: conversation.id }))
+        .filter(({ role }) => role === "user").map(({ revisionId }) => revisionId), userMessages);
+      await invoke(browser, "stop_conversation_turn", { conversationId: conversation.id, runId: retry.runId });
+      await browser.waitUntil(async () => {
+        const run = await invoke(browser, "latest_conversation_run", { conversationId: conversation.id });
+        return run?.id === retry.runId && ["cancelled", "interrupted"].includes(run.status);
       }, { timeout: 15_000 });
     }
     await checkSimulation(browser, main);

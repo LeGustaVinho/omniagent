@@ -19,12 +19,13 @@ const queuedJob: JobInspection = {
   job: {
     id: "job-2", projectId, checkoutId, taskId: null, origin: { type: "operator" },
     context: { conversationId: "conversation-2", contextId: "context-2" }, mode: "read_only",
-    priority: 10, queueState: "queued", latestAttempt: null,
+    priority: 10, queueState: "queued", latestAttempt: null, queuedRecovery: null,
   },
   blockers: [
     { type: "dependency", jobId: "job-1", status: "running", queueState: "queued" },
     { type: "capacity", active: 2, limit: 2 },
   ],
+  recoveryActions: [],
 };
 
 const runningJob: JobInspection = {
@@ -32,9 +33,10 @@ const runningJob: JobInspection = {
     ...queuedJob.job, id: "job-1", priority: 0,
     origin: { type: "agent", runId: "origin-run", requestId: "request-1" },
     context: { conversationId: "conversation-1", contextId: "context-1" },
-    latestAttempt: { runId: "run-1", ordinal: 2, status: "running", cancelRequested: false },
+    latestAttempt: { runId: "run-1", ordinal: 2, status: "running", cancelRequested: false, previousRunId: null, recovery: null },
   },
   blockers: [],
+  recoveryActions: [],
 };
 
 function renderQueue(overrides: Partial<WorkspaceProps> & { active?: boolean } = {}) {
@@ -84,5 +86,26 @@ describe("project queue", () => {
     await user.click(screen.getByRole("button", { name: "Pause queue" }));
     expect(screen.getByRole("button", { name: "Resume queue" })).toBeDefined();
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("shows a queued recovery in Waiting while retaining its previous attempt", async () => {
+    const recovery: JobInspection = {
+      ...runningJob,
+      job: {
+        ...runningJob.job,
+        queuedRecovery: "resume",
+        latestAttempt: {
+          runId: "interrupted-run", ordinal: 1, status: "interrupted", cancelRequested: false, previousRunId: null, recovery: null,
+        },
+      },
+    };
+    vi.mocked(invoke).mockResolvedValue({ settings: { paused: false, capacity: 2 }, active: 0, jobs: [recovery] });
+    const user = userEvent.setup();
+    const { openActivity } = renderQueue();
+    await user.click(screen.getByRole("button", { name: "Waiting" }));
+    await user.click(await screen.findByRole("button", { name: "Agent job" }));
+    expect(screen.getByText("Checkpoint queued for resumption.")).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "Inspect attempt" }));
+    expect(openActivity).toHaveBeenCalledWith("interrupted-run", "conversation-1");
   });
 });

@@ -1,20 +1,28 @@
 import { DndContext, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { Activity, FileText, GitCompare, GripVertical, LayoutGrid, List, Plus, Search, X } from "lucide-react";
 import { Dialog } from "radix-ui";
-import { useEffect, useState, type FormEvent } from "react";
+import { lazy, Suspense, useEffect, useState, type FormEvent } from "react";
+import { AgileTable, type WorkEvidence } from "@/agile-table";
+import { ConversationMarkdown } from "@/conversation-markdown";
 import { useGitSimulation } from "@/git-simulation";
+import { exampleNotes } from "@/ide-knowledge-data";
+import { resolveWiki } from "@/knowledge-document";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import { deliveryConversation } from "@/conversation-preview-data";
 import { DeliveryStatus, InlineIssue, IntegrationNotice } from "@/tasks-git-ui";
 import {
-  deliveryBase, deliveryBlocker, deliveryCommit, deliveryModels, deliveryNotePath, deliveryRunId,
+  deliveryBase, deliveryBlocker, deliveryBranch, deliveryCommit, deliveryModels, deliveryNotePath, deliveryRunId,
   deliveryStageIndex, deliveryStages, deliveryStatus, deliveryTaskId, exampleTasks, modelName,
-  releaseTask, taskStates, type DeliveryTask, type TaskPriority, type TaskState,
+  releaseTask, taskStates, workCode, workKind, type ChecklistMode, type DeliveryTask, type TaskPriority, type TaskState, type WorkKind, type WorktreeStrategy,
 } from "@/tasks-demo-data";
 import type { SimulationSession, WorkspaceProps } from "@/workbench-contract";
 
-const tabs = ["Overview", "Workflow", "Runs", "Context", "Changes"] as const;
+const tabs = ["Overview", "Workflow", "Work history", "Context", "Changes"] as const;
+const levels = ["Task", "Epic", "Sub-Task"] as const;
+const levelLabels = { Epic: "Epics", Task: "Tasks", "Sub-Task": "Sub-Tasks" };
+const MarkdownEditor = lazy(() => import("@/knowledge-editor").then(({ MarkdownEditor }) => ({ default: MarkdownEditor })));
+const descriptionModes = [["source", "Source"], ["live", "Live Preview"], ["reading", "Reading"]] as const;
 const priorities = ["Urgent", "High", "Normal", "Low"] as const;
 const agents = ["Planning agent", "Cross-review", "Implementation agent", "Verification agent"] as const;
 type DetailTab = typeof tabs[number];
@@ -56,7 +64,7 @@ function TaskCard({ task, selected, onSelect }: { task: DeliveryTask; selected: 
   return (
     <article ref={setNodeRef} style={style} className="delivery-card relative" data-selected={selected} data-dragging={isDragging}>
       <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>{task.id === deliveryTaskId ? "OPS-24" : task.id}</span>
+        <span>{workCode(task)}</span>
         {canMove && <button type="button" className="cursor-grab rounded p-0.5 hover:text-foreground" ref={setActivatorNodeRef} {...attributes} {...listeners} aria-label={`Drag ${task.title}`}><GripVertical size={14} /></button>}
       </div>
       <button type="button" onClick={() => onSelect(task.id)} aria-pressed={selected} className="block w-full py-1.5 text-left text-sm font-medium leading-5 break-words">
@@ -64,56 +72,124 @@ function TaskCard({ task, selected, onSelect }: { task: DeliveryTask; selected: 
       </button>
       {task.blocker && <p className="mb-2 text-xs leading-5 text-muted-foreground">{task.blocker}</p>}
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <span className="rounded bg-muted px-1.5 py-0.5">{task.priority}</span><span>{modelName(task.assignment)}</span>
+        {workKind(task) !== "Epic" && <><span className="rounded bg-muted px-1.5 py-0.5">{task.priority}</span><span>{modelName(task.assignment)}</span></>}
+        {!!task.checklist?.length && <span>{task.checklist.filter(({ checked }) => checked).length}/{task.checklist.length} checked</span>}
       </div>
     </article>
   );
 }
 
-function TaskForm({ task, onSave, canMove }: { task: DeliveryTask; onSave: (task: DeliveryTask) => void; canMove: boolean }) {
+function TaskForm({ task, parents, onSave, hasWorktree }: {
+  task: DeliveryTask;
+  parents: DeliveryTask[];
+  onSave: (task: DeliveryTask) => void;
+  hasWorktree: boolean;
+}) {
   const [draft, setDraft] = useState(task);
   const [criteria, setCriteria] = useState(task.criteria.join("\n"));
   const [dependencies, setDependencies] = useState(task.dependencies.join("\n"));
-  const [subtasks, setSubtasks] = useState(task.subtasks.join("\n"));
+  const [descriptionMode, setDescriptionMode] = useState<typeof descriptionModes[number][0]>("live");
+  const [linkedNote, setLinkedNote] = useState<string>();
+  const kind = workKind(task);
+  const canMove = task.id !== deliveryTaskId;
+  const validParent = kind !== "Sub-Task" || Boolean(draft.parentId);
+  const descriptionPath = workCode(task) + ".md";
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const title = draft.title.trim();
-    if (!title) return;
+    if (!title || !validParent) return;
     const lines = (value: string) => value.split("\n").map((line) => line.trim()).filter(Boolean);
-    onSave({ ...draft, title, criteria: lines(criteria), dependencies: lines(dependencies), subtasks: lines(subtasks) });
+    onSave({ ...draft, title, criteria: lines(criteria), dependencies: lines(dependencies) });
   }
 
   return (
     <form className="grid gap-3" onSubmit={submit}>
       <label className="delivery-field">Title<input className="delivery-filter" required value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
-      <label className="delivery-field">Description<textarea className="delivery-filter" rows={3} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
+      <section aria-label="Description" className="grid gap-1.5">
+        <h4 className="text-sm font-medium">Description</h4>
+        <div className="agile-description">
+          <div className="flex flex-wrap gap-1 border-b border-border px-1.5 py-1" aria-label="Description views">
+            {descriptionModes.map(([mode, label]) => <button key={mode} type="button" className="delivery-tab" aria-pressed={descriptionMode === mode}
+              onClick={() => setDescriptionMode(mode)}>{label}</button>)}
+          </div>
+          {descriptionMode === "reading"
+            ? <div className="agile-description-reading">{draft.description
+              ? <ConversationMarkdown>{draft.description}</ConversationMarkdown>
+              : <p className="text-muted-foreground">No description.</p>}</div>
+            : <div className="agile-description-editor"><Suspense fallback={<p className="p-3 text-xs text-muted-foreground" role="status">Loading editor…</p>}>
+                <MarkdownEditor mode={descriptionMode} path={descriptionPath} source={draft.description} files={exampleNotes}
+                  onChange={(description) => setDraft((current) => ({ ...current, description }))}
+                  onLink={(link) => {
+                    const locations = resolveWiki(link, descriptionPath, exampleNotes);
+                    const [match] = locations;
+                    if (match && locations.length === 1) setLinkedNote(match.path);
+                  }} />
+              </Suspense></div>}
+        </div>
+        {linkedNote && <details open className="agile-description-reading agile-description">
+          <summary className="mb-1 cursor-pointer font-semibold text-primary">{linkedNote}</summary>
+          <ConversationMarkdown>{exampleNotes.find(({ path }) => path === linkedNote)?.content ?? ""}</ConversationMarkdown>
+        </details>}
+      </section>
+      {kind !== "Epic" && <label className="delivery-field">{kind === "Task" ? "Epic" : "Parent Task"}
+        <select className="delivery-filter" required={kind === "Sub-Task"} value={draft.parentId ?? ""}
+          onChange={(event) => setDraft({ ...draft, parentId: event.target.value || undefined })}>
+          <option value="">{kind === "Task" ? "No epic" : "Select a task"}</option>
+          {parents.map((parent) => <option key={parent.id} value={parent.id}>{workCode(parent)} · {parent.title}</option>)}
+        </select>
+      </label>}
       <div className="grid grid-cols-2 gap-2">
-        <label className="delivery-field">Priority<select className="delivery-filter" value={draft.priority} onChange={(event) => setDraft({ ...draft, priority: event.target.value as TaskPriority })}>{priorities.map((priority) => <option key={priority}>{priority}</option>)}</select></label>
+        {kind !== "Epic" && <label className="delivery-field">Priority<select className="delivery-filter" value={draft.priority} onChange={(event) => setDraft({ ...draft, priority: event.target.value as TaskPriority })}>{priorities.map((priority) => <option key={priority}>{priority}</option>)}</select></label>}
         <label className="delivery-field">State<select className="delivery-filter" disabled={!canMove} value={draft.state} onChange={(event) => setDraft({ ...draft, state: event.target.value as TaskState })}>{taskStates.map((state) => <option key={state}>{state}</option>)}</select></label>
       </div>
+      {kind !== "Epic" && <>
+      <label className="delivery-field">Checklist execution<select className="delivery-filter" value={draft.checklistMode ?? ""}
+        onChange={(event) => setDraft({ ...draft, checklistMode: (event.target.value || undefined) as ChecklistMode | undefined })}>
+        <option value="">Inherit default</option><option>Track progress</option><option>Run by item</option>
+      </select></label>
+      {kind === "Task" && <label className="delivery-field">Branch strategy
+        <select className="delivery-filter" disabled={hasWorktree} value={draft.worktreeStrategy ?? ""}
+          onChange={(event) => setDraft({ ...draft, worktreeStrategy: (event.target.value || undefined) as WorktreeStrategy | undefined })}>
+          <option value="">Inherit project strategy</option>
+          <option value="isolated">Branch per work item</option>
+          <option value="shared">Shared branch per Task</option>
+        </select>
+        {hasWorktree && <span className="text-xs text-muted-foreground">This task already has a worktree.</span>}
+      </label>}
       <ModelPicker label="Planned assignment" options={deliveryModels} selection={{ mode: "single", selected: draft.assignment, onChange: (assignment) => setDraft({ ...draft, assignment }) }} />
       <label className="delivery-field">Acceptance criteria<textarea className="delivery-filter" rows={3} value={criteria} onChange={(event) => setCriteria(event.target.value)} /></label>
       <label className="delivery-field">Dependencies<textarea className="delivery-filter" rows={2} value={dependencies} onChange={(event) => setDependencies(event.target.value)} /></label>
-      <label className="delivery-field">Subtasks<textarea className="delivery-filter" rows={2} value={subtasks} onChange={(event) => setSubtasks(event.target.value)} /></label>
       {canMove && <label className="delivery-field">Blocker<input className="delivery-filter" value={draft.blocker} onChange={(event) => setDraft({ ...draft, blocker: event.target.value })} /></label>}
-      <Button type="submit" className="justify-self-start px-2.5 py-1.5 text-xs" disabled={!draft.title.trim()}>Save task</Button>
+      </>}
+      <Button type="submit" className="justify-self-start px-2.5 py-1.5 text-xs" disabled={!draft.title.trim() || !validParent}>Save {kind.toLowerCase()}</Button>
     </form>
   );
 }
 
-function TaskDialog({ open, task, onClose, onSave }: { open: boolean; task: DeliveryTask; onClose: () => void; onSave: (task: DeliveryTask) => void }) {
+function TaskDialog({ task, parents, onClose, onSave, hasWorktree }: {
+  task: DeliveryTask;
+  parents: DeliveryTask[];
+  onClose: () => void;
+  onSave: (task: DeliveryTask) => void;
+  hasWorktree: boolean;
+}) {
+  const kind = workKind(task).toLowerCase();
+  const activator = useState(() => document.activeElement)[0];
   return (
-    <Dialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
+    <Dialog.Root open onOpenChange={(next) => { if (!next) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[min(43rem,calc(100dvh-3rem))] w-[min(31rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-auto rounded-xl border border-border bg-card p-5 shadow-xl">
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[min(47rem,calc(100dvh-2rem))] w-[min(36rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-auto rounded-xl border border-border bg-card p-5 shadow-xl"
+          onCloseAutoFocus={(event) => {
+            if (activator instanceof HTMLElement && activator.getClientRects().length) { event.preventDefault(); activator.focus(); }
+          }}>
           <header className="mb-4 flex items-center justify-between gap-3">
-            <Dialog.Title className="font-semibold">{task.title ? "Edit task" : "New task"}</Dialog.Title>
+            <Dialog.Title className="font-semibold">{task.title ? `Edit ${kind}` : `New ${kind}`}</Dialog.Title>
             <Dialog.Close aria-label="Close task editor" className="rounded p-1 text-muted-foreground hover:bg-muted"><X size={17} /></Dialog.Close>
           </header>
           <Dialog.Description className="sr-only">Edit the task details, planned assignment, dependencies and criteria.</Dialog.Description>
-          {open && <TaskForm task={task} canMove={task.id !== deliveryTaskId} onSave={onSave} />}
+          <TaskForm task={task} parents={parents} onSave={onSave} hasWorktree={hasWorktree} />
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -183,8 +259,13 @@ function TaskActions({ simulation, openWorkspace, openActivity, openChanges, set
   }
 }
 
-function TaskDetails({ task, tab, setTab, close, edit, props, mergeRequired, setMergeRequired }: {
+function TaskDetails({ task, parent, children, onSelect, onCheck, onAddItem, tab, setTab, close, edit, props, mergeRequired, setMergeRequired }: {
   task: DeliveryTask;
+  parent?: DeliveryTask;
+  children: DeliveryTask[];
+  onSelect: (id: string) => void;
+  onCheck: (workId: string, itemId: string, checked: boolean) => void;
+  onAddItem: (workId: string, title: string) => void;
   tab: DetailTab;
   setTab: (tab: DetailTab) => void;
   close: () => void;
@@ -197,10 +278,14 @@ function TaskDetails({ task, tab, setTab, close, edit, props, mergeRequired, set
   const isDelivery = task.id === deliveryTaskId && sim !== null;
   const hasCandidate = sim ? ["review", "verified", "accepted", "merged"].includes(sim.delivery) : false;
   const participants = recordedParticipants(task, sim?.delivery);
+  const kind = workKind(task);
+  const mode = task.checklistMode ?? parent?.checklistMode ?? "Track progress";
+  const [itemTitle, setItemTitle] = useState("");
   return (
     <aside className="delivery-detail" aria-label="Task details">
       <header className="flex items-start justify-between gap-3 border-b border-border p-3.5">
         <div className="min-w-0">
+          <p className="mb-1 text-xs text-muted-foreground">{kind} · {workCode(task)}</p>
           <DeliveryStatus>{task.state}</DeliveryStatus>
           <h3 className="mt-1.5 text-sm font-semibold leading-5 break-words">{task.title}</h3>
         </div>
@@ -211,23 +296,55 @@ function TaskDetails({ task, tab, setTab, close, edit, props, mergeRequired, set
       </nav>
       <div className="delivery-detail-content grid content-start gap-4 p-3.5">
         {tab === "Overview" && <>
-          <p className="text-sm leading-6 text-muted-foreground">{task.description}</p>
+          {parent && <button type="button" className="agile-ref justify-self-start" onClick={() => onSelect(parent.id)}>
+            {workKind(parent)} · {parent.title}
+          </button>}
+          {task.description && <div className="text-sm leading-6"><ConversationMarkdown>{task.description}</ConversationMarkdown></div>}
           {task.blocker && <InlineIssue>{task.blocker}</InlineIssue>}
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm">
+          {kind !== "Epic" && <><dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm">
             <dt className="text-muted-foreground">Priority</dt><dd>{task.priority}</dd>
             <dt className="text-muted-foreground">Planned assignment</dt><dd>{modelName(task.assignment)}</dd>
-            {isDelivery && <><dt className="text-muted-foreground">Working now</dt><dd>{sim.delivery === "running" ? "GPT-6.1 Sol · Implementation" : "No active agent"}</dd></>}
+            <dt className="text-muted-foreground">Working now</dt><dd>{task.state === "In Progress"
+              ? participants.at(-1)?.model ?? "No agent reported"
+              : "No active agent"}</dd>
           </dl>
           <Checklist label="Acceptance criteria" entries={task.criteria} />
           <Checklist label="Dependencies" entries={task.dependencies} />
-          <Checklist label="Subtasks" entries={task.subtasks} />
+          <section className="agile-checklist" aria-label="Checklist">
+            <div className="flex flex-wrap justify-between gap-2">
+              <h4 className="text-xs font-semibold">Checklist</h4><span className="text-xs text-muted-foreground">{mode}</span>
+            </div>
+            <ul>
+              {task.checklist?.map((item) => <li key={item.id}><label className="agile-check">
+                <input type="checkbox" checked={item.checked} onChange={(event) => onCheck(task.id, item.id, event.currentTarget.checked)} />
+                <span>{item.title}</span>
+              </label></li>)}
+            </ul>
+            <form className="flex flex-wrap gap-2" onSubmit={(event) => {
+              event.preventDefault();
+              if (itemTitle.trim()) { onAddItem(task.id, itemTitle.trim()); setItemTitle(""); }
+            }}>
+              <input className="delivery-filter flex-1" aria-label="New checklist item" placeholder="Add checklist item" value={itemTitle}
+                onChange={(event) => setItemTitle(event.target.value)} />
+              <Button variant="outline" type="submit" disabled={!itemTitle.trim()}>Add</Button>
+            </form>
+            {mode === "Run by item" && <p className="text-xs text-muted-foreground">Manual checks are available. Dispatch by item requires the Agile service.</p>}
+          </section></>}
+          {!!children.length && <section aria-label={kind === "Epic" ? "Tasks in this epic" : "Sub-Tasks"} className="grid gap-2">
+            <h4 className="text-xs font-semibold">{kind === "Epic" ? "Tasks" : "Sub-Tasks"}</h4>
+            <ul className="divide-y divide-border">{children.map((child) => <li key={child.id} className="flex items-center justify-between gap-2 py-1.5">
+              <button type="button" className="text-left text-sm hover:underline" onClick={() => onSelect(child.id)}>{child.title}</button>
+              <DeliveryStatus>{child.state}</DeliveryStatus>
+            </li>)}</ul>
+          </section>}
           <div className="flex flex-wrap gap-2">
-            <Button className="px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={edit}>Edit task</Button>
+            <Button className="px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={edit}>Edit {kind.toLowerCase()}</Button>
+            {isDelivery && <Button className="px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={() => props.openWorkspace("pipelines", "task-delivery")}>Run pipeline</Button>}
             {isDelivery && <TaskActions simulation={sim} openWorkspace={props.openWorkspace} openActivity={props.openActivity} openChanges={props.openChanges} setTab={setTab} />}
           </div>
         </>}
         {tab === "Workflow" && (isDelivery ? <Workflow simulation={sim} openWorkspace={props.openWorkspace} /> : <p className="text-sm text-muted-foreground">No workflow linked to this task.</p>)}
-        {tab === "Runs" && <>
+        {tab === "Work history" && <>
           <h4 className="text-xs font-semibold">Work history</h4>
           {participants.length ? <ul className="grid divide-y divide-border">{participants.map(({ role, model }) => <li className="flex flex-wrap justify-between gap-2 py-2 text-sm" key={role}><span>{role}</span><span className="text-muted-foreground">{model}</span></li>)}</ul> : <p className="text-sm text-muted-foreground">No linked attempts.</p>}
           {isDelivery && participants.length > 0 && <Button type="button" variant="outline" className="justify-self-start px-2.5 py-1.5 text-xs" onClick={() => props.openActivity(deliveryRunId)}><Activity size={14} /> View run activity</Button>}
@@ -236,7 +353,7 @@ function TaskDetails({ task, tab, setTab, close, edit, props, mergeRequired, set
           ? <><h4 className="text-xs font-semibold">Source revision</h4><div className="delivery-card"><p className="break-all font-mono text-xs">{deliveryNotePath}</p><p className="mt-1 text-xs text-muted-foreground">Repository note · {deliveryBase}</p></div><Button type="button" variant="outline" className="justify-self-start px-2.5 py-1.5 text-xs" onClick={() => props.openWorkspace("knowledge", deliveryNotePath)}><FileText size={14} /> Open note</Button></>
           : <p className="text-sm text-muted-foreground">No context linked to this task.</p>)}
         {tab === "Changes" && <>
-          {isDelivery && <label className="delivery-field">Completion milestone<select className="delivery-filter" value={mergeRequired ? "merged" : "accepted"} onChange={(event) => setMergeRequired(event.target.value === "merged")}><option value="accepted">Diff accepted</option><option value="merged">Merged into destination</option></select></label>}
+          {isDelivery && <label className="delivery-field">Completion milestone<select className="delivery-filter" value={mergeRequired ? "merged" : "committed"} onChange={(event) => setMergeRequired(event.target.value === "merged")}><option value="committed">Verified commit</option><option value="merged">Verified merge</option></select></label>}
           {isDelivery && hasCandidate
             ? <><p className="text-sm text-muted-foreground">Saved candidate <code>{deliveryCommit}</code></p><Button type="button" variant="outline" className="justify-self-start px-2.5 py-1.5 text-xs" onClick={() => props.openChanges("saved")}><GitCompare size={14} /> Open saved diff</Button></>
             : <p className="text-sm text-muted-foreground">No candidate diff captured for this task.</p>}
@@ -248,17 +365,19 @@ function TaskDetails({ task, tab, setTab, close, edit, props, mergeRequired, set
 
 export default function TasksWorkspace(props: WorkspaceProps) {
   const { simulation, startSimulation, target } = props;
+  const git = useGitSimulation();
   const [tasks, setTasks] = useState<DeliveryTask[]>([releaseTask, ...exampleTasks]);
   const [selected, setSelected] = useState<string>();
   const [tab, setTab] = useState<DetailTab>("Overview");
   const [editing, setEditing] = useState<DeliveryTask>();
   const [view, setView] = useState<"board" | "list">("board");
+  const [level, setLevel] = useState<WorkKind>("Task");
   const [query, setQuery] = useState("");
   const [stateFilter, setStateFilter] = useState("");
   const [modelFilter, setModelFilter] = useState("");
   const [providerFilter, setProviderFilter] = useState("");
   const [agentFilter, setAgentFilter] = useState("");
-  const [mergeRequired, setMergeRequired] = useState(false);
+  const { mergeRequired, setMergeRequired } = git;
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor));
 
   useEffect(() => {
@@ -284,11 +403,51 @@ export default function TasksWorkspace(props: WorkspaceProps) {
     setTasks((current) => current.map((task) => task.id === event.active.id ? { ...task, state } : task));
   }
 
-  const available = simulation ? tasks.map((task) => task.id === deliveryTaskId
-    ? { ...task, state: deliveryStatus(simulation.delivery, mergeRequired), blocker: deliveryBlocker(simulation.delivery, mergeRequired) }
-    : task) : [];
+  function check(workId: string, itemId: string, checked: boolean) {
+    setTasks((current) => current.map((work) => work.id === workId ? {
+      ...work,
+      checklist: work.checklist?.map((item) => item.id === itemId ? { ...item, checked } : item),
+    } : work));
+  }
+
+  function addItem(workId: string, title: string) {
+    const item = { id: crypto.randomUUID(), title, checked: false };
+    setTasks((current) => current.map((work) => work.id === workId
+      ? { ...work, checklist: [...work.checklist ?? [], item] }
+      : work));
+  }
+
+  function create(kind: WorkKind) {
+    const prefix = kind === "Epic" ? "EPIC" : "OPS";
+    const existing = new Set(tasks.map(workCode));
+    let ordinal = kind === "Epic" ? 2 : 25;
+    while (existing.has(`${prefix}-${ordinal}`)) ordinal++;
+    setEditing({
+      id: `${prefix}-${ordinal}`, kind, title: "", description: "", state: "Backlog", priority: "Normal",
+      assignment: null, criteria: [], dependencies: [], blocker: "",
+      parentId: kind === "Sub-Task" && selectedTask && workKind(selectedTask) === "Task" ? selectedTask.id : undefined,
+    });
+  }
+
+  const available = simulation ? tasks.map((task): DeliveryTask => {
+    if (task.id !== deliveryTaskId) return task;
+    const state = deliveryStatus(simulation.delivery, mergeRequired, git.candidateCommitted);
+    const subTasks = tasks.filter(({ parentId }) => parentId === task.id);
+    const openChecklist = task.checklist?.some(({ checked }) => !checked);
+    const openSubTasks = subTasks.some(({ state }) => state !== "Completed" && state !== "Cancelled");
+    if (state === "Completed" && (openChecklist || openSubTasks)) {
+      return { ...task, state: "In Review", blocker: openChecklist ? "Finish the checklist to complete this task." : "Waiting for Sub-Tasks to finish." };
+    }
+    return { ...task, state, blocker: deliveryBlocker(simulation.delivery, mergeRequired, git.candidateCommitted) };
+  }) : [];
+  const work = available.map((item): DeliveryTask => {
+    if (workKind(item) !== "Epic") return item;
+    const children = available.filter(({ parentId }) => parentId === item.id);
+    if (!children.length || children.some(({ state }) => state !== "Completed" && state !== "Cancelled")) return item;
+    return { ...item, state: children.some(({ state }) => state === "Completed") ? "Completed" : "Cancelled" };
+  });
   const filter = query.trim().toLocaleLowerCase();
-  const visible = available.filter((task) => {
+  const visible = work.filter((task) => {
     const participants = recordedParticipants(task, simulation?.delivery);
     const matchingModels = deliveryModels.filter((model) => model.selection.modelId === task.assignment?.modelId
       || participants.some((participant) => participant.model === model.name));
@@ -296,38 +455,54 @@ export default function TasksWorkspace(props: WorkspaceProps) {
       && (!agentFilter || participants.some(({ role }) => role === agentFilter))
       && (!(modelFilter || providerFilter) || matchingModels.some(({ selection }) =>
         (!modelFilter || selection.modelId === modelFilter) && (!providerFilter || selection.provider === providerFilter)))
-      && (!filter || `${task.id} ${task.title} ${task.description}`.toLocaleLowerCase().includes(filter));
+      && (!filter || [workCode(task), task.title, task.description, ...task.checklist?.map(({ title }) => title) ?? []].join(" ").toLocaleLowerCase().includes(filter));
   });
-  const selectedTask = available.find((task) => task.id === selected);
+  const selectedTask = work.find((task) => task.id === selected);
+  const atLevel = visible.filter((task) => workKind(task) === level);
   const columns = stateFilter ? taskStates.filter((state) => state === stateFilter) : taskStates;
+  const newKind = view === "board" ? level : "Task";
+  function evidence(task: DeliveryTask): WorkEvidence | undefined {
+    if (task.id !== deliveryTaskId || !simulation || !["queued", "running", "interrupted", "failed", "review", "verified", "accepted", "merged"].includes(simulation.delivery)) return undefined;
+    return { branch: deliveryBranch, commit: git.candidateCommitted ? deliveryCommit : null };
+  }
 
   return (
     <section className="delivery-view" aria-label="Tasks workspace">
       <header className="delivery-toolbar">
-        <h2 className="mr-2">Tasks</h2>
-        <button type="button" className="delivery-tab" aria-pressed={view === "board"} onClick={() => setView("board")}><LayoutGrid size={14} className="mr-1 inline-block" />Board</button>
-        <button type="button" className="delivery-tab" aria-pressed={view === "list"} onClick={() => setView("list")}><List size={14} className="mr-1 inline-block" />List</button>
+        <h2 className="mr-2">Agile Board</h2>
+        <button type="button" className="delivery-tab" aria-pressed={view === "board"} onClick={() => setView("board")}><LayoutGrid size={14} className="mr-1 inline-block" />Kanban</button>
+        <button type="button" className="delivery-tab" aria-pressed={view === "list"} onClick={() => setView("list")}><List size={14} className="mr-1 inline-block" />Table</button>
         <Button type="button" className="ml-auto px-3 py-1.5 text-xs" disabled={!simulation} title={simulation ? undefined : "Task creation integration pending"}
-          onClick={() => setEditing({ id: `OPS-${25 + tasks.length - 1 - exampleTasks.length}`, title: "", description: "", state: "Backlog", priority: "Normal", assignment: null, criteria: [], dependencies: [], subtasks: [], blocker: "" })}>
-          <Plus size={15} /> New task
+          onClick={() => create(newKind)}>
+          <Plus size={15} /> New {newKind.toLowerCase()}
         </Button>
       </header>
-      <div className="delivery-toolbar min-h-0 py-2">
+      {simulation && <div className="delivery-toolbar delivery-filters">
+        {view === "board" && <select className="delivery-filter font-medium" aria-label="Kanban level" value={level}
+          onChange={(event) => setLevel(event.target.value as WorkKind)}>{levels.map((kind) => <option key={kind} value={kind}>{levelLabels[kind]}</option>)}</select>}
         <label className="relative min-w-35 max-w-65 flex-1"><Search className="pointer-events-none absolute left-2.5 top-1.5 text-muted-foreground" size={15} /><input className="delivery-filter delivery-search w-full" placeholder="Find a task" aria-label="Find a task" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
         <select className="delivery-filter" aria-label="Filter tasks by state" value={stateFilter} onChange={(event) => setStateFilter(event.target.value)}><option value="">All states</option>{taskStates.map((state) => <option key={state}>{state}</option>)}</select>
         <select className="delivery-filter" aria-label="Filter tasks by provider" value={providerFilter} onChange={(event) => setProviderFilter(event.target.value)}><option value="">All providers</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="antigravity">Antigravity</option></select>
         <select className="delivery-filter" aria-label="Filter tasks by agent" disabled={!simulation} value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}><option value="">All agents</option>{agents.map((agent) => <option key={agent}>{agent}</option>)}</select>
         <select className="delivery-filter" disabled={!simulation} aria-label="Filter tasks by model" value={modelFilter} onChange={(event) => setModelFilter(event.target.value)}><option value="">All models</option>{simulation && deliveryModels.map((model) => <option key={model.selection.modelId} value={model.selection.modelId}>{model.name}</option>)}</select>
-      </div>
+        {(filter || stateFilter || providerFilter || agentFilter || modelFilter) && <button className="delivery-tab" type="button" onClick={() => {
+          setQuery(""); setStateFilter(""); setProviderFilter(""); setAgentFilter(""); setModelFilter("");
+        }}>Clear filters</button>}
+      </div>}
       <div className="delivery-body">
         <div className="delivery-main">
-          {!simulation && <IntegrationNotice title="Task integration pending" onSimulate={startSimulation}>Manage tasks, dependencies and reviews for this project here when the task service is connected.</IntegrationNotice>}
-          {view === "board" ? <DndContext sensors={sensors} onDragEnd={move}><div className="delivery-board">{columns.map((state) => <TaskColumn key={state} state={state} tasks={visible.filter((task) => task.state === state)} selected={selected} onSelect={open} />)}</div></DndContext>
-            : <table className="delivery-table"><thead><tr><th>Task</th><th>State</th><th>Priority</th><th>Assignment</th></tr></thead><tbody>{visible.map((task) => <tr key={task.id}><td><button type="button" onClick={() => open(task.id)} className="text-left font-medium hover:underline">{task.title}</button></td><td><DeliveryStatus>{task.state}</DeliveryStatus></td><td>{task.priority}</td><td>{modelName(task.assignment)}</td></tr>)}</tbody></table>}
+          {!simulation ? <IntegrationNotice title="Tasks are unavailable in this checkout" onSimulate={startSimulation}>Explore the board, task details, dependencies, and reviews with example data.</IntegrationNotice>
+            : !(view === "board" ? atLevel.length : visible.length) ? <div className="delivery-empty"><h3>No matching work items</h3><p>Adjust the filters or create a work item.</p></div>
+            : view === "board" ? <DndContext sensors={sensors} onDragEnd={move}><div className="delivery-board">{columns.map((state) => <TaskColumn key={state} state={state} tasks={atLevel.filter((task) => task.state === state)} selected={selected} onSelect={open} />)}</div></DndContext>
+            : <AgileTable items={work} matches={new Set(visible.map(({ id }) => id))} selected={selected} onSelect={open} onCheck={check}
+              evidence={evidence} openGit={props.openChanges} />}
         </div>
-        {selectedTask && <TaskDetails task={selectedTask} tab={tab} setTab={setTab} close={() => setSelected(undefined)} edit={() => setEditing(selectedTask)} props={props} mergeRequired={mergeRequired} setMergeRequired={setMergeRequired} />}
+        {selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} parent={work.find(({ id }) => id === selectedTask.parentId)}
+          children={work.filter(({ parentId }) => parentId === selectedTask.id)} onSelect={open} onCheck={check} onAddItem={addItem}
+          tab={tab} setTab={setTab} close={() => setSelected(undefined)} edit={() => setEditing(selectedTask)} props={props} mergeRequired={mergeRequired} setMergeRequired={setMergeRequired} />}
       </div>
-      {editing && <TaskDialog open task={editing} onClose={() => setEditing(undefined)} onSave={save} />}
+      {editing && <TaskDialog task={editing} parents={work.filter((item) => workKind(item) === (workKind(editing) === "Task" ? "Epic" : "Task"))}
+        onClose={() => setEditing(undefined)} onSave={save} hasWorktree={Boolean(evidence(editing))} />}
     </section>
   );
 }

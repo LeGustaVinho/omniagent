@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { advancePipelineRun, beginPipelineRun, createDeliveryWorkflow, declineStage, resolveStage, retryStage, runStatus, stageAttempt, validateWorkflow } from "./pipelines-model";
+import { advancePipelineRun, beginPipelineRun, createDeliveryWorkflow, declineStage, recordPipelineGit, resolveStage, retryStage, runStatus, stageAttempt, validateWorkflow } from "./pipelines-model";
 import type { PipelineRun } from "./pipelines-model";
 
 function settle(run: PipelineRun) {
@@ -39,7 +39,21 @@ describe("pipeline scenario", () => {
     run = settle(retryStage(run, "verify"));
     expect(run.attempts.verify?.map((attempt) => attempt.status)).toEqual(["failed", "succeeded"]);
     expect(stageAttempt(run, "accept")?.status).toBe("waiting");
-    expect(runStatus(settle(resolveStage(run, "accept")))).toBe("succeeded");
+    run = settle(resolveStage(run, "accept"));
+    expect(stageAttempt(run, "commit")?.detail).toBe("Waiting for commit");
+    expect(resolveStage(run, "commit")).toBe(run);
+    const commit = { branch: "agent/release-checklist", sha: "d73b42a91be3c8c63cf128379192f229061cca70e" };
+    let withMerge = settle(recordPipelineGit({ ...run, workflow: { ...run.workflow, mergeRequired: true } }, { commit }));
+    expect(stageAttempt(withMerge, "merge")?.detail).toBe("Waiting for merge");
+    expect(resolveStage(withMerge, "merge")).toBe(withMerge);
+    const merge = { branch: "main", sha: "13a63c87cbb034dbf6a6d4deda4f93facbe28daae" };
+    withMerge = settle(recordPipelineGit(withMerge, { merge }));
+    expect(stageAttempt(withMerge, "merge")?.git).toEqual(merge);
+    expect(runStatus(withMerge)).toBe("succeeded");
+    run = settle(recordPipelineGit(run, { commit }));
+    expect(stageAttempt(run, "commit")?.git).toEqual(commit);
+    expect(stageAttempt(run, "merge")?.status).toBe("skipped");
+    expect(runStatus(run)).toBe("succeeded");
   });
 
   it("runs both selected branches and keeps repository writes waiting after rejection", () => {

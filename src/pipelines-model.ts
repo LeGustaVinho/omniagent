@@ -26,17 +26,19 @@ export const stageKinds = {
   condition: "Condition",
   review: "Review",
   join: "Join",
-  task: "Create task",
+  task: "Create or link work",
   approval: "Approve implementation",
   implementation: "Implementation",
-  verify: "Verification",
+  verify: "Verify candidate",
   accept: "Accept diff",
+  commit: "Commit",
+  merge: "Merge",
 } as const;
 
 export type StageKind = keyof typeof stageKinds;
 export type StageMode = "read-only" | "plan" | "write";
 export type ReleasePredicate = "plan-present" | "reviews-passed";
-type OutputType = "plan" | "review" | "task" | "release" | "patch" | "checks" | "decision";
+type OutputType = "plan" | "review" | "task" | "release" | "patch" | "checks" | "decision" | "commit" | "integration";
 
 export interface Role {
   id: string;
@@ -79,18 +81,19 @@ export interface WorkflowRevision {
   edges: StageEdge[];
   roles: Role[];
   comparisonRuns?: string[];
+  mergeRequired?: boolean;
 }
 
 export function createStage(kind: StageKind, id: string, x: number, y: number): StageNode {
   const stageRoles: Partial<Record<StageKind, string>> = { plan: "planner", review: "reviewer", implementation: "implementer", verify: "reviewer" };
   const outputs: Record<StageKind, OutputType> = {
     plan: "plan", condition: "decision", review: "review", join: "review", task: "task",
-    approval: "release", implementation: "patch", verify: "checks", accept: "decision",
+    approval: "release", implementation: "patch", verify: "checks", accept: "decision", commit: "commit", merge: "integration",
   };
   return {
     id, type: "stage", position: { x, y }, ariaLabel: stageKinds[kind],
     data: {
-      title: stageKinds[kind], kind, roleId: stageRoles[kind] ?? "", mode: kind === "implementation" ? "write" : kind === "plan" ? "plan" : "read-only",
+      title: stageKinds[kind], kind, roleId: stageRoles[kind] ?? "", mode: ["implementation", "commit", "merge"].includes(kind) ? "write" : kind === "plan" ? "plan" : "read-only",
       model: null, timeoutMinutes: 10, retryLimit: kind === "verify" ? 1 : 0, output: outputs[kind], requiredCapability: "",
       subagents: 0, release: "human", predicate: "reviews-passed", goal: "", evidence: "", goalMinutes: 15, goalContinuation: "managed",
     },
@@ -109,11 +112,13 @@ export function createDeliveryWorkflow(): WorkflowRevision {
     createStage("implementation", "implementation", 624, 360),
     createStage("verify", "verify", 424, 360),
     createStage("accept", "accept", 224, 360),
+    createStage("commit", "commit", 24, 360),
+    createStage("merge", "merge", 24, 540),
   ];
   const pairs: [string, string][] = [
     ["plan", "condition"], ["condition", "review"], ["condition", "migration"], ["review", "join"],
     ["migration", "join"], ["join", "task"], ["task", "approval"], ["approval", "implementation"],
-    ["implementation", "verify"], ["verify", "accept"],
+    ["implementation", "verify"], ["verify", "accept"], ["accept", "commit"], ["commit", "merge"],
   ];
   const roles = [
     { id: "planner", title: "Planner", model: getSampleModel("gpt-6.1-sol")?.selection ?? null, effort: "high", instructions: "Read the pinned release note and propose a scoped plan.", tools: "Repository read", completion: "Return a versioned plan and acceptance criteria.", review: "Cross-review", requirements: ["Interactive questions"] },
@@ -121,7 +126,7 @@ export function createDeliveryWorkflow(): WorkflowRevision {
     { id: "implementer", title: "Implementer", model: getSampleModel("gpt-6.1-terra")?.selection ?? null, effort: "high", instructions: "Implement the approved plan in the assigned worktree.", tools: "Approved worktree write", completion: "Return a patch and verification evidence.", review: "Human approval", requirements: [] },
   ] satisfies Role[];
   return {
-    label: "Repository delivery",
+    label: "Task delivery",
     revision: 3,
     nodes,
     edges: pairs.map(([source, target]) => ({
@@ -197,10 +202,16 @@ export function validateWorkflow({ nodes, edges }: WorkflowRevision): string[] {
     if (data.kind === "accept" && !upstream.some((stage) => stage.data.kind === "verify" && stage.data.output === "checks")) {
       errors.push(data.title + " needs checks from an upstream verification stage.");
     }
+    if (data.kind === "commit" && !upstream.some((stage) => stage.data.kind === "accept")) {
+      errors.push(data.title + " needs an accepted candidate.");
+    }
+    if (data.kind === "merge" && !upstream.some((stage) => stage.data.kind === "commit")) {
+      errors.push(data.title + " needs a verified source commit.");
+    }
     if (data.mode === "write" && (data.kind === "approval" || (!hasCycle && !released(id)))) {
       errors.push(data.title + " must follow Approve implementation on every path.");
     }
-    if (data.kind === "implementation" && data.mode !== "write") errors.push(data.title + " requires a writing profile.");
+    if (["implementation", "commit", "merge"].includes(data.kind) && data.mode !== "write") errors.push(data.title + " requires a writing profile.");
     if (data.goal.trim() && (!data.evidence.trim() || !Number.isInteger(data.goalMinutes) || data.goalMinutes < 1)) {
       errors.push(data.title + " needs completion evidence and a positive time budget for its goal.");
     }
@@ -212,10 +223,12 @@ export function validateWorkflow({ nodes, edges }: WorkflowRevision): string[] {
 }
 
 export type StageStatus = "queued" | "running" | "waiting" | "succeeded" | "failed" | "skipped";
+export type GitEvidence = { branch: string; sha: string };
 export interface Attempt {
   number: number;
   status: StageStatus;
   detail: string;
+  git?: GitEvidence;
 }
 export interface PipelineRun {
   id: number;
@@ -237,10 +250,10 @@ export function stageAttempt(run: PipelineRun, id: string) {
   return run.attempts[id]?.at(-1);
 }
 
-function updateAttempt(run: PipelineRun, id: string, status: StageStatus, detail: string): PipelineRun {
+function updateAttempt(run: PipelineRun, id: string, status: StageStatus, detail: string, git?: GitEvidence): PipelineRun {
   const prior = run.attempts[id];
   if (!prior?.length) return run;
-  return { ...run, attempts: { ...run.attempts, [id]: [...prior.slice(0, -1), { number: prior.length, status, detail }] } };
+  return { ...run, attempts: { ...run.attempts, [id]: [...prior.slice(0, -1), { number: prior.length, status, detail, git }] } };
 }
 
 function readyState(run: PipelineRun, id: string): "blocked" | "skip" | "ready" {
@@ -261,7 +274,11 @@ export function advancePipelineRun(run: PipelineRun): PipelineRun {
     if (!attempt) continue;
     if (attempt.status === "queued") {
       const readiness = readyState(run, node.id);
-      if (readiness === "ready") next = updateAttempt(next, node.id, "running", "Executing against workflow revision " + run.workflow.revision + ".");
+      if (readiness === "ready") {
+        next = node.data.kind === "merge" && !run.workflow.mergeRequired
+          ? updateAttempt(next, node.id, "skipped", "The selected delivery policy requires a verified commit.")
+          : updateAttempt(next, node.id, "running", "Executing against workflow revision " + run.workflow.revision + ".");
+      }
       if (readiness === "skip") next = updateAttempt(next, node.id, "skipped", "Branch was excluded by the planning decision.");
       continue;
     }
@@ -273,6 +290,8 @@ export function advancePipelineRun(run: PipelineRun): PipelineRun {
       next = updateAttempt(next, node.id, "failed", "Native goal control is unverified for this example profile. Select a qualified profile or managed continuation.");
     } else if (requiredCapability === "Windows host control" || role?.requirements.includes("Windows host control")) {
       next = updateAttempt(next, node.id, "failed", "Windows host control is unverified for this example profile.");
+    } else if (kind === "commit" || kind === "merge") {
+      next = updateAttempt(next, node.id, "waiting", kind === "commit" ? "Waiting for commit" : "Waiting for merge");
     } else if (kind === "plan" || goal) {
       next = updateAttempt(next, node.id, "waiting", kind === "plan" ? "Planning needs an answer about migration scope." : "Confirm that the goal evidence meets its completion criteria.");
     } else if (kind === "approval" || kind === "accept") {
@@ -295,8 +314,18 @@ export function advancePipelineRun(run: PipelineRun): PipelineRun {
 export function resolveStage(run: PipelineRun, id: string, migration?: boolean): PipelineRun {
   const node = run.workflow.nodes.find((stage) => stage.id === id);
   if (!node || stageAttempt(run, id)?.status !== "waiting") return run;
+  if (node.data.kind === "commit" || node.data.kind === "merge") return run;
   const resolved = updateAttempt(run, id, "succeeded", node.data.kind === "approval" ? "Approved on the pinned workflow and plan revision." : "Recorded decision and output: " + node.data.output + ".");
   return node.data.kind === "plan" ? { ...resolved, migration: migration ?? false } : resolved;
+}
+
+export function recordPipelineGit(run: PipelineRun, evidence: { commit?: GitEvidence; merge?: GitEvidence }): PipelineRun {
+  return run.workflow.nodes.reduce((current, node) => {
+    const kind = node.data.kind;
+    if ((kind !== "commit" && kind !== "merge") || stageAttempt(current, node.id)?.status !== "waiting") return current;
+    const result = evidence[kind];
+    return result ? updateAttempt(current, node.id, "succeeded", kind === "commit" ? "Verified source commit recorded." : "Verified integration recorded.", result) : current;
+  }, run);
 }
 
 export function declineStage(run: PipelineRun, id: string): PipelineRun {

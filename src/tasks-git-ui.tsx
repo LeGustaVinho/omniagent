@@ -22,7 +22,7 @@ export function IntegrationNotice({ title, children, onSimulate }: {
 }) {
   return (
     <div className="delivery-empty">
-      <CircleOff size={22} aria-hidden="true" />
+      <span className="work-empty-icon"><CircleOff size={20} aria-hidden="true" /></span>
       <h3 className="font-semibold text-foreground">{title}</h3>
       <p className="text-sm leading-6">{children}</p>
       <Button className="mt-1 px-2.5 py-1.5 text-xs" variant="outline" type="button" onClick={() => onSimulate()}>
@@ -34,7 +34,7 @@ export function IntegrationNotice({ title, children, onSimulate }: {
 
 export function InlineIssue({ children }: { children: ReactNode }) {
   return (
-    <p role="alert" className="flex items-start gap-2 rounded-md border border-border p-2.5 text-sm leading-5">
+    <p role="alert" className="flex min-w-0 items-start gap-2 rounded-md border border-border bg-card p-2.5 text-sm leading-5 wrap-anywhere">
       <AlertCircle size={16} className="mt-0.5 shrink-0 text-[var(--warning,#ebbd70)]" aria-hidden="true" />
       <span>{children}</span>
     </p>

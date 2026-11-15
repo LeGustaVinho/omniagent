@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -93,6 +93,16 @@ pub struct AttemptPlan {
     pub(crate) question_route: QuestionRoute,
     pub(crate) answered_question: Option<QuestionOrigin>,
     pub(crate) requires_bridge: bool,
+    pub(crate) native_job_recovery: Option<NativeJobRecovery>,
+}
+
+pub(crate) struct NativeJobRecovery {
+    pub source_run_id: String,
+    pub provider_session_id: String,
+    pub provider_turn_id: Option<String>,
+    pub context_id: String,
+    pub executable_revision: String,
+    pub approved_customizations: BTreeMap<String, String>,
 }
 
 enum AttemptInput {
@@ -484,6 +494,7 @@ impl Store {
                     frozen,
                     question_route,
                     answer,
+                    history: AttemptHistory::Automatic,
                 },
             )?;
             tx.commit()?;
@@ -761,9 +772,28 @@ impl Store {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             active_attempt(&tx, &run_id)?;
             let run = runs::load_run(&tx, &run_id)?;
+            crate::jobs::record_process_launch(&tx, &run_id)?;
             runs::advance_run(&tx, &run, RunStatus::Running)?;
             tx.commit()?;
             Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn record_agent_launch_intent(&self, run_id: String) -> Result<bool> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            active_attempt(&tx, &run_id)?;
+            let cancel_requested: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM job_attempts WHERE run_id = ?1 AND cancel_requested = 1)",
+                [&run_id], |row| row.get(0),
+            )?;
+            if cancel_requested {
+                return Ok(false);
+            }
+            crate::jobs::record_process_launch(&tx, &run_id)?;
+            tx.commit()?;
+            Ok(true)
         })
         .await
     }
@@ -791,6 +821,7 @@ impl Store {
             } else {
                 active.context_id
             };
+            tx.execute("UPDATE agent_attempts SET result_context_id = ?1 WHERE run_id = ?2", params![context_id, run_id])?;
             if outcome == RunStatus::Succeeded {
                 tx.execute("UPDATE agent_sessions SET cursor_context_id = ?1 WHERE id = ?2 AND provider_session_id IS NOT NULL
                     AND EXISTS(SELECT 1 FROM agent_attempts a
@@ -833,6 +864,10 @@ impl Store {
                 close_permissions(&tx, &id)?;
                 close_native_questions(&tx, &id)?;
                 close_unfinished_structured_questions(&tx, &id)?;
+                tx.execute(
+                    "UPDATE agent_attempts SET result_context_id = context_id WHERE run_id = ?1",
+                    [&id],
+                )?;
                 crate::jobs::release_writer(&tx, &id)?;
             }
             tx.execute(
@@ -855,6 +890,13 @@ struct PreparedAttempt {
     frozen: Option<(PathBuf, Vec<u8>)>,
     question_route: QuestionRoute,
     answer: Option<(QuestionOrigin, QuestionReply)>,
+    history: AttemptHistory,
+}
+
+pub(crate) enum AttemptHistory {
+    Automatic,
+    Retry { input_context_id: String },
+    Resume { native: Option<NativeJobRecovery> },
 }
 
 pub(crate) fn consume_matching_draft(
@@ -893,6 +935,33 @@ pub(crate) fn insert_job_attempt(
             frozen: None,
             question_route: QuestionRoute::Native,
             answer: None,
+            history: AttemptHistory::Automatic,
+        },
+    )
+}
+
+pub(crate) fn insert_job_recovery_attempt(
+    db: &Connection,
+    conversation: Conversation,
+    scope: SessionScope,
+    history: AttemptHistory,
+) -> Result<AttemptPlan> {
+    let encrypted = if matches!(history, AttemptHistory::Resume { .. }) {
+        Some(protection::protect(b"Continue the interrupted task from the recorded result. Check the work already completed before taking further action, and finish the remaining work.")?)
+    } else {
+        None
+    };
+    insert_attempt(
+        db,
+        PreparedAttempt {
+            conversation_id: conversation.id,
+            base_context_id: conversation.context_id,
+            scope,
+            encrypted,
+            frozen: None,
+            question_route: QuestionRoute::Native,
+            answer: None,
+            history,
         },
     )
 }
@@ -906,6 +975,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         frozen,
         question_route,
         answer,
+        history,
     } = prepared;
     let serialized = serde_json::to_string(&scope)?;
     let checkout = &scope.checkout;
@@ -931,10 +1001,14 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             "attachment checkout changed after admission"
         );
     }
-    let mut entries = context_entries(db, &conversation_id, &base_context_id)?;
+    let input_context_id = match &history {
+        AttemptHistory::Retry { input_context_id } => input_context_id,
+        _ => &base_context_id,
+    };
+    let mut entries = context_entries(db, &conversation_id, input_context_id)?;
     let previous = previous_attempt(db, &conversation_id)?;
-    let continuity = match &previous {
-        Some(prior)
+    let continuity = match (&history, &previous) {
+        (AttemptHistory::Automatic, Some(prior))
             if prior.scope == serialized
                 && scope
                     .account_binding
@@ -942,6 +1016,24 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
                     .is_some_and(|id| !id.is_empty()) =>
         {
             append_only_cursor(db, &conversation_id, &entries, prior)?
+        }
+        (
+            AttemptHistory::Resume {
+                native: Some(recovery),
+            },
+            Some(prior),
+        ) => {
+            ensure!(
+                prior.run_id == recovery.source_run_id
+                    && prior.provider_session_id.as_ref() == Some(&recovery.provider_session_id),
+                "The provider session changed before recovery"
+            );
+            let checkpoint = context_entries(db, &conversation_id, &recovery.context_id)?;
+            ensure!(
+                entries.starts_with(&checkpoint),
+                "The saved input is outside the recovery context"
+            );
+            Some((prior, recovery.context_id.clone(), checkpoint.len()))
         }
         _ => None,
     };
@@ -969,25 +1061,33 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             (id, None, SessionIntent::Start, 0)
         };
 
-    let encrypted = if let (Some((_, reply)), Some((_, form))) = (&answer, &answered_request) {
-        let values = serde_json::json!({"question": form, "answer": reply.values});
-        let text = format!(
-            "The user answered this saved planning question. Continue the original planning task with the supplied values.\n{}",
-            serde_json::to_string(&values)?
-        );
-        protection::protect(text.as_bytes())?
-    } else {
-        encrypted.context("missing admitted message content")?
-    };
-    let revision = insert_message(db, &conversation_id, MessageRole::User, encrypted)?;
-    if let Some((_, payload)) = frozen {
+    let context_id = if let AttemptHistory::Retry { input_context_id } = &history {
         db.execute(
-            "INSERT INTO message_attachments(message_revision_id, payload) VALUES (?1, ?2)",
-            params![revision, payload],
+            "UPDATE conversations SET active_context_id = ?1 WHERE id = ?2",
+            params![input_context_id, conversation_id],
         )?;
-    }
-    entries.push(revision);
-    let context_id = activate_context(db, &conversation_id, &entries)?;
+        input_context_id.clone()
+    } else {
+        let encrypted = if let (Some((_, reply)), Some((_, form))) = (&answer, &answered_request) {
+            let values = serde_json::json!({"question": form, "answer": reply.values});
+            let text = format!(
+                "The user answered this saved planning question. Continue the original planning task with the supplied values.\n{}",
+                serde_json::to_string(&values)?
+            );
+            protection::protect(text.as_bytes())?
+        } else {
+            encrypted.context("missing admitted message content")?
+        };
+        let revision = insert_message(db, &conversation_id, MessageRole::User, encrypted)?;
+        if let Some((_, payload)) = frozen {
+            db.execute(
+                "INSERT INTO message_attachments(message_revision_id, payload) VALUES (?1, ?2)",
+                params![revision, payload],
+            )?;
+        }
+        entries.push(revision);
+        activate_context(db, &conversation_id, &entries)?
+    };
     let input = load_messages(db, &conversation_id, &entries[consumed..])?;
     let mut attachments = Vec::new();
     for message in &input {
@@ -1088,7 +1188,39 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         question_route,
         answered_question,
         requires_bridge: false,
+        native_job_recovery: match history {
+            AttemptHistory::Resume { native } => native,
+            _ => None,
+        },
     })
+}
+
+pub(crate) fn recovery_checkpoint(
+    db: &Connection,
+    conversation_id: &str,
+    source_run: &str,
+    input_context_id: &str,
+    sealed_result: Option<&str>,
+) -> Result<Option<String>> {
+    let current = load_conversation(db, conversation_id)?.context_id;
+    if previous_attempt(db, conversation_id)?.is_none_or(|prior| prior.run_id != source_run) {
+        return Ok(None);
+    }
+    if let Some(result) = sealed_result {
+        return Ok((current == result).then_some(current));
+    }
+    // Legacy attempts did not store the output context. Recognize only the old
+    // settlement shape: the exact sent context followed by one assistant revision.
+    let sent = context_entries(db, conversation_id, input_context_id)?;
+    let entries = context_entries(db, conversation_id, &current)?;
+    if entries == sent {
+        return Ok(Some(current));
+    }
+    if !entries.starts_with(&sent) || entries.len() != sent.len() + 1 {
+        return Ok(None);
+    }
+    let tail = load_messages(db, conversation_id, &entries[sent.len()..])?;
+    Ok((tail[0].role == MessageRole::Assistant).then_some(current))
 }
 
 fn new_id() -> String {
@@ -2006,6 +2138,129 @@ mod tests {
         assert_eq!(dispatch.delivery, Delivery::Unconfirmed);
         let next = prepare(&store, &conversation.id, scope, "continue").await?;
         assert!(matches!(next.intent, SessionIntent::Start));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queue_recovers_an_ambiguous_dispatch_only_on_request_and_records_one_terminal_event()
+    -> Result<()> {
+        use crate::jobs::{AdmissionEnvironment, JobContext, RecoveryAction};
+
+        let (_dir, store, chat, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let database = scope.checkout.join("store.sqlite");
+        let environment = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: false,
+        };
+        let prompt = "Protect this queued input after a crash.";
+        store
+            .save_conversation_draft(chat.id.clone(), prompt.into())
+            .await?;
+        let job = store
+            .enqueue_conversation_turn(
+                JobContext {
+                    conversation_id: chat.id.clone(),
+                    context_id: chat.context_id,
+                },
+                scope,
+                prompt.into(),
+            )
+            .await?;
+        let first = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("initial claim missing")?;
+        let lost_run = first.run.id.clone();
+        assert!(store.record_agent_launch_intent(lost_run.clone()).await?);
+        store.mark_agent_running(lost_run.clone()).await?;
+        let dispatch_id = prepare_fixture_dispatch(&store, &first).await?;
+        let before = store
+            .agent_dispatch(chat.id.clone(), lost_run.clone())
+            .await?
+            .context("prepared evidence missing")?;
+        assert_eq!(before.delivery, Delivery::Prepared);
+        drop(store);
+
+        let store = Store::open(database.clone())?;
+        store.recover_agent_attempts_after_restart().await?;
+        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        let interrupted = store
+            .job(job.project_id.clone(), job.id.clone())
+            .await?
+            .unwrap();
+        assert_eq!(
+            interrupted.latest_attempt.unwrap().status,
+            RunStatus::Interrupted
+        );
+        let saved = store
+            .agent_dispatch(chat.id.clone(), lost_run.clone())
+            .await?
+            .context("dispatch evidence was lost")?;
+        assert_eq!(saved.id, dispatch_id);
+        assert_eq!(saved.delivery, Delivery::Unconfirmed);
+        assert_eq!(saved.frames, before.frames);
+        store
+            .queue_job_recovery(
+                job.project_id.clone(),
+                job.id.clone(),
+                lost_run.clone(),
+                RecoveryAction::Resume,
+            )
+            .await?;
+        let resumed = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("explicit resume was not claimed")?;
+        assert!(matches!(resumed.intent, SessionIntent::Start));
+        assert_eq!(resumed.previous_run_id, Some(lost_run));
+        assert_eq!(resumed.input[0].text, prompt);
+        store.mark_agent_running(resumed.run.id.clone()).await?;
+        store
+            .record_agent_observation(
+                resumed.run.id.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: ProviderLocation::default(),
+                    data: ProviderEventData::TurnFinished {
+                        outcome: TurnOutcome::Completed,
+                    },
+                },
+            )
+            .await?;
+
+        let canceller = Store::open(database.clone())?;
+        let (cancel, complete) = tokio::join!(
+            canceller.request_job_interrupt(chat.id.clone(), resumed.run.id.clone()),
+            store.finish_agent_attempt(
+                resumed.run.id.clone(),
+                RunStatus::Succeeded,
+                Some("Confirmed answer".into())
+            ),
+        );
+        complete?;
+        if let Err(error) = cancel {
+            assert!(error.to_string().contains("no longer active"));
+        }
+        assert!(
+            canceller
+                .finish_agent_attempt(resumed.run.id.clone(), RunStatus::Cancelled, None)
+                .await
+                .is_err()
+        );
+        let terminal = store
+            .job(job.project_id, job.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap();
+        assert_eq!(terminal.status, RunStatus::Succeeded);
+        assert!(!terminal.cancel_requested);
+        let db = rusqlite::Connection::open(database)?;
+        let statuses = db.prepare("SELECT json_extract(payload, '$.status') FROM run_events WHERE turn_id = ?1 ORDER BY seq")?
+            .query_map([resumed.run.turn_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(statuses, ["starting", "running", "succeeded"]);
         Ok(())
     }
 

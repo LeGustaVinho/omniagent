@@ -91,11 +91,12 @@
 .pipeline-tabs button[aria-current="page"] { border-block-end-color: var(--primary); }
 .pipeline-tabs button:focus-visible { outline-offset: -3px; }
 
-.pipeline-view { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.pipeline-view { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow: auto; }
 .pipeline-view[hidden] { display: none; }
 .pipeline-view-content { gap: 1rem; overflow: auto; padding: 1.25rem; }
 
 .pipeline-toolbar {
+  flex: none;
   flex-wrap: wrap;
   min-height: 3.25rem;
   padding: 0.5rem 1rem;
@@ -328,9 +329,36 @@
 .pipeline-attempts p { font-size: 0.75rem; color: var(--muted-foreground); }
 .pipeline-plugin { padding-block: 0.5rem; border-block-start: 1px solid var(--border); }
 
+.pipeline-catalog { display: grid; align-content: start; gap: 1.15rem; min-width: 0; }
+.pipeline-catalog-toolbar { display: flex; flex-wrap: wrap; gap: .7rem; justify-content: space-between; }
+.pipeline-catalog-search {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  flex: 1 1 16rem;
+  max-width: 25rem;
+  padding-inline: .65rem;
+  border: 1px solid var(--border);
+  border-radius: .45rem;
+  background: var(--background);
+  color: var(--muted-foreground);
+}
+.pipeline-catalog-search:focus-within { border-color: var(--ring); }
+.pipeline-catalog-search > input { flex: 1; min-width: 0; height: 2.15rem; color: var(--foreground); outline: none !important; }
+.pipeline-catalog-group > h3 { margin-bottom: .45rem; font-size: .8125rem; font-weight: 650; }
+.pipeline-catalog-group > ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: .55rem; }
+.pipeline-catalog-node { display: flex; height: 100%; align-items: start; gap: .6rem; justify-content: space-between; padding: .65rem .75rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--card); }
+.pipeline-catalog-node > div { min-width: 0; }
+.pipeline-catalog-node h4 { margin-bottom: .3rem; font-size: .8125rem; font-weight: 620; }
+.pipeline-catalog-node dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .2rem .5rem; font-size: .73rem; }
+.pipeline-catalog-node :is(dt, .pipeline-meta) { color: var(--muted-foreground); }
+.pipeline-catalog-node .pipeline-meta { text-align: end; }
+.pipeline-catalog-dialog { width: min(820px, calc(100vw - 34px)); }
+.pipeline-catalog-dialog .pipeline-catalog-group > ul { grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); }
+
 @container pipelines (width < 700px) {
-  .pipeline-editor { display: flex; flex-direction: column; min-height: 28rem; overflow: auto; }
-  .pipeline-canvas { flex: 1; min-height: 21rem; }
+  .pipeline-editor { display: flex; flex: 0 0 auto; flex-direction: column; min-height: 0; }
+  .pipeline-canvas { flex: none; min-height: clamp(15rem, 48vh, 26rem); }
   .pipeline-inspector { min-height: 10rem; border-inline-start: 0; border-block-start: 1px solid var(--border); overflow: visible; }
   .pipeline-two-columns { grid-template-columns: minmax(0, 1fr); }
   .pipeline-stage-jump { display: block; }

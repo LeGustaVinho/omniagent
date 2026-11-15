@@ -29,12 +29,14 @@ function UnifiedPatch({ file }: { file: ChangedFile }) {
   );
 }
 
-function MonacoComparison({ file, inline, ready }: { file: ChangedFile; inline: boolean; ready: (instance: editor.IStandaloneDiffEditor | null) => void }) {
+type DiffLayout = "auto" | "split" | "unified";
+
+function MonacoComparison({ file, layout, ready }: { file: ChangedFile; layout: DiffLayout; ready: (instance: editor.IStandaloneDiffEditor | null) => void }) {
   const anchor = useRef<HTMLDivElement>(null);
   const instance = useRef<editor.IStandaloneDiffEditor | null>(null);
   const [error, setError] = useState("");
-  const inlineSetting = useRef(inline);
-  inlineSetting.current = inline;
+  const layoutSetting = useRef(layout);
+  layoutSetting.current = layout;
 
   useEffect(() => {
     const host = anchor.current;
@@ -56,9 +58,9 @@ function MonacoComparison({ file, inline, ready }: { file: ChangedFile; inline: 
         renderMarginRevertIcon: false,
         renderGutterMenu: false,
         renderIndicators: true,
-        renderSideBySide: !inlineSetting.current,
-        useInlineViewWhenSpaceIsLimited: true,
-        renderSideBySideInlineBreakpoint: 760,
+        renderSideBySide: layoutSetting.current !== "unified",
+        useInlineViewWhenSpaceIsLimited: layoutSetting.current === "auto",
+        renderSideBySideInlineBreakpoint: 700,
         hideUnchangedRegions: { enabled: true, contextLineCount: 3 },
         ignoreTrimWhitespace: false,
         scrollBeyondLastLine: false,
@@ -94,7 +96,9 @@ function MonacoComparison({ file, inline, ready }: { file: ChangedFile; inline: 
     };
   }, [file, ready]);
 
-  useEffect(() => { instance.current?.updateOptions({ renderSideBySide: !inline }); }, [inline]);
+  useEffect(() => {
+    instance.current?.updateOptions({ renderSideBySide: layout !== "unified", useInlineViewWhenSpaceIsLimited: layout === "auto" });
+  }, [layout]);
 
   return error ? <><div className="p-2"><InlineIssue>Diff editor unavailable. Showing the recorded text.</InlineIssue></div><UnifiedPatch file={file} /></>
     : <div className="h-full min-h-45 w-full min-w-0 overflow-hidden" ref={anchor} aria-label={`Diff editor for ${file.path}`} />;
@@ -121,7 +125,7 @@ export default function ChangesPanel({
     : activeSource === "branch" ? (git.checkout === "release" ? branchChanges : [])
     : liveFiles;
   const [selection, setSelection] = useState<string>();
-  const [inline, setInline] = useState(false);
+  const [layout, setLayout] = useState<DiffLayout>("auto");
   const [patch, setPatch] = useState(false);
   const [diffInstance, setDiffInstance] = useState<editor.IStandaloneDiffEditor | null>(null);
   const selected = selection === "" ? undefined : files.find((file) => file.path === selection) ?? files[0];
@@ -140,22 +144,27 @@ export default function ChangesPanel({
     if (simulation?.delivery !== "verified" || git.drift) return;
     simulation.advanceDelivery("accept");
     if (git.gitMode !== "manual") {
-      git.commit(savedCandidate.map(({ path }) => path), "Add verified release readiness checklist", "release");
+      git.commitCandidate();
       if (git.gitMode === "merge") simulation.advanceDelivery("merge");
     }
   }
 
   return (
     <section className="delivery-view" aria-label="Changes">
-      <header className="delivery-toolbar">
+      <header className="delivery-toolbar diff-toolbar">
         <GitCompare size={16} className="text-muted-foreground" aria-hidden="true" />
-        <h2>Changes</h2>
-        <span className="rounded bg-muted px-1.5 py-0.5 text-xs" data-source={activeSource}>{label}</span>
+        <h2 className="diff-source" data-source={activeSource}>{label}</h2>
         {simulation && <span className="flex gap-1.5 text-xs tabular-nums"><span className="text-[var(--success)]">+{totals.additions}</span><span className="text-[var(--danger)]">−{totals.deletions}</span></span>}
         <div className="ml-auto flex items-center gap-0.5">
-          <button type="button" className="delivery-tab" aria-label="Previous change" title="Previous change" disabled={!diffInstance} onClick={() => diffInstance?.goToDiff("previous")}><ChevronUp size={15} /></button>
-          <button type="button" className="delivery-tab" aria-label="Next change" title="Next change" disabled={!diffInstance} onClick={() => diffInstance?.goToDiff("next")}><ChevronDown size={15} /></button>
-          <button type="button" className="delivery-tab" aria-label={inline ? "Automatic layout" : "Unified layout"} title={inline ? "Automatic layout" : "Unified layout"} disabled={!selected || patch} onClick={() => setInline((value) => !value)}>{inline ? <Rows3 size={15} /> : <Columns2 size={15} />}</button>
+          <button type="button" className="delivery-tab" aria-label="Previous change" title="Previous change" disabled={!diffInstance || patch} onClick={() => diffInstance?.goToDiff("previous")}><ChevronUp size={15} /></button>
+          <button type="button" className="delivery-tab" aria-label="Next change" title="Next change" disabled={!diffInstance || patch} onClick={() => diffInstance?.goToDiff("next")}><ChevronDown size={15} /></button>
+          <label className="diff-layout-select">
+            {layout === "unified" ? <Rows3 size={14} aria-hidden="true" /> : <Columns2 size={14} aria-hidden="true" />}
+            <select aria-label="Diff layout" className="delivery-filter" value={layout} disabled={!selected || selected.kind === "Binary" || patch}
+              onChange={(event) => setLayout(event.target.value as DiffLayout)}>
+              <option value="auto">Auto</option><option value="split">Split</option><option value="unified">Unified</option>
+            </select>
+          </label>
           {onClose && <button type="button" className="delivery-tab" aria-label="Close changes" onClick={onClose}><X size={16} /></button>}
         </div>
       </header>
@@ -167,24 +176,24 @@ export default function ChangesPanel({
           ? <div className="delivery-empty"><GitCompare size={22} aria-hidden="true" /><h3 className="font-semibold text-foreground">{activeSource === "saved" ? "No saved candidate" : "No changes"}</h3><p className="text-sm">{activeSource === "saved" ? "Capture an attempt to review its exact revision." : "Stage changes from the Git workspace to compare them here."}</p></div>
           : <div className="flex min-h-0 flex-1 flex-col">
             <section className="max-h-44 shrink-0 overflow-auto border-b border-border" aria-label="Changed files">
-              {files.map((file) => <button type="button" key={file.path} className="flex w-full flex-wrap items-center gap-2 border-b border-border px-3 py-2 text-left text-xs hover:bg-muted last:border-b-0 aria-expanded:bg-muted" aria-expanded={selected?.path === file.path}
+              {files.map((file) => <button type="button" key={file.path} className="diff-file-row" aria-expanded={selected?.path === file.path}
                 onClick={() => { setSelection(selected?.path === file.path ? "" : file.path); setPatch(false); }}>
                 {selected?.path === file.path ? <ChevronDown size={14} /> : <ChevronUp size={14} className="rotate-90 text-muted-foreground" />}
                 {file.kind === "Binary" ? <FileImage size={14} className="text-muted-foreground" /> : <FileCode2 size={14} className="text-muted-foreground" />}
-                <span className="min-w-0 flex-1 break-all font-mono">{file.previousPath && `${file.previousPath} → `}{file.path}</span>
+                <span className="min-w-0 flex-1 truncate font-mono" title={file.path}>{file.previousPath && `${file.previousPath} → `}{file.path}</span>
                 <span className="text-muted-foreground">{file.kind}</span>
                 {file.kind !== "Binary" && <span className="flex gap-1.5 tabular-nums"><span className="text-[var(--success)]">+{file.additions}</span><span className="text-[var(--danger)]">−{file.deletions}</span></span>}
               </button>)}
             </section>
             {selected && <div className="flex min-h-0 flex-1 flex-col">
-              <div className="flex flex-wrap items-center gap-1 border-b border-border px-2 py-1">
+              {(activeSource === "saved" ? selected.patch : selected.kind !== "Binary") && <div className="flex flex-wrap items-center gap-1 border-b border-border px-2 py-1">
                 {activeSource === "saved" && selected.patch && <button className="delivery-tab" type="button" aria-pressed={patch} onClick={() => setPatch(!patch)}>{patch ? "Compare side by side" : "View saved patch"}</button>}
                 {selected.kind !== "Binary" && activeSource !== "saved" && <button className="delivery-tab" type="button" onClick={() => openWorkspace(selected.path.endsWith(".md") ? "knowledge" : "ide", selected.path)}>Open file <ExternalLink size={12} className="ml-1 inline-block" /></button>}
-              </div>
+              </div>}
               {selected.kind === "Binary"
                 ? <div className="delivery-empty"><FileImage size={22} /><p className="text-sm">Binary file. Text comparison is unavailable.</p></div>
                 : <div className="min-h-0 flex-1 overflow-auto">
-                  {patch ? <UnifiedPatch file={selected} /> : <MonacoComparison key={selected.path} file={selected} inline={inline} ready={setDiffInstance} />}
+                  {patch ? <UnifiedPatch file={selected} /> : <MonacoComparison key={selected.path} file={selected} layout={layout} ready={setDiffInstance} />}
                 </div>}
             </div>}
             {simulation && activeSource === "saved" && <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-3 py-2">

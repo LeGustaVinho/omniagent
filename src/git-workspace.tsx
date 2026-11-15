@@ -3,9 +3,9 @@ import { Dialog } from "radix-ui";
 import { useEffect, useState, type FormEvent } from "react";
 import ChangesPanel from "@/changes-panel";
 import { Button } from "@/components/ui/button";
-import { releaseCommits, savedCandidate, workingChanges, type ChangesSource } from "@/git-demo-data";
+import { releaseCommits, revisionMessage, workingChanges, type ChangesSource } from "@/git-demo-data";
 import { useGitSimulation } from "@/git-simulation";
-import { deliveryBase, deliveryBranch, deliveryCommit, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
+import { deliveryBase, deliveryBranch, deliveryCommit, deliveryCommitSha, deliveryMergeSha, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
 import { DeliveryStatus, InlineIssue, IntegrationNotice } from "@/tasks-git-ui";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -15,7 +15,6 @@ const sources: { id: ChangesSource; label: string }[] = [
   { id: "working", label: "Working tree" }, { id: "staged", label: "Staged" },
   { id: "branch", label: "Branch comparison" }, { id: "saved", label: "Saved diff" },
 ];
-const revisionMessage = "Add verified release readiness checklist";
 
 function EmptyGitView({ view, props }: { view: GitView; props: WorkspaceProps }) {
   const labels = {
@@ -171,14 +170,14 @@ function ChangeOperations({ props, source, baseRef }: { props: WorkspaceProps; s
             <dl className="grid grid-cols-[auto_1fr] gap-2 text-sm">
               <dt className="text-muted-foreground">Base</dt><dd className="font-mono">{deliveryBase}</dd>
               <dt className="text-muted-foreground">Candidate</dt><dd className="font-mono">{deliveryCommit}</dd>
-              <dt className="text-muted-foreground">Commit</dt><dd>{git.candidateCommitted ? "Committed" : "Pending"}</dd>
-              <dt className="text-muted-foreground">Merge</dt><dd>{simulation.delivery === "merged" ? "Merged into destination" : candidateAccepted ? "Waiting for merge" : "Waiting for acceptance"}</dd>
+              <dt className="text-muted-foreground">Commit</dt><dd>{git.candidateCommitted ? <><span>{deliveryBranch}</span><code className="block wrap-anywhere text-xs">{deliveryCommitSha}</code></> : candidateAccepted ? "Waiting for commit" : "Waiting for acceptance"}</dd>
+              <dt className="text-muted-foreground">Merge</dt><dd>{simulation.delivery === "merged" ? <><span>Merged into destination</span><code className="block wrap-anywhere text-xs">main · {deliveryMergeSha}</code></> : git.candidateCommitted && candidateAccepted ? "Waiting for merge" : "Requires a verified commit"}</dd>
             </dl>
             <label className="delivery-field">After diff acceptance<select className="delivery-filter" value={git.gitMode} onChange={(event) => git.setGitMode(event.target.value as typeof git.gitMode)}>
-              <option value="manual">Manual commit and merge</option><option value="commit">Automatic commit, manual merge</option><option value="merge">Automatic commit and local merge</option>
+              <option value="manual">User commits and merges</option><option value="commit">Automatic commit and user merge</option><option value="merge">Automatic local commit and merge</option>
             </select></label>
             {simulation.delivery === "accepted" && <>
-              <Button className="justify-self-start px-2.5 py-1.5 text-xs" type="button" disabled={Boolean(git.drift) || git.candidateCommitted} onClick={() => git.commit(savedCandidate.map(({ path }) => path), revisionMessage, "release")}><GitCommitHorizontal size={15} /> Commit accepted candidate</Button>
+              <Button className="justify-self-start px-2.5 py-1.5 text-xs" type="button" disabled={Boolean(git.drift) || git.candidateCommitted} onClick={git.commitCandidate}><GitCommitHorizontal size={15} /> Commit accepted candidate</Button>
               <Button className="justify-self-start px-2.5 py-1.5 text-xs" type="button" variant="outline" disabled={!mergeReady} onClick={() => simulation.advanceDelivery("merge")}><GitMerge size={15} /> Merge into destination</Button>
             </>}
             <Button className="justify-self-start px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={() => props.openWorkspace("tasks", deliveryTaskId)}>Open linked task <ArrowRight size={14} /></Button>

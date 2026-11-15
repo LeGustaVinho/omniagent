@@ -47,6 +47,16 @@ export const policyFields = {
       placeholder: "Use the OmniAgent data directory",
     },
     {
+      id: "branch-strategy", label: "Agile branch strategy", kind: "choice", initial: "isolated",
+      description: "Applies when provisioning worktrees for Tasks and Sub-Tasks.",
+      options: [["isolated", "Branch per work item"], ["shared", "Shared branch per Task"]],
+    },
+    {
+      id: "checklist-mode", label: "Default checklist mode", kind: "choice", initial: "track",
+      description: "Tasks and Sub-Tasks can override how checklist items are sent to an agent.",
+      options: [["track", "Track progress"], ["by-item", "Run by item"]],
+    },
+    {
       id: "writer-admission", label: "Repository writes", kind: "choice", initial: "approval",
       description: "Scope checked when an implementation job requests permission to write.",
       options: [["approval", "Approved task worktree"], ["read-only", "Read-only"]],
@@ -112,9 +122,9 @@ export const policyFields = {
       options: [["pause", "Pause and review the update"], ["prepare", "Prepare a conflict-free update and rerun checks"]],
     },
     {
-      id: "completion-milestone", label: "Task completion milestone", kind: "choice", initial: "accepted",
-      description: "Controls when accepted work reaches Completed.",
-      options: [["accepted", "Diff accepted"], ["merged", "Merged into destination"]],
+      id: "completion-milestone", label: "Task completion milestone", kind: "choice", initial: "committed",
+      description: "Choose the required Git evidence for repository work to reach Completed.",
+      options: [["committed", "Verified commit"], ["merged", "Verified merge"]],
     },
   ],
   automation: [

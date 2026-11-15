@@ -1,13 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { IDockviewPanelProps } from "dockview-react";
-import { Activity, ArrowDown, ArrowUp, MessageSquare, Plus, Search } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, MessageSquare, Plus, RotateCcw, Search } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { AdmissionBlocker } from "@/bindings/AdmissionBlocker";
 import type { Job } from "@/bindings/Job";
 import type { JobInspection } from "@/bindings/JobInspection";
+import type { RecoveryAction } from "@/bindings/RecoveryAction";
 import type { MessageRevision } from "@/bindings/MessageRevision";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
@@ -26,7 +27,7 @@ const draftWrites = new Map<string, Promise<void>>();
 const historyOffsets = new Map<string, number>();
 
 function pendingJob(inspection: JobInspection | null | undefined) {
-  return Boolean(inspection && !inspection.job.latestAttempt && inspection.job.queueState !== "cancelled");
+  return Boolean(inspection && (!inspection.job.latestAttempt || inspection.job.queuedRecovery) && inspection.job.queueState !== "cancelled");
 }
 
 function waitReason(blocker: AdmissionBlocker | undefined): string {
@@ -65,11 +66,30 @@ export function ConversationListPanel({ containerApi }: IDockviewPanelProps) {
   return <ConversationSidebar checkoutId={checkoutId} onOpen={(conversation) => openConversation(containerApi, conversation)} />;
 }
 
-export function ConversationSidebar({ checkoutId, onOpen, activeId, onSimulate, onRenamed }: {
+export function useNewConversation(checkoutId: string, onOpen: (conversation: Conversation) => void) {
+  const queryClient = useQueryClient();
+  const key = ["conversations", checkoutId];
+  return useMutation({
+    mutationKey: ["new-conversation", checkoutId],
+    scope: { id: "new-conversation:" + checkoutId },
+    mutationFn: async () => {
+      const list = await queryClient.fetchQuery({
+        queryKey: key,
+        queryFn: () => invoke<Conversation[]>("list_conversations", { checkoutId }),
+      });
+      return invoke<Conversation>("create_conversation", { checkoutId, title: `Conversation ${list.length + 1}` });
+    },
+    onSuccess: (conversation) => {
+      void queryClient.invalidateQueries({ queryKey: key });
+      onOpen(conversation);
+    },
+  });
+}
+
+export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }: {
   checkoutId: string;
   onOpen: (conversation: Conversation) => void;
   activeId?: string;
-  onSimulate?: () => void;
   onRenamed?: (conversation: Conversation) => void;
 }) {
   const queryClient = useQueryClient();
@@ -84,16 +104,7 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onSimulate, 
     queryFn: () => invoke<Conversation[]>("list_conversations", { checkoutId }),
     enabled: Boolean(checkoutId),
   });
-  const start = useMutation({
-    mutationFn: () => invoke<Conversation>("create_conversation", {
-      checkoutId,
-      title: `Conversation ${(conversations.data?.length ?? 0) + 1}`,
-    }),
-    onSuccess: (conversation) => {
-      void queryClient.invalidateQueries({ queryKey: listKey });
-      onOpen(conversation);
-    },
-  });
+  const start = useNewConversation(checkoutId, onOpen);
   const rename = useMutation({
     mutationFn: ({ conversationId, title }: { conversationId: string; title: string }) =>
       invoke<Conversation>("rename_conversation", { checkoutId, conversationId, title }),
@@ -120,7 +131,7 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onSimulate, 
         <Search aria-hidden /><input aria-label="Filter conversations" placeholder="Filter conversations" value={filter}
           onChange={(event) => setFilter(event.target.value)} />
       </label>
-      {error && <p role="alert" className="mb-4 text-sm text-red-300">{String(error)}</p>}
+      {error && <p role="alert" className="conv-alert mt-2">{String(error)}</p>}
       {conversations.isPending && <p role="status" className="text-sm text-muted-foreground">Loading conversations…</p>}
       {matching?.length === 0 && <p className="conv-sidebar-note">{filter ? "No matching conversations." : "New conversations appear here."}</p>}
       <ul className="conv-session-list">
@@ -148,7 +159,6 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onSimulate, 
         ))}
       </ul>
       {notice && <p role="status" className="conv-sidebar-note">{notice}</p>}
-      {onSimulate && Boolean(matching?.length) && <p className="conv-sidebar-note">Try organization and history controls in <button type="button" className="conv-inline-action" onClick={onSimulate}>Simulation</button>.</p>}
       {renaming && <Dialog.Root open onOpenChange={(open) => { if (!open && !rename.isPending) setRenaming(undefined); }}>
         <Dialog.Portal>
           <Dialog.Overlay className="conv-dialog-scrim" />
@@ -297,13 +307,21 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
       queryClient.setQueryData<string>(draftKey, (current) => current === submitted ? "" : current);
       setDraftStatus("");
       setDraftError("");
-      queryClient.setQueryData<JobInspection>(jobKey, { job: queuedJob, blockers: [] });
+      queryClient.setQueryData<JobInspection>(jobKey, { job: queuedJob, blockers: [], recoveryActions: [] });
       void queryClient.invalidateQueries({ queryKey: jobKey });
     },
   });
   const cancelQueued = useMutation({
     mutationFn: (jobId: string) => invoke("cancel_conversation_job", { conversationId, jobId }),
     onSettled: () => queryClient.invalidateQueries({ queryKey: jobKey }),
+  });
+  const recover = useMutation({
+    mutationFn: ({ jobId, runId, action }: { jobId: string; runId: string; action: RecoveryAction }) =>
+      invoke<Job>("recover_conversation_job", { conversationId, jobId, runId, action }),
+    onSuccess: (recoveryJob) => {
+      queryClient.setQueryData<JobInspection>(jobKey, { job: recoveryJob, blockers: [], recoveryActions: [] });
+      void queryClient.invalidateQueries({ queryKey: jobKey });
+    },
   });
 
   function editDraft(text: string) {
@@ -321,7 +339,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     });
   }
 
-  const canSend = Boolean(text.trim() && !busy && !latest.isPending && !latestJob.isPending && selected?.option.selectable && !send.isPending);
+  const canSend = Boolean(text.trim() && !busy && !latest.isPending && !latestJob.isPending && selected?.option.selectable && !send.isPending && !recover.isPending);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -354,7 +372,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
         }}>
         <div ref={historyContents} className="conv-reading">
         {history.isPending && <p role="status" className="text-sm text-muted-foreground">Loading messages…</p>}
-        {history.error && <p role="alert" className="text-sm text-red-300">{String(history.error)}</p>}
+        {history.error && <p role="alert" className="conv-alert">{String(history.error)}</p>}
         {history.data?.length === 0 && !run && !queued && <div className="conv-empty">
           <MessageSquare aria-hidden />
           <h2>Start a conversation</h2>
@@ -368,13 +386,27 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
             </li>
           ))}
         </ol>
-        {(latestJob.error || cancelQueued.error) && <p role="alert" className="text-sm text-red-300">{String(latestJob.error || cancelQueued.error)}</p>}
-        {latest.error && <p role="alert" className="text-sm text-red-300">{String(latest.error)}</p>}
-        {activity.error && <p role="alert" className="text-sm text-red-300">{String(activity.error)}</p>}
+        {(latestJob.error || cancelQueued.error || recover.error) && <p role="alert" className="conv-alert">{String(latestJob.error || cancelQueued.error || recover.error)}</p>}
+        {latest.error && <p role="alert" className="conv-alert">{String(latest.error)}</p>}
+        {activity.error && <p role="alert" className="conv-alert">{String(activity.error)}</p>}
         {live && activity.output && <div className="conv-stream" aria-label="Streaming response">
           <ConversationMarkdown>{activity.output}</ConversationMarkdown>
         </div>}
         {run && <ConversationRequests activity={activity} conversationId={conversationId} runId={run.id} />}
+        {job && attempt && !busy && job.recoveryActions.length > 0 && (
+          <section className="conv-recovery" aria-label="Recover job">
+            <div className="conv-recovery-message"><RotateCcw size={16} aria-hidden="true" /><div>
+              <h2>Recover this turn</h2>
+              <p>{job.recoveryActions.includes("resume") ? "Continue from a recorded checkpoint or retry with the saved input." : "Start another attempt with the saved input."}</p>
+            </div></div>
+            <div className="flex flex-wrap gap-2">
+            {job.recoveryActions.map((action) => <Button key={action} type="button" variant="outline" disabled={recover.isPending || send.isPending}
+              onClick={() => recover.mutate({ jobId: job.job.id, runId: attempt.runId, action })}>
+              {action === "retry" ? "Retry saved input" : "Resume from checkpoint"}
+            </Button>)}
+            </div>
+          </section>
+        )}
         </div>
       </div>
       <div className="conv-composer-area">
@@ -437,12 +469,12 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           </div>
           {models.isPending && <p role="status" className="text-xs text-muted-foreground">Checking CLI models…</p>}
           {models.error && <div className="flex flex-wrap items-center gap-2">
-            <p role="alert" className="text-xs text-red-300">{String(models.error)}</p>
+            <p role="alert" className="conv-alert">{String(models.error)}</p>
             <Button type="button" variant="outline" onClick={() => void models.refetch()}>Refresh models</Button>
           </div>}
           {draftStatus && <p role="status" className="text-xs text-muted-foreground">{draftStatus}</p>}
-          {(draftError || draft.error) && <p role="alert" className="text-sm text-red-300">{draftError || String(draft.error)}</p>}
-          {send.error && <p role="alert" className="text-sm text-red-300">{String(send.error)}</p>}
+          {(draftError || draft.error) && <p role="alert" className="conv-alert">{draftError || String(draft.error)}</p>}
+          {send.error && <p role="alert" className="conv-alert">{String(send.error)}</p>}
       </form>
       </div>
       </div>

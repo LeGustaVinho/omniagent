@@ -3,26 +3,31 @@ import {
   Background, Controls, Handle, MarkerType, Position, ReactFlow, addEdge, applyEdgeChanges, applyNodeChanges, useUpdateNodeInternals,
 } from "@xyflow/react";
 import type { Node, NodeProps } from "@xyflow/react";
-import { ArrowUpRight, Check, ChevronRight, CircleAlert, CirclePlay, GitBranch, GitMerge, Layers3, ListChecks, Plus, Save, ShieldCheck, Workflow } from "lucide-react";
+import { ArrowUpRight, Check, CircleAlert, CirclePlay, GitBranch, GitCommitHorizontal, GitMerge, Layers3, ListChecks, Plus, Save, ShieldCheck, Workflow, X } from "lucide-react";
+import { Dialog } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { useGitSimulation } from "@/git-simulation";
+import { PipelineCatalog } from "@/pipeline-catalog";
+import { deliveryBranch, deliveryCommitSha, deliveryMergeSha, deliveryRunId } from "@/tasks-demo-data";
 import {
   advancePipelineRun, beginPipelineRun, createDeliveryWorkflow, createStage, declineStage, interruptStage, resolveStage,
-  retryStage, runStatus, sampleModels, snapshotWorkflow, stageAttempt, stageKinds, validateWorkflow,
+  recordPipelineGit, retryStage, runStatus, sampleModels, snapshotWorkflow, stageAttempt, stageKinds, validateWorkflow,
 } from "./pipelines-model";
 import type { PipelineRun, Stage, StageEdge, StageKind, StageStatus, WorkflowRevision } from "./pipelines-model";
 import { ComparisonView, PendingPipeline, PipelineMaintenance, RoleEditor, TemplateHistory } from "./pipelines-secondary";
 import "@xyflow/react/dist/style.css";
 import "./pipelines-workspace.css";
 
-const panels = ["Builder", "Runs", "Roles & templates", "Compare", "Maintenance"] as const;
+const panels = ["Builder", "Runs", "Roles & templates", "Library", "Compare", "Maintenance"] as const;
 type View = typeof panels[number];
 type RenderNode = Node<Stage & { status?: StageStatus; inputSide?: Position; outputSide?: Position }, "stage">;
 
 const stageIcons = {
   plan: ListChecks, condition: GitBranch, review: ListChecks, join: GitMerge, task: Layers3,
   approval: ShieldCheck, implementation: Workflow, verify: Check, accept: ShieldCheck,
+  commit: GitCommitHorizontal, merge: GitMerge,
 };
 
 function StageCard({ id, data, selected }: NodeProps<RenderNode>) {
@@ -53,7 +58,7 @@ function handleSide(node: Pick<Node, "position">, other: Pick<Node, "position"> 
   return y < 0 ? Position.Top : Position.Bottom;
 }
 
-const viewTargets: Record<string, View> = { comparison: "Compare", compare: "Compare", maintenance: "Maintenance", runs: "Runs", roles: "Roles & templates", builder: "Builder" };
+const viewTargets: Record<string, View> = { comparison: "Compare", compare: "Compare", maintenance: "Maintenance", runs: "Runs", roles: "Roles & templates", builder: "Builder", library: "Library" };
 
 function StageConfiguration({ draft, activeId, onPatch, onConnect }: {
   draft: WorkflowRevision; activeId: string; onPatch: (patch: Partial<Stage>) => void;
@@ -130,6 +135,9 @@ function StageRunDetails({ run, activeId, actions, links }: {
     <div className="pipeline-stack">
       <span className="pipeline-status pipeline-self-start" data-status={attempt.status}>{attempt.status}</span>
       <p>{attempt.detail}</p>
+      {attempt.git && <div className="pipeline-evidence">
+        <dl className="pipeline-data"><dt>Branch</dt><dd>{attempt.git.branch}</dd><dt>SHA</dt><dd><code>{attempt.git.sha}</code></dd></dl>
+      </div>}
       <dl className="pipeline-data"><dt>Workflow revision</dt><dd>{run.workflow.revision}</dd><dt>Attempt</dt><dd>{attempt.number}</dd><dt>Profile</dt><dd>{data.mode}</dd><dt>Output contract</dt><dd>{data.output}</dd></dl>
       {attempt.status === "waiting" && data.kind === "plan" && (
         <form className="pipeline-form pipeline-stack pipeline-evidence" onSubmit={(event) => { event.preventDefault(); actions.resolve(migration); }}>
@@ -148,7 +156,10 @@ function StageRunDetails({ run, activeId, actions, links }: {
           <div className="pipeline-actions"><Button onClick={() => actions.resolve()}>{data.kind === "approval" ? "Approve implementation" : "Accept diff"}</Button>{data.kind === "accept" && <Button variant="outline" onClick={() => links.openChanges("saved")}>Open saved diff</Button>}<Button variant="outline" onClick={actions.decline}>Decline</Button></div>
         </section>
       )}
-      {attempt.status === "waiting" && data.goal && data.kind !== "plan" && data.kind !== "approval" && data.kind !== "accept" && (
+      {attempt.status === "waiting" && (data.kind === "commit" || data.kind === "merge") && (
+        <Button variant="outline" onClick={() => links.openWorkspace("git", "saved")}>Open Git delivery <ArrowUpRight size={14} /></Button>
+      )}
+      {attempt.status === "waiting" && data.goal && !["plan", "approval", "accept", "commit", "merge"].includes(data.kind) && (
         <section className="pipeline-evidence pipeline-stack"><strong>{data.goal}</strong><p>{data.evidence}</p><p className="pipeline-meta">{data.goalContinuation === "native" ? "Provider-native" : "OmniAgent-managed"} · {data.goalMinutes} min limit</p><Button onClick={() => actions.resolve()}>Confirm goal evidence</Button></section>
       )}
       <div className="pipeline-actions">
@@ -156,7 +167,7 @@ function StageRunDetails({ run, activeId, actions, links }: {
         {(attempt.status === "running" || attempt.status === "waiting") && <Button variant="outline" onClick={actions.interrupt}>Interrupt stage</Button>}
         {data.kind === "task" && attempt.status === "succeeded" && <Button variant="outline" onClick={() => links.openWorkspace("tasks", "release")}>Open task <ArrowUpRight size={14} /></Button>}
         {data.output === "patch" && attempt.status === "succeeded" && <Button variant="outline" onClick={() => links.openChanges("saved")}>Open saved diff</Button>}
-        {data.kind === "implementation" && <Button variant="outline" onClick={() => links.openActivity("release")}>Activity</Button>}
+        {data.kind === "implementation" && <Button variant="outline" onClick={() => links.openActivity(deliveryRunId)}>Activity</Button>}
       </div>
       <details className="pipeline-evidence"><summary>Context and exact input</summary><p className="pipeline-meta">Context 41ac02e · release/notes · pinned role requirements</p><pre>{role?.instructions || "Structured input from the recorded upstream stages."}</pre></details>
       <details className="pipeline-evidence" open={attempt.number > 1}><summary>Attempt history</summary><ol className="pipeline-attempts">{run.attempts[activeId]?.map((record) => <li key={record.number}><strong>Attempt {record.number} · {record.status}</strong><p>{record.detail}</p></li>)}</ol></details>
@@ -166,13 +177,14 @@ function StageRunDetails({ run, activeId, actions, links }: {
 
 export default function PipelinesWorkspace(props: WorkspaceProps) {
   const { simulation, target, startSimulation } = props;
+  const git = useGitSimulation();
   const [view, setView] = useState<View>("Builder");
   const [draft, setDraft] = useState<WorkflowRevision | null>(() => simulation ? createDeliveryWorkflow() : null);
   const [revisions, setRevisions] = useState<WorkflowRevision[]>(() => draft ? [draft] : []);
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [runId, setRunId] = useState<number | null>(null);
   const [selectedId, setSelectedId] = useState("plan");
-  const [kind, setKind] = useState<StageKind>("review");
+  const [catalogOpen, setCatalogOpen] = useState(false);
   const [status, setStatus] = useState("");
   const [issues, setIssues] = useState<string[]>([]);
 
@@ -195,24 +207,41 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
   }, []);
 
   useEffect(() => {
+    if (target === "task-delivery") {
+      setView("Builder");
+      setStatus("Working on OPS-24 · Add release readiness checklist");
+      return;
+    }
     if (target && viewTargets[target]) setView(viewTargets[target]);
   }, [target]);
 
   useEffect(() => {
     if (!latestRun) return;
-    const next = advancePipelineRun(latestRun);
+    const progressed = advancePipelineRun(latestRun);
+    const next = recordPipelineGit(progressed, {
+      commit: git.candidateCommitted && !git.drift && (simulation?.delivery === "accepted" || simulation?.delivery === "merged")
+        ? { branch: deliveryBranch, sha: deliveryCommitSha } : undefined,
+      merge: simulation?.delivery === "merged" && !git.drift ? { branch: "main", sha: deliveryMergeSha } : undefined,
+    });
     if (next === latestRun) return;
     const timer = window.setTimeout(() => setRuns((items) => items.map((item) => item === latestRun ? next : item)), 650);
     return () => window.clearTimeout(timer);
-  }, [latestRun]);
+  }, [latestRun, git.candidateCommitted, git.drift, simulation?.delivery]);
 
   useEffect(() => {
-    if (!latestRun || simulation?.scenario !== "pipelines") return;
+    if (!latestRun || !simulation || !latestRun.workflow.nodes.some(({ id }) => id === "implementation")) return;
+    const planning = stageAttempt(latestRun, "plan")?.status;
     const release = stageAttempt(latestRun, "approval")?.status;
     const implementation = stageAttempt(latestRun, "implementation")?.status;
     const verification = stageAttempt(latestRun, "verify")?.status;
     const acceptance = stageAttempt(latestRun, "accept")?.status;
     switch (simulation.delivery) {
+      case "note":
+        if (planning === "waiting" || planning === "succeeded") simulation.advanceDelivery("start");
+        break;
+      case "question":
+        if (planning === "succeeded") simulation.advanceDelivery("answer");
+        break;
       case "plan":
         if (release === "succeeded") simulation.advanceDelivery("approve");
         break;
@@ -230,10 +259,16 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
         if (verification === "succeeded") simulation.advanceDelivery("verify");
         break;
       case "verified":
-        if (acceptance === "succeeded") simulation.advanceDelivery("accept");
+        if (acceptance === "succeeded" && !git.drift) {
+          simulation.advanceDelivery("accept");
+          if (git.gitMode !== "manual") {
+            git.commitCandidate();
+            if (git.gitMode === "merge") simulation.advanceDelivery("merge");
+          }
+        }
         break;
     }
-  }, [latestRun, simulation]);
+  }, [latestRun, simulation, git]);
 
   function simulate() {
     startSimulation("pipelines");
@@ -247,9 +282,11 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
     setIssues([]);
   }
 
-  function addStage() {
+  function addStage(kind: StageKind, title: string) {
     if (!draft) return;
     const stage = createStage(kind, crypto.randomUUID(), 30 + (draft.nodes.length % 4) * 200, 40 + Math.floor(draft.nodes.length / 4) * 110);
+    stage.data.title = title;
+    stage.ariaLabel = title;
     setDraft({ ...draft, nodes: [...draft.nodes, stage] });
     setSelectedId(stage.id);
     setIssues([]);
@@ -276,7 +313,7 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
       setIssues(validation);
       return;
     }
-    const snapshot = snapshotWorkflow(draft);
+    const snapshot = snapshotWorkflow({ ...draft, mergeRequired: git.mergeRequired });
     const previous = revisions.find((revision) => revision.revision === draft.revision);
     const unchanged = previous && JSON.stringify(snapshotWorkflow(previous)) === JSON.stringify(snapshot);
     const pinned = unchanged ? previous : { ...snapshot, revision: (revisions.at(-1)?.revision ?? 0) + 1 };
@@ -311,7 +348,7 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
   return (
     <section className="pipelines-workspace" aria-label="Pipelines workspace">
       <header className="pipeline-workspace-heading">
-        <div className="pipeline-title"><div className="pipeline-heading-icon"><Workflow size={18} /></div><div><h1>Pipelines</h1><p>{props.checkout.checkoutRoot.split(/[\\/]/).at(-1) || "Project"} <ChevronRight size={12} /> Workflows</p></div></div>
+        <div className="pipeline-title"><div className="pipeline-heading-icon"><Workflow size={18} aria-hidden="true" /></div><h1>Pipelines</h1></div>
         {view === "Builder" && <div className="pipeline-actions"><Button variant="outline" onClick={save} disabled={!draft}><Save size={15} /> Save revision</Button><Button onClick={start} disabled={!draft || Boolean(live)}><CirclePlay size={15} /> Run pipeline</Button></div>}
       </header>
       <nav className="pipeline-tabs" aria-label="Pipelines views">
@@ -331,10 +368,16 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
           </label> : <label className="pipeline-inline-field">Template
             <input aria-label="Template name" disabled={!draft} value={draft?.label ?? ""} placeholder="No template selected" onChange={(event) => setDraft(draft && { ...draft, label: event.currentTarget.value })} />
           </label>}
-          {view === "Builder" && <div className="pipeline-actions">
-            <label className="pipeline-inline-field"><span className="sr-only">Stage type</span><select disabled={!draft} value={kind} onChange={(event) => setKind(event.currentTarget.value as StageKind)}>{Object.entries(stageKinds).map(([id, title]) => <option key={id} value={id}>{title}</option>)}</select></label>
-            <Button variant="outline" onClick={addStage} disabled={!draft}><Plus size={15} /> Add stage</Button>
-          </div>}
+          {view === "Builder" && <Dialog.Root open={catalogOpen} onOpenChange={setCatalogOpen}>
+            <Dialog.Trigger asChild><Button variant="outline" disabled={!draft}><Plus size={15} /> Add node</Button></Dialog.Trigger>
+            <Dialog.Portal>
+              <Dialog.Overlay className="file-dialog-overlay" />
+              <Dialog.Content className="file-dialog pipeline-catalog-dialog" aria-describedby={undefined}>
+                <header><Dialog.Title>Node catalog</Dialog.Title><Dialog.Close className="fw-icon" aria-label="Close node catalog"><X size={17} /></Dialog.Close></header>
+                <PipelineCatalog onAdd={(kind, title) => { addStage(kind, title); setCatalogOpen(false); }} />
+              </Dialog.Content>
+            </Dialog.Portal>
+          </Dialog.Root>}
           {inspectingRun && <div className="pipeline-actions">
             {actionableStage && <Button variant="outline" onClick={() => setSelectedId(actionableStage.id)}>View waiting stage</Button>}
             {failedStage && <Button variant="outline" onClick={() => setSelectedId(failedStage.id)}>View failed stage</Button>}
@@ -419,6 +462,9 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
       </div>
       <div className="pipeline-view pipeline-view-content" hidden={view !== "Compare"}>
         <ComparisonView simulated={Boolean(simulation)} onSimulate={simulate} onUse={(ids) => { setDraft((document) => document && { ...document, comparisonRuns: ids }); setView("Builder"); setStatus("Selected comparison responses linked to the workflow draft."); }} />
+      </div>
+      <div className="pipeline-view pipeline-view-content" hidden={view !== "Library"}>
+        <PipelineCatalog />
       </div>
       <div className="pipeline-view pipeline-view-content" hidden={view !== "Maintenance"}>
         <PipelineMaintenance simulation={simulation} startSimulation={startSimulation} openWorkspace={props.openWorkspace} openChanges={props.openChanges} />

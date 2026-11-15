@@ -297,10 +297,11 @@ pub(crate) fn insert_run(
 
 pub(crate) fn advance_run(db: &Connection, run: &RunRecord, status: RunStatus) -> Result<RunEvent> {
     ensure!(run.status.can_advance(status), "invalid run transition");
-    db.execute(
-        "UPDATE runs SET status = ?1 WHERE id = ?2",
-        params![status.as_sql(), run.id],
+    let changed = db.execute(
+        "UPDATE runs SET status = ?1 WHERE id = ?2 AND status = ?3",
+        params![status.as_sql(), run.id, run.status.as_sql()],
     )?;
+    ensure!(changed == 1, "run status changed during transition");
     if status.is_terminal() {
         db.execute(
             "UPDATE turns SET closed_at = unixepoch() WHERE id = ?1",

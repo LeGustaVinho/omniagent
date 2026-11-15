@@ -27,6 +27,7 @@ function firstWaitReason(inspection: JobInspection) {
   const { job, blockers } = inspection;
   const blocker = blockers[0];
   if (blocker) return queueBlockerReason(blocker);
+  if (job.queuedRecovery) return job.queuedRecovery === "resume" ? "Checkpoint queued for resumption." : "Saved input queued for retry.";
   if (job.latestAttempt?.cancelRequested) return "Cancellation requested.";
   if (job.latestAttempt) return job.latestAttempt.status === "waiting_for_input" ? "The current attempt needs input." : "—";
   if (job.queueState === "queued") return "Waiting to start.";
@@ -59,6 +60,7 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
           <dt className="text-muted-foreground">Priority</dt><dd>{job.priority}</dd>
           <dt className="text-muted-foreground">Attempt</dt><dd>{attempt ? `#${attempt.ordinal}` : "Awaiting dispatch"}</dd>
           {attempt && <><dt className="text-muted-foreground">Run ID</dt><dd className="break-all font-mono text-xs">{attempt.runId}</dd></>}
+          {attempt?.recovery && <><dt className="text-muted-foreground">Recovery</dt><dd>{attempt.recovery === "resume" ? "Resumed from checkpoint" : "Retried saved input"}</dd></>}
         </dl>
         {blockers.length > 0 && <section className="grid gap-1.5" aria-label="Admission blockers">
           <h4 className="text-xs font-semibold">Admission blockers</h4>
@@ -75,6 +77,7 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
           {conversationId && !ownCheckout && <p className="w-full text-xs text-muted-foreground">Select the linked worktree to open this conversation.</p>}
           {job.taskId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openWorkspace("tasks", job.taskId ?? undefined)}>Open task <ArrowRight size={13} /></Button>}
           {attempt && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(attempt.runId, conversationId)}>Inspect attempt</Button>}
+          {attempt?.previousRunId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(attempt.previousRunId!, conversationId)}>Inspect previous attempt</Button>}
           {requestingRunId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(requestingRunId)}>Open requesting run</Button>}
         </div>
       </div>
@@ -113,7 +116,7 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
         <div className="delivery-main">
           {query.isPending && active && <p className="px-4 py-3 text-sm text-muted-foreground" role="status">Loading project queue…</p>}
           {query.isError && <div className="p-3"><InlineIssue>Could not refresh the project queue. {String(query.error)}</InlineIssue></div>}
-          <table className="delivery-table"><thead><tr><th>Job</th><th>Status</th><th>Priority</th><th>Attempt</th><th>Wait reason</th></tr></thead>
+          {visible.length > 0 && <table className="delivery-table"><thead><tr><th>Job</th><th>Status</th><th>Priority</th><th>Attempt</th><th>Wait reason</th></tr></thead>
             <tbody>{visible.map((inspection) => (
               <tr key={inspection.job.id}>
                 <td><button type="button" onClick={() => setSelected(inspection.job.id)} className="text-left font-medium hover:underline" aria-pressed={selected === inspection.job.id}>{jobTitle(inspection)}</button><div className="mt-0.5 break-all text-xs text-muted-foreground">{jobRequester(inspection)}</div></td>
@@ -123,11 +126,16 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
                 <td className="break-words text-muted-foreground">{firstWaitReason(inspection)}</td>
               </tr>
             ))}</tbody>
-          </table>
-          {query.data && !visible.length && <p className="px-4 py-3 text-sm text-muted-foreground">{query.data.jobs.length ? "No matching jobs." : "No jobs in this project."}</p>}
+          </table>}
+          {query.data && !visible.length && <div className="delivery-empty">
+            <span className="work-empty-icon"><ListTodo size={20} aria-hidden="true" /></span>
+            <h3>{query.data.jobs.length ? "No matching jobs" : "No jobs in this project"}</h3>
+            <p>{query.data.jobs.length ? "Choose another status to see more jobs." : "Conversation turns appear here when you send a message."}</p>
+          </div>}
         </div>
         {selectedJob && <JobDetails inspection={selectedJob} checkout={checkout} onClose={() => setSelected(undefined)}
-          openActivity={openActivity} openWorkspace={openWorkspace} onDependency={(id) => { setView("All"); setSelected(id); }} />}
+          openActivity={openActivity} openWorkspace={(workspace, target) => { openWorkspace(workspace, target); onClose?.(); }}
+          onDependency={(id) => { setView("All"); setSelected(id); }} />}
       </div>
     </section>
   );

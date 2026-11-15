@@ -11,7 +11,7 @@ import { Dialog } from "radix-ui";
 import { useEffect, useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
-import { ConversationListPanel, ConversationPanel, ConversationSidebar } from "@/conversation-panels";
+import { ConversationListPanel, ConversationPanel, ConversationSidebar, useNewConversation } from "@/conversation-panels";
 import { CustomizationsPanel } from "@/customizations-panel";
 import { FixtureListPanel, FixtureRunPanel } from "@/fixture-panels";
 import { ProviderSettingsPanel } from "@/provider-settings";
@@ -143,13 +143,12 @@ function Dock({
 }
 
 export function RealConversations({
-  checkout, sidebar, onSidebarChange, compact, onSimulate, target,
+  checkout, sidebar, onSidebarChange, compact, target,
 }: {
   checkout: ProjectCheckout;
   sidebar: boolean;
   onSidebarChange: (visible: boolean) => void;
   compact: boolean;
-  onSimulate: () => void;
   target?: string;
 }) {
   const dock = useDesktopDock(checkout, "conversations");
@@ -172,6 +171,8 @@ export function RealConversations({
     if (compact) onSidebarChange(false);
   }
 
+  const start = useNewConversation(checkout.checkoutId, open);
+
   function updateTitle(conversation: Conversation) {
     const panel = dock.api?.getPanel("conversation:" + conversation.id);
     if (!panel) return;
@@ -180,7 +181,7 @@ export function RealConversations({
   }
 
   const contents = dock.ready
-    ? <ConversationSidebar checkoutId={checkout.checkoutId} onOpen={open} onRenamed={updateTitle} activeId={dock.activeId} onSimulate={onSimulate} />
+    ? <ConversationSidebar checkoutId={checkout.checkoutId} onOpen={open} onRenamed={updateTitle} activeId={dock.activeId} />
     : <p className="work-progress" role="status">Loading conversations…</p>;
   return (
     <div className="flex h-full min-h-0 min-w-0">
@@ -198,10 +199,16 @@ export function RealConversations({
         </Dialog.Portal>
       </Dialog.Root>}
       <Dock dock={dock}>
-        <MessageSquarePlus size={28} />
-        <h2>Open a conversation</h2>
-        <p>Start a new conversation or return to one from this checkout.</p>
-        {!sidebar && <Button variant="outline" onClick={() => onSidebarChange(true)}>Show conversations</Button>}
+        <span className="work-empty-icon"><MessageSquarePlus size={23} aria-hidden="true" /></span>
+        <h2>Start a conversation</h2>
+        <p>Ask an agent about this checkout or open an existing conversation.</p>
+        <div className="work-empty-actions">
+          <Button onClick={() => start.mutate()} disabled={start.isPending} aria-label="Start a new conversation">
+            {start.isPending ? "Creating…" : "New conversation"}
+          </Button>
+          {!sidebar && <Button variant="outline" onClick={() => onSidebarChange(true)}>Show conversations</Button>}
+        </div>
+        {start.error && <p className="conv-alert" role="alert">{String(start.error)}</p>}
       </Dock>
     </div>
   );
@@ -215,7 +222,12 @@ export function RealDiagnostics({ checkout }: { checkout: ProjectCheckout }) {
         <span className="font-semibold">Diagnostics</span>
         <Button variant="ghost" disabled={!dock.ready} onClick={() => dock.api && openFixtureList(dock.api)}><GitBranch size={15} /> Fixture runs</Button>
       </div>
-      <Dock dock={dock} />
+      <Dock dock={dock}>
+        <span className="work-empty-icon"><GitBranch size={23} aria-hidden="true" /></span>
+        <h2>Check the execution environment</h2>
+        <p>Run a fixture to inspect its output, requests, events, and final state.</p>
+        <Button className="mt-2" onClick={() => dock.api && openFixtureList(dock.api)}>Open fixture runs</Button>
+      </Dock>
     </section>
   );
 }

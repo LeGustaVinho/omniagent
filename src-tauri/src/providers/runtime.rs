@@ -509,6 +509,12 @@ impl TurnExecution {
             session.arguments(),
             registration,
         )?;
+        if let Some(recovery) = &self.plan.native_job_recovery {
+            ensure!(
+                launch.evidence.approved == recovery.approved_customizations,
+                "Executable customizations changed since the provider checkpoint"
+            );
+        }
         launch.identify_mcp_executables(runner, &review, registration)?;
         if scope.provider == Provider::Claude
             && self.plan.attachments.iter().any(|(_, attachment)| {
@@ -544,12 +550,24 @@ impl TurnExecution {
             .map(|argument| argument.as_os_str())
             .collect::<Vec<_>>();
         self.executable_revision = runner.executable_revision(&scope.executable);
+        if let Some(recovery) = &self.plan.native_job_recovery {
+            ensure!(
+                self.executable_revision.as_ref() == Some(&recovery.executable_revision),
+                "The CLI executable changed since the provider checkpoint"
+            );
+        }
         self.platform = runner.execution_platform();
         let plugins = probe_run_plugins(&scope, runner);
         self.plugin_inventory = Some(
             self.app
                 .block_on(self.store.save_plugin_inventory(plugins))?,
         );
+        if !self.app.block_on(
+            self.store
+                .record_agent_launch_intent(self.plan.run.id.clone()),
+        )? {
+            return Ok(RunStatus::Cancelled);
+        }
         let mut process = runner.launch(LaunchRequest {
             version: CONTRACT_VERSION,
             executable: &scope.executable,
@@ -756,18 +774,27 @@ impl TurnExecution {
         checkout: &CheckoutLayout,
         runner: &dyn Runner,
     ) -> Result<()> {
-        let native_history = match (&self.plan.intent, &self.plan.resume_cursor_id) {
-            (SessionIntent::Start, None) => NativeHistory::Fresh,
-            (
-                SessionIntent::Resume {
-                    provider_session_id,
+        let native_history = if let Some(recovery) = &self.plan.native_job_recovery {
+            NativeHistory::ProviderRecovery {
+                session_id: recovery.provider_session_id.clone(),
+                source_run_id: recovery.source_run_id.clone(),
+                source_turn_id: recovery.provider_turn_id.clone(),
+                context_id: recovery.context_id.clone(),
+            }
+        } else {
+            match (&self.plan.intent, &self.plan.resume_cursor_id) {
+                (SessionIntent::Start, None) => NativeHistory::Fresh,
+                (
+                    SessionIntent::Resume {
+                        provider_session_id,
+                    },
+                    Some(context_id),
+                ) => NativeHistory::ProviderCursor {
+                    session_id: provider_session_id.clone(),
+                    context_id: context_id.clone(),
                 },
-                Some(context_id),
-            ) => NativeHistory::ProviderCursor {
-                session_id: provider_session_id.clone(),
-                context_id: context_id.clone(),
-            },
-            _ => anyhow::bail!("inconsistent resume cursor"),
+                _ => anyhow::bail!("inconsistent resume cursor"),
+            }
         };
         let (mut configuration, filesystem_skills, instructions) =
             configuration::inspect(&self.plan.scope, checkout, &self.reported)?;
@@ -989,7 +1016,7 @@ impl TurnExecution {
             encoded_request_bytes: None,
             estimated_context_input_tokens: None,
             provider_context: self.reported.context_usage,
-            provider_history_usage_unknown: matches!(history, NativeHistory::ProviderCursor { .. })
+            provider_history_usage_unknown: !matches!(history, NativeHistory::Fresh)
                 && self.reported.context_usage.is_none(),
         };
         let mut attachments = Vec::new();
