@@ -28,6 +28,7 @@ mod question_answers;
 mod question_waits;
 mod recovery;
 mod scheduler;
+mod side_requests;
 mod steering_delivery;
 mod subagent_audit;
 mod subagents;
@@ -85,6 +86,8 @@ pub use recovery::RecoveryAction;
 pub(crate) use recovery::{requeue_rejected_native_goal, requeue_unlaunched_job};
 pub use scheduler::JobScheduler;
 pub(crate) use scheduler::LaunchGate;
+pub(crate) use side_requests::recover as recover_side_requests;
+pub use side_requests::{ComposerSuggestionMode, SavedSideRequest, SidePurpose, SideSubmission};
 pub(crate) use steering_delivery::{
     SteeringPreparationRejected, accepted_revisions as accepted_steering_revisions,
     record_event as record_steering_event, settle_interrupted as settle_steering_at_stop,
@@ -160,6 +163,7 @@ pub enum JobOrigin {
 pub enum JobKind {
     Agent,
     Command,
+    Side,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -605,7 +609,8 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
                 a.previous_run_id, coalesce(a.kind, 'initial'), recovery.action,
                 CASE WHEN j.writer_checkout_id IS NOT NULL THEN j.task_id END, attempt.conversation_id,
                 EXISTS(SELECT 1 FROM job_commands command WHERE command.job_id = j.id),
-                instruction.run_id IS NOT NULL, j.origin_run_id IS NOT NULL AND j.operator_scope IS NOT NULL
+                instruction.run_id IS NOT NULL, j.origin_run_id IS NOT NULL AND j.operator_scope IS NOT NULL,
+                EXISTS(SELECT 1 FROM job_side_requests side WHERE side.job_id = j.id)
          FROM jobs j
          LEFT JOIN job_worktree_scopes scope ON scope.job_id = j.id
          LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (
@@ -672,7 +677,9 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
         worktree_owner_task_id: row.get(16)?,
         origin,
         operator_requested: row.get::<_, bool>(20)?.then_some(true),
-        kind: if row.get(18)? {
+        kind: if row.get(21)? {
+            JobKind::Side
+        } else if row.get(18)? {
             JobKind::Command
         } else {
             JobKind::Agent

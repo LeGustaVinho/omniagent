@@ -11,6 +11,7 @@ import { defaultAppearance, useAppearancePresentation, useEditableAppearance } f
 import { SettingRow } from "@/settings-controls";
 import { PolicyForm, policyFields } from "@/settings-policies";
 import { ProviderProfiles, useProviderExamples } from "@/settings-provider-profiles";
+import { ComposerSuggestionSettings } from "@/conversation-side-requests";
 import { SystemSettings, useMaintenanceSimulation } from "@/settings-system";
 import { ProjectSubagentControls } from "@/subagent-quota";
 import { ProjectSubagentAuditControl } from "@/subagent-audit-controls";
@@ -245,7 +246,8 @@ function SettingsSession({
         if (simulation || !checkout) return policy("conversation");
         return <>
           <ProjectQueueHistoryPolicy key={checkout.projectId} projectId={checkout.projectId} />
-          <PolicyForm fields={policyFields.conversation.filter(({ id }) => id !== "queued-context")} stored={undefined} simulate={simulate} />
+          <ComposerSuggestionSettings />
+          <PolicyForm fields={policyFields.conversation.filter(({ id }) => id !== "queued-context" && id !== "suggestions")} stored={undefined} simulate={simulate} />
         </>;
       case "execution":
         if (simulation || !checkout) return policy("execution");

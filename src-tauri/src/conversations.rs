@@ -1114,6 +1114,7 @@ impl Store {
             crate::jobs::recover_native_subagents(&tx)?;
             crate::jobs::recover_managed_goal_stops(&tx)?;
             crate::jobs::recover_commands(&tx)?;
+            crate::jobs::recover_side_requests(&tx)?;
             crate::jobs::settle_owned_goal_cancellations(&tx)?;
             tx.commit()?;
             Ok(())

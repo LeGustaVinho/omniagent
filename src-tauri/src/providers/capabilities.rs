@@ -90,6 +90,23 @@ pub struct CapabilityDescriptor {
 }
 
 impl CapabilityDescriptor {
+    pub fn side_request(provider: Provider) -> Self {
+        Self {
+            subject: CapabilitySubject::Protocol {
+                capability: Capability::SideRequest,
+            },
+            source: DeclaredSource::Adapter,
+            availability: if provider == Provider::Antigravity {
+                Availability::Unavailable
+            } else {
+                Availability::Unknown
+            },
+            observed: None,
+            blocker: None,
+            boundary: EvidenceBoundary::ExactCheckout,
+        }
+    }
+
     pub fn native_attachment(format: AttachmentFormat, encoding: NativeAttachmentEncoding) -> Self {
         Self {
             subject: CapabilitySubject::NativeAttachment { format, encoding },
@@ -352,6 +369,14 @@ impl CapabilityScope {
                 }
                 (self.configuration.scoped_launch_revision.as_deref()?, None)
             }
+            CapabilitySubject::Protocol {
+                capability: Capability::SideRequest,
+            } => {
+                if descriptor.boundary != EvidenceBoundary::ExactCheckout {
+                    return None;
+                }
+                (self.configuration.scoped_launch_revision.as_deref()?, None)
+            }
             CapabilitySubject::Protocol { .. } => {
                 (self.configuration.environment_revision.as_deref()?, None)
             }
@@ -601,6 +626,17 @@ impl ReportedCapabilities {
         let mut descriptors: Vec<_> = Capability::ALL
             .into_iter()
             .map(|capability| {
+                if capability == Capability::SideRequest {
+                    let mut descriptor = CapabilityDescriptor::side_request(scope.provider);
+                    if self.observed.contains(&capability)
+                        && descriptor.availability != Availability::Unavailable
+                    {
+                        descriptor.source = DeclaredSource::Provider;
+                        descriptor.availability = Availability::Available;
+                        descriptor.observed = Some(ObservedResult::Succeeded);
+                    }
+                    return descriptor;
+                }
                 if capability == Capability::OsCommandSandbox {
                     return CapabilityDescriptor {
                         subject: CapabilitySubject::Protocol { capability },
@@ -923,6 +959,22 @@ impl Store {
         })
         .await
     }
+}
+
+pub(crate) fn verified_side_profile(
+    db: &Connection,
+    scope: &CapabilityScope,
+) -> Result<Option<String>> {
+    let descriptor = CapabilityDescriptor::side_request(scope.provider);
+    if descriptor.availability == Availability::Unavailable {
+        return Ok(None);
+    }
+    let Some(key) = scope.key(&descriptor) else {
+        return Ok(None);
+    };
+    Ok(latest_evidence(db, &revision(&key)?)?
+        .filter(Verification::verified)
+        .map(|evidence| evidence.id))
 }
 
 fn latest_evidence(db: &Connection, hash: &str) -> Result<Option<Verification>> {

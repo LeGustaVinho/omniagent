@@ -1,4 +1,6 @@
 use std::{
+    ffi::OsString,
+    io,
     path::Path,
     sync::mpsc::RecvTimeoutError,
     time::{Duration, Instant},
@@ -15,7 +17,8 @@ use crate::{
 };
 
 use super::{
-    AdapterUpdate, Provider, ProviderEvent, ProviderEventData, ProviderLocation, WireMessage,
+    AdapterUpdate, Provider, ProviderEvent, ProviderEventData, ProviderLocation, SessionIntent,
+    SessionMode, SessionRequest, WireMessage,
 };
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -39,14 +42,14 @@ pub struct SideInput {
 }
 
 impl SideInput {
-    pub(super) fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         !self.request_id.trim().is_empty()
             && !self.pin.context_id.trim().is_empty()
             && !self.question.trim().is_empty()
             && self.question.len() <= 8 * 1024
     }
 
-    pub(super) fn reply(self, outcome: SideOutcome) -> SideResponse {
+    pub(crate) fn reply(self, outcome: SideOutcome) -> SideResponse {
         SideResponse {
             request_id: self.request_id,
             pin: self.pin,
@@ -65,6 +68,7 @@ pub enum SideUnavailable {
     InvalidInput,
     Busy,
     ProfileMismatch,
+    UnverifiedProfile,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -93,6 +97,7 @@ pub enum SideOutcome {
     Failed,
     TimedOut,
     Cancelled,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -132,12 +137,33 @@ pub fn run_fresh(
     input: SideInput,
     pinned_context: &str,
 ) -> Result<SideResponse> {
+    if scope.runner != runner.identity() {
+        return Ok(input.reply(SideOutcome::Unavailable {
+            reason: SideUnavailable::ProfileMismatch,
+        }));
+    }
+    run_fresh_until(
+        scope,
+        |request| runner.launch(request),
+        input,
+        pinned_context,
+        &|| false,
+    )
+}
+
+pub(crate) fn run_fresh_until(
+    scope: &SessionScope,
+    launch: impl FnOnce(LaunchRequest<'_>) -> io::Result<CapturedProcess>,
+    input: SideInput,
+    pinned_context: &str,
+    stopped: &dyn Fn() -> bool,
+) -> Result<SideResponse> {
     let unavailable =
         |input: SideInput, reason| Ok(input.reply(SideOutcome::Unavailable { reason }));
     if !input.is_valid() || pinned_context.len() > 64 * 1024 {
         return unavailable(input, SideUnavailable::InvalidInput);
     }
-    if scope.provider != Provider::Claude || scope.runner != runner.identity() {
+    if scope.provider != Provider::Claude {
         return unavailable(input, SideUnavailable::ToolFreeFreshRouteUnavailable);
     }
     let Some(model) = scope.model.as_deref() else {
@@ -170,18 +196,15 @@ pub fn run_fresh(
         args.extend(["--effort", effort]);
     }
     let arguments = args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
-    let mut process = runner.launch(LaunchRequest {
+    let mut process = launch(LaunchRequest {
         version: CONTRACT_VERSION,
         executable: &scope.executable,
         checkout: &directory,
         arguments: &arguments,
     })?;
     let context = json!({"context":pinned_context, "question":input.question});
-    let observed = fresh_claude_response(&mut process, &directory, model, context);
-    let stopped = process.control.cancel();
-    let ended = process.control.wait();
-    stopped?;
-    ended?;
+    let observed = fresh_claude_response(&mut process, &directory, model, context, stopped);
+    stop_process(&process)?;
     let (outcome, usage) = observed?;
     let mut result = input.reply(outcome);
     result.usage = usage;
@@ -193,6 +216,7 @@ fn fresh_claude_response(
     directory: &Path,
     model: &str,
     question: Value,
+    stopped: &dyn Fn() -> bool,
 ) -> Result<(SideOutcome, Option<SideUsage>)> {
     fn send(process: &mut CapturedProcess, value: Value) -> Result<()> {
         super::runtime::bounded_write(process, vec![WireMessage::json(&value)?])
@@ -207,12 +231,18 @@ fn fresh_claude_response(
     let mut init_sent = false;
     let mut session_id = None;
     loop {
+        if stopped() {
+            return Ok((SideOutcome::Cancelled, None));
+        }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return Ok((SideOutcome::TimedOut, None));
         };
-        let frame = match process.output.recv_timeout(remaining) {
+        let frame = match process
+            .output
+            .recv_timeout(remaining.min(Duration::from_millis(100)))
+        {
             Ok(frame) => frame?,
-            Err(RecvTimeoutError::Timeout) => return Ok((SideOutcome::TimedOut, None)),
+            Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return Ok((SideOutcome::Failed, None)),
         };
         if frame.stream != Stream::Stdout {
@@ -300,4 +330,169 @@ fn fresh_claude_response(
             _ => {}
         }
     }
+}
+
+pub fn run_native_until(
+    scope: &SessionScope,
+    launch: impl FnOnce(LaunchRequest<'_>) -> io::Result<CapturedProcess>,
+    input: SideInput,
+    reported_model: Option<&str>,
+    reported_effort: Option<&str>,
+    stopped: &dyn Fn() -> bool,
+) -> Result<SideResponse> {
+    let Some(source) = input.pin.provider_source.as_ref() else {
+        return Ok(input.reply(SideOutcome::Unavailable {
+            reason: SideUnavailable::SourceBoundaryUnavailable,
+        }));
+    };
+    if !input.is_valid() || scope.provider != Provider::Codex {
+        return Ok(input.reply(SideOutcome::Unavailable {
+            reason: SideUnavailable::ProfileMismatch,
+        }));
+    }
+    let mut session = scope.provider.adapter().create_session(SessionRequest {
+        checkout: scope.checkout.clone(),
+        intent: SessionIntent::Resume {
+            provider_session_id: source.session_id.clone(),
+        },
+        mode: SessionMode::ReadOnly,
+        model: scope.model.clone(),
+        effort: scope.effort.clone(),
+    })?;
+    let scratch = tempfile::tempdir()?;
+    let checkout = dunce::canonicalize(scratch.path())?;
+    let projects = toml::Table::from_iter([(
+        scope.checkout.to_string_lossy().into_owned(),
+        toml::Value::Table(toml::Table::from_iter([(
+            "trust_level".into(),
+            toml::Value::String("untrusted".into()),
+        )])),
+    )]);
+    let flags = [
+        format!("projects={}", toml::Value::Table(projects)),
+        "mcp_servers={}".into(),
+        "features.hooks=false".into(),
+        "features.goals=false".into(),
+        "agents.enabled=false".into(),
+        "features.multi_agent_v2.enabled=false".into(),
+        "project_doc_max_bytes=0".into(),
+    ];
+    let arguments = flags
+        .iter()
+        .flat_map(|flag| [OsString::from("-c"), OsString::from(flag)])
+        .chain(session.arguments())
+        .collect::<Vec<_>>();
+    let mut process = launch(LaunchRequest {
+        version: CONTRACT_VERSION,
+        executable: &scope.executable,
+        checkout: &checkout,
+        arguments: &arguments
+            .iter()
+            .map(OsString::as_os_str)
+            .collect::<Vec<_>>(),
+    })?;
+    let pin = input.pin.clone();
+    let request_id = input.request_id.clone();
+    let reply = |outcome| SideResponse {
+        request_id: request_id.clone(),
+        pin: pin.clone(),
+        outcome,
+        usage: None,
+    };
+    let result = (|| -> Result<SideResponse> {
+        super::runtime::bounded_write(&mut process, session.start()?.outbound)?;
+        let deadline = Instant::now() + Duration::from_secs(25);
+        let mut pending = Some(input);
+        loop {
+            if stopped() {
+                return Ok(reply(SideOutcome::Cancelled));
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Ok(reply(SideOutcome::TimedOut));
+            };
+            let frame = match process
+                .output
+                .recv_timeout(remaining.min(Duration::from_millis(100)))
+            {
+                Ok(frame) => frame?,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return Ok(reply(SideOutcome::Failed)),
+            };
+            let update = session.receive(frame)?;
+            for event in update.events {
+                match event.data {
+                    ProviderEventData::SessionReady { model, effort } if pending.is_some() => {
+                        if model.as_deref() != reported_model
+                            || model.is_none()
+                            || effort.as_deref() != reported_effort
+                        {
+                            return Ok(reply(SideOutcome::Unavailable {
+                                reason: SideUnavailable::ProfileMismatch,
+                            }));
+                        }
+                        let request = session.request_side(pending.take().unwrap())?;
+                        if let Some(response) = matching_response(request.events, &request_id, &pin)
+                        {
+                            return Ok(response);
+                        }
+                        super::runtime::bounded_write(&mut process, request.outbound)?;
+                    }
+                    ProviderEventData::SideResponse { response }
+                        if response.request_id == request_id && response.pin == pin =>
+                    {
+                        return Ok(response);
+                    }
+                    ProviderEventData::Error { message }
+                        if pending.is_some()
+                            && message.ends_with("already has an active writer") =>
+                    {
+                        return Ok(reply(SideOutcome::Unavailable {
+                            reason: SideUnavailable::Busy,
+                        }));
+                    }
+                    ProviderEventData::TurnStarted
+                    | ProviderEventData::Tool { .. }
+                    | ProviderEventData::Approval { .. }
+                    | ProviderEventData::ContextRead { .. }
+                    | ProviderEventData::Error { .. } => return Ok(reply(SideOutcome::Failed)),
+                    _ => {}
+                }
+            }
+            super::runtime::bounded_write(&mut process, update.outbound)?;
+        }
+    })();
+    stop_process(&process)?;
+    result
+}
+
+fn matching_response(events: Vec<ProviderEvent>, id: &str, pin: &SidePin) -> Option<SideResponse> {
+    events.into_iter().find_map(|event| match event.data {
+        ProviderEventData::SideResponse { response }
+            if response.request_id == id && response.pin == *pin =>
+        {
+            Some(response)
+        }
+        _ => None,
+    })
+}
+
+#[derive(Debug)]
+pub(crate) struct SideProcessStillActive;
+
+impl std::fmt::Display for SideProcessStillActive {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("The isolated CLI process could not be confirmed stopped")
+    }
+}
+
+fn stop_process(process: &CapturedProcess) -> Result<()> {
+    let cancelled = process.control.cancel();
+    let ended = process.control.wait();
+    process
+        .control
+        .confirm_quiescence()
+        .context(SideProcessStillActive)?;
+    cancelled?;
+    ended?;
+    Ok(())
 }

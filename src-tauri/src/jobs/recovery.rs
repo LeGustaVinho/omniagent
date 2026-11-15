@@ -99,6 +99,9 @@ impl RecoveryProfile {
 
 pub(super) enum RecoveryCheckpoint {
     Agent(Box<RecoverySource>),
+    Side {
+        run_id: String,
+    },
     Command {
         run_id: String,
         launch_requested: bool,
@@ -109,21 +112,22 @@ impl RecoveryCheckpoint {
     pub(super) fn run_id(&self) -> &str {
         match self {
             Self::Agent(source) => &source.source_run_id,
-            Self::Command { run_id, .. } => run_id,
+            Self::Command { run_id, .. } | Self::Side { run_id } => run_id,
         }
     }
 
     pub(super) fn context_id(&self) -> Option<&str> {
         match self {
             Self::Agent(source) => Some(&source.result_context_id),
-            Self::Command { .. } => None,
+            Self::Command { .. } | Self::Side { .. } => None,
         }
     }
 
     pub(super) fn actions(&self, mode: SessionMode) -> Vec<RecoveryAction> {
         match self {
             Self::Agent(source) => source.actions(mode),
-            Self::Command {
+            Self::Side { .. }
+            | Self::Command {
                 launch_requested: false,
                 ..
             } => vec![RecoveryAction::Retry],
@@ -193,6 +197,11 @@ fn load_recovery_source(
         || super::question_waits::has_open_questions(db, &attempt.run_id)?
     {
         return Ok(None);
+    }
+    if job.kind == JobKind::Side {
+        return Ok(Some(RecoveryCheckpoint::Side {
+            run_id: attempt.run_id.clone(),
+        }));
     }
     if job.kind == JobKind::Command {
         let launch_requested = db.query_row(
@@ -357,7 +366,8 @@ pub(crate) fn requeue_unlaunched_job(db: &Connection, run_id: &str) -> Result<()
          LEFT JOIN agent_attempts attempt ON attempt.run_id = a.run_id
          WHERE a.run_id = ?1 AND a.process_launch_requested = 0 AND a.cancel_requested = 0
            AND j.queue_state IN ('queued', 'paused')
-           AND (r.kind = 'command' OR attempt.result_context_id = attempt.context_id)
+           AND (r.kind = 'command' OR attempt.result_context_id = attempt.context_id
+                OR EXISTS (SELECT 1 FROM job_side_requests WHERE job_id = j.id))
            AND NOT EXISTS (SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
                            WHERE s.run_id = a.run_id)
          ON CONFLICT(job_id) DO NOTHING",

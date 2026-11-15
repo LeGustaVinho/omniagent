@@ -36,6 +36,7 @@ use super::{
     question_answers::{self, QuestionContinuation, load_continuation},
     question_waits::{QuestionWaitSummary, has_open_questions, question_wait_summary},
     recovery::{RecoveryCheckpoint, pending_recovery, pending_writer_checkpoint, recovery_source},
+    side_requests::{self, SideAttempt, SidePayload},
     subagents::{SubagentAllocation, job_subagent_allocation},
 };
 
@@ -157,6 +158,7 @@ pub struct ProjectQueue {
 pub(super) enum ScheduledAttempt {
     Agent(Box<AttemptPlan>),
     Command(CommandAttempt),
+    Side(Box<SideAttempt>),
 }
 
 impl ScheduledAttempt {
@@ -164,6 +166,7 @@ impl ScheduledAttempt {
         match self {
             Self::Agent(plan) => &plan.run,
             Self::Command(attempt) => &attempt.run,
+            Self::Side(attempt) => &attempt.run,
         }
     }
 }
@@ -457,7 +460,8 @@ impl Store {
                          OR EXISTS (SELECT 1 FROM ready_question_continuations WHERE job_id = j.id)
                          OR EXISTS (SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
                              WHERE a.job_id = j.id AND w.state = 'waiting'))
-                    ORDER BY priority DESC, sequence",
+                    ORDER BY CASE (SELECT purpose FROM job_side_requests WHERE job_id = j.id)
+                        WHEN 'suggestion' THEN 2 WHEN 'question' THEN 1 ELSE 0 END, priority DESC, sequence",
                 )?;
                 query
                     .query_map([], |row| {
@@ -467,7 +471,7 @@ impl Store {
             };
             for (project, id) in candidates {
                 let job = load_job(&tx, &project, &id)?.context("pending job disappeared")?;
-                if !include_commands && job.kind == JobKind::Command {
+                if !include_commands && job.kind != JobKind::Agent {
                     continue;
                 }
                 let inputs = load_inputs(&tx, &job)?;
@@ -626,6 +630,7 @@ struct Inputs {
     request: JobRequest,
     scope: Option<SessionScope>,
     command: Option<CommandInvocation>,
+    side: Option<SidePayload>,
     question: Option<QuestionContinuation>,
     instruction: Option<QueuedRevision>,
     goal: Option<GoalBoundary>,
@@ -640,6 +645,14 @@ fn build_attempt(
     allocation: SubagentAllocation,
     instruction_revision: Option<String>,
 ) -> Result<ScheduledAttempt> {
+    if let Some(payload) = inputs.side {
+        let (run, _) = runs::insert_run(db, job.checkout_id.clone(), "agent")?;
+        return Ok(ScheduledAttempt::Side(Box::new(SideAttempt {
+            run,
+            job_id: job.id.clone(),
+            payload,
+        })));
+    }
     if let Some(invocation) = inputs.command {
         let (run, _) = runs::insert_run(db, job.checkout_id.clone(), "command")?;
         return Ok(ScheduledAttempt::Command(CommandAttempt {
@@ -745,8 +758,8 @@ fn build_attempt(
                 );
                 plan
             }
-            Some(RecoveryCheckpoint::Command { .. }) => {
-                anyhow::bail!("The job has a command checkpoint")
+            Some(RecoveryCheckpoint::Command { .. } | RecoveryCheckpoint::Side { .. }) => {
+                anyhow::bail!("The job does not have an agent checkpoint")
             }
             None => {
                 if let Some(instruction) = inputs.instruction {
@@ -920,6 +933,21 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let request: JobRequest = serde_json::from_slice(&protection::unprotect(&request)?)?;
+    if let Some(side) = side_requests::load(db, &job.id)? {
+        return Ok(Inputs {
+            request,
+            scope: Some(SessionScope {
+                mode: SessionMode::ReadOnly,
+                ..side.scope.clone()
+            }),
+            command: None,
+            side: Some(side),
+            question: None,
+            instruction: None,
+            goal: None,
+            native_seed: None,
+        });
+    }
     let scope: Option<SessionScope> = match (&job.origin, operator_scope) {
         (_, Some(bytes)) => Some(serde_json::from_slice(&protection::unprotect(&bytes)?)?),
         (JobOrigin::Operator | JobOrigin::Pipeline, None) => None,
@@ -958,6 +986,7 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
         request,
         scope,
         command,
+        side: None,
         question: load_continuation(db, job)?,
         instruction: instructions::load_revision(db, &job.id)?,
         goal: goals::managed_boundary(db, &job.id)?,
@@ -1352,6 +1381,28 @@ fn evaluate(
             active,
             limit: settings.capacity,
         });
+    }
+    if let Some(side) = &inputs.side {
+        if !rule.requirements.customizations.is_empty()
+            || rule
+                .requirements
+                .capabilities
+                .iter()
+                .any(|capability| *capability != Capability::SideRequest)
+        {
+            blockers.push(Policy { reason: "The tool-disabled side route cannot fulfill the project rule's capability and customization requirements" });
+        }
+        if !side.still_qualified(db)? {
+            blockers.push(Policy {
+                reason: "The qualified tool-disabled side profile changed",
+            });
+        }
+        if !side_requests::suggestion_still_current(db, &job.id, side)? {
+            blockers.push(Policy {
+                reason: "The suggestion's source or composer is no longer current",
+            });
+        }
+        return Ok((blockers, SubagentAllocation::default()));
     }
     let allocation = match job_subagent_allocation(db, job, inputs.scope.as_ref())? {
         Ok(allocation) => allocation,

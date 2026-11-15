@@ -18,7 +18,9 @@ use crate::{
     store::Store,
 };
 
-use super::{AdmissionEnvironment, admission::ScheduledAttempt, command::start_command};
+use super::{
+    AdmissionEnvironment, admission::ScheduledAttempt, command::start_command, side_requests,
+};
 
 #[derive(Clone)]
 pub struct JobScheduler {
@@ -59,7 +61,7 @@ enum ActiveControl {
         conversation: String,
         control: ManagedTurnControl,
     },
-    Command(watch::Sender<bool>),
+    Process(watch::Sender<bool>),
 }
 
 impl ActiveControl {
@@ -67,21 +69,21 @@ impl ActiveControl {
         match self {
             Self::Agent { control, .. } if !cancelled => control.yield_to_downstream().is_ok(),
             Self::Agent { control, .. } => control.interrupt().is_ok(),
-            Self::Command(signal) => signal.send(true).is_ok(),
+            Self::Process(signal) => signal.send(true).is_ok(),
         }
     }
 }
 
 enum Worker {
     Agent(ManagedTurn),
-    Command(JoinHandle<Result<()>>),
+    Process(JoinHandle<Result<()>>),
 }
 
 impl Worker {
     async fn wait(self) -> Result<()> {
         match self {
             Self::Agent(worker) => worker.wait().await.map(|_| ()),
-            Self::Command(worker) => worker.await.context("Command job worker failed")?,
+            Self::Process(worker) => worker.await.context("Process job worker failed")?,
         }
     }
 }
@@ -253,8 +255,22 @@ async fn drive(
                                 );
                                 (
                                     run_id,
-                                    ActiveControl::Command(control),
-                                    Worker::Command(worker),
+                                    ActiveControl::Process(control),
+                                    Worker::Process(worker),
+                                )
+                            }
+                            ScheduledAttempt::Side(attempt) => {
+                                let run_id = attempt.run.id.clone();
+                                let (control, worker) = side_requests::start(
+                                    store.clone(),
+                                    runner.clone(),
+                                    *attempt,
+                                    admission.clone(),
+                                );
+                                (
+                                    run_id,
+                                    ActiveControl::Process(control),
+                                    Worker::Process(worker),
                                 )
                             }
                         };

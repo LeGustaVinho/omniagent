@@ -22,6 +22,7 @@ import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun
 import { ConversationInstructions, useConversationInstructions } from "@/conversation-instructions";
 import { ConversationHistoryControls } from "@/conversation-history-controls";
 import { ConversationSubagentControls } from "@/subagent-quota";
+import { SideQuestionPanel, type SideSubmission, useSideRequests, useSuggestionMode } from "@/conversation-side-requests";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
 import { WorktreeEvidence } from "@/worktree-evidence";
@@ -268,6 +269,8 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
   const [effort, setEffort] = useState("");
   const [mode, setMode] = useState<ConversationMode>("read_only");
   const text = draft.data ?? "";
+  const isSideQuestion = /^\/btw(?:\s|$)/u.test(text.trim());
+  const [showSideQuestions, setShowSideQuestions] = useState(false);
   const goalUnavailable = mode === "goal" || goalCommand(text) !== undefined;
   const models = useQuery({
     queryKey: ["conversation-models", provider],
@@ -345,6 +348,40 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     mutationFn: (jobId: string) => invoke("cancel_conversation_job", { conversationId, jobId }),
     onSettled: () => queryClient.invalidateQueries({ queryKey: jobKey }),
   });
+  const askSide = useMutation({
+    mutationFn: (submitted: string) => invoke<SideSubmission>("enqueue_conversation_side_request", {
+      conversationId, expectedContextId: history.data?.contextId, selection,
+      effort: efforts?.efforts.includes(effort) ? effort : null,
+      mode: mode === "goal" ? "read_only" : mode,
+      purpose: "question", question: submitted.trim().replace(/^\/btw\s*/u, ""),
+    }),
+    onSuccess: (outcome, submitted) => {
+      if (outcome.status === "queued") {
+        if (queryClient.getQueryData(draftKey) === submitted) editDraft("");
+        void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "side-requests"] });
+      }
+    },
+  });
+  const sideEffort = efforts?.efforts.includes(effort) ? effort : null;
+  const sideMode = mode === "goal" ? "read_only" : mode;
+  const suggestionsEnabled = useSuggestionMode(visible).data === "omniagent";
+  const sideHistory = useSideRequests(conversationId, visible && suggestionsEnabled);
+  const suggestionSource = useRef<string>(undefined);
+  useEffect(() => {
+    if (run && isLiveRun(run)) suggestionSource.current = run.id;
+    if (!visible || !suggestionsEnabled || busy || text.trim() || !selection || !selected?.option.selectable
+      || run?.status !== "succeeded" || suggestionSource.current !== run.id) return;
+    suggestionSource.current = undefined;
+    void invoke<SideSubmission>("enqueue_conversation_side_request", {
+      conversationId, expectedSourceRunId: run.id, selection, effort: sideEffort, mode: sideMode,
+      purpose: "suggestion", question: "",
+    }).then(() => queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "side-requests"] }), () => {});
+  }, [run, visible, suggestionsEnabled, busy, text, selection, selected, conversationId, queryClient, sideEffort, sideMode]);
+  const suggested = suggestionsEnabled && !busy && !text.trim() ? sideHistory.data?.find((item) =>
+    item.purpose === "suggestion" && item.contextId === history.data?.contextId
+    && item.sourceRunId === run?.id && item.provider === selection?.provider && item.profileId === selection?.profileId
+    && item.model === selection?.modelId && item.effort === sideEffort && item.mode === sideMode)?.response?.outcome : undefined;
+  const suggestion = suggested?.kind === "answered" ? suggested.text : undefined;
   const recover = useMutation({
     mutationFn: ({ jobId, runId, action }: { jobId: string; runId: string; action: RecoveryAction }) =>
       invoke<Job>("recover_conversation_job", { conversationId, jobId, runId, action }),
@@ -369,12 +406,19 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     });
   }
 
-  const canSend = Boolean(text.trim() && !goalUnavailable && !latest.isPending && !latestJob.isPending && selected?.option.selectable && !send.isPending && !recover.isPending);
+  const canSend = Boolean(text.trim() && selected?.option.selectable && (isSideQuestion
+    ? text.trim() !== "/btw" && history.data?.contextId && !askSide.isPending
+    : !goalUnavailable && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending));
   const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
 
   function submit(event: FormEvent) {
     event.preventDefault();
     if (!canSend) return;
+    if (isSideQuestion) {
+      setShowSideQuestions(true);
+      askSide.mutate(text);
+      return;
+    }
     stickToEnd.current = true;
     if (historyRegion.current) historyRegion.current.scrollTop = historyRegion.current.scrollHeight;
     setShowJump(false);
@@ -387,6 +431,8 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
         <MessageSquare aria-hidden />
         <h1>{title}</h1>
         <div className="ml-auto flex items-center gap-1">
+        <button type="button" className="conv-quiet-button" aria-expanded={showSideQuestions}
+          onClick={() => setShowSideQuestions(!showSideQuestions)}>Side questions</button>
         {run && <button ref={activityButton} type="button" className="conv-quiet-button" aria-expanded={Boolean(showingActivity)}
           onClick={() => showingActivity ? closeActivity() : setInspectedRun(run.id)}>
           <Activity aria-hidden /> Activity
@@ -471,10 +517,18 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           </div>
         </div>}
       <form onSubmit={submit} className="conv-composer">
+          {suggestion && <button type="button" className="conv-quiet-button" onClick={() => editDraft(suggestion)}>
+            Use suggested draft · {suggestion}
+          </button>}
           <label htmlFor={`draft-${conversationId}`} className="sr-only">Message draft</label>
           <textarea id={`draft-${conversationId}`} placeholder="Ask about this repository…"
             value={text} onChange={(event) => editDraft(event.target.value)} disabled={draft.isPending || Boolean(draft.error) || send.isPending}
             onKeyDown={(event) => {
+              if (suggestion && event.key === "Tab" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                editDraft(suggestion);
+                return;
+              }
               if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 event.currentTarget.form?.requestSubmit();
@@ -497,10 +551,11 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
                 className={selectorClass} value={effort} onChange={setEffort} />
               {live && <StopConversation {...activity} />}
                 <Button type="submit" className="conv-send" disabled={!canSend}>
-                  {send.isPending ? "Queueing…" : goalUnavailable ? "Start goal" : queueNext ? "Queue for next turn" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
+                  {isSideQuestion ? askSide.isPending ? "Queueing…" : "Ask side question"
+                    : send.isPending ? "Queueing…" : goalUnavailable ? "Start goal" : queueNext ? "Queue for next turn" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
                 </Button>
           </div>
-          {goalUnavailable && <p className="conv-goal-note" role="status"><Target size={14} aria-hidden />
+          {goalUnavailable && !isSideQuestion && <p className="conv-goal-note" role="status"><Target size={14} aria-hidden />
             Goal Mode is available in Simulation while runtime integration is pending.
           </p>}
           {models.error && <div className="flex flex-wrap items-center gap-2">
@@ -514,10 +569,12 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           {draftStatus && <p role="status" className="text-xs text-muted-foreground">{draftStatus}</p>}
           {(draftError || draft.error) && <p role="alert" className="conv-alert">{draftError || String(draft.error)}</p>}
           {send.error && <p role="alert" className="conv-alert">{String(send.error)}</p>}
+          {askSide.error && <p role="alert" className="conv-alert">{String(askSide.error)}</p>}
       </form>
       </div>
       </div>
       {showingActivity && <ConversationActivity key={run.id} conversationId={conversationId} run={run} projection={activity.projection} onClose={closeActivity} />}
+      {visible && showSideQuestions && <SideQuestionPanel conversationId={conversationId} submission={askSide.data} onClose={() => setShowSideQuestions(false)} />}
       </div>
     </section>
   );

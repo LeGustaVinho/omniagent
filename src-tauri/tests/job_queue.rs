@@ -18,6 +18,19 @@ use omniagent::{
     store::Store,
 };
 
+fn remove_side_request_schema(db: &rusqlite::Connection) -> Result<()> {
+    db.execute_batch(
+        "DROP TRIGGER discard_suggestion_on_draft_insert;
+         DROP TRIGGER discard_suggestion_on_draft_edit;
+         DROP TRIGGER discard_suggestion_on_context_change;
+         DROP TRIGGER retire_discarded_suggestion;
+         DROP TABLE composer_suggestions_settings;
+         DROP TABLE job_side_responses;
+         DROP TABLE job_side_requests;",
+    )?;
+    Ok(())
+}
+
 async fn origin(store: &Store, path: &Path) -> Result<AttemptPlan> {
     origin_with_mode(store, path, SessionMode::ReadOnly).await
 }
@@ -1496,6 +1509,7 @@ async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -
 
     // Recreate the previous schema with history intact and verify the upgrade.
     let db = rusqlite::Connection::open(&path)?;
+    remove_side_request_schema(&db)?;
     db.execute_batch(
         "DROP TABLE attempt_subagent_audit;
          DROP TABLE native_subagent_audit_candidates;
@@ -2122,7 +2136,9 @@ async fn queued_conversation_draft_and_snapshot_survive_reopen_without_creating_
     );
     drop(store);
     // A pending conversation job from the previous schema already owns its prompt and scope.
-    rusqlite::Connection::open(&database)?.execute_batch(
+    let db = rusqlite::Connection::open(&database)?;
+    remove_side_request_schema(&db)?;
+    db.execute_batch(
         "DROP TABLE conversation_forks;
          DROP VIEW unconfirmed_agent_stops;
          DROP TABLE unconfirmed_managed_goal_stops;
@@ -2151,6 +2167,7 @@ async fn queued_conversation_draft_and_snapshot_survive_reopen_without_creating_
          DROP INDEX jobs_by_conversation_sequence;
          PRAGMA user_version = 38;",
     )?;
+    drop(db);
     let store = Store::open(database)?;
     assert_eq!(store.job_queue_settings().await?, settings);
     assert!(store.claim_next_job(environment(false)).await?.is_none());

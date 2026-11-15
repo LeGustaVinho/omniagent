@@ -47,6 +47,7 @@ function applyQueueAction(projectId: string, action: QueueAction) {
 }
 
 function jobTitle({ job }: JobInspection) {
+  if (job.kind === "side") return "Isolated request";
   if (job.kind === "command") return "Command job";
   if (job.context && job.origin.type === "operator") return "Conversation turn";
   if (job.origin.type === "agent") return "Agent job";

@@ -3,8 +3,9 @@ use omniagent::{
     conversations::SessionScope,
     diagnostics,
     jobs::{
-        GoalControlState, GoalStopAction, Job, JobContext, JobInspection, JobScheduler,
-        PendingInstruction, ProjectQueue, QueueState, RecoveryAction,
+        ComposerSuggestionMode, GoalControlState, GoalStopAction, Job, JobContext, JobInspection,
+        JobScheduler, PendingInstruction, ProjectQueue, QueueState, RecoveryAction,
+        SavedSideRequest, SidePurpose, SideSubmission,
     },
     model_catalog::ModelSelection,
     providers::{
@@ -138,6 +139,65 @@ pub async fn enqueue_managed_agent_job(
     }
     .await
     .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn enqueue_conversation_side_request(
+    store: State<'_, Store>,
+    conversation_id: String,
+    expected_context_id: Option<String>,
+    expected_source_run_id: Option<String>,
+    selection: ModelSelection,
+    effort: Option<String>,
+    mode: SessionMode,
+    purpose: SidePurpose,
+    question: String,
+) -> Result<SideSubmission, String> {
+    async {
+        let chat = store.conversation(conversation_id.clone()).await?;
+        let scope = selected_scope(&store, chat.checkout_id, selection, effort, mode).await?;
+        store
+            .enqueue_side_request(
+                conversation_id,
+                expected_context_id,
+                expected_source_run_id,
+                scope,
+                purpose,
+                question,
+            )
+            .await
+    }
+    .await
+    .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn conversation_side_requests(
+    store: State<'_, Store>,
+    conversation_id: String,
+) -> Result<Vec<SavedSideRequest>, String> {
+    store
+        .saved_side_requests(conversation_id)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn composer_suggestion_mode(
+    store: State<'_, Store>,
+) -> Result<ComposerSuggestionMode, String> {
+    store.composer_suggestion_mode().await.map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn set_composer_suggestion_mode(
+    store: State<'_, Store>,
+    mode: ComposerSuggestionMode,
+) -> Result<ComposerSuggestionMode, String> {
+    store
+        .set_composer_suggestion_mode(mode)
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]
