@@ -483,7 +483,7 @@ impl Store {
     }
 }
 
-fn queue_settings(db: &Connection) -> Result<QueueSettings> {
+pub(super) fn queue_settings(db: &Connection) -> Result<QueueSettings> {
     Ok(db.query_row(
         "SELECT paused, capacity FROM job_queue_settings WHERE id = 1",
         [],
@@ -645,7 +645,11 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
     })
 }
 
-fn inspect(db: &Connection, job: Job, env: &AdmissionEnvironment) -> Result<JobInspection> {
+pub(super) fn inspect(
+    db: &Connection,
+    job: Job,
+    env: &AdmissionEnvironment,
+) -> Result<JobInspection> {
     let awaiting_recovery = job.queued_recovery.is_some();
     let blockers = if let Some(attempt) = job.latest_attempt.as_ref().filter(|_| !awaiting_recovery)
     {

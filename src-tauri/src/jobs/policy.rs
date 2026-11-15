@@ -98,12 +98,13 @@ pub enum DispatchRejection {
 }
 
 pub(super) struct EffectivePolicy {
+    pub role: JobRole,
     pub permission: JobPermission,
     pub key: String,
     pub requirements: JobRequirements,
 }
 
-fn rules(db: &Connection, project: &str) -> Result<Vec<JobRule>> {
+pub(super) fn rules(db: &Connection, project: &str) -> Result<Vec<JobRule>> {
     let serialized: Option<String> = db
         .query_row(
             "SELECT rules FROM project_job_policies WHERE project_id = ?1",
@@ -133,12 +134,14 @@ pub(super) fn effective_policy(db: &Connection, job: &Job) -> Result<EffectivePo
     });
     if let Some(rule) = matched {
         return Ok(EffectivePolicy {
+            role,
             permission: rule.permission,
             key: format!("{:x}", Sha256::digest(serde_json::to_vec(&rule)?)),
             requirements: rule.requirements,
         });
     }
     Ok(EffectivePolicy {
+        role,
         permission: if role == JobRole::Agent || job.mode == SessionMode::ApprovedWrite {
             JobPermission::Review
         } else {

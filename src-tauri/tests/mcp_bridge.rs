@@ -9,13 +9,20 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::{AttemptPlan, SessionScope},
+    dispatch::EventSource,
     jobs::{
         AdmissionBlocker, AdmissionEnvironment, JobPermission, JobRequest, JobRole, JobRule,
         JobWorkspace, PipelineDispatch, PipelineNodeKind, RecoveryAction, ReleaseBlocker,
     },
     mcp_bridge::{HELPER_FLAG, RunBridge},
     process_io::{CapturedProcess, Stream},
-    providers::{Provider, SessionMode, WireMessage},
+    providers::{
+        Capability, Provider, ProviderEvent, ProviderEventData, SessionMode, WireMessage,
+        capabilities::{
+            Availability, CapabilityDescriptor, CapabilityScope, CapabilitySubject,
+            CheckoutIdentity, DeclaredSource, EvidenceBoundary, ObservedResult, PolicyBlocker,
+        },
+    },
     repository,
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
     runs::RunStatus,
@@ -103,8 +110,288 @@ async fn start_helper(ticket: PathBuf, checkout: PathBuf) -> Result<CapturedProc
         send(&mut process, json!({"jsonrpc":"2.0", "id":2, "method":"tools/list"}))?;
         let listing = receive(&process, 2)?;
         ensure!(listing["result"]["tools"][0]["name"] == "inspect_run_scope");
+        ensure!(listing["result"]["tools"].as_array().is_some_and(|tools| tools.iter()
+            .any(|tool| tool["name"] == "inspect_omniagent" && tool["annotations"]["readOnlyHint"] == true)));
         Ok(process)
     }).await?
+}
+
+#[tokio::test]
+async fn runtime_inspection_is_bounded_redacted_and_audited_on_the_bound_attempt() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("bridge.sqlite"))?;
+    let fixture = attempt(&store, directory.path().join("source")).await?;
+    let foreign = attempt(&store, directory.path().join("foreign")).await?;
+    let project = fixture.run.project_id.clone();
+    let task = store
+        .create_project_task(
+            project.clone(),
+            "Inspection fixture api_key=task-canary".into(),
+        )
+        .await?;
+    let pipeline = "inspection-pipeline".to_owned();
+    store
+        .register_job_pipeline(project.clone(), pipeline.clone())
+        .await?;
+    store
+        .register_job_pipeline_node(
+            project.clone(),
+            pipeline.clone(),
+            "inspect".into(),
+            PipelineNodeKind::Execution,
+        )
+        .await?;
+    let request = JobRequest {
+        checkout_id: Some(fixture.run.checkout_id.clone()),
+        task_id: Some(task.id.clone()),
+        mode: SessionMode::ReadOnly,
+        instructions: "private-instructions-canary".into(),
+        dependencies: vec![],
+        requires_bridge: false,
+    };
+    let root = store
+        .submit_pipeline_agent_job(
+            PipelineDispatch {
+                pipeline_run_id: pipeline,
+                node_instance_id: "inspect".into(),
+                plan_revision: None,
+                release_id: None,
+            },
+            SessionScope {
+                account_binding: Some("private-account-canary".into()),
+                ..fixture.scope.clone()
+            },
+            request.clone(),
+        )
+        .await?;
+    let env = AdmissionEnvironment {
+        runner: DirectWindowsRunner.identity().into(),
+        bridge_available: true,
+    };
+    let active = store
+        .claim_next_job(env)
+        .await?
+        .context("The scoped fixture was not admitted")?;
+    store.mark_agent_running(active.run.id.clone()).await?;
+    let publish = |run: String, source, data| {
+        store.record_agent_observation(
+            run,
+            source,
+            ProviderEvent {
+                location: Default::default(),
+                data,
+            },
+        )
+    };
+    let scope = CapabilityScope {
+        provider: active.scope.provider,
+        transport: active.scope.provider.adapter().transport(),
+        cli_version: active.scope.cli_version.clone(),
+        executable_revision: None,
+        profile_id: active.scope.profile_id.clone(),
+        account_binding: active.scope.account_binding.clone(),
+        requested_model: None,
+        reported_model: None,
+        requested_effort: None,
+        reported_effort: None,
+        runner: active.scope.runner.clone(),
+        platform: DirectWindowsRunner.execution_platform(),
+        mode: active.scope.mode,
+        permission_revision: active.scope.permission_revision.clone(),
+        checkout: CheckoutIdentity {
+            id: active.run.checkout_id.clone(),
+            path: active.scope.checkout.clone(),
+        },
+        configuration: serde_json::from_value(json!({
+            "detected": [], "unresolved": [], "providerRevision": null, "effectiveRevision": null,
+        }))?,
+    };
+    let assessment = store
+        .resolve_capability_assessment(
+            scope,
+            vec![
+                CapabilityDescriptor {
+                    subject: CapabilitySubject::Protocol {
+                        capability: Capability::RunScopedMcp,
+                    },
+                    source: DeclaredSource::Provider,
+                    availability: Availability::Available,
+                    observed: Some(ObservedResult::Succeeded),
+                    blocker: None,
+                    boundary: EvidenceBoundary::ExactCheckout,
+                },
+                CapabilityDescriptor {
+                    subject: CapabilitySubject::Protocol {
+                        capability: Capability::WorkspaceWrite,
+                    },
+                    source: DeclaredSource::Policy,
+                    availability: Availability::Unavailable,
+                    observed: None,
+                    blocker: Some(PolicyBlocker::ReadOnlyProfile),
+                    boundary: EvidenceBoundary::ExactCheckout,
+                },
+                CapabilityDescriptor {
+                    subject: CapabilitySubject::Tool {
+                        id: "private-tool-canary".into(),
+                        version: "1".into(),
+                        operation: "list".into(),
+                    },
+                    source: DeclaredSource::Provider,
+                    availability: Availability::Available,
+                    observed: None,
+                    blocker: None,
+                    boundary: EvidenceBoundary::ExactCheckout,
+                },
+            ],
+        )
+        .await?;
+    publish(
+        active.run.id.clone(),
+        EventSource::Application,
+        ProviderEventData::CapabilityAssessmentUpdated {
+            assessment: Box::new(assessment),
+        },
+    )
+    .await?;
+    publish(
+        active.run.id.clone(),
+        EventSource::Provider,
+        ProviderEventData::AssistantMessage {
+            text: "private-transcript-canary".into(),
+        },
+    )
+    .await?;
+    publish(
+        fixture.run.id.clone(),
+        EventSource::Provider,
+        ProviderEventData::Diagnostic {
+            message: "sibling-diagnostic-canary".into(),
+        },
+    )
+    .await?;
+    for index in 0..6 {
+        publish(
+            active.run.id.clone(),
+            EventSource::Provider,
+            ProviderEventData::Diagnostic {
+                message: format!(
+                    "Fixture diagnostic {index} Authorization: Bearer credential-canary"
+                ),
+            },
+        )
+        .await?;
+    }
+    let sibling = store
+        .submit_agent_job(fixture.run.id, "sibling".into(), request.clone())
+        .await?;
+    let mut children = Vec::new();
+    for index in 0..8 {
+        let child = store
+            .submit_agent_job(
+                active.run.id.clone(),
+                format!("child-{index}"),
+                request.clone(),
+            )
+            .await?;
+        children.push(child.id);
+    }
+    let bridge = RunBridge::start(&store, active.run.id.clone()).await?;
+    let helper = start_helper(bridge.ticket_path().into(), active.scope.checkout.clone()).await?;
+    let (helper, spoofed) = invoke_tool(
+        helper,
+        "inspect_omniagent",
+        json!({
+            "runId": foreign.run.id, "projectId": foreign.run.project_id,
+        }),
+    )
+    .await?;
+    assert!(spoofed["error"].is_object());
+    let (helper, result) = invoke_tool(helper, "inspect_omniagent", json!({})).await?;
+    let body = result["result"]["structuredContent"]
+        .as_object()
+        .with_context(|| format!("Inspection failed {result}"))?;
+    assert_eq!(body["version"], 1);
+    assert_eq!(body["build"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(body["build"]["target"], env!("OMNIAGENT_BUILD_TARGET"));
+    assert_eq!(body["build"]["profile"], env!("OMNIAGENT_BUILD_PROFILE"));
+    let build_commit = env!("OMNIAGENT_BUILD_COMMIT");
+    assert_eq!(
+        body["build"]["sourceCommit"].as_str(),
+        (!build_commit.is_empty()).then_some(build_commit)
+    );
+    assert_eq!(body["run"]["id"], active.run.id);
+    assert_eq!(body["run"]["projectId"], project);
+    assert_eq!(body["profile"]["mode"], "read_only");
+    assert_eq!(body["policy"]["role"], "pipeline");
+    assert_eq!(body["policy"]["permission"], "allow");
+    assert_eq!(body["policy"]["admittedRevision"], "default");
+    assert_eq!(body["settingsRevision"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        body["capabilities"]["protocol"],
+        json!({ "run_scoped_mcp": "observed", "workspace_write": "blocked" })
+    );
+    assert_eq!(
+        body["task"],
+        json!({ "id": task.id, "title": "Inspection fixture [redacted]" })
+    );
+    assert_eq!(body["queue"]["settings"]["capacity"], 3);
+    assert_eq!(body["queue"]["current"]["id"], root.id);
+    assert_eq!(body["queue"]["moreSubmitted"], true);
+    let submitted = body["queue"]["submitted"].as_array().unwrap();
+    assert_eq!(
+        submitted
+            .iter()
+            .map(|job| job["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        children[2..]
+            .iter()
+            .rev()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(submitted[0]["blockers"], json!(["approval"]));
+    let diagnostics = body["diagnostics"].as_array().unwrap();
+    assert_eq!(diagnostics.len(), 4);
+    assert_eq!(body["moreDiagnostics"], true);
+    assert_eq!(diagnostics[0]["message"], "Fixture diagnostic 5 [redacted]");
+    let serialized = serde_json::to_string(body)?;
+    for protected in [
+        sibling.id.as_str(),
+        foreign.run.id.as_str(),
+        foreign.run.project_id.as_str(),
+        "credential-canary",
+        "task-canary",
+        "private-instructions-canary",
+        "private-transcript-canary",
+        "private-account-canary",
+        "private-tool-canary",
+        "sibling-diagnostic-canary",
+    ] {
+        assert!(!serialized.contains(protected));
+    }
+    let audit = store
+        .agent_observations(active.conversation_id, active.run.id.clone(), 0)
+        .await?
+        .into_iter()
+        .filter(|event| matches!(event.event.data, ProviderEventData::RuntimeInspected { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0].source, EventSource::Application);
+    assert!(matches!(
+        audit[0].event.data,
+        ProviderEventData::RuntimeInspected {
+            jobs: 7,
+            diagnostics: 4,
+            task: true,
+            capabilities: true
+        }
+    ));
+    store
+        .finish_agent_attempt(active.run.id, RunStatus::Cancelled, None)
+        .await?;
+    let (_helper, expired) = invoke_tool(helper, "inspect_omniagent", json!({})).await?;
+    assert!(expired["error"].is_object());
+    Ok(())
 }
 
 async fn invoke(process: CapturedProcess, arguments: Value) -> Result<(CapturedProcess, Value)> {

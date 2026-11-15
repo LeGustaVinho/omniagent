@@ -11,6 +11,7 @@ type EventData =
   | { type: "assistant_delta" | "assistant_message" | "plan_proposed"; text: string }
   | { type: "error"; message: string }
   | { type: "tool"; name: string; phase: string }
+  | { type: "runtime_inspected" }
   | { type: "reasoning"; text: string; summary: boolean }
   | { type: "usage"; input: number | null; output: number | null; cached_input: number | null }
   | { type: "context_window_usage"; used: number; size: number }
@@ -82,6 +83,7 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
           if (data.type === "error") current.error = data.message;
           if (data.type === "reasoning") current.reasoning.push(data);
           if (data.type === "tool") current.tools.push(data);
+          if (data.type === "runtime_inspected") current.tools.push({ type: "tool", name: "inspect_omniagent", phase: "Scope inspected" });
           if (data.type === "usage") current.usage = data;
           if (data.type === "context_window_usage") current.contextWindow = data;
         }

@@ -17,6 +17,7 @@ use rmcp::{
     model::*,
     service::{RequestContext, RoleServer},
 };
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
@@ -37,6 +38,7 @@ use crate::{
     protection,
     providers::{ApprovalDecision, ProviderEvent, ProviderEventData, ProviderLocation, RequestId},
     runs,
+    runtime_inspection::RuntimeInspection,
     store::Store,
 };
 
@@ -44,6 +46,7 @@ pub const HELPER_FLAG: &str = "--mcp-bridge";
 pub(crate) const SERVER_NAME: &str = "omniagent_runtime";
 const PIPE_PREFIX: &str = r"\\.\pipe\omniagent-run-";
 pub(crate) const INSPECT_SCOPE: &str = "inspect_run_scope";
+pub(crate) const INSPECT_OMNIAGENT: &str = "inspect_omniagent";
 pub(crate) const SUBMIT_JOB: &str = "submit_job";
 pub(crate) const GET_JOB_STATUS: &str = "get_job_status";
 pub(crate) const REQUEST_PERMISSION: &str = "request_permission";
@@ -55,8 +58,8 @@ const PERMISSION_DEADLINE: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RunScope {
-    run_id: String,
+pub(crate) struct RunScope {
+    pub(crate) run_id: String,
     project_id: String,
     checkout_id: String,
     turn_id: String,
@@ -99,6 +102,7 @@ struct JobStatusRequest {
 enum Operation {
     ListTools,
     InspectScope,
+    InspectOmniagent,
     SubmitJob(SubmitJob),
     GetJobStatus(JobStatusRequest),
     RequestPermission(PermissionPrompt),
@@ -117,6 +121,7 @@ struct Request {
 #[serde(tag = "status", content = "payload", rename_all = "snake_case")]
 enum Response {
     Scope(RunScope),
+    Inspection(Box<RuntimeInspection>),
     JobSubmitted { job_id: String },
     JobStatus(Box<Job>),
     JobRejected,
@@ -251,24 +256,26 @@ impl Drop for RunBridge {
 
 async fn active_scope(store: &Store, run_id: String) -> Result<Option<RunScope>> {
     store
-        .execute(move |db| {
-            let active: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM active_agent_attempts WHERE run_id = ?1)",
-                [&run_id],
-                |row| row.get(0),
-            )?;
-            if !active {
-                return Ok(None);
-            }
-            let run = runs::load_run(db, &run_id)?;
-            Ok((!run.status.is_terminal()).then_some(RunScope {
-                run_id: run.id,
-                project_id: run.project_id,
-                checkout_id: run.checkout_id,
-                turn_id: run.turn_id,
-            }))
-        })
+        .execute(move |db| read_active_scope(db, &run_id))
         .await
+}
+
+pub(crate) fn read_active_scope(db: &Connection, run_id: &str) -> Result<Option<RunScope>> {
+    let active: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM active_agent_attempts WHERE run_id = ?1)",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    if !active {
+        return Ok(None);
+    }
+    let run = runs::load_run(db, run_id)?;
+    Ok((!run.status.is_terminal()).then_some(RunScope {
+        run_id: run.id,
+        project_id: run.project_id,
+        checkout_id: run.checkout_id,
+        turn_id: run.turn_id,
+    }))
 }
 
 async fn serve_pipe(
@@ -294,6 +301,19 @@ async fn serve_pipe(
                     Operation::InspectScope => {
                         observed.fetch_max(2, Ordering::Release);
                         (Response::Scope(scope.clone()), None)
+                    }
+                    Operation::InspectOmniagent => {
+                        // Leave room for the containing response tag and fields.
+                        match store
+                            .inspect_omniagent(scope.clone(), MAX_FRAME_BYTES - 128)
+                            .await
+                        {
+                            Ok(inspection) => {
+                                observed.fetch_max(2, Ordering::Release);
+                                (Response::Inspection(Box::new(inspection)), None)
+                            }
+                            Err(_) => (Response::Unavailable, None),
+                        }
                     }
                     Operation::SubmitJob(input) => {
                         let response = match store
@@ -525,6 +545,12 @@ impl ServerHandler for StdioBridge {
                     .open_world(false),
             ),
             Tool::new(
+                INSPECT_OMNIAGENT,
+                "Returns the running OmniAgent build, effective profile and policy, verified capability status, and visible task, queue and redacted diagnostics for this run.",
+                json!({"type":"object", "properties":{}, "additionalProperties":false})
+                    .as_object().unwrap().clone(),
+            ).with_annotations(ToolAnnotations::new().read_only(true).destructive(false).idempotent(true).open_world(false)),
+            Tool::new(
                 SUBMIT_JOB,
                 "Queues work in OmniAgent under this run and returns its job ID. Use a stable requestId when retrying the same request.",
                 json!({"type":"object", "required":["requestId","request"], "additionalProperties":false, "properties":{
@@ -615,7 +641,7 @@ impl ServerHandler for StdioBridge {
                 CallToolResult::success(vec![ContentBlock::text(response.to_string())]).into(),
             );
         }
-        if request.name != INSPECT_SCOPE
+        if !matches!(request.name.as_ref(), INSPECT_SCOPE | INSPECT_OMNIAGENT)
             || request
                 .arguments
                 .is_some_and(|arguments| !arguments.is_empty())
@@ -624,6 +650,15 @@ impl ServerHandler for StdioBridge {
                 "Unknown tool or unexpected arguments",
                 None,
             ));
+        }
+        if request.name == INSPECT_OMNIAGENT {
+            let response = exchange(&self.0, Operation::InspectOmniagent)
+                .await
+                .map_err(|_| bridge_unavailable())?;
+            let Response::Inspection(inspection) = response else {
+                return Err(bridge_unavailable());
+            };
+            return Ok(CallToolResult::structured(json!(inspection)).into());
         }
         let scope = read_scope(&self.0, Operation::InspectScope)
             .await

@@ -12,6 +12,7 @@ use crate::{
 mod admission;
 mod command;
 mod failures;
+mod inspection;
 mod notices;
 mod pipeline;
 mod policy;
@@ -26,6 +27,7 @@ pub(crate) use failures::record_job_failure;
 pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
+pub(crate) use inspection::{InspectionPolicy, InspectionQueue, load_inspection_queue};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use pipeline::{
     PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease, ReleaseBlocker,

@@ -635,7 +635,13 @@ impl Store {
                 }
                 _ => {}
             }
-            tx.execute("INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)", params![run_id, source.as_sql(), payload])?;
+            let diagnostic = event.location.parent_item_id.is_none()
+                && matches!(&event.data, ProviderEventData::Diagnostic { .. } | ProviderEventData::Error { .. });
+            tx.execute("INSERT INTO agent_events(run_id, source, payload, inspect_diagnostic) VALUES (?1, ?2, ?3, ?4)",
+                params![run_id, source.as_sql(), payload, diagnostic])?;
+            if source == EventSource::Application && let ProviderEventData::CapabilityAssessmentUpdated { assessment } = &event.data {
+                crate::runtime_inspection::save_capability_summary(&tx, &run_id, assessment)?;
+            }
             if source == EventSource::Provider && let ProviderEventData::Approval { request_id, prompt, .. } = &event.data {
                 let route = if prompt.is_some() { PermissionRoute::ClaudePrompt } else { PermissionRoute::Native };
                 if prompt.is_some() {

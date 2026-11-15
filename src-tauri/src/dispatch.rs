@@ -154,6 +154,9 @@ impl Store {
             tx.execute("INSERT INTO dispatches(id, turn_id, snapshot_id, ordinal, frames, delivery)
                         VALUES (?1, ?2, ?3, 1, ?4, 'prepared')", params![dispatch_id, turn, snapshot_id, frame_cipher])?;
             tx.execute("UPDATE agent_sessions SET cursor_context_id = NULL WHERE id = ?1", [&session])?;
+            if let Some(assessment) = snapshot.capabilities.as_ref() {
+                crate::runtime_inspection::save_capability_summary(&tx, &run_id, assessment)?;
+            }
             tx.commit()?;
             Ok(Some(dispatch_id))
         }).await?;

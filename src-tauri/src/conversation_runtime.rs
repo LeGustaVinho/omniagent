@@ -280,6 +280,7 @@ pub async fn conversation_events(
                     | ProviderEventData::Reasoning { .. }
                     | ProviderEventData::Usage { .. }
                     | ProviderEventData::ContextWindowUsage { .. }
+                    | ProviderEventData::RuntimeInspected { .. }
                     | ProviderEventData::ChildActivity { .. }
             )
         })

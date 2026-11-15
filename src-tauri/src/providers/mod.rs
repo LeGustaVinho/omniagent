@@ -355,6 +355,12 @@ pub enum ProviderEventData {
     CapabilityAssessmentUpdated {
         assessment: Box<capabilities::CapabilityAssessment>,
     },
+    RuntimeInspected {
+        jobs: u32,
+        diagnostics: u32,
+        task: bool,
+        capabilities: bool,
+    },
     Handshake {
         protocol: String,
         capabilities: Vec<Capability>,
