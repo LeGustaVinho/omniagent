@@ -54,3 +54,40 @@ impl SteerTarget {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::{Provider, SessionIntent, SessionMode, SessionRequest, TurnInput};
+
+    #[test]
+    fn an_unqualified_transport_retains_the_instruction_for_app_routing() -> anyhow::Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let target = SteerTarget {
+            session_id: "session".into(),
+            turn_id: "active".into(),
+        };
+        for provider in [Provider::Claude, Provider::Antigravity] {
+            let mut session = provider.adapter().create_session(SessionRequest {
+                checkout: checkout.path().into(),
+                intent: SessionIntent::Start,
+                mode: SessionMode::ReadOnly,
+                model: None,
+                effort: None,
+            })?;
+            let candidate = TurnInput {
+                message_id: "draft-revision".into(),
+                text: "Follow-up instruction".into(),
+                attachments: Vec::new(),
+            };
+            let update = session.steer(target.clone(), candidate)?;
+            assert!(update.outbound.is_empty());
+            assert!(matches!(update.events.as_slice(), [ProviderEvent {
+                data: ProviderEventData::SteeringSettled {
+                    message_id, target: intended, outcome: SteerOutcome::Unavailable,
+                }, location
+            }] if message_id == "draft-revision" && intended == &target && location.turn_id.is_none()));
+        }
+        Ok(())
+    }
+}

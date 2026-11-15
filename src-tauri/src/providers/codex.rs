@@ -1473,6 +1473,31 @@ mod tests {
         assert_eq!(outcome(&accepted), SteerOutcome::Accepted);
         assert_eq!(accepted.events[0].location.turn_id.as_deref(), Some("turn"));
 
+        let rejected = outbound(
+            &session.steer(target.clone(), input("provider-rejected"))?,
+            0,
+        )?;
+        let response = inbound(
+            &mut *session,
+            json!({
+                "id": rejected["id"], "error":{"code":-32600,"message":"no active turn to steer"}
+            }),
+        )?;
+        assert!(matches!(response.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::SteeringSettled { message_id, outcome: SteerOutcome::ProviderRejected, .. }, ..
+        }] if message_id == "provider-rejected"));
+        assert!(response.outbound.is_empty());
+
+        let ambiguous = outbound(&session.steer(target.clone(), input("ambiguous"))?, 0)?;
+        let response = inbound(
+            &mut *session,
+            json!({
+                "id": ambiguous["id"], "result":{"turnId":"different-turn"}
+            }),
+        )?;
+        assert_eq!(outcome(&response), SteerOutcome::Unconfirmed);
+        assert!(response.outbound.is_empty());
+
         let next = outbound(&session.steer(target, input("late"))?, 0)?;
         let terminal = inbound(
             &mut *session,
