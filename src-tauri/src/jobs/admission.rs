@@ -615,7 +615,6 @@ fn occupancy(db: &Connection) -> Result<u32> {
             SELECT a.run_id FROM job_attempts a JOIN runs r ON r.id = a.run_id
             WHERE r.status IN ('starting', 'running', 'waiting_for_input')
             UNION SELECT run_id FROM unconfirmed_agent_stops
-            UNION SELECT run_id FROM native_goal_executors WHERE NOT stop_confirmed
          )",
         [],
         |row| row.get(0),

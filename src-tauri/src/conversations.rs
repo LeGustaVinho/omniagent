@@ -3976,7 +3976,8 @@ mod tests {
             )
             .await?;
         drop(store);
-        let store = Store::open(database)?;
+        let store = Store::open(database.clone())?;
+        store.recover_agent_attempts_after_restart().await?;
         let persisted = store
             .active_conversation_goal(conversation.id.clone())
             .await?
@@ -4009,10 +4010,35 @@ mod tests {
                 run_id: plan.run.id.clone()
             }]
         );
-        let next = store
-            .claim_next_job(environment.clone())
-            .await?
-            .context("Missing the goal continuation")?;
+        let replay_run = plan.run.id.clone();
+        let replay_context = checkpoint.context_id.clone();
+        let goal_revision = persisted.id.clone();
+        store.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for _ in 0..2 {
+                crate::jobs::accept_goal_checkpoint(&tx, &replay_run, &replay_context)?;
+            }
+            let checkpoints: u32 = tx.query_row(
+                "SELECT count(*) FROM goal_checkpoints WHERE revision_id = ?1",
+                [&goal_revision], |row| row.get(0),
+            )?;
+            let continuations: Vec<u32> = tx.prepare(
+                "SELECT checkpoint_ordinal FROM goal_continuations WHERE revision_id = ?1 ORDER BY checkpoint_ordinal",
+            )?.query_map([&goal_revision], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+            assert_eq!(checkpoints, 1);
+            assert_eq!(continuations, [0, 1]);
+            tx.commit()?;
+            Ok(())
+        }).await?;
+        let second_scheduler = Store::open(database)?;
+        let (first, second) = tokio::try_join!(
+            store.claim_next_job(environment.clone()),
+            second_scheduler.claim_next_job(environment.clone()),
+        )?;
+        let next = match (first, second) {
+            (Some(attempt), None) | (None, Some(attempt)) => attempt,
+            _ => anyhow::bail!("Expected exactly one scheduler to claim the continuation"),
+        };
         assert_eq!(next.previous_run_id.as_deref(), Some(plan.run.id.as_str()));
         assert_eq!(next.input.last().unwrap().text, "Check both migrations");
         assert!(store.claim_next_job(environment.clone()).await?.is_none());

@@ -911,18 +911,24 @@ pub(crate) fn record_native_goal_turn(
 pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) -> Result<()> {
     let source = db.query_row(
         "SELECT r.id, c.checkpoint_ordinal + 1, r.definition, r.deadline_ms, j.job_id,
-                g.project_id, a.conversation_id, report.payload, r.continuation_owner,
-                (SELECT provider_result FROM native_goal_executors WHERE run_id = j.run_id AND stop_confirmed)
+                g.project_id, a.conversation_id, report.payload,
+                x.run_id IS NOT NULL OR r.continuation_owner = 'native',
+                CASE WHEN x.stop_confirmed THEN x.provider_result END
          FROM job_attempts j JOIN goal_continuations c ON c.job_id = j.job_id
          JOIN goal_revisions r ON r.id = c.revision_id JOIN active_goals active ON active.revision_id = r.id
          JOIN goals g ON g.id = r.goal_id JOIN agent_attempts a ON a.run_id = j.run_id
+         JOIN runs completed ON completed.id = j.run_id
+         JOIN goal_revision_controls controls ON controls.revision_id = r.id
+         LEFT JOIN native_goal_executors x ON x.run_id = j.run_id
          LEFT JOIN goal_turn_reports report ON report.run_id = j.run_id
          WHERE j.run_id = ?1 AND j.cancel_requested = 0 AND a.provider_terminal = 'completed'
+           AND completed.status = 'succeeded' AND controls.state = 'active' AND a.result_context_id = ?2
+           AND NOT EXISTS (SELECT 1 FROM job_attempts later WHERE later.job_id = j.job_id AND later.ordinal > j.ordinal)
            AND EXISTS (SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
                        WHERE s.run_id = ?1 AND d.ordinal = 1 AND d.delivery = 'submitted')",
-        [run], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, Vec<u8>>(2)?,
+        params![run, context], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, Vec<u8>>(2)?,
             row.get::<_, Option<i64>>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?, row.get::<_, Option<Vec<u8>>>(7)?, row.get::<_, String>(8)?,
+            row.get::<_, String>(6)?, row.get::<_, Option<Vec<u8>>>(7)?, row.get::<_, bool>(8)?,
             row.get::<_, Option<String>>(9)?)),
     ).optional()?;
     let Some((
@@ -934,7 +940,7 @@ pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) 
         project,
         conversation,
         report,
-        owner,
+        native,
         native_result,
     )) = source
     else {
@@ -942,7 +948,7 @@ pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) 
     };
     let definition: GoalDefinition = serde_json::from_slice(&protection::unprotect(&definition)?)?;
     let report = decode_report(report)?;
-    let mut next = if owner == "native" {
+    let mut next = if native {
         match native_result.as_deref() {
             Some("blocked") => "blocked",
             Some("limit_reached") => "limit_reached",
@@ -952,7 +958,7 @@ pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) 
     } else {
         match report.as_ref().map(|report| report.action) {
             Some(GoalTurnAction::Blocked) => "blocked",
-            Some(GoalTurnAction::Continue) if owner == "managed" => {
+            Some(GoalTurnAction::Continue) => {
                 if managed_turn_limit_reached(db, &revision)?
                     || deadline.is_some_and(|deadline| now_ms() >= deadline)
                     || definition.token_budget.is_some()

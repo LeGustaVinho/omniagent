@@ -2254,6 +2254,21 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
         .await
         .context("native completion")?;
     assert_eq!(completed.continuation_owner, GoalContinuationOwner::Native);
+    let completed_run = completed
+        .job
+        .latest_attempt
+        .as_ref()
+        .unwrap()
+        .run_id
+        .clone();
+    let ledger: (u32, u32, u32) = rusqlite::Connection::open(&database)?.query_row(
+        "SELECT (SELECT count(*) FROM native_goal_turns WHERE run_id = ?1 AND outcome = 'completed'),
+                (SELECT count(*) FROM goal_checkpoints WHERE revision_id = ?2),
+                (SELECT count(*) FROM goal_continuations WHERE revision_id = ?2)",
+        [&completed_run, &completed.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    // The fixture repeats the first turn's terminal message after the second starts.
+    assert_eq!(ledger, (2, 1, 1));
     assert_eq!(
         completed.job.latest_attempt.unwrap().status,
         RunStatus::Succeeded
@@ -2365,6 +2380,20 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
     );
     let review = finished_goal(&store, &chat, 1).await?;
     assert_eq!(review.control_state, GoalControlState::NeedsReview);
+    let blocked_chat = store.conversation(chat.clone()).await?;
+    let mut read_only = scope.clone();
+    read_only.mode = SessionMode::ReadOnly;
+    let overlapping = store
+        .prepare_agent_attempt(
+            chat.clone(),
+            blocked_chat.context_id,
+            read_only,
+            "A separate read-only turn during the uncertain native stop".into(),
+        )
+        .await;
+    assert!(
+        overlapping.is_err_and(|error| error.to_string().contains("already has an active turn"))
+    );
     assert!(
         store
             .confirm_native_goal_stop(project.clone(), native.id.clone(), native_run.clone())
@@ -2462,7 +2491,7 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
             .is_none()
     );
     let retry = store
-        .agent_dispatch(chat, attempt.run_id)
+        .agent_dispatch(chat, attempt.run_id.clone())
         .await?
         .context("managed fallback was not dispatched")?;
     assert!(
@@ -2474,6 +2503,13 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
             .iter()
             .any(|input| input.contents == "features.goals=false")
     );
+    let ledger: (u32, u32, String) = rusqlite::Connection::open(&database)?.query_row(
+        "SELECT (SELECT count(*) FROM native_goal_executors WHERE revision_id = ?1 AND stop_confirmed),
+                (SELECT count(*) FROM native_goal_executors WHERE revision_id = ?1 AND NOT stop_confirmed),
+                (SELECT run_id FROM goal_checkpoints WHERE revision_id = ?1 AND ordinal = 1)",
+        [&native.id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(ledger, (1, 0, attempt.run_id));
     scheduler.shutdown().await?;
     Ok(())
 }
