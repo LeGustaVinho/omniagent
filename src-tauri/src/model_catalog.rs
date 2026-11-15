@@ -164,6 +164,44 @@ mod tests {
     }
 
     #[test]
+    fn preserves_every_value_in_the_supplied_table() {
+        let expected = [
+            ("Claude Fable 5.2", 1000, 1600, 95),
+            ("Claude Opus 5.5", 876, 800, 80),
+            ("Gemini 4 Argon", 796, 400, 65),
+            ("GPT‑6 Astra", 763, 2000, 100),
+            ("Gemini 4 Hydrogen", 747, 300, 59),
+            ("Claude Sonnet 5.5", 739, 400, 65),
+            ("GPT‑6.1 Sol", 738, 400, 65),
+            ("GPT‑6.1 Terra", 731, 200, 50),
+            ("GPT‑5.6 Sol", 537, 800, 80),
+            ("GPT‑6 Sol", 525, 400, 65),
+            ("Gemini 3.8 Flash", 390, 150, 44),
+            ("Claude Haiku 5.5", 307, 20, 0),
+            ("Gemini 3.1 Pro", 218, 450, 68),
+            ("GPT‑6 Luna", 169, 20, 0),
+        ];
+        let rows: Vec<_> = MODEL_CATALOG
+            .models
+            .iter()
+            .map(|model| {
+                (
+                    model.name.as_str(),
+                    model.rating.intelligence_tenths,
+                    model.rating.api_reference_cents,
+                    model.rating.price_score,
+                )
+            })
+            .collect();
+        assert_eq!(rows, expected);
+        let sol = |id| MODEL_CATALOG.lookup(Provider::Codex, id);
+        assert_eq!(sol("gpt-5.6-sol").unwrap().rating.intelligence_tenths, 537);
+        assert_eq!(sol("gpt-6-sol").unwrap().rating.intelligence_tenths, 525);
+        assert_eq!(sol("gpt-6.1-sol").unwrap().rating.intelligence_tenths, 738);
+        assert!(sol("gpt-6.1-sol-preview").is_none());
+    }
+
+    #[test]
     fn rates_only_models_in_the_inventory_and_keeps_their_ids_and_eligibility() {
         let inventory = [
             ObservedModel {
