@@ -31,7 +31,7 @@ pub(crate) fn inspect(
     reported_revision: Option<&str>,
 ) -> anyhow::Result<ConfigurationEvidence> {
     let mut discovery = Discovery::default();
-    let home = env::var_os("USERPROFILE").map(PathBuf::from);
+    let home = configured_directory("USERPROFILE");
     match provider {
         Provider::Codex => {
             discovery.files(
@@ -91,7 +91,7 @@ pub(crate) fn inspect(
             if let Some(home) = &home {
                 discovery.files(home, &[".claude.json"]);
             }
-            if let Some(program_files) = env::var_os("ProgramFiles").map(PathBuf::from) {
+            if let Some(program_files) = configured_directory("ProgramFiles") {
                 discovery.files(
                     &program_files,
                     &[
@@ -120,10 +120,23 @@ pub(crate) fn inspect(
 }
 
 fn profile_root(variable: &str, home: Option<&Path>, fallback: &str) -> Option<PathBuf> {
-    env::var_os(variable)
+    configured_directory(variable).or_else(|| home.map(|home| home.join(fallback)))
+}
+
+fn configured_directory(variable: &str) -> Option<PathBuf> {
+    let path = env::var_os(variable)
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| home.map(|home| home.join(fallback)))
+        .map(PathBuf::from)?;
+    // Configured roots can use Windows short names or different casing. Keep
+    // the original path if it cannot be inspected so the scan reports the gap.
+    if plain_metadata(&path)
+        .ok()
+        .flatten()
+        .is_some_and(|metadata| metadata.is_dir())
+    {
+        return Some(dunce::canonicalize(&path).unwrap_or(path));
+    }
+    Some(path)
 }
 
 #[derive(Default)]
@@ -283,9 +296,10 @@ mod tests {
     #[test]
     fn effective_revisions_follow_relative_scope_and_file_changes() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
-        let fixture = dir.path().join("a-fixture");
-        let profile = dir.path().join("b-profile");
-        let task = dir.path().join("c-task");
+        let root = dunce::canonicalize(dir.path())?;
+        let fixture = root.join("a-fixture");
+        let profile = root.join("b-profile");
+        let task = root.join("c-task");
         for directory in [&fixture, &profile, &task] {
             fs::create_dir(directory)?;
             fs::write(directory.join("AGENTS.md"), b"project rules")?;
@@ -298,7 +312,7 @@ mod tests {
         };
         let original = assess(&fixture, Some("reported"))?;
         let matching = assess(&task, Some("reported"))?;
-        assert_eq!(original.detected.len(), 2);
+        assert_eq!(original.detected.len(), 2, "{:?}", original.unresolved);
         assert!(original.effective_revision.is_some());
         assert_eq!(original.effective_revision, matching.effective_revision);
         fs::write(task.join("AGENTS.md"), b"changed rules")?;
