@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail, ensure};
 use omniagent::{
     process_io::CapturedProcess,
     providers::{
-        AdapterUpdate, ApprovalDecision, CliAdapter, CliSession, ProviderEventData, SessionIntent,
-        SessionMode, SessionRequest, TurnInput, TurnOutcome, codex::CodexAdapter,
+        AdapterUpdate, ApprovalDecision, CliAdapter, CliSession, ForkBoundary, ProviderEventData,
+        SessionIntent, SessionMode, SessionRequest, TurnInput, TurnOutcome, codex::CodexAdapter,
     },
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
 };
@@ -29,7 +29,15 @@ fn run_turn(
     checkout: &Path,
     intent: SessionIntent,
     expected: &str,
-) -> Result<String> {
+    compact_after: bool,
+) -> Result<(String, String)> {
+    let mut fork_boundary = match &intent {
+        SessionIntent::Fork {
+            provider_session_id,
+            boundary: ForkBoundary::CompletedTurn { turn_id },
+        } => Some((provider_session_id.clone(), turn_id.clone())),
+        _ => None,
+    };
     let mut session: Box<dyn CliSession> = CodexAdapter.create_session(SessionRequest {
         checkout: checkout.into(),
         intent,
@@ -54,6 +62,9 @@ fn run_turn(
     let mut thread = None;
     let mut final_text = String::new();
     let mut streamed = String::new();
+    let mut finished_turn = None;
+    let mut compacted = false;
+    let mut compaction_finished = false;
     loop {
         let frame = process
             .output
@@ -65,7 +76,20 @@ fn run_turn(
         }
         for event in update.events {
             match event.data {
+                ProviderEventData::NativeForkVerified {
+                    source_session_id,
+                    last_turn_id,
+                } => {
+                    assert_eq!(
+                        fork_boundary.take(),
+                        Some((source_session_id, last_turn_id))
+                    );
+                }
                 ProviderEventData::SessionReady { model, .. } => {
+                    assert!(
+                        fork_boundary.is_none(),
+                        "fork was not verified before readiness"
+                    );
                     ensure!(
                         model.as_deref() == Some("gpt-6-luna"),
                         "Codex selected a different model"
@@ -136,12 +160,33 @@ fn run_turn(
                         streamed.contains(expected),
                         "Codex response was not streamed"
                     );
-                    process.control.cancel()?;
-                    process.control.wait()?;
-                    return thread.context("Codex did not publish a session ID");
+                    finished_turn = event.location.turn_id;
+                    if compact_after {
+                        send(&mut process, session.compact_native()?)?;
+                    }
+                }
+                ProviderEventData::Compacted if finished_turn.is_some() => {
+                    assert_eq!(event.location.session_id, thread);
+                    assert!(event.location.turn_id.is_some());
+                    compacted = true;
+                }
+                ProviderEventData::NativeCompactionFinished { outcome } => {
+                    assert!(compacted);
+                    assert_eq!(outcome, TurnOutcome::Completed);
+                    compaction_finished = true;
                 }
                 _ => {}
             }
+        }
+        if let Some(turn) = &finished_turn
+            && (!compact_after || compaction_finished)
+        {
+            process.control.cancel()?;
+            process.control.wait()?;
+            return Ok((
+                thread.context("Codex did not publish a session ID")?,
+                turn.clone(),
+            ));
         }
     }
 }
@@ -170,20 +215,67 @@ fn codex_starts_streams_and_resumes_a_read_only_session() -> Result<()> {
         .context("Windows version unavailable")?;
     assert!(platform.host.build > 0);
     assert!(platform.guest.is_none());
-    let session_id = run_turn(
+    let (session_id, _) = run_turn(
         &executable,
         checkout.path(),
         SessionIntent::Start,
         "OMNIAGENT_START",
+        false,
     )?;
-    let resumed = run_turn(
+    let (resumed, _) = run_turn(
         &executable,
         checkout.path(),
         SessionIntent::Resume {
             provider_session_id: session_id.clone(),
         },
         "OMNIAGENT_RESUME",
+        false,
     )?;
     assert_eq!(session_id, resumed);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires an installed, authenticated Codex CLI with exact forks and native compaction"]
+fn codex_forks_at_a_completed_turn_and_compacts_the_verified_fork() -> Result<()> {
+    let checkout = tempfile::tempdir()?;
+    let output = Command::new("git.exe")
+        .args(["init", "--quiet"])
+        .current_dir(checkout.path())
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "could not initialize the disposable checkout"
+    );
+    support::write_skill(checkout.path(), ".agents/skills")?;
+    let executable = CodexAdapter.discover(None)?;
+    let (source, first) = run_turn(
+        &executable,
+        checkout.path(),
+        SessionIntent::Start,
+        "WALNUT",
+        false,
+    )?;
+    let (_, later) = run_turn(
+        &executable,
+        checkout.path(),
+        SessionIntent::Resume {
+            provider_session_id: source.clone(),
+        },
+        "ALMOND",
+        false,
+    )?;
+    assert_ne!(first, later);
+    let (fork, _) = run_turn(
+        &executable,
+        checkout.path(),
+        SessionIntent::Fork {
+            provider_session_id: source.clone(),
+            boundary: ForkBoundary::CompletedTurn { turn_id: first },
+        },
+        "PECAN",
+        true,
+    )?;
+    assert_ne!(source, fork);
     Ok(())
 }

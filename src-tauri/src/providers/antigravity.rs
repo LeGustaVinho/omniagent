@@ -52,6 +52,10 @@ impl CliAdapter for AntigravityAdapter {
 
     fn create_session(&self, request: SessionRequest) -> Result<Box<dyn CliSession>> {
         ensure!(
+            !matches!(request.intent, SessionIntent::Fork { .. }),
+            "Antigravity ACP has no qualified exact-turn fork route"
+        );
+        ensure!(
             request.checkout.is_absolute(),
             "ACP checkout must be absolute"
         );
@@ -292,6 +296,9 @@ impl AcpSession {
         }
         let method = match &self.request.intent {
             SessionIntent::Start => "session/new",
+            SessionIntent::Fork { .. } => {
+                bail!("Antigravity ACP has no qualified exact-turn fork route")
+            }
             SessionIntent::Resume {
                 provider_session_id,
             } => {
@@ -336,6 +343,7 @@ impl AcpSession {
         let reported = result["sessionId"].as_str();
         let id = match &self.request.intent {
             SessionIntent::Start => reported.context("ACP session/new did not return an ID")?,
+            SessionIntent::Fork { .. } => bail!("unexpected Antigravity ACP fork response"),
             SessionIntent::Resume {
                 provider_session_id,
             } => {
@@ -465,6 +473,9 @@ impl AcpSession {
                     .map(str::to_owned),
             }),
         );
+        if matches!(self.request.intent, SessionIntent::Start) {
+            announced.push(self.event(ProviderEventData::FreshSessionOpened));
+        }
         Ok(events(announced))
     }
 

@@ -52,6 +52,10 @@ impl CliAdapter for ClaudeAdapter {
             request.checkout.is_absolute(),
             "Claude checkout must be absolute"
         );
+        ensure!(
+            !matches!(request.intent, SessionIntent::Fork { .. }),
+            "Claude streaming adapter has no qualified exact-turn fork route"
+        );
         if let SessionIntent::Resume {
             provider_session_id,
         } = &request.intent
@@ -155,6 +159,8 @@ impl ClaudeSession {
                 "Claude reported an unexpected permission mode"
             );
         }
+        let fresh =
+            self.session_id.is_none() && matches!(self.request.intent, SessionIntent::Start);
         self.session_id = Some(id.to_owned());
         let mut observations = vec![self.event(
             frame,
@@ -163,6 +169,25 @@ impl ClaudeSession {
                 effort: string(frame, "effort"),
             },
         )];
+        if fresh {
+            observations.push(self.event(frame, ProviderEventData::FreshSessionOpened));
+        }
+        if let Some(tools) = frame["tools"].as_array()
+            && tools.iter().all(Value::is_string)
+        {
+            observations.push(
+                self.event(
+                    frame,
+                    ProviderEventData::DelegationControlsReported {
+                        controls: super::DelegationControls::ClaudeSessionToolList {
+                            agent_tool_available: tools
+                                .iter()
+                                .any(|tool| matches!(tool.as_str(), Some("Agent" | "Task"))),
+                        },
+                    },
+                ),
+            );
+        }
         let skills = strings(frame, "skills");
         let plugins = frame["plugins"].as_array().map(|plugins| {
             plugins

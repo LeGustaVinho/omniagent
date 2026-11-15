@@ -464,8 +464,14 @@ impl ReportedCapabilities {
                     self.effort = Some(effort.clone());
                 }
                 if changed {
-                    self.observed
-                        .retain(|capability| *capability == Capability::NativePlanMode);
+                    self.observed.retain(|capability| {
+                        matches!(
+                            capability,
+                            Capability::NativePlanMode
+                                | Capability::FreshSession
+                                | Capability::NativeTurnFork
+                        )
+                    });
                     self.context_usage = None;
                 }
                 changed
@@ -495,10 +501,22 @@ impl ReportedCapabilities {
             ProviderEventData::PlanProposed { .. } => {
                 self.observed.insert(Capability::NativePlanOutput)
             }
-            ProviderEventData::ChildActivity { .. } => {
-                self.observed.insert(Capability::SubagentEvents)
+            ProviderEventData::FreshSessionOpened => self.observed.insert(Capability::FreshSession),
+            ProviderEventData::NativeForkVerified { .. } => {
+                self.observed.insert(Capability::NativeTurnFork)
+            }
+            ProviderEventData::DelegationControlsReported { .. } => {
+                self.available.insert(Capability::NativeDelegationControls)
+            }
+            ProviderEventData::ChildActivity { child_id, .. } => {
+                let changed = self.observed.insert(Capability::SubagentEvents);
+                let identified = child_id.as_ref().is_some_and(|id| !id.trim().is_empty());
+                (identified && self.observed.insert(Capability::PerChildEvents)) || changed
             }
             ProviderEventData::Compacted => self.observed.insert(Capability::NativeCompaction),
+            ProviderEventData::NativeCompactionFinished {
+                outcome: super::TurnOutcome::Completed,
+            } => self.observed.insert(Capability::ManualNativeCompaction),
             ProviderEventData::ContextWindowUsage { used, size } => {
                 self.context_usage = Some(AttachmentContextUsage {
                     used: *used,
@@ -548,6 +566,19 @@ impl ReportedCapabilities {
                 }
                 let observed = self.observed.contains(&capability);
                 let announced = self.available.contains(&capability);
+                let unavailable = match scope.provider {
+                    Provider::Codex => false,
+                    Provider::Claude => matches!(
+                        capability,
+                        Capability::NativeTurnFork | Capability::ManualNativeCompaction
+                    ),
+                    Provider::Antigravity => matches!(
+                        capability,
+                        Capability::NativeTurnFork
+                            | Capability::ManualNativeCompaction
+                            | Capability::NativeDelegationControls
+                    ),
+                };
                 let blocked = capability == Capability::WorkspaceWrite
                     && scope.mode != SessionMode::ApprovedWrite;
                 CapabilityDescriptor {
@@ -561,6 +592,8 @@ impl ReportedCapabilities {
                     },
                     availability: if announced || observed {
                         Availability::Available
+                    } else if unavailable {
+                        Availability::Unavailable
                     } else {
                         Availability::Unknown
                     },
@@ -568,7 +601,10 @@ impl ReportedCapabilities {
                     blocker: blocked.then_some(PolicyBlocker::ReadOnlyProfile),
                     boundary: if capability == Capability::WorkspaceWrite
                         || capability.is_planning()
-                    {
+                        || matches!(
+                            capability,
+                            Capability::NativeTurnFork | Capability::NativeDelegationControls
+                        ) {
                         EvidenceBoundary::ExactCheckout
                     } else {
                         EvidenceBoundary::EquivalentConfiguration

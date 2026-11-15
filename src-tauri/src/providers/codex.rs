@@ -9,10 +9,10 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
 use super::{
-    AdapterUpdate, ApprovalDecision, AuthProbe, Authentication, CliAdapter, CliSession, Interrupt,
-    ProbeKind, Provider, ProviderEvent, ProviderEventData, ProviderLocation, ReportedModel,
-    RequestId, SessionIntent, SessionMode, SessionRequest, Transport, TurnInput, TurnOutcome,
-    WireMessage, capabilities,
+    AdapterUpdate, ApprovalDecision, AuthProbe, Authentication, CliAdapter, CliSession,
+    DelegationControls, ForkBoundary, Interrupt, ProbeKind, Provider, ProviderEvent,
+    ProviderEventData, ProviderLocation, ReportedModel, RequestId, SessionIntent, SessionMode,
+    SessionRequest, Transport, TurnInput, TurnOutcome, WireMessage, capabilities,
     rpc::{self, Rpc},
     skills::{SkillCatalog, SkillCatalogIssue, SkillEntry, SkillSource},
 };
@@ -55,6 +55,19 @@ impl CliAdapter for CodexAdapter {
             request.checkout.is_absolute(),
             "Codex checkout must be absolute"
         );
+        if let SessionIntent::Fork {
+            provider_session_id,
+            boundary,
+        } = &request.intent
+        {
+            let ForkBoundary::CompletedTurn { turn_id } = boundary else {
+                bail!("Codex native forks require a completed provider turn boundary");
+            };
+            ensure!(
+                !provider_session_id.trim().is_empty() && !turn_id.trim().is_empty(),
+                "Codex native forks require a session and turn ID"
+            );
+        }
         Ok(Box::new(CodexSession {
             checkout_root: request.checkout.clone(),
             bridge: None,
@@ -62,6 +75,7 @@ impl CliAdapter for CodexAdapter {
             rpc: Rpc::new(false),
             handshake_started: false,
             session: None,
+            pending_fork: None,
             active: None,
             model_pages: Vec::new(),
             workspace_instructions: None,
@@ -77,10 +91,12 @@ impl CliAdapter for CodexAdapter {
 enum Request {
     Initialize,
     OpenSession,
+    VerifyFork,
     ReadConfiguration,
     ListSkills,
     ModelPage,
     StartTurn,
+    StartCompaction,
     Interrupt,
 }
 
@@ -93,6 +109,14 @@ struct Session {
 struct ActiveTurn {
     id: Option<String>,
     interrupt_requested: bool,
+    compaction: Option<Compaction>,
+}
+
+#[derive(Default)]
+struct Compaction {
+    acknowledged: bool,
+    observed: bool,
+    outcome: Option<TurnOutcome>,
 }
 
 enum Approval {
@@ -107,6 +131,7 @@ struct CodexSession {
     rpc: Rpc<Request>,
     handshake_started: bool,
     session: Option<Session>,
+    pending_fork: Option<Session>,
     active: Option<ActiveTurn>,
     model_pages: Vec<ReportedModel>,
     workspace_instructions: Option<String>,
@@ -148,6 +173,16 @@ impl CodexSession {
                 params["threadId"] = json!(provider_session_id);
                 "thread/resume"
             }
+            SessionIntent::Fork {
+                provider_session_id,
+                boundary: ForkBoundary::CompletedTurn { turn_id },
+            } => {
+                params["threadId"] = json!(provider_session_id);
+                params["lastTurnId"] = json!(turn_id);
+                params["excludeTurns"] = json!(true);
+                "thread/fork"
+            }
+            SessionIntent::Fork { .. } => bail!("unsupported Codex fork boundary"),
         };
         Ok(AdapterUpdate {
             outbound: vec![
@@ -230,6 +265,9 @@ impl CodexSession {
             if request == Request::StartTurn {
                 events.extend(self.finish_turn(TurnOutcome::Failed));
             }
+            if request == Request::StartCompaction {
+                events.extend(self.finish_compaction(TurnOutcome::Failed));
+            }
             return Ok(self.events(events));
         }
         let result = response
@@ -266,12 +304,32 @@ impl CodexSession {
                         "Codex resumed an unexpected session"
                     );
                 }
-                let effort = string(result, "reasoningEffort");
-                self.session = Some(Session {
+                let session = Session {
                     id: id.to_owned(),
                     model: model.to_owned(),
-                    effort: effort.clone(),
-                });
+                    effort: string(result, "reasoningEffort"),
+                };
+                if let SessionIntent::Fork {
+                    provider_session_id,
+                    ..
+                } = &self.request.intent
+                {
+                    ensure!(
+                        provider_session_id != id,
+                        "Codex returned the source session for a fork"
+                    );
+                    let request = self.rpc.request(
+                        "thread/turns/list",
+                        json!({"threadId": id, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded"}),
+                        Request::VerifyFork,
+                    )?;
+                    self.pending_fork = Some(session);
+                    return Ok(AdapterUpdate {
+                        outbound: vec![request],
+                        events: Vec::new(),
+                    });
+                }
+                self.session = Some(session);
                 let mut events = Vec::new();
                 if matches!(self.request.intent, SessionIntent::Resume { .. })
                     && let Some(turns) = result["thread"]["turns"].as_array()
@@ -281,22 +339,38 @@ impl CodexSession {
                         item_kind: None,
                     }));
                 }
-                events.push(self.event(ProviderEventData::SessionReady {
-                    model: Some(model.to_owned()),
-                    effort,
-                }));
-                Ok(AdapterUpdate {
-                    outbound: vec![self.rpc.request(
-                        "model/list",
-                        json!({"limit":100}),
-                        Request::ModelPage,
-                    )?],
-                    events,
-                })
+                self.opened(events)
+            }
+            Request::VerifyFork => {
+                let SessionIntent::Fork {
+                    provider_session_id,
+                    boundary: ForkBoundary::CompletedTurn { turn_id },
+                } = &self.request.intent
+                else {
+                    bail!("unexpected Codex fork verification");
+                };
+                let session = self
+                    .pending_fork
+                    .take()
+                    .context("Codex did not return a fork session")?;
+                let turns = result["data"]
+                    .as_array()
+                    .context("Codex did not return fork turns")?;
+                ensure!(
+                    matches!(turns.as_slice(), [last] if last["id"].as_str() == Some(turn_id) && last["status"] == "completed"),
+                    "Codex fork did not end at the requested completed turn"
+                );
+                let verification = ProviderEventData::NativeForkVerified {
+                    source_session_id: provider_session_id.clone(),
+                    last_turn_id: turn_id.clone(),
+                };
+                self.session = Some(session);
+                self.opened(vec![self.event(verification)])
             }
             Request::ReadConfiguration => {
                 let mut codex_instructions = None;
                 let mut qualification = None;
+                let mut events = Vec::new();
                 let revision = if let Some(mut config) = result
                     .get("config")
                     .filter(|value| value.is_object())
@@ -306,6 +380,19 @@ impl CodexSession {
                         || config.get("project_doc_max_bytes").is_some()
                     {
                         codex_instructions = serde_json::from_value(config.clone()).ok();
+                    }
+                    let agents = &config["agents"];
+                    let enabled = agents["enabled"].as_bool();
+                    let concurrent_spawned_threads = agents["max_concurrent_threads_per_session"]
+                        .as_u64()
+                        .or_else(|| agents["max_threads"].as_u64());
+                    if enabled.is_some() || concurrent_spawned_threads.is_some() {
+                        events.push(self.event(ProviderEventData::DelegationControlsReported {
+                            controls: DelegationControls::CodexSessionTree {
+                                enabled,
+                                concurrent_spawned_threads,
+                            },
+                        }));
                     }
                     config.sort_all_objects();
                     if let Some(fields) = config.as_object() {
@@ -319,13 +406,12 @@ impl CodexSession {
                 } else {
                     None
                 };
-                Ok(
-                    self.events(vec![self.event(ProviderEventData::ConfigurationReported {
-                        revision,
-                        codex_instructions,
-                        qualification,
-                    })]),
-                )
+                events.push(self.event(ProviderEventData::ConfigurationReported {
+                    revision,
+                    codex_instructions,
+                    qualification,
+                }));
+                Ok(self.events(events))
             }
             Request::ListSkills => {
                 let catalog = self.decode_skills(result)?;
@@ -344,8 +430,41 @@ impl CodexSession {
                 }
                 Ok(self.events(events))
             }
+            Request::StartCompaction => {
+                if let Some(progress) = self
+                    .active
+                    .as_mut()
+                    .and_then(|turn| turn.compaction.as_mut())
+                {
+                    progress.acknowledged = true;
+                }
+                let events = self.settle_compaction();
+                Ok(self.events(events))
+            }
             Request::Interrupt => Ok(AdapterUpdate::default()),
         }
+    }
+
+    fn opened(&mut self, mut events: Vec<ProviderEvent>) -> Result<AdapterUpdate> {
+        let session = self
+            .session
+            .as_ref()
+            .context("Codex session has not started")?;
+        events.push(self.event(ProviderEventData::SessionReady {
+            model: Some(session.model.clone()),
+            effort: session.effort.clone(),
+        }));
+        if matches!(self.request.intent, SessionIntent::Start) {
+            events.push(self.event(ProviderEventData::FreshSessionOpened));
+        }
+        Ok(AdapterUpdate {
+            outbound: vec![self.rpc.request(
+                "model/list",
+                json!({"limit": 100}),
+                Request::ModelPage,
+            )?],
+            events,
+        })
     }
 
     fn decode_skills(&self, result: &Value) -> Result<SkillCatalog> {
@@ -471,7 +590,11 @@ impl CodexSession {
             return Ok(Vec::new());
         }
         turn.id = Some(id.to_owned());
-        Ok(vec![self.event(ProviderEventData::TurnStarted)])
+        Ok(if turn.compaction.is_some() {
+            Vec::new()
+        } else {
+            vec![self.event(ProviderEventData::TurnStarted)]
+        })
     }
 
     fn finish_turn(&mut self, outcome: TurnOutcome) -> Vec<ProviderEvent> {
@@ -485,11 +608,43 @@ impl CodexSession {
         vec![finished]
     }
 
+    fn finish_compaction(&mut self, outcome: TurnOutcome) -> Vec<ProviderEvent> {
+        let finished = self.event(ProviderEventData::NativeCompactionFinished { outcome });
+        self.active = None;
+        self.approvals.clear();
+        self.questions.clear();
+        vec![finished]
+    }
+
+    fn settle_compaction(&mut self) -> Vec<ProviderEvent> {
+        let Some(progress) = self
+            .active
+            .as_ref()
+            .and_then(|turn| turn.compaction.as_ref())
+        else {
+            return Vec::new();
+        };
+        match (progress.acknowledged, progress.outcome, progress.observed) {
+            (true, Some(TurnOutcome::Completed), false) => {
+                self.finish_compaction(TurnOutcome::Failed)
+            }
+            (true, Some(outcome), _) => self.finish_compaction(outcome),
+            _ => Vec::new(),
+        }
+    }
+
     fn notification(&mut self, method: &str, params: &Value) -> Result<AdapterUpdate> {
         if self.active.is_none() && method != "error" {
             return Ok(AdapterUpdate::default());
         }
         let thread = params["threadId"].as_str();
+        let is_compaction = self
+            .active
+            .as_ref()
+            .is_some_and(|turn| turn.compaction.is_some());
+        if is_compaction && thread.is_none() {
+            return Ok(AdapterUpdate::default());
+        }
         if let Some(thread) = thread
             && self
                 .session
@@ -530,7 +685,16 @@ impl CodexSession {
                         ));
                     }
                 };
-                events.extend(self.finish_turn(outcome));
+                if let Some(progress) = self
+                    .active
+                    .as_mut()
+                    .and_then(|turn| turn.compaction.as_mut())
+                {
+                    progress.outcome = Some(outcome);
+                    events.extend(self.settle_compaction());
+                } else {
+                    events.extend(self.finish_turn(outcome));
+                }
             }
             return Ok(self.events(events));
         }
@@ -567,6 +731,23 @@ impl CodexSession {
                 }
             }
             "item/started" | "item/completed" => {
+                if is_compaction {
+                    let item = &params["item"];
+                    if item["type"] != "contextCompaction" || method != "item/completed" {
+                        return Ok(AdapterUpdate::default());
+                    }
+                    let Some(turn_id) = params["turnId"].as_str() else {
+                        return Ok(AdapterUpdate::default());
+                    };
+                    self.learn_turn(turn_id)?;
+                    if let Some(progress) = self
+                        .active
+                        .as_mut()
+                        .and_then(|turn| turn.compaction.as_mut())
+                    {
+                        progress.observed = true;
+                    }
+                }
                 return self.item(params, method.ends_with("/completed"));
             }
             "hook/started" | "hook/completed" => {
@@ -885,10 +1066,36 @@ impl CliSession for CodexSession {
         self.active = Some(ActiveTurn {
             id: None,
             interrupt_requested: false,
+            compaction: None,
         });
         Ok(AdapterUpdate {
             outbound: vec![message],
             events: vec![],
+        })
+    }
+
+    fn compact_native(&mut self) -> Result<AdapterUpdate> {
+        ensure!(
+            self.active.is_none(),
+            "Codex already has a turn in progress"
+        );
+        let session = self
+            .session
+            .as_ref()
+            .context("Codex session has not started")?;
+        let message = self.rpc.request(
+            "thread/compact/start",
+            json!({"threadId": session.id}),
+            Request::StartCompaction,
+        )?;
+        self.active = Some(ActiveTurn {
+            id: None,
+            interrupt_requested: false,
+            compaction: Some(Compaction::default()),
+        });
+        Ok(AdapterUpdate {
+            outbound: vec![message],
+            events: Vec::new(),
         })
     }
 
@@ -1015,7 +1222,15 @@ impl CliSession for CodexSession {
             TerminalOutcome::Cancelled(_) => TurnOutcome::Interrupted,
             TerminalOutcome::Exited(_) => TurnOutcome::Failed,
         };
-        let events = self.finish_turn(outcome);
+        let events = if self
+            .active
+            .as_ref()
+            .is_some_and(|turn| turn.compaction.is_some())
+        {
+            self.finish_compaction(outcome)
+        } else {
+            self.finish_turn(outcome)
+        };
         self.events(events)
     }
 }
@@ -1047,6 +1262,111 @@ mod tests {
 
     fn outbound(update: &AdapterUpdate, index: usize) -> Result<Value> {
         Ok(serde_json::from_slice(update.outbound[index].as_bytes())?)
+    }
+
+    #[test]
+    fn rejects_message_items_and_a_fork_with_a_different_last_turn() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let request = |boundary| SessionRequest {
+            checkout: checkout.path().into(),
+            intent: SessionIntent::Fork {
+                provider_session_id: "original".into(),
+                boundary,
+            },
+            mode: SessionMode::ReadOnly,
+            model: None,
+            effort: None,
+        };
+        assert!(
+            CodexAdapter
+                .create_session(request(ForkBoundary::MessageItem {
+                    item_id: "inside-turn".into(),
+                }))
+                .is_err()
+        );
+        let mut session = CodexAdapter.create_session(request(ForkBoundary::CompletedTurn {
+            turn_id: "boundary".into(),
+        }))?;
+        session.start()?;
+        let initialize = inbound(
+            &mut *session,
+            json!({"id":1,"result":{"userAgent":"fixture"}}),
+        )?;
+        let fork = outbound(&initialize, 1)?;
+        assert_eq!(fork["method"], "thread/fork");
+        assert_eq!(fork["params"]["lastTurnId"], "boundary");
+        let opened = inbound(
+            &mut *session,
+            json!({
+                "id": fork["id"], "result": {
+                    "thread": {"id": "forked"},
+                    "cwd": checkout.path(),
+                    "sandbox": {"type":"readOnly"},
+                    "model": "fixture-model"
+                }
+            }),
+        )?;
+        assert!(opened.events.is_empty());
+        let query = outbound(&opened, 0)?;
+        assert_eq!(query["method"], "thread/turns/list");
+        assert_eq!(query["params"]["threadId"], "forked");
+        assert!(
+            inbound(
+                &mut *session,
+                json!({"id":query["id"],
+                    "result":{"data":[{"id":"later-turn","status":"completed"}]}
+                })
+            )
+            .is_err()
+        );
+        assert!(session.compact_native().is_err());
+        assert!(
+            session
+                .send(TurnInput {
+                    message_id: "message".into(),
+                    text: "offline fixture".into(),
+                    attachments: Vec::new(),
+                })
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compaction_requires_acknowledgement_and_matching_provider_evidence() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate(SessionMode::ReadOnly, SessionIntent::Start, checkout.path())?;
+        let start = session.compact_native()?;
+        let request = outbound(&start, 0)?;
+        assert_eq!(request["method"], "thread/compact/start");
+        assert!(session.compact_native().is_err());
+        let started = inbound(
+            &mut *session,
+            json!({"method":"turn/started","params":{
+                "threadId":"session", "turn":{"id":"compact"}
+            }}),
+        )?;
+        assert!(started.events.is_empty());
+        let unrelated = inbound(
+            &mut *session,
+            json!({"method":"item/completed","params":{
+                "threadId":"session", "turnId":"other", "item":{"id":"other-item","type":"contextCompaction"}
+            }}),
+        )?;
+        assert!(unrelated.events.is_empty());
+        let terminal = inbound(
+            &mut *session,
+            json!({"method":"turn/completed","params":{
+                "threadId":"session", "turn":{"id":"compact","status":"completed"}
+            }}),
+        )?;
+        assert!(terminal.events.is_empty());
+        let ack = inbound(&mut *session, json!({"id":request["id"],"result":{}}))?;
+        assert!(matches!(ack.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::NativeCompactionFinished { outcome: TurnOutcome::Failed },
+            location
+        }] if location.turn_id.as_deref() == Some("compact")));
+        Ok(())
     }
 
     fn negotiate(

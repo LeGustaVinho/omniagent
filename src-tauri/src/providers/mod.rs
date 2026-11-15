@@ -80,7 +80,9 @@ pub enum Authentication {
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     ModelInventory,
+    FreshSession,
     Resume,
+    NativeTurnFork,
     Reasoning,
     ToolApprovals,
     NativePlanMode,
@@ -89,7 +91,10 @@ pub enum Capability {
     NativePlanOutput,
     CancelTurn,
     SubagentEvents,
+    PerChildEvents,
+    NativeDelegationControls,
     NativeCompaction,
+    ManualNativeCompaction,
     NativeSuggestions,
     SideRequest,
     WorkspaceWrite,
@@ -97,9 +102,11 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 20] = [
         Self::ModelInventory,
+        Self::FreshSession,
         Self::Resume,
+        Self::NativeTurnFork,
         Self::Reasoning,
         Self::ToolApprovals,
         Self::NativePlanMode,
@@ -108,7 +115,10 @@ impl Capability {
         Self::NativePlanOutput,
         Self::CancelTurn,
         Self::SubagentEvents,
+        Self::PerChildEvents,
+        Self::NativeDelegationControls,
         Self::NativeCompaction,
+        Self::ManualNativeCompaction,
         Self::NativeSuggestions,
         Self::SideRequest,
         Self::WorkspaceWrite,
@@ -129,7 +139,36 @@ impl Capability {
 #[derive(Clone)]
 pub enum SessionIntent {
     Start,
-    Resume { provider_session_id: String },
+    Resume {
+        provider_session_id: String,
+    },
+    Fork {
+        provider_session_id: String,
+        boundary: ForkBoundary,
+    },
+}
+
+#[derive(Clone)]
+pub enum ForkBoundary {
+    CompletedTurn { turn_id: String },
+    MessageItem { item_id: String },
+}
+
+/// Settings and tool exposure observed on the wire. Enforcement requires separate verification.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "scope",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum DelegationControls {
+    CodexSessionTree {
+        enabled: Option<bool>,
+        concurrent_spawned_threads: Option<u64>,
+    },
+    ClaudeSessionToolList {
+        agent_tool_available: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -310,6 +349,14 @@ pub enum ProviderEventData {
         model: Option<String>,
         effort: Option<String>,
     },
+    FreshSessionOpened,
+    NativeForkVerified {
+        source_session_id: String,
+        last_turn_id: String,
+    },
+    DelegationControlsReported {
+        controls: DelegationControls,
+    },
     ModelObserved {
         model: Option<String>,
         effort: Option<String>,
@@ -431,6 +478,9 @@ pub enum ProviderEventData {
         source: planning::PlanSource,
     },
     Compacted,
+    NativeCompactionFinished {
+        outcome: TurnOutcome,
+    },
     GoalObserved {
         observation: goal::NativeGoalObservation,
     },
@@ -489,6 +539,9 @@ pub trait CliSession: Send {
         Ok(None)
     }
     fn send(&mut self, input: TurnInput) -> anyhow::Result<AdapterUpdate>;
+    fn compact_native(&mut self) -> anyhow::Result<AdapterUpdate> {
+        anyhow::bail!("this adapter has no qualified manual native compaction route")
+    }
     fn receive(&mut self, frame: OutputFrame) -> anyhow::Result<AdapterUpdate>;
     fn respond_approval(
         &mut self,
