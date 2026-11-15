@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: "Geist", "Segoe UI", sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+}
+
+:root {
+  color-scheme: dark;
+  --background: #111318;
+  --foreground: #f0f2f5;
+  --card: #191c23;
+  --muted: #242833;
+  --muted-foreground: #abb4c4;
+  --primary: #a6bbfd;
+  --primary-foreground: #121d39;
+  --border: #353b48;
+  --ring: #b6c7ff;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
