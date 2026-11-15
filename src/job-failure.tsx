@@ -24,6 +24,7 @@ const causes: Record<FailureCause, string> = {
   launch_rejected: "The runner returned a launch error.",
   startup_timeout: "The provider did not become ready before the startup deadline.",
   goal_time_limit: "The goal reached its time limit.",
+  goal_authority_revoked: "Authorization changed while the goal was running.",
   provider_error: "The provider reported an error.",
   transport_closed: "The provider transport closed before the attempt settled.",
   process_exit: "The provider exited without completing the attempt.",

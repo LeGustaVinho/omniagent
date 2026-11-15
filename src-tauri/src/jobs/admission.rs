@@ -612,6 +612,7 @@ fn occupancy(db: &Connection) -> Result<u32> {
             SELECT a.run_id FROM job_attempts a JOIN runs r ON r.id = a.run_id
             WHERE r.status IN ('starting', 'running', 'waiting_for_input')
             UNION SELECT run_id FROM unconfirmed_question_stops
+            UNION SELECT run_id FROM native_goal_executors WHERE NOT stop_confirmed
          )",
         [],
         |row| row.get(0),
@@ -625,6 +626,7 @@ struct Inputs {
     question: Option<QuestionContinuation>,
     instruction: Option<QueuedRevision>,
     goal: Option<GoalBoundary>,
+    native_seed: Option<super::NativeGoalSeed>,
 }
 
 fn build_attempt(
@@ -787,12 +789,17 @@ fn build_attempt(
                         }
                         (JobOrigin::Operator, Some(context), None) => {
                             let conversation = load_conversation(db, &context.conversation_id)?;
-                            insert_job_attempt(
+                            crate::conversations::insert_job_with_history(
                                 db,
                                 conversation,
                                 scope,
                                 &inputs.request.instructions,
                                 allocation,
+                                if inputs.native_seed.is_some() {
+                                    AttemptHistory::Fresh
+                                } else {
+                                    AttemptHistory::Automatic
+                                },
                             )?
                         }
                         _ => {
@@ -816,6 +823,13 @@ fn build_attempt(
         }
     };
     plan.requires_bridge = inputs.request.requires_bridge;
+    if inputs.native_seed.is_some() {
+        ensure!(
+            matches!(plan.intent, crate::providers::SessionIntent::Start),
+            "Native goals require a fresh session"
+        );
+        plan.native_goal_seed = inputs.native_seed;
+    }
     Ok(ScheduledAttempt::Agent(Box::new(plan)))
 }
 
@@ -939,6 +953,7 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
     } else {
         None
     };
+    let native_seed = super::native_goal_qualification::native_goal_seed(db, job, scope.as_ref())?;
     Ok(Inputs {
         request,
         scope,
@@ -946,6 +961,7 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
         question: load_continuation(db, job)?,
         instruction: instructions::load_revision(db, &job.id)?,
         goal: goals::managed_boundary(db, &job.id)?,
+        native_seed,
     })
 }
 
@@ -1093,7 +1109,7 @@ fn evaluate(
         QueueState::Paused => blockers.push(JobPaused),
         QueueState::Cancelled => return Ok((vec![JobCancelled], SubagentAllocation::default())),
     }
-    if let Some(reason) = goals::limit_blocker(db, &job.id)? {
+    if let Some(reason) = goals::limit_blocker(db, &job.id, inputs.native_seed.is_some())? {
         blockers.push(Policy { reason });
     }
     for id in &inputs.request.dependencies {

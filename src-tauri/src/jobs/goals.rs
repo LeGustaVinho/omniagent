@@ -8,7 +8,10 @@ use uuid::Uuid;
 use crate::{
     conversations::{SessionScope, consume_matching_draft, load_conversation},
     protection,
-    providers::{Provider, goal::NativeGoalObservation, questions::QuestionRoute},
+    providers::{
+        Provider, ProviderEvent, ProviderEventData, TurnOutcome, goal::NativeGoalObservation,
+        questions::QuestionRoute,
+    },
     repository::writers::writer_owner,
     store::Store,
 };
@@ -25,7 +28,7 @@ use super::{
 pub struct GoalDefinition {
     pub objective: String,
     pub criteria: Vec<String>,
-    pub max_turns: u32,
+    pub max_turns: Option<u32>,
     pub max_seconds: Option<u32>,
     pub token_budget: Option<u64>,
 }
@@ -40,13 +43,15 @@ impl GoalDefinition {
             "Goal criteria must be nonempty"
         );
         ensure!(
-            self.max_turns > 0 && self.max_seconds != Some(0) && self.token_budget != Some(0),
+            self.max_turns != Some(0)
+                && self.max_seconds != Some(0)
+                && self.token_budget != Some(0),
             "Goal limits must be positive"
         );
         Ok(())
     }
 
-    fn instructions(&self) -> String {
+    pub(super) fn instructions(&self) -> String {
         let mut prompt = format!(
             "Goal objective\n{}\n\nTake one bounded turn toward this goal. Before ending the turn, use report_goal_progress to record evidence and select the next action.",
             self.objective.trim()
@@ -59,6 +64,18 @@ impl GoalDefinition {
             }
         }
         prompt
+    }
+
+    pub(super) fn native_objective(&self) -> String {
+        let mut objective = self.objective.trim().to_owned();
+        if !self.criteria.is_empty() {
+            objective.push_str("\n\nAcceptance criteria\n");
+            for criterion in &self.criteria {
+                objective.push_str("\n- ");
+                objective.push_str(criterion.trim());
+            }
+        }
+        objective
     }
 }
 
@@ -379,7 +396,11 @@ fn load_revision(db: &Connection, id: String) -> Result<GoalRevision> {
     })
 }
 
-pub(super) fn limit_blocker(db: &Connection, job: &str) -> Result<Option<&'static str>> {
+pub(super) fn limit_blocker(
+    db: &Connection,
+    job: &str,
+    native_candidate: bool,
+) -> Result<Option<&'static str>> {
     let limits: Option<(Option<i64>, bool, String)> = db
         .query_row(
             "SELECT r.deadline_ms, r.continuation_owner = 'managed' AND r.token_budget_requested, controls.state
@@ -398,7 +419,9 @@ pub(super) fn limit_blocker(db: &Connection, job: &str) -> Result<Option<&'stati
     }
     Ok(match (deadline, unsupported_budget) {
         (Some(deadline), _) if now_ms() >= deadline => Some("The goal reached its time limit"),
-        (_, true) => Some("The managed goal route cannot enforce this token budget"),
+        (_, true) if !native_candidate => {
+            Some("The managed goal route cannot enforce this token budget")
+        }
         _ => None,
     })
 }
@@ -460,6 +483,76 @@ impl Store {
             ).optional()?)
         }).await
     }
+
+    pub(crate) async fn activate_native_goal_executor(
+        &self,
+        run: String,
+        evidence: String,
+    ) -> Result<bool> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let execution: Option<(String, String)> = tx.query_row(
+                "SELECT r.id, s.provider_session_id FROM active_agent_attempts active
+                 JOIN job_attempts j ON j.run_id = active.run_id
+                 JOIN goal_revisions r ON r.initial_job_id = j.job_id
+                 JOIN active_goals current ON current.revision_id = r.id
+                 JOIN goal_revision_controls controls ON controls.revision_id = r.id
+                 JOIN agent_attempts a ON a.run_id = active.run_id
+                 JOIN agent_sessions s ON s.id = a.agent_session_id
+                 WHERE active.run_id = ?1 AND r.continuation_owner = 'managed'
+                   AND controls.state = 'active' AND NOT j.cancel_requested
+                   AND (r.deadline_ms IS NULL OR r.deadline_ms > ?2)
+                   AND EXISTS (SELECT 1 FROM native_goal_context_receipts c
+                     WHERE c.run_id = ?1 AND c.provider_session_id = s.provider_session_id)
+                   AND EXISTS (SELECT 1 FROM native_goal_qualifications q WHERE q.evidence_id = ?3)",
+                params![run, now_ms(), evidence], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?;
+            let Some((revision, session)) = execution else {
+                return Ok(false);
+            };
+            if !super::validate_attempt_policy(&tx, &run)? {
+                tx.commit()?;
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO native_goal_executors(run_id, revision_id, provider_session_id, evidence_id)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![run, revision, session, evidence],
+            )?;
+            tx.execute("UPDATE goal_revisions SET continuation_owner = 'native' WHERE id = ?1", [&revision])?;
+            tx.commit()?;
+            Ok(true)
+        }).await
+    }
+
+    pub(crate) async fn record_native_goal_result(
+        &self,
+        run: String,
+        result: &'static str,
+    ) -> Result<()> {
+        self.execute(move |db| {
+            let changed = db.execute(
+                "UPDATE native_goal_executors SET provider_result = ?2 WHERE run_id = ?1 AND provider_result IS NULL",
+                params![run, result],
+            )?;
+            ensure!(changed == 1, "The native executor has no current result boundary");
+            Ok(())
+        }).await
+    }
+}
+
+pub(crate) fn settle_native_goal_executor(
+    db: &Connection,
+    run: &str,
+    confirmed: bool,
+) -> Result<()> {
+    if confirmed {
+        db.execute(
+            "UPDATE native_goal_executors SET stop_confirmed = 1 WHERE run_id = ?1",
+            [run],
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn record_native_goal(
@@ -481,10 +574,100 @@ pub(crate) fn record_native_goal(
     Ok(())
 }
 
+pub(crate) fn is_native_goal_run(db: &Connection, run: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM job_attempts j
+           JOIN goal_continuations c ON c.job_id = j.job_id
+           JOIN goal_revisions r ON r.id = c.revision_id
+           WHERE j.run_id = ?1 AND r.continuation_owner = 'native')",
+        [run],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn record_native_goal_turn(
+    db: &Connection,
+    run: &str,
+    seq: i64,
+    event: &ProviderEvent,
+) -> Result<()> {
+    if matches!(&event.data, ProviderEventData::GoalObserved { .. }) {
+        // Goal notifications can refer to a turn that has already ended.
+        return Ok(());
+    }
+    let turn = event.location.turn_id.as_deref();
+    match &event.data {
+        ProviderEventData::TurnStarted => {
+            let turn = turn.context("Native goal turn has no turn ID")?;
+            ensure!(
+                event.location.session_id.is_some(),
+                "Native goal turn has no session ID"
+            );
+            let inserted = db.execute(
+                "INSERT INTO native_goal_turns(run_id, provider_turn_id, started_event_seq)
+                 VALUES (?1, ?2, ?3) ON CONFLICT(run_id, provider_turn_id) DO NOTHING",
+                params![run, turn, seq],
+            )?;
+            if inserted == 1 {
+                db.execute(
+                    "UPDATE agent_attempts SET provider_turn_id = ?2, provider_terminal = NULL
+                     WHERE run_id = ?1",
+                    params![run, turn],
+                )?;
+            }
+        }
+        ProviderEventData::TurnFinished { outcome } => {
+            let turn = turn.context("Native goal turn has no turn ID")?;
+            ensure!(
+                event.location.session_id.is_some(),
+                "Native goal turn has no session ID"
+            );
+            let state = match outcome {
+                TurnOutcome::Completed => "completed",
+                TurnOutcome::Failed => "failed",
+                TurnOutcome::Interrupted => "interrupted",
+            };
+            let changed = db.execute(
+                "UPDATE native_goal_turns SET finished_event_seq = ?3, outcome = ?4
+                 WHERE run_id = ?1 AND provider_turn_id = ?2 AND outcome IS NULL",
+                params![run, turn, seq, state],
+            )?;
+            if changed == 1 {
+                db.execute(
+                    "UPDATE agent_attempts SET provider_terminal = ?3
+                     WHERE run_id = ?1 AND provider_turn_id = ?2",
+                    params![run, turn, state],
+                )?;
+            } else {
+                let known: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM native_goal_turns WHERE run_id = ?1 AND provider_turn_id = ?2)",
+                    params![run, turn],
+                    |row| row.get(0),
+                )?;
+                ensure!(known, "Native goal terminal event has no observed start");
+            }
+        }
+        _ if let Some(turn) = turn => {
+            let open: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM native_goal_turns WHERE run_id = ?1 AND provider_turn_id = ?2 AND outcome IS NULL)",
+                params![run, turn],
+                |row| row.get(0),
+            )?;
+            ensure!(
+                open,
+                "Provider event does not match the active native goal turn"
+            );
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) -> Result<()> {
     let source = db.query_row(
         "SELECT r.id, c.checkpoint_ordinal + 1, r.definition, r.deadline_ms, j.job_id,
-                g.project_id, a.conversation_id, report.payload, r.continuation_owner
+                g.project_id, a.conversation_id, report.payload, r.continuation_owner,
+                (SELECT provider_result FROM native_goal_executors WHERE run_id = j.run_id AND stop_confirmed)
          FROM job_attempts j JOIN goal_continuations c ON c.job_id = j.job_id
          JOIN goal_revisions r ON r.id = c.revision_id JOIN active_goals active ON active.revision_id = r.id
          JOIN goals g ON g.id = r.goal_id JOIN agent_attempts a ON a.run_id = j.run_id
@@ -494,7 +677,8 @@ pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) 
                        WHERE s.run_id = ?1 AND d.ordinal = 1 AND d.delivery = 'submitted')",
         [run], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, Vec<u8>>(2)?,
             row.get::<_, Option<i64>>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?, row.get::<_, Option<Vec<u8>>>(7)?, row.get::<_, String>(8)?)),
+            row.get::<_, String>(6)?, row.get::<_, Option<Vec<u8>>>(7)?, row.get::<_, String>(8)?,
+            row.get::<_, Option<String>>(9)?)),
     ).optional()?;
     let Some((
         revision,
@@ -506,25 +690,35 @@ pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) 
         conversation,
         report,
         owner,
+        native_result,
     )) = source
     else {
         return Ok(());
     };
     let definition: GoalDefinition = serde_json::from_slice(&protection::unprotect(&definition)?)?;
     let report = decode_report(report)?;
-    let mut next = match report.as_ref().map(|report| report.action) {
-        Some(GoalTurnAction::Blocked) => "blocked",
-        Some(GoalTurnAction::Continue) if owner == "managed" => {
-            if ordinal >= definition.max_turns
-                || deadline.is_some_and(|deadline| now_ms() >= deadline)
-                || definition.token_budget.is_some()
-            {
-                "limit_reached"
-            } else {
-                "continue"
-            }
+    let mut next = if owner == "native" {
+        match native_result.as_deref() {
+            Some("blocked") => "blocked",
+            Some("limit_reached") => "limit_reached",
+            Some("completed") => "review",
+            _ => return Ok(()),
         }
-        _ => "review",
+    } else {
+        match report.as_ref().map(|report| report.action) {
+            Some(GoalTurnAction::Blocked) => "blocked",
+            Some(GoalTurnAction::Continue) if owner == "managed" => {
+                if definition.max_turns.is_some_and(|max| ordinal >= max)
+                    || deadline.is_some_and(|deadline| now_ms() >= deadline)
+                    || definition.token_budget.is_some()
+                {
+                    "limit_reached"
+                } else {
+                    "continue"
+                }
+            }
+            _ => "review",
+        }
     };
     let mut continuation = None;
     if next == "continue" {

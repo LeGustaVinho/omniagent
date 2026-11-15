@@ -83,6 +83,7 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
         case "profile_unavailable": return "The selected CLI profile changed or could not be verified.";
         case "worktree_unavailable": return "The worktree identity could not be verified.";
         case "native_delegation_unverified": return "The CLI did not confirm its reserved native subagent limit.";
+        case "native_goal_unverified": return "The selected CLI profile no longer matches its native goal qualification.";
         case "subagent_audit_unverified": return "The effective CLI profile changed after its native subagent audit was verified.";
         case "requirements": {
           const missing = [

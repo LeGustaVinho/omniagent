@@ -261,6 +261,14 @@ impl RecoverySource {
         let Some(session) = &self.session else {
             return Ok(None);
         };
+        let goal_executor: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM native_goal_executors WHERE run_id = ?1)",
+            [&self.source_run_id],
+            |row| row.get(0),
+        )?;
+        if goal_executor {
+            return Ok(None);
+        }
         let encrypted: Option<Vec<u8>> = db.query_row(
             "SELECT x.payload FROM context_snapshots x JOIN dispatches d ON d.snapshot_id = x.id
              WHERE x.run_id = ?1 AND d.ordinal = 1 AND d.delivery = 'submitted'",
@@ -334,6 +342,85 @@ pub(crate) fn requeue_unlaunched_job(db: &Connection, run_id: &str) -> Result<()
         reconcile_approval(db, &job)?;
     }
     Ok(())
+}
+
+pub(crate) fn requeue_rejected_native_goal(db: &Connection, run: &str) -> Result<()> {
+    use super::{DispatchRejection, policy::dispatch_rejection};
+    if dispatch_rejection(db, run)? != Some(DispatchRejection::NativeGoalUnverified) {
+        return Ok(());
+    }
+    let Some(job) = load_attempt_job(db, run)? else {
+        return Ok(());
+    };
+    let writer = job.mode == SessionMode::ApprovedWrite;
+    if writer && !unchanged_native_preflight(db, run)? {
+        return Ok(());
+    }
+    let queued = db.execute(
+        "INSERT INTO job_recoveries(job_id, source_run_id, action, context_id)
+         SELECT j.id, attempt.run_id, CASE WHEN ?2 THEN 'resume' ELSE 'retry' END, a.result_context_id
+         FROM jobs j JOIN job_attempts attempt ON attempt.job_id = j.id
+         JOIN agent_attempts a ON a.run_id = attempt.run_id
+         JOIN goal_revisions r ON r.initial_job_id = j.id
+         JOIN active_goals g ON g.revision_id = r.id
+         JOIN goal_revision_controls control ON control.revision_id = r.id
+         WHERE a.run_id = ?1 AND attempt.ordinal = 1 AND NOT attempt.cancel_requested
+           AND r.continuation_owner = 'managed' AND control.state = 'active'
+           AND j.queue_state IN ('queued', 'paused') AND a.result_context_id = a.context_id
+           AND (NOT EXISTS (SELECT 1 FROM context_snapshots snap WHERE snap.run_id = a.run_id)
+                OR EXISTS (SELECT 1 FROM native_goal_context_receipts seed WHERE seed.run_id = a.run_id))
+           AND NOT EXISTS (SELECT 1 FROM native_goal_executors x WHERE x.run_id = a.run_id)
+         ON CONFLICT(job_id) DO NOTHING",
+        params![run, writer],
+    )?;
+    if queued != 0 {
+        if writer {
+            db.execute(
+                "INSERT INTO goal_writer_recoveries VALUES (?1, ?2)",
+                params![job.id, run],
+            )?;
+        }
+        reconcile_approval(db, &job)?;
+    }
+    Ok(())
+}
+
+fn unchanged_native_preflight(db: &Connection, run: &str) -> Result<bool> {
+    use crate::repository::AttemptWorktreeEvidence;
+    let saved: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT evidence FROM job_worktree_candidates WHERE run_id = ?1 AND capture_confirmed",
+            [run],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(saved) = saved else { return Ok(false) };
+    let AttemptWorktreeEvidence::Saved { artifact } =
+        serde_json::from_slice(&protection::unprotect(&saved)?)?
+    else {
+        return Ok(false);
+    };
+    let before = &artifact.start.starting;
+    let after = &artifact.candidate;
+    Ok(before.head == after.head
+        && before.status == after.status
+        && before.index_digest == after.index_digest
+        && before.staged_diff_digest == after.staged_diff_digest
+        && before.unstaged_diff_digest == after.unstaged_diff_digest
+        && before
+            .changes
+            .as_ref()
+            .zip(after.changes.as_ref())
+            .is_some_and(|(before, after)| {
+                before
+                    .untracked
+                    .iter()
+                    .map(|file| (&file.path, &file.sha256))
+                    .eq(after
+                        .untracked
+                        .iter()
+                        .map(|file| (&file.path, &file.sha256)))
+            }))
 }
 
 pub(super) fn pending_writer_checkpoint(db: &Connection, job: &Job) -> Result<Option<String>> {

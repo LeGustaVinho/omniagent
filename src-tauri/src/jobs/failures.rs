@@ -30,6 +30,7 @@ pub enum FailureCause {
     LaunchRejected,
     StartupTimeout,
     GoalTimeLimit,
+    GoalAuthorityRevoked,
     ProviderError,
     TransportClosed,
     ProcessExit,

@@ -350,6 +350,51 @@ impl Runner for CandidateWriter {
     }
 }
 
+struct NativeGoalFixture(AtomicBool);
+
+impl Runner for NativeGoalFixture {
+    fn identity(&self) -> &str {
+        DirectWindowsRunner.identity()
+    }
+
+    fn execution_platform(&self) -> Option<omniagent::runner::ExecutionPlatform> {
+        DirectWindowsRunner.execution_platform()
+    }
+
+    fn executable_revision(&self, _path: &Path) -> Option<String> {
+        Some("native-goal-fixture".into())
+    }
+
+    fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
+        if request.arguments.first() == Some(&OsStr::new("plugin")) {
+            let powershell = std::path::PathBuf::from(
+                std::env::var_os("SystemRoot")
+                    .context("missing SystemRoot")
+                    .map_err(io::Error::other)?,
+            )
+            .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+            return DirectWindowsRunner.launch(LaunchRequest {
+                executable: &powershell,
+                arguments: &[
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    r#"Write-Output '{"installed":[]}'"#,
+                ]
+                .map(OsStr::new),
+                ..request
+            });
+        }
+        if request
+            .arguments
+            .contains(&OsStr::new("features.goals=true"))
+        {
+            self.0.store(true, Ordering::Release);
+        }
+        CandidateWriter.launch(request)
+    }
+}
+
 fn register_fixture_bridge(request: &LaunchRequest<'_>) -> Result<()> {
     let Some(config) = request
         .arguments
@@ -429,6 +474,8 @@ fn register_fixture_bridge(request: &LaunchRequest<'_>) -> Result<()> {
 #[ignore = "native child for the managed worktree candidate test"]
 fn candidate_fixture_worker() -> Result<()> {
     let root = std::env::current_dir()?;
+    let native_fixture = root.join("fixture-native-goal").is_file();
+    let mut native_goal = Value::Null;
     let mut output = io::stdout().lock();
     for line in io::stdin().lock().lines() {
         let frame: Value = serde_json::from_str(&line?)?;
@@ -439,8 +486,70 @@ fn candidate_fixture_worker() -> Result<()> {
                 "thread":{"id":"fixture"}, "cwd":root, "model":"fixture",
                 "sandbox":{"type":"workspaceWrite"}
             }),
+            Some("config/read") if native_fixture => json!({"config":{
+                "sandbox_mode":"workspace-write","features":{"goals":true},
+                "changedProfile":root.join("fixture-native-profile-changed").is_file()
+            }}),
             Some("config/read") => json!({"config":{"sandbox_mode":"workspace-write"}}),
+            Some("skills/list") if native_fixture => json!({"data":[{"cwd":root,"skills":[]}]}),
             Some("model/list" | "skills/list") => json!({"data":[]}),
+            Some("thread/goal/set") if native_fixture => {
+                let params = &frame["params"];
+                if params["objective"].is_null() {
+                    native_goal["status"] = params["status"].clone();
+                    json!({"goal":native_goal})
+                } else {
+                    native_goal = json!({
+                        "threadId":"fixture", "status":"active", "objective":params["objective"],
+                        "tokenBudget":params["tokenBudget"], "tokensUsed":0u64
+                    });
+                    let start = |turn| {
+                        json!({"method":"turn/started","params":{
+                            "threadId":"fixture","turn":{"id":turn}
+                        }})
+                    };
+                    let done = |turn| {
+                        json!({"method":"turn/completed","params":{
+                            "threadId":"fixture","turn":{"id":turn,"status":"completed"}
+                        }})
+                    };
+                    fs::write(root.join("candidate.bin"), b"native first turn")?;
+                    let reply = json!({"id":frame["id"],"result":{"goal":native_goal}});
+                    writeln!(
+                        output,
+                        "{reply}\n{}\n{}\n{}\n{}",
+                        start("native-first"),
+                        done("native-first"),
+                        start("native-second"),
+                        done("native-first")
+                    )?;
+                    fs::write(root.join("candidate.bin"), b"native second turn")?;
+                    if root.join("fixture-native-complete").is_file() {
+                        native_goal["status"] = json!("complete");
+                        let observed = json!({"method":"thread/goal/updated","params":{
+                            "threadId":"fixture","turnId":"native-second","goal":native_goal
+                        }});
+                        writeln!(output, "{observed}\n{}", done("native-second"))?;
+                    }
+                    output.flush()?;
+                    continue;
+                }
+            }
+            Some("thread/goal/get") if native_fixture => json!({"goal":native_goal}),
+            Some("thread/inject_items") if native_fixture => {
+                let text = frame["params"]["items"][0]["content"][0]["text"]
+                    .as_str()
+                    .context("missing native goal fixture seed")?;
+                ensure!(
+                    text.contains("Save the writer result")
+                        && !text.contains("report_goal_progress")
+                );
+                json!({})
+            }
+            Some("thread/goal/clear") if native_fixture => {
+                native_goal = Value::Null;
+                json!({"cleared":true})
+            }
             Some("turn/start") => {
                 let text = frame
                     .pointer("/params/input/0/text")
@@ -552,7 +661,7 @@ fn candidate_fixture_worker() -> Result<()> {
                 };
                 let reply = json!({"id":frame["id"],"result":{}});
                 let terminal = json!({"method":"turn/completed", "params":{
-                    "threadId":"fixture", "turn":{"id":"turn","status":status}
+                    "threadId":"fixture", "turn":{"id":frame["params"]["turnId"],"status":status}
                 }});
                 writeln!(output, "{reply}\n{terminal}")?;
                 output.flush()?;
@@ -1689,6 +1798,373 @@ async fn expired_writer_question_retains_partial_work_and_releases_the_slot() ->
 }
 
 #[tokio::test]
+async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_turns() -> Result<()>
+{
+    use omniagent::{
+        jobs::{GoalContinuationOwner, GoalRevision},
+        providers::{
+            Capability,
+            capabilities::{CapabilitySubject, EvidenceOrigin, ObservedResult},
+            goal::NativeGoalAction,
+        },
+    };
+    use std::{collections::BTreeSet, time::Duration};
+
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("store.sqlite");
+    let store = Store::open(database.clone())?;
+    let source = temp.path().join("source");
+    let checkout = repository(&store, &source).await?;
+    let project = checkout.project_id;
+    let task = store
+        .create_project_task(project.clone(), "Native goal writer".into())
+        .await?;
+    let tree = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project.clone(),
+        task.id.clone(),
+        checkout.checkout_id,
+    )
+    .await?;
+    fs::create_dir_all(source.join(".git/info"))?;
+    fs::write(
+        source.join(".git/info/exclude"),
+        "ignored.txt\nfixture-native-goal\nfixture-native-complete\nfixture-native-profile-changed\n",
+    )?;
+    fs::write(tree.root.join("fixture-native-goal"), [])?;
+    let runner = Arc::new(NativeGoalFixture(AtomicBool::new(false)));
+    let env = AdmissionEnvironment {
+        runner: runner.identity().into(),
+        bridge_available: true,
+    };
+    let scope = SessionScope {
+        provider: Provider::Codex,
+        profile_id: "native-goal-writer".into(),
+        account_binding: Some("fixture-account".into()),
+        checkout: tree.root.clone(),
+        executable: std::env::current_exe()?,
+        cli_version: "0.169.0-alpha.11.1".into(),
+        runner: runner.identity().into(),
+        permission_revision: "native-goal-fixture".into(),
+        mode: SessionMode::ApprovedWrite,
+        model: Some("fixture".into()),
+        effort: None,
+    };
+    let queue = |title: &'static str, max_turns, token_budget| {
+        let (store, project, task, scope, checkout, env) = (
+            store.clone(),
+            project.clone(),
+            task.id.clone(),
+            scope.clone(),
+            tree.checkout_id.clone(),
+            env.clone(),
+        );
+        async move {
+            let chat = store.create_conversation(checkout, title.into()).await?;
+            let goal = store
+                .start_conversation_goal(
+                    JobContext {
+                        conversation_id: chat.id.clone(),
+                        context_id: chat.context_id,
+                    },
+                    scope,
+                    Some(task),
+                    GoalDefinition {
+                        objective: title.into(),
+                        criteria: vec!["Save the writer result".into()],
+                        max_turns,
+                        max_seconds: Some(90),
+                        token_budget,
+                    },
+                    None,
+                )
+                .await?;
+            let inspect = store
+                .inspect_job(project.clone(), goal.job.id.clone(), env)
+                .await?
+                .unwrap();
+            let [AdmissionBlocker::Approval { approval_id }] = inspect.blockers.as_slice() else {
+                anyhow::bail!("expected goal approval, got {:?}", inspect.blockers);
+            };
+            store
+                .decide_job_approval(project, approval_id.clone(), true)
+                .await?;
+            Ok::<_, anyhow::Error>((chat.id, goal))
+        }
+    };
+    async fn finished_goal(store: &Store, chat: &str, ordinal: u32) -> Result<GoalRevision> {
+        tokio::time::timeout(Duration::from_secs(35), async {
+            loop {
+                let goal = store
+                    .active_conversation_goal(chat.into())
+                    .await?
+                    .context("fixture goal disappeared")?;
+                if goal
+                    .job
+                    .latest_attempt
+                    .as_ref()
+                    .is_some_and(|a| a.ordinal == ordinal && a.status.is_terminal())
+                {
+                    return Ok::<_, anyhow::Error>(goal);
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .with_context(|| format!("goal {chat} did not settle attempt {ordinal}"))?
+    }
+    store.set_job_queue_capacity(1).await?;
+    let bridge = std::path::PathBuf::from(env!("CARGO_BIN_EXE_omniagent"));
+    let scheduler = JobScheduler::start(store.clone(), runner.clone(), Some(bridge));
+    let (calibration_chat, _) =
+        queue("Record the fixture's effective profile", Some(1), None).await?;
+    let calibration = finished_goal(&store, &calibration_chat, 1)
+        .await
+        .context("effective profile calibration")?;
+    let run = calibration
+        .job
+        .latest_attempt
+        .context("missing calibration attempt")?;
+    assert_eq!(run.status, RunStatus::Succeeded);
+    assert!(!runner.0.load(Ordering::Acquire));
+    let assessment = store
+        .agent_dispatch(calibration_chat, run.run_id.clone())
+        .await?
+        .context("missing calibration dispatch")?
+        .snapshot
+        .capabilities
+        .context("missing capability scope")?;
+    let descriptor = assessment
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.descriptor.subject
+                == CapabilitySubject::Protocol {
+                    capability: Capability::NativeGoalCommand,
+                }
+        })
+        .context("missing native goal capability")?
+        .descriptor
+        .clone();
+    store
+        .record_capability_evidence(
+            assessment.scope.clone(),
+            descriptor,
+            EvidenceOrigin::AuthenticatedFixture,
+            ObservedResult::Succeeded,
+            run.run_id,
+        )
+        .await?;
+    let controls = BTreeSet::from([
+        NativeGoalAction::SeedContext,
+        NativeGoalAction::Start,
+        NativeGoalAction::Status,
+        NativeGoalAction::Pause,
+        NativeGoalAction::Resume,
+        NativeGoalAction::Cancel,
+    ]);
+    store
+        .register_native_goal_qualification(
+            scope.clone(),
+            assessment.scope.clone(),
+            controls.clone(),
+            true,
+        )
+        .await?;
+
+    let (chat, goal) = queue("Run two native turns", None, Some(40_000)).await?;
+    tokio::time::timeout(Duration::from_secs(35), async {
+        loop {
+            let current = store
+                .active_conversation_goal(chat.clone())
+                .await?
+                .context("missing writer goal")?;
+            if current.continuation_owner == GoalContinuationOwner::Native
+                && fs::read(tree.root.join("candidate.bin")).ok().as_deref()
+                    == Some(b"native second turn")
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+            if current
+                .job
+                .latest_attempt
+                .as_ref()
+                .is_some_and(|a| a.status.is_terminal())
+            {
+                anyhow::bail!("native goal ended before its second turn: {current:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .context("native writer did not reach its second turn")??;
+    assert!(runner.0.load(Ordering::Acquire));
+    assert_eq!(
+        store
+            .inspect_project_queue(project.clone(), env.clone())
+            .await?
+            .active,
+        1
+    );
+    assert!(
+        with_managed_worktree_writer(
+            &store,
+            project.clone(),
+            tree.checkout_id.clone(),
+            task.id.clone(),
+            |_| Ok(())
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        store
+            .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Cancel)
+            .await?,
+        GoalControlState::Cancelling
+    );
+    let cancelled = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let job = store
+                .job(project.clone(), goal.job.id.clone())
+                .await?
+                .unwrap();
+            if let Some(attempt) = job.latest_attempt.filter(|a| a.status.is_terminal()) {
+                return Ok::<_, anyhow::Error>(attempt);
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .context("native writer did not settle cancellation")??;
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
+    assert_eq!(cancelled.ordinal, 1);
+    assert!(
+        store
+            .active_conversation_goal(chat.clone())
+            .await?
+            .is_none()
+    );
+    let initial_dispatch = store
+        .agent_dispatch(chat, cancelled.run_id.clone())
+        .await?
+        .context("missing native context dispatch")?;
+    let [seed] = initial_dispatch.frames.as_slice() else {
+        anyhow::bail!("native context has more than one initial dispatch");
+    };
+    let wire: Value = serde_json::from_slice(seed)?;
+    assert_eq!(wire["method"], "thread/inject_items");
+    let turns: Vec<(String, String)> = rusqlite::Connection::open(&database)?
+        .prepare("SELECT provider_turn_id, outcome FROM native_goal_turns WHERE run_id = ?1 ORDER BY started_event_seq")?
+        .query_map([&cancelled.run_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    assert_eq!(
+        turns,
+        [
+            ("native-first".into(), "completed".into()),
+            ("native-second".into(), "interrupted".into())
+        ]
+    );
+    let Some(AttemptWorktreeEvidence::Saved { artifact }) = store
+        .attempt_worktree_evidence(project.clone(), cancelled.run_id)
+        .await?
+    else {
+        anyhow::bail!("native cancellation lost its worktree candidate");
+    };
+    let binary = artifact
+        .candidate
+        .changes
+        .as_ref()
+        .and_then(|changes| {
+            changes
+                .untracked
+                .iter()
+                .find(|item| item.path == "candidate.bin")
+        })
+        .and_then(|file| file.content_base64.as_deref())
+        .context("missing saved native worktree bytes")?;
+    assert_eq!(STANDARD.decode(binary)?, b"native second turn");
+    with_managed_worktree_writer(
+        &store,
+        project.clone(),
+        tree.checkout_id.clone(),
+        task.id.clone(),
+        |_| Ok(()),
+    )
+    .await?;
+
+    fs::write(tree.root.join("fixture-native-complete"), [])?;
+    let (chat, _) = queue("Finish a native goal", None, None).await?;
+    let completed = finished_goal(&store, &chat, 1)
+        .await
+        .context("native completion")?;
+    assert_eq!(completed.continuation_owner, GoalContinuationOwner::Native);
+    assert_eq!(
+        completed.job.latest_attempt.unwrap().status,
+        RunStatus::Succeeded
+    );
+    assert_eq!(
+        completed
+            .checkpoint
+            .context("missing native checkpoint")?
+            .next_action,
+        "review"
+    );
+    assert_eq!(
+        store
+            .inspect_project_queue(project.clone(), env.clone())
+            .await?
+            .active,
+        0
+    );
+
+    fs::write(tree.root.join("fixture-native-profile-changed"), [])?;
+    let (chat, _) = queue(
+        "Fall back after the verified configuration changes",
+        None,
+        None,
+    )
+    .await?;
+    let fallback = match finished_goal(&store, &chat, 2).await {
+        Ok(goal) => goal,
+        Err(error) => {
+            let live = store.active_conversation_goal(chat.clone()).await?.unwrap();
+            let inspect = store.inspect_job(project.clone(), live.job.id, env).await?;
+            return Err(error).context(format!("managed fallback state: {inspect:?}"));
+        }
+    };
+    assert_eq!(fallback.continuation_owner, GoalContinuationOwner::Managed);
+    let attempt = fallback
+        .job
+        .latest_attempt
+        .context("missing managed retry")?;
+    assert_eq!(attempt.status, RunStatus::Succeeded);
+    assert!(attempt.previous_run_id.is_some());
+    assert!(
+        store
+            .agent_dispatch(chat.clone(), attempt.previous_run_id.unwrap())
+            .await?
+            .is_none()
+    );
+    let retry = store
+        .agent_dispatch(chat, attempt.run_id)
+        .await?
+        .context("managed fallback was not dispatched")?;
+    assert!(
+        retry
+            .snapshot
+            .scoped_launch
+            .context("managed fallback launch evidence")?
+            .inputs
+            .iter()
+            .any(|input| input.contents == "features.goals=false")
+    );
+    scheduler.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn paused_goal_resumes_only_from_the_confirmed_writer_candidate() -> Result<()> {
     use std::time::Duration;
 
@@ -1748,7 +2224,7 @@ async fn paused_goal_resumes_only_from_the_confirmed_writer_candidate() -> Resul
             GoalDefinition {
                 objective: "Edit a candidate and wait for the operator".into(),
                 criteria: Vec::new(),
-                max_turns: 2,
+                max_turns: Some(2),
                 max_seconds: None,
                 token_budget: None,
             },

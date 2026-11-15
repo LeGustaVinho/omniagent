@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeGoalAction {
+    SeedContext,
     Start,
     Status,
     Pause,
@@ -23,6 +24,19 @@ pub enum NativeGoalCommand {
     Stop,
     Resume,
     Cancel,
+}
+
+impl NativeGoalCommand {
+    pub(crate) fn action(&self) -> NativeGoalAction {
+        match self {
+            Self::Start { .. } => NativeGoalAction::Start,
+            Self::Status => NativeGoalAction::Status,
+            Self::Pause => NativeGoalAction::Pause,
+            Self::Stop => NativeGoalAction::Stop,
+            Self::Resume => NativeGoalAction::Resume,
+            Self::Cancel => NativeGoalAction::Cancel,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -61,6 +75,14 @@ pub struct NativeGoalObservation {
     pub evaluation: Option<NativeGoalEvaluation>,
 }
 
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum NativeGoalControlOutcome {
+    Confirmed { observation: NativeGoalObservation },
+    Rejected,
+    Unconfirmed,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedGoalReason {
@@ -94,6 +116,7 @@ impl NativeGoalSupport {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NativeGoalEvidence {
     // A discovered command does not establish working lifecycle controls.
     pub scope_key: String,
@@ -110,7 +133,7 @@ impl NativeGoalEvidence {
             ManagedGoalReason::StaleEvidence
         } else if self.evidence_id.is_empty() {
             ManagedGoalReason::Unqualified
-        } else if [Start, Status, Resume, Cancel]
+        } else if [SeedContext, Start, Status, Resume, Cancel]
             .iter()
             .any(|action| !self.controls.contains(action))
             || !(self.controls.contains(&Pause) || self.controls.contains(&Stop))
@@ -162,7 +185,9 @@ mod tests {
                 reason: ManagedGoalReason::IncompleteLifecycle,
             }
         );
-        evidence.controls.extend([Status, Stop, Resume, Cancel]);
+        evidence
+            .controls
+            .extend([SeedContext, Status, Stop, Resume, Cancel]);
         assert_eq!(
             evidence.resolve("changed-model", false),
             NativeGoalSupport::Managed {

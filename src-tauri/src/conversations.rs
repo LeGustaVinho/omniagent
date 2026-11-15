@@ -103,6 +103,7 @@ pub struct AttemptPlan {
     pub(crate) answered_question: Option<QuestionOrigin>,
     pub(crate) requires_bridge: bool,
     pub(crate) native_job_recovery: Option<NativeJobRecovery>,
+    pub(crate) native_goal_seed: Option<crate::jobs::NativeGoalSeed>,
     pub(crate) native_subagent_limit: Option<u32>,
     pub(crate) subagent_audit: SubagentAuditRoute,
 }
@@ -665,9 +666,23 @@ impl Store {
         let payload = protection::protect(&serde_json::to_vec(&event)?)?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let active = active_attempt(&tx, &run_id)?;
+            let active = match active_attempt(&tx, &run_id) {
+                Ok(active) => active,
+                Err(error) if matches!(error.downcast_ref::<rusqlite::Error>(), Some(rusqlite::Error::QueryReturnedNoRows))
+                    && crate::jobs::late_native_goal_evidence(&tx, &run_id, source, &event)? =>
+                {
+                    tx.execute(
+                        "INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)",
+                        params![run_id, source.as_sql(), payload],
+                    )?;
+                    tx.commit()?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
             let primary = source == EventSource::Provider && event.location.parent_item_id.is_none()
                 && !matches!(event.data, ProviderEventData::Diagnostic { .. });
+            let native_goal = primary && crate::jobs::is_native_goal_run(&tx, &run_id)?;
             if primary && let Some(id) = &event.location.session_id {
                 let old: Option<String> = tx.query_row(
                     "SELECT provider_session_id FROM agent_sessions WHERE id = ?1", [&active.session_id], |row| row.get(0),
@@ -675,7 +690,7 @@ impl Store {
                 ensure!(old.as_ref().is_none_or(|old| old == id), "provider session changed during the attempt");
                 tx.execute("UPDATE agent_sessions SET provider_session_id = ?1 WHERE id = ?2", params![id, active.session_id])?;
             }
-            if primary && let Some(id) = &event.location.turn_id {
+            if primary && !native_goal && let Some(id) = &event.location.turn_id {
                 let old: Option<String> = tx.query_row(
                     "SELECT provider_turn_id FROM agent_attempts WHERE run_id = ?1", [&run_id], |row| row.get(0),
                 )?;
@@ -687,7 +702,7 @@ impl Store {
                     tx.execute("UPDATE agent_attempts SET reported_model = coalesce(?1, reported_model), reported_effort = coalesce(?2, reported_effort) WHERE run_id = ?3",
                         params![model, effort, run_id])?;
                 }
-                ProviderEventData::TurnFinished { outcome } if primary => {
+                ProviderEventData::TurnFinished { outcome } if primary && !native_goal => {
                     let state = match outcome {
                         TurnOutcome::Completed => "completed",
                         TurnOutcome::Failed => "failed",
@@ -701,12 +716,17 @@ impl Store {
                 && matches!(&event.data, ProviderEventData::Diagnostic { .. } | ProviderEventData::Error { .. });
             tx.execute("INSERT INTO agent_events(run_id, source, payload, inspect_diagnostic) VALUES (?1, ?2, ?3, ?4)",
                 params![run_id, source.as_sql(), payload, diagnostic])?;
-            crate::jobs::record_steering_event(&tx, &active.conversation_id, &run_id, source, tx.last_insert_rowid(), &event.data)?;
+            let event_seq = tx.last_insert_rowid();
+            if native_goal {
+                crate::jobs::record_native_goal_turn(&tx, &run_id, event_seq, &event)?;
+            }
+            crate::jobs::record_native_goal_control(&tx, &run_id, event_seq, source, &event)?;
+            crate::jobs::record_steering_event(&tx, &active.conversation_id, &run_id, source, event_seq, &event.data)?;
             if source == EventSource::Provider {
-                crate::jobs::record_native_subagent(&tx, &run_id, tx.last_insert_rowid(), &event.data)?;
+                crate::jobs::record_native_subagent(&tx, &run_id, event_seq, &event.data)?;
             }
             if primary && let ProviderEventData::GoalObserved { observation } = &event.data {
-                crate::jobs::record_native_goal(&tx, &run_id, tx.last_insert_rowid(), observation)?;
+                crate::jobs::record_native_goal(&tx, &run_id, event_seq, observation)?;
             }
             if source == EventSource::Application && let ProviderEventData::CapabilityAssessmentUpdated { assessment } = &event.data {
                 crate::runtime_inspection::save_capability_summary(&tx, &run_id, assessment)?;
@@ -722,14 +742,14 @@ impl Store {
                 }
                 tx.execute("INSERT INTO agent_permissions(request_event_seq, run_id, turn_id, request_key, delivery, route)
                     VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
-                    params![tx.last_insert_rowid(), run_id, active.turn_id, permission_key(request_id)?, route.as_sql()])?;
+                    params![event_seq, run_id, active.turn_id, permission_key(request_id)?, route.as_sql()])?;
             }
             match &event.data {
                 ProviderEventData::Question { request_id, normalized: Some(_), route, .. }
                     if (primary && route.is_native()) || (source == EventSource::Application
                         && event.location.parent_item_id.is_none() && !route.is_native()) =>
                 {
-                    let request_event_seq = tx.last_insert_rowid();
+                    let request_event_seq = event_seq;
                     let inserted = tx.execute(
                         "INSERT INTO agent_questions(request_event_seq, run_id, turn_id, request_key, route, delivery)
                          SELECT ?1, ?2, ?3, ?4, ?5, 'pending'
@@ -760,7 +780,7 @@ impl Store {
                     tx.execute(
                         "UPDATE agent_questions SET delivery = 'prepared', reply_event_seq = ?4
                          WHERE run_id = ?1 AND turn_id = ?2 AND request_key = ?3 AND route = 'native' AND delivery = 'pending'",
-                        params![run_id, active.turn_id, key, tx.last_insert_rowid()],
+                        params![run_id, active.turn_id, key, event_seq],
                     )?;
                 }
                 ProviderEventData::QuestionReplySettled { request_id, delivery, .. } if source == EventSource::Application => {
@@ -914,7 +934,13 @@ impl Store {
             let active = active_attempt(&tx, &run_id)?;
             let run = runs::load_run(&tx, &run_id)?;
             let incomplete = crate::jobs::settle_subagent_audit(&tx, &run_id, has_response)?;
-            let (outcome, failure) = if incomplete && outcome == RunStatus::Succeeded {
+            let (outcome, failure) = if outcome == RunStatus::Succeeded && crate::jobs::pause_revoked_goal(&tx, &run_id)? {
+                (RunStatus::Interrupted, Some(crate::jobs::FailureObservation {
+                    phase: crate::jobs::FailurePhase::Execution,
+                    cause: Some(crate::jobs::FailureCause::GoalAuthorityRevoked),
+                    process: failure.and_then(|observed| observed.process),
+                }))
+            } else if incomplete && outcome == RunStatus::Succeeded {
                 (RunStatus::Failed, Some(crate::jobs::FailureObservation {
                     phase: crate::jobs::FailurePhase::EvidenceCapture,
                     cause: Some(crate::jobs::FailureCause::EvidenceUnavailable),
@@ -930,6 +956,7 @@ impl Store {
             crate::jobs::release_settled_writer(&tx, &run_id)?;
             let saved_input = crate::jobs::settle_question_waits(&tx, &run_id, &context_id, quiescence_confirmed)?;
             crate::jobs::settle_native_subagents(&tx, &run_id, quiescence_confirmed)?;
+            crate::jobs::settle_native_goal_executor(&tx, &run_id, quiescence_confirmed)?;
             let suspended = crate::jobs::settle_parent_wait(
                 &tx, &run_id, &context_id, outcome, quiescence_confirmed,
             )?;
@@ -943,7 +970,8 @@ impl Store {
                         JOIN context_snapshots s ON s.run_id = a.run_id
                         JOIN dispatches d ON d.snapshot_id = s.id
                         WHERE a.run_id = ?3 AND a.provider_terminal = 'completed' AND d.delivery = 'submitted')
-                    AND NOT EXISTS (SELECT 1 FROM borrowed_instruction_deliveries WHERE run_id = ?3 AND uncertain)",
+                    AND NOT EXISTS (SELECT 1 FROM borrowed_instruction_deliveries WHERE run_id = ?3 AND uncertain)
+                    AND NOT EXISTS (SELECT 1 FROM native_goal_executors WHERE run_id = ?3)",
                     params![context_id, active.session_id, run_id])?;
                 tx.execute(
                     "INSERT INTO structured_question_continuations(request_event_seq, context_id)
@@ -959,6 +987,9 @@ impl Store {
             tx.execute("DELETE FROM active_agent_attempts WHERE run_id = ?1", [&run_id])?;
             if outcome == RunStatus::Interrupted && !suspended && !saved_input {
                 crate::jobs::requeue_unlaunched_job(&tx, &run_id)?;
+                if quiescence_confirmed {
+                    crate::jobs::requeue_rejected_native_goal(&tx, &run_id)?;
+                }
             }
             crate::jobs::observe_child_run(&tx, &run_id)?;
             tx.commit()?;
@@ -1076,6 +1107,7 @@ pub(crate) struct RecordedAttempt {
 
 pub(crate) enum AttemptHistory {
     Automatic,
+    Fresh,
     QueuedInstruction { revision_id: String },
     Retry { input_context_id: String },
     Resume { native: Option<NativeJobRecovery> },
@@ -1110,6 +1142,24 @@ pub(crate) fn insert_job_attempt(
     text: &str,
     allocation: SubagentAllocation,
 ) -> Result<AttemptPlan> {
+    insert_job_with_history(
+        db,
+        conversation,
+        scope,
+        text,
+        allocation,
+        AttemptHistory::Automatic,
+    )
+}
+
+pub(crate) fn insert_job_with_history(
+    db: &Connection,
+    conversation: Conversation,
+    scope: SessionScope,
+    text: &str,
+    allocation: SubagentAllocation,
+    history: AttemptHistory,
+) -> Result<AttemptPlan> {
     insert_attempt(
         db,
         PreparedAttempt {
@@ -1120,7 +1170,7 @@ pub(crate) fn insert_job_attempt(
             frozen: None,
             question_route: QuestionRoute::Native,
             answer: None,
-            history: AttemptHistory::Automatic,
+            history,
             recorded: None,
             instruction_revision: None,
             allocation,
@@ -1595,6 +1645,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         answered_question,
         requires_bridge: false,
         native_job_recovery,
+        native_goal_seed: None,
         native_subagent_limit: allocation.native_allowance,
         subagent_audit: allocation.audit,
     })
@@ -1939,7 +1990,8 @@ fn previous_attempt(db: &Connection, conversation: &str) -> Result<Option<Previo
     Ok(db
         .query_row(
             "SELECT a.run_id, s.id, s.scope, s.provider_session_id, s.cursor_context_id, s.native_subagent_limit,
-                EXISTS (SELECT 1 FROM native_subagent_reservations WHERE session_id = s.id AND state <> 'released'),
+                (EXISTS (SELECT 1 FROM native_subagent_reservations WHERE session_id = s.id AND state <> 'released')
+                 OR EXISTS (SELECT 1 FROM native_goal_executors WHERE run_id = a.run_id)),
                 audit.route, audit.native_evidence_id
          FROM agent_attempts a JOIN agent_sessions s ON s.id = a.agent_session_id
          LEFT JOIN attempt_subagent_audit audit ON audit.run_id = a.run_id
@@ -2892,6 +2944,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoking_authority_pauses_a_running_goal_and_fences_its_checkpoint() -> Result<()> {
+        exercise_goal_stop(GoalStopScenario::AuthorityRevokedWhileRunning).await?;
+        exercise_goal_stop(GoalStopScenario::AuthorityRevokedBeforeSettlement).await
+    }
+
+    #[tokio::test]
     async fn restarting_with_a_goal_stop_in_flight_keeps_the_revision_for_review() -> Result<()> {
         exercise_goal_stop(GoalStopScenario::RestartDuringPause).await
     }
@@ -2909,6 +2967,8 @@ mod tests {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum GoalStopScenario {
         ConfirmedPause,
+        AuthorityRevokedWhileRunning,
+        AuthorityRevokedBeforeSettlement,
         RestartDuringPause,
         RestartDuringExecution,
         CancelAfterRestart,
@@ -2916,7 +2976,8 @@ mod tests {
 
     async fn exercise_goal_stop(scenario: GoalStopScenario) -> Result<()> {
         use crate::jobs::{
-            AdmissionEnvironment, GoalControlState, GoalDefinition, GoalStopAction, JobContext,
+            AdmissionEnvironment, FailureCause, GoalControlState, GoalDefinition, GoalStopAction,
+            JobContext, JobPermission, JobRole, JobRule, JobWorkspace,
         };
 
         let (_dir, store, conversation, mut scope) = setup().await?;
@@ -2929,7 +2990,7 @@ mod tests {
         let definition = GoalDefinition {
             objective: "Verify controlled interruption".into(),
             criteria: Vec::new(),
-            max_turns: 2,
+            max_turns: Some(2),
             max_seconds: None,
             token_budget: None,
         };
@@ -2965,6 +3026,46 @@ mod tests {
             .await?
             .context("Resumed goal lacked a queued attempt")?;
         store.mark_agent_running(initial.run.id.clone()).await?;
+        let revokes_authority = matches!(
+            scenario,
+            GoalStopScenario::AuthorityRevokedWhileRunning
+                | GoalStopScenario::AuthorityRevokedBeforeSettlement
+        );
+        let confirmed_stop = revokes_authority || scenario == GoalStopScenario::ConfirmedPause;
+        let denied = vec![JobRule {
+            role: JobRole::Operator,
+            operation: initial.scope.mode,
+            workspace: JobWorkspace::Project,
+            permission: JobPermission::Deny,
+            requirements: Default::default(),
+        }];
+        if revokes_authority {
+            assert!(
+                !store
+                    .pause_goal_if_policy_changed(initial.run.id.clone())
+                    .await?
+            );
+            store
+                .set_project_job_rules(project.clone(), Vec::new(), denied.clone())
+                .await?;
+            if scenario == GoalStopScenario::AuthorityRevokedWhileRunning {
+                assert!(
+                    store
+                        .pause_goal_if_policy_changed(initial.run.id.clone())
+                        .await?
+                );
+                assert!(
+                    !store
+                        .pause_goal_if_policy_changed(initial.run.id.clone())
+                        .await?
+                );
+                assert!(
+                    store
+                        .goal_pause_requests_input_retention(initial.run.id.clone())
+                        .await?
+                );
+            }
+        }
         if matches!(
             scenario,
             GoalStopScenario::ConfirmedPause | GoalStopScenario::RestartDuringPause
@@ -2988,16 +3089,32 @@ mod tests {
                 .is_err()
         );
         assert!(store.claim_next_job(env.clone()).await?.is_none());
-        if scenario == GoalStopScenario::ConfirmedPause {
-            store
+        if confirmed_stop {
+            let before_settlement = scenario == GoalStopScenario::AuthorityRevokedBeforeSettlement;
+            let outcome = store
                 .finish_observed_agent_attempt(
                     initial.run.id.clone(),
-                    RunStatus::Interrupted,
+                    if before_settlement {
+                        RunStatus::Succeeded
+                    } else {
+                        RunStatus::Interrupted
+                    },
                     None,
                     None,
                     true,
                 )
                 .await?;
+            assert_eq!(outcome, RunStatus::Interrupted);
+            if before_settlement {
+                let failure = store
+                    .job_failure(project.clone(), initial.run.id.clone())
+                    .await?
+                    .context("Missing authorization failure")?;
+                assert_eq!(
+                    failure.observation.cause,
+                    Some(FailureCause::GoalAuthorityRevoked)
+                );
+            }
         }
         drop(store);
         let store = Store::open(database)?;
@@ -3008,7 +3125,7 @@ mod tests {
             .unwrap();
         assert_eq!(persisted.id, goal.id);
         assert!(store.claim_next_job(env.clone()).await?.is_none());
-        if scenario != GoalStopScenario::ConfirmedPause {
+        if !confirmed_stop {
             assert_eq!(persisted.control_state, GoalControlState::NeedsReview);
             if scenario == GoalStopScenario::CancelAfterRestart {
                 use crate::jobs::QueueHistoryPolicy;
@@ -3076,6 +3193,12 @@ mod tests {
         } else {
             assert_eq!(persisted.control_state, GoalControlState::Paused);
         }
+        if revokes_authority {
+            assert!(persisted.checkpoint.is_none());
+            store
+                .set_project_job_rules(project.clone(), denied, Vec::new())
+                .await?;
+        }
         store.resume_goal(project.clone(), goal.id.clone()).await?;
         let resumed = store
             .claim_next_job(env.clone())
@@ -3135,7 +3258,7 @@ mod tests {
         let definition = GoalDefinition {
             objective: "Inspect the migration plan".into(),
             criteria: vec!["Identify the last compatible schema".into()],
-            max_turns: 2,
+            max_turns: Some(2),
             max_seconds: Some(90),
             token_budget: None,
         };
@@ -3330,12 +3453,23 @@ mod tests {
 
     #[tokio::test]
     async fn stage_goal_keeps_its_task_and_matches_native_evidence_to_its_session() -> Result<()> {
+        exercise_native_goal_evidence(false, true).await?;
+        exercise_native_goal_evidence(true, false).await?;
+        exercise_native_goal_evidence(true, true).await
+    }
+
+    async fn exercise_native_goal_evidence(
+        current_receipt: bool,
+        quiescence_confirmed: bool,
+    ) -> Result<()> {
         use crate::{
             jobs::{
-                AdmissionEnvironment, GoalContinuationOwner, GoalDefinition, JobContext,
-                PipelineDispatch, PipelineNodeKind,
+                AdmissionEnvironment, GoalContinuationOwner, GoalControlState, GoalDefinition,
+                GoalStopAction, JobContext, PipelineDispatch, PipelineNodeKind,
             },
-            providers::goal::{NativeGoalObservation, NativeGoalState},
+            providers::goal::{
+                NativeGoalAction, NativeGoalControlOutcome, NativeGoalObservation, NativeGoalState,
+            },
         };
 
         let (_dir, store, conversation, mut scope) = setup().await?;
@@ -3393,7 +3527,7 @@ mod tests {
                 GoalDefinition {
                     objective: "Verify the accepted plan".into(),
                     criteria: vec!["Collect fixture evidence".into()],
-                    max_turns: 1,
+                    max_turns: Some(1),
                     max_seconds: None,
                     token_budget: None,
                 },
@@ -3481,8 +3615,205 @@ mod tests {
                 observed("native-session"),
             )
             .await?;
+        let turn = |id: &str, data: ProviderEventData| {
+            store.record_agent_observation(
+                run.run.id.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: ProviderLocation {
+                        session_id: Some("native-session".into()),
+                        turn_id: Some(id.into()),
+                        ..Default::default()
+                    },
+                    data,
+                },
+            )
+        };
+        let completed = || ProviderEventData::TurnFinished {
+            outcome: TurnOutcome::Completed,
+        };
+        turn("provider-1", ProviderEventData::TurnStarted).await?;
+        assert!(
+            turn("provider-2", ProviderEventData::TurnStarted)
+                .await
+                .is_err()
+        );
+        turn("provider-1", completed()).await?;
+        turn("provider-2", ProviderEventData::TurnStarted).await?;
+        turn("provider-1", ProviderEventData::TurnStarted).await?;
+        turn("provider-1", completed()).await?;
+        assert!(
+            turn(
+                "provider-1",
+                ProviderEventData::AssistantDelta {
+                    text: "Stale output".into()
+                }
+            )
+            .await
+            .is_err()
+        );
+        turn(
+            "provider-2",
+            ProviderEventData::AssistantDelta {
+                text: "Current output".into(),
+            },
+        )
+        .await?;
+        turn("provider-2", completed()).await?;
+        let control = |source, data| {
+            store.record_agent_observation(
+                run.run.id.clone(),
+                source,
+                ProviderEvent {
+                    location: ProviderLocation {
+                        session_id: Some("native-session".into()),
+                        ..Default::default()
+                    },
+                    data,
+                },
+            )
+        };
+        let unconfirmed = |id, action| ProviderEventData::NativeGoalControlSettled {
+            request_id: RequestId::Number(id),
+            action,
+            result: NativeGoalControlOutcome::Unconfirmed,
+        };
+        assert!(
+            control(
+                EventSource::Supervisor,
+                unconfirmed(17, NativeGoalAction::Pause)
+            )
+            .await
+            .is_err()
+        );
+        control(EventSource::Application, ProviderEventData::NativeGoalControlPrepared {
+            request_id: RequestId::Number(17),
+            action: NativeGoalAction::Pause,
+            frame: br#"{"id":17,"method":"thread/goal/set","params":{"threadId":"native-session","status":"paused"}}"#.to_vec(),
+        }).await?;
+        assert!(
+            control(
+                EventSource::Supervisor,
+                unconfirmed(17, NativeGoalAction::Cancel)
+            )
+            .await
+            .is_err()
+        );
+        control(
+            EventSource::Supervisor,
+            unconfirmed(17, NativeGoalAction::Pause),
+        )
+        .await?;
+        store.mark_agent_running(run.run.id.clone()).await?;
+        let ProviderEventData::GoalObserved { mut observation } = observed("native-session").data
+        else {
+            unreachable!();
+        };
+        observation.state = NativeGoalState::Paused;
+        observation.reported_state = Some("paused".into());
+        let prepared_pause = |id| ProviderEventData::NativeGoalControlPrepared {
+            request_id: RequestId::Number(id),
+            action: NativeGoalAction::Pause,
+            frame: serde_json::to_vec(&serde_json::json!({"id":id, "method":"thread/goal/set",
+                "params":{"threadId":"native-session","status":"paused"}}))
+            .unwrap(),
+        };
+        let confirmed_pause = |id| ProviderEventData::NativeGoalControlSettled {
+            request_id: RequestId::Number(id),
+            action: NativeGoalAction::Pause,
+            result: NativeGoalControlOutcome::Confirmed {
+                observation: observation.clone(),
+            },
+        };
+        control(EventSource::Application, prepared_pause(18)).await?;
+        control(EventSource::Provider, confirmed_pause(18)).await?;
+        assert_eq!(
+            store
+                .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Pause)
+                .await?,
+            GoalControlState::Pausing
+        );
+        if current_receipt {
+            control(EventSource::Application, prepared_pause(19)).await?;
+            control(EventSource::Provider, confirmed_pause(19)).await?;
+        }
+        store
+            .finish_observed_agent_attempt(
+                run.run.id.clone(),
+                RunStatus::Interrupted,
+                None,
+                None,
+                quiescence_confirmed,
+            )
+            .await?;
+        observation.provider_goal_id = Some("late-goal-report".into());
+        let late_receipt = ProviderEventData::NativeGoalControlSettled {
+            request_id: RequestId::Number(17),
+            action: NativeGoalAction::Pause,
+            result: NativeGoalControlOutcome::Confirmed { observation },
+        };
+        control(EventSource::Provider, late_receipt.clone()).await?;
+        assert!(
+            store
+                .record_agent_observation(
+                    run.run.id.clone(),
+                    EventSource::Provider,
+                    observed("foreign")
+                )
+                .await
+                .is_err()
+        );
         drop(store);
         let store = Store::open(database)?;
+        let (control_outcome, persisted_late_receipt) = store
+            .execute({
+                let run_id = run.run.id.clone();
+                move |db| {
+                    let outcome: String = db.query_row(
+                        "SELECT outcome FROM native_goal_controls WHERE run_id = ?1 AND request_key = '17'",
+                        [&run_id],
+                        |row| row.get(0),
+                    )?;
+                    let event: Vec<u8> = db.query_row(
+                    "SELECT payload FROM agent_events WHERE run_id = ?1 ORDER BY seq DESC LIMIT 1",
+                    [&run_id], |row| row.get(0),
+                )?;
+                    let saved: ProviderEvent =
+                        serde_json::from_slice(&protection::unprotect(&event)?)?;
+                    Ok((outcome, saved.data))
+                }
+            })
+            .await?;
+        assert_eq!(control_outcome, "unconfirmed");
+        assert_eq!(persisted_late_receipt, late_receipt);
+        let turns = store
+            .execute({
+                let run_id = run.run.id.clone();
+                move |db| {
+                    let mut statement = db.prepare(
+                        "SELECT t.provider_turn_id, t.outcome, a.provider_turn_id
+                     FROM native_goal_turns t JOIN agent_attempts a ON a.run_id = t.run_id
+                     WHERE t.run_id = ?1 ORDER BY t.started_event_seq",
+                    )?;
+                    Ok(statement
+                        .query_map([run_id], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?)
+                }
+            })
+            .await?;
+        assert_eq!(
+            turns,
+            [
+                ("provider-1".into(), "completed".into(), "provider-2".into()),
+                ("provider-2".into(), "completed".into(), "provider-2".into()),
+            ]
+        );
         let revision = store
             .active_pipeline_goal(project, stage.pipeline_run_id, stage.node_instance_id)
             .await?
@@ -3496,6 +3827,14 @@ mod tests {
             Some("native-session")
         );
         assert_eq!(revision.provider_goal_id.as_deref(), Some("provider-goal"));
+        assert_eq!(
+            revision.control_state,
+            if current_receipt && quiescence_confirmed {
+                GoalControlState::Paused
+            } else {
+                GoalControlState::NeedsReview
+            }
+        );
         Ok(())
     }
 
@@ -3529,7 +3868,7 @@ mod tests {
                     GoalDefinition {
                         objective: "Retain the recorded scope".into(),
                         criteria: Vec::new(),
-                        max_turns: 2,
+                        max_turns: Some(2),
                         max_seconds: None,
                         token_budget: None,
                     },
@@ -3680,7 +4019,7 @@ mod tests {
                 GoalDefinition {
                     objective: "Continue only the recorded history".into(),
                     criteria: Vec::new(),
-                    max_turns: 2,
+                    max_turns: Some(2),
                     max_seconds: None,
                     token_budget: None,
                 },
@@ -3768,7 +4107,7 @@ mod tests {
                 GoalDefinition {
                     objective: "Ask what scope to retain".into(),
                     criteria: Vec::new(),
-                    max_turns: 2,
+                    max_turns: Some(2),
                     max_seconds: None,
                     token_budget: None,
                 },
@@ -3872,7 +4211,7 @@ mod tests {
         let definition = GoalDefinition {
             objective: "Inspect the fixture".into(),
             criteria: Vec::new(),
-            max_turns: 1,
+            max_turns: Some(1),
             max_seconds: None,
             token_budget: Some(100),
         };

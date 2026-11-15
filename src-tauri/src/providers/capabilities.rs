@@ -284,11 +284,12 @@ impl CapabilityScope {
     }
 
     fn key(&self, descriptor: &CapabilityDescriptor) -> Option<QualificationKey<'_>> {
-        if descriptor.subject
-            == (CapabilitySubject::Protocol {
-                capability: Capability::NativeSubagentAudit,
-            })
-            && descriptor.boundary != EvidenceBoundary::ExactCheckout
+        if matches!(
+            descriptor.subject,
+            CapabilitySubject::Protocol {
+                capability: Capability::NativeSubagentAudit | Capability::NativeGoalCommand,
+            }
+        ) && descriptor.boundary != EvidenceBoundary::ExactCheckout
         {
             return None;
         }
@@ -339,7 +340,8 @@ impl CapabilityScope {
                 capability:
                     Capability::WorkspaceWrite
                     | Capability::ToolApprovals
-                    | Capability::NativeSubagentAudit,
+                    | Capability::NativeSubagentAudit
+                    | Capability::NativeGoalCommand,
             } => (self.configuration.effective_revision.as_deref()?, None),
             CapabilitySubject::Protocol { capability } if capability.is_planning() => {
                 if descriptor.boundary != EvidenceBoundary::ExactCheckout {
@@ -731,6 +733,20 @@ impl ReportedCapabilities {
 
 pub(crate) fn revision(value: &impl Serialize) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
+}
+
+pub(crate) fn native_goal_scope_key(scope: &CapabilityScope) -> Result<Option<String>> {
+    let descriptor = CapabilityDescriptor {
+        subject: CapabilitySubject::Protocol {
+            capability: Capability::NativeGoalCommand,
+        },
+        source: DeclaredSource::Adapter,
+        availability: Availability::Unknown,
+        observed: None,
+        blocker: None,
+        boundary: EvidenceBoundary::ExactCheckout,
+    };
+    scope.key(&descriptor).map(|key| revision(&key)).transpose()
 }
 
 impl Store {

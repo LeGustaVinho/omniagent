@@ -87,6 +87,21 @@ impl GoalStopAction {
 }
 
 impl Store {
+    pub(crate) async fn pause_goal_if_policy_changed(&self, run: String) -> Result<bool> {
+        let paused = self
+            .execute(move |db| {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let paused = pause_revoked_goal(&tx, &run)?;
+                tx.commit()?;
+                Ok(paused)
+            })
+            .await?;
+        if paused {
+            self.job_signal.send_replace(());
+        }
+        Ok(paused)
+    }
+
     pub async fn request_goal_stop(
         &self,
         project: String,
@@ -136,6 +151,7 @@ impl Store {
                 "UPDATE goal_revision_controls SET state = ?2, stop_action = ?3,
                         stop_run_id = CASE WHEN ?2 = 'needs_review' THEN coalesce(?4, stop_run_id) ELSE ?4 END,
                         requested_ms = ?5, settled_ms = ?6,
+                        stop_event_floor = coalesce((SELECT max(seq) FROM agent_events WHERE run_id = ?4), 0),
                         confirmed_by = CASE WHEN ?6 IS NOT NULL THEN 'recorded_idle' END WHERE revision_id = ?1",
                 params![revision, state.key(), action.key(), run, now,
                     (state == action.settled()).then_some(now)],
@@ -234,6 +250,66 @@ impl Store {
             )?)
         }).await
     }
+
+    pub(crate) async fn native_goal_stop_action(&self, run: String) -> Result<GoalStopAction> {
+        let (project, revision, action): (String, String, Option<String>) = self.execute({
+            let run = run.clone();
+            move |db| {
+                Ok(db.query_row(
+                    "SELECT goal.project_id, g.revision_id,
+                        CASE WHEN controls.stop_run_id = ?1 AND controls.state IN ('pausing', 'cancelling')
+                             THEN controls.stop_action END
+                     FROM native_goal_executors x
+                     JOIN active_goals g ON g.revision_id = x.revision_id
+                     JOIN goals goal ON goal.id = g.goal_id
+                     JOIN goal_revision_controls controls ON controls.revision_id = x.revision_id
+                     WHERE x.run_id = ?1 AND NOT x.stop_confirmed",
+                    [&run], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?)
+            }
+        }).await?;
+        match action.as_deref() {
+            Some("cancel") => Ok(GoalStopAction::Cancel),
+            Some("pause") => Ok(GoalStopAction::Pause),
+            _ => {
+                self.request_goal_stop(project, revision, GoalStopAction::Pause)
+                    .await?;
+                Ok(GoalStopAction::Pause)
+            }
+        }
+    }
+}
+
+pub(crate) fn pause_revoked_goal(db: &Connection, run: &str) -> Result<bool> {
+    let revision: Option<String> = db
+        .query_row(
+            "SELECT c.revision_id FROM active_agent_attempts a JOIN job_attempts j ON j.run_id = a.run_id
+             JOIN goal_continuations c ON c.job_id = j.job_id
+             JOIN active_goals g ON g.revision_id = c.revision_id
+             JOIN goal_revision_controls controls ON controls.revision_id = c.revision_id
+             WHERE a.run_id = ?1 AND controls.state = 'active' AND NOT j.cancel_requested",
+            [run],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(revision) = revision else {
+        return Ok(false);
+    };
+    if super::validate_attempt_policy(db, run)? {
+        return Ok(false);
+    }
+    db.execute(
+        "UPDATE goal_revision_controls SET state = 'pausing', stop_action = 'pause',
+            stop_run_id = ?2, requested_ms = ?3, settled_ms = NULL, confirmed_by = NULL,
+            stop_event_floor = coalesce((SELECT max(seq) FROM agent_events WHERE run_id = ?2), 0)
+         WHERE revision_id = ?1",
+        params![revision, run, now_ms()],
+    )?;
+    db.execute(
+        "UPDATE job_attempts SET cancel_requested = 1 WHERE run_id = ?1",
+        [run],
+    )?;
+    Ok(true)
 }
 
 pub(super) fn worker_confirmed_goal_pause(
@@ -341,10 +417,10 @@ pub(crate) fn settle_goal_stop(
         }
         return Ok(());
     };
+    let provider_stopped = owner == "managed"
+        || super::native_goal_evidence::confirmed_stop_control(db, run, &revision, &action)?;
     let stopped = !launched
-        || (owner == "managed"
-            && quiescence_confirmed
-            && !has_unsettled_reservation(db, &revision)?);
+        || (quiescence_confirmed && provider_stopped && !has_unsettled_reservation(db, &revision)?);
     let state = if stopped {
         settled_state(&action)
     } else {
@@ -416,6 +492,8 @@ fn has_unsettled_reservation(db: &Connection, revision: &str) -> Result<bool> {
             WHERE c.revision_id = ?1 AND (
                 EXISTS (SELECT 1 FROM job_writer_reservations WHERE run_id = a.run_id)
                 OR EXISTS (SELECT 1 FROM unconfirmed_question_stops WHERE run_id = a.run_id)
+                OR EXISTS (SELECT 1 FROM native_subagent_reservations WHERE run_id = a.run_id AND state <> 'released')
+                OR EXISTS (SELECT 1 FROM native_goal_executors WHERE run_id = a.run_id AND NOT stop_confirmed)
             )
          )",
         [revision],

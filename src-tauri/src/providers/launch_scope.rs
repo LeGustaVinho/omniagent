@@ -54,6 +54,29 @@ pub(crate) struct ScopedLaunch {
 }
 
 impl ScopedLaunch {
+    pub(crate) fn enable_codex_native_goals(&mut self) -> Result<()> {
+        ensure!(
+            self.evidence.provider == Provider::Codex,
+            "The CLI cannot supervise native goals"
+        );
+        let disabled = "features.goals=false";
+        let enabled = "features.goals=true";
+        let argument = self
+            .arguments
+            .iter_mut()
+            .find(|argument| argument.as_os_str() == disabled)
+            .context("Missing scoped Codex goal setting")?;
+        let evidence = self
+            .evidence
+            .inputs
+            .iter_mut()
+            .find(|input| input.contents == disabled)
+            .context("Missing scoped Codex goal launch evidence")?;
+        *argument = OsString::from(enabled);
+        evidence.contents = enabled.into();
+        Ok(())
+    }
+
     pub(crate) fn apply_codex_subagent_limit(&mut self, allowance: u32) -> Result<()> {
         ensure!(
             self.evidence.provider == Provider::Codex,

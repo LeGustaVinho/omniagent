@@ -551,6 +551,20 @@ pub enum ProviderEventData {
     GoalObserved {
         observation: goal::NativeGoalObservation,
     },
+    NativeGoalContextSeeded {
+        request_id: RequestId,
+        accepted: bool,
+    },
+    NativeGoalControlPrepared {
+        request_id: RequestId,
+        action: goal::NativeGoalAction,
+        frame: Vec<u8>,
+    },
+    NativeGoalControlSettled {
+        request_id: RequestId,
+        action: goal::NativeGoalAction,
+        result: goal::NativeGoalControlOutcome,
+    },
     NativeGoalCommandReported {
         available: bool,
     },
@@ -677,6 +691,10 @@ pub trait CliSession: Send {
         _command: goal::NativeGoalCommand,
     ) -> anyhow::Result<AdapterUpdate> {
         anyhow::bail!("the native goal lifecycle is unqualified for this session")
+    }
+
+    fn seed_native_goal_context(&mut self, _input: TurnInput) -> anyhow::Result<AdapterUpdate> {
+        anyhow::bail!("the session cannot seed context without starting a turn")
     }
 }
 

@@ -19,6 +19,8 @@ mod history;
 mod inspection;
 mod instruction_delivery;
 mod instructions;
+mod native_goal_evidence;
+mod native_goal_qualification;
 mod notices;
 mod pipeline;
 mod policy;
@@ -40,19 +42,24 @@ pub(crate) use failures::record_job_failure;
 pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
-pub(crate) use goal_control::settle_goal_stop;
 pub use goal_control::{GoalControlState, GoalStopAction};
+pub(crate) use goal_control::{pause_revoked_goal, settle_goal_stop};
 pub use goals::{
     GoalCheckpoint, GoalContinuationOwner, GoalDefinition, GoalRevision, GoalTurnAction,
     GoalTurnReport,
 };
-pub(crate) use goals::{GoalExecution, accept_goal_checkpoint, record_native_goal};
+pub(crate) use goals::{
+    GoalExecution, accept_goal_checkpoint, is_native_goal_run, record_native_goal,
+    record_native_goal_turn, settle_native_goal_executor,
+};
 pub use history::{QueueHistoryPolicy, QueueHistorySettings};
 pub(crate) use history::{apply_queue_history_policy, detached_question_context};
 pub(crate) use inspection::{InspectionPolicy, InspectionQueue, load_inspection_queue};
 pub(crate) use instruction_delivery::validate_revisions as validate_instruction_revisions;
 pub(crate) use instructions::migrate_pending_instructions;
 pub use instructions::{InstructionDelivery, PendingInstruction};
+pub(crate) use native_goal_evidence::{late_native_goal_evidence, record_native_goal_control};
+pub(crate) use native_goal_qualification::{NativeGoalSeed, effective_qualification_matches};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use pipeline::{
     PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease, ReleaseBlocker,
@@ -69,7 +76,7 @@ pub(crate) use question_waits::{
 };
 pub use question_waits::{QuestionWaitSummary, SavedConversationQuestion};
 pub use recovery::RecoveryAction;
-pub(crate) use recovery::requeue_unlaunched_job;
+pub(crate) use recovery::{requeue_rejected_native_goal, requeue_unlaunched_job};
 pub use scheduler::JobScheduler;
 pub(crate) use scheduler::LaunchGate;
 pub(crate) use steering_delivery::{

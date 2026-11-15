@@ -21,7 +21,7 @@ use crate::{
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
     jobs::{
         DispatchRejection, FailureCause, FailureObservation, FailurePhase, GoalExecution,
-        LaunchGate, QuestionTimer, SubagentAuditRoute, now_ms,
+        LaunchGate, QuestionTimer, SubagentAuditRoute, effective_qualification_matches, now_ms,
     },
     mcp_bridge::{PERMISSION_PREFIX, Registration, RunBridge},
     process::TerminalOutcome,
@@ -49,6 +49,7 @@ use super::{
     suggestions::SuggestionOutcome,
 };
 
+mod native_goals;
 mod requirements;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -316,6 +317,7 @@ fn start_turn(
             downstream_requested: false,
             question_changed: false,
             goal: None,
+            native_goal: None,
         };
         let outcome = execution
             .run(runner.as_ref(), &receiver, bridge_executable)
@@ -381,6 +383,7 @@ fn start_turn(
 struct TurnExecution {
     question_changed: bool,
     goal: Option<GoalExecution>,
+    native_goal: Option<native_goals::NativeGoalLoop>,
     failure: FailureObservation,
     quiescence_confirmed: bool,
     downstream_requested: bool,
@@ -405,6 +408,11 @@ struct TurnExecution {
 
 impl TurnExecution {
     fn record(&mut self, event: ProviderEvent, source: EventSource) -> Result<()> {
+        if source == EventSource::Provider
+            && let Some(native) = &mut self.native_goal
+        {
+            native.observe(&event);
+        }
         let question_changed = event.location.parent_item_id.is_none()
             && matches!(
                 event.data,
@@ -481,6 +489,15 @@ impl TurnExecution {
                 self.store
                     .resolve_capability_assessment(scope.clone(), descriptors),
             )?;
+            if let (Some(native), Some(seed)) = (&mut self.native_goal, &self.plan.native_goal_seed)
+                && !effective_qualification_matches(
+                    &seed.proof,
+                    &assessment,
+                    seed.token_budget.is_some(),
+                )?
+            {
+                native.profile_changed = true;
+            }
             self.app.block_on(self.store.record_agent_observation(
                 self.plan.run.id.clone(),
                 EventSource::Application,
@@ -615,6 +632,13 @@ impl TurnExecution {
             session.arguments(),
             registration,
         )?;
+        if self.plan.native_goal_seed.is_some() {
+            ensure!(
+                matches!(self.plan.intent, SessionIntent::Start),
+                "Native goals require a fresh session"
+            );
+            launch.enable_codex_native_goals()?;
+        }
         if let Some(allowance) = self.plan.native_subagent_limit {
             launch.apply_codex_subagent_limit(allowance)?;
         }
@@ -731,6 +755,11 @@ impl TurnExecution {
                     runner,
                 )
             });
+        if self.native_goal.is_some() && !matches!(run, Ok(RunStatus::Succeeded)) {
+            let _ = self
+                .app
+                .block_on(self.store.native_goal_stop_action(self.plan.run.id.clone()));
+        }
         let prior_failure = self.failure;
         let awaiting_question = self.app.block_on(
             self.store
@@ -742,6 +771,13 @@ impl TurnExecution {
         let ended = control.wait();
         if let Ok(exit) = ended.as_ref() {
             self.failure.process = Some((*exit).into());
+            if self.native_goal.is_some() {
+                self.record_update(
+                    &mut process,
+                    session.process_finished(*exit),
+                    EventSource::Supervisor,
+                )?;
+            }
         }
         let registration = endpoint.map(RunBridge::registration);
         drop(bridge);
@@ -817,14 +853,39 @@ impl TurnExecution {
         let mut wait_for_configuration = false;
         let mut wait_for_skills = false;
         let mut question_deadline = None;
+        let mut next_goal_authority_check = Instant::now();
+        let mut native_context_deadline = None;
         loop {
+            let model_started =
+                sent && (self.plan.native_goal_seed.is_none() || self.native_goal.is_some());
+            if native_context_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                self.failure.cause = Some(FailureCause::StartupTimeout);
+                return Ok(RunStatus::Interrupted);
+            }
+            if self
+                .native_goal
+                .as_ref()
+                .is_some_and(native_goals::NativeGoalLoop::should_stop)
+            {
+                if self
+                    .native_goal
+                    .as_ref()
+                    .is_some_and(|native| native.profile_changed)
+                {
+                    self.failure.cause = Some(FailureCause::GoalAuthorityRevoked);
+                }
+                return self.stop_native_goal(process, session);
+            }
             if self
                 .goal
                 .as_ref()
                 .is_some_and(GoalExecution::time_limit_reached)
             {
                 self.failure.cause = Some(FailureCause::GoalTimeLimit);
-                if sent {
+                if self.native_goal.is_some() {
+                    return self.stop_native_goal(process, session);
+                }
+                if model_started {
                     self.app.block_on(
                         self.store
                             .preserve_questions_after_turn(self.plan.run.id.clone(), false),
@@ -834,6 +895,28 @@ impl TurnExecution {
                     })?;
                 }
                 return Ok(RunStatus::Interrupted);
+            }
+            if sent && self.goal.is_some() && Instant::now() >= next_goal_authority_check {
+                next_goal_authority_check = Instant::now() + Duration::from_secs(1);
+                if self.app.block_on(
+                    self.store
+                        .pause_goal_if_policy_changed(self.plan.run.id.clone()),
+                )? {
+                    self.failure.cause = Some(FailureCause::GoalAuthorityRevoked);
+                    self.app.block_on(
+                        self.store
+                            .preserve_questions_after_turn(self.plan.run.id.clone(), false),
+                    )?;
+                    if self.native_goal.is_some() {
+                        return self.stop_native_goal(process, session);
+                    }
+                    if model_started {
+                        interrupt_to_completion(process, session, |event, source| {
+                            self.record(event, source)
+                        })?;
+                    }
+                    return Ok(RunStatus::Interrupted);
+                }
             }
             let registration = bridge.map(RunBridge::registration);
             if let Some(registration) = &registration {
@@ -845,7 +928,7 @@ impl TurnExecution {
             } else {
                 commands.try_recv()
             };
-            if sent
+            if model_started
                 && !matches!(
                     &command,
                     Ok(Command::Interrupt | Command::YieldToDownstream)
@@ -863,6 +946,9 @@ impl TurnExecution {
                         QuestionTimer::Idle => None,
                         QuestionTimer::WakeAt(deadline) => Some(deadline),
                         QuestionTimer::Stop => {
+                            if self.native_goal.is_some() {
+                                return self.stop_native_goal(process, session);
+                            }
                             interrupt_to_completion(process, session, |event, source| {
                                 self.record(event, source)
                             })?;
@@ -882,7 +968,11 @@ impl TurnExecution {
                             self.store
                                 .goal_pause_requests_input_retention(self.plan.run.id.clone()),
                         )?;
-                    if sent && !exiting && !yielding && matches!(command, Ok(Command::Interrupt)) {
+                    if model_started
+                        && !exiting
+                        && !yielding
+                        && matches!(command, Ok(Command::Interrupt))
+                    {
                         let run = self.plan.run.id.clone();
                         if paused {
                             self.app
@@ -892,7 +982,10 @@ impl TurnExecution {
                                 .block_on(self.store.close_questions_for_operator_stop(run))?;
                         }
                     }
-                    let outcome = if sent {
+                    if self.native_goal.is_some() {
+                        return self.stop_native_goal(process, session);
+                    }
+                    let outcome = if model_started {
                         match interrupt_to_completion(process, session, |event, source| {
                             self.record(event, source)
                         })? {
@@ -996,6 +1089,9 @@ impl TurnExecution {
                     return Ok(RunStatus::Interrupted);
                 }
                 sent = true;
+                if self.plan.native_goal_seed.is_some() {
+                    native_context_deadline = Some(Instant::now() + Duration::from_secs(20));
+                }
                 self.failure.phase = FailurePhase::Execution;
             }
             if !ready && Instant::now() >= startup_deadline {
@@ -1033,6 +1129,13 @@ impl TurnExecution {
                 }
             };
             let update = session.receive(frame)?;
+            let native_seed_receipt = update.events.iter().find_map(|event| {
+                if let ProviderEventData::NativeGoalContextSeeded { accepted, .. } = event.data {
+                    Some(accepted)
+                } else {
+                    None
+                }
+            });
             let session_ready = !ready
                 && update.events.iter().any(|event| {
                     matches!(event.data, ProviderEventData::SessionReady { .. })
@@ -1048,7 +1151,51 @@ impl TurnExecution {
                 event.location.parent_item_id.is_none()
                     && matches!(event.data, ProviderEventData::Error { .. })
             });
-            if let Some(status) = self.record_update(process, update, EventSource::Provider)? {
+            let turn_status = self.record_update(process, update, EventSource::Provider)?;
+            if let Some(accepted) = native_seed_receipt {
+                ensure!(
+                    native_context_deadline.take().is_some(),
+                    "Unexpected native goal context receipt"
+                );
+                if !accepted {
+                    self.failure.cause = Some(FailureCause::ProviderError);
+                    return Ok(RunStatus::Failed);
+                }
+                if !self.start_native_goal(process, session)? {
+                    return Ok(RunStatus::Interrupted);
+                }
+                continue;
+            }
+            if let Some(native) = &self.native_goal {
+                if native.result().is_some() {
+                    if !self.confirm_native_terminal(process, session)? {
+                        return self.stop_native_goal(process, session);
+                    }
+                    let Some(result) = self
+                        .native_goal
+                        .as_ref()
+                        .and_then(native_goals::NativeGoalLoop::result)
+                    else {
+                        continue;
+                    };
+                    let Some(result) = result else {
+                        return self.stop_native_goal(process, session);
+                    };
+                    if !self.app.block_on(
+                        self.store
+                            .preserve_questions_after_turn(self.plan.run.id.clone(), false),
+                    )? {
+                        self.app.block_on(
+                            self.store
+                                .record_native_goal_result(self.plan.run.id.clone(), result),
+                        )?;
+                        return Ok(RunStatus::Succeeded);
+                    }
+                    return self.stop_native_goal(process, session);
+                }
+                continue;
+            }
+            if let Some(status) = turn_status {
                 if status == RunStatus::Failed && provider_error {
                     self.failure.cause = Some(FailureCause::ProviderError);
                 }
@@ -1168,6 +1315,20 @@ impl TurnExecution {
             self.store
                 .resolve_capability_assessment(scope.clone(), descriptors),
         )?;
+        if let Some(seed) = &self.plan.native_goal_seed
+            && !effective_qualification_matches(
+                &seed.proof,
+                &capabilities,
+                seed.token_budget.is_some(),
+            )?
+        {
+            self.app.block_on(
+                self.store
+                    .invalidate_native_goal_qualification(seed.proof.evidence_id.clone()),
+            )?;
+            self.reject_dispatch(DispatchRejection::NativeGoalUnverified)?;
+            return Ok(false);
+        }
         if let SubagentAuditRoute::Native { evidence_id } = &self.plan.subagent_audit {
             let subject = CapabilitySubject::Protocol {
                 capability: super::Capability::NativeSubagentAudit,
@@ -1190,7 +1351,18 @@ impl TurnExecution {
             }
         }
         self.check_dispatch_requirements(&capabilities, &instructions, checkout)?;
-        let mut input = format_input(&self.plan.input)?;
+        let native_seed = self.plan.native_goal_seed.as_ref();
+        let mut input = if let Some(seed) = native_seed {
+            let mut projected = self.plan.input.clone();
+            let goal = projected
+                .iter_mut()
+                .rfind(|message| message.text == seed.managed_instructions)
+                .context("The admitted native goal context lost its objective")?;
+            goal.text = seed.objective.clone();
+            format_input(&projected)?
+        } else {
+            format_input(&self.plan.input)?
+        };
         if !self.plan.question_route.is_native() {
             input.text.push_str("\n\n");
             input.text.push_str(STRUCTURED_PLANNING_PROMPT);
@@ -1228,7 +1400,11 @@ impl TurnExecution {
         if let Some(blocked) = assessment.take_if(|report| !report.blockers.is_empty()) {
             return self.record_attachment_assessment(blocked).map(|()| true);
         }
-        let update = session.send(input)?;
+        let update = if self.plan.native_goal_seed.is_some() {
+            session.seed_native_goal_context(input)?
+        } else {
+            session.send(input)?
+        };
         if let Some(mut report) = assessment {
             report.check_encoded_request(
                 update

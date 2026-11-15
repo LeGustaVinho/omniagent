@@ -13,7 +13,10 @@ use super::{
     CliSession, DelegationControls, ForkBoundary, Interrupt, ProbeKind, Provider, ProviderEvent,
     ProviderEventData, ProviderLocation, ReportedModel, RequestId, SessionIntent, SessionMode,
     SessionRequest, Transport, TurnInput, TurnOutcome, WireMessage, capabilities,
-    goal::{NativeGoalObservation, NativeGoalState, NativeGoalSupport},
+    goal::{
+        NativeGoalCommand, NativeGoalControlOutcome, NativeGoalObservation, NativeGoalState,
+        NativeGoalSupport,
+    },
     rpc::{self, Rpc},
     side::{SideInput, SideOutcome, SideRoute, SideUnavailable, SideUsage},
     skills::{SkillCatalog, SkillCatalogIssue, SkillEntry, SkillSource},
@@ -81,6 +84,8 @@ impl CliAdapter for CodexAdapter {
             session: None,
             pending_fork: None,
             goal_command: None,
+            pending_goal_control: None,
+            native_goal_turns: None,
             active: None,
             pending_steer: None,
             pending_sample: None,
@@ -110,6 +115,8 @@ enum Request {
     Steer,
     Sample,
     Prediction,
+    GoalControl,
+    GoalContext,
     StartCompaction,
     Interrupt,
 }
@@ -140,6 +147,158 @@ struct Prediction {
     outcome: Option<SuggestionOutcome>,
 }
 
+struct PendingGoalControl {
+    request_id: RequestId,
+    thread_id: String,
+    command: NativeGoalCommand,
+}
+
+impl PendingGoalControl {
+    fn read_response(&self, response: &Value) -> NativeGoalControlOutcome {
+        use NativeGoalControlOutcome::{Confirmed, Rejected, Unconfirmed};
+        if let Some(error) = response.get("error") {
+            return match error["code"].as_i64() {
+                Some(-32601 | -32602) if response.get("result").is_none() => Rejected,
+                _ => Unconfirmed,
+            };
+        }
+        let result = &response["result"];
+        let goal = &result["goal"];
+        let observation = match &self.command {
+            NativeGoalCommand::Status if result.get("goal") == Some(&Value::Null) => {
+                goal_absent(&self.thread_id)
+            }
+            NativeGoalCommand::Cancel if result["cleared"] == true => goal_absent(&self.thread_id),
+            _ => {
+                let Ok(observation) = read_goal(&self.thread_id, None, goal) else {
+                    return Unconfirmed;
+                };
+                let valid = match &self.command {
+                    NativeGoalCommand::Start {
+                        objective,
+                        token_budget,
+                    } => {
+                        observation.state == NativeGoalState::Active
+                            && goal["objective"].as_str() == Some(objective)
+                            && observation.token_budget == *token_budget
+                            && (token_budget.is_some() || goal["tokenBudget"].is_null())
+                    }
+                    NativeGoalCommand::Status => observation.state != NativeGoalState::Unknown,
+                    NativeGoalCommand::Pause => observation.state == NativeGoalState::Paused,
+                    NativeGoalCommand::Resume => observation.state == NativeGoalState::Active,
+                    NativeGoalCommand::Stop | NativeGoalCommand::Cancel => false,
+                };
+                if !valid {
+                    return Unconfirmed;
+                }
+                observation
+            }
+        };
+        Confirmed { observation }
+    }
+
+    fn settlement(self, result: NativeGoalControlOutcome) -> ProviderEvent {
+        ProviderEvent {
+            location: ProviderLocation {
+                session_id: Some(self.thread_id),
+                ..Default::default()
+            },
+            data: ProviderEventData::NativeGoalControlSettled {
+                request_id: self.request_id,
+                action: self.command.action(),
+                result,
+            },
+        }
+    }
+}
+
+fn goal_request(thread: &str, command: &NativeGoalCommand) -> Result<(&'static str, Value)> {
+    let mut params = json!({"threadId":thread});
+    let method = match command {
+        NativeGoalCommand::Status => "thread/goal/get",
+        NativeGoalCommand::Cancel => {
+            params["origin"] = json!("user");
+            "thread/goal/clear"
+        }
+        NativeGoalCommand::Start {
+            objective,
+            token_budget,
+        } => {
+            ensure!(
+                !objective.trim().is_empty() && objective.chars().count() <= 4000,
+                "Codex goal objectives must contain between 1 and 4000 characters"
+            );
+            ensure!(
+                token_budget.is_none_or(|tokens| (1..=i64::MAX as u64).contains(&tokens)),
+                "Invalid Codex goal token budget"
+            );
+            params["origin"] = json!("user");
+            params["status"] = json!("active");
+            params["objective"] = json!(objective);
+            if let Some(tokens) = token_budget {
+                params["tokenBudget"] = json!(tokens);
+            }
+            "thread/goal/set"
+        }
+        NativeGoalCommand::Pause | NativeGoalCommand::Resume => {
+            params["origin"] = json!("user");
+            let status = if matches!(command, NativeGoalCommand::Pause) {
+                "paused"
+            } else {
+                "active"
+            };
+            params["status"] = json!(status);
+            "thread/goal/set"
+        }
+        NativeGoalCommand::Stop => {
+            bail!("Pausing the goal and interrupting its turn are separate Codex controls")
+        }
+    };
+    Ok((method, params))
+}
+
+fn goal_absent(thread: &str) -> NativeGoalObservation {
+    NativeGoalObservation {
+        provider_session_id: thread.into(),
+        provider_goal_id: None,
+        provider_turn_id: None,
+        state: NativeGoalState::Cleared,
+        reported_state: None,
+        tokens_used: None,
+        token_budget: None,
+        elapsed_seconds: None,
+        evaluation: None,
+    }
+}
+
+fn read_goal(thread: &str, turn: Option<String>, goal: &Value) -> Result<NativeGoalObservation> {
+    ensure!(
+        goal["threadId"].as_str() == Some(thread),
+        "Codex goal belongs to another thread"
+    );
+    let status = required_string(goal, "status")?;
+    let state = match status {
+        "active" => NativeGoalState::Active,
+        "paused" => NativeGoalState::Paused,
+        "blocked" => NativeGoalState::Blocked,
+        "budgetLimited" => NativeGoalState::BudgetLimited,
+        "usageLimited" => NativeGoalState::UsageLimited,
+        "complete" => NativeGoalState::Completed,
+        _ => NativeGoalState::Unknown,
+    };
+    Ok(NativeGoalObservation {
+        provider_session_id: thread.into(),
+        provider_goal_id: None,
+        provider_turn_id: turn,
+        state,
+        reported_state: Some(status.into()),
+        tokens_used: goal["tokensUsed"].as_u64(),
+        token_budget: goal["tokenBudget"].as_u64(),
+        elapsed_seconds: goal["timeUsedSeconds"].as_u64(),
+        evaluation: None,
+    })
+}
+
 #[derive(Default)]
 struct Compaction {
     acknowledged: bool,
@@ -161,6 +320,8 @@ struct CodexSession {
     session: Option<Session>,
     pending_fork: Option<Session>,
     goal_command: Option<bool>,
+    pending_goal_control: Option<PendingGoalControl>,
+    native_goal_turns: Option<HashSet<String>>,
     active: Option<ActiveTurn>,
     pending_steer: Option<PendingSteer>,
     pending_sample: Option<SideInput>,
@@ -281,6 +442,24 @@ impl CodexSession {
         }
         if request == Request::Sample {
             return Ok(self.finish_sample(response));
+        }
+        if request == Request::GoalControl {
+            let control = self
+                .pending_goal_control
+                .take()
+                .filter(|control| control.request_id == *id)
+                .context("Codex goal control has no matching request")?;
+            let result = control.read_response(response);
+            return Ok(self.events(vec![control.settlement(result)]));
+        }
+        if request == Request::GoalContext {
+            let accepted = response.get("error").is_none() && response["result"].is_object();
+            return Ok(self.events(vec![self.event(
+                ProviderEventData::NativeGoalContextSeeded {
+                    request_id: id.clone(),
+                    accepted,
+                },
+            )]));
         }
         if request == Request::Prediction {
             let result = if let Some(error) = response.get("error") {
@@ -520,6 +699,12 @@ impl CodexSession {
             Request::Prediction => {
                 unreachable!("prediction replies are handled before other responses")
             }
+            Request::GoalControl => {
+                unreachable!("goal control replies are handled before other responses")
+            }
+            Request::GoalContext => {
+                unreachable!("goal context replies are handled before other responses")
+            }
             Request::StartCompaction => {
                 if let Some(progress) = self
                     .active
@@ -672,6 +857,13 @@ impl CodexSession {
     }
 
     fn learn_turn(&mut self, id: &str) -> Result<Vec<ProviderEvent>> {
+        if self
+            .native_goal_turns
+            .as_ref()
+            .is_some_and(|completed| completed.contains(id))
+        {
+            return Ok(Vec::new());
+        }
         let Some(turn) = self.active.as_mut() else {
             return Ok(Vec::new());
         };
@@ -692,6 +884,11 @@ impl CodexSession {
             return Vec::new();
         }
         let finished = self.event(ProviderEventData::TurnFinished { outcome });
+        if let (Some(completed), Some(turn)) =
+            (&mut self.native_goal_turns, &finished.location.turn_id)
+        {
+            completed.insert(turn.clone());
+        }
         if self.suggestion_enabled
             && outcome == TurnOutcome::Completed
             && self.questions.is_empty()
@@ -822,6 +1019,41 @@ impl CodexSession {
         }
         if matches!(method, "thread/goal/updated" | "thread/goal/cleared") {
             return self.goal_notification(method, params);
+        }
+        if matches!(method, "turn/started" | "turn/completed")
+            && let Some(completed) = &self.native_goal_turns
+        {
+            let Some(thread) = params["threadId"].as_str() else {
+                return Ok(self.diagnostic("Codex native goal turn has no thread identity"));
+            };
+            if self
+                .session
+                .as_ref()
+                .is_none_or(|session| session.id != thread)
+            {
+                return Ok(AdapterUpdate::default());
+            }
+            let turn = required_string(&params["turn"], "id")?;
+            if completed.contains(turn) {
+                return Ok(AdapterUpdate::default());
+            }
+            if method == "turn/started" {
+                ensure!(
+                    self.active
+                        .as_ref()
+                        .and_then(|active| active.id.as_deref())
+                        .is_none_or(|id| id == turn),
+                    "Codex started a second turn before settling its active goal turn"
+                );
+                if self.active.is_none() {
+                    self.active = Some(ActiveTurn {
+                        id: None,
+                        message_id: None,
+                        interrupt_requested: false,
+                        compaction: None,
+                    });
+                }
+            }
         }
         if self.active.is_none() && method != "error" {
             return Ok(AdapterUpdate::default());
@@ -985,47 +1217,13 @@ impl CodexSession {
         if self.session.as_ref().is_none_or(|session| session.id != id) {
             return Ok(AdapterUpdate::default());
         }
-        let cleared = method == "thread/goal/cleared";
-        let goal = if cleared {
-            &Value::Null
+        let observation = if method == "thread/goal/cleared" {
+            goal_absent(id)
         } else {
-            &params["goal"]
+            let turn = string(params, "turnId").filter(|id| !id.is_empty());
+            read_goal(id, turn, &params["goal"])?
         };
-        let (state, reported_state) = if cleared {
-            (NativeGoalState::Cleared, None)
-        } else {
-            ensure!(
-                goal["threadId"].as_str() == Some(id),
-                "Codex goal belongs to another thread"
-            );
-            let status = required_string(goal, "status")?;
-            let state = match status {
-                "active" => NativeGoalState::Active,
-                "paused" => NativeGoalState::Paused,
-                "blocked" => NativeGoalState::Blocked,
-                "budgetLimited" => NativeGoalState::BudgetLimited,
-                "usageLimited" => NativeGoalState::UsageLimited,
-                "complete" => NativeGoalState::Completed,
-                _ => NativeGoalState::Unknown,
-            };
-            (state, Some(status.to_owned()))
-        };
-        let provider_turn_id = if cleared {
-            None
-        } else {
-            string(params, "turnId").filter(|id| !id.is_empty())
-        };
-        let observation = NativeGoalObservation {
-            provider_session_id: id.to_owned(),
-            provider_goal_id: None,
-            provider_turn_id: provider_turn_id.clone(),
-            state,
-            reported_state,
-            tokens_used: goal["tokensUsed"].as_u64(),
-            token_budget: goal["tokenBudget"].as_u64(),
-            elapsed_seconds: goal["timeUsedSeconds"].as_u64(),
-            evaluation: None,
-        };
+        let provider_turn_id = observation.provider_turn_id.clone();
         let mut event = self.event(ProviderEventData::GoalObserved { observation });
         event.location.turn_id = provider_turn_id;
         Ok(self.events(vec![event]))
@@ -1308,6 +1506,93 @@ impl CliSession for CodexSession {
 
     fn native_goal_support(&self) -> NativeGoalSupport {
         NativeGoalSupport::from_advertisement(self.goal_command)
+    }
+
+    fn control_native_goal(&mut self, command: NativeGoalCommand) -> Result<AdapterUpdate> {
+        ensure!(
+            self.goal_command == Some(true),
+            "Codex goals are disabled or unavailable in this session"
+        );
+        ensure!(
+            self.pending_goal_control.is_none(),
+            "Another Codex goal control is awaiting a reply"
+        );
+        let session = self
+            .session
+            .as_ref()
+            .context("Codex session has not started")?;
+        let (method, params) = goal_request(&session.id, &command)?;
+        let (request_id, frame) = self
+            .rpc
+            .request_with_id(method, params, Request::GoalControl)?;
+        let event = ProviderEvent {
+            location: ProviderLocation {
+                session_id: Some(session.id.clone()),
+                ..Default::default()
+            },
+            data: ProviderEventData::NativeGoalControlPrepared {
+                request_id: request_id.clone(),
+                action: command.action(),
+                frame: frame.as_bytes().to_vec(),
+            },
+        };
+        if matches!(
+            command,
+            NativeGoalCommand::Start { .. } | NativeGoalCommand::Resume
+        ) {
+            self.native_goal_turns.get_or_insert_with(HashSet::new);
+        }
+        self.pending_goal_control = Some(PendingGoalControl {
+            request_id,
+            thread_id: session.id.clone(),
+            command,
+        });
+        Ok(AdapterUpdate {
+            outbound: vec![frame],
+            events: vec![event],
+        })
+    }
+
+    fn seed_native_goal_context(&mut self, input: TurnInput) -> Result<AdapterUpdate> {
+        use crate::attachments::AttachmentInput;
+        ensure!(
+            self.goal_command == Some(true)
+                && self.active.is_none()
+                && self.native_goal_turns.is_none()
+                && matches!(self.request.intent, SessionIntent::Start),
+            "Native goals require an idle fresh Codex session"
+        );
+        let session = self
+            .session
+            .as_ref()
+            .context("Codex session has not started")?;
+        let mut content = vec![json!({"type":"input_text","text":input.text})];
+        for attachment in &input.attachments {
+            let item = match attachment {
+                AttachmentInput::Native(image) if image.format.is_image() => json!({
+                    "type":"input_image",
+                    "image_url":format!("data:{};base64,{}", image.format.mime(), image.content),
+                    "detail":"auto",
+                }),
+                _ => {
+                    let block = attachment.block(Provider::Codex)?;
+                    json!({"type":"input_text","text":required_string(&block, "text")?})
+                }
+            };
+            content.push(item);
+        }
+        let frame = self.rpc.request(
+            "thread/inject_items",
+            json!({
+                "threadId":session.id,
+                "items":[{"type":"message","role":"user","content":content}],
+            }),
+            Request::GoalContext,
+        )?;
+        Ok(AdapterUpdate {
+            outbound: vec![frame],
+            events: Vec::new(),
+        })
     }
 
     fn set_question_route(&mut self, route: super::questions::QuestionRoute) {
@@ -1662,6 +1947,10 @@ impl CliSession for CodexSession {
         } else {
             Vec::new()
         };
+        if let Some(control) = self.pending_goal_control.take() {
+            self.rpc.take_request(&control.request_id);
+            events.push(control.settlement(NativeGoalControlOutcome::Unconfirmed));
+        }
         let outcome = match outcome {
             TerminalOutcome::Cancelled(_) => TurnOutcome::Interrupted,
             TerminalOutcome::Exited(_) => TurnOutcome::Failed,
@@ -1882,6 +2171,293 @@ mod tests {
             data: ProviderEventData::TurnFinished { outcome: TurnOutcome::Interrupted },
             location
         }] if location.turn_id.as_deref() == Some("turn")));
+        Ok(())
+    }
+
+    #[test]
+    fn native_goal_controls_verify_the_command_response_on_the_original_thread() -> Result<()> {
+        use super::super::goal::{ManagedGoalReason, NativeGoalAction};
+        use NativeGoalControlOutcome::{Confirmed, Rejected, Unconfirmed};
+
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate(SessionMode::ReadOnly, SessionIntent::Start, checkout.path())?;
+        assert!(
+            session
+                .control_native_goal(NativeGoalCommand::Status)
+                .is_err()
+        );
+        let read_config = session.query_effective_configuration()?.unwrap();
+        let query: Value = serde_json::from_slice(read_config.as_bytes())?;
+        inbound(
+            &mut *session,
+            json!({"id":query["id"],"result":{"config":{"features":{"goals":true}}}}),
+        )?;
+        assert_eq!(
+            session.native_goal_support(),
+            NativeGoalSupport::Managed {
+                reason: ManagedGoalReason::IncompleteLifecycle
+            }
+        );
+
+        let prepare = |session: &mut dyn CliSession, command: NativeGoalCommand| -> Result<Value> {
+            let action = command.action();
+            let exchange = session.control_native_goal(command)?;
+            let wire = outbound(&exchange, 0)?;
+            assert_eq!(wire["params"]["threadId"], "session");
+            assert!(matches!(exchange.events.as_slice(), [ProviderEvent {
+                data: ProviderEventData::NativeGoalControlPrepared { request_id, action: recorded, frame },
+                location,
+            }] if json!(request_id) == wire["id"] && *recorded == action
+                && frame == exchange.outbound[0].as_bytes() && location.session_id.as_deref() == Some("session")
+                && location.turn_id.is_none()));
+            Ok(wire)
+        };
+        let response = |session: &mut dyn CliSession,
+                        frame: Value,
+                        action: NativeGoalAction|
+         -> Result<NativeGoalControlOutcome> {
+            let id = frame["id"].clone();
+            let update = inbound(session, frame)?;
+            let [
+                ProviderEvent {
+                    data:
+                        ProviderEventData::NativeGoalControlSettled {
+                            request_id,
+                            action: reported,
+                            result,
+                        },
+                    location,
+                },
+            ] = update.events.as_slice()
+            else {
+                panic!(
+                    "expected a single goal control receipt: {:?}",
+                    update.events
+                );
+            };
+            assert_eq!(json!(request_id), id);
+            assert_eq!(*reported, action);
+            assert_eq!(location.session_id.as_deref(), Some("session"));
+            assert!(location.turn_id.is_none());
+            Ok(result.clone())
+        };
+        let start = prepare(
+            &mut *session,
+            NativeGoalCommand::Start {
+                objective: "Inspect the fixture".into(),
+                token_budget: Some(256),
+            },
+        )?;
+        assert_eq!(start["method"], "thread/goal/set");
+        assert_eq!(
+            start["params"],
+            json!({
+                "threadId":"session","origin":"user","status":"active","objective":"Inspect the fixture","tokenBudget":256
+            })
+        );
+        assert!(
+            session
+                .control_native_goal(NativeGoalCommand::Pause)
+                .is_err()
+        );
+        let goal = |thread: &str, status: &str, budget: u64| {
+            json!({
+                "threadId":thread,"status":status,"objective":"Inspect the fixture","tokensUsed":7,"tokenBudget":budget
+            })
+        };
+        let notice = inbound(
+            &mut *session,
+            json!({
+                "method":"thread/goal/updated","params":{"threadId":"session","goal":goal("session","active",256)}
+            }),
+        )?;
+        assert!(matches!(
+            notice.events[0].data,
+            ProviderEventData::GoalObserved { .. }
+        ));
+        assert!(
+            session
+                .control_native_goal(NativeGoalCommand::Pause)
+                .is_err()
+        );
+        let unrelated = inbound(
+            &mut *session,
+            json!({
+                "id":"unrelated","result":{"goal":goal("session","active",256)}
+            }),
+        )?;
+        assert!(!unrelated.events.iter().any(|event| matches!(
+            event.data,
+            ProviderEventData::NativeGoalControlSettled { .. }
+        )));
+        let applied = response(
+            &mut *session,
+            json!({
+                "id":start["id"],"result":{"goal":goal("session","active",256)}
+            }),
+            NativeGoalAction::Start,
+        )?;
+        assert!(matches!(applied, Confirmed { observation }
+            if observation.state == NativeGoalState::Active && observation.token_budget == Some(256)));
+
+        let pause = prepare(&mut *session, NativeGoalCommand::Pause)?;
+        assert_eq!(pause["params"]["status"], "paused");
+        assert!(pause["params"].get("objective").is_none());
+        let foreign = json!({"id":pause["id"],"result":{"goal":goal("foreign","paused",256)}});
+        assert_eq!(
+            response(&mut *session, foreign, NativeGoalAction::Pause)?,
+            Unconfirmed
+        );
+
+        let status = prepare(&mut *session, NativeGoalCommand::Status)?;
+        assert_eq!(status["method"], "thread/goal/get");
+        let reconciled = response(
+            &mut *session,
+            json!({
+                "id":status["id"],"result":{"goal":goal("session","paused",256)}
+            }),
+            NativeGoalAction::Status,
+        )?;
+        assert!(matches!(reconciled, Confirmed { observation }
+            if observation.state == NativeGoalState::Paused && observation.tokens_used == Some(7)));
+
+        let resume = prepare(&mut *session, NativeGoalCommand::Resume)?;
+        assert_eq!(resume["params"]["status"], "active");
+        assert_eq!(
+            response(
+                &mut *session,
+                json!({
+                    "id":resume["id"],"error":{"code":-32602}
+                }),
+                NativeGoalAction::Resume
+            )?,
+            Rejected
+        );
+
+        let cancel = prepare(&mut *session, NativeGoalCommand::Cancel)?;
+        assert_eq!(cancel["method"], "thread/goal/clear");
+        let cleared = response(
+            &mut *session,
+            json!({
+                "id":cancel["id"],"result":{"cleared":true}
+            }),
+            NativeGoalAction::Cancel,
+        )?;
+        assert!(
+            matches!(cleared, Confirmed { observation } if observation.state == NativeGoalState::Cleared)
+        );
+
+        let query = prepare(&mut *session, NativeGoalCommand::Status)?;
+        assert_eq!(
+            response(
+                &mut *session,
+                json!({
+                    "id":query["id"],"result":{}
+                }),
+                NativeGoalAction::Status
+            )?,
+            Unconfirmed
+        );
+        let query = prepare(&mut *session, NativeGoalCommand::Status)?;
+        let absent = response(
+            &mut *session,
+            json!({
+                "id":query["id"],"result":{"goal":null}
+            }),
+            NativeGoalAction::Status,
+        )?;
+        assert!(
+            matches!(absent, Confirmed { observation } if observation.state == NativeGoalState::Cleared)
+        );
+
+        let pause = prepare(&mut *session, NativeGoalCommand::Pause)?;
+        let ended = session.process_finished(TerminalOutcome::Exited(0));
+        assert!(matches!(ended.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::NativeGoalControlSettled {
+                request_id, action: NativeGoalAction::Pause, result: Unconfirmed,
+            }, ..
+        }] if json!(request_id) == pause["id"]));
+        Ok(())
+    }
+
+    #[test]
+    fn native_goal_turns_are_followed_in_order_and_replays_are_ignored() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate(SessionMode::ReadOnly, SessionIntent::Start, checkout.path())?;
+        let turn = |method: &str, thread: &str, id: &str| {
+            json!({"method":method,"params":{
+                "threadId":thread,"turn":{"id":id,"status":"completed"}
+            }})
+        };
+        let started = |thread, id| turn("turn/started", thread, id);
+        let finished = |thread, id| turn("turn/completed", thread, id);
+        assert!(
+            inbound(&mut *session, started("session", "unarmed"))?
+                .events
+                .is_empty()
+        );
+
+        let read_config = session.query_effective_configuration()?.unwrap();
+        let query: Value = serde_json::from_slice(read_config.as_bytes())?;
+        inbound(
+            &mut *session,
+            json!({"id":query["id"],"result":{"config":{"features":{"goals":true}}}}),
+        )?;
+        let start = outbound(
+            &session.control_native_goal(NativeGoalCommand::Start {
+                objective: "Inspect the fixture".into(),
+                token_budget: None,
+            })?,
+            0,
+        )?;
+        assert!(
+            inbound(&mut *session, started("another-session", "foreign"))?
+                .events
+                .is_empty()
+        );
+        let first = inbound(&mut *session, started("session", "first-native"))?;
+        assert!(matches!(first.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::TurnStarted, location
+        }] if location.turn_id.as_deref() == Some("first-native")));
+        inbound(
+            &mut *session,
+            json!({
+                "id":start["id"],"result":{"goal":{
+                    "threadId":"session","status":"active","objective":"Inspect the fixture"
+                }}
+            }),
+        )?;
+        assert!(
+            inbound(&mut *session, started("session", "first-native"))?
+                .events
+                .is_empty()
+        );
+        let first_done = inbound(&mut *session, finished("session", "first-native"))?;
+        assert!(matches!(first_done.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::TurnFinished { outcome: TurnOutcome::Completed }, location
+        }] if location.turn_id.as_deref() == Some("first-native")));
+        assert!(
+            inbound(&mut *session, started("session", "first-native"))?
+                .events
+                .is_empty()
+        );
+
+        let second = inbound(&mut *session, started("session", "second-native"))?;
+        assert!(matches!(second.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::TurnStarted, location
+        }] if location.turn_id.as_deref() == Some("second-native")));
+        assert!(
+            inbound(&mut *session, finished("session", "first-native"))?
+                .events
+                .is_empty()
+        );
+        let interrupt = session.interrupt()?;
+        let wire: Value = serde_json::from_slice(interrupt.outbound[0].as_bytes())?;
+        assert_eq!(wire["params"]["turnId"], "second-native");
+        let second_done = inbound(&mut *session, finished("session", "second-native"))?;
+        assert!(matches!(second_done.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::TurnFinished { .. }, location
+        }] if location.turn_id.as_deref() == Some("second-native")));
         Ok(())
     }
 
