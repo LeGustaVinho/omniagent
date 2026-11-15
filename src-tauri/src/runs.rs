@@ -456,4 +456,58 @@ mod tests {
         assert_eq!(live??, [terminal?]);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn exact_input_stays_protected_and_requires_the_run_checkout() -> Result<()> {
+        let (_dir, store) = sample_store().await?;
+        let (run, _) = store.start_run("checkout".into()).await?;
+        for status in [RunStatus::Running, RunStatus::WaitingForInput] {
+            store
+                .record_run_event(run.id.clone(), RunEventData::Status { status })
+                .await?;
+        }
+        let exact = "api_key=fixture-only Pronto ☕\n";
+        store
+            .prepare_fixture_input(run.id.clone(), exact.into())
+            .await?;
+        assert!(
+            store
+                .prepare_fixture_input(run.id.clone(), "replacement".into())
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .fixture_input("another-checkout".into(), run.id.clone())
+                .await?
+                .is_none()
+        );
+        let prepared = store
+            .fixture_input(run.checkout_id.clone(), run.id.clone())
+            .await?
+            .unwrap();
+        assert_eq!(prepared.text, exact);
+        assert!(!prepared.sent);
+
+        store.mark_fixture_input_sent(run.id.clone()).await?;
+        assert!(
+            store
+                .fixture_input(run.checkout_id, run.id)
+                .await?
+                .unwrap()
+                .sent
+        );
+        store
+            .execute(|db| {
+                let bytes: Vec<u8> =
+                    db.query_row("SELECT payload FROM fixture_inputs", [], |row| row.get(0))?;
+                assert!(
+                    !bytes
+                        .windows(exact.len())
+                        .any(|slice| slice == exact.as_bytes())
+                );
+                Ok(())
+            })
+            .await
+    }
 }
