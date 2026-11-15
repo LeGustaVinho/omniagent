@@ -10,7 +10,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use omniagent::{
     jobs::JobScheduler,
-    repository::{self, ProjectCheckout},
+    repository::{self, ManagedWorktree, ProjectCheckout, WorktreeStart},
     runner::DirectWindowsRunner,
     store::Store,
 };
@@ -27,6 +27,48 @@ async fn register_project(
     directory: PathBuf,
 ) -> Result<ProjectCheckout, String> {
     repository::register(&store, directory)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn provision_task_worktree(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, Store>,
+    project_id: String,
+    task_id: String,
+    source_checkout_id: String,
+) -> Result<ManagedWorktree, String> {
+    let root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("worktrees");
+    repository::provision_task_worktree(&store, root, project_id, task_id, source_checkout_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+async fn set_project_worktree_root(
+    store: tauri::State<'_, Store>,
+    project_id: String,
+    root: Option<PathBuf>,
+) -> Result<(), String> {
+    store
+        .set_project_worktree_root(project_id, root)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn managed_worktree_start(
+    store: tauri::State<'_, Store>,
+    project_id: String,
+    run_id: String,
+) -> Result<Option<WorktreeStart>, String> {
+    store
+        .worktree_start(project_id, run_id)
         .await
         .map_err(|error| error.to_string())
 }
@@ -67,6 +109,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             runtime_status,
             register_project,
+            provision_task_worktree,
+            set_project_worktree_root,
+            managed_worktree_start,
             desktop::choose_repository,
             ipc::active_checkout,
             ipc::cli_executables,

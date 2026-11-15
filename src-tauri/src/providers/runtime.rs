@@ -446,6 +446,10 @@ impl TurnExecution {
             self.plan.run.checkout_id.clone(),
             scope.checkout.clone(),
         ))?;
+        self.app.block_on(repository::capture_worktree_start(
+            &self.store,
+            self.plan.run.id.clone(),
+        ))?;
         let adapter = scope.provider.adapter();
         let mut session = adapter.create_session(SessionRequest {
             checkout: scope.checkout.clone(),

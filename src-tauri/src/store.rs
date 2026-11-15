@@ -35,6 +35,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/020-job-queue.sql"),
     include_str!("../migrations/021-job-admission.sql"),
     include_str!("../migrations/022-job-recovery.sql"),
+    include_str!("../migrations/023-managed-worktrees.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

@@ -8,12 +8,17 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use rusqlite::{TransactionBehavior, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{customizations, store::Store};
+
+mod isolated_git;
+mod worktrees;
+pub(crate) use worktrees::capture_worktree_start;
+pub use worktrees::{GitStartingState, ManagedWorktree, WorktreeStart, provision_task_worktree};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -94,37 +99,46 @@ pub async fn register(store: &Store, directory: PathBuf) -> Result<ProjectChecko
     store
         .execute(move |db| {
             let transaction = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let project_id = transaction.query_row(
-                "INSERT INTO projects(id, git_common_dir, root) VALUES (?1, ?2, ?3)
-             ON CONFLICT(git_common_dir) DO UPDATE SET root = excluded.root RETURNING id",
-                params![
-                    Uuid::new_v4().to_string(),
-                    repository.git_common_dir,
-                    repository.repository_root
-                ],
-                |row| row.get(0),
-            )?;
-            let checkout_id: String = transaction.query_row(
-                "INSERT INTO checkouts(id, project_id, git_dir, root) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(project_id, git_dir) DO UPDATE SET root = excluded.root RETURNING id",
-                params![
-                    Uuid::new_v4().to_string(),
-                    project_id,
-                    repository.git_dir,
-                    repository.checkout_root
-                ],
-                |row| row.get(0),
-            )?;
-            customizations::save(&transaction, &checkout_id, &inventory)?;
+            let checkout = persist_checkout(&transaction, repository, &inventory)?;
             transaction.commit()?;
-            Ok(ProjectCheckout {
-                project_id,
-                repository_root: repository.repository_root,
-                checkout_id,
-                checkout_root: repository.checkout_root,
-            })
+            Ok(checkout)
         })
         .await
+}
+
+fn persist_checkout(
+    db: &Connection,
+    repository: CheckoutPaths,
+    inventory: &customizations::CustomizationInventory,
+) -> Result<ProjectCheckout> {
+    let project_id = db.query_row(
+        "INSERT INTO projects(id, git_common_dir, root) VALUES (?1, ?2, ?3)
+             ON CONFLICT(git_common_dir) DO UPDATE SET root = excluded.root RETURNING id",
+        params![
+            Uuid::new_v4().to_string(),
+            repository.git_common_dir,
+            repository.repository_root
+        ],
+        |row| row.get(0),
+    )?;
+    let checkout_id: String = db.query_row(
+        "INSERT INTO checkouts(id, project_id, git_dir, root) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id, git_dir) DO UPDATE SET root = excluded.root RETURNING id",
+        params![
+            Uuid::new_v4().to_string(),
+            project_id,
+            repository.git_dir,
+            repository.checkout_root
+        ],
+        |row| row.get(0),
+    )?;
+    customizations::save(db, &checkout_id, inventory)?;
+    Ok(ProjectCheckout {
+        project_id,
+        repository_root: repository.repository_root,
+        checkout_id,
+        checkout_root: repository.checkout_root,
+    })
 }
 
 struct CheckoutPaths {
@@ -227,10 +241,15 @@ fn git_command(git: &Path, directory: &Path) -> Command {
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_CONFIG")
         .env_remove("GIT_NAMESPACE")
         .env_remove("GIT_CONFIG_COUNT")
         .env_remove("GIT_CONFIG_PARAMETERS")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .stdin(Stdio::null())
         .arg("-C")
         .arg(directory);
