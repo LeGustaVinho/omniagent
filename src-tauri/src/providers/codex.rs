@@ -1,0 +1,858 @@
+use std::{collections::HashMap, ffi::OsString, path::Path, time::Duration};
+
+use anyhow::{Context, Result, bail, ensure};
+use serde_json::{Value, json};
+
+use super::{
+    AdapterUpdate, ApprovalDecision, AuthProbe, Authentication, CliAdapter, CliSession, Interrupt,
+    ProbeKind, Provider, ProviderEvent, ProviderEventData, ProviderLocation, RequestId,
+    SessionIntent, SessionMode, SessionRequest, Transport, TurnInput, TurnOutcome,
+    rpc::{self, Rpc},
+};
+use crate::{
+    diagnostics,
+    process::TerminalOutcome,
+    process_io::{OutputFrame, Stream},
+};
+
+pub struct CodexAdapter;
+
+impl CliAdapter for CodexAdapter {
+    fn provider(&self) -> Provider {
+        Provider::Codex
+    }
+    fn transport(&self) -> Transport {
+        Transport::CodexAppServer
+    }
+
+    fn authentication_probe(&self) -> AuthProbe {
+        AuthProbe {
+            kind: ProbeKind::Command,
+            arguments: ["login", "status"].map(OsString::from).to_vec(),
+        }
+    }
+
+    fn decode_authentication(&self, status: TerminalOutcome, output: &str) -> Authentication {
+        let normalized = output.trim().to_ascii_lowercase();
+        if status == TerminalOutcome::Exited(0) && normalized.starts_with("logged in") {
+            Authentication::Authenticated
+        } else if normalized.starts_with("not logged in") {
+            Authentication::Required
+        } else {
+            Authentication::Unknown
+        }
+    }
+
+    fn create_session(&self, request: SessionRequest) -> Result<Box<dyn CliSession>> {
+        ensure!(
+            request.checkout.is_absolute(),
+            "Codex checkout must be absolute"
+        );
+        Ok(Box::new(CodexSession {
+            request,
+            rpc: Rpc::new(false),
+            handshake_started: false,
+            session: None,
+            active: None,
+            approvals: HashMap::new(),
+            questions: HashMap::new(),
+        }))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Request {
+    Initialize,
+    OpenSession,
+    StartTurn,
+    Interrupt,
+}
+
+struct Session {
+    id: String,
+    model: String,
+    effort: Option<String>,
+}
+
+struct ActiveTurn {
+    id: Option<String>,
+    interrupt_requested: bool,
+}
+
+enum Approval {
+    Decision,
+    Permissions(Value),
+}
+
+struct CodexSession {
+    request: SessionRequest,
+    rpc: Rpc<Request>,
+    handshake_started: bool,
+    session: Option<Session>,
+    active: Option<ActiveTurn>,
+    approvals: HashMap<RequestId, Approval>,
+    questions: HashMap<RequestId, Vec<String>>,
+}
+
+impl CodexSession {
+    fn sandbox(&self) -> (&'static str, &'static str) {
+        match self.request.mode {
+            SessionMode::ApprovedWrite => ("workspace-write", "workspaceWrite"),
+            SessionMode::ReadOnly | SessionMode::Plan => ("read-only", "readOnly"),
+        }
+    }
+
+    fn open_session(&mut self) -> Result<AdapterUpdate> {
+        let approval = match self.request.mode {
+            SessionMode::ApprovedWrite => "on-request",
+            _ => "never",
+        };
+        let mut params = json!({
+            "cwd": self.request.checkout,
+            "sandbox": self.sandbox().0,
+            "approvalPolicy": approval,
+        });
+        if let Some(model) = &self.request.model {
+            params["model"] = json!(model);
+        }
+        let method = match &self.request.intent {
+            SessionIntent::Start => "thread/start",
+            SessionIntent::Resume {
+                provider_session_id,
+            } => {
+                params["threadId"] = json!(provider_session_id);
+                "thread/resume"
+            }
+        };
+        Ok(AdapterUpdate {
+            outbound: vec![
+                self.rpc.notify("initialized", None)?,
+                self.rpc.request(method, params, Request::OpenSession)?,
+            ],
+            events: vec![self.event(ProviderEventData::Handshake {
+                protocol: "codex-app-server-v2".into(),
+                capabilities: Vec::new(),
+            })],
+        })
+    }
+
+    fn event(&self, data: ProviderEventData) -> ProviderEvent {
+        ProviderEvent {
+            location: ProviderLocation {
+                session_id: self.session.as_ref().map(|session| session.id.clone()),
+                turn_id: self.active.as_ref().and_then(|turn| turn.id.clone()),
+                ..Default::default()
+            },
+            data,
+        }
+    }
+
+    fn diagnostic(&self, message: &str) -> AdapterUpdate {
+        self.events(vec![self.event(ProviderEventData::Diagnostic {
+            message: diagnostics::preview(message),
+        })])
+    }
+
+    fn events(&self, events: Vec<ProviderEvent>) -> AdapterUpdate {
+        AdapterUpdate {
+            outbound: Vec::new(),
+            events,
+        }
+    }
+
+    fn response(&mut self, id: &RequestId, response: &Value) -> Result<AdapterUpdate> {
+        let Some(request) = self.rpc.take_request(id) else {
+            return Ok(self.diagnostic("Codex sent a response for an unknown request"));
+        };
+        if let Some(error) = response.get("error") {
+            let message =
+                diagnostics::preview(error["message"].as_str().unwrap_or("Codex request failed"));
+            let mut events = vec![self.event(ProviderEventData::Error { message })];
+            if request == Request::StartTurn {
+                events.extend(self.finish_turn(TurnOutcome::Failed));
+            }
+            return Ok(self.events(events));
+        }
+        let result = response
+            .get("result")
+            .context("Codex response has no result")?;
+        match request {
+            Request::Initialize => {
+                ensure!(
+                    result["userAgent"].is_string(),
+                    "invalid Codex initialize response"
+                );
+                self.open_session()
+            }
+            Request::OpenSession => {
+                let id = required_string(&result["thread"], "id")?;
+                let model = required_string(result, "model")?;
+                let cwd = required_string(result, "cwd")?;
+                ensure!(
+                    dunce::canonicalize(Path::new(cwd))?
+                        == dunce::canonicalize(&self.request.checkout)?,
+                    "Codex reported an unexpected checkout"
+                );
+                ensure!(
+                    result.pointer("/sandbox/type").and_then(Value::as_str)
+                        == Some(self.sandbox().1),
+                    "Codex did not establish the requested sandbox"
+                );
+                if let SessionIntent::Resume {
+                    provider_session_id,
+                } = &self.request.intent
+                {
+                    ensure!(
+                        provider_session_id == id,
+                        "Codex resumed an unexpected session"
+                    );
+                }
+                let effort = string(result, "reasoningEffort");
+                self.session = Some(Session {
+                    id: id.to_owned(),
+                    model: model.to_owned(),
+                    effort: effort.clone(),
+                });
+                Ok(
+                    self.events(vec![self.event(ProviderEventData::SessionReady {
+                        model: Some(model.to_owned()),
+                        effort,
+                    })]),
+                )
+            }
+            Request::StartTurn => {
+                let id = required_string(&result["turn"], "id")?;
+                let events = self.learn_turn(id)?;
+                Ok(self.events(events))
+            }
+            Request::Interrupt => Ok(AdapterUpdate::default()),
+        }
+    }
+
+    fn learn_turn(&mut self, id: &str) -> Result<Vec<ProviderEvent>> {
+        let Some(turn) = self.active.as_mut() else {
+            return Ok(Vec::new());
+        };
+        if let Some(known) = &turn.id {
+            ensure!(known == id, "Codex sent an unexpected turn ID");
+            return Ok(Vec::new());
+        }
+        turn.id = Some(id.to_owned());
+        Ok(vec![self.event(ProviderEventData::TurnStarted)])
+    }
+
+    fn finish_turn(&mut self, outcome: TurnOutcome) -> Vec<ProviderEvent> {
+        if self.active.is_none() {
+            return Vec::new();
+        }
+        let finished = self.event(ProviderEventData::TurnFinished { outcome });
+        self.active = None;
+        self.approvals.clear();
+        self.questions.clear();
+        vec![finished]
+    }
+
+    fn notification(&mut self, method: &str, params: &Value) -> Result<AdapterUpdate> {
+        if self.active.is_none() && method != "error" {
+            return Ok(AdapterUpdate::default());
+        }
+        let thread = params["threadId"].as_str();
+        if let Some(thread) = thread
+            && self
+                .session
+                .as_ref()
+                .is_none_or(|session| session.id != thread)
+        {
+            return Ok(AdapterUpdate::default());
+        }
+        if let Some(turn) = params["turnId"].as_str()
+            && self
+                .active
+                .as_ref()
+                .and_then(|active| active.id.as_deref())
+                .is_some_and(|id| id != turn)
+        {
+            return Ok(AdapterUpdate::default());
+        }
+        if matches!(method, "turn/started" | "turn/completed") {
+            let id = required_string(&params["turn"], "id")?;
+            if self
+                .active
+                .as_ref()
+                .and_then(|turn| turn.id.as_deref())
+                .is_some_and(|active| id != active)
+            {
+                return Ok(AdapterUpdate::default());
+            }
+            let mut events = self.learn_turn(id)?;
+            if method == "turn/completed" {
+                let outcome = match params["turn"]["status"].as_str() {
+                    Some("completed") => TurnOutcome::Completed,
+                    Some("interrupted") => TurnOutcome::Interrupted,
+                    Some("failed") => TurnOutcome::Failed,
+                    _ => return Ok(self.diagnostic("Codex sent an unknown terminal turn status")),
+                };
+                events.extend(self.finish_turn(outcome));
+            }
+            return Ok(self.events(events));
+        }
+        let delta = || required_string(params, "delta").map(str::to_owned);
+        let data = match method {
+            "item/agentMessage/delta" => ProviderEventData::AssistantDelta { text: delta()? },
+            "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
+                ProviderEventData::Reasoning {
+                    text: delta()?,
+                    summary: method.ends_with("/summaryTextDelta"),
+                }
+            }
+            "thread/tokenUsage/updated" => {
+                let usage = &params["tokenUsage"]["last"];
+                ProviderEventData::Usage {
+                    input: usage["inputTokens"].as_u64(),
+                    output: usage["outputTokens"].as_u64(),
+                    cached_input: usage["cachedInputTokens"].as_u64(),
+                }
+            }
+            "item/started" | "item/completed" => {
+                return self.item(params, method.ends_with("/completed"));
+            }
+            "error" => ProviderEventData::Error {
+                message: diagnostics::preview(
+                    params["error"]["message"]
+                        .as_str()
+                        .unwrap_or("Codex reported an error"),
+                ),
+            },
+            _ => return Ok(AdapterUpdate::default()),
+        };
+        let mut event = self.event(data);
+        event.location.turn_id = string(params, "turnId").or(event.location.turn_id);
+        event.location.item_id = string(params, "itemId");
+        Ok(self.events(vec![event]))
+    }
+
+    fn item(&self, params: &Value, completed: bool) -> Result<AdapterUpdate> {
+        let item = &params["item"];
+        let kind = required_string(item, "type")?;
+        let event = |data| {
+            let mut event = self.event(data);
+            event.location.item_id = string(item, "id");
+            event.location.turn_id = string(params, "turnId").or(event.location.turn_id);
+            event
+        };
+        let data = match (kind, completed) {
+            ("agentMessage", true) => ProviderEventData::AssistantMessage {
+                text: required_string(item, "text")?.to_owned(),
+            },
+            ("contextCompaction", true) => ProviderEventData::Compacted,
+            (
+                "commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall" | "webSearch",
+                _,
+            ) => ProviderEventData::Tool {
+                name: string(item, "tool").unwrap_or_else(|| kind.to_owned()),
+                phase: string(item, "status")
+                    .unwrap_or_else(|| if completed { "completed" } else { "started" }.to_owned()),
+            },
+            ("collabAgentToolCall", _) => {
+                let children = item["receiverThreadIds"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>();
+                if !children.is_empty() {
+                    return Ok(self.events(
+                        children
+                            .into_iter()
+                            .map(|child| {
+                                event(ProviderEventData::ChildActivity {
+                                    child_id: Some(child.to_owned()),
+                                    status: string(&item["agentsStates"][child], "status"),
+                                })
+                            })
+                            .collect(),
+                    ));
+                }
+                ProviderEventData::ChildActivity {
+                    child_id: None,
+                    status: string(item, "status"),
+                }
+            }
+            _ => return Ok(AdapterUpdate::default()),
+        };
+        Ok(self.events(vec![event(data)]))
+    }
+
+    fn server_request(
+        &mut self,
+        id: RequestId,
+        method: &str,
+        params: &Value,
+    ) -> Result<AdapterUpdate> {
+        let allowed = self.active.is_some()
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|session| params["threadId"].as_str() == Some(session.id.as_str()))
+            && self
+                .active
+                .as_ref()
+                .and_then(|turn| turn.id.as_deref())
+                .is_none_or(|turn| params["turnId"].as_str() == Some(turn));
+        if !allowed {
+            return Ok(AdapterUpdate {
+                outbound: vec![self.rpc.error(
+                    &id,
+                    -32602,
+                    "request does not belong to the active turn",
+                )?],
+                events: vec![],
+            });
+        }
+        ensure!(
+            !self.approvals.contains_key(&id) && !self.questions.contains_key(&id),
+            "duplicate Codex server request"
+        );
+        let approval = match method {
+            "item/tool/requestUserInput" => {
+                let questions = params["questions"]
+                    .as_array()
+                    .context("Codex planning request has no questions")?;
+                let ids = questions
+                    .iter()
+                    .map(|question| required_string(question, "id").map(str::to_owned))
+                    .collect::<Result<Vec<_>>>()?;
+                self.questions.insert(id.clone(), ids);
+                return Ok(self.events(vec![self.event(ProviderEventData::Question {
+                    request_id: id,
+                    form: params["questions"].clone(),
+                })]));
+            }
+            "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+                Approval::Decision
+            }
+            "item/permissions/requestApproval" => {
+                Approval::Permissions(params["permissions"].clone())
+            }
+            _ => {
+                return Ok(AdapterUpdate {
+                    outbound: vec![self.rpc.error(
+                        &id,
+                        -32601,
+                        "method not supported by OmniAgent",
+                    )?],
+                    events: vec![],
+                });
+            }
+        };
+        let mut event = self.event(ProviderEventData::Approval {
+            request_id: id.clone(),
+            operation: method.to_owned(),
+            description: string(params, "reason").map(|value| diagnostics::preview(&value)),
+        });
+        event.location.item_id = string(params, "itemId");
+        self.approvals.insert(id, approval);
+        Ok(self.events(vec![event]))
+    }
+}
+
+impl CliSession for CodexSession {
+    fn arguments(&self) -> Vec<OsString> {
+        ["app-server", "--listen", "stdio://"]
+            .map(OsString::from)
+            .to_vec()
+    }
+
+    fn start(&mut self) -> Result<AdapterUpdate> {
+        ensure!(!self.handshake_started, "Codex handshake already started");
+        self.handshake_started = true;
+        Ok(AdapterUpdate {
+            outbound: vec![self.rpc.request("initialize", json!({
+                "clientInfo": { "name": "omniagent", "title": "OmniAgent", "version": env!("CARGO_PKG_VERSION") },
+                "capabilities": { "experimentalApi": true, "explicitGatewayOauth": true },
+            }), Request::Initialize)?],
+            events: vec![],
+        })
+    }
+
+    fn send(&mut self, input: TurnInput) -> Result<AdapterUpdate> {
+        ensure!(
+            self.active.is_none(),
+            "Codex already has a turn in progress"
+        );
+        let session = self
+            .session
+            .as_ref()
+            .context("Codex session has not started")?;
+        let mut params =
+            json!({ "threadId": session.id, "input": [{ "type": "text", "text": input.text }] });
+        if let Some(effort) = &self.request.effort {
+            params["effort"] = json!(effort);
+        }
+        if self.request.mode == SessionMode::Plan {
+            params["collaborationMode"] = json!({
+                "mode": "plan",
+                "settings": { "model": session.model, "reasoning_effort": self.request.effort.as_ref().or(session.effort.as_ref()) },
+            });
+        }
+        let message = self.rpc.request("turn/start", params, Request::StartTurn)?;
+        self.active = Some(ActiveTurn {
+            id: None,
+            interrupt_requested: false,
+        });
+        Ok(AdapterUpdate {
+            outbound: vec![message],
+            events: vec![],
+        })
+    }
+
+    fn receive(&mut self, frame: OutputFrame) -> Result<AdapterUpdate> {
+        if frame.stream == Stream::Stderr {
+            return Ok(self.diagnostic(&frame.data));
+        }
+        let Ok(body) = serde_json::from_str::<Value>(&frame.data) else {
+            return Ok(self.diagnostic("Malformed Codex protocol frame"));
+        };
+        let id = rpc::id(&body);
+        let params = &body["params"];
+        match (body["method"].as_str(), id) {
+            (Some(method), Some(id)) => self.server_request(id, method, params),
+            (Some(method), None) => self.notification(method, params),
+            (None, Some(id)) => self.response(&id, &body),
+            _ => Ok(self.diagnostic("Unrecognized Codex protocol frame")),
+        }
+    }
+
+    fn respond_approval(
+        &mut self,
+        id: &RequestId,
+        decision: ApprovalDecision,
+    ) -> Result<AdapterUpdate> {
+        ensure!(
+            decision != ApprovalDecision::AllowOnce
+                || self.request.mode == SessionMode::ApprovedWrite,
+            "read-only Codex sessions cannot grant write or execution approval"
+        );
+        let approval = self
+            .approvals
+            .remove(id)
+            .context("Codex approval is stale or unknown")?;
+        let value = match approval {
+            Approval::Decision => json!({ "decision": match decision {
+                ApprovalDecision::AllowOnce => "accept", ApprovalDecision::Deny => "decline", ApprovalDecision::Cancel => "cancel",
+            }}),
+            Approval::Permissions(requested) => json!({
+                "permissions": if decision == ApprovalDecision::AllowOnce { requested } else { json!({}) },
+                "scope": "turn",
+            }),
+        };
+        Ok(AdapterUpdate {
+            outbound: vec![self.rpc.result(id, value)?],
+            events: vec![],
+        })
+    }
+
+    fn respond_question(&mut self, id: &RequestId, answer: Value) -> Result<AdapterUpdate> {
+        let questions = self
+            .questions
+            .get(id)
+            .context("Codex question is stale or unknown")?;
+        let answers = answer["answers"]
+            .as_object()
+            .context("Codex question response requires answers")?;
+        ensure!(
+            answers.len() == questions.len()
+                && questions.iter().all(|question| {
+                    answers
+                        .get(question)
+                        .and_then(|value| value["answers"].as_array())
+                        .is_some_and(|choices| choices.iter().all(Value::is_string))
+                }),
+            "Codex question response does not match the active form"
+        );
+        let result = self.rpc.result(id, answer)?;
+        self.questions.remove(id);
+        Ok(AdapterUpdate {
+            outbound: vec![result],
+            events: vec![],
+        })
+    }
+
+    fn interrupt(&mut self) -> Result<Interrupt> {
+        let session = self
+            .session
+            .as_ref()
+            .context("Codex session has not started")?;
+        let turn = self.active.as_mut().context("Codex has no active turn")?;
+        ensure!(
+            !turn.interrupt_requested,
+            "Codex turn interrupt already requested"
+        );
+        turn.interrupt_requested = true;
+        let Some(turn_id) = &turn.id else {
+            return Ok(Interrupt {
+                outbound: vec![],
+                grace: Duration::ZERO,
+            });
+        };
+        Ok(Interrupt {
+            outbound: vec![self.rpc.request(
+                "turn/interrupt",
+                json!({ "threadId": session.id, "turnId": turn_id }),
+                Request::Interrupt,
+            )?],
+            grace: Duration::from_secs(5),
+        })
+    }
+
+    fn process_finished(&mut self, outcome: TerminalOutcome) -> AdapterUpdate {
+        let outcome = match outcome {
+            TerminalOutcome::Cancelled(_) => TurnOutcome::Interrupted,
+            TerminalOutcome::Exited(_) => TurnOutcome::Failed,
+        };
+        let events = self.finish_turn(outcome);
+        self.events(events)
+    }
+}
+
+fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
+    let Some(result) = value[key]
+        .as_str()
+        .filter(|text| !text.is_empty() || key == "text" || key == "delta")
+    else {
+        bail!("Codex protocol field {key} is missing or invalid");
+    };
+    Ok(result)
+}
+
+fn string(value: &Value, key: &str) -> Option<String> {
+    value[key].as_str().map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inbound(session: &mut dyn CliSession, frame: Value) -> Result<AdapterUpdate> {
+        session.receive(OutputFrame {
+            stream: Stream::Stdout,
+            data: frame.to_string(),
+        })
+    }
+
+    fn outbound(update: &AdapterUpdate, index: usize) -> Result<Value> {
+        Ok(serde_json::from_slice(update.outbound[index].as_bytes())?)
+    }
+
+    fn negotiate(
+        mode: SessionMode,
+        intent: SessionIntent,
+        checkout: &Path,
+    ) -> Result<Box<dyn CliSession>> {
+        let resuming = matches!(&intent, SessionIntent::Resume { .. });
+        let mut session = CodexAdapter.create_session(SessionRequest {
+            checkout: checkout.to_path_buf(),
+            intent,
+            mode,
+            model: Some("gpt-6.1-sol".into()),
+            effort: Some("high".into()),
+        })?;
+        assert_eq!(outbound(&session.start()?, 0)?["method"], "initialize");
+        let initialized = inbound(
+            &mut *session,
+            json!({"id":1,"result":{"userAgent":"fixture"}}),
+        )?;
+        assert_eq!(outbound(&initialized, 0)?["method"], "initialized");
+        let request = outbound(&initialized, 1)?;
+        assert_eq!(request["params"]["model"], "gpt-6.1-sol");
+        if resuming {
+            assert_eq!(request["method"], "thread/resume");
+            assert_eq!(request["params"]["threadId"], "session");
+        } else {
+            assert_eq!(request["method"], "thread/start");
+        }
+        let opened = inbound(
+            &mut *session,
+            json!({"id":2,"result":{
+                "thread":{"id":"session"}, "model":"gpt-6.1-sol", "cwd":checkout,
+                "sandbox":{"type":if mode == SessionMode::ApprovedWrite { "workspaceWrite" } else { "readOnly" }}
+            }}),
+        )?;
+        assert!(matches!(
+            opened.events[0].data,
+            ProviderEventData::SessionReady { .. }
+        ));
+        Ok(session)
+    }
+
+    #[test]
+    fn streams_a_resumed_turn_with_correlation_and_interrupt() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate(
+            SessionMode::Plan,
+            SessionIntent::Resume {
+                provider_session_id: "session".into(),
+            },
+            checkout.path(),
+        )?;
+        let text = "first line\nsecond line ☕";
+        let request = session.send(TurnInput {
+            message_id: "message".into(),
+            text: text.into(),
+        })?;
+        assert_eq!(outbound(&request, 0)?["params"]["input"][0]["text"], text);
+        assert_eq!(
+            outbound(&request, 0)?["params"]["collaborationMode"]["mode"],
+            "plan"
+        );
+        assert!(
+            session
+                .send(TurnInput {
+                    message_id: "another".into(),
+                    text: "blocked".into()
+                })
+                .is_err()
+        );
+        let start = inbound(
+            &mut *session,
+            json!({"method":"turn/started","params":{
+                "threadId":"session","turn":{"id":"turn","status":"inProgress"}
+            }}),
+        )?;
+        assert_eq!(start.events[0].location.turn_id.as_deref(), Some("turn"));
+        assert!(
+            inbound(
+                &mut *session,
+                json!({"id":3,"result":{"turn":{"id":"turn"}}})
+            )?
+            .events
+            .is_empty()
+        );
+        let unrelated = inbound(
+            &mut *session,
+            json!({"method":"item/agentMessage/delta","params":{
+                "threadId":"session","turnId":"previous","itemId":"other","delta":"stale"
+            }}),
+        )?;
+        assert!(unrelated.events.is_empty());
+        let delta = inbound(
+            &mut *session,
+            json!({"method":"item/agentMessage/delta","params":{
+                "threadId":"session","turnId":"turn","itemId":"response","delta":"partial"
+            }}),
+        )?;
+        assert_eq!(
+            delta.events[0].data,
+            ProviderEventData::AssistantDelta {
+                text: "partial".into()
+            }
+        );
+        let reasoning = inbound(
+            &mut *session,
+            json!({"method":"item/reasoning/summaryTextDelta","params":{
+                "threadId":"session","turnId":"turn","itemId":"thought","delta":"summary"
+            }}),
+        )?;
+        assert!(matches!(
+            reasoning.events[0].data,
+            ProviderEventData::Reasoning { summary: true, .. }
+        ));
+        let children = inbound(
+            &mut *session,
+            json!({"method":"item/completed","params":{
+                "threadId":"session", "turnId":"turn", "item":{"id":"call","type":"collabAgentToolCall",
+                    "receiverThreadIds":["child"],"agentsStates":{"child":{"status":"completed"}}}
+            }}),
+        )?;
+        assert_eq!(
+            children.events[0].data,
+            ProviderEventData::ChildActivity {
+                child_id: Some("child".into()),
+                status: Some("completed".into())
+            }
+        );
+        let interrupt = session.interrupt()?;
+        let wire: Value = serde_json::from_slice(interrupt.outbound[0].as_bytes())?;
+        assert_eq!(wire["method"], "turn/interrupt");
+        assert_eq!(wire["params"]["turnId"], "turn");
+        let finished = inbound(
+            &mut *session,
+            json!({"method":"turn/completed","params":{
+                "threadId":"session","turn":{"id":"turn","status":"interrupted"}
+            }}),
+        )?;
+        assert_eq!(
+            finished.events[0].data,
+            ProviderEventData::TurnFinished {
+                outcome: TurnOutcome::Interrupted
+            }
+        );
+        assert!(
+            session
+                .process_finished(TerminalOutcome::Exited(0))
+                .events
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn routes_approvals_once_and_preserves_question_ids() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate(
+            SessionMode::ApprovedWrite,
+            SessionIntent::Start,
+            checkout.path(),
+        )?;
+        session.send(TurnInput {
+            message_id: "message".into(),
+            text: "run".into(),
+        })?;
+        inbound(
+            &mut *session,
+            json!({"id":3,"result":{"turn":{"id":"turn"}}}),
+        )?;
+        let request = inbound(
+            &mut *session,
+            json!({"id":"approval","method":"item/fileChange/requestApproval",
+            "params":{"threadId":"session","turnId":"turn","itemId":"patch","reason":"save generated file"}}),
+        )?;
+        assert_eq!(request.events[0].location.item_id.as_deref(), Some("patch"));
+        let approval_id = RequestId::Text("approval".into());
+        let decision = session.respond_approval(&approval_id, ApprovalDecision::AllowOnce)?;
+        assert_eq!(
+            outbound(&decision, 0)?,
+            json!({"id":"approval","result":{"decision":"accept"}})
+        );
+        assert!(
+            session
+                .respond_approval(&approval_id, ApprovalDecision::Deny)
+                .is_err()
+        );
+
+        let prompts = inbound(
+            &mut *session,
+            json!({"id":91,"method":"item/tool/requestUserInput",
+            "params":{"threadId":"session","turnId":"turn","questions":[{"id":"q-1","question":"Which?"}]}}),
+        )?;
+        assert!(matches!(
+            &prompts.events[0].data,
+            ProviderEventData::Question {
+                request_id: RequestId::Number(91),
+                ..
+            }
+        ));
+        assert!(
+            session
+                .respond_question(
+                    &RequestId::Number(91),
+                    json!({"answers":{"wrong":{"answers":["a"]}}})
+                )
+                .is_err()
+        );
+        let answer = json!({"answers":{"q-1":{"answers":["free text"]}}});
+        let response = session.respond_question(&RequestId::Number(91), answer.clone())?;
+        assert_eq!(outbound(&response, 0)?["result"], answer);
+        Ok(())
+    }
+}
