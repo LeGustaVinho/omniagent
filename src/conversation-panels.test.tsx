@@ -6,9 +6,41 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import type { Conversation } from "@/bindings/Conversation";
 import { ConversationSidebar } from "@/conversation-panels";
+import { SideQuestionPanel } from "@/conversation-side-requests";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
+
+test("restores the side question and cancels its own queue attempt", async () => {
+  const side = {
+    question: "What did the previous turn establish?",
+    purpose: "question",
+    job: {
+      id: "side-job", projectId: "project", queueState: "queued",
+      latestAttempt: { runId: "side-run", status: "running", cancelRequested: false },
+    },
+    response: null,
+  };
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "conversation_side_requests") return [side];
+    if (command === "interrupt_queued_job_attempt") {
+      side.job.latestAttempt.status = "cancelled";
+      return;
+    }
+    throw new Error(`Unexpected command: ${command}`);
+  });
+  const client = new QueryClient();
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={client}>
+    <SideQuestionPanel conversationId="chat" onClose={vi.fn()} />
+  </QueryClientProvider>);
+  expect(await screen.findByText(side.question)).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Cancel side question" }));
+  expect(await screen.findByText("Cancelled")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("interrupt_queued_job_attempt", {
+    projectId: "project", jobId: "side-job", runId: "side-run",
+  });
+});
 
 test("renames the attributed conversation in its checkout and refreshes the open tab callback", async () => {
   let conversation: Conversation = {

@@ -90,9 +90,11 @@ fn codex_side_sample_uses_the_pinned_turn_without_tools_or_transcript_entries() 
         arguments: &args,
     })?;
     write(&mut process, session.start()?)?;
-    until_event(&mut process, &mut *session, |data, _| {
-        matches!(data, ProviderEventData::SessionReady { .. }).then_some(())
-    })?;
+    let (reported_model, reported_effort) =
+        until_event(&mut process, &mut *session, |data, _| match data {
+            ProviderEventData::SessionReady { model, effort } => Some((model, effort)),
+            _ => None,
+        })?;
     write(&mut process, session.send(TurnInput {
         message_id: "main-message".into(),
         text: "The fixture code word is BLUE_PIN_FIXTURE. Remember it and reply exactly READY without tools.".into(),
@@ -171,6 +173,39 @@ fn codex_side_sample_uses_the_pinned_turn_without_tools_or_transcript_entries() 
     }
     let repeat = session.request_side(input("side", Some(source.clone()), "Replay"))?;
     assert!(repeat.outbound.is_empty() && repeat.events.is_empty());
+    let scope = SessionScope {
+        provider: Provider::Codex,
+        profile_id: "codex-side-fixture".into(),
+        account_binding: Some("authenticated-vendor-fixture".into()),
+        checkout: dunce::canonicalize(checkout.path())?,
+        executable,
+        cli_version: "fixture".into(),
+        runner: DirectWindowsRunner.identity().into(),
+        permission_revision: "fixture-read-only".into(),
+        mode: SessionMode::ReadOnly,
+        model: Some("gpt-6-luna".into()),
+        effort: None,
+    };
+    let scheduled = || {
+        side::run_native_until(
+            &scope,
+            |request| DirectWindowsRunner.launch(request),
+            input(
+                "scheduled",
+                Some(source.clone()),
+                "Reply exactly with the original fixture code word and SCHEDULED_SIDE_FIXTURE.",
+            ),
+            reported_model.as_deref(),
+            reported_effort.as_deref(),
+            &|| false,
+        )
+    };
+    assert_eq!(
+        scheduled()?.outcome,
+        SideOutcome::Unavailable {
+            reason: side::SideUnavailable::Busy
+        }
+    );
     let query = omniagent::providers::WireMessage::json(&json!({
         "id":9999, "method":"thread/turns/list", "params":{"threadId":source.session_id,"itemsView":"full","limit":10}
     }))?;
@@ -192,12 +227,24 @@ fn codex_side_sample_uses_the_pinned_turn_without_tools_or_transcript_entries() 
             assert_eq!(turns.len(), 1);
             assert_eq!(turns[0]["id"], source.turn_id);
             assert!(!frame.data.contains("SIDE_ONLY_FIXTURE"));
+            assert!(!frame.data.contains("SCHEDULED_SIDE_FIXTURE"));
             assert!(!frame.data.contains("SECRET_CODEX_SIDE_FIXTURE"));
             break;
         }
     }
     process.control.cancel()?;
     process.control.wait()?;
+    process.control.confirm_quiescence()?;
+    let response = scheduled()?;
+    assert!(
+        matches!(
+            response.outcome,
+            SideOutcome::Answered { route: SideRoute::CodexSample, ref text, .. }
+                if text.contains("BLUE_PIN_FIXTURE") && text.contains("SCHEDULED_SIDE_FIXTURE")
+        ),
+        "The supervised sample must use the pinned thread: {:?}",
+        response.outcome
+    );
     Ok(())
 }
 

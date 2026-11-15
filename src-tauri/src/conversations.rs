@@ -5604,6 +5604,416 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn side_requests_share_capacity_without_joining_main_history() -> Result<()> {
+        use crate::{
+            jobs::{
+                AdmissionEnvironment, ComposerSuggestionMode, JobContext, JobScheduler,
+                RecoveryAction, SidePurpose, SideSubmission,
+            },
+            providers::{
+                capabilities::{
+                    CapabilityAssessment, CapabilityDescriptor, CapabilityScope,
+                    ConfigurationEvidence,
+                },
+                side::SideOutcome,
+            },
+        };
+
+        struct SideRunner {
+            frames: Arc<Mutex<Vec<Vec<u8>>>>,
+            output: Arc<Mutex<Vec<mpsc::Sender<io::Result<OutputFrame>>>>>,
+            source_checkout: PathBuf,
+        }
+        struct SideWire(Arc<Mutex<Vec<Vec<u8>>>>);
+        impl io::Write for SideWire {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().push(bytes.to_vec());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Runner for SideRunner {
+            fn identity(&self) -> &str {
+                "side-fixture"
+            }
+            fn executable_revision(&self, _: &Path) -> Option<String> {
+                Some("side-fixture-build".into())
+            }
+            fn execution_platform(&self) -> Option<ExecutionPlatform> {
+                DirectWindowsRunner.execution_platform()
+            }
+            fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
+                assert_ne!(request.checkout, self.source_checkout);
+                assert!(
+                    request
+                        .arguments
+                        .windows(2)
+                        .any(|args| args == ["--tools", ""].map(std::ffi::OsStr::new))
+                );
+                let (send, output) = mpsc::channel();
+                for data in [
+                    json!({"type":"control_response","response":{"request_id":"side-init","subtype":"success"}}),
+                    json!({"type":"system","subtype":"init","session_id":"side-only","model":"side-selected","tools":[],"cwd":request.checkout}),
+                ] {
+                    send.send(Ok(OutputFrame {
+                        stream: Stream::Stdout,
+                        data: data.to_string(),
+                    }))
+                    .unwrap();
+                }
+                self.output.lock().unwrap().push(send);
+                Ok(CapturedProcess {
+                    input: ProcessInput::new(SideWire(self.frames.clone())),
+                    output,
+                    control: Arc::new(CompletedProcess),
+                })
+            }
+        }
+
+        let (_dir, store, chat, mut scope) = setup().await?;
+        let database = scope.checkout.join("store.sqlite");
+        let frames: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let outputs: Arc<Mutex<Vec<mpsc::Sender<io::Result<OutputFrame>>>>> = Arc::default();
+        let runner = Arc::new(SideRunner {
+            frames: frames.clone(),
+            output: outputs.clone(),
+            source_checkout: scope.checkout.clone(),
+        });
+        scope.runner = runner.identity().into();
+        scope.provider = Provider::Claude;
+        scope.executable = std::env::current_exe()?;
+        scope.model = Some("side-selected".into());
+        let completed =
+            prepare(&store, &chat.id, scope.clone(), "Original permitted source").await?;
+        let profile = CapabilityScope::from_dispatch(
+            &scope,
+            chat.checkout_id.clone(),
+            runner.executable_revision(&scope.executable),
+            runner.execution_platform(),
+            ConfigurationEvidence {
+                detected: vec![],
+                unresolved: vec![],
+                provider_revision: None,
+                effective_revision: None,
+                scoped_launch_revision: Some("tool-disabled-source".into()),
+                environment_revision: None,
+                tool_revisions: Default::default(),
+            },
+            scope.model.clone(),
+            scope.effort.clone(),
+        );
+        let descriptor = CapabilityDescriptor::side_request(scope.provider);
+        store
+            .record_capability_evidence(
+                profile.clone(),
+                descriptor,
+                EvidenceOrigin::AuthenticatedFixture,
+                ObservedResult::Succeeded,
+                "isolated-fixture".into(),
+            )
+            .await?;
+        store.mark_agent_running(completed.run.id.clone()).await?;
+        let dispatch = prepare_fixture_dispatch_with_capabilities(
+            &store,
+            &completed,
+            Some(CapabilityAssessment {
+                version: crate::providers::capabilities::CAPABILITY_SCHEMA_VERSION,
+                scope: profile,
+                entries: vec![],
+            }),
+        )
+        .await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        for data in [
+            ProviderEventData::SessionReady {
+                model: scope.model.clone(),
+                effort: scope.effort.clone(),
+            },
+            ProviderEventData::TurnFinished {
+                outcome: TurnOutcome::Completed,
+            },
+        ] {
+            store
+                .record_agent_observation(
+                    completed.run.id.clone(),
+                    EventSource::Provider,
+                    ProviderEvent {
+                        location: ProviderLocation {
+                            session_id: Some("primary-thread".into()),
+                            turn_id: Some("primary-turn".into()),
+                            ..Default::default()
+                        },
+                        data,
+                    },
+                )
+                .await?;
+        }
+        store
+            .finish_agent_attempt(
+                completed.run.id.clone(),
+                RunStatus::Succeeded,
+                Some("Committed primary answer".into()),
+            )
+            .await?;
+
+        store.set_job_queue_capacity(2).await?;
+        let current = store.conversation(chat.id.clone()).await?;
+        store
+            .set_composer_suggestion_mode(ComposerSuggestionMode::Omniagent)
+            .await?;
+        let SideSubmission::Queued {
+            job_id: suggestion_id,
+        } = store
+            .enqueue_side_request(
+                chat.id.clone(),
+                None,
+                Some(completed.run.id),
+                scope.clone(),
+                SidePurpose::Suggestion,
+                String::new(),
+            )
+            .await?
+        else {
+            anyhow::bail!("The current completed turn should qualify for a suggestion");
+        };
+        for question in [
+            "side-private-cancel",
+            "side-private-finish",
+            "side-private-attempted-tool",
+            "side-private-restart",
+        ] {
+            assert!(matches!(
+                store
+                    .enqueue_side_request(
+                        chat.id.clone(),
+                        Some(current.context_id.clone()),
+                        None,
+                        scope.clone(),
+                        SidePurpose::Question,
+                        question.into()
+                    )
+                    .await?,
+                SideSubmission::Queued { .. }
+            ));
+        }
+        store
+            .save_conversation_draft(chat.id.clone(), "Main turn after the side pin".into())
+            .await?;
+        store.execute(move |db| {
+            let state: (bool, String) = db.query_row(
+                "SELECT s.discarded, j.queue_state FROM job_side_requests s JOIN jobs j ON j.id = s.job_id WHERE j.id = ?1",
+                [&suggestion_id], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(state, (true, "cancelled".into()));
+            Ok(())
+        }).await?;
+        store
+            .enqueue_conversation_turn(
+                JobContext {
+                    conversation_id: chat.id.clone(),
+                    context_id: current.context_id,
+                },
+                scope,
+                "Main turn after the side pin".into(),
+            )
+            .await?;
+        let env = AdmissionEnvironment {
+            runner: runner.identity().into(),
+            bridge_available: false,
+        };
+        let main = store
+            .claim_next_job(env.clone())
+            .await?
+            .context("Regular work should have priority")?;
+        store.mark_agent_running(main.run.id.clone()).await?;
+        assert_eq!(
+            main.input.last().unwrap().text,
+            "Main turn after the side pin"
+        );
+        let scheduler = JobScheduler::start(store.clone(), runner, None);
+        let wait = |index: usize, status: RunStatus| {
+            let (store, id) = (store.clone(), chat.id.clone());
+            async move {
+                tokio::time::timeout(Duration::from_secs(12), async {
+                    loop {
+                        let mut records = store.saved_side_requests(id.clone()).await?;
+                        if records[index]
+                            .job
+                            .latest_attempt
+                            .as_ref()
+                            .is_some_and(|a| a.status == status)
+                        {
+                            return Ok::<_, anyhow::Error>(records.remove(index));
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await?
+            }
+        };
+        let first = wait(0, RunStatus::Running).await?;
+        let insp = store
+            .inspect_project_queue(first.job.project_id.clone(), env.clone())
+            .await?;
+        assert_eq!(insp.active, 2);
+        assert!(
+            store.saved_side_requests(chat.id.clone()).await?[1]
+                .job
+                .latest_attempt
+                .is_none()
+        );
+        store
+            .request_project_job_interrupt(
+                first.job.project_id,
+                first.job.id,
+                first.job.latest_attempt.unwrap().run_id,
+            )
+            .await?;
+        assert_eq!(
+            wait(0, RunStatus::Cancelled)
+                .await?
+                .response
+                .unwrap()
+                .outcome,
+            SideOutcome::Cancelled
+        );
+        let send = |index: usize, data: Value| {
+            let outputs = outputs.clone();
+            async move {
+                let output = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let Some(output) = outputs.lock().unwrap().get(index).cloned() {
+                            return output;
+                        }
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                })
+                .await?;
+                output.send(Ok(OutputFrame {
+                    stream: Stream::Stdout,
+                    data: data.to_string(),
+                }))?;
+                Ok::<_, anyhow::Error>(())
+            }
+        };
+        wait(1, RunStatus::Running).await?;
+        send(
+            1,
+            json!({"type":"result","subtype":"success","is_error":false,"session_id":"side-only","result":"protected-response-canary"}),
+        ).await?;
+        let second = wait(1, RunStatus::Succeeded).await?;
+        assert!(
+            matches!(second.response.unwrap().outcome, SideOutcome::Answered { ref text, .. } if text == "protected-response-canary")
+        );
+        wait(2, RunStatus::Running).await?;
+        send(
+            2,
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}),
+        )
+        .await?;
+        assert_eq!(
+            wait(2, RunStatus::Failed).await?.response.unwrap().outcome,
+            SideOutcome::Failed
+        );
+        assert_eq!(
+            store
+                .latest_conversation_run(chat.id.clone())
+                .await?
+                .unwrap()
+                .id,
+            main.run.id
+        );
+        assert!(
+            !format!(
+                "{:?}",
+                store.conversation_history(chat.id.clone()).await?.messages
+            )
+            .contains("side-private")
+        );
+        let sent = frames
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            sent.iter()
+                .any(|frame| frame.contains("Original permitted source")
+                    && frame.contains("side-private-finish")
+                    && !frame.contains("Main turn after"))
+        );
+        let interrupted = wait(3, RunStatus::Running).await?;
+        let checkpoint_path = database.with_file_name("side-recovery.sqlite");
+        store.execute({
+            let path = checkpoint_path.to_string_lossy().into_owned();
+            move |db| {
+                let (writer_count, indexed_count): (i64, i64) = db.query_row(
+                    "SELECT (SELECT COUNT(*) FROM job_writer_reservations w JOIN job_attempts a ON a.run_id = w.run_id JOIN job_side_requests s ON s.job_id = a.job_id),
+                         (SELECT COUNT(*) FROM agent_attempts p JOIN job_attempts a ON a.run_id = p.run_id JOIN job_side_requests s ON s.job_id = a.job_id)",
+                    [], |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!((writer_count, indexed_count), (0, 0));
+                for (table, canary) in [
+                    ("job_side_requests", "side-private-finish"),
+                    ("job_side_responses", "protected-response-canary"),
+                ] {
+                    let count: i64 = db.query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE instr(payload, CAST(?1 AS BLOB)) > 0"),
+                        [canary], |row| row.get(0),
+                    )?;
+                    assert_eq!(count, 0);
+                }
+                db.execute("VACUUM INTO ?1", [path])?;
+                Ok(())
+            }
+        }).await?;
+        let checkpoint = Store::open(checkpoint_path)?;
+        checkpoint.recover_agent_attempts_after_restart().await?;
+        let jobs = checkpoint
+            .inspect_project_queue(interrupted.job.project_id, env)
+            .await?;
+        let recovered = jobs
+            .jobs
+            .iter()
+            .find(|job| job.job.id == interrupted.job.id)
+            .unwrap();
+        assert_eq!(
+            recovered.job.latest_attempt.as_ref().unwrap().status,
+            RunStatus::Interrupted
+        );
+        assert_eq!(recovered.recovery_actions, [RecoveryAction::Retry]);
+        assert!(recovered.job.queued_recovery.is_none());
+        assert_eq!(
+            checkpoint.saved_side_requests(chat.id.clone()).await?[3]
+                .response
+                .as_ref()
+                .unwrap()
+                .outcome,
+            SideOutcome::Interrupted
+        );
+        scheduler.shutdown().await?;
+        store
+            .finish_agent_attempt(main.run.id, RunStatus::Succeeded, None)
+            .await?;
+        drop(store);
+        let reopened = Store::open(database)?;
+        reopened.recover_agent_attempts_after_restart().await?;
+        assert!(
+            matches!(reopened.saved_side_requests(chat.id.clone()).await?[1].response.as_ref().unwrap().outcome, SideOutcome::Answered { ref text, .. } if text == "protected-response-canary")
+        );
+        assert!(
+            !format!(
+                "{:?}",
+                reopened.conversation_history(chat.id).await?.messages
+            )
+            .contains("protected-response-canary")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn queued_instruction_claim_and_restart_submit_one_accepted_revision_to_the_cli()
     -> Result<()> {
         use crate::jobs::{AdmissionEnvironment, JobContext};
