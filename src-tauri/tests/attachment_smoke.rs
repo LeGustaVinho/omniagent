@@ -12,8 +12,8 @@ use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     attachments::{
-        AttachmentFormat, AttachmentPreview, AttachmentSource, NativeAttachmentEncoding,
-        TurnAttachment,
+        AttachmentDelivery, AttachmentFormat, AttachmentInput, AttachmentPreview, AttachmentSource,
+        NativeAttachmentEncoding, TurnAttachment,
     },
     conversations::SessionScope,
     process_io::CapturedProcess,
@@ -361,7 +361,11 @@ fn observe(
                 let update = session.send(TurnInput {
                     message_id: "attachment-fixture".into(),
                     text: prompt,
-                    attachments: blocks.clone(),
+                    attachments: blocks
+                        .iter()
+                        .cloned()
+                        .map(AttachmentInput::Native)
+                        .collect(),
                 })?;
                 verify_wire(
                     provider,
@@ -568,9 +572,18 @@ async fn codex_reads_a_scoped_local_image() -> Result<()> {
         .agent_dispatch(chat.id.clone(), run)
         .await?
         .context("missing image wire evidence")?;
-    assert_eq!(saved.snapshot.attachments[0].qualification_id, evidence_id);
     assert_eq!(
-        STANDARD.decode(&saved.snapshot.attachments[0].input.content)?,
+        saved.snapshot.attachments[0].qualification_id.as_deref(),
+        Some(evidence_id.as_str())
+    );
+    assert_eq!(
+        STANDARD.decode(
+            &saved.snapshot.attachments[0]
+                .input
+                .native()
+                .unwrap()
+                .content
+        )?,
         media[0].bytes
     );
     let messages = store.conversation_messages(chat.id).await?;
@@ -640,5 +653,149 @@ fn antigravity_checks_its_advertised_native_inputs() -> Result<()> {
             eprintln!("ACP {:?}: format capability was unavailable", item.format);
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Antigravity with Gemini 3.8 Flash"]
+async fn antigravity_reads_a_resource_link_and_receives_the_previewed_excerpt() -> Result<()> {
+    verify_fallback_routes(Provider::Antigravity, "gemini-3.8-flash").await
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Codex with gpt-6-luna"]
+async fn codex_reads_a_local_reference_and_receives_the_previewed_excerpt() -> Result<()> {
+    verify_fallback_routes(Provider::Codex, "gpt-6-luna").await
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Claude Code with Haiku 5.5"]
+async fn claude_reads_a_local_reference_and_receives_the_previewed_excerpt() -> Result<()> {
+    verify_fallback_routes(Provider::Claude, "claude-haiku-5-5").await
+}
+
+async fn verify_fallback_routes(provider: Provider, model: &str) -> Result<()> {
+    let (_owned, checkout) = fixture()?;
+    let external = tempfile::tempdir()?;
+    let store = Store::open(checkout.join("fallback-fixture.sqlite"))?;
+    let repo = repository::register(&store, checkout.clone()).await?;
+    let chat = store
+        .create_conversation(repo.checkout_id, "Attachment fallback fixture".into())
+        .await?;
+    let probe = probe_cli(ConfiguredExecutable {
+        provider,
+        executable: None,
+    })?;
+    let scope = SessionScope {
+        provider,
+        profile_id: "fallback-fixture".into(),
+        account_binding: Some("authenticated-vendor-fixture".into()),
+        checkout: checkout.clone(),
+        executable: probe.executable.context("missing executable")?.into(),
+        cli_version: probe.version.context("missing CLI build")?,
+        runner: DirectWindowsRunner.identity().into(),
+        permission_revision: "read-only-fallback-fixture".into(),
+        mode: SessionMode::ReadOnly,
+        model: Some(model.into()),
+        effort: None,
+    };
+    let link_code = Uuid::new_v4().simple().to_string();
+    let excerpt_code = Uuid::new_v4().simple().to_string();
+    let relative_path = PathBuf::from("link #fixture.txt");
+    let reference = if provider == Provider::Antigravity {
+        checkout.join(&relative_path)
+    } else {
+        dunce::canonicalize(external.path())?.join(&relative_path)
+    };
+    fs::write(&reference, &link_code)?;
+    fs::write(
+        checkout.join("excerpt.txt"),
+        format!("{excerpt_code}\nunselected"),
+    )?;
+    let selected_reference = AttachmentPreview::read_with_delivery(
+        &checkout,
+        if provider == Provider::Antigravity {
+            AttachmentSource::Checkout { relative_path }
+        } else {
+            AttachmentSource::SelectedFile {
+                path: reference.clone(),
+            }
+        },
+        AttachmentDelivery::Reference,
+    )?;
+    let excerpt = AttachmentPreview::read_with_delivery(
+        &checkout,
+        AttachmentSource::Checkout {
+            relative_path: "excerpt.txt".into(),
+        },
+        AttachmentDelivery::Excerpt {
+            start: 0,
+            end: excerpt_code.len() as u64,
+        },
+    )?;
+    let plan = store.prepare_agent_attempt_with_attachments(
+        chat.id.clone(), chat.context_id, scope,
+        "Reply with the two exact codes. Read the attached file reference with a file read tool if needed. The other code is in the attached excerpt.".into(),
+        vec![excerpt, selected_reference],
+    ).await?;
+    let run = plan.run.id.clone();
+    let result = start_managed_turn(store.clone(), Arc::new(DirectWindowsRunner), plan, None)
+        .wait()
+        .await?;
+    let saved = store
+        .agent_dispatch(chat.id.clone(), run.clone())
+        .await?
+        .context("missing fallback dispatch")?;
+    let frame: Value = serde_json::from_slice(&saved.frames[0])?;
+    let blocks = match provider {
+        Provider::Antigravity => &frame["params"]["prompt"],
+        Provider::Codex => &frame["params"]["input"],
+        Provider::Claude => &frame["message"]["content"],
+    };
+    assert_eq!(
+        blocks[1]["text"],
+        format!(
+            "Excerpt from attachment \"excerpt.txt\" (UTF-8 bytes 0..{}):\n{excerpt_code}",
+            excerpt_code.len()
+        )
+    );
+    let dispatched_path = saved.snapshot.attachments[1].input.path().unwrap();
+    if provider == Provider::Antigravity {
+        assert_eq!(dispatched_path, reference);
+        assert_eq!(
+            blocks[2],
+            json!({
+                "type": "resource_link", "uri": tauri::Url::from_file_path(&reference).unwrap().as_str(),
+                "name": "link #fixture.txt", "mimeType": "text/plain", "size": link_code.len(),
+            })
+        );
+    } else {
+        assert_ne!(dispatched_path, reference);
+        assert!(!dispatched_path.exists());
+        assert_eq!(fs::read_to_string(reference)?, link_code);
+        assert_eq!(
+            blocks[2],
+            json!({
+                "type":"text",
+                "text":format!("Attachment reference \"link #fixture.txt\" (local file path): {}", dispatched_path.display()),
+            })
+        );
+    }
+    ensure!(
+        result == RunStatus::Succeeded,
+        "{provider:?} reference prompt failed: {:?}",
+        store
+            .agent_observations(chat.id.clone(), run, 0)
+            .await?
+            .into_iter()
+            .map(|entry| entry.event.data)
+            .collect::<Vec<_>>()
+    );
+    let messages = store.conversation_messages(chat.id).await?;
+    let answer = &messages.last().context("missing fallback answer")?.text;
+    ensure!(
+        answer.contains(&excerpt_code) && answer.contains(&link_code),
+        "{provider:?} did not consume both routes: {answer}"
+    );
     Ok(())
 }

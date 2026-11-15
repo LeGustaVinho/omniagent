@@ -135,7 +135,7 @@ pub struct SessionRequest {
 pub struct TurnInput {
     pub message_id: String,
     pub text: String,
-    pub attachments: Vec<crate::attachments::TurnAttachment>,
+    pub attachments: Vec<crate::attachments::AttachmentInput>,
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -244,6 +244,9 @@ pub struct SessionPlugin {
 pub enum ProviderEventData {
     DispatchSubmitted {
         dispatch_id: String,
+    },
+    AttachmentBlocked {
+        blockers: Vec<crate::attachments::AttachmentBlocker>,
     },
     ConfigurationReported {
         revision: Option<String>,

@@ -10,7 +10,10 @@ use serde_json::Value;
 use tokio::{runtime::Handle, sync::oneshot, task::JoinHandle};
 
 use crate::{
-    attachments::{AttachmentDispatch, AttachmentFormat, StagedAttachments},
+    attachments::{
+        AttachmentBlocker, AttachmentDispatch, AttachmentFormat, AttachmentInput, AttachmentSource,
+        CapturedAttachment, CapturedPayload, StagedAttachments,
+    },
     conversations::{AttemptPlan, MessageRevision, MessageRole, PermissionRoute},
     diagnostics,
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
@@ -27,7 +30,10 @@ use super::{
     AdapterUpdate, ApprovalDecision, CliSession, Provider, ProviderEvent, ProviderEventData,
     ProviderLocation, RequestId, SessionIntent, SessionMode, SessionRequest, TurnInput,
     TurnOutcome, WireMessage,
-    capabilities::{CapabilityScope, CapabilitySubject, ReportedCapabilities, Verification},
+    capabilities::{
+        CapabilityAssessment, CapabilityScope, CapabilitySubject, ReportedCapabilities,
+        Verification,
+    },
     configuration,
     launch_scope::{ScopedLaunch, ScopedLaunchEvidence},
     plugins::{PluginInventory, probe_run_plugins},
@@ -404,6 +410,21 @@ impl TurnExecution {
             registration,
         )?;
         launch.identify_mcp_executables(runner, &review, registration)?;
+        if scope.provider == Provider::Claude
+            && self.plan.attachments.iter().any(|(_, attachment)| {
+                matches!(
+                    attachment.metadata.source,
+                    AttachmentSource::SelectedFile { .. }
+                ) && matches!(attachment.payload, CapturedPayload::Reference { .. })
+            })
+            && let Ok(directory) = self
+                .staged_attachments
+                .configure_claude_read_directory(runner)
+        {
+            launch
+                .arguments
+                .splice(0..0, ["--add-dir".into(), directory.into_os_string()]);
+        }
         if let Some(instructions) = launch.protocol_instructions.take() {
             session.set_workspace_instructions(instructions)?;
         }
@@ -646,30 +667,53 @@ impl TurnExecution {
         )?;
         let mut input = format_input(&self.plan.input)?;
         let mut attachments = Vec::new();
+        let mut blockers = Vec::new();
         for (revision, attachment) in &self.plan.attachments {
-            let format = attachment.metadata.format;
-            let label = attachment
-                .metadata
-                .source
-                .file_name()
-                .unwrap_or("attachment");
-            let encoding = session.attachment_encoding(format).with_context(|| {
-                format!("{label} has no native attachment route for this session")
-            })?;
-            let qualification = capabilities.entries.iter().find(|entry| {
-                entry.descriptor.subject == CapabilitySubject::NativeAttachment { format, encoding }
-            }).and_then(|entry| entry.evidence.as_ref()).filter(|evidence| Verification::verified(evidence))
-                .with_context(|| format!("{label} has no native attachment qualification for this profile and checkout"))?;
-            let block = self
-                .staged_attachments
-                .materialize(runner, attachment, encoding)?;
-            input.attachments.push(block.clone());
-            attachments.push(AttachmentDispatch {
-                message_revision_id: revision.clone(),
-                metadata: attachment.metadata.clone(),
-                qualification_id: qualification.id.clone(),
-                input: block,
-            });
+            match prepare_attachment(
+                &mut self.staged_attachments,
+                runner,
+                session,
+                checkout,
+                &capabilities,
+                attachment,
+            ) {
+                Ok((block, qualification_id)) => {
+                    input.attachments.push(block.clone());
+                    attachments.push(AttachmentDispatch {
+                        message_revision_id: revision.clone(),
+                        metadata: attachment.metadata.clone(),
+                        qualification_id,
+                        input: block,
+                    });
+                }
+                Err(error) => blockers.push(AttachmentBlocker {
+                    message_revision_id: revision.clone(),
+                    source: attachment.metadata.source.clone(),
+                    delivery: attachment.delivery(),
+                    reason: format!("{error:#}"),
+                }),
+            }
+        }
+        if !blockers.is_empty() {
+            let reasons = blockers
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{}: {}",
+                        item.source.file_name().unwrap_or("attachment"),
+                        item.reason
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.record(
+                ProviderEvent {
+                    location: ProviderLocation::default(),
+                    data: ProviderEventData::AttachmentBlocked { blockers },
+                },
+                EventSource::Application,
+            )?;
+            anyhow::bail!("{reasons}");
         }
         if attachments.iter().any(|attachment| {
             attachment.message_revision_id
@@ -708,7 +752,7 @@ impl TurnExecution {
             )
         });
         let snapshot = ContextSnapshot {
-            version: 8,
+            version: 9,
             context_id: self.plan.context_id.clone(),
             scope: self.plan.scope.clone(),
             base_commit: repository::base_commit(&self.plan.scope.checkout)?,
@@ -830,6 +874,64 @@ fn status(outcome: TurnOutcome) -> RunStatus {
         TurnOutcome::Failed => RunStatus::Failed,
         TurnOutcome::Interrupted => RunStatus::Cancelled,
     }
+}
+
+fn prepare_attachment(
+    staging: &mut StagedAttachments,
+    runner: &dyn Runner,
+    session: &dyn CliSession,
+    checkout: &CheckoutLayout,
+    capabilities: &CapabilityAssessment,
+    attachment: &CapturedAttachment,
+) -> Result<(AttachmentInput, Option<String>)> {
+    let scope = &capabilities.scope;
+    let (input, qualification_id) = match &attachment.payload {
+        CapturedPayload::Native { content } => {
+            let format = attachment.metadata.format;
+            let encoding = session
+                .attachment_encoding(format)
+                .context("this session has no native route for the attachment format")?;
+            let qualification = capabilities
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry.descriptor.subject
+                        == CapabilitySubject::NativeAttachment { format, encoding }
+                })
+                .and_then(|entry| entry.evidence.as_ref())
+                .filter(|evidence| Verification::verified(evidence))
+                .context("native delivery is unverified for this profile and checkout")?;
+            let native = staging.native(runner, &attachment.metadata, content, encoding)?;
+            (
+                AttachmentInput::Native(native),
+                Some(qualification.id.clone()),
+            )
+        }
+        CapturedPayload::Excerpt { excerpt } => (AttachmentInput::Excerpt(excerpt.clone()), None),
+        CapturedPayload::Reference { reference_path } => {
+            if scope.provider == Provider::Claude
+                && matches!(
+                    attachment.metadata.source,
+                    AttachmentSource::Checkout { .. }
+                )
+            {
+                ensure!(
+                    reference_path.starts_with(&checkout.cwd),
+                    "the attachment is outside the Claude working directory"
+                );
+            }
+            let reference = staging.reference(
+                runner,
+                &checkout.root,
+                scope.provider,
+                &attachment.metadata,
+                reference_path,
+            )?;
+            (AttachmentInput::Reference(reference), None)
+        }
+    };
+    input.block(scope.provider)?;
+    Ok((input, qualification_id))
 }
 
 fn format_input(input: &[MessageRevision]) -> Result<TurnInput> {

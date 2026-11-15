@@ -1,7 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Write},
-    os::windows::fs::OpenOptionsExt,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -10,12 +9,11 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
 use crate::{
     providers::{
         Provider,
-        configuration::{open_verified_local_file, plain_metadata},
+        configuration::{open_locked_local_file, plain_metadata},
     },
     runner::Runner,
 };
@@ -23,6 +21,7 @@ use crate::{
 const FILE_LIMIT: u64 = 20 * 1024 * 1024;
 const TURN_LIMIT: u64 = 50 * 1024 * 1024;
 const COUNT_LIMIT: usize = 10;
+const EXCERPT_LIMIT: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,17 +85,17 @@ impl AttachmentFormat {
         matches!(self, Self::Wav | Self::Mp3)
     }
 
-    fn detect(bytes: &[u8]) -> Self {
+    fn detect_binary(bytes: &[u8]) -> Option<Self> {
         match infer::get(bytes).map(|kind| kind.mime_type()) {
-            Some("image/png") => Self::Png,
-            Some("image/jpeg") => Self::Jpeg,
-            Some("image/gif") => Self::Gif,
-            Some("image/webp") => Self::Webp,
-            Some("application/pdf") => Self::Pdf,
-            Some("audio/wav" | "audio/x-wav") => Self::Wav,
-            Some("audio/mpeg") => Self::Mp3,
-            None if !bytes.contains(&0) && std::str::from_utf8(bytes).is_ok() => Self::Text,
-            _ => Self::Unknown,
+            Some("image/png") => Some(Self::Png),
+            Some("image/jpeg") => Some(Self::Jpeg),
+            Some("image/gif") => Some(Self::Gif),
+            Some("image/webp") => Some(Self::Webp),
+            Some("application/pdf") => Some(Self::Pdf),
+            Some("audio/wav" | "audio/x-wav") => Some(Self::Wav),
+            Some("audio/mpeg") => Some(Self::Mp3),
+            Some(_) => Some(Self::Unknown),
+            None => None,
         }
     }
 }
@@ -132,10 +131,36 @@ pub struct AttachmentMetadata {
     pub size: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AttachmentDelivery {
+    Native,
+    Excerpt { start: u64, end: u64 },
+    Reference,
+}
+
+impl AttachmentDelivery {
+    fn uses_file_budget(self, source: &AttachmentSource) -> bool {
+        match self {
+            Self::Native => true,
+            Self::Excerpt { .. } => false,
+            Self::Reference => matches!(source, AttachmentSource::SelectedFile { .. }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReferencePreview<'a> {
+    CheckoutPath(&'a Path),
+    ReadOnlyCopyOf(&'a Path),
+}
+
 pub struct AttachmentPreview {
     metadata: AttachmentMetadata,
     canonical: PathBuf,
     checkout: PathBuf,
+    delivery: AttachmentDelivery,
+    excerpt: Option<TextExcerpt>,
 }
 
 impl AttachmentPreview {
@@ -144,12 +169,48 @@ impl AttachmentPreview {
     }
     /// An external path must come from the application's individual file selection.
     pub fn read(checkout: &Path, source: AttachmentSource) -> Result<Self> {
-        let canonical = authorized_path(checkout, &source)?;
-        let bytes = read_file(&canonical)?;
-        Ok(Self {
-            metadata: metadata(source, &bytes),
-            canonical,
-            checkout: checkout.into(),
+        Self::read_with_delivery(checkout, source, AttachmentDelivery::Native)
+    }
+
+    /// An external path must come from the application's individual file selection.
+    pub fn read_with_delivery(
+        checkout: &Path,
+        source: AttachmentSource,
+        delivery: AttachmentDelivery,
+    ) -> Result<Self> {
+        let result = (|| {
+            let canonical = authorized_path(checkout, &source)?;
+            let mut file = open_locked_local_file(&canonical)?;
+            let metadata = inspect(&mut file, &source, delivery)?;
+            let excerpt = read_excerpt(&mut file, &metadata, delivery)?;
+            Ok(Self {
+                metadata,
+                canonical,
+                checkout: checkout.into(),
+                delivery,
+                excerpt,
+            })
+        })();
+        with_file_reason(result, source.file_name().unwrap_or("attachment"))
+    }
+
+    pub fn delivery(&self) -> AttachmentDelivery {
+        self.delivery
+    }
+
+    pub fn excerpt(&self) -> Option<&TextExcerpt> {
+        self.excerpt.as_ref()
+    }
+
+    pub fn reference_target(&self) -> Option<ReferencePreview<'_>> {
+        if self.delivery != AttachmentDelivery::Reference {
+            return None;
+        }
+        Some(match self.metadata.source {
+            AttachmentSource::Checkout { .. } => ReferencePreview::CheckoutPath(&self.canonical),
+            AttachmentSource::SelectedFile { .. } => {
+                ReferencePreview::ReadOnlyCopyOf(&self.canonical)
+            }
         })
     }
 
@@ -163,15 +224,30 @@ impl AttachmentPreview {
             path == self.canonical,
             "attachment path changed after preview"
         );
-        let bytes = read_file(&path)?;
-        let observed = metadata(self.metadata.source.clone(), &bytes);
+        let mut file = open_locked_local_file(&path)?;
+        let observed = inspect(&mut file, &self.metadata.source, self.delivery)?;
         ensure!(
             observed == self.metadata,
-            "attachment changed after preview"
+            "attachment changed after preview, preview it again"
         );
+        let payload = match self.delivery {
+            AttachmentDelivery::Native => {
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                CapturedPayload::Native {
+                    content: STANDARD.encode(bytes),
+                }
+            }
+            AttachmentDelivery::Excerpt { .. } => CapturedPayload::Excerpt {
+                excerpt: self.excerpt.context("missing previewed excerpt")?,
+            },
+            AttachmentDelivery::Reference => CapturedPayload::Reference {
+                reference_path: path,
+            },
+        };
         Ok(CapturedAttachment {
             metadata: observed,
-            content: STANDARD.encode(bytes),
+            payload,
         })
     }
 }
@@ -213,45 +289,168 @@ fn authorized_path(checkout: &Path, source: &AttachmentSource) -> Result<PathBuf
     Ok(canonical)
 }
 
-fn read_file(path: &Path) -> Result<Vec<u8>> {
-    let file = open_verified_local_file(path)?;
+fn inspect(
+    file: &mut File,
+    source: &AttachmentSource,
+    delivery: AttachmentDelivery,
+) -> Result<AttachmentMetadata> {
+    let size = file.metadata()?.len();
+    if delivery.uses_file_budget(source) {
+        ensure!(
+            size <= FILE_LIMIT,
+            "attachment exceeds the 20 MiB file limit"
+        );
+    }
+    if let AttachmentDelivery::Excerpt { start, end } = delivery {
+        ensure!(
+            start < end && end <= size,
+            "excerpt range is outside the file"
+        );
+        ensure!(
+            end - start <= EXCERPT_LIMIT,
+            "excerpt exceeds the 64 KiB UTF-8 limit"
+        );
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 8192];
+    let mut carry = 0;
+    let mut consumed = 0;
+    let mut format = None;
+    while consumed < size {
+        let read = file.read(&mut buffer[carry..])?;
+        ensure!(read > 0, "attachment size changed during inspection");
+        if consumed == 0 {
+            format = AttachmentFormat::detect_binary(&buffer[..read]);
+        }
+        consumed += read as u64;
+        digest.update(&buffer[carry..carry + read]);
+        if format.is_some() {
+            continue;
+        }
+        let end = carry + read;
+        let text = &buffer[..end];
+        carry = match std::str::from_utf8(text) {
+            Ok(_) if !text.contains(&0) => 0,
+            Err(error) if error.error_len().is_none() && !text.contains(&0) => {
+                let remaining = end - error.valid_up_to();
+                buffer.copy_within(error.valid_up_to()..end, 0);
+                remaining
+            }
+            _ => {
+                format = Some(AttachmentFormat::Unknown);
+                0
+            }
+        };
+    }
     ensure!(
-        file.metadata()?.len() <= FILE_LIMIT,
-        "attachment exceeds the 20 MiB native file limit"
+        consumed == size,
+        "attachment size changed during inspection"
     );
-    let mut bytes = Vec::new();
-    file.take(FILE_LIMIT + 1).read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() as u64 <= FILE_LIMIT,
-        "attachment exceeds the 20 MiB native file limit"
-    );
-    Ok(bytes)
+    file.rewind()?;
+    Ok(AttachmentMetadata {
+        source: source.clone(),
+        format: format.unwrap_or(if carry == 0 {
+            AttachmentFormat::Text
+        } else {
+            AttachmentFormat::Unknown
+        }),
+        sha256: format!("{:x}", digest.finalize()),
+        size,
+    })
 }
 
-fn metadata(source: AttachmentSource, bytes: &[u8]) -> AttachmentMetadata {
-    AttachmentMetadata {
-        source,
-        format: AttachmentFormat::detect(bytes),
-        sha256: format!("{:x}", Sha256::digest(bytes)),
-        size: bytes.len() as u64,
-    }
+fn read_excerpt(
+    file: &mut File,
+    metadata: &AttachmentMetadata,
+    delivery: AttachmentDelivery,
+) -> Result<Option<TextExcerpt>> {
+    let AttachmentDelivery::Excerpt { start, end } = delivery else {
+        return Ok(None);
+    };
+    ensure!(
+        metadata.format == AttachmentFormat::Text,
+        "excerpt requires a UTF-8 text file"
+    );
+    file.seek(SeekFrom::Start(start))?;
+    let mut selected = vec![0; (end - start) as usize];
+    file.read_exact(&mut selected)?;
+    Ok(Some(TextExcerpt {
+        name: metadata
+            .source
+            .file_name()
+            .unwrap_or("attachment")
+            .to_owned(),
+        start,
+        end,
+        text: String::from_utf8(selected).context("excerpt splits a UTF-8 character")?,
+    }))
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CapturedAttachment {
     pub metadata: AttachmentMetadata,
-    content: String,
+    #[serde(flatten)]
+    pub payload: CapturedPayload,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum CapturedPayload {
+    Native { content: String },
+    Excerpt { excerpt: TextExcerpt },
+    Reference { reference_path: PathBuf },
+}
+
+impl CapturedAttachment {
+    pub(crate) fn delivery(&self) -> AttachmentDelivery {
+        match &self.payload {
+            CapturedPayload::Native { .. } => AttachmentDelivery::Native,
+            CapturedPayload::Excerpt { excerpt } => AttachmentDelivery::Excerpt {
+                start: excerpt.start,
+                end: excerpt.end,
+            },
+            CapturedPayload::Reference { .. } => AttachmentDelivery::Reference,
+        }
+    }
+
+    pub(crate) fn charged_size(&self) -> u64 {
+        charged_size(&self.metadata, self.delivery())
+    }
+}
+
+fn charged_size(metadata: &AttachmentMetadata, delivery: AttachmentDelivery) -> u64 {
+    if delivery.uses_file_budget(&metadata.source) {
+        metadata.size
+    } else {
+        0
+    }
 }
 
 pub(crate) fn capture(
     checkout: &Path,
     previews: Vec<AttachmentPreview>,
 ) -> Result<Vec<CapturedAttachment>> {
-    check_limits(previews.iter().map(|file| file.metadata.size))?;
+    check_limits(
+        previews
+            .iter()
+            .map(|file| charged_size(&file.metadata, file.delivery)),
+    )?;
     previews
         .into_iter()
-        .map(|preview| preview.capture(checkout))
+        .map(|preview| {
+            let label = preview
+                .metadata
+                .source
+                .file_name()
+                .unwrap_or("attachment")
+                .to_owned();
+            with_file_reason(preview.capture(checkout), &label)
+        })
         .collect()
+}
+
+fn with_file_reason<T>(result: Result<T>, label: &str) -> Result<T> {
+    result.map_err(|error| anyhow::anyhow!("{label}: {error:#}"))
 }
 
 pub(crate) fn check_limits(sizes: impl IntoIterator<Item = u64>) -> Result<()> {
@@ -260,7 +459,7 @@ pub(crate) fn check_limits(sizes: impl IntoIterator<Item = u64>) -> Result<()> {
         ensure!(index < COUNT_LIMIT, "turn exceeds the 10-attachment limit");
         ensure!(
             size <= FILE_LIMIT,
-            "attachment exceeds the 20 MiB native file limit"
+            "attachment exceeds the 20 MiB file limit"
         );
         total += size;
         ensure!(
@@ -305,8 +504,102 @@ impl NativeAttachmentEncoding {
 pub struct AttachmentDispatch {
     pub message_revision_id: String,
     pub metadata: AttachmentMetadata,
-    pub qualification_id: String,
-    pub input: TurnAttachment,
+    #[serde(default)]
+    pub qualification_id: Option<String>,
+    pub input: AttachmentInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentBlocker {
+    pub message_revision_id: String,
+    pub source: AttachmentSource,
+    pub delivery: AttachmentDelivery,
+    pub reason: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AttachmentInput {
+    Native(TurnAttachment),
+    Excerpt(TextExcerpt),
+    Reference(AttachmentReference),
+}
+
+impl AttachmentInput {
+    pub fn native(&self) -> Option<&TurnAttachment> {
+        match self {
+            Self::Native(native) => Some(native),
+            _ => None,
+        }
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Native(native) => native.path.as_deref(),
+            Self::Excerpt(_) => None,
+            Self::Reference(reference) => Some(&reference.path),
+        }
+    }
+
+    pub(crate) fn block(&self, provider: Provider) -> Result<Value> {
+        match self {
+            Self::Native(native) => native.block(provider),
+            Self::Excerpt(excerpt) => Ok(json!({
+                "type":"text",
+                "text":format!(
+                    "Excerpt from attachment {:?} (UTF-8 bytes {}..{}):\n{}",
+                    excerpt.name, excerpt.start, excerpt.end, excerpt.text,
+                ),
+            })),
+            Self::Reference(reference) => reference.block(provider),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextExcerpt {
+    pub name: String,
+    pub start: u64,
+    pub end: u64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentReference {
+    pub name: String,
+    pub path: PathBuf,
+    pub uri: Option<String>,
+    pub format: AttachmentFormat,
+    pub size: u64,
+}
+
+impl AttachmentReference {
+    fn block(&self, provider: Provider) -> Result<Value> {
+        ensure!(
+            self.path.is_absolute(),
+            "attachment reference requires an absolute runner path"
+        );
+        Ok(match provider {
+            Provider::Antigravity => {
+                let uri = self
+                    .uri
+                    .as_ref()
+                    .context("ACP resource link requires a file URI")?;
+                json!({
+                    "type": "resource_link", "uri": uri, "name": self.name,
+                    "mimeType": self.format.mime(), "size": self.size,
+                })
+            }
+            Provider::Claude | Provider::Codex => {
+                json!({
+                    "type": "text",
+                    "text": format!("Attachment reference {:?} (local file path): {}", self.name, self.path.display()),
+                })
+            }
+        })
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -379,60 +672,153 @@ impl TurnAttachment {
 pub(crate) struct StagedAttachments {
     locks: Vec<File>,
     directory: Option<tempfile::TempDir>,
+    claude_read_directory: Option<PathBuf>,
 }
 
 impl StagedAttachments {
-    pub(crate) fn materialize(
+    pub(crate) fn configure_claude_read_directory(
         &mut self,
         runner: &dyn Runner,
-        captured: &CapturedAttachment,
+    ) -> Result<PathBuf> {
+        let directory = runner_path(runner, &self.directory()?)?;
+        self.claude_read_directory = Some(directory.clone());
+        Ok(directory)
+    }
+
+    pub(crate) fn native(
+        &mut self,
+        runner: &dyn Runner,
+        metadata: &AttachmentMetadata,
+        content: &str,
         encoding: NativeAttachmentEncoding,
     ) -> Result<TurnAttachment> {
         let path = if encoding == NativeAttachmentEncoding::CodexLocalImage {
-            if self.directory.is_none() {
-                self.directory = Some(
-                    tempfile::Builder::new()
-                        .prefix("omniagent-attachments-")
-                        .tempdir()?,
-                );
-            }
-            let directory = self.directory.as_ref().expect("attachment staging exists");
-            let path = dunce::canonicalize(directory.path())?.join(format!(
-                "{}.{}",
-                uuid::Uuid::new_v4(),
-                captured.metadata.format.extension()
-            ));
-            OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&path)?
-                .write_all(&STANDARD.decode(&captured.content)?)?;
-            let lock = OpenOptions::new()
-                .read(true)
-                .share_mode(FILE_SHARE_READ)
-                .open(&path)?;
-            let mut digest = Sha256::new();
-            std::io::copy(&mut &lock, &mut digest)?;
-            ensure!(
-                format!("{:x}", digest.finalize()) == captured.metadata.sha256,
-                "staged attachment changed"
-            );
-            self.locks.push(lock);
-            Some(
-                runner
-                    .attachment_path(&path)
-                    .context("runner has no read-only attachment path mapping")?,
-            )
+            Some(self.stage(runner, metadata, |output| {
+                output.write_all(&STANDARD.decode(content)?)?;
+                Ok(())
+            })?)
         } else {
             None
         };
         Ok(TurnAttachment {
             encoding,
-            format: captured.metadata.format,
-            content: captured.content.clone(),
+            format: metadata.format,
+            content: content.into(),
             path,
             resource_uri: (encoding == NativeAttachmentEncoding::AcpResource)
-                .then(|| format!("urn:omniagent:attachment:{}", captured.metadata.sha256)),
+                .then(|| format!("urn:omniagent:attachment:{}", metadata.sha256)),
         })
     }
+
+    pub(crate) fn reference(
+        &mut self,
+        runner: &dyn Runner,
+        checkout: &Path,
+        provider: Provider,
+        metadata: &AttachmentMetadata,
+        captured_path: &Path,
+    ) -> Result<AttachmentReference> {
+        let path = authorized_path(checkout, &metadata.source)?;
+        ensure!(
+            path == captured_path,
+            "attachment reference target changed, preview it again"
+        );
+        let mut lock = open_locked_local_file(&path)?;
+        ensure!(
+            inspect(&mut lock, &metadata.source, AttachmentDelivery::Reference)? == *metadata,
+            "attachment reference changed, preview it again"
+        );
+        let path = match &metadata.source {
+            AttachmentSource::Checkout { .. } => {
+                let path = runner_path(runner, &path)?;
+                self.locks.push(lock);
+                path
+            }
+            AttachmentSource::SelectedFile { .. } => {
+                let staged = self.stage(runner, metadata, |output| {
+                    std::io::copy(&mut lock, output)?;
+                    Ok(())
+                })?;
+                if provider == Provider::Claude {
+                    let directory = self
+                        .claude_read_directory
+                        .as_deref()
+                        .context("Claude has no scoped staging directory in this runner")?;
+                    ensure!(
+                        staged.parent() == Some(directory),
+                        "the mapped attachment is outside Claude's staged read directory"
+                    );
+                }
+                staged
+            }
+        };
+        let uri = if provider == Provider::Antigravity {
+            Some(
+                tauri::Url::from_file_path(&path)
+                    .map_err(|_| anyhow::anyhow!("runner attachment path has no file URI"))?
+                    .into(),
+            )
+        } else {
+            None
+        };
+        Ok(AttachmentReference {
+            name: metadata
+                .source
+                .file_name()
+                .unwrap_or("attachment")
+                .to_owned(),
+            format: metadata.format,
+            size: metadata.size,
+            path,
+            uri,
+        })
+    }
+
+    fn stage(
+        &mut self,
+        runner: &dyn Runner,
+        metadata: &AttachmentMetadata,
+        write: impl FnOnce(&mut File) -> Result<()>,
+    ) -> Result<PathBuf> {
+        let path = self.directory()?.join(format!(
+            "{}.{}",
+            uuid::Uuid::new_v4(),
+            metadata.format.extension()
+        ));
+        write(
+            &mut OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)?,
+        )?;
+        let mut lock = open_locked_local_file(&path)?;
+        let mut digest = Sha256::new();
+        std::io::copy(&mut lock, &mut digest)?;
+        ensure!(
+            format!("{:x}", digest.finalize()) == metadata.sha256,
+            "staged attachment changed"
+        );
+        let mapped = runner_path(runner, &path)?;
+        self.locks.push(lock);
+        Ok(mapped)
+    }
+
+    fn directory(&mut self) -> Result<PathBuf> {
+        if self.directory.is_none() {
+            self.directory = Some(
+                tempfile::Builder::new()
+                    .prefix("omniagent-attachments-")
+                    .tempdir()?,
+            );
+        }
+        let directory = self.directory.as_ref().expect("attachment staging exists");
+        Ok(dunce::canonicalize(directory.path())?)
+    }
+}
+
+fn runner_path(runner: &dyn Runner, path: &Path) -> Result<PathBuf> {
+    runner
+        .attachment_path(path)
+        .filter(|path| path.is_absolute())
+        .context("runner has no read-only attachment path mapping")
 }

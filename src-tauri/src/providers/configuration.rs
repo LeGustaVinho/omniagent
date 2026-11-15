@@ -13,7 +13,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_FLAG_OPEN_REPARSE_POINT, GetFinalPathNameByHandleW,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, GetFinalPathNameByHandleW,
 };
 
 use super::{
@@ -374,7 +374,15 @@ pub(crate) fn read_local_file(path: &Path) -> io::Result<Vec<u8>> {
 }
 
 pub(crate) fn open_verified_local_file(path: &Path) -> io::Result<fs::File> {
-    let file = fs::OpenOptions::new()
+    open_local_file(path, &mut fs::OpenOptions::new())
+}
+
+pub(crate) fn open_locked_local_file(path: &Path) -> io::Result<fs::File> {
+    open_local_file(path, fs::OpenOptions::new().share_mode(FILE_SHARE_READ))
+}
+
+fn open_local_file(path: &Path, options: &mut fs::OpenOptions) -> io::Result<fs::File> {
+    let file = options
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;

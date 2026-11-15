@@ -360,7 +360,7 @@ impl Store {
                     attachments.extend(items.into_iter().map(|item| (message.revision_id.clone(), item)));
                 }
             }
-            attachments::check_limits(attachments.iter().map(|(_, item)| item.metadata.size))?;
+            attachments::check_limits(attachments.iter().map(|(_, item)| item.charged_size()))?;
             let (run, _) = runs::insert_run(&tx, conversation.checkout_id, "agent")?;
             let ordinal = previous.as_ref().map_or(1, |prior| prior.ordinal + 1);
             let previous_run_id = previous.map(|prior| prior.run_id);
@@ -1256,7 +1256,7 @@ mod tests {
                 assert_eq!(evidence.delivery, Delivery::Prepared);
                 assert_eq!(evidence.frames, [bytes]);
                 for attachment in &evidence.snapshot.attachments {
-                    if let Some(path) = &attachment.input.path {
+                    if let Some(path) = attachment.input.path() {
                         assert!(std::fs::File::open(path).is_ok());
                         assert!(std::fs::OpenOptions::new().write(true).open(path).is_err());
                     }
@@ -1448,8 +1448,12 @@ mod tests {
         let committed = store.agent_dispatch(chat.id.clone(), run).await?.unwrap();
         let attachment = &committed.snapshot.attachments[0];
         assert_eq!(attachment.metadata, expected);
-        assert_eq!(attachment.qualification_id, qualification);
-        assert_eq!(attachment.input.content, PNG);
+        assert_eq!(
+            attachment.qualification_id.as_deref(),
+            Some(qualification.as_str())
+        );
+        let native = attachment.input.native().unwrap();
+        assert_eq!(native.content, PNG);
         assert_eq!(
             attachment.message_revision_id,
             committed.snapshot.submitted_messages[0].revision_id
@@ -1457,9 +1461,9 @@ mod tests {
         let frame: Value = serde_json::from_slice(&committed.frames[0])?;
         assert_eq!(
             frame["params"]["input"][1],
-            json!({"type":"localImage","path":attachment.input.path})
+            json!({"type":"localImage","path":native.path})
         );
-        assert!(!attachment.input.path.as_ref().unwrap().exists());
+        assert!(!native.path.as_ref().unwrap().exists());
 
         let next = prepare(&store, &chat.id, scope.clone(), "Continue").await?;
         assert!(next.attachments.is_empty());
@@ -1472,6 +1476,197 @@ mod tests {
         assert!(matches!(fresh.intent, SessionIntent::Start));
         assert_eq!(fresh.attachments.len(), 1);
         assert_eq!(fresh.attachments[0].1.metadata, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fallback_attachments_preserve_the_preview_and_audit_the_runner_target() -> Result<()> {
+        use crate::attachments::{
+            AttachmentDelivery, AttachmentInput, AttachmentPreview, AttachmentSource,
+            ReferencePreview,
+        };
+
+        let (_dir, store, chat, mut scope) = setup().await?;
+        let runner = Arc::new(FixtureRunner(WireLog {
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            conversation: chat.id.clone(),
+            frames: Arc::default(),
+        }));
+        let excerpt_path = scope.checkout.join("excerpt.txt");
+        std::fs::write(&excerpt_path, "unselected\ncafé ☕\nprivate")?;
+        let excerpt_source = AttachmentSource::Checkout {
+            relative_path: "excerpt.txt".into(),
+        };
+        assert!(
+            AttachmentPreview::read_with_delivery(
+                &scope.checkout,
+                excerpt_source.clone(),
+                AttachmentDelivery::Excerpt { start: 15, end: 20 },
+            )
+            .is_err()
+        ); // Starts inside the two-byte é.
+        let excerpt = AttachmentPreview::read_with_delivery(
+            &scope.checkout,
+            excerpt_source,
+            AttachmentDelivery::Excerpt { start: 11, end: 20 },
+        )?;
+        assert_eq!(excerpt.excerpt().unwrap().text, "café ☕");
+
+        let checkout_path = scope.checkout.join("large.bin");
+        std::fs::File::create(&checkout_path)?.set_len(20 * 1024 * 1024 + 1)?;
+        let checkout_source = AttachmentSource::Checkout {
+            relative_path: "large.bin".into(),
+        };
+        assert!(AttachmentPreview::read(&scope.checkout, checkout_source.clone()).is_err());
+        let checkout_reference = AttachmentPreview::read_with_delivery(
+            &scope.checkout,
+            checkout_source,
+            AttachmentDelivery::Reference,
+        )?;
+        assert_eq!(
+            checkout_reference.reference_target(),
+            Some(ReferencePreview::CheckoutPath(&checkout_path))
+        );
+
+        let external_dir = tempfile::tempdir()?;
+        let external = dunce::canonicalize(external_dir.path())?.join("selected.txt");
+        std::fs::write(&external, "external selection")?;
+        let external_reference = AttachmentPreview::read_with_delivery(
+            &scope.checkout,
+            AttachmentSource::SelectedFile {
+                path: external.clone(),
+            },
+            AttachmentDelivery::Reference,
+        )?;
+        assert_eq!(
+            external_reference.reference_target(),
+            Some(ReferencePreview::ReadOnlyCopyOf(&external))
+        );
+        scope.checkout = scope.checkout.join("nested-cwd");
+        std::fs::create_dir(&scope.checkout)?;
+        let plan = store
+            .prepare_agent_attempt_with_attachments(
+                chat.id.clone(),
+                chat.context_id,
+                scope,
+                "Use the attachments".into(),
+                vec![excerpt, checkout_reference, external_reference],
+            )
+            .await?;
+        let run = plan.run.id.clone();
+        std::fs::write(excerpt_path, "edited after admission")?;
+        assert_eq!(
+            start_managed_turn(store.clone(), runner, plan, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        let saved = store.agent_dispatch(chat.id, run).await?.unwrap();
+        let frame: Value = serde_json::from_slice(&saved.frames[0])?;
+        assert_eq!(saved.snapshot.attachments.len(), 3);
+        let AttachmentInput::Excerpt(excerpt) = &saved.snapshot.attachments[0].input else {
+            panic!("dispatch omitted the frozen excerpt")
+        };
+        assert_eq!(excerpt.text, "café ☕");
+        assert_eq!(
+            frame["params"]["input"][1]["text"],
+            "Excerpt from attachment \"excerpt.txt\" (UTF-8 bytes 11..20):\ncafé ☕"
+        );
+        assert_eq!(
+            saved.snapshot.attachments[1].input.path(),
+            Some(checkout_path.as_path())
+        );
+        let staged = saved.snapshot.attachments[2].input.path().unwrap();
+        assert_ne!(staged, external);
+        assert!(!staged.exists());
+        assert_eq!(std::fs::read_to_string(external)?, "external selection");
+        assert_eq!(
+            frame["params"]["input"][2]["text"],
+            format!(
+                "Attachment reference \"large.bin\" (local file path): {}",
+                checkout_path.display()
+            )
+        );
+        assert_eq!(
+            frame["params"]["input"][3]["text"],
+            format!(
+                "Attachment reference \"selected.txt\" (local file path): {}",
+                staged.display()
+            )
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_references_and_unsupported_native_formats_report_each_file_before_dispatch()
+    -> Result<()> {
+        use crate::attachments::{AttachmentDelivery, AttachmentPreview, AttachmentSource};
+
+        let (_dir, store, chat, scope) = setup().await?;
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(FixtureRunner(WireLog {
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            conversation: chat.id.clone(),
+            frames: frames.clone(),
+        }));
+        let path = scope.checkout.join("stale.txt");
+        std::fs::write(&path, "old content")?;
+        std::fs::write(scope.checkout.join("unsupported.txt"), "plain text")?;
+        let reference = AttachmentPreview::read_with_delivery(
+            &scope.checkout,
+            AttachmentSource::Checkout {
+                relative_path: "stale.txt".into(),
+            },
+            AttachmentDelivery::Reference,
+        )?;
+        let unsupported = AttachmentPreview::read(
+            &scope.checkout,
+            AttachmentSource::Checkout {
+                relative_path: "unsupported.txt".into(),
+            },
+        )?;
+        let plan = store
+            .prepare_agent_attempt_with_attachments(
+                chat.id.clone(),
+                chat.context_id,
+                scope,
+                "Use these files".into(),
+                vec![reference, unsupported],
+            )
+            .await?;
+        let run = plan.run.id.clone();
+        std::fs::write(path, "new content")?;
+        assert_eq!(
+            start_managed_turn(store.clone(), runner, plan, None)
+                .wait()
+                .await?,
+            RunStatus::Failed
+        );
+        assert!(
+            store
+                .agent_dispatch(chat.id.clone(), run.clone())
+                .await?
+                .is_none()
+        );
+        assert!(frames.lock().unwrap().iter().all(|frame| {
+            serde_json::from_slice::<Value>(frame).unwrap()["method"] != "turn/start"
+        }));
+        let blockers = store
+            .agent_observations(chat.id, run, 0)
+            .await?
+            .into_iter()
+            .find_map(|entry| match entry.event.data {
+                ProviderEventData::AttachmentBlocked { blockers } => Some(blockers),
+                _ => None,
+            })
+            .context("missing attachment blockers")?;
+        assert_eq!(blockers.len(), 2);
+        assert_eq!(blockers[0].source.file_name(), Some("stale.txt"));
+        assert!(blockers[0].reason.contains("preview it again"));
+        assert_eq!(blockers[1].source.file_name(), Some("unsupported.txt"));
+        assert!(blockers[1].reason.contains("no native route"));
         Ok(())
     }
 

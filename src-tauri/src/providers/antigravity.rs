@@ -786,10 +786,12 @@ impl CliSession for AcpSession {
             prompt.push(json!({"type":"text", "text": input.text}));
         }
         for attachment in &input.attachments {
-            ensure!(
-                self.attachment_encoding(attachment.format) == Some(attachment.encoding),
-                "ACP did not advertise this attachment format"
-            );
+            if let Some(native) = attachment.native() {
+                ensure!(
+                    self.attachment_encoding(native.format) == Some(native.encoding),
+                    "ACP did not advertise this attachment format"
+                );
+            }
             prompt.push(attachment.block(Provider::Antigravity)?);
         }
         let frame = self.rpc.request(
