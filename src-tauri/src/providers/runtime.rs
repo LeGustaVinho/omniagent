@@ -26,6 +26,7 @@ use super::{
     WireMessage,
     capabilities::{CapabilityScope, ReportedCapabilities},
     configuration,
+    launch_scope::{ScopedLaunch, ScopedLaunchEvidence},
     skills::SkillCatalog,
 };
 
@@ -190,6 +191,7 @@ pub fn start_managed_turn(store: Store, runner: Arc<dyn Runner>, plan: AttemptPl
             streamed_answer: String::new(),
             reported: ReportedCapabilities::default(),
             reported_skills: None,
+            scoped_launch: None,
             capability_scope: None,
             executable_revision: None,
             platform: None,
@@ -238,6 +240,7 @@ struct TurnExecution {
     streamed_answer: String,
     reported: ReportedCapabilities,
     reported_skills: Option<SkillCatalog>,
+    scoped_launch: Option<ScopedLaunchEvidence>,
     capability_scope: Option<CapabilityScope>,
     executable_revision: Option<String>,
     platform: Option<ExecutionPlatform>,
@@ -292,7 +295,7 @@ impl TurnExecution {
         runner: &dyn Runner,
         commands: &mpsc::Receiver<Command>,
     ) -> Result<RunStatus> {
-        let scope = &self.plan.scope;
+        let scope = self.plan.scope.clone();
         ensure!(
             scope.runner == runner.identity(),
             "selected runner differs from admission"
@@ -310,8 +313,33 @@ impl TurnExecution {
             model: scope.model.clone(),
             effort: scope.effort.clone(),
         })?;
-        let args = session.arguments();
-        let args = args
+        let review = self.app.block_on(self.store.resolve_launch_review(
+            self.plan.run.checkout_id.clone(),
+            &checkout,
+            scope.provider,
+        ))?;
+        let mut launch = ScopedLaunch::prepare(
+            scope.provider,
+            &scope.cli_version,
+            &checkout,
+            &review,
+            session.arguments(),
+        )?;
+        if let Some(instructions) = launch.protocol_instructions.take() {
+            session.set_workspace_instructions(instructions)?;
+        }
+        self.record(
+            ProviderEvent {
+                location: ProviderLocation::default(),
+                data: ProviderEventData::ScopedLaunchPrepared {
+                    evidence: Box::new(launch.evidence.clone()),
+                },
+            },
+            EventSource::Application,
+        )?;
+        self.scoped_launch = Some(launch.evidence.clone());
+        let args = launch
+            .arguments
             .iter()
             .map(|argument| argument.as_os_str())
             .collect::<Vec<_>>();
@@ -473,14 +501,14 @@ impl TurnExecution {
         let reported_skills = self.reported_skills.clone().unwrap_or_else(|| {
             SkillCatalog::unavailable(match self.plan.scope.provider {
                 Provider::Codex => "Codex did not report its skill inventory before dispatch",
-                Provider::Claude => "Claude safe mode disables skill loading",
+                Provider::Claude => "Restricted Claude launch excludes implicit repository skills",
                 Provider::Antigravity => {
                     "ACP reports available commands without skill source paths"
                 }
             })
         });
         let snapshot = ContextSnapshot {
-            version: 4,
+            version: 5,
             context_id: self.plan.context_id.clone(),
             scope: self.plan.scope.clone(),
             base_commit: repository::base_commit(&self.plan.scope.checkout)?,
@@ -490,6 +518,7 @@ impl TurnExecution {
             filesystem_skills,
             reported_skills: Some(reported_skills),
             instructions: Some(instructions),
+            scoped_launch: self.scoped_launch.clone(),
         };
         let frames = update
             .outbound

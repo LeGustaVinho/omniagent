@@ -22,13 +22,17 @@ use crate::{
 
 use super::{
     CustomizationEntry, CustomizationInventory, CustomizationKind, MarkdownInstruction,
-    ReviewState, ScannedFile,
+    RawDeclaration, ReviewState, ScannedFile,
 };
 
 const TEXT_BUDGET: usize = 4 * 1024 * 1024;
 const DIRECTORY_LIMIT: usize = 128;
 
-pub(super) fn inspect(root: &Path, cwd: &Path) -> Result<CustomizationInventory> {
+pub(super) fn inspect(
+    root: &Path,
+    cwd: &Path,
+    capture_commands: bool,
+) -> Result<(CustomizationInventory, Vec<RawDeclaration>)> {
     ensure!(
         cwd.starts_with(root),
         "customization directory is outside the checkout"
@@ -37,6 +41,7 @@ pub(super) fn inspect(root: &Path, cwd: &Path) -> Result<CustomizationInventory>
         root,
         cwd,
         text_left: TEXT_BUDGET,
+        commands: capture_commands.then(Vec::new),
         inventory: CustomizationInventory {
             working_directory: path_string(cwd)?,
             instructions: Vec::new(),
@@ -58,13 +63,14 @@ pub(super) fn inspect(root: &Path, cwd: &Path) -> Result<CustomizationInventory>
         .sort_by(|a, b| (&a.source, &a.label, &a.id).cmp(&(&b.source, &b.label, &b.id)));
     scan.inventory.unresolved_sources.sort();
     scan.inventory.unresolved_sources.dedup();
-    Ok(scan.inventory)
+    Ok((scan.inventory, scan.commands.unwrap_or_default()))
 }
 
 struct Scan<'a> {
     root: &'a Path,
     cwd: &'a Path,
     text_left: usize,
+    commands: Option<Vec<RawDeclaration>>,
     inventory: CustomizationInventory,
 }
 
@@ -77,6 +83,7 @@ struct Declaration<'a> {
     scope: String,
     body: &'a Value,
     target: Option<&'a str>,
+    hook_event: Option<&'a str>,
     arguments: Vec<String>,
     shell: bool,
     enabled: bool,
@@ -155,6 +162,17 @@ impl Scan<'_> {
             self.configuration(Provider::Claude, &directory.join(name))?;
         }
         self.claude_skills(&directory.join(".claude/skills"))?;
+        if let Some((file, contents)) = self.file(&directory.join(".gemini/config.json"))? {
+            let includes_personal_directory = serde_json::from_slice::<Value>(&contents)
+                .ok()
+                .and_then(|data| {
+                    data.as_object()
+                        .map(|fields| fields.contains_key("personal_customization_dir"))
+                });
+            if includes_personal_directory != Some(false) {
+                self.inventory.unresolved_sources.push(file.path);
+            }
+        }
         for folder in [".agents", ".agent", "_agents", "_agent"] {
             let path = directory.join(folder);
             for name in ["AGENTS.md", "GEMINI.md"] {
@@ -304,6 +322,14 @@ impl Scan<'_> {
                 )?;
             }
         }
+        if provider == Provider::Antigravity
+            && path.file_name().is_some_and(|name| name == "plugins.json")
+            && root["inherits"]
+                .as_array()
+                .is_some_and(|manifests| !manifests.is_empty())
+        {
+            self.inventory.unresolved_sources.push(file.path.clone());
+        }
         if provider == Provider::Claude {
             for key in [
                 "statusLine",
@@ -323,6 +349,7 @@ impl Scan<'_> {
                         scope: "Claude startup or UI helper".into(),
                         body,
                         target: body.as_str().or_else(|| body["command"].as_str()),
+                        hook_event: None,
                         arguments: Vec::new(),
                         shell: true,
                         enabled: true,
@@ -382,6 +409,7 @@ impl Scan<'_> {
                         target: handler["command"]
                             .as_str()
                             .or_else(|| handler["url"].as_str()),
+                        hook_event: Some(event),
                         arguments: strings(&handler["args"]),
                         shell: handler["command"].is_string(),
                         enabled: group_enabled
@@ -419,6 +447,7 @@ impl Scan<'_> {
             scope,
             body,
             target,
+            hook_event: None,
             arguments: strings(&body["args"]),
             shell: false,
             enabled: body["enabled"] != false,
@@ -443,6 +472,7 @@ impl Scan<'_> {
             scope: "Plugin components require resolved sources".into(),
             body,
             target: None,
+            hook_event: None,
             arguments: Vec::new(),
             shell: false,
             enabled,
@@ -473,6 +503,7 @@ impl Scan<'_> {
                     scope: "On skill expansion".into(),
                     body: &body,
                     target: Some(command),
+                    hook_event: None,
                     arguments: Vec::new(),
                     shell: true,
                     enabled: true,
@@ -492,6 +523,7 @@ impl Scan<'_> {
             scope,
             body,
             target,
+            hook_event,
             arguments,
             shell,
             enabled,
@@ -508,6 +540,16 @@ impl Scan<'_> {
         } else {
             ReviewState::Pending
         };
+        if review == ReviewState::Pending
+            && let Some(commands) = &mut self.commands
+        {
+            commands.push(RawDeclaration {
+                id: id.clone(),
+                name: label.clone(),
+                event: hook_event.map(str::to_owned),
+                body: body.clone(),
+            });
+        }
         self.inventory.entries.push(CustomizationEntry {
             id,
             provider,
@@ -770,7 +812,7 @@ args = ["./server.js"]
             "httpUrl":"https://user:password@example.invalid/mcp?secret=token"
         }}}"#,
         )?;
-        let result = inspect(&root, &root)?;
+        let (result, _) = inspect(&root, &root, false)?;
         assert!(result.unresolved_sources.is_empty());
         assert_eq!(result.entries.len(), 4);
         let find = |provider, kind| {

@@ -244,6 +244,9 @@ pub enum ProviderEventData {
     SkillsReported {
         catalog: skills::SkillCatalog,
     },
+    ScopedLaunchPrepared {
+        evidence: Box<launch_scope::ScopedLaunchEvidence>,
+    },
     CapabilityAssessmentUpdated {
         assessment: Box<capabilities::CapabilityAssessment>,
     },
@@ -366,6 +369,9 @@ pub trait CliAdapter: Send + Sync {
 /// Methods advance one provider protocol per process. The runtime owns I/O and persistence.
 pub trait CliSession: Send {
     fn arguments(&self) -> Vec<OsString>;
+    fn set_workspace_instructions(&mut self, _instructions: String) -> anyhow::Result<()> {
+        anyhow::bail!("this adapter does not accept protocol instruction projection")
+    }
     fn start(&mut self) -> anyhow::Result<AdapterUpdate>;
     fn query_effective_configuration(&mut self) -> anyhow::Result<Option<WireMessage>> {
         Ok(None)
@@ -490,6 +496,7 @@ pub mod claude;
 pub mod codex;
 pub mod configuration;
 pub mod goal;
+pub mod launch_scope;
 pub mod plugins;
 pub mod profiles;
 mod rpc;

@@ -62,6 +62,7 @@ impl CliAdapter for CodexAdapter {
             session: None,
             active: None,
             model_pages: Vec::new(),
+            workspace_instructions: None,
             model_cursors: HashSet::new(),
             approvals: HashMap::new(),
             questions: HashMap::new(),
@@ -103,6 +104,7 @@ struct CodexSession {
     session: Option<Session>,
     active: Option<ActiveTurn>,
     model_pages: Vec<ReportedModel>,
+    workspace_instructions: Option<String>,
     model_cursors: HashSet<String>,
     approvals: HashMap<RequestId, Approval>,
     questions: HashMap<RequestId, Vec<String>>,
@@ -128,6 +130,9 @@ impl CodexSession {
         });
         if let Some(model) = &self.request.model {
             params["model"] = json!(model);
+        }
+        if let Some(instructions) = &self.workspace_instructions {
+            params["developerInstructions"] = json!(instructions);
         }
         let method = match &self.request.intent {
             SessionIntent::Start => "thread/start",
@@ -717,6 +722,15 @@ impl CodexSession {
 }
 
 impl CliSession for CodexSession {
+    fn set_workspace_instructions(&mut self, instructions: String) -> Result<()> {
+        ensure!(
+            !self.handshake_started,
+            "Codex instruction projection must precede startup"
+        );
+        self.workspace_instructions = Some(instructions);
+        Ok(())
+    }
+
     fn arguments(&self) -> Vec<OsString> {
         ["app-server", "--listen", "stdio://"]
             .map(OsString::from)

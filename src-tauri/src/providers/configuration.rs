@@ -148,6 +148,91 @@ pub(crate) fn inspect(
     Ok((configuration, skills, instructions))
 }
 
+pub(crate) fn claude_workspace_projection(
+    layout: &CheckoutLayout,
+    version: &str,
+) -> anyhow::Result<(String, Vec<InstructionSource>)> {
+    let mut inventory = InstructionInventory::new(layout);
+    inventory.claude(&mut Discovery::default(), None, None, version);
+    let belongs = |source: &InstructionSource| {
+        matches!(
+            source.scope,
+            InstructionScope::Checkout | InstructionScope::PrimaryCheckout
+        ) && source.selection == InstructionSelection::DisabledByProfile
+    };
+    let has_claude = inventory
+        .sources
+        .iter()
+        .filter(|source| belongs(source) && source.imported_from.is_none())
+        .any(|source| {
+            source.path.ends_with("CLAUDE.md") || source.path.ends_with("CLAUDE.local.md")
+        });
+    let sources: Vec<_> = inventory
+        .sources
+        .into_iter()
+        .filter(|source| {
+            belongs(source)
+                && (!has_claude
+                    || source.imported_from.is_some()
+                    || !source.path.ends_with("AGENTS.md"))
+        })
+        .collect();
+    project_sources(layout, sources)
+}
+
+pub(crate) fn codex_workspace_projection(
+    layout: &CheckoutLayout,
+) -> anyhow::Result<(String, Vec<InstructionSource>)> {
+    let home = configured_directory("USERPROFILE");
+    let profile = profile_root("CODEX_HOME", home.as_deref(), ".codex");
+    let mut inventory = InstructionInventory::new(layout);
+    inventory.codex(
+        &mut Discovery::default(),
+        &instructions::workspace_directories(layout),
+        profile.as_deref(),
+        None,
+    );
+    let sources = inventory
+        .sources
+        .into_iter()
+        .filter(|source| {
+            source.scope == InstructionScope::Checkout
+                && source.selection == InstructionSelection::Expected
+        })
+        .collect();
+    project_sources(layout, sources)
+}
+
+fn project_sources(
+    layout: &CheckoutLayout,
+    sources: Vec<InstructionSource>,
+) -> anyhow::Result<(String, Vec<InstructionSource>)> {
+    let mut instructions = String::new();
+    for source in &sources {
+        let bytes = read_local_file(&source.path)?;
+        anyhow::ensure!(
+            source.revision.as_deref() == Some(&format!("{:x}", Sha256::digest(&bytes))),
+            "instruction changed while preparing the launch"
+        );
+        use std::fmt::Write;
+        let logical_path = source
+            .path
+            .strip_prefix(&layout.root)
+            .or_else(|_| source.path.strip_prefix(&layout.primary_root))
+            .unwrap_or(&source.path);
+        writeln!(
+            instructions,
+            "\n# Repository instructions from {}\n",
+            logical_path.display()
+        )?;
+        let text = String::from_utf8(bytes)?;
+        let length = source.included_bytes.unwrap_or(text.len()).min(text.len());
+        instructions.push_str(&text[..text.floor_char_boundary(length)]);
+        instructions.push('\n');
+    }
+    Ok((instructions, sources))
+}
+
 fn profile_root(variable: &str, home: Option<&Path>, fallback: &str) -> Option<PathBuf> {
     configured_directory(variable).or_else(|| home.map(|home| home.join(fallback)))
 }

@@ -5,9 +5,26 @@ use rusqlite::{Connection, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::{protection, providers::Provider, repository, store::Store};
+use crate::{
+    protection,
+    providers::Provider,
+    repository::{self, CheckoutLayout},
+    store::Store,
+};
 
 mod scan;
+
+pub(crate) struct RawDeclaration {
+    pub id: String,
+    pub name: String,
+    pub event: Option<String>,
+    pub body: serde_json::Value,
+}
+
+pub(crate) struct LaunchReview {
+    pub inventory: CustomizationInventory,
+    pub approved: Vec<(CustomizationEntry, RawDeclaration)>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -77,7 +94,7 @@ pub struct CustomizationInventory {
 }
 
 pub(crate) fn inspect(root: &Path, cwd: &Path) -> Result<CustomizationInventory> {
-    scan::inspect(root, cwd)
+    Ok(scan::inspect(root, cwd, false)?.0)
 }
 
 pub(crate) fn save(
@@ -125,6 +142,42 @@ fn apply_approvals(
 }
 
 impl Store {
+    pub(crate) async fn resolve_launch_review(
+        &self,
+        checkout_id: String,
+        layout: &CheckoutLayout,
+        provider: Provider,
+    ) -> Result<LaunchReview> {
+        let root = layout.root.clone();
+        let cwd = layout.cwd.clone();
+        let (mut inventory, commands) =
+            tokio::task::spawn_blocking(move || scan::inspect(&root, &cwd, true)).await??;
+        self.execute(move |db| {
+            apply_approvals(db, &checkout_id, &mut inventory)?;
+            inventory.entries.retain(|entry| entry.provider == provider);
+            let mut commands: std::collections::BTreeMap<_, _> = commands
+                .into_iter()
+                .map(|command| (command.id.clone(), command))
+                .collect();
+            let approved = inventory
+                .entries
+                .iter()
+                .filter(|entry| entry.review == ReviewState::Approved)
+                .map(|entry| {
+                    let raw = commands
+                        .remove(&entry.id)
+                        .context("approved customization lacks a resolved declaration")?;
+                    Ok((entry.clone(), raw))
+                })
+                .collect::<Result<_>>()?;
+            Ok(LaunchReview {
+                inventory,
+                approved,
+            })
+        })
+        .await
+    }
+
     pub async fn saved_checkout_customizations(
         &self,
         checkout_id: String,

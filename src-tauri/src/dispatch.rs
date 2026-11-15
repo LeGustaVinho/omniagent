@@ -10,6 +10,7 @@ use crate::{
         ProviderEvent,
         capabilities::CapabilityAssessment,
         configuration::InstructionInventory,
+        launch_scope::ScopedLaunchEvidence,
         skills::{SkillCatalog, SkillEntry},
     },
     store::Store,
@@ -32,6 +33,8 @@ pub struct ContextSnapshot {
     pub reported_skills: Option<SkillCatalog>,
     #[serde(default)]
     pub instructions: Option<InstructionInventory>,
+    #[serde(default)]
+    pub scoped_launch: Option<ScopedLaunchEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

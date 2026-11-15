@@ -1,0 +1,309 @@
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+
+use crate::{
+    customizations::{CustomizationKind, LaunchReview, ReviewState},
+    repository::CheckoutLayout,
+};
+
+use super::{
+    Provider,
+    configuration::{self, InstructionSource},
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopedLaunchEvidence {
+    pub provider: Provider,
+    pub strategy: String,
+    pub approved: BTreeMap<String, String>,
+    pub excluded: BTreeMap<String, String>,
+    pub instruction_sources: Vec<InstructionSource>,
+    pub inputs: Vec<LaunchInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchInput {
+    pub name: String,
+    pub contents: String,
+}
+
+pub(crate) struct ScopedLaunch {
+    pub arguments: Vec<OsString>,
+    pub evidence: ScopedLaunchEvidence,
+    directory: Option<tempfile::TempDir>,
+    pub protocol_instructions: Option<String>,
+}
+
+impl ScopedLaunch {
+    pub(crate) fn prepare(
+        provider: Provider,
+        version: &str,
+        layout: &CheckoutLayout,
+        review: &LaunchReview,
+        arguments: Vec<OsString>,
+    ) -> Result<Self> {
+        let mut launch = Self {
+            arguments,
+            evidence: ScopedLaunchEvidence {
+                provider,
+                strategy: String::new(),
+                approved: BTreeMap::new(),
+                excluded: BTreeMap::new(),
+                instruction_sources: Vec::new(),
+                inputs: Vec::new(),
+            },
+            directory: None,
+            protocol_instructions: None,
+        };
+        for entry in &review.inventory.entries {
+            let reason = match entry.review {
+                ReviewState::Pending | ReviewState::Changed => {
+                    "Current fingerprint requires approval"
+                }
+                ReviewState::Disabled => "Disabled in repository configuration",
+                ReviewState::Unresolved => "Executable target is unresolved",
+                ReviewState::Approved => continue,
+            };
+            launch
+                .evidence
+                .excluded
+                .insert(entry.id.clone(), reason.into());
+        }
+        match provider {
+            Provider::Claude => launch.claude(version, layout, review)?,
+            Provider::Codex => launch.codex(layout, review)?,
+            Provider::Antigravity => launch.antigravity(review)?,
+        }
+        Ok(launch)
+    }
+
+    fn claude(
+        &mut self,
+        version: &str,
+        layout: &CheckoutLayout,
+        review: &LaunchReview,
+    ) -> Result<()> {
+        ensure!(
+            at_least(version, (2, 1, 257)),
+            "This Claude Code build cannot enforce the scoped restricted launch"
+        );
+        self.evidence.strategy = "claude_restricted".into();
+        let mut hooks: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
+        let mut mcp = Map::new();
+        for (entry, declaration) in &review.approved {
+            match entry.kind {
+                CustomizationKind::Hook => {
+                    let event = declaration
+                        .event
+                        .as_deref()
+                        .context("approved Claude hook has no trigger")?;
+                    hooks.entry(event).or_default().push(json!({
+                        "matcher": declaration.body["matcher"], "hooks": [declaration.body["handler"]],
+                    }));
+                }
+                CustomizationKind::McpServer => {
+                    ensure!(
+                        mcp.insert(declaration.name.clone(), declaration.body.clone())
+                            .is_none(),
+                        "Multiple approved Claude declarations use the same MCP server name"
+                    );
+                }
+                _ => {
+                    self.evidence.excluded.insert(
+                        entry.id.clone(),
+                        "Restricted Claude launch supports projected hooks and MCP servers".into(),
+                    );
+                    continue;
+                }
+            }
+            self.evidence
+                .approved
+                .insert(entry.id.clone(), entry.fingerprint.clone());
+        }
+        let (instruction_text, sources) =
+            configuration::claude_workspace_projection(layout, version)?;
+        self.evidence.instruction_sources = sources;
+        let settings = self.write(
+            "settings.json",
+            serde_json::to_string(&json!({
+                "hooks": hooks, "autoMemoryEnabled": false,
+            }))?,
+        )?;
+        let mcp = self.write(
+            "mcp.json",
+            serde_json::to_string(&json!({"mcpServers": mcp}))?,
+        )?;
+        self.arguments.retain(|argument| argument != "--safe-mode");
+        let existing_mcp = self
+            .arguments
+            .iter()
+            .position(|argument| argument == "--mcp-config")
+            .context("Claude argument contract omitted --mcp-config")?;
+        *self
+            .arguments
+            .get_mut(existing_mcp + 1)
+            .context("Claude argument contract omitted the MCP configuration value")? =
+            mcp.into_os_string();
+        self.arguments.extend([
+            OsString::from("--restricted"),
+            OsString::from("--system-prompt-snapshot"),
+            OsString::from("off"),
+            OsString::from("--settings"),
+            settings.into_os_string(),
+        ]);
+        if !instruction_text.is_empty() {
+            let path = self.write("instructions.md", instruction_text)?;
+            self.arguments.extend([
+                OsString::from("--append-system-prompt-file"),
+                path.into_os_string(),
+            ]);
+        }
+        Ok(())
+    }
+
+    fn codex(&mut self, layout: &CheckoutLayout, review: &LaunchReview) -> Result<()> {
+        self.evidence.strategy = "codex_untrusted_project".into();
+        let mut projects = toml::Table::new();
+        for directory in layout
+            .cwd
+            .ancestors()
+            .take_while(|directory| directory.starts_with(&layout.root))
+        {
+            projects.insert(
+                directory.to_string_lossy().into_owned(),
+                toml::Value::Table(
+                    [(
+                        "trust_level".into(),
+                        toml::Value::String("untrusted".into()),
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+            );
+        }
+        let mut servers = toml::Table::new();
+        for (entry, declaration) in &review.approved {
+            if entry.kind == CustomizationKind::McpServer {
+                let mut server = toml::Value::try_from(&declaration.body)
+                    .context("could not encode the approved MCP server")?;
+                if declaration.body["command"].is_string() {
+                    let server = server
+                        .as_table_mut()
+                        .context("approved Codex MCP declaration is not a table")?;
+                    server.entry("cwd").or_insert_with(|| {
+                        toml::Value::String(layout.cwd.to_string_lossy().into_owned())
+                    });
+                }
+                ensure!(
+                    servers.insert(declaration.name.clone(), server).is_none(),
+                    "Multiple approved Codex declarations use the same MCP server name"
+                );
+                self.evidence
+                    .approved
+                    .insert(entry.id.clone(), entry.fingerprint.clone());
+            } else {
+                self.evidence.excluded.insert(entry.id.clone(),
+                    "Scoped Codex launch preserves native hook trust and supports approved MCP servers".into());
+            }
+        }
+        let flags = [
+            format!("projects={}", toml::Value::Table(projects)),
+            format!("mcp_servers={}", toml::Value::Table(servers)),
+            "project_doc_max_bytes=0".into(),
+        ];
+        let mut arguments: Vec<_> = flags
+            .iter()
+            .flat_map(|flag| [OsString::from("-c"), OsString::from(flag)])
+            .collect();
+        arguments.append(&mut self.arguments);
+        self.arguments = arguments;
+        self.evidence.inputs = flags
+            .into_iter()
+            .map(|contents| LaunchInput {
+                name: "--config".into(),
+                contents,
+            })
+            .collect();
+        let (instructions, sources) = configuration::codex_workspace_projection(layout)?;
+        self.evidence.instruction_sources = sources;
+        if !instructions.is_empty() {
+            self.evidence.inputs.push(LaunchInput {
+                name: "developerInstructions".into(),
+                contents: instructions.clone(),
+            });
+            self.protocol_instructions = Some(instructions);
+        }
+        Ok(())
+    }
+
+    fn antigravity(&mut self, review: &LaunchReview) -> Result<()> {
+        let executable_scope = review
+            .inventory
+            .entries
+            .iter()
+            .any(|entry| entry.review != ReviewState::Disabled)
+            || review.inventory.unresolved_sources.iter().any(|path| {
+                Path::new(path).components().any(|component| {
+                    matches!(
+                        component.as_os_str().to_str(),
+                        Some(".agents" | ".agent" | "_agents" | "_agent" | ".gemini")
+                    )
+                })
+            });
+        if executable_scope {
+            bail!(
+                "Antigravity ACP cannot enforce the repository's individual executable approvals with this launch profile"
+            );
+        }
+        self.evidence.strategy = "acp_workspace_without_executable_customizations".into();
+        Ok(())
+    }
+
+    fn write(&mut self, name: &str, contents: String) -> Result<PathBuf> {
+        if self.directory.is_none() {
+            self.directory = Some(
+                tempfile::Builder::new()
+                    .prefix("omniagent-launch-")
+                    .tempdir()?,
+            );
+        }
+        let path = self
+            .directory
+            .as_ref()
+            .expect("launch staging")
+            .path()
+            .join(name);
+        fs::write(&path, contents.as_bytes())?;
+        self.evidence.inputs.push(LaunchInput {
+            name: name.into(),
+            contents,
+        });
+        Ok(path)
+    }
+}
+
+fn at_least(version: &str, minimum: (u32, u32, u32)) -> bool {
+    let mut parts = version
+        .split(['-', '+'])
+        .next()
+        .unwrap_or_default()
+        .split('.');
+    let version = (|| {
+        Some((
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        ))
+    })();
+    version.is_some_and(|version| version >= minimum)
+}

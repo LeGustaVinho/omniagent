@@ -720,6 +720,7 @@ mod tests {
                     filesystem_skills: Vec::new(),
                     reported_skills: None,
                     instructions: None,
+                    scoped_launch: None,
                 },
                 vec![b"{\"fixture\":true}\n".to_vec()],
             )
