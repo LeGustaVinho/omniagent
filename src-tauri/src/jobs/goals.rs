@@ -1077,6 +1077,24 @@ pub(super) fn queued_boundary_owner(
     conversation: &str,
     context: &str,
 ) -> Result<Option<String>> {
+    // Releasing the process reservation does not settle the native goal's
+    // continuation. Keep its context reserved until the owner is reconciled.
+    let native_owner = db
+        .query_row(
+            "SELECT x.run_id FROM native_goal_executors x
+         JOIN active_goals g ON g.revision_id = x.revision_id
+         JOIN goal_revisions r ON r.id = g.revision_id
+         JOIN agent_attempts a ON a.run_id = x.run_id
+         WHERE a.conversation_id = ?1 AND coalesce(a.result_context_id, a.context_id) = ?2
+           AND r.continuation_owner = 'native'
+         ORDER BY a.ordinal DESC LIMIT 1",
+            params![conversation, context],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if native_owner.is_some() {
+        return Ok(native_owner);
+    }
     Ok(db
         .query_row(
             "SELECT checkpoint.run_id

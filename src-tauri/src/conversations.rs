@@ -3010,7 +3010,9 @@ mod tests {
 
     #[tokio::test]
     async fn restarting_a_native_goal_restores_its_output_before_explicit_recovery() -> Result<()> {
-        use crate::jobs::{AdmissionEnvironment, GoalControlState, GoalDefinition, JobContext};
+        use crate::jobs::{
+            AdmissionBlocker, AdmissionEnvironment, GoalControlState, GoalDefinition, JobContext,
+        };
         let (_directory, store, conversation, mut scope) = setup().await?;
         scope.executable = std::env::current_exe()?;
         scope.runner = crate::runner::DirectWindowsRunner::IDENTITY.into();
@@ -3025,7 +3027,7 @@ mod tests {
                     conversation_id: conversation.id.clone(),
                     context_id: conversation.context_id,
                 },
-                scope,
+                scope.clone(),
                 None,
                 GoalDefinition {
                     objective: "Restore the recorded provider work".into(),
@@ -3116,11 +3118,59 @@ mod tests {
                 )
                 .await?;
         }
+        let pending_text = "Deliver this only after the native goal yields";
+        let current = store.conversation(conversation.id.clone()).await?;
+        store
+            .save_conversation_draft(conversation.id.clone(), pending_text.into())
+            .await?;
+        let pending = store
+            .enqueue_conversation_turn(
+                JobContext {
+                    conversation_id: conversation.id.clone(),
+                    context_id: current.context_id,
+                },
+                scope,
+                pending_text.into(),
+            )
+            .await?;
+        let assert_native_owner = |store: Store, blocker: AdmissionBlocker| {
+            let (project, job, env) = (
+                pending.project_id.clone(),
+                pending.id.clone(),
+                environment.clone(),
+            );
+            async move {
+                let inspection = store
+                    .inspect_job(project, job, env.clone())
+                    .await?
+                    .context("missing instruction")?;
+                assert!(
+                    inspection.blockers.contains(&blocker),
+                    "{:?}",
+                    inspection.blockers
+                );
+                assert!(store.claim_next_job(env).await?.is_none());
+                Ok::<_, anyhow::Error>(())
+            }
+        };
+        assert_native_owner(
+            store.clone(),
+            AdmissionBlocker::ConversationBusy {
+                run_id: attempt.run.id.clone(),
+            },
+        )
+        .await?;
         drop(store);
         let store = Store::open(database)?;
         store.recover_agent_attempts_after_restart().await?;
         let project = goal.job.project_id;
-        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        assert_native_owner(
+            store.clone(),
+            AdmissionBlocker::ContinuationOwner {
+                run_id: attempt.run.id.clone(),
+            },
+        )
+        .await?;
         assert!(
             store
                 .resume_goal(project.clone(), goal.id.clone())
@@ -5549,6 +5599,169 @@ mod tests {
         assert_eq!(dispatch.delivery, Delivery::Unconfirmed);
         let next = prepare(&store, &conversation.id, scope, "continue").await?;
         assert!(matches!(next.intent, SessionIntent::Start));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_instruction_claim_and_restart_submit_one_accepted_revision_to_the_cli()
+    -> Result<()> {
+        use crate::jobs::{AdmissionEnvironment, JobContext};
+
+        let (_directory, store, chat, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let database = scope.checkout.join("store.sqlite");
+        let environment = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: false,
+        };
+        let active = prepare(&store, &chat.id, scope.clone(), "Already running").await?;
+        store.mark_agent_running(active.run.id.clone()).await?;
+        let enqueue = |text: &'static str| {
+            let (store, conversation_id, context_id, scope) = (
+                store.clone(),
+                chat.id.clone(),
+                active.context_id.clone(),
+                scope.clone(),
+            );
+            async move {
+                store
+                    .save_conversation_draft(conversation_id.clone(), text.into())
+                    .await?;
+                store
+                    .enqueue_conversation_turn(
+                        JobContext {
+                            conversation_id,
+                            context_id,
+                        },
+                        scope,
+                        text.into(),
+                    )
+                    .await
+            }
+        };
+        let first = enqueue("superseded-draft").await?;
+        let removed = enqueue("withdrawn-draft").await?;
+        let queue = store
+            .pending_conversation_instructions(chat.id.clone(), environment.clone())
+            .await?;
+        store
+            .revise_pending_instruction(
+                chat.id.clone(),
+                first.id.clone(),
+                queue[0].revision_id.clone(),
+                "ready-instruction".into(),
+                None,
+            )
+            .await?;
+        store
+            .remove_pending_instruction(chat.id.clone(), removed.id, queue[1].revision_id.clone())
+            .await?;
+        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        store
+            .finish_agent_attempt(
+                active.run.id,
+                RunStatus::Succeeded,
+                Some("Previous turn settled".into()),
+            )
+            .await?;
+
+        let pending = store
+            .pending_conversation_instructions(chat.id.clone(), environment.clone())
+            .await?;
+        let other = Store::open(database.clone())?;
+        let (claim, edit) = tokio::join!(
+            store.claim_next_job(environment.clone()),
+            other.revise_pending_instruction(
+                chat.id.clone(),
+                first.id,
+                pending[0].revision_id.clone(),
+                "racing-instruction".into(),
+                None
+            ),
+        );
+        let plan = claim?.context("Missing instruction claim")?;
+        let accepted = plan.input.last().context("Missing claimed revision")?;
+        assert_eq!(
+            accepted.text,
+            if edit.is_ok() {
+                "racing-instruction"
+            } else {
+                "ready-instruction"
+            }
+        );
+        let accepted_text = accepted.text.clone();
+        let accepted_id = accepted.revision_id.clone();
+        drop(other);
+        drop(store);
+
+        let store = Store::open(database)?;
+        store.recover_agent_attempts_after_restart().await?;
+        let replay = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("Missing recovered claim")?;
+        assert_eq!(replay.previous_run_id.as_ref(), Some(&plan.run.id));
+        let run = replay.run.id.clone();
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let runner = Arc::new(FixtureRunner(WireLog {
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            conversation: chat.id.clone(),
+            frames: frames.clone(),
+        }));
+        assert_eq!(
+            start_managed_turn(store.clone(), runner, replay, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        let dispatch = store
+            .agent_dispatch(chat.id.clone(), run)
+            .await?
+            .context("Missing final wire evidence")?;
+        assert_eq!(dispatch.delivery, Delivery::Submitted);
+        assert_eq!(
+            dispatch
+                .snapshot
+                .submitted_messages
+                .iter()
+                .filter(|message| message.revision_id == accepted_id)
+                .count(),
+            1
+        );
+        let sent = frames
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|bytes| serde_json::from_slice::<Value>(bytes))
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        let turn_inputs = sent
+            .iter()
+            .filter(|frame| frame["method"] == "turn/start")
+            .collect::<Vec<_>>();
+        assert_eq!(turn_inputs.len(), 1);
+        let prompt = turn_inputs[0]["params"]["input"][0]["text"]
+            .as_str()
+            .context("The CLI didn't receive the prompt")?;
+        assert_eq!(prompt.matches(accepted_text.as_str()).count(), 1);
+        for rejected in [
+            "superseded-draft",
+            "withdrawn-draft",
+            if edit.is_ok() {
+                "ready-instruction"
+            } else {
+                "racing-instruction"
+            },
+        ] {
+            assert!(!prompt.contains(rejected));
+        }
+        assert!(
+            store
+                .pending_conversation_instructions(chat.id, environment.clone())
+                .await?
+                .is_empty()
+        );
+        assert!(store.claim_next_job(environment).await?.is_none());
         Ok(())
     }
 
