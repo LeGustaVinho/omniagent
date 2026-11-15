@@ -76,9 +76,9 @@ impl From<AdmissionBlocker> for QueueBlockerKind {
             AdmissionBlocker::Dependency { .. } => Self::Dependency,
             AdmissionBlocker::Approval { .. } => Self::Approval,
             AdmissionBlocker::Policy { .. } => Self::Policy,
-            AdmissionBlocker::ContextChanged { .. } | AdmissionBlocker::ConversationBusy { .. } => {
-                Self::Context
-            }
+            AdmissionBlocker::ContextChanged { .. }
+            | AdmissionBlocker::ConversationBusy { .. }
+            | AdmissionBlocker::Downstream { .. } => Self::Context,
             AdmissionBlocker::MissingCapability { .. } => Self::Capability,
             AdmissionBlocker::DispatchRejected { .. } => Self::Dispatch,
             AdmissionBlocker::PipelineRelease { .. } => Self::ImplementationRelease,

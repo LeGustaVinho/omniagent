@@ -34,7 +34,7 @@ use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 use crate::{
     diagnostics,
     dispatch::{Delivery, EventSource},
-    jobs::{Job, JobRequest, JobRequestConflict},
+    jobs::{DownstreamWaitState, JobRequest, JobRequestConflict},
     protection,
     providers::{ApprovalDecision, ProviderEvent, ProviderEventData, ProviderLocation, RequestId},
     runs,
@@ -49,6 +49,7 @@ pub(crate) const INSPECT_SCOPE: &str = "inspect_run_scope";
 pub(crate) const INSPECT_OMNIAGENT: &str = "inspect_omniagent";
 pub(crate) const SUBMIT_JOB: &str = "submit_job";
 pub(crate) const GET_JOB_STATUS: &str = "get_job_status";
+pub(crate) const WAIT_FOR_JOBS: &str = "wait_for_jobs";
 pub(crate) const REQUEST_PERMISSION: &str = "request_permission";
 pub(crate) const PERMISSION_PREFIX: &str = "omniagent-permission:";
 pub(crate) const VERSION: u8 = 1;
@@ -98,6 +99,13 @@ struct JobStatusRequest {
 }
 
 #[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WaitForJobsRequest {
+    request_id: String,
+    child_job_ids: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Operation {
     ListTools,
@@ -105,6 +113,7 @@ enum Operation {
     InspectOmniagent,
     SubmitJob(SubmitJob),
     GetJobStatus(JobStatusRequest),
+    WaitForJobs(WaitForJobsRequest),
     RequestPermission(PermissionPrompt),
     PollPermission { id: String },
 }
@@ -122,8 +131,14 @@ struct Request {
 enum Response {
     Scope(RunScope),
     Inspection(Box<RuntimeInspection>),
-    JobSubmitted { job_id: String },
-    JobStatus(Box<Job>),
+    JobSubmitted {
+        job_id: String,
+    },
+    JobStatus(Value),
+    JobWaiting {
+        wait_id: String,
+        state: DownstreamWaitState,
+    },
     JobRejected,
     JobRequestConflict,
     PermissionRequested(String),
@@ -333,8 +348,27 @@ async fn serve_pipe(
                             .active_run_child_job(scope.run_id.clone(), input.job_id)
                             .await?
                         {
-                            Some(job) => Response::JobStatus(Box::new(job)),
+                            Some(mut job) => {
+                                let wait = job.downstream_wait.take();
+                                let mut status = serde_json::to_value(job)?;
+                                if let Some(wait) = wait {
+                                    status["downstreamWait"] = json!({
+                                        "id": wait.id, "state": wait.state, "selectedJobs": wait.inputs.len(),
+                                        "pendingJobs": wait.inputs.iter().filter(|input| input.status.is_none()).count(),
+                                    });
+                                }
+                                Response::JobStatus(status)
+                            }
                             None => Response::JobRejected,
+                        };
+                        (response, None)
+                    }
+                    Operation::WaitForJobs(input) => {
+                        let response = match store.request_downstream_wait(
+                            scope.run_id.clone(), input.request_id, input.child_job_ids,
+                        ).await {
+                            Ok(wait) => Response::JobWaiting { wait_id: wait.id, state: wait.state },
+                            Err(_) => Response::JobRejected,
                         };
                         (response, None)
                     }
@@ -571,6 +605,14 @@ impl ServerHandler for StdioBridge {
                 json!({"type":"object", "required":["jobId"], "additionalProperties":false,
                     "properties":{"jobId":{"type":"string"}}}).as_object().unwrap().clone(),
             ).with_annotations(ToolAnnotations::new().read_only(true).destructive(false).idempotent(true).open_world(false)),
+            Tool::new(
+                WAIT_FOR_JOBS,
+                "Park this scheduled attempt until the selected direct child jobs settle. Finish the current turn after this request. A linked attempt will receive the selected results.",
+                json!({"type":"object", "required":["requestId","childJobIds"], "additionalProperties":false,
+                    "properties":{"requestId":{"type":"string","minLength":1,"maxLength":256},
+                        "childJobIds":{"type":"array","minItems":1,"items":{"type":"string"}}}})
+                    .as_object().unwrap().clone(),
+            ).with_annotations(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
         ];
         if self.0.permission_prompt {
             tools.push(Tool::new(
@@ -589,20 +631,31 @@ impl ServerHandler for StdioBridge {
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        if matches!(request.name.as_ref(), SUBMIT_JOB | GET_JOB_STATUS) {
+        if matches!(
+            request.name.as_ref(),
+            SUBMIT_JOB | GET_JOB_STATUS | WAIT_FOR_JOBS
+        ) {
             let arguments = Value::Object(request.arguments.unwrap_or_default());
             let invalid = |_| ErrorData::invalid_params("Invalid job tool arguments", None);
-            let operation = if request.name == SUBMIT_JOB {
-                Operation::SubmitJob(serde_json::from_value(arguments).map_err(invalid)?)
-            } else {
-                Operation::GetJobStatus(serde_json::from_value(arguments).map_err(invalid)?)
+            let operation = match request.name.as_ref() {
+                SUBMIT_JOB => {
+                    Operation::SubmitJob(serde_json::from_value(arguments).map_err(invalid)?)
+                }
+                WAIT_FOR_JOBS => {
+                    Operation::WaitForJobs(serde_json::from_value(arguments).map_err(invalid)?)
+                }
+                _ => Operation::GetJobStatus(serde_json::from_value(arguments).map_err(invalid)?),
             };
             let result = match exchange(&self.0, operation)
                 .await
                 .map_err(|_| bridge_unavailable())?
             {
                 Response::JobSubmitted { job_id } => json!({"jobId": job_id}),
-                Response::JobStatus(job) => json!(job),
+                Response::JobStatus(job) => job,
+                Response::JobWaiting { wait_id, state } => {
+                    json!({"waitId": wait_id, "state": state,
+                    "next": "Finish the current turn. OmniAgent will continue it with the selected results."})
+                }
                 Response::JobRequestConflict => {
                     return Err(ErrorData::invalid_params(
                         "This run already used that request ID for a different job",
@@ -611,7 +664,11 @@ impl ServerHandler for StdioBridge {
                 }
                 Response::JobRejected => {
                     return Err(ErrorData::invalid_params(
-                        "The job or its requested scope is unavailable to this run",
+                        if request.name == WAIT_FOR_JOBS {
+                            "The selected jobs cannot be awaited from this run"
+                        } else {
+                            "The job or its requested scope is unavailable to this run"
+                        },
                         None,
                     ));
                 }

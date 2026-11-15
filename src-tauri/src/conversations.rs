@@ -813,7 +813,7 @@ impl Store {
         outcome: RunStatus,
         response: Option<String>,
     ) -> Result<()> {
-        self.finish_observed_agent_attempt(run_id, outcome, response, None)
+        self.finish_observed_agent_attempt(run_id, outcome, response, None, false)
             .await
     }
 
@@ -823,6 +823,7 @@ impl Store {
         outcome: RunStatus,
         response: Option<String>,
         failure: Option<crate::jobs::FailureObservation>,
+        quiescence_confirmed: bool,
     ) -> Result<()> {
         ensure!(outcome.is_terminal(), "attempt outcome must be terminal");
         let encrypted = response
@@ -843,7 +844,11 @@ impl Store {
                 active.context_id
             };
             tx.execute("UPDATE agent_attempts SET result_context_id = ?1 WHERE run_id = ?2", params![context_id, run_id])?;
-            if outcome == RunStatus::Succeeded {
+            crate::jobs::release_settled_writer(&tx, &run_id)?;
+            let suspended = crate::jobs::settle_parent_wait(
+                &tx, &run_id, &context_id, outcome, quiescence_confirmed,
+            )?;
+            if outcome == RunStatus::Succeeded && !suspended {
                 tx.execute("UPDATE agent_sessions SET cursor_context_id = ?1 WHERE id = ?2 AND provider_session_id IS NOT NULL
                     AND EXISTS(SELECT 1 FROM agent_attempts a
                         JOIN context_snapshots s ON s.run_id = a.run_id
@@ -861,11 +866,11 @@ impl Store {
             }
             close_permissions(&tx, &run_id)?;
             close_native_questions(&tx, &run_id)?;
-            crate::jobs::release_settled_writer(&tx, &run_id)?;
             tx.execute("DELETE FROM active_agent_attempts WHERE run_id = ?1", [&run_id])?;
-            if outcome == RunStatus::Interrupted {
+            if outcome == RunStatus::Interrupted && !suspended {
                 crate::jobs::requeue_unlaunched_job(&tx, &run_id)?;
             }
+            crate::jobs::observe_child_run(&tx, &run_id)?;
             tx.commit()?;
             Ok(())
         }).await?;
@@ -903,7 +908,10 @@ impl Store {
                     [&id],
                 )?;
                 crate::jobs::release_settled_writer(&tx, &id)?;
-                crate::jobs::requeue_unlaunched_job(&tx, &id)?;
+                if !crate::jobs::recover_waiting_parent(&tx, &id)? {
+                    crate::jobs::requeue_unlaunched_job(&tx, &id)?;
+                }
+                crate::jobs::observe_child_run(&tx, &id)?;
             }
             tx.execute(
                 "UPDATE dispatches SET delivery = 'unconfirmed' WHERE delivery = 'prepared'",
@@ -935,6 +943,7 @@ pub(crate) enum AttemptHistory {
     Automatic,
     Retry { input_context_id: String },
     Resume { native: Option<NativeJobRecovery> },
+    Downstream,
 }
 
 pub(crate) fn consume_matching_draft(
@@ -1002,6 +1011,52 @@ pub(crate) fn insert_job_recovery_attempt(
             history,
         },
     )
+}
+
+pub(crate) fn insert_downstream_attempt(
+    db: &Connection,
+    conversation: Conversation,
+    scope: SessionScope,
+    input: &str,
+) -> Result<AttemptPlan> {
+    insert_attempt(
+        db,
+        PreparedAttempt {
+            conversation_id: conversation.id,
+            base_context_id: conversation.context_id,
+            scope,
+            encrypted: Some(protection::protect(input.as_bytes())?),
+            frozen: None,
+            question_route: QuestionRoute::Native,
+            answer: None,
+            history: AttemptHistory::Downstream,
+        },
+    )
+}
+
+pub(crate) fn attempt_output(
+    db: &Connection,
+    run: &str,
+    context: &str,
+) -> Result<Option<MessageRevision>> {
+    let origin: Option<(String, String)> = db.query_row(
+        "SELECT conversation_id, context_id FROM agent_attempts WHERE run_id = ?1 AND result_context_id = ?2",
+        params![run, context], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let Some((conversation, input_context)) = origin else {
+        return Ok(None);
+    };
+    if input_context == context {
+        return Ok(None);
+    }
+    let input = context_entries(db, &conversation, &input_context)?;
+    let result = context_entries(db, &conversation, context)?;
+    let Some(output) = result.strip_prefix(input.as_slice()) else {
+        return Ok(None);
+    };
+    Ok(load_messages(db, &conversation, output)?
+        .into_iter()
+        .find(|message| message.role == MessageRole::Assistant))
 }
 
 fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptPlan> {

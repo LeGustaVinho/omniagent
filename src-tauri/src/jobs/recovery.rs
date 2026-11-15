@@ -315,6 +315,7 @@ impl Store {
                 move |db| {
                     let job = load_job(db, &project, &id)?
                         .context("Job is unavailable in this project")?;
+                    ensure!(job.downstream_wait.is_none(), "The job is waiting for downstream results");
                     ensure!(release_blocker(db, &job)?.is_none(),
                         "The pipeline job needs an accepted release for the current plan and worktree");
                     let scope = recovery_scope(db, &job)?;
@@ -377,6 +378,10 @@ impl Store {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let job = load_job(&tx, &project_id, &job_id)?
                     .context("Job is unavailable in this project")?;
+                ensure!(
+                    job.downstream_wait.is_none(),
+                    "The job is waiting for downstream results"
+                );
                 ensure!(
                     release_blocker(&tx, &job)?.is_none(),
                     "The pipeline job needs an accepted release for the current plan and worktree"

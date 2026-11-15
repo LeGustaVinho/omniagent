@@ -11,8 +11,9 @@ use omniagent::{
     conversations::{AttemptPlan, SessionScope},
     dispatch::EventSource,
     jobs::{
-        AdmissionBlocker, AdmissionEnvironment, JobPermission, JobRequest, JobRole, JobRule,
-        JobWorkspace, PipelineDispatch, PipelineNodeKind, RecoveryAction, ReleaseBlocker,
+        AdmissionBlocker, AdmissionEnvironment, DownstreamWaitState, JobContext, JobPermission,
+        JobRequest, JobRole, JobRule, JobWorkspace, PipelineDispatch, PipelineNodeKind,
+        RecoveryAction, ReleaseBlocker,
     },
     mcp_bridge::{HELPER_FLAG, RunBridge},
     process_io::{CapturedProcess, Stream},
@@ -424,6 +425,131 @@ fn expect_scope(response: &Value, attempt: &AttemptPlan) {
             "checkoutId":attempt.run.checkout_id, "turnId":attempt.run.turn_id,
         })
     );
+}
+
+#[tokio::test]
+async fn wait_for_jobs_authenticates_children_and_leaves_an_unconfirmed_restart_for_review()
+-> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("wait.sqlite"))?;
+    let earlier = attempt(&store, directory.path().join("project")).await?;
+    let project = earlier.run.project_id.clone();
+    let conversation = store
+        .create_conversation(earlier.run.checkout_id, "Wait fixture".into())
+        .await?;
+    let text = "Wait for a delegated result".to_owned();
+    store
+        .save_conversation_draft(conversation.id.clone(), text.clone())
+        .await?;
+    let parent = store
+        .enqueue_conversation_turn(
+            JobContext {
+                conversation_id: conversation.id,
+                context_id: conversation.context_id,
+            },
+            earlier.scope,
+            text,
+        )
+        .await?;
+    let env = AdmissionEnvironment {
+        runner: DirectWindowsRunner.identity().into(),
+        bridge_available: true,
+    };
+    let active = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("The wait fixture was not admitted")?;
+    store.mark_agent_running(active.run.id.clone()).await?;
+    let request = JobRequest {
+        checkout_id: None,
+        task_id: None,
+        mode: SessionMode::ReadOnly,
+        instructions: "Return a read-only report".into(),
+        dependencies: vec![],
+        requires_bridge: false,
+    };
+    let own = store
+        .submit_agent_job(active.run.id.clone(), "own".into(), request.clone())
+        .await?;
+    let cycle = store
+        .submit_agent_job(
+            active.run.id.clone(),
+            "cycle".into(),
+            JobRequest {
+                dependencies: vec![parent.id.clone()],
+                ..request.clone()
+            },
+        )
+        .await?;
+    let other = store
+        .submit_agent_job(earlier.run.id, "other".into(), request)
+        .await?;
+    let bridge = RunBridge::start(&store, active.run.id.clone()).await?;
+    let helper = start_helper(bridge.ticket_path().into(), active.scope.checkout.clone()).await?;
+    let (helper, unauthorized) = invoke_tool(
+        helper,
+        "wait_for_jobs",
+        json!({
+            "requestId": "bad-scope", "childJobIds": [other.id],
+        }),
+    )
+    .await?;
+    assert!(unauthorized["error"].is_object());
+    let (helper, cycle) = invoke_tool(
+        helper,
+        "wait_for_jobs",
+        json!({
+            "requestId": "bad-dependency", "childJobIds": [cycle.id],
+        }),
+    )
+    .await?;
+    assert!(cycle["error"].is_object());
+    let request = json!({ "requestId": "wait-once", "childJobIds": [own.id] });
+    let (helper, accepted) = invoke_tool(helper, "wait_for_jobs", request.clone()).await?;
+    let wait = store
+        .downstream_wait(project.clone(), active.run.id.clone())
+        .await?
+        .context("The wait was not persisted")?;
+    assert_eq!(accepted["result"]["structuredContent"]["waitId"], wait.id);
+    assert_eq!(accepted["result"]["structuredContent"]["state"], "yielding");
+    let (_helper, repeated) = invoke_tool(helper, "wait_for_jobs", request).await?;
+    assert_eq!(repeated["result"]["structuredContent"]["waitId"], wait.id);
+    store.recover_agent_attempts_after_restart().await?;
+    let recovered = store
+        .downstream_wait(project.clone(), active.run.id.clone())
+        .await?
+        .unwrap();
+    assert_eq!(recovered.state, DownstreamWaitState::NeedsReview);
+    assert!(recovered.continuation_run_id.is_none());
+    let listed = store
+        .inspect_job(project.clone(), parent.id.clone(), env.clone())
+        .await?
+        .unwrap();
+    assert!(listed.blockers.iter().any(|blocker| matches!(
+        blocker,
+        AdmissionBlocker::Downstream {
+            needs_review: true,
+            ..
+        }
+    )));
+    assert!(listed.recovery_actions.is_empty());
+    assert!(store.claim_next_job(env).await?.is_none());
+    store
+        .set_pending_job_state(
+            project.clone(),
+            parent.id,
+            omniagent::jobs::QueueState::Cancelled,
+        )
+        .await?;
+    assert_eq!(
+        store
+            .downstream_wait(project, active.run.id)
+            .await?
+            .unwrap()
+            .state,
+        DownstreamWaitState::Cancelled
+    );
+    Ok(())
 }
 
 #[tokio::test]

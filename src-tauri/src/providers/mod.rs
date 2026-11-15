@@ -361,6 +361,13 @@ pub enum ProviderEventData {
         task: bool,
         capabilities: bool,
     },
+    DownstreamWaitRequested {
+        wait_id: String,
+    },
+    DownstreamContinuation {
+        wait_id: String,
+        parent_run_id: String,
+    },
     Handshake {
         protocol: String,
         capabilities: Vec<Capability>,

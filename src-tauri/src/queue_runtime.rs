@@ -1,8 +1,8 @@
 use omniagent::{
     diagnostics,
     jobs::{
-        CommandJobOutput, Job, JobFailure, JobRequest, JobRule, QueueSettings, QueueState,
-        RecoveryAction,
+        CommandJobOutput, DownstreamWait, Job, JobFailure, JobRequest, JobRule, QueueSettings,
+        QueueState, RecoveryAction,
     },
     runs::RunRecord,
     store::Store,
@@ -11,6 +11,18 @@ use tauri::State;
 
 fn ui_error(error: anyhow::Error) -> String {
     diagnostics::preview(&error.to_string())
+}
+
+#[tauri::command]
+pub async fn downstream_wait(
+    store: State<'_, Store>,
+    project_id: String,
+    run_id: String,
+) -> Result<Option<DownstreamWait>, String> {
+    store
+        .downstream_wait(project_id, run_id)
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]

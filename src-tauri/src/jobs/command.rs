@@ -76,6 +76,19 @@ pub(super) fn load_command(db: &Connection, job_id: &str) -> Result<Option<Comma
         .transpose()
 }
 
+pub(super) fn load_command_output(db: &Connection, run: &str) -> Result<Option<CommandJobOutput>> {
+    let bytes: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT output FROM job_command_outputs WHERE run_id = ?1",
+            [run],
+            |row| row.get(0),
+        )
+        .optional()?;
+    bytes
+        .map(|bytes| Ok(serde_json::from_slice(&protection::unprotect(&bytes)?)?))
+        .transpose()
+}
+
 impl Store {
     pub async fn command_job_run(&self, project: String, run: String) -> Result<Option<RunRecord>> {
         self.execute(move |db| {
@@ -421,6 +434,7 @@ fn settle_command(
     if status == RunStatus::Interrupted {
         super::requeue_unlaunched_job(db, id)?;
     }
+    super::observe_child_run(db, id)?;
     Ok(())
 }
 

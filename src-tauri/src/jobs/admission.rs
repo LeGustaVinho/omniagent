@@ -8,7 +8,8 @@ use ts_rs::TS;
 use crate::{
     conversations::{
         AttemptHistory, AttemptPlan, SessionScope, consume_matching_draft, insert_conversation,
-        insert_job_attempt, insert_job_recovery_attempt, load_conversation,
+        insert_downstream_attempt, insert_job_attempt, insert_job_recovery_attempt,
+        load_conversation, recovery_checkpoint,
     },
     protection,
     providers::{Capability, SessionMode},
@@ -18,9 +19,10 @@ use crate::{
 };
 
 use super::{
-    DispatchRejection, Job, JobContext, JobKind, JobOrigin, JobPermission, JobRequest, QueueState,
-    RecoveryAction, ReleaseBlocker,
+    DispatchRejection, DownstreamWait, DownstreamWaitState, Job, JobContext, JobKind, JobOrigin,
+    JobPermission, JobRequest, QueueState, RecoveryAction, ReleaseBlocker,
     command::{CommandAttempt, CommandInvocation, load_command},
+    downstream::{continuation_prompt, record_continuation},
     insert_job, load_job,
     pipeline::release_blocker,
     policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
@@ -67,6 +69,11 @@ pub enum AdmissionBlocker {
     },
     ConversationBusy {
         run_id: String,
+    },
+    Downstream {
+        wait_id: String,
+        pending: u32,
+        needs_review: bool,
     },
     MissingCapability {
         capability: Capability,
@@ -165,7 +172,9 @@ impl Store {
                     "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.conversation_id = ?1
                  AND j.origin_run_id IS NULL AND j.queue_state IN ('queued', 'paused')
                  AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
-                      OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id)))",
+                      OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id)
+                      OR EXISTS (SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
+                          WHERE a.job_id = j.id AND w.state IN ('waiting', 'needs_review'))))",
                     [&context.conversation_id],
                     |row| row.get(0),
                 )?;
@@ -385,7 +394,9 @@ impl Store {
                 let mut query = tx.prepare(
                     "SELECT project_id, id FROM jobs j WHERE queue_state = 'queued'
                     AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
-                         OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id))
+                         OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id)
+                         OR EXISTS (SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
+                             WHERE a.job_id = j.id AND w.state = 'waiting'))
                     ORDER BY priority DESC, sequence",
                 )?;
                 query
@@ -411,12 +422,14 @@ impl Store {
                     })
                     .transpose()?;
                 let plan = build_attempt(&tx, &job, inputs, checkpoint.as_ref())?;
-                let previous_run = checkpoint.as_ref().map(RecoveryCheckpoint::run_id);
+                let wait = job.downstream_wait.as_ref();
+                let previous_run = wait.map(|wait| wait.parent_run_id.as_str())
+                    .or_else(|| checkpoint.as_ref().map(RecoveryCheckpoint::run_id));
                 let ordinal = job
                     .latest_attempt
                     .as_ref()
                     .map_or(1, |previous| previous.ordinal + 1);
-                let kind = job.queued_recovery.map_or("initial", RecoveryAction::key);
+                let kind = if wait.is_some() { "resume" } else { job.queued_recovery.map_or("initial", RecoveryAction::key) };
                 if checkpoint.is_some() {
                     tx.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [&job.id])?;
                 }
@@ -426,6 +439,9 @@ impl Store {
                     params![job.id, ordinal, plan.run().id, previous_run, kind],
                 )?;
                 bind_attempt_policy(&tx, &job, &plan.run().id)?;
+                if let Some(wait) = wait {
+                    record_continuation(&tx, wait, &plan.run().id)?;
+                }
                 if job.mode == SessionMode::ApprovedWrite {
                     tx.execute(
                         "INSERT INTO job_writer_reservations VALUES (?1, ?2)",
@@ -527,44 +543,93 @@ fn build_attempt(
     let scope = inputs
         .scope
         .context("Admitted job has no effective CLI profile")?;
-    let mut plan = match checkpoint {
-        Some(RecoveryCheckpoint::Agent(checkpoint)) => {
-            let conversation = load_conversation(db, &checkpoint.conversation_id)?;
-            let history = match job
-                .queued_recovery
-                .context("The recovery action is missing")?
-            {
-                RecoveryAction::Retry => AttemptHistory::Retry {
-                    input_context_id: checkpoint.input_context_id.clone(),
-                },
-                RecoveryAction::Resume => AttemptHistory::Resume {
-                    native: checkpoint.native_resume(db, &scope)?,
-                },
-            };
-            let plan = insert_job_recovery_attempt(db, conversation, scope, history)?;
-            ensure!(
-                plan.previous_run_id.as_ref() == Some(&checkpoint.source_run_id),
-                "The recovered attempt lost its lineage"
-            );
-            plan
-        }
-        Some(RecoveryCheckpoint::Command { .. }) => {
-            anyhow::bail!("The job has a command checkpoint")
-        }
-        None => {
-            let conversation = match (&job.origin, job.context.as_ref()) {
-                (JobOrigin::Operator, Some(context)) => {
-                    load_conversation(db, &context.conversation_id)?
-                }
-                _ => {
-                    insert_conversation(db, job.checkout_id.clone(), "Background job".into(), true)?
-                }
-            };
-            insert_job_attempt(db, conversation, scope, &inputs.request.instructions)?
+    let mut plan = if let Some(wait) = &job.downstream_wait {
+        let conversation =
+            downstream_conversation(db, wait)?.context("The downstream wait context changed")?;
+        let text = continuation_prompt(db, wait)?;
+        let plan = insert_downstream_attempt(db, conversation, scope, &text)?;
+        ensure!(
+            plan.previous_run_id.as_ref() == Some(&wait.parent_run_id),
+            "The continuation lost its waiting attempt"
+        );
+        plan
+    } else {
+        match checkpoint {
+            Some(RecoveryCheckpoint::Agent(checkpoint)) => {
+                let conversation = load_conversation(db, &checkpoint.conversation_id)?;
+                let history = match job
+                    .queued_recovery
+                    .context("The recovery action is missing")?
+                {
+                    RecoveryAction::Retry => AttemptHistory::Retry {
+                        input_context_id: checkpoint.input_context_id.clone(),
+                    },
+                    RecoveryAction::Resume => AttemptHistory::Resume {
+                        native: checkpoint.native_resume(db, &scope)?,
+                    },
+                };
+                let plan = insert_job_recovery_attempt(db, conversation, scope, history)?;
+                ensure!(
+                    plan.previous_run_id.as_ref() == Some(&checkpoint.source_run_id),
+                    "The recovered attempt lost its lineage"
+                );
+                plan
+            }
+            Some(RecoveryCheckpoint::Command { .. }) => {
+                anyhow::bail!("The job has a command checkpoint")
+            }
+            None => {
+                let conversation = match (&job.origin, job.context.as_ref()) {
+                    (JobOrigin::Operator, Some(context)) => {
+                        load_conversation(db, &context.conversation_id)?
+                    }
+                    _ => insert_conversation(
+                        db,
+                        job.checkout_id.clone(),
+                        "Background job".into(),
+                        true,
+                    )?,
+                };
+                insert_job_attempt(db, conversation, scope, &inputs.request.instructions)?
+            }
         }
     };
     plan.requires_bridge = inputs.request.requires_bridge;
     Ok(ScheduledAttempt::Agent(Box::new(plan)))
+}
+
+fn downstream_conversation(
+    db: &Connection,
+    wait: &DownstreamWait,
+) -> Result<Option<crate::conversations::Conversation>> {
+    let Some(context) = wait.context_id.as_deref() else {
+        return Ok(None);
+    };
+    let conversation: String = db.query_row(
+        "SELECT conversation_id FROM agent_attempts WHERE run_id = ?1",
+        [&wait.parent_run_id],
+        |r| r.get(0),
+    )?;
+    if recovery_checkpoint(
+        db,
+        &conversation,
+        &wait.parent_run_id,
+        context,
+        Some(context),
+    )?
+    .is_none()
+    {
+        return Ok(None);
+    }
+    let busy: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM active_agent_attempts WHERE conversation_id = ?1)",
+        [&conversation],
+        |r| r.get(0),
+    )?;
+    if busy {
+        return Ok(None);
+    }
+    Ok(Some(load_conversation(db, &conversation)?))
 }
 
 pub(super) fn recovery_scope(
@@ -650,7 +715,7 @@ pub(super) fn inspect(
     job: Job,
     env: &AdmissionEnvironment,
 ) -> Result<JobInspection> {
-    let awaiting_recovery = job.queued_recovery.is_some();
+    let awaiting_recovery = job.queued_recovery.is_some() || job.downstream_wait.is_some();
     let blockers = if let Some(attempt) = job.latest_attempt.as_ref().filter(|_| !awaiting_recovery)
     {
         dispatch_rejection(db, &attempt.run_id)?
@@ -694,7 +759,11 @@ fn evaluate(
     for id in &inputs.request.dependencies {
         let dependency =
             load_job(db, &job.project_id, id)?.context("job dependency disappeared")?;
-        let status = dependency.latest_attempt.map(|attempt| attempt.status);
+        let status = if dependency.downstream_wait.is_some() {
+            None
+        } else {
+            dependency.latest_attempt.map(|attempt| attempt.status)
+        };
         if status != Some(RunStatus::Succeeded) {
             blockers.push(Dependency {
                 job_id: id.clone(),
@@ -745,7 +814,26 @@ fn evaluate(
         }
         _ => {}
     }
-    if let Some(action) = job.queued_recovery {
+    if let Some(wait) = &job.downstream_wait {
+        if !wait.ready() {
+            blockers.push(Downstream {
+                wait_id: wait.id.clone(),
+                pending: wait
+                    .inputs
+                    .iter()
+                    .filter(|input| input.status.is_none())
+                    .count() as u32,
+                needs_review: wait.state == DownstreamWaitState::NeedsReview,
+            });
+        } else if downstream_conversation(db, wait)?.is_none() {
+            blockers.push(ContextChanged {
+                context_id: wait
+                    .context_id
+                    .clone()
+                    .context("A waiting job has no recorded context")?,
+            });
+        }
+    } else if let Some(action) = job.queued_recovery {
         let (source_run, context_id) =
             pending_recovery(db, job)?.context("Missing queued recovery")?;
         let matching = recovery_source(db, job)?.is_some_and(|source| {

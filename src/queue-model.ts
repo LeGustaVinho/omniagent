@@ -4,7 +4,7 @@ import type { ReleaseBlocker } from "@/bindings/ReleaseBlocker";
 import type { RunStatus } from "@/bindings/RunStatus";
 import type { RequiredCustomization } from "@/bindings/RequiredCustomization";
 
-export type JobState = "Queued" | "Starting" | "Running" | "Waiting for input" | "Waiting for approval" | "Paused" | "Interrupted" | "Completed" | "Failed" | "Cancelled";
+export type JobState = "Queued" | "Starting" | "Running" | "Yielding" | "Waiting for jobs" | "Needs review" | "Waiting for input" | "Waiting for approval" | "Paused" | "Interrupted" | "Completed" | "Failed" | "Cancelled";
 
 export const queueViews = ["All", "Waiting", "Active", "Needs input", "History"] as const;
 export type QueueView = typeof queueViews[number];
@@ -22,18 +22,21 @@ const runLabels: Record<RunStatus, JobState> = {
 export function matchesQueueView(state: JobState, view: QueueView) {
   switch (view) {
     case "All": return true;
-    case "Waiting": return state === "Queued" || state === "Paused";
-    case "Active": return state === "Starting" || state === "Running" || state === "Waiting for input";
-    case "Needs input": return state === "Waiting for input" || state === "Waiting for approval";
+    case "Waiting": return state === "Queued" || state === "Paused" || state === "Waiting for jobs";
+    case "Active": return state === "Starting" || state === "Running" || state === "Waiting for input" || state === "Yielding";
+    case "Needs input": return state === "Waiting for input" || state === "Waiting for approval" || state === "Needs review";
     case "History": return state === "Completed" || state === "Failed" || state === "Interrupted" || state === "Cancelled";
   }
 }
 
 export function queueJobState({ job, blockers }: JobInspection): JobState {
-  if (job.latestAttempt && !job.queuedRecovery) return runLabels[job.latestAttempt.status];
   if (job.queueState === "cancelled") return "Cancelled";
+  if (job.latestAttempt && !job.queuedRecovery && !job.downstreamWait) return runLabels[job.latestAttempt.status];
   if (job.queueState === "paused") return "Paused";
   if (blockers.some(({ type }) => type === "approval")) return "Waiting for approval";
+  if (job.downstreamWait?.state === "yielding") return "Yielding";
+  if (job.downstreamWait?.state === "needs_review") return "Needs review";
+  if (job.downstreamWait?.state === "waiting") return "Waiting for jobs";
   return "Queued";
 }
 
@@ -61,6 +64,9 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
     case "policy": return blocker.reason;
     case "context_changed": return `The conversation changed since context ${blocker.contextId} was queued.`;
     case "conversation_busy": return "Waiting for the active conversation run.";
+    case "downstream":
+      if (blocker.needsReview) return "The parent attempt needs review before it can continue.";
+      return blocker.pending > 0 ? `Waiting for ${blocker.pending} downstream job results.` : "Waiting for the parent attempt to settle.";
     case "missing_capability": return `Required capability unavailable: ${blocker.capability.replaceAll("_", " ")}.`;
     case "pipeline_release": return releaseReasons[blocker.reason];
     case "dispatch_rejected": {

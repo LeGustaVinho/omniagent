@@ -338,7 +338,9 @@ impl Store {
                 let pending = tx.prepare(
                     "SELECT id FROM jobs j WHERE project_id = ?1 AND queue_state <> 'cancelled'
                      AND (NOT EXISTS(SELECT 1 FROM job_attempts a WHERE a.job_id = j.id)
-                          OR EXISTS(SELECT 1 FROM job_recoveries r WHERE r.job_id = j.id))",
+                          OR EXISTS(SELECT 1 FROM job_recoveries r WHERE r.job_id = j.id)
+                          OR EXISTS(SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
+                              WHERE a.job_id = j.id AND w.state = 'waiting'))",
                 )?.query_map([&project], |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 for id in pending {

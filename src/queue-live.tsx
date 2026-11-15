@@ -60,6 +60,7 @@ function firstWaitReason(inspection: JobInspection) {
   const blocker = blockers[0];
   if (blocker) return queueBlockerReason(blocker);
   if (job.queuedRecovery) return job.queuedRecovery === "resume" ? "Checkpoint queued for resumption." : "Saved input queued for retry.";
+  if (job.downstreamWait) return "Selected downstream results are ready.";
   if (job.latestAttempt?.cancelRequested) return "Cancellation requested.";
   if (job.latestAttempt) return job.latestAttempt.status === "waiting_for_input" ? "The current attempt needs input." : "—";
   if (job.queueState === "queued") return "Waiting to start.";
@@ -106,7 +107,8 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
   const conversationId = attempt?.conversationId
     ?? (job.origin.type === "operator" ? job.context?.conversationId : undefined);
   const requestingRunId = job.origin.type === "agent" ? job.origin.runId : undefined;
-  const pending = job.queueState !== "cancelled" && (!attempt || job.queuedRecovery !== null);
+  const pending = job.queueState !== "cancelled" && (!attempt || job.queuedRecovery !== null ||
+    Boolean(job.downstreamWait && job.downstreamWait.state !== "yielding"));
   const running = attempt && ["starting", "running", "waiting_for_input"].includes(attempt.status);
 
   return (
@@ -134,9 +136,21 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
           {attempt && <><dt className="text-muted-foreground">Run ID</dt><dd className="break-all font-mono text-xs">{attempt.runId}</dd></>}
           {attempt?.recovery && <><dt className="text-muted-foreground">Recovery</dt><dd>{attempt.recovery === "resume" ? "Resumed from checkpoint" : "Retried saved input"}</dd></>}
         </dl>
-        {attempt && (attempt.status === "failed" || attempt.status === "interrupted") &&
+        {attempt && (!job.downstreamWait || job.downstreamWait.state === "needs_review")
+          && (attempt.status === "failed" || attempt.status === "interrupted") &&
           <JobFailurePanel projectId={job.projectId} runId={attempt.runId}
             openLogs={() => openActivity(attempt.runId, attempt.conversationId ?? undefined)} />}
+        {job.downstreamWait && <section className="grid gap-1.5" aria-label="Downstream jobs">
+          <h4 className="text-xs font-semibold">Downstream jobs</h4>
+          <ul className="divide-y divide-border rounded border border-border">
+            {job.downstreamWait.inputs.map((input) => <li key={input.childJobId} className="grid gap-1 p-2 text-xs">
+              <button type="button" className="break-all text-left text-primary hover:underline" onClick={() => onDependency(input.childJobId)}>
+                {input.childJobId}
+              </button>
+              <span className="capitalize">{input.status ?? "Pending result"}</span>
+            </li>)}
+          </ul>
+        </section>}
         {blockers.length > 0 && <section className="grid gap-1.5" aria-label="Admission blockers">
           <h4 className="text-xs font-semibold">Admission blockers</h4>
           <ul className="divide-y divide-border rounded border border-border">

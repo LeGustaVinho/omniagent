@@ -281,6 +281,8 @@ pub async fn conversation_events(
                     | ProviderEventData::Usage { .. }
                     | ProviderEventData::ContextWindowUsage { .. }
                     | ProviderEventData::RuntimeInspected { .. }
+                    | ProviderEventData::DownstreamWaitRequested { .. }
+                    | ProviderEventData::DownstreamContinuation { .. }
                     | ProviderEventData::ChildActivity { .. }
             )
         })

@@ -147,6 +147,7 @@ fn write_frames(process: &mut CapturedProcess, frames: Vec<WireMessage>) -> Resu
 
 enum Command {
     Interrupt,
+    YieldToDownstream,
     Approval(RequestId, ApprovalDecision, oneshot::Sender<Result<()>>),
     Question(RequestId, Value, oneshot::Sender<Result<()>>),
     Steer(SteerTarget, TurnInput, oneshot::Sender<Result<()>>),
@@ -180,6 +181,12 @@ impl ManagedTurnControl {
     pub fn interrupt(&self) -> Result<()> {
         self.commands
             .try_send(Command::Interrupt)
+            .map_err(|_| anyhow::anyhow!("attempt command queue is closed or busy"))
+    }
+
+    pub(crate) fn yield_to_downstream(&self) -> Result<()> {
+        self.commands
+            .try_send(Command::YieldToDownstream)
             .map_err(|_| anyhow::anyhow!("attempt command queue is closed or busy"))
     }
 
@@ -302,11 +309,16 @@ fn start_turn(
                 phase: FailurePhase::Preparation,
                 ..Default::default()
             },
+            quiescence_confirmed: false,
+            downstream_requested: false,
         };
         let outcome = execution
             .run(runner.as_ref(), &receiver, bridge_executable)
             .and_then(|status| {
-                if status == RunStatus::Succeeded && !execution.plan.question_route.is_native() {
+                if status == RunStatus::Succeeded
+                    && !execution.plan.question_route.is_native()
+                    && !execution.downstream_requested
+                {
                     execution.failure.phase = FailurePhase::ResultValidation;
                     execution.complete_structured_planning()?;
                 }
@@ -350,6 +362,7 @@ fn start_turn(
                 status,
                 Some(answer),
                 Some(execution.failure),
+                execution.quiescence_confirmed,
             ))?;
         Ok(status)
     });
@@ -362,6 +375,8 @@ fn start_turn(
 
 struct TurnExecution {
     failure: FailureObservation,
+    quiescence_confirmed: bool,
+    downstream_requested: bool,
     admission: Option<LaunchGate>,
     app: Handle,
     store: Store,
@@ -688,10 +703,16 @@ impl TurnExecution {
         if let Ok(exit) = ended.as_ref() {
             self.failure.process = Some((*exit).into());
         }
-        if managed_writer || self.exiting() {
+        let registration = endpoint.map(RunBridge::registration);
+        drop(bridge);
+        self.downstream_requested = self
+            .app
+            .block_on(self.store.has_yielding_wait(self.plan.run.id.clone()))?;
+        if managed_writer || self.exiting() || self.downstream_requested {
             control
                 .confirm_quiescence()
                 .inspect_err(|_| self.failure.cause = Some(FailureCause::StopUnconfirmed))?;
+            self.quiescence_confirmed = true;
         }
         if managed_writer {
             self.failure.phase = FailurePhase::EvidenceCapture;
@@ -709,8 +730,8 @@ impl TurnExecution {
             process: self.failure.process,
             ..prior_failure
         };
-        if let Some(endpoint) = endpoint {
-            let registration = match endpoint.registration() {
+        if let Some(registration) = registration {
+            let registration = match registration {
                 Registration::Configured
                     if self.plan.requires_bridge || matches!(run, Ok(RunStatus::Succeeded)) =>
                 {
@@ -760,7 +781,9 @@ impl TurnExecution {
                 commands.try_recv()
             };
             match command {
-                Ok(Command::Interrupt) | Err(mpsc::TryRecvError::Disconnected) => {
+                Ok(Command::Interrupt | Command::YieldToDownstream)
+                | Err(mpsc::TryRecvError::Disconnected) => {
+                    let yielding = matches!(command, Ok(Command::YieldToDownstream));
                     let outcome = if sent {
                         match interrupt_to_completion(process, session, |event, source| {
                             self.record(event, source)
@@ -771,11 +794,13 @@ impl TurnExecution {
                     } else {
                         RunStatus::Cancelled
                     };
-                    return Ok(if exiting && outcome == RunStatus::Cancelled {
-                        RunStatus::Interrupted
-                    } else {
-                        outcome
-                    });
+                    return Ok(
+                        if (exiting || yielding) && outcome == RunStatus::Cancelled {
+                            RunStatus::Interrupted
+                        } else {
+                            outcome
+                        },
+                    );
                 }
                 Ok(Command::Approval(id, answer, reply)) => {
                     if matches!(&id, RequestId::Text(id) if id.starts_with(PERMISSION_PREFIX)) {
@@ -1348,7 +1373,8 @@ impl TurnExecution {
         let deadline = Instant::now() + Duration::from_secs(5);
         while session.suggestion_pending() {
             match commands.try_recv() {
-                Ok(Command::Interrupt) | Err(mpsc::TryRecvError::Disconnected) => {
+                Ok(Command::Interrupt | Command::YieldToDownstream)
+                | Err(mpsc::TryRecvError::Disconnected) => {
                     return self.finish_suggestion(session, SuggestionOutcome::Cancelled);
                 }
                 Ok(

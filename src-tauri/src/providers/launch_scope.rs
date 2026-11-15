@@ -13,7 +13,7 @@ use crate::{
     customizations::{CustomizationKind, LaunchReview, ReviewState},
     mcp_bridge::{
         BridgeLaunch, GET_JOB_STATUS, INSPECT_OMNIAGENT, INSPECT_SCOPE, REQUEST_PERMISSION,
-        SERVER_NAME, SUBMIT_JOB,
+        SERVER_NAME, SUBMIT_JOB, WAIT_FOR_JOBS,
     },
     repository::CheckoutLayout,
     runner::Runner,
@@ -165,9 +165,15 @@ impl ScopedLaunch {
             mcp.insert(SERVER_NAME.into(), serde_json::to_value(bridge)?);
             self.record_argument(
                 "--allowedTools",
-                [INSPECT_SCOPE, INSPECT_OMNIAGENT, SUBMIT_JOB, GET_JOB_STATUS]
-                    .map(|tool| format!("mcp__{SERVER_NAME}__{tool}"))
-                    .join(","),
+                [
+                    INSPECT_SCOPE,
+                    INSPECT_OMNIAGENT,
+                    SUBMIT_JOB,
+                    GET_JOB_STATUS,
+                    WAIT_FOR_JOBS,
+                ]
+                .map(|tool| format!("mcp__{SERVER_NAME}__{tool}"))
+                .join(","),
             );
             if bridge.permission_prompt {
                 self.record_argument(
@@ -306,6 +312,7 @@ impl ScopedLaunch {
                         INSPECT_OMNIAGENT: {"approval_mode": "approve"},
                         SUBMIT_JOB: {"approval_mode": "approve"},
                         GET_JOB_STATUS: {"approval_mode": "approve"},
+                        WAIT_FOR_JOBS: {"approval_mode": "approve"},
                     },
                 }))?,
             );

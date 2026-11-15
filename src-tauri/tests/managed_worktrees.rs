@@ -15,9 +15,9 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     conversations::SessionScope,
     jobs::{
-        AdmissionBlocker, AdmissionEnvironment, FailureCause, FailurePhase, Job, JobKind,
-        JobPermission, JobRequest, JobRole, JobRule, JobScheduler, JobWorkspace, PipelineCommand,
-        PipelineDispatch, PipelineNodeKind, RecoveryAction, ReleaseBlocker,
+        AdmissionBlocker, AdmissionEnvironment, DownstreamWaitState, FailureCause, FailurePhase,
+        Job, JobKind, JobPermission, JobRequest, JobRole, JobRule, JobScheduler, JobWorkspace,
+        PipelineCommand, PipelineDispatch, PipelineNodeKind, RecoveryAction, ReleaseBlocker,
     },
     process_io::CapturedProcess,
     providers::{Provider, SessionMode, runtime::start_managed_turn},
@@ -314,6 +314,45 @@ fn candidate_fixture_worker() -> Result<()> {
             Some("config/read") => json!({"config":{"sandbox_mode":"workspace-write"}}),
             Some("model/list" | "skills/list") => json!({"data":[]}),
             Some("turn/start") => {
+                let text = frame
+                    .pointer("/params/input/0/text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let report = if text.contains("\"selectedResults\"") {
+                    ensure!(
+                        text.contains("Selected downstream report"),
+                        "The continuation missed the selected report"
+                    );
+                    ensure!(
+                        text.contains("Selected command report"),
+                        "The continuation missed the command output"
+                    );
+                    ensure!(
+                        !text.contains("non-selected report"),
+                        "The continuation received an unselected result"
+                    );
+                    Some("Continued with the selected report")
+                } else if text == "Produce downstream report fixture" {
+                    fs::write(
+                        root.join("downstream.txt"),
+                        "Child writer changed this file\n",
+                    )?;
+                    Some("Selected downstream report")
+                } else {
+                    None
+                };
+                if let Some(report) = report {
+                    let accepted = json!({"id":frame["id"], "result":{"turn":{"id":"turn"}}});
+                    let message = json!({"method":"item/completed","params":{
+                        "threadId":"fixture", "turnId":"turn", "item":{"type":"agentMessage","id":"message","text":report}
+                    }});
+                    let terminal = json!({"method":"turn/completed","params":{
+                        "threadId":"fixture", "turn":{"id":"turn","status":"completed"}
+                    }});
+                    writeln!(output, "{accepted}\n{message}\n{terminal}")?;
+                    output.flush()?;
+                    continue;
+                }
                 let binary = root.join("candidate.bin");
                 if !binary.exists() {
                     fs::write(root.join("committed.txt"), "Committed by the CLI\n")?;
@@ -605,6 +644,394 @@ async fn queue_approved_writer(
         .decide_job_approval(job.project_id.clone(), approval.clone(), true)
         .await?;
     Ok(job)
+}
+
+struct DownstreamFixtureRunner;
+
+impl Runner for DownstreamFixtureRunner {
+    fn identity(&self) -> &str {
+        DirectWindowsRunner.identity()
+    }
+
+    fn executable_revision(&self, path: &Path) -> Option<String> {
+        (path.file_name() == Some(OsStr::new("powershell.exe")))
+            .then(|| DirectWindowsRunner.executable_revision(path))
+            .flatten()
+    }
+
+    fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
+        if request.executable.file_name() == Some(OsStr::new("powershell.exe")) {
+            DirectWindowsRunner.launch(request)
+        } else {
+            CandidateWriter.launch(request)
+        }
+    }
+}
+
+#[tokio::test]
+async fn waiting_writer_yields_its_only_slot_and_resumes_once_with_frozen_child_results()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("downstream.sqlite");
+    let store = Store::open(database.clone())?;
+    let source_path = temp.path().join("source");
+    let project = repository(&store, &source_path).await?;
+    let task = store
+        .create_project_task(project.project_id.clone(), "Downstream fixture".into())
+        .await?;
+    let managed = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project.project_id.clone(),
+        task.id.clone(),
+        project.checkout_id.clone(),
+    )
+    .await?;
+    fs::create_dir_all(source_path.join(".git/info"))?;
+    fs::write(
+        source_path.join(".git/info/exclude"),
+        "fixture-hold-open\nfixture-ready\nignored.txt\n",
+    )?;
+    fs::write(managed.root.join("fixture-hold-open"), [])?;
+    let runtime = Arc::new(DownstreamFixtureRunner);
+    store.set_job_queue_capacity(1).await?;
+    let env = AdmissionEnvironment {
+        runner: runtime.identity().into(),
+        bridge_available: false,
+    };
+    let pipeline = "downstream-fixture".to_owned();
+    store
+        .register_job_pipeline(project.project_id.clone(), pipeline.clone())
+        .await?;
+    for (node, kind) in [
+        ("parent", PipelineNodeKind::Execution),
+        ("command", PipelineNodeKind::Execution),
+        ("approval", PipelineNodeKind::ImplementationApproval),
+    ] {
+        store
+            .register_job_pipeline_node(
+                project.project_id.clone(),
+                pipeline.clone(),
+                node.into(),
+                kind,
+            )
+            .await?;
+    }
+    store
+        .set_job_pipeline_plan(
+            project.project_id.clone(),
+            pipeline.clone(),
+            None,
+            "plan-v1".into(),
+        )
+        .await?;
+    let release = store
+        .record_job_pipeline_release(
+            project.project_id.clone(),
+            pipeline.clone(),
+            "approval".into(),
+            "plan-v1".into(),
+            managed.checkout_id.clone(),
+            task.id.clone(),
+        )
+        .await?;
+    let binding = |node: &str| PipelineDispatch {
+        pipeline_run_id: pipeline.clone(),
+        node_instance_id: node.into(),
+        plan_revision: Some(release.plan_revision.clone()),
+        release_id: Some(release.id.clone()),
+    };
+    store
+        .set_project_job_rules(
+            project.project_id.clone(),
+            vec![],
+            vec![JobRule {
+                role: JobRole::Pipeline,
+                operation: SessionMode::ApprovedWrite,
+                workspace: JobWorkspace::Project,
+                permission: JobPermission::Allow,
+                requirements: Default::default(),
+            }],
+        )
+        .await?;
+    let parent = store
+        .submit_pipeline_agent_job(
+            binding("parent"),
+            SessionScope {
+                provider: Provider::Codex,
+                profile_id: "downstream-fixture".into(),
+                account_binding: None,
+                checkout: managed.root.clone(),
+                executable: std::env::current_exe()?,
+                cli_version: "0.169.0-alpha.11.1".into(),
+                runner: runtime.identity().into(),
+                permission_revision: "writer-fixture".into(),
+                mode: SessionMode::ApprovedWrite,
+                model: None,
+                effort: None,
+            },
+            JobRequest {
+                checkout_id: Some(managed.checkout_id.clone()),
+                task_id: Some(task.id.clone()),
+                mode: SessionMode::ApprovedWrite,
+                instructions: "Edit the fixture and wait for downstream work".into(),
+                dependencies: vec![],
+                requires_bridge: false,
+            },
+        )
+        .await?;
+    let scheduler = JobScheduler::start(store.clone(), runtime.clone(), None);
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        while !managed.root.join("fixture-ready").is_file() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await?;
+    let current = store
+        .job(project.project_id.clone(), parent.id.clone())
+        .await?
+        .unwrap()
+        .latest_attempt
+        .unwrap();
+    assert_eq!(current.status, RunStatus::Running);
+    let submit = |request_id: &str, instructions: &str| {
+        store.submit_agent_job(
+            current.run_id.clone(),
+            request_id.into(),
+            JobRequest {
+                checkout_id: None,
+                task_id: None,
+                mode: SessionMode::ApprovedWrite,
+                instructions: instructions.into(),
+                dependencies: vec![],
+                requires_bridge: false,
+            },
+        )
+    };
+    let selected = submit("selected", "Produce downstream report fixture").await?;
+    let cancelled = submit("cancelled", "This selected command is cancelled").await?;
+    let ignored = submit("ignored", "non-selected report").await?;
+    let command = store
+        .submit_pipeline_command_job(
+            binding("command"),
+            managed.checkout_id.clone(),
+            task.id.clone(),
+            vec![],
+            PipelineCommand {
+                executable: std::path::PathBuf::from(
+                    std::env::var_os("SystemRoot").context("Windows root is unavailable")?,
+                )
+                .join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
+                arguments: vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    "Write-Output 'Selected command report'".into(),
+                ],
+            },
+        )
+        .await?;
+    assert!(
+        store
+            .request_downstream_wait(
+                current.run_id.clone(),
+                "wrong-route".into(),
+                vec![command.id.clone()]
+            )
+            .await
+            .is_err()
+    );
+    let inspection = store
+        .inspect_job(project.project_id.clone(), selected.id.clone(), env.clone())
+        .await?
+        .unwrap();
+    assert!(inspection.blockers.iter().any(|blocker| matches!(
+        blocker,
+        AdmissionBlocker::Capacity {
+            active: 1,
+            limit: 1
+        }
+    )));
+    assert!(inspection.blockers.iter().any(|blocker| matches!(blocker, AdmissionBlocker::Writer { run_id, .. } if run_id == &current.run_id)));
+    let approval = inspection
+        .blockers
+        .into_iter()
+        .find_map(|blocker| match blocker {
+            AdmissionBlocker::Approval { approval_id } => Some(approval_id),
+            _ => None,
+        })
+        .context("The child didn't request approval")?;
+    store
+        .decide_job_approval(project.project_id.clone(), approval, true)
+        .await?;
+    store.set_job_queue_paused(true).await?;
+    let wait = store
+        .request_pipeline_downstream_wait(
+            current.run_id.clone(),
+            "fixture-wait".into(),
+            vec![
+                selected.id.clone(),
+                cancelled.id.clone(),
+                command.id.clone(),
+            ],
+        )
+        .await?;
+    let duplicate = store
+        .request_pipeline_downstream_wait(
+            current.run_id.clone(),
+            "fixture-wait".into(),
+            vec![
+                cancelled.id.clone(),
+                command.id.clone(),
+                selected.id.clone(),
+            ],
+        )
+        .await?;
+    assert_eq!(duplicate.id, wait.id);
+    assert!(
+        store
+            .request_downstream_wait(
+                current.run_id.clone(),
+                "fixture-wait".into(),
+                vec![ignored.id]
+            )
+            .await
+            .is_err()
+    );
+    store
+        .set_pending_job_state(
+            project.project_id.clone(),
+            cancelled.id.clone(),
+            omniagent::jobs::QueueState::Cancelled,
+        )
+        .await?;
+    let parked = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        loop {
+            let wait = store
+                .downstream_wait(project.project_id.clone(), current.run_id.clone())
+                .await?
+                .unwrap();
+            if wait.state != DownstreamWaitState::Yielding {
+                return Ok::<_, anyhow::Error>(wait);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await??;
+    assert_eq!(parked.state, DownstreamWaitState::Waiting);
+    let parent_conversation = current
+        .conversation_id
+        .as_ref()
+        .context("The parent conversation is unavailable")?;
+    assert_eq!(
+        parked.context_id.as_ref(),
+        Some(
+            &store
+                .conversation(parent_conversation.clone())
+                .await?
+                .context_id
+        )
+    );
+    let queue = store
+        .inspect_project_queue(project.project_id.clone(), env.clone())
+        .await?;
+    assert_eq!(queue.active, 0);
+    let selected_after_yield = queue
+        .jobs
+        .iter()
+        .find(|job| job.job.id == selected.id)
+        .unwrap();
+    assert_eq!(
+        selected_after_yield.blockers,
+        [AdmissionBlocker::QueuePaused]
+    );
+    assert!(matches!(
+        store
+            .attempt_worktree_evidence(project.project_id.clone(), current.run_id.clone())
+            .await?,
+        Some(AttemptWorktreeEvidence::Saved { .. })
+    ));
+    scheduler.shutdown().await?;
+    drop(store);
+
+    let store = Store::open(database)?;
+    store.recover_agent_attempts_after_restart().await?;
+    assert_eq!(
+        store
+            .downstream_wait(project.project_id.clone(), current.run_id.clone())
+            .await?,
+        Some(parked)
+    );
+    let scheduler = JobScheduler::start(store.clone(), runtime, None);
+    store.set_job_queue_paused(false).await?;
+    let continued = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        loop {
+            let attempt = store
+                .job(project.project_id.clone(), parent.id.clone())
+                .await?
+                .unwrap()
+                .latest_attempt
+                .unwrap();
+            if attempt.ordinal > current.ordinal && attempt.status.is_terminal() {
+                return Ok::<_, anyhow::Error>(attempt);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await??;
+    assert_eq!(continued.status, RunStatus::Succeeded);
+    assert_eq!(continued.ordinal, 2);
+    assert_eq!(continued.previous_run_id.as_ref(), Some(&current.run_id));
+    let evidence = store
+        .downstream_wait(project.project_id.clone(), current.run_id.clone())
+        .await?
+        .unwrap();
+    assert_eq!(evidence.state, DownstreamWaitState::Continued);
+    assert_eq!(
+        evidence.continuation_run_id.as_ref(),
+        Some(&continued.run_id)
+    );
+    let observed_child = evidence
+        .inputs
+        .iter()
+        .find(|input| input.child_job_id == selected.id)
+        .unwrap();
+    assert_eq!(observed_child.status, Some(RunStatus::Succeeded));
+    assert!(observed_child.child_run_id.is_some() && observed_child.result_context_id.is_some());
+    assert!(
+        evidence
+            .inputs
+            .iter()
+            .any(|input| input.child_job_id == command.id
+                && input.status == Some(RunStatus::Succeeded)
+                && input.child_run_id.is_some()
+                && input.result_context_id.is_none())
+    );
+    assert!(
+        evidence
+            .inputs
+            .iter()
+            .any(|input| input.child_job_id == cancelled.id
+                && input.status == Some(RunStatus::Cancelled)
+                && input.child_run_id.is_none())
+    );
+    let dispatch = store
+        .agent_dispatch(parent_conversation.clone(), continued.run_id)
+        .await?
+        .context("Missing continuation dispatch")?;
+    let continuation = &dispatch
+        .snapshot
+        .submitted_messages
+        .last()
+        .context("Missing continuation input")?
+        .text;
+    assert!(continuation.contains("Selected downstream report") && continuation.contains(&wait.id));
+    assert!(continuation.contains("Selected command report"));
+    assert!(!continuation.contains("non-selected report"));
+    assert!(managed.root.join("downstream.txt").is_file());
+    scheduler.shutdown().await?;
+    assert!(store.claim_next_job(env).await?.is_none());
+    Ok(())
 }
 
 struct VerifyCommandOnRetry(AtomicBool);

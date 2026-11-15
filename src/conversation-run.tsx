@@ -12,6 +12,8 @@ type EventData =
   | { type: "error"; message: string }
   | { type: "tool"; name: string; phase: string }
   | { type: "runtime_inspected" }
+  | { type: "downstream_wait_requested"; wait_id: string }
+  | { type: "downstream_continuation"; wait_id: string; parent_run_id: string }
   | { type: "reasoning"; text: string; summary: boolean }
   | { type: "usage"; input: number | null; output: number | null; cached_input: number | null }
   | { type: "context_window_usage"; used: number; size: number }
@@ -84,6 +86,8 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
           if (data.type === "reasoning") current.reasoning.push(data);
           if (data.type === "tool") current.tools.push(data);
           if (data.type === "runtime_inspected") current.tools.push({ type: "tool", name: "inspect_omniagent", phase: "Scope inspected" });
+          if (data.type === "downstream_wait_requested") current.tools.push({ type: "tool", name: "wait_for_jobs", phase: `Wait ${data.wait_id} recorded` });
+          if (data.type === "downstream_continuation") current.tools.push({ type: "tool", name: "wait_for_jobs", phase: `Continued wait ${data.wait_id}` });
           if (data.type === "usage") current.usage = data;
           if (data.type === "context_window_usage") current.contextWindow = data;
         }

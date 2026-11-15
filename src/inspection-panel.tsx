@@ -5,6 +5,7 @@ import { CircleDot, FlaskConical, LibraryBig } from "lucide-react";
 import { useState } from "react";
 import type { RunRecord } from "@/bindings/RunRecord";
 import type { CommandJobOutput } from "@/bindings/CommandJobOutput";
+import type { DownstreamWait } from "@/bindings/DownstreamWait";
 import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
 import { deliveryBase, deliveryBranch, deliveryNotePath, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
@@ -22,10 +23,10 @@ type InspectorPage = (typeof inspectorPages)[number];
 
 type InspectorProps = WorkspaceProps & { runId: string; conversationId?: string; onClose: () => void };
 
-export function RunInspector({ runId, conversationId, onClose, checkout, simulation, openWorkspace, openChanges }: InspectorProps) {
+export function RunInspector({ runId, conversationId, onClose, checkout, simulation, openWorkspace, openChanges, openActivity }: InspectorProps) {
   const [page, setPage] = useState<InspectorPage>("Overview");
   if (!simulation) return <RecordedExecutionRun projectId={checkout.projectId} runId={runId}
-    conversationId={conversationId} onClose={onClose} />;
+    conversationId={conversationId} onClose={onClose} openActivity={openActivity} />;
 
   const step = simulation.delivery;
   const status = steps[step];
@@ -66,7 +67,7 @@ export function RunInspector({ runId, conversationId, onClose, checkout, simulat
   );
 }
 
-type RecordedRunProps = Pick<InspectorProps, "conversationId" | "runId" | "onClose"> & { projectId: string };
+type RecordedRunProps = Pick<InspectorProps, "conversationId" | "runId" | "onClose" | "openActivity"> & { projectId: string };
 
 function RecordedExecutionRun(props: RecordedRunProps) {
   const { projectId, conversationId, runId } = props;
@@ -120,7 +121,7 @@ function RecordedCommandRun({ run, onClose }: { run: RunRecord; onClose: () => v
   </section>;
 }
 
-function RecordedConversationRun({ conversationId, projectId, runId, onClose }: RecordedRunProps) {
+function RecordedConversationRun({ conversationId, projectId, runId, onClose, openActivity }: RecordedRunProps) {
   const current = useQuery({
     queryKey: ["inspect-conversation-run", projectId, conversationId, runId],
     queryFn: () => invoke<[RunRecord, string]>("inspect_conversation_run", { projectId, conversationId, runId }),
@@ -133,12 +134,40 @@ function RecordedConversationRun({ conversationId, projectId, runId, onClose }: 
   return <div className="h-full overflow-auto">
     <ConversationActivity embedded conversationId={owner} run={run} projection={activity.projection} onClose={onClose} />
     <div className="work-inspection-body">
+      {!activity.live && <DownstreamHistory projectId={projectId} runId={runId} openActivity={openActivity} />}
       {(run.status === "failed" || run.status === "interrupted") && <JobFailurePanel projectId={projectId} runId={runId} />}
       <ConversationRequests conversationId={owner} runId={runId} activity={activity} />
       {activity.live && <StopConversation {...activity} />}
       {activity.error && <p role="alert">{String(activity.error)}</p>}
     </div>
   </div>;
+}
+
+function DownstreamHistory({ projectId, runId, openActivity }: Pick<RecordedRunProps, "projectId" | "runId" | "openActivity">) {
+  const recorded = useQuery({
+    queryKey: ["downstream-wait", projectId, runId],
+    queryFn: () => invoke<DownstreamWait | null>("downstream_wait", { projectId, runId }),
+    refetchInterval: ({ state }) => state.data?.state === "waiting" ? 750 : false,
+  });
+  if (recorded.isError) return <p role="alert">{String(recorded.error)}</p>;
+  const wait = recorded.data;
+  if (!wait) return null;
+  return <section aria-label="Downstream results" className="grid gap-2 pb-3">
+    <h3>Downstream results</h3>
+    <p className="capitalize">{wait.state.replaceAll("_", " ")}</p>
+    <ul className="grid gap-1">
+      {wait.inputs.map((input) => <li key={input.childJobId} className="flex flex-wrap items-center gap-2">
+        <code className="break-all">{input.childJobId}</code>
+        <span className="capitalize">{input.status ?? "Pending result"}</span>
+        {input.childRunId && <Button type="button" variant="outline" onClick={() => openActivity(input.childRunId!)}>
+          Inspect child attempt
+        </Button>}
+      </li>)}
+    </ul>
+    {wait.continuationRunId && <Button className="justify-self-start" variant="outline" onClick={() => openActivity(wait.continuationRunId!)}>
+      Open continuation
+    </Button>}
+  </section>;
 }
 
 export function SimulationDiagnostics({ openSystem, openActivity, simulation }: WorkspaceProps & { openSystem?: () => void }) {

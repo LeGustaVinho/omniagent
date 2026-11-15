@@ -63,8 +63,9 @@ enum ActiveControl {
 }
 
 impl ActiveControl {
-    fn interrupt(&self) -> bool {
+    fn request_stop(&self, cancelled: bool) -> bool {
         match self {
+            Self::Agent { control, .. } if !cancelled => control.yield_to_downstream().is_ok(),
             Self::Agent { control, .. } => control.interrupt().is_ok(),
             Self::Command(signal) => signal.send(true).is_ok(),
         }
@@ -176,14 +177,14 @@ async fn drive(
         } else {
             // Observe changes before reading, so a submission between the read and wait wakes us.
             signal.borrow_and_update();
-            match pending_interrupts(&store).await {
-                Ok(ids) => {
+            match pending_stops(&store).await {
+                Ok(stops) => {
                     let mut live = active.lock().expect("job scheduler lock");
-                    for id in ids {
+                    for (id, cancelled) in stops {
                         if let Some(turn) = live.get_mut(&id)
                             && !turn.interrupt_sent
                         {
-                            turn.interrupt_sent = turn.control.interrupt();
+                            turn.interrupt_sent = turn.control.request_stop(cancelled);
                         }
                     }
                 }
@@ -262,14 +263,23 @@ async fn drive(
     }
 }
 
-async fn pending_interrupts(store: &Store) -> Result<Vec<String>> {
-    store.execute(|db| {
-        let mut query = db.prepare(
-            "SELECT a.run_id FROM job_attempts a JOIN runs r ON r.id = a.run_id
-             WHERE a.cancel_requested = 1 AND r.status IN ('starting', 'running', 'waiting_for_input')",
+async fn pending_stops(store: &Store) -> Result<Vec<(String, bool)>> {
+    store
+        .execute(|db| {
+            let mut query = db.prepare(
+            "SELECT a.run_id, a.cancel_requested FROM job_attempts a JOIN runs r ON r.id = a.run_id
+             WHERE r.status IN ('starting', 'running', 'waiting_for_input') AND (
+                  a.cancel_requested = 1 OR EXISTS (
+                      SELECT 1 FROM job_downstream_waits w WHERE w.parent_run_id = a.run_id
+                      AND w.state = 'yielding' AND w.requested_at <= unixepoch('subsec') - 1
+                  )
+             )",
         )?;
-        Ok(query.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
-    }).await
+            Ok(query
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await
 }
 
 fn report(error: &anyhow::Error) {

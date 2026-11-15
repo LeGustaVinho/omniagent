@@ -188,6 +188,7 @@ fn main() {
             queue_runtime::project_job_rules,
             queue_runtime::set_project_job_rules,
             queue_runtime::job_failure,
+            queue_runtime::downstream_wait,
             queue_runtime::command_job_run,
             queue_runtime::command_job_output,
             queue_runtime::set_pending_job_state,

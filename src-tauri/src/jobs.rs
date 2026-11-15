@@ -11,6 +11,7 @@ use crate::{
 
 mod admission;
 mod command;
+mod downstream;
 mod failures;
 mod inspection;
 mod notices;
@@ -23,6 +24,8 @@ pub use admission::{
 };
 pub(crate) use command::recover_commands;
 pub use command::{CommandJobOutput, PipelineCommand};
+pub use downstream::{DownstreamInput, DownstreamWait, DownstreamWaitState};
+pub(crate) use downstream::{observe_child_run, recover_waiting_parent, settle_parent_wait};
 pub(crate) use failures::record_job_failure;
 pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
@@ -144,6 +147,7 @@ pub struct Job {
     pub queue_state: QueueState,
     pub latest_attempt: Option<JobAttempt>,
     pub queued_recovery: Option<RecoveryAction>,
+    pub downstream_wait: Option<DownstreamWait>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -285,14 +289,23 @@ impl Store {
                     "UPDATE jobs SET queue_state = ?3 WHERE project_id = ?1 AND id = ?2
                  AND queue_state IN ('queued', 'paused')
                  AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = ?2)
-                      OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = ?2))",
+                      OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = ?2)
+                      OR EXISTS (SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
+                          WHERE a.job_id = ?2 AND w.state IN ('waiting', 'needs_review')))",
                     params![project_id, id, state.as_sql()],
                 )?;
                 ensure!(changed == 1, "job is not pending in this project");
                 if state == QueueState::Cancelled {
                     tx.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [&id])?;
+                    tx.execute("UPDATE job_downstream_waits SET state = 'cancelled'
+                        WHERE state IN ('waiting', 'needs_review') AND parent_run_id IN (
+                            SELECT run_id FROM job_attempts WHERE job_id = ?1
+                        )", [&id])?;
                 }
                 let job = load_job(&tx, &project_id, &id)?.context("job no longer exists")?;
+                if state == QueueState::Cancelled {
+                    downstream::observe_cancelled_job(&tx, &job)?;
+                }
                 tx.commit()?;
                 Ok(job)
             })
@@ -450,6 +463,17 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
         }
         None => None,
     };
+    let downstream_wait = match latest_attempt.as_ref() {
+        Some(attempt) => downstream::load_wait(db, &attempt.run_id)?.filter(|wait| {
+            matches!(
+                wait.state,
+                DownstreamWaitState::Yielding
+                    | DownstreamWaitState::Waiting
+                    | DownstreamWaitState::NeedsReview
+            )
+        }),
+        None => None,
+    };
     Ok(Some(Job {
         id: id.into(),
         project_id: project_id.into(),
@@ -468,6 +492,7 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
         priority: row.get(7)?,
         queue_state: QueueState::from_sql(row.get_ref(8)?.as_str()?)?,
         latest_attempt,
+        downstream_wait,
         queued_recovery: row
             .get::<_, Option<String>>(15)?
             .as_deref()
