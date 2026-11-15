@@ -26,6 +26,8 @@ use uuid::Uuid;
 
 mod support;
 
+const INSTRUCTION_AUDIT: &str = "Instruction audit. Reply with the marker values from your instruction context. Do not read any files or use any tools. If there are no markers reply NONE.";
+
 struct Worktree {
     _temporary: tempfile::TempDir,
     primary: PathBuf,
@@ -104,8 +106,9 @@ fn invoke(
     model: &str,
     mode: SessionMode,
     cwd: &Path,
-    launch_prefix: &[&str],
-) -> Result<String> {
+    prompt: &str,
+    configure: impl FnOnce(Vec<OsString>) -> Vec<OsString>,
+) -> Result<(String, Vec<ProviderEventData>)> {
     let adapter = provider.adapter();
     let executable = adapter.discover(None)?;
     let mut session = adapter.create_session(SessionRequest {
@@ -115,11 +118,7 @@ fn invoke(
         model: Some(model.into()),
         effort: None,
     })?;
-    let arguments = launch_prefix
-        .iter()
-        .map(OsString::from)
-        .chain(session.arguments())
-        .collect::<Vec<_>>();
+    let arguments = configure(session.arguments());
     let arguments = arguments
         .iter()
         .map(|value| value.as_os_str())
@@ -135,6 +134,7 @@ fn invoke(
     }
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut output = String::new();
+    let mut observations = Vec::new();
     let mut sent = false;
     loop {
         let frame = process
@@ -150,10 +150,13 @@ fn invoke(
                 || (provider == Provider::Claude
                     && matches!(event.data, ProviderEventData::Handshake { .. }));
             if ready && !sent {
-                for frame in session.send(TurnInput {
-                    message_id: "instructions".into(),
-                    text: "Instruction audit. Reply with the marker values from your instruction context. Do not read any files or use any tools. If there are no markers reply NONE.".into(),
-                })?.outbound {
+                for frame in session
+                    .send(TurnInput {
+                        message_id: "instructions".into(),
+                        text: prompt.into(),
+                    })?
+                    .outbound
+                {
                     process.input.send(frame.as_bytes())?;
                 }
                 sent = true;
@@ -178,8 +181,11 @@ fn invoke(
                         outcome == TurnOutcome::Completed,
                         "instruction audit did not complete"
                     );
-                    return Ok(output);
+                    return Ok((output, observations));
                 }
+                evidence @ (ProviderEventData::ContextRead { .. }
+                | ProviderEventData::SessionCustomizationsReported { .. }
+                | ProviderEventData::SkillUsed { .. }) => observations.push(evidence),
                 _ => {}
             }
         }
@@ -194,12 +200,19 @@ fn codex_loads_configured_fallback_and_linked_worktree_override() -> Result<()> 
     let fallback = marker(&worktree.linked.join("CODEX.md"))?;
     let override_marker = marker(&worktree.cwd.join("AGENTS.override.md"))?;
     let excluded_base = marker(&worktree.cwd.join("AGENTS.md"))?;
-    let output = invoke(
+    let (output, _) = invoke(
         Provider::Codex,
         "gpt-6-luna",
         SessionMode::ReadOnly,
         &worktree.cwd,
-        &["-c", "project_doc_fallback_filenames=[\"CODEX.md\"]"],
+        INSTRUCTION_AUDIT,
+        |args| {
+            ["-c", "project_doc_fallback_filenames=[\"CODEX.md\"]"]
+                .map(OsString::from)
+                .into_iter()
+                .chain(args)
+                .collect()
+        },
     )?;
     assert!(
         output.contains(&fallback),
@@ -229,12 +242,13 @@ fn antigravity_discovers_linked_worktree_instructions() -> Result<()> {
     let gemini = marker(&worktree.cwd.join("GEMINI.md"))?;
     fs::create_dir(worktree.cwd.join(".agents"))?;
     let custom = marker(&worktree.cwd.join(".agents/AGENTS.md"))?;
-    let output = invoke(
+    let (output, _) = invoke(
         Provider::Antigravity,
         "gemini-3.8-flash",
         SessionMode::Plan,
         &worktree.cwd,
-        &[],
+        INSTRUCTION_AUDIT,
+        std::convert::identity,
     )?;
     assert!(
         output.contains(&root),
@@ -264,12 +278,13 @@ fn claude_safe_mode_excludes_linked_worktree_imports() -> Result<()> {
     fs::write(worktree.linked.join("CLAUDE.md"), "@AGENTS.md")?;
     let local = marker(&worktree.linked.join("CLAUDE.local.md"))?;
     let direct = marker(&worktree.cwd.join("AGENTS.md"))?;
-    let output = invoke(
+    let (output, _) = invoke(
         Provider::Claude,
         "claude-haiku-5-5",
         SessionMode::ReadOnly,
         &worktree.cwd,
-        &[],
+        INSTRUCTION_AUDIT,
+        std::convert::identity,
     )?;
     assert_eq!(
         output.trim(),
@@ -282,6 +297,142 @@ fn claude_safe_mode_excludes_linked_worktree_imports() -> Result<()> {
             "Claude loaded implicit instructions in safe mode"
         );
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires authenticated Codex and gpt-6-luna"]
+fn codex_invokes_the_skill_from_the_linked_checkout() -> Result<()> {
+    let worktree = Worktree::new()?;
+    let primary = support::write_skill(&worktree.primary, ".agents/skills")?;
+    let linked = support::write_skill(&worktree.linked, ".agents/skills")?;
+    let (answer, _) = invoke(
+        Provider::Codex,
+        "gpt-6-luna",
+        SessionMode::ReadOnly,
+        &worktree.cwd,
+        "$omniagent-skill-fixture Follow the explicitly named skill and return its exact marker.",
+        std::convert::identity,
+    )?;
+    assert!(
+        answer.contains(&linked) && !answer.contains(&primary),
+        "unexpected Codex skill result: {answer}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires authenticated Antigravity and Gemini 3.8 Flash"]
+fn antigravity_invokes_and_reads_the_skill_from_the_linked_checkout() -> Result<()> {
+    let worktree = Worktree::new()?;
+    let primary = support::write_skill(&worktree.primary, ".agents/skills")?;
+    let linked = support::write_skill(&worktree.linked, ".agents/skills")?;
+    let (answer, events) = invoke(
+        Provider::Antigravity,
+        "gemini-3.8-flash",
+        SessionMode::Plan,
+        &worktree.cwd,
+        "/omniagent-skill-fixture",
+        std::convert::identity,
+    )?;
+    assert!(
+        answer.contains(&linked) && !answer.contains(&primary),
+        "unexpected Antigravity skill result: {answer}"
+    );
+    assert!(events.iter().any(|event| match event {
+        ProviderEventData::ContextRead { path, tool } if tool == "read_file" => {
+            dunce::canonicalize(path.trim_start_matches('/')).is_ok_and(|path| {
+                path == worktree
+                    .linked
+                    .join(".agents/skills/omniagent-skill-fixture/SKILL.md")
+            })
+        }
+        _ => false,
+    }));
+    Ok(())
+}
+
+fn claude_native_fixture(mut arguments: Vec<OsString>) -> Vec<OsString> {
+    arguments.retain(|argument| argument != "--safe-mode");
+    let sources = arguments
+        .iter()
+        .position(|arg| arg == "--setting-sources")
+        .expect("setting sources");
+    arguments[sources + 1] = "project".into();
+    arguments.extend(["--settings".into(), r#"{"disableAllHooks":true,"autoMemoryEnabled":false,"enabledPlugins":{"cc-plugin-agents-md@builtin":true},"pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":"claude-md-or-agents-md"}}}}"#.into()]);
+    arguments
+}
+
+#[test]
+#[ignore = "requires authenticated Claude Code v2.1.285+ with Haiku 5.5"]
+fn claude_resolves_direct_agents_and_the_main_checkout_skill_fallback() -> Result<()> {
+    let worktree = Worktree::new()?;
+    let primary_instructions = marker(&worktree.primary.join("CLAUDE.md"))?;
+    let shared = marker(&worktree.linked.join("AGENTS.md"))?;
+    let nested = marker(&worktree.cwd.join("AGENTS.md"))?;
+    let primary_skill = support::write_skill(&worktree.primary, ".claude/skills")?;
+    let (direct, _) = invoke(
+        Provider::Claude,
+        "claude-haiku-5-5",
+        SessionMode::ReadOnly,
+        &worktree.cwd,
+        INSTRUCTION_AUDIT,
+        claude_native_fixture,
+    )?;
+    assert!(
+        direct.contains(&shared)
+            && direct.contains(&nested)
+            && !direct.contains(&primary_instructions),
+        "unexpected Claude direct instruction result: {direct}"
+    );
+
+    let claude_file = worktree.linked.join("CLAUDE.md");
+    let claude = marker(&claude_file)?;
+    let text = fs::read_to_string(&claude_file)?;
+    fs::write(claude_file, format!("@AGENTS.md\n{text}"))?;
+    // Launch from the linked root so the import target is inside the CLI's working directory.
+    let (import, _) = invoke(
+        Provider::Claude,
+        "claude-haiku-5-5",
+        SessionMode::ReadOnly,
+        &worktree.linked,
+        INSTRUCTION_AUDIT,
+        claude_native_fixture,
+    )?;
+    assert!(
+        import.contains(&claude)
+            && import.contains(&shared)
+            && !import.contains(&nested)
+            && !import.contains(&primary_instructions),
+        "unexpected Claude import result: {import}; expected {claude} and {shared}"
+    );
+
+    let qualified_prompt = "/omniagent-skill-fixture";
+    let (inherited, _) = invoke(
+        Provider::Claude,
+        "claude-haiku-5-5",
+        SessionMode::ReadOnly,
+        &worktree.linked,
+        qualified_prompt,
+        claude_native_fixture,
+    )?;
+    assert!(
+        inherited.contains(&primary_skill),
+        "unexpected Claude inherited skill result: {inherited}"
+    );
+    let linked_skill = support::write_skill(&worktree.linked, ".claude/skills")?;
+    let (local, _) = invoke(
+        Provider::Claude,
+        "claude-haiku-5-5",
+        SessionMode::ReadOnly,
+        &worktree.linked,
+        qualified_prompt,
+        claude_native_fixture,
+    )?;
+    assert!(
+        local.contains(&linked_skill) && !local.contains(&primary_skill),
+        "unexpected Claude local skill result: {local}"
+    );
     Ok(())
 }
 
