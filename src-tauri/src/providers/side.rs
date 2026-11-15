@@ -21,6 +21,9 @@ use super::{
     SessionMode, SessionRequest, WireMessage,
 };
 
+mod codex_fresh;
+pub(crate) use codex_fresh::run_fresh_codex_until;
+
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SideSource {
@@ -68,6 +71,7 @@ pub enum SideUnavailable {
     InvalidInput,
     Busy,
     ProfileMismatch,
+    AccountChanged,
     UnverifiedProfile,
 }
 
@@ -75,7 +79,18 @@ pub enum SideUnavailable {
 #[serde(rename_all = "snake_case")]
 pub enum SideRoute {
     CodexSample,
+    FreshCodexSession,
     FreshClaudeSession,
+}
+
+impl SideRoute {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::CodexSample => "codex_sample",
+            Self::FreshCodexSession => "fresh_codex_session",
+            Self::FreshClaudeSession => "fresh_claude_session",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -147,6 +162,7 @@ pub fn run_fresh(
         |request| runner.launch(request),
         input,
         pinned_context,
+        scope.model.as_deref(),
         &|| false,
     )
 }
@@ -156,6 +172,7 @@ pub(crate) fn run_fresh_until(
     launch: impl FnOnce(LaunchRequest<'_>) -> io::Result<CapturedProcess>,
     input: SideInput,
     pinned_context: &str,
+    reported_model: Option<&str>,
     stopped: &dyn Fn() -> bool,
 ) -> Result<SideResponse> {
     let unavailable =
@@ -166,7 +183,7 @@ pub(crate) fn run_fresh_until(
     if scope.provider != Provider::Claude {
         return unavailable(input, SideUnavailable::ToolFreeFreshRouteUnavailable);
     }
-    let Some(model) = scope.model.as_deref() else {
+    let Some((model, reported_model)) = scope.model.as_deref().zip(reported_model) else {
         return unavailable(input, SideUnavailable::ProfileMismatch);
     };
     let scratch = tempfile::tempdir()?;
@@ -181,6 +198,8 @@ pub(crate) fn run_fresh_until(
         "--safe-mode",
         "--setting-sources",
         "",
+        "--permission-mode",
+        "plan",
         "--tools",
         "",
         "--strict-mcp-config",
@@ -203,7 +222,8 @@ pub(crate) fn run_fresh_until(
         arguments: &arguments,
     })?;
     let context = json!({"context":pinned_context, "question":input.question});
-    let observed = fresh_claude_response(&mut process, &directory, model, context, stopped);
+    let observed =
+        fresh_claude_response(&mut process, &directory, reported_model, context, stopped);
     stop_process(&process)?;
     let (outcome, usage) = observed?;
     let mut result = input.reply(outcome);
@@ -230,6 +250,7 @@ fn fresh_claude_response(
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut init_sent = false;
     let mut session_id = None;
+    let mut observed_model = false;
     loop {
         if stopped() {
             return Ok((SideOutcome::Cancelled, None));
@@ -271,8 +292,10 @@ fn fresh_claude_response(
                 )?;
             }
             Some("system") if frame["subtype"] == "init" => {
-                let valid = frame["model"].as_str() == Some(model)
-                    && frame["tools"].as_array().is_some_and(Vec::is_empty)
+                let valid = frame["model"]
+                    .as_str()
+                    .is_some_and(|model| !model.is_empty())
+                    && frame["permissionMode"] == "plan"
                     && frame["cwd"]
                         .as_str()
                         .and_then(|cwd| dunce::canonicalize(cwd).ok())
@@ -290,17 +313,39 @@ fn fresh_claude_response(
                         None,
                     ));
                 }
+                if !frame["tools"].as_array().is_some_and(Vec::is_empty) {
+                    return Ok((
+                        SideOutcome::Unavailable {
+                            reason: SideUnavailable::ToolFreeFreshRouteUnavailable,
+                        },
+                        None,
+                    ));
+                }
             }
             Some("control_request") => return Ok((SideOutcome::Failed, None)),
-            Some("assistant")
+            Some("assistant") => {
                 if frame
                     .pointer("/message/content")
                     .and_then(Value::as_array)
                     .is_some_and(|blocks| {
-                        blocks.iter().any(|block| block["type"] == "tool_use")
-                    }) =>
-            {
-                return Ok((SideOutcome::Failed, None));
+                        blocks.iter().any(|block| {
+                            matches!(block["type"].as_str(), Some("tool_use" | "server_tool_use"))
+                        })
+                    })
+                {
+                    return Ok((SideOutcome::Failed, None));
+                }
+                if let Some(producer) = frame.pointer("/message/model").and_then(Value::as_str) {
+                    if producer != model {
+                        return Ok((
+                            SideOutcome::Unavailable {
+                                reason: SideUnavailable::ProfileMismatch,
+                            },
+                            None,
+                        ));
+                    }
+                    observed_model = true;
+                }
             }
             Some("result") => {
                 if session_id
@@ -311,6 +356,28 @@ fn fresh_claude_response(
                     || frame["is_error"] != false
                 {
                     return Ok((SideOutcome::Failed, None));
+                }
+                if let Some(usage) = frame["modelUsage"]
+                    .as_object()
+                    .filter(|usage| !usage.is_empty())
+                {
+                    if usage.len() != 1 || !usage.contains_key(model) {
+                        return Ok((
+                            SideOutcome::Unavailable {
+                                reason: SideUnavailable::ProfileMismatch,
+                            },
+                            None,
+                        ));
+                    }
+                    observed_model = true;
+                }
+                if !observed_model {
+                    return Ok((
+                        SideOutcome::Unavailable {
+                            reason: SideUnavailable::ProfileMismatch,
+                        },
+                        None,
+                    ));
                 }
                 let usage = frame.get("usage").map(|usage| SideUsage {
                     input: usage["input_tokens"].as_u64(),

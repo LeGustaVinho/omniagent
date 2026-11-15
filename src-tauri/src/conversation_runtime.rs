@@ -50,6 +50,7 @@ async fn selected_scope(
         executable,
         version,
         models,
+        account_binding,
     } = profile(store, selection.provider, Some(selection.model_id.clone())).await?;
     let selected = models
         .into_iter()
@@ -64,7 +65,7 @@ async fn selected_scope(
     Ok(SessionScope {
         provider: selection.provider,
         profile_id: selection.profile_id,
-        account_binding: None,
+        account_binding,
         checkout: repository::checkout_root(store, checkout_id).await?,
         executable,
         cli_version: version,

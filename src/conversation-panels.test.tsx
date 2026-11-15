@@ -42,6 +42,24 @@ test("restores the side question and cancels its own queue attempt", async () =>
   });
 });
 
+test("shows a completed validation receipt without projecting its fixture answer", async () => {
+  vi.mocked(invoke).mockResolvedValue([{
+    purpose: "validation", provider: "claude", model: "haiku", evidenceId: "verification",
+    job: { id: "fixture", queueState: "queued", latestAttempt: { status: "succeeded" } },
+    response: { outcome: { kind: "answered", text: "private-fixture-code" } },
+  }]);
+  const client = new QueryClient();
+  const user = userEvent.setup();
+  const onStart = vi.fn();
+  render(<QueryClientProvider client={client}>
+    <SideQuestionPanel conversationId="chat" validation={{ pending: false, onStart }} onClose={vi.fn()} />
+  </QueryClientProvider>);
+  expect(await screen.findByText("Validation passed")).toBeTruthy();
+  expect(screen.queryByText("private-fixture-code")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Validate side questions" }));
+  expect(onStart).toHaveBeenCalledOnce();
+});
+
 test("renames the attributed conversation in its checkout and refreshes the open tab callback", async () => {
   let conversation: Conversation = {
     id: "conversation", checkoutId: "source-checkout", title: "Original title", contextId: "context",

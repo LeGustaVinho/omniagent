@@ -937,7 +937,7 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
         return Ok(Inputs {
             request,
             scope: Some(SessionScope {
-                mode: SessionMode::ReadOnly,
+                mode: job.mode,
                 ..side.scope.clone()
             }),
             command: None,

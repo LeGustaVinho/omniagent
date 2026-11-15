@@ -6,7 +6,7 @@ use crate::{
     jobs::{DispatchRejection, RequiredCustomization},
     process::TerminalOutcome,
     repository::CheckoutLayout,
-    runner::Runner,
+    runner::{LaunchRequest, Runner},
 };
 
 use super::{
@@ -15,7 +15,10 @@ use super::{
         capabilities::{CapabilityAssessment, CapabilityStatus, CapabilitySubject},
         configuration::{InstructionInventory, InstructionSelection},
         plugins::PluginInventoryStatus,
-        profiles::{DESKTOP_PERMISSION_REVISION, command_probe_with_limits, published_version},
+        profiles::{
+            DESKTOP_PERMISSION_REVISION, command_probe_with_limits, published_version,
+            verify_account_binding,
+        },
         skills::SkillEntry,
     },
     TurnExecution,
@@ -52,13 +55,14 @@ impl TurnExecution {
         );
         let neutral = tempfile::tempdir()?;
         let cwd = dunce::canonicalize(neutral.path())?;
+        let launch = |request: LaunchRequest<'_>| {
+            let _guard = self.app.block_on(gate.enter()).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::Interrupted, "The scheduler is exiting")
+            })?;
+            runner.launch(request)
+        };
         let output = command_probe_with_limits(
-            |request| {
-                let _guard = self.app.block_on(gate.enter()).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::Interrupted, "The scheduler is exiting")
-                })?;
-                runner.launch(request)
-            },
+            launch,
             &effective,
             &cwd,
             adapter.version_arguments(),
@@ -72,7 +76,7 @@ impl TurnExecution {
                 && version.as_ref() == Some(&scope.cli_version),
             "The configured CLI build changed or could not be verified"
         );
-        Ok(())
+        verify_account_binding(scope, launch)
     }
 
     pub(super) fn reject_dispatch(&self, rejection: DispatchRejection) -> Result<()> {

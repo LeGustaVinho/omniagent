@@ -5612,7 +5612,7 @@ mod tests {
             },
             providers::{
                 capabilities::{
-                    CapabilityAssessment, CapabilityDescriptor, CapabilityScope,
+                    CapabilityAssessment, CapabilityDescriptor, CapabilityScope, CapabilityStatus,
                     ConfigurationEvidence,
                 },
                 side::SideOutcome,
@@ -5655,7 +5655,7 @@ mod tests {
                 let (send, output) = mpsc::channel();
                 for data in [
                     json!({"type":"control_response","response":{"request_id":"side-init","subtype":"success"}}),
-                    json!({"type":"system","subtype":"init","session_id":"side-only","model":"side-selected","tools":[],"cwd":request.checkout}),
+                    json!({"type":"system","subtype":"init","session_id":"side-only","model":"side-selected","permissionMode":"plan","tools":[],"cwd":request.checkout}),
                 ] {
                     send.send(Ok(OutputFrame {
                         stream: Stream::Stdout,
@@ -5705,22 +5705,13 @@ mod tests {
             scope.effort.clone(),
         );
         let descriptor = CapabilityDescriptor::side_request(scope.provider);
-        store
-            .record_capability_evidence(
-                profile.clone(),
-                descriptor,
-                EvidenceOrigin::AuthenticatedFixture,
-                ObservedResult::Succeeded,
-                "isolated-fixture".into(),
-            )
-            .await?;
         store.mark_agent_running(completed.run.id.clone()).await?;
         let dispatch = prepare_fixture_dispatch_with_capabilities(
             &store,
             &completed,
             Some(CapabilityAssessment {
                 version: crate::providers::capabilities::CAPABILITY_SCHEMA_VERSION,
-                scope: profile,
+                scope: profile.clone(),
                 entries: vec![],
             }),
         )
@@ -5760,6 +5751,87 @@ mod tests {
 
         store.set_job_queue_capacity(2).await?;
         let current = store.conversation(chat.id.clone()).await?;
+        let SideSubmission::Queued {
+            job_id: validation_id,
+        } = store
+            .enqueue_side_request(
+                chat.id.clone(),
+                Some(current.context_id.clone()),
+                None,
+                scope.clone(),
+                SidePurpose::Validation,
+                "Ignored untrusted text".into(),
+            )
+            .await?
+        else {
+            anyhow::bail!("The fixture should be admitted without an existing proof");
+        };
+        assert!(matches!(
+            store.enqueue_side_request(
+                chat.id.clone(), Some(current.context_id.clone()), None, scope.clone(), SidePurpose::Validation, String::new(),
+            ).await?, SideSubmission::Queued { job_id } if job_id == validation_id
+        ));
+        let code: String = store
+            .execute({
+                let id = validation_id.clone();
+                move |db| {
+                    let protected: Vec<u8> = db.query_row(
+                        "SELECT payload FROM job_side_requests WHERE job_id = ?1 AND validation",
+                        [id],
+                        |row| row.get(0),
+                    )?;
+                    let body: Value = serde_json::from_slice(&protection::unprotect(&protected)?)?;
+                    Ok(body["context"]
+                        .as_str()
+                        .context("missing fixture code")?
+                        .to_owned())
+                }
+            })
+            .await?;
+        let fixture = JobScheduler::start(store.clone(), runner.clone(), None);
+        let fixture_output = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(endpoint) = outputs.lock().unwrap().first().cloned() {
+                    return endpoint;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await?;
+        fixture_output.send(Ok(OutputFrame {
+            stream: Stream::Stdout,
+                    data: json!({"type":"result","subtype":"success","is_error":false,"session_id":"side-only","result":code,"modelUsage":{"side-selected":{}}}).to_string(),
+        }))?;
+        let verified = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut records = store.saved_side_requests(chat.id.clone()).await?;
+                if records[0].evidence_id.is_some() {
+                    return Ok::<_, anyhow::Error>(records.remove(0));
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await??;
+        assert_eq!(verified.purpose, SidePurpose::Validation);
+        let evidence = store
+            .resolve_capability_assessment(profile, vec![descriptor])
+            .await?
+            .entries
+            .remove(0);
+        assert_eq!(evidence.status(), CapabilityStatus::Verified);
+        let evidence = evidence.evidence.unwrap();
+        assert_eq!(Some(evidence.id), verified.evidence_id);
+        assert_eq!(
+            evidence.artifact_id,
+            verified.job.latest_attempt.unwrap().run_id
+        );
+        fixture.shutdown().await?;
+        for wire in std::mem::take(&mut *frames.lock().unwrap()) {
+            let wire = String::from_utf8(wire)?;
+            assert!(!wire.contains("Original permitted source"));
+            assert!(!wire.contains("Ignored untrusted text"));
+        }
+        outputs.lock().unwrap().clear();
         store
             .set_composer_suggestion_mode(ComposerSuggestionMode::Omniagent)
             .await?;
@@ -5839,6 +5911,7 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(12), async {
                     loop {
                         let mut records = store.saved_side_requests(id.clone()).await?;
+                        records.retain(|record| record.purpose == SidePurpose::Question);
                         if records[index]
                             .job
                             .latest_attempt
@@ -5859,7 +5932,13 @@ mod tests {
             .await?;
         assert_eq!(insp.active, 2);
         assert!(
-            store.saved_side_requests(chat.id.clone()).await?[1]
+            store
+                .saved_side_requests(chat.id.clone())
+                .await?
+                .into_iter()
+                .filter(|record| record.purpose == SidePurpose::Question)
+                .nth(1)
+                .unwrap()
                 .job
                 .latest_attempt
                 .is_none()
@@ -5901,7 +5980,7 @@ mod tests {
         wait(1, RunStatus::Running).await?;
         send(
             1,
-            json!({"type":"result","subtype":"success","is_error":false,"session_id":"side-only","result":"protected-response-canary"}),
+            json!({"type":"result","subtype":"success","is_error":false,"session_id":"side-only","result":"protected-response-canary","modelUsage":{"side-selected":{}}}),
         ).await?;
         let second = wait(1, RunStatus::Succeeded).await?;
         assert!(
@@ -5986,7 +6065,13 @@ mod tests {
         assert_eq!(recovered.recovery_actions, [RecoveryAction::Retry]);
         assert!(recovered.job.queued_recovery.is_none());
         assert_eq!(
-            checkpoint.saved_side_requests(chat.id.clone()).await?[3]
+            checkpoint
+                .saved_side_requests(chat.id.clone())
+                .await?
+                .into_iter()
+                .filter(|record| record.purpose == SidePurpose::Question)
+                .nth(3)
+                .unwrap()
                 .response
                 .as_ref()
                 .unwrap()
@@ -6001,7 +6086,7 @@ mod tests {
         let reopened = Store::open(database)?;
         reopened.recover_agent_attempts_after_restart().await?;
         assert!(
-            matches!(reopened.saved_side_requests(chat.id.clone()).await?[1].response.as_ref().unwrap().outcome, SideOutcome::Answered { ref text, .. } if text == "protected-response-canary")
+            matches!(reopened.saved_side_requests(chat.id.clone()).await?.into_iter().filter(|record| record.purpose == SidePurpose::Question).nth(1).unwrap().response.as_ref().unwrap().outcome, SideOutcome::Answered { ref text, .. } if text == "protected-response-canary")
         );
         assert!(
             !format!(

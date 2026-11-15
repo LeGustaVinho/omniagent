@@ -6,14 +6,18 @@ use std::{
 use anyhow::{Context, Result, bail};
 use omniagent::{
     conversations::SessionScope,
+    jobs::{ComposerSuggestionMode, JobContext, JobScheduler, SidePurpose, SideSubmission},
     process_io::{CapturedProcess, Stream},
     providers::{
         AdapterUpdate, CliSession, Provider, ProviderEventData, SessionIntent, SessionMode,
         SessionRequest, TurnInput, TurnOutcome,
-        profiles::{ConfiguredExecutable, probe_cli},
+        profiles::{ConfiguredExecutable, DESKTOP_PERMISSION_REVISION, desktop_profile, probe_cli},
         side::{self, SideInput, SideOutcome, SidePin, SideRoute, SideSource},
     },
+    repository,
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
+    runs::RunStatus,
+    store::Store,
 };
 use serde_json::{Value, json};
 
@@ -294,5 +298,188 @@ fn fresh_claude_side_request_preserves_model_and_uses_only_the_pinned_context() 
     assert!(text.contains("BLUE_PIN_FIXTURE"));
     assert!(!text.contains("SECRET_CLAUDE_SIDE_FIXTURE"));
     assert_eq!(response.pin.context_id, "pinned-fixture");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an identifiable signed-in Claude Code CLI and Haiku model usage"]
+async fn desktop_claude_validates_side_requests_and_reuses_the_scoped_proof() -> Result<()> {
+    desktop_validates_side_requests(Provider::Claude).await
+}
+
+#[tokio::test]
+#[ignore = "requires an identifiable signed-in Codex CLI and GPT-6 Luna model usage"]
+async fn desktop_codex_validates_side_requests_and_reuses_the_scoped_proof() -> Result<()> {
+    desktop_validates_side_requests(Provider::Codex).await
+}
+
+async fn desktop_validates_side_requests(provider: Provider) -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let path = fixture.path().join("checkout");
+    std::fs::create_dir(&path)?;
+    let status = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&path)
+        .status()?;
+    assert!(status.success());
+    let store = Store::open(fixture.path().join("fixture.sqlite"))?;
+    let checkout = dunce::canonicalize(path)?;
+    let project = repository::register(&store, checkout.clone()).await?;
+    let conversation = store
+        .create_conversation(project.checkout_id, "Side qualification fixture".into())
+        .await?;
+    let desktop = desktop_profile(
+        ConfiguredExecutable {
+            provider,
+            executable: None,
+        },
+        None,
+    )?;
+    let chosen = desktop
+        .models
+        .into_iter()
+        .find(|model| {
+            let id = model.option.selection.model_id.as_str();
+            model.option.selectable
+                && match provider {
+                    Provider::Claude => id == "haiku" || id.starts_with("claude-haiku-"),
+                    Provider::Codex => id == "gpt-6-luna",
+                    Provider::Antigravity => false,
+                }
+        })
+        .context("The selected provider does not offer the fixture model")?;
+    let effort = (provider == Provider::Codex
+        && chosen.efforts.iter().any(|effort| effort == "low"))
+    .then(|| "low".into());
+    let scope = SessionScope {
+        provider,
+        profile_id: chosen.option.selection.profile_id,
+        account_binding: Some(desktop.account_binding.context("No account identity")?),
+        executable: desktop.executable,
+        cli_version: desktop.version,
+        checkout,
+        runner: DirectWindowsRunner.identity().into(),
+        permission_revision: DESKTOP_PERMISSION_REVISION.into(),
+        mode: SessionMode::ReadOnly,
+        model: Some(chosen.option.selection.model_id),
+        effort,
+    };
+    let prompt =
+        "The conversation fixture code is BLUE_SIDE_PROFILE. Reply exactly READY, using no tools.";
+    store
+        .save_conversation_draft(conversation.id.clone(), prompt.into())
+        .await?;
+    let job = store
+        .enqueue_conversation_turn(
+            JobContext {
+                conversation_id: conversation.id.clone(),
+                context_id: conversation.context_id,
+            },
+            scope.clone(),
+            prompt.into(),
+        )
+        .await?;
+    let scheduler = JobScheduler::start(
+        store.clone(),
+        std::sync::Arc::new(DirectWindowsRunner),
+        None,
+    );
+    let wait = |id: String| {
+        let store = store.clone();
+        let project = job.project_id.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(45), async {
+                loop {
+                    let job = store
+                        .job(project.clone(), id.clone())
+                        .await?
+                        .context("fixture job is missing")?;
+                    if let Some(attempt) = job.latest_attempt
+                        && !matches!(
+                            attempt.status,
+                            RunStatus::Starting | RunStatus::Running | RunStatus::WaitingForInput
+                        )
+                    {
+                        if attempt.status != RunStatus::Succeeded {
+                            let failure = store.job_failure(project, attempt.run_id).await?;
+                            bail!("fixture ended as {:?} ({failure:?})", attempt.status);
+                        }
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await?
+        }
+    };
+    wait(job.id.clone())
+        .await
+        .context("preparing the committed source turn")?;
+    let current = store.conversation(conversation.id.clone()).await?;
+    let enqueue = |purpose, question: &str| {
+        let (store, id, context, scope, question) = (
+            store.clone(),
+            current.id.clone(),
+            current.context_id.clone(),
+            scope.clone(),
+            question.to_owned(),
+        );
+        async move {
+            let result = store
+                .enqueue_side_request(id, Some(context), None, scope, purpose, question)
+                .await?;
+            match result {
+                SideSubmission::Queued { job_id } => Ok(job_id),
+                SideSubmission::Unavailable { reason, .. } => {
+                    bail!("side request was unavailable: {reason:?}")
+                }
+                SideSubmission::Skipped => bail!("side request was skipped"),
+            }
+        }
+    };
+    let validation_id = enqueue(SidePurpose::Validation, "").await?;
+    if let Err(error) = wait(validation_id).await {
+        let outcomes = store
+            .saved_side_requests(current.id.clone())
+            .await?
+            .into_iter()
+            .map(|record| record.response.map(|response| response.outcome))
+            .collect::<Vec<_>>();
+        return Err(error).context(format!("validating the selected side route: {outcomes:?}"));
+    }
+    wait(
+        enqueue(
+            SidePurpose::Question,
+            "Reply exactly with the stored conversation fixture code.",
+        )
+        .await?,
+    )
+    .await
+    .context("running the side question using the saved validation")?;
+    let records = store.saved_side_requests(current.id.clone()).await?;
+    assert!(records[0].evidence_id.is_some());
+    assert!(matches!(
+        &records[1].response.as_ref().unwrap().outcome,
+        SideOutcome::Answered { text, .. } if text.contains("BLUE_SIDE_PROFILE")
+    ));
+    store
+        .set_composer_suggestion_mode(ComposerSuggestionMode::Omniagent)
+        .await?;
+    let suggestion_id = enqueue(SidePurpose::Suggestion, "").await?;
+    wait(suggestion_id)
+        .await
+        .context("running a suggestion in the same queue")?;
+    let records = store.saved_side_requests(current.id.clone()).await?;
+    let suggested = records
+        .iter()
+        .find(|record| record.purpose == SidePurpose::Suggestion)
+        .and_then(|record| record.response.as_ref())
+        .context("missing composer suggestion attempt")?;
+    assert!(
+        matches!(&suggested.outcome, SideOutcome::Answered { text, .. } if !text.trim().is_empty())
+    );
+    let history = store.conversation_history(current.id).await?;
+    assert_eq!(history.messages.len(), 2);
+    scheduler.shutdown().await?;
     Ok(())
 }

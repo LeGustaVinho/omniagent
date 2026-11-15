@@ -364,6 +364,13 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
   });
   const sideEffort = efforts?.efforts.includes(effort) ? effort : null;
   const sideMode = mode === "goal" ? "read_only" : mode;
+  const validateSide = useMutation({
+    mutationFn: () => invoke<SideSubmission>("enqueue_conversation_side_request", {
+      conversationId, expectedContextId: history.data?.contextId, selection,
+      effort: sideEffort, mode: sideMode, purpose: "validation", question: "",
+    }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "side-requests"] }),
+  });
   const suggestionsEnabled = useSuggestionMode(visible).data === "omniagent";
   const sideHistory = useSideRequests(conversationId, visible && suggestionsEnabled);
   const suggestionSource = useRef<string>(undefined);
@@ -574,7 +581,12 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
       </div>
       </div>
       {showingActivity && <ConversationActivity key={run.id} conversationId={conversationId} run={run} projection={activity.projection} onClose={closeActivity} />}
-      {visible && showSideQuestions && <SideQuestionPanel conversationId={conversationId} submission={askSide.data} onClose={() => setShowSideQuestions(false)} />}
+      {visible && showSideQuestions && <SideQuestionPanel conversationId={conversationId}
+        submission={validateSide.data?.status === "unavailable" ? validateSide.data : askSide.data}
+        validation={selection && selection.provider !== "antigravity" && selected?.option.selectable && history.data?.contextId
+          ? { pending: validateSide.isPending, error: validateSide.error, onStart: () => { askSide.reset(); validateSide.mutate(); } }
+          : undefined}
+        onClose={() => { validateSide.reset(); setShowSideQuestions(false); }} />}
       </div>
     </section>
   );

@@ -20,7 +20,8 @@ use omniagent::{
 
 fn remove_side_request_schema(db: &rusqlite::Connection) -> Result<()> {
     db.execute_batch(
-        "DROP TRIGGER discard_suggestion_on_draft_insert;
+        "DROP TABLE side_validation_evidence;
+         DROP TRIGGER discard_suggestion_on_draft_insert;
          DROP TRIGGER discard_suggestion_on_draft_edit;
          DROP TRIGGER discard_suggestion_on_context_change;
          DROP TRIGGER retire_discarded_suggestion;

@@ -27,6 +27,9 @@ use super::{
     SessionIntent, SessionMode, SessionOption, SessionRequest,
 };
 
+mod account;
+pub(crate) use account::verify_account_binding;
+
 const PROBE_TIME: Duration = Duration::from_secs(10);
 const MAX_PROBE_OUTPUT: usize = 32 * 1024;
 static VERSION: LazyLock<Regex> = LazyLock::new(|| {
@@ -77,6 +80,9 @@ pub struct CliProbe {
     pub authentication: Authentication,
     pub effective_permissions: PermissionCheck,
     pub os_sandbox_support: OsSandboxSupport,
+    #[serde(skip)]
+    #[ts(skip)]
+    account_binding: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +99,7 @@ pub struct DesktopProfile {
     pub executable: PathBuf,
     pub version: String,
     pub models: Vec<DesktopModel>,
+    pub account_binding: Option<String>,
 }
 
 /// Query the CLI in a neutral directory with no prompt or project customizations.
@@ -203,10 +210,20 @@ pub fn desktop_profile(
             }
         },
     )?;
+    let account_binding = match provider {
+        Provider::Codex => account::codex_binding(
+            |request| DirectWindowsRunner.launch(request),
+            &executable,
+            &cwd,
+        )
+        .unwrap_or_default(),
+        _ => check.account_binding,
+    };
     Ok(DesktopProfile {
         executable,
         version,
         models,
+        account_binding,
     })
 }
 
@@ -313,6 +330,7 @@ fn probe_cli_profile(
         protocol: ProtocolCheck::Unchecked,
         authentication: Authentication::Unknown,
         effective_permissions: PermissionCheck::Unverified,
+        account_binding: None,
         os_sandbox_support: super::sandbox::support(
             provider,
             DirectWindowsRunner.execution_platform().as_ref(),
@@ -349,6 +367,9 @@ fn probe_cli_profile(
         check.authentication = adapter.decode_authentication(output.status, &output.stdout);
         if check.authentication == Authentication::Unknown {
             check.authentication = adapter.decode_authentication(output.status, &output.stderr);
+        }
+        if provider == Provider::Claude && check.authentication == Authentication::Authenticated {
+            check.account_binding = account::claude_binding(&output)?;
         }
     }
     match handshake_probe(

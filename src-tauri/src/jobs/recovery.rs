@@ -550,7 +550,7 @@ impl Store {
                     let scope = recovery_scope(db, &job)?;
                     let refresh = (job.origin == JobOrigin::Operator || job.operator_requested == Some(true))
                         && matches!(&scope, RecoveryProfile::Agent(profile)
-                            if profile.permission_revision == DESKTOP_PERMISSION_REVISION && profile.account_binding.is_none());
+                            if profile.permission_revision == DESKTOP_PERMISSION_REVISION);
                     let writer_checkpoint = writer_checkpoint_for_recovery(db, &job, &run, action, revision.as_deref())?;
                     Ok((job.checkout_id, job.worktree_owner_task_id, scope, refresh, writer_checkpoint))
                 }
@@ -602,6 +602,10 @@ impl Store {
                         .as_ref()
                         .is_none_or(|effort| item.efforts.contains(effort))),
                 "The original job model or thinking level is unavailable"
+            );
+            ensure!(
+                scope.account_binding.is_none() || scope.account_binding == profile.account_binding,
+                "The configured CLI account changed or its identity is unavailable"
             );
             let mut current = scope.clone();
             current.executable = profile.executable;

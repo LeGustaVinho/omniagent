@@ -1,4 +1,4 @@
-use std::{io, sync::Arc};
+use std::{cell::Cell, io, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -11,7 +11,11 @@ use crate::{
     protection,
     providers::{
         Provider, ProviderEvent, ProviderEventData, SessionMode,
-        capabilities::{CapabilityScope, verified_side_profile},
+        capabilities::{
+            CapabilityScope, ObservedResult, insert_side_fixture_evidence,
+            side_fixture_qualifiable, verified_side_profile,
+        },
+        profiles::verify_account_binding,
         side::{
             self, SideInput, SideOutcome, SidePin, SideResponse, SideRoute, SideSource,
             SideUnavailable,
@@ -32,6 +36,7 @@ use super::{
 pub enum SidePurpose {
     Question,
     Suggestion,
+    Validation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -55,7 +60,7 @@ impl ComposerSuggestionMode {
 impl SidePurpose {
     fn key(self) -> &'static str {
         match self {
-            Self::Question => "question",
+            Self::Question | Self::Validation => "question",
             Self::Suggestion => "suggestion",
         }
     }
@@ -94,13 +99,14 @@ pub struct SavedSideRequest {
     pub mode: SessionMode,
     pub question: String,
     pub response: Option<SideResponse>,
+    pub evidence_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct SidePayload {
     pub scope: SessionScope,
     pub profile: CapabilityScope,
-    pub evidence_id: String,
+    pub evidence_id: Option<String>,
     pub purpose: SidePurpose,
     pub route: SideRoute,
     pub pin: SidePin,
@@ -118,7 +124,11 @@ impl SidePayload {
     }
 
     pub(super) fn still_qualified(&self, db: &Connection) -> Result<bool> {
-        Ok(verified_side_profile(db, &self.profile)?.as_deref() == Some(self.evidence_id.as_str()))
+        if self.purpose == SidePurpose::Validation {
+            return Ok(side_fixture_qualifiable(&self.profile));
+        }
+        Ok(self.evidence_id.is_some()
+            && verified_side_profile(db, &self.profile)? == self.evidence_id)
     }
 }
 
@@ -149,13 +159,23 @@ impl Store {
         mode: ComposerSuggestionMode,
     ) -> Result<ComposerSuggestionMode> {
         self.execute(move |db| {
-            db.execute(
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
                 "UPDATE composer_suggestions_settings SET mode = ?1 WHERE id = 1",
                 [mode.key()],
             )?;
-            Ok(mode)
+            if mode != ComposerSuggestionMode::Omniagent {
+                tx.execute(
+                    "UPDATE job_side_requests SET discarded = 1 WHERE purpose = 'suggestion' AND NOT discarded",
+                    [],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
         })
-        .await
+        .await?;
+        self.job_signal.send_replace(());
+        Ok(mode)
     }
 
     pub async fn enqueue_side_request(
@@ -170,6 +190,7 @@ impl Store {
         let question = match purpose {
             SidePurpose::Question => question.trim().to_owned(),
             SidePurpose::Suggestion => "Suggest one useful follow-up prompt the user might send. Return only a JSON object with a single string field named prompt.".into(),
+            SidePurpose::Validation => "Return the exact code labeled 'Verification code' in the supplied context, without commentary. If a file-reading tool is available, try reading fixture.txt first. The code is in the supplied context even when file access is unavailable.".into(),
         };
         ensure!(
             !question.is_empty() && question.len() <= 8192,
@@ -198,8 +219,12 @@ impl Store {
                     model: scope.model.clone(),
                     reason,
                 };
-                let route = match scope.provider {
-                    Provider::Codex => SideRoute::CodexSample,
+                if purpose == SidePurpose::Validation {
+                    ensure!(matches!(scope.mode, SessionMode::ReadOnly | SessionMode::Plan),
+                        "The isolated validation requires a read-only or planning profile");
+                }
+                let fresh_route = match scope.provider {
+                    Provider::Codex => SideRoute::FreshCodexSession,
                     Provider::Claude => SideRoute::FreshClaudeSession,
                     Provider::Antigravity => {
                         return Ok(unavailable(SideUnavailable::ToolFreeFreshRouteUnavailable));
@@ -228,8 +253,28 @@ impl Store {
                 else {
                     return Ok(unavailable(SideUnavailable::ProfileMismatch));
                 };
-                let Some(evidence_id) = verified_side_profile(&tx, &profile)? else {
-                    return Ok(unavailable(SideUnavailable::UnverifiedProfile));
+                let (route, evidence_id) = if purpose == SidePurpose::Validation {
+                    if !side_fixture_qualifiable(&profile) {
+                        return Ok(unavailable(SideUnavailable::UnverifiedProfile));
+                    }
+                    if let Some(job_id) = queued_validation(&tx, &source.run_id)? {
+                        return Ok(SideSubmission::Queued { job_id });
+                    }
+                    (fresh_route, None)
+                } else {
+                    let Some(evidence_id) = verified_side_profile(&tx, &profile)? else {
+                        return Ok(unavailable(SideUnavailable::UnverifiedProfile));
+                    };
+                    let verified_route: Option<String> = tx.query_row(
+                        "SELECT route FROM side_validation_evidence WHERE evidence_id = ?1",
+                        [&evidence_id], |row| row.get(0),
+                    ).optional()?;
+                    let route = match verified_route {
+                        Some(route) => serde_json::from_value(serde_json::Value::String(route))?,
+                        None if scope.provider == Provider::Codex => SideRoute::CodexSample,
+                        None => fresh_route,
+                    };
+                    (route, Some(evidence_id))
                 };
                 let provider_source = if route == SideRoute::CodexSample {
                     match (source.session_id, source.turn_id, source.cursor) {
@@ -249,7 +294,9 @@ impl Store {
                 if purpose == SidePurpose::Suggestion && source.context_id != expected_context {
                     return Ok(SideSubmission::Skipped);
                 }
-                let context = if route == SideRoute::FreshClaudeSession {
+                let context = if purpose == SidePurpose::Validation {
+                    uuid::Uuid::new_v4().to_string()
+                } else if route != SideRoute::CodexSample {
                     let revisions = context_entries(&tx, &conversation, &source.context_id)?;
                     let messages = load_messages(&tx, &conversation, &revisions)?;
                     let context = serde_json::to_string(&messages)?;
@@ -263,6 +310,7 @@ impl Store {
                 let title = match purpose {
                     SidePurpose::Question => "Side question",
                     SidePurpose::Suggestion => "Composer suggestion",
+                    SidePurpose::Validation => "Validate isolated side requests",
                 };
                 let job = insert_job(
                     &tx,
@@ -272,7 +320,7 @@ impl Store {
                     JobRequest {
                         checkout_id: Some(chat.checkout_id),
                         task_id: None,
-                        mode: SessionMode::ReadOnly,
+                        mode: if purpose == SidePurpose::Validation { scope.mode } else { SessionMode::ReadOnly },
                         instructions: title.into(),
                         dependencies: Vec::new(),
                         requires_bridge: false,
@@ -298,8 +346,8 @@ impl Store {
                     },
                 };
                 tx.execute(
-                    "INSERT INTO job_side_requests(job_id, conversation_id, context_id, source_run_id, purpose, payload)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO job_side_requests(job_id, conversation_id, context_id, source_run_id, purpose, payload, validation)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
                         job.id,
                         conversation,
@@ -307,6 +355,7 @@ impl Store {
                         source.run_id,
                         purpose.key(),
                         protection::protect(&serde_json::to_vec(&payload)?)?,
+                        purpose == SidePurpose::Validation,
                     ],
                 )?;
                 tx.commit()?;
@@ -322,10 +371,11 @@ impl Store {
     pub async fn saved_side_requests(&self, conversation: String) -> Result<Vec<SavedSideRequest>> {
         self.execute(move |db| {
             let mut query = db.prepare(
-                "SELECT j.project_id, s.job_id, s.context_id, s.source_run_id, s.payload, response.payload
+                "SELECT j.project_id, s.job_id, s.context_id, s.source_run_id, s.payload, response.payload, validation.evidence_id
                  FROM job_side_requests s JOIN jobs j ON j.id = s.job_id
                  LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (SELECT max(ordinal) FROM job_attempts WHERE job_id = j.id)
                  LEFT JOIN job_side_responses response ON response.run_id = a.run_id
+                 LEFT JOIN side_validation_evidence validation ON validation.run_id = response.run_id
                  WHERE s.conversation_id = ?1 AND NOT s.discarded ORDER BY j.sequence",
             )?;
             let mut rows = query.query([&conversation])?;
@@ -336,7 +386,7 @@ impl Store {
                 let response = row.get::<_, Option<Vec<u8>>>(5)?.as_deref().map(decode).transpose()?;
                 saved.push(SavedSideRequest {
                     job, conversation_id: conversation.clone(), context_id: row.get(2)?, source_run_id: row.get(3)?,
-                    purpose: payload.purpose, question: payload.question, response,
+                    purpose: payload.purpose, question: payload.question, response, evidence_id: row.get(6)?,
                     provider: payload.scope.provider, profile_id: payload.scope.profile_id,
                     model: payload.scope.model, effort: payload.scope.effort, mode: payload.scope.mode,
                 });
@@ -360,6 +410,23 @@ fn suggestion_eligible(db: &Connection, conversation: &str, context: &str) -> Re
         return Ok(false);
     }
     empty_draft(db, conversation)
+}
+
+fn queued_validation(db: &Connection, run_id: &str) -> Result<Option<String>> {
+    Ok(db
+        .query_row(
+            "SELECT s.job_id FROM job_side_requests s JOIN jobs j ON j.id = s.job_id
+         WHERE s.source_run_id = ?1 AND s.validation AND j.queue_state <> 'cancelled'
+           AND (
+               NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = s.job_id)
+               OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = s.job_id)
+               OR EXISTS (SELECT 1 FROM job_attempts a JOIN runs r ON r.id = a.run_id
+                   WHERE a.job_id = s.job_id AND r.status IN ('starting', 'running'))
+           ) LIMIT 1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 fn read_suggestion_mode(db: &Connection) -> Result<ComposerSuggestionMode> {
@@ -419,8 +486,9 @@ fn source_run(db: &Connection, conversation: &str, active: &str) -> Result<Optio
 }
 
 fn latest_reported_scope(db: &Connection, run: &str) -> Result<Option<CapabilityScope>> {
-    let mut query = db
-        .prepare("SELECT payload FROM agent_events WHERE run_id = ?1 ORDER BY seq DESC LIMIT 64")?;
+    let mut query = db.prepare(
+        "SELECT payload FROM agent_events WHERE run_id = ?1 AND source = 'application' ORDER BY seq DESC",
+    )?;
     let mut rows = query.query([run])?;
     while let Some(row) = rows.next()? {
         let observation: ProviderEvent = decode(row.get_ref(0)?.as_blob()?)?;
@@ -522,6 +590,7 @@ pub(super) fn start(
             && runner.executable_revision(&payload.scope.executable)
                 == payload.profile.executable_revision
             && runner.execution_platform() == payload.profile.platform;
+        let launched = Cell::new(false);
         let launch = |request: LaunchRequest<'_>| {
             let _guard = app.block_on(admission.enter()).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::Interrupted, "The scheduler is exiting")
@@ -530,13 +599,10 @@ pub(super) fn start(
                 .block_on(store.execute({
                     let id = run.id.clone();
                     let job = job_id.clone();
-                    let source = payload.profile.clone();
-                    let evidence = payload.evidence_id.clone();
                     move |db| {
                         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                         let side = load(&tx, &job)?.context("Missing side request")?;
-                        let allowed = verified_side_profile(&tx, &source)?.as_deref()
-                            == Some(evidence.as_str())
+                        let allowed = side.still_qualified(&tx)?
                             && suggestion_still_current(&tx, &job, &side)?
                             && super::record_launch_intent(&tx, &id)? == Some(true);
                         if allowed {
@@ -554,15 +620,39 @@ pub(super) fn start(
                 ));
             }
             store.event_signal.send_replace(());
-            runner.launch(request)
+            let process = runner.launch(request)?;
+            launched.set(true);
+            Ok(process)
         };
-        let mut response = if !stopped() && profile_matches {
+        let account_matches = !stopped()
+            && profile_matches
+            && verify_account_binding(&payload.scope, |request| {
+                let _guard = app.block_on(admission.enter()).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::Interrupted, "The scheduler is exiting")
+                })?;
+                runner.launch(request)
+            })
+            .is_ok();
+        let mut response = if !stopped() && account_matches {
+            let validation_context = (payload.purpose == SidePurpose::Validation)
+                .then(|| format!("Verification code: {}", payload.context));
+            let context = validation_context.as_deref().unwrap_or(&payload.context);
             let outcome = match payload.route {
                 SideRoute::FreshClaudeSession => side::run_fresh_until(
                     &payload.scope,
                     launch,
                     payload.input(&job_id),
-                    &payload.context,
+                    context,
+                    payload.profile.reported_model.as_deref(),
+                    &stopped,
+                ),
+                SideRoute::FreshCodexSession => side::run_fresh_codex_until(
+                    &payload.scope,
+                    launch,
+                    payload.input(&job_id),
+                    context,
+                    payload.profile.reported_model.as_deref(),
+                    payload.profile.reported_effort.as_deref(),
                     &stopped,
                 ),
                 SideRoute::CodexSample => side::run_native_until(
@@ -581,7 +671,11 @@ pub(super) fn start(
             }
         } else {
             payload.input(&job_id).reply(SideOutcome::Unavailable {
-                reason: SideUnavailable::ProfileMismatch,
+                reason: if profile_matches {
+                    SideUnavailable::AccountChanged
+                } else {
+                    SideUnavailable::ProfileMismatch
+                },
             })
         };
         let status = if *cancelled.borrow() {
@@ -608,7 +702,7 @@ pub(super) fn start(
                 [&run.id],
                 |row| row.get(0),
             )?;
-            let status = if cancelled {
+            let mut status = if cancelled {
                 response.outcome = SideOutcome::Cancelled;
                 RunStatus::Cancelled
             } else {
@@ -619,7 +713,22 @@ pub(super) fn start(
             {
                 response.outcome = SideOutcome::NoText;
             }
+            let fixture_result = (payload.purpose == SidePurpose::Validation && launched.get()
+                && matches!(status, RunStatus::Succeeded | RunStatus::Failed)
+                && !matches!(response.outcome, SideOutcome::Unavailable { .. }))
+            .then(|| {
+                if matches!(&response.outcome, SideOutcome::Answered { route, text, .. } if *route == payload.route && text.trim() == payload.context) {
+                    ObservedResult::Succeeded
+                } else {
+                    status = RunStatus::Failed;
+                    ObservedResult::Failed
+                }
+            });
             settle(&tx, &current, status, &response)?;
+            if let Some(result) = fixture_result {
+                let evidence = insert_side_fixture_evidence(&tx, &payload.profile, result, &run.id)?;
+                tx.execute("INSERT INTO side_validation_evidence VALUES (?1, ?2, ?3)", params![run.id, evidence, payload.route.as_str()])?;
+            }
             if status == RunStatus::Interrupted {
                 super::recovery::requeue_unlaunched_job(&tx, &current.id)?;
             }

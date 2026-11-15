@@ -874,10 +874,13 @@ impl Store {
                 "tool qualification requires an identity, version, and operation"
             );
         }
-        let key = scope
-            .key(&descriptor)
-            .context("qualification scope is incomplete")?;
-        let hash = revision(&key)?;
+        let (hash, evidence) = encoded_capability_evidence(
+            &scope,
+            &descriptor,
+            result,
+            &artifact_id,
+            attachment_limits,
+        )?;
         let native_audit = descriptor.subject
             == (CapabilitySubject::Protocol {
                 capability: Capability::NativeSubagentAudit,
@@ -886,28 +889,12 @@ impl Store {
             && origin == EvidenceOrigin::AuthenticatedFixture
             && result == ObservedResult::Succeeded)
             .then(|| artifact_id.clone());
-        let evidence = if let Some(limits) = attachment_limits {
-            serde_json::to_vec(&(key, result, artifact_id, limits))?
-        } else {
-            serde_json::to_vec(&(key, result, artifact_id))?
-        };
-        let evidence = protection::protect(&evidence)?;
         let id = Uuid::new_v4().to_string();
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let launch_key = native_fixture.as_deref()
                 .map(|run| crate::jobs::native_audit_fixture_key(&tx, &scope, run)).transpose()?;
-            tx.execute(
-                "INSERT INTO capability_evidence(id, version, qualification_key, origin, payload)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    id,
-                    CAPABILITY_SCHEMA_VERSION,
-                    hash,
-                    origin.as_sql(),
-                    evidence
-                ],
-            )?;
+            insert_capability_evidence_row(&tx, &id, &hash, origin, &evidence)?;
             if let Some(launch_key) = launch_key {
                 tx.execute(
                     "INSERT INTO native_subagent_audit_candidates(launch_key, evidence_id) VALUES (?1, ?2)
@@ -959,6 +946,76 @@ impl Store {
         })
         .await
     }
+}
+
+fn encoded_capability_evidence(
+    scope: &CapabilityScope,
+    descriptor: &CapabilityDescriptor,
+    result: ObservedResult,
+    artifact_id: &str,
+    attachment_limits: Option<QualifiedAttachmentLimits>,
+) -> Result<(String, Vec<u8>)> {
+    let key = scope
+        .key(descriptor)
+        .context("qualification scope is incomplete")?;
+    let hash = revision(&key)?;
+    let evidence = if let Some(limits) = attachment_limits {
+        serde_json::to_vec(&(key, result, artifact_id, limits))?
+    } else {
+        serde_json::to_vec(&(key, result, artifact_id))?
+    };
+    Ok((hash, protection::protect(&evidence)?))
+}
+
+fn insert_capability_evidence_row(
+    db: &Connection,
+    id: &str,
+    hash: &str,
+    origin: EvidenceOrigin,
+    evidence: &[u8],
+) -> Result<()> {
+    db.execute(
+        "INSERT INTO capability_evidence(id, version, qualification_key, origin, payload)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            id,
+            CAPABILITY_SCHEMA_VERSION,
+            hash,
+            origin.as_sql(),
+            evidence
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn side_fixture_qualifiable(scope: &CapabilityScope) -> bool {
+    scope.provider != Provider::Antigravity
+        && scope
+            .key(&CapabilityDescriptor::side_request(scope.provider))
+            .is_some()
+}
+
+pub(crate) fn insert_side_fixture_evidence(
+    db: &Connection,
+    scope: &CapabilityScope,
+    result: ObservedResult,
+    run_id: &str,
+) -> Result<String> {
+    ensure!(
+        side_fixture_qualifiable(scope),
+        "The isolated profile qualification is incomplete"
+    );
+    let descriptor = CapabilityDescriptor::side_request(scope.provider);
+    let (hash, encoded) = encoded_capability_evidence(scope, &descriptor, result, run_id, None)?;
+    let id = Uuid::new_v4().to_string();
+    insert_capability_evidence_row(
+        db,
+        &id,
+        &hash,
+        EvidenceOrigin::AuthenticatedFixture,
+        &encoded,
+    )?;
+    Ok(id)
 }
 
 pub(crate) fn verified_side_profile(

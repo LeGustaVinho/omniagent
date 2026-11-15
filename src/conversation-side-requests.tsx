@@ -22,9 +22,10 @@ interface SideRequest {
   model: string | null;
   effort: string | null;
   mode: SessionMode;
-  purpose: "question" | "suggestion";
+  purpose: "question" | "suggestion" | "validation";
   question: string;
   response: { outcome: SideOutcome } | null;
+  evidenceId: string | null;
 }
 
 type SuggestionMode = "off" | "native" | "omniagent";
@@ -75,15 +76,17 @@ function unavailableReason(reason: string) {
     case "source_boundary_unavailable": return "An eligible completed source turn is required.";
     case "invalid_input": return "The question or saved context exceeds the side request limit.";
     case "profile_mismatch": return "The selected profile differs from the saved source.";
+    case "account_changed": return "The authenticated CLI account changed or could not be confirmed.";
     case "unverified_profile": return "This profile has no verified tool-disabled route.";
     case "busy": return "The CLI is still using the source session. Try again after the main turn finishes.";
     default: return "The selected CLI has no available isolated route.";
   }
 }
 
-export function SideQuestionPanel({ conversationId, submission, onClose }: {
+export function SideQuestionPanel({ conversationId, submission, validation, onClose }: {
   conversationId: string;
   submission?: SideSubmission;
+  validation?: { pending: boolean; error?: Error | null; onStart: () => void };
   onClose: () => void;
 }) {
   const client = useQueryClient();
@@ -100,7 +103,7 @@ export function SideQuestionPanel({ conversationId, submission, onClose }: {
     },
     onSettled: () => client.invalidateQueries({ queryKey }),
   });
-  const questions = saved.data?.filter(({ purpose }) => purpose === "question") ?? [];
+  const requests = saved.data?.filter(({ purpose }) => purpose !== "suggestion") ?? [];
   return <aside className="conv-activity" aria-label="Side questions">
     <header className="conv-activity-heading"><h2>Side questions</h2>
       <button type="button" className="conv-icon-button ml-auto" aria-label="Close side questions" onClick={onClose}><X size={16} /></button>
@@ -110,15 +113,25 @@ export function SideQuestionPanel({ conversationId, submission, onClose }: {
     </p>}
     {saved.isError && <p role="alert" className="conv-alert">{String(saved.error)}</p>}
     {control.isError && <p role="alert" className="conv-alert">{String(control.error)}</p>}
+    {validation?.error && <p role="alert" className="conv-alert">{String(validation.error)}</p>}
     {copyError && <p role="alert" className="conv-alert">{copyError}</p>}
-    {!questions.length && saved.isSuccess && submission?.status !== "unavailable" && <p className="p-3 text-sm text-muted-foreground">Start a side question with /btw followed by your question.</p>}
+    {validation && <div className="px-3 pt-3">
+      <Button type="button" variant="outline" disabled={validation.pending} onClick={validation.onStart}>
+        {validation.pending ? "Queueing validation…" : "Validate side questions"}
+      </Button>
+      <p className="mt-1 text-sm text-muted-foreground">Runs a disposable fixture through the selected model and can consume account usage.</p>
+    </div>}
+    {!requests.length && saved.isSuccess && submission?.status !== "unavailable" && <p className="p-3 text-sm text-muted-foreground">Start a side question with /btw followed by your question.</p>}
     <ul className="grid gap-3 p-3">
-      {questions.map(({ job, question, response }) => {
+      {requests.map(({ job, question, response, purpose, provider, model, evidenceId }) => {
         const outcome = response?.outcome;
+        const fixture = purpose === "validation";
         const pending = job.queueState !== "cancelled" && (!job.latestAttempt || job.queuedRecovery || isLiveRun(job.latestAttempt));
         return <li key={job.id} className="grid gap-2 rounded border border-border p-3 text-sm">
-          <p className="whitespace-pre-wrap break-words font-medium">{question}</p>
-          {outcome?.kind === "answered" ? <>
+          <p className="whitespace-pre-wrap break-words font-medium">
+            {fixture ? ["Side question validation", providers[provider], model].filter(Boolean).join(" · ") : question}
+          </p>
+          {outcome?.kind === "answered" && !fixture ? <>
             <ConversationMarkdown>{outcome.text}</ConversationMarkdown>
             <Button type="button" variant="outline" className="justify-self-start" onClick={() => {
               setCopyError("");
@@ -130,10 +143,11 @@ export function SideQuestionPanel({ conversationId, submission, onClose }: {
                 : job.queueState === "cancelled" || job.latestAttempt?.status === "cancelled" || outcome?.kind === "cancelled" ? "Cancelled"
                   : job.latestAttempt?.status === "interrupted" || outcome?.kind === "interrupted" ? "Interrupted"
                     : outcome?.kind === "timed_out" ? "Timed out"
+                      : fixture ? (job.latestAttempt?.status === "succeeded" && evidenceId ? "Validation passed" : "Validation failed")
                       : outcome?.kind === "no_text" ? "No answer returned" : "The side request failed"}
           </p>}
           {pending && <Button type="button" variant="outline" className="justify-self-start" disabled={control.isPending || job.latestAttempt?.cancelRequested}
-            onClick={() => control.mutate(job)}>Cancel side question</Button>}
+            onClick={() => control.mutate(job)}>{fixture ? "Cancel validation" : "Cancel side question"}</Button>}
         </li>;
       })}
     </ul>
