@@ -10,7 +10,10 @@ use std::{path::PathBuf, sync::Arc};
 
 use omniagent::{
     jobs::JobScheduler,
-    repository::{self, ManagedWorktree, ProjectCheckout, WorktreeStart},
+    repository::{
+        self, AttemptWorktreeEvidence, LiveWorktree, ManagedWorktree, ProjectCheckout,
+        WorktreeStart,
+    },
     runner::DirectWindowsRunner,
     store::Store,
 };
@@ -73,6 +76,30 @@ async fn managed_worktree_start(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn attempt_worktree_evidence(
+    store: tauri::State<'_, Store>,
+    project_id: String,
+    run_id: String,
+) -> Result<Option<AttemptWorktreeEvidence>, String> {
+    store
+        .attempt_worktree_evidence(project_id, run_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+async fn live_managed_worktree(
+    store: tauri::State<'_, Store>,
+    project_id: String,
+    owner_task_id: String,
+) -> Result<Option<LiveWorktree>, String> {
+    store
+        .live_managed_worktree(project_id, owner_task_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
 fn main() {
     if let Some(code) = omniagent::mcp_bridge::run_from_args() {
         std::process::exit(code);
@@ -112,6 +139,8 @@ fn main() {
             provision_task_worktree,
             set_project_worktree_root,
             managed_worktree_start,
+            attempt_worktree_evidence,
+            live_managed_worktree,
             desktop::choose_repository,
             ipc::active_checkout,
             ipc::cli_executables,

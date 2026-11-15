@@ -15,6 +15,7 @@ import type { RunRecord } from "@/bindings/RunRecord";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import { ConversationRun, isLiveRun } from "@/conversation-run";
+import { WorktreeEvidence } from "@/worktree-evidence";
 import { openConversation } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
 
@@ -248,6 +249,9 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
         {(latestJob.error || cancelQueued.error || recover.error) && <p role="alert" className="text-sm text-red-300">{String(latestJob.error || cancelQueued.error || recover.error)}</p>}
         {latest.error && <p role="alert" className="text-sm text-red-300">{String(latest.error)}</p>}
         {run && <ConversationRun key={run.id} conversationId={conversationId} run={run} cancelRequested={attempt?.runId === run.id && attempt.cancelRequested} />}
+        {job?.job.mode === "approved_write" && attempt && !isLiveRun(attempt) && (
+          <WorktreeEvidence key={attempt.runId} projectId={job.job.projectId} runId={attempt.runId} ownerTaskId={job.job.taskId} />
+        )}
         {job && attempt && !busy && job.recoveryActions.length > 0 && (
           <div className="mx-auto mt-3 flex max-w-3xl flex-wrap gap-2" aria-label="Recover job">
             {job.recoveryActions.map((action) => <Button key={action} variant="outline" disabled={recover.isPending || send.isPending}

@@ -275,6 +275,7 @@ fn start_turn(
             platform: None,
             staged_attachments: StagedAttachments::default(),
             native_suggestions,
+            writer_handoff_allowed: true,
         };
         let outcome = execution
             .run(runner.as_ref(), &receiver, bridge_executable)
@@ -307,10 +308,11 @@ fn start_turn(
         });
         execution
             .app
-            .block_on(execution.store.finish_agent_attempt(
+            .block_on(execution.store.finish_supervised_attempt(
                 execution.plan.run.id,
                 status,
                 Some(answer),
+                execution.writer_handoff_allowed,
             ))?;
         Ok(status)
     });
@@ -322,6 +324,7 @@ fn start_turn(
 }
 
 struct TurnExecution {
+    writer_handoff_allowed: bool,
     app: Handle,
     store: Store,
     plan: AttemptPlan,
@@ -446,10 +449,6 @@ impl TurnExecution {
             self.plan.run.checkout_id.clone(),
             scope.checkout.clone(),
         ))?;
-        self.app.block_on(repository::capture_worktree_start(
-            &self.store,
-            self.plan.run.id.clone(),
-        ))?;
         let adapter = scope.provider.adapter();
         let mut session = adapter.create_session(SessionRequest {
             checkout: scope.checkout.clone(),
@@ -566,6 +565,10 @@ impl TurnExecution {
             self.app
                 .block_on(self.store.save_plugin_inventory(plugins))?,
         );
+        let managed_writer = self.app.block_on(repository::capture_worktree_start(
+            &self.store,
+            self.plan.run.id.clone(),
+        ))?;
         if !self.app.block_on(
             self.store
                 .record_agent_launch_intent(self.plan.run.id.clone()),
@@ -578,20 +581,32 @@ impl TurnExecution {
             checkout: &scope.checkout,
             arguments: &args,
         })?;
-        self.app
-            .block_on(self.store.mark_agent_running(self.plan.run.id.clone()))?;
+        self.writer_handoff_allowed = !managed_writer;
         let control = process.control.clone();
         let endpoint = bridge.as_ref().map(|(endpoint, _)| endpoint);
-        let run = self.drive(
-            &mut process,
-            session.as_mut(),
-            commands,
-            &checkout,
-            endpoint,
-            runner,
-        );
+        let run = self
+            .app
+            .block_on(self.store.mark_agent_running(self.plan.run.id.clone()))
+            .and_then(|()| {
+                self.drive(
+                    &mut process,
+                    session.as_mut(),
+                    commands,
+                    &checkout,
+                    endpoint,
+                    runner,
+                )
+            });
         let stopped = control.cancel();
         let ended = control.wait();
+        if managed_writer {
+            control.confirm_quiescence()?;
+            self.app.block_on(repository::save_worktree_candidate(
+                &self.store,
+                self.plan.run.id.clone(),
+            ))?;
+            self.writer_handoff_allowed = true;
+        }
         stopped?;
         ended?;
         if let Some(endpoint) = endpoint {

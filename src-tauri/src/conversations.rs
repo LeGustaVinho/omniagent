@@ -804,6 +804,17 @@ impl Store {
         outcome: RunStatus,
         response: Option<String>,
     ) -> Result<()> {
+        self.finish_supervised_attempt(run_id, outcome, response, true)
+            .await
+    }
+
+    pub(crate) async fn finish_supervised_attempt(
+        &self,
+        run_id: String,
+        outcome: RunStatus,
+        response: Option<String>,
+        writer_handoff_allowed: bool,
+    ) -> Result<()> {
         ensure!(outcome.is_terminal(), "attempt outcome must be terminal");
         let encrypted = response
             .filter(|text| !text.is_empty())
@@ -840,7 +851,9 @@ impl Store {
             }
             close_permissions(&tx, &run_id)?;
             close_native_questions(&tx, &run_id)?;
-            crate::jobs::release_writer(&tx, &run_id)?;
+            if writer_handoff_allowed {
+                crate::jobs::release_writer(&tx, &run_id)?;
+            }
             tx.execute("DELETE FROM active_agent_attempts WHERE run_id = ?1", [&run_id])?;
             tx.commit()?;
             Ok(())

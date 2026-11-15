@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs, io,
+    fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, Weak},
 };
@@ -8,18 +8,19 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::{
     customizations, protection,
-    providers::configuration::{normalize_path, open_locked_local_file, plain_metadata},
+    providers::configuration::{normalize_path, plain_metadata},
     store::Store,
 };
 
 use super::{
-    CheckoutPaths, base_commit, git_command, git_path, git_query, inspect,
+    CheckoutPaths, base_commit,
+    candidates::{GitChanges, capture_git, read_status},
+    git_command, git_path, git_query, inspect,
     isolated_git::{IsolatedGit, check},
     persist_checkout,
 };
@@ -43,6 +44,8 @@ pub struct GitStartingState {
     pub index_digest: String,
     pub staged_diff_digest: String,
     pub unstaged_diff_digest: String,
+    #[serde(default)]
+    pub changes: Option<GitChanges>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,7 +334,7 @@ fn normalize_root(path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn load_worktree(
+pub(super) fn load_worktree(
     db: &Connection,
     project: &str,
     task: &str,
@@ -462,7 +465,7 @@ fn check_branch(root: &Path, git: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn verify_managed(
+pub(super) fn verify_managed(
     worktree: &ManagedWorktree,
     git_dir: &str,
     common: &str,
@@ -482,21 +485,7 @@ fn verify_managed(
     Ok(checkout)
 }
 
-fn read_status(view: &IsolatedGit) -> Result<Vec<String>> {
-    let raw = view.read(&[
-        "status",
-        "--porcelain=v2",
-        "-z",
-        "--untracked-files=all",
-        "--ignore-submodules=all",
-    ])?;
-    Ok(String::from_utf8(raw)?
-        .split_terminator('\0')
-        .map(str::to_owned)
-        .collect())
-}
-
-pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Result<()> {
+pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Result<bool> {
     let identity = store.execute({
         let run = run_id.clone();
         move |db| {
@@ -512,54 +501,20 @@ pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Res
                     params![checkout, run], |row| row.get(0))?;
                 ensure!(holder, "writer job does not hold its worktree reservation");
             }
-            load_worktree(db, &project, &task)
+            Ok(load_worktree(db, &project, &task)?.map(|identity| (identity, writes)))
         }
     }).await?;
-    let Some((worktree, git_dir, common)) = identity else {
-        return Ok(());
+    let Some(((worktree, git_dir, common), writes)) = identity else {
+        return Ok(false);
     };
     let saved = tokio::task::spawn_blocking(move || {
         let paths = verify_managed(&worktree, &git_dir, &common)?;
-        let head = base_commit(&worktree.root)?.context("the managed branch has no commit")?;
-        let index = Path::new(&git_dir).join("index");
-        let index_digest = file_digest(&index)?;
-        let view = IsolatedGit::open(&paths, &worktree.root, &head)?;
-        view.copy_index(&paths)?;
-        let status = read_status(&view)?;
-        let staged = view.read(&[
-            "diff",
-            "--cached",
-            "--binary",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=all",
-            "--",
-        ])?;
-        let unstaged = view.read(&[
-            "diff",
-            "--binary",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=all",
-            "--",
-        ])?;
-        verify_managed(&worktree, &git_dir, &common)?;
-        ensure!(
-            base_commit(&worktree.root)?.as_deref() == Some(&head)
-                && file_digest(&index)? == index_digest,
-            "the worktree HEAD or index changed while capturing the starting state"
-        );
+        let starting = capture_git(&worktree, &git_dir, &common, None)?.state;
         Ok::<_, anyhow::Error>(WorktreeStart {
             worktree,
             repository_root: PathBuf::from(paths.repository_root),
             git_common_dir: PathBuf::from(common),
-            starting: GitStartingState {
-                head,
-                status,
-                index_digest,
-                staged_diff_digest: digest(&staged),
-                unstaged_diff_digest: digest(&unstaged),
-            },
+            starting,
         })
     })
     .await??;
@@ -572,15 +527,6 @@ pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Res
             )?;
             Ok(())
         })
-        .await
-}
-
-fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-fn file_digest(path: &Path) -> Result<String> {
-    let mut hash = Sha256::new();
-    io::copy(&mut open_locked_local_file(path)?, &mut hash)?;
-    Ok(format!("{:x}", hash.finalize()))
+        .await?;
+    Ok(writes)
 }

@@ -1,6 +1,7 @@
 use std::{
     ffi::OsStr,
-    fs, io,
+    fs,
+    io::{self, BufRead, Write},
     path::Path,
     process::Command,
     sync::{
@@ -10,16 +11,18 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     conversations::SessionScope,
     jobs::{AdmissionBlocker, AdmissionEnvironment, JobRequest},
     process_io::CapturedProcess,
     providers::{Provider, SessionMode, runtime::start_managed_turn},
-    repository::{self, ProjectCheckout, provision_task_worktree},
-    runner::{LaunchRequest, Runner},
+    repository::{self, AttemptWorktreeEvidence, ProjectCheckout, provision_task_worktree},
+    runner::{DirectWindowsRunner, LaunchRequest, Runner},
     runs::RunStatus,
     store::Store,
 };
+use serde_json::{Value, json};
 
 fn git(directory: &Path, args: &[impl AsRef<OsStr>]) -> Result<String> {
     let output = Command::new("git.exe")
@@ -261,6 +264,96 @@ impl Runner for RejectAfterCapture {
     }
 }
 
+struct CandidateWriter;
+
+impl Runner for CandidateWriter {
+    fn identity(&self) -> &str {
+        DirectWindowsRunner.identity()
+    }
+
+    fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
+        if request.arguments.contains(&OsStr::new("app-server")) {
+            return DirectWindowsRunner.launch(LaunchRequest {
+                arguments: &[
+                    "--ignored",
+                    "--exact",
+                    "candidate_fixture_worker",
+                    "--nocapture",
+                ]
+                .map(OsStr::new),
+                ..request
+            });
+        }
+        Err(io::Error::other(
+            "the fixture only implements the app server",
+        ))
+    }
+}
+
+#[test]
+#[ignore = "native child for the managed worktree candidate test"]
+fn candidate_fixture_worker() -> Result<()> {
+    let root = std::env::current_dir()?;
+    let mut output = io::stdout().lock();
+    for line in io::stdin().lock().lines() {
+        let frame: Value = serde_json::from_str(&line?)?;
+        let result = match frame["method"].as_str() {
+            Some("initialize") => json!({"userAgent":"fixture"}),
+            Some("initialized") => continue,
+            Some("thread/start") => json!({
+                "thread":{"id":"fixture"}, "cwd":root, "model":"fixture",
+                "sandbox":{"type":"workspaceWrite"}
+            }),
+            Some("config/read") => json!({"config":{"sandbox_mode":"workspace-write"}}),
+            Some("model/list" | "skills/list") => json!({"data":[]}),
+            Some("turn/start") => {
+                let binary = root.join("candidate.bin");
+                if !binary.exists() {
+                    fs::write(root.join("committed.txt"), "Committed by the CLI\n")?;
+                    git(&root, &["add", "--", "committed.txt"])?;
+                    git(
+                        &root,
+                        &[
+                            "-c",
+                            "user.name=Fixture",
+                            "-c",
+                            "user.email=fixture@example.invalid",
+                            "-c",
+                            "commit.gpgsign=false",
+                            "-c",
+                            "core.hooksPath=NUL",
+                            "commit",
+                            "--quiet",
+                            "-m",
+                            "Fixture candidate",
+                        ],
+                    )?;
+                    fs::write(&binary, [0, 255, 68, 13, 10])?;
+                } else {
+                    fs::write(&binary, b"Later file revision\n")?;
+                }
+                fs::write(root.join("staged.txt"), "Staged by the CLI\n")?;
+                git(&root, &["add", "--", "staged.txt"])?;
+                fs::write(root.join("staged.txt"), "Unstaged by the CLI\n")?;
+                fs::write(root.join("ignored.txt"), "Ignored fixture data\n")?;
+                let terminal = json!({"method":"turn/completed","params":{
+                    "threadId":"fixture", "turn":{"id":"turn","status":"completed"}
+                }});
+                let accepted = json!({"id":frame["id"],"result":{"turn":{"id":"turn"}}});
+                writeln!(output, "{accepted}\n{terminal}")?;
+                output.flush()?;
+                // Keep the native process alive until the runtime stops its job object.
+                continue;
+            }
+            other => anyhow::bail!("unexpected fixture request {other:?}"),
+        };
+        let reply = json!({"id":frame["id"],"result":result});
+        writeln!(output, "\n{reply}")?;
+        output.flush()?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn scheduled_writer_records_worktree_identity_and_git_state_before_launch() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -363,7 +456,7 @@ async fn scheduled_writer_records_worktree_identity_and_git_state_before_launch(
         "writer never reached the attempted CLI launch"
     );
     let start = store
-        .worktree_start(job.project_id, run_id.clone())
+        .worktree_start(job.project_id.clone(), run_id.clone())
         .await?
         .context("starting Git state missing")?;
     assert_eq!(start.repository_root, dunce::canonicalize(source)?);
@@ -383,6 +476,12 @@ async fn scheduled_writer_records_worktree_identity_and_git_state_before_launch(
         start.starting.unstaged_diff_digest
     );
     assert!(!managed.root.join("clean-ran").exists());
+    assert!(matches!(
+        store
+            .attempt_worktree_evidence(job.project_id, run_id.clone())
+            .await?,
+        Some(AttemptWorktreeEvidence::Unavailable { .. })
+    ));
     let state: Vec<u8> = rusqlite::Connection::open(database)?.query_row(
         "SELECT state FROM job_worktree_starts WHERE run_id = ?1",
         [run_id],
@@ -392,6 +491,195 @@ async fn scheduled_writer_records_worktree_identity_and_git_state_before_launch(
         !state
             .windows(b"untracked-private-marker".len())
             .any(|window| window == b"untracked-private-marker")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_writer_captures_immutable_binary_and_git_changes_per_attempt() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("store.sqlite");
+    let store = Store::open(database.clone())?;
+    let source = temp.path().join("source");
+    let project = repository(&store, &source).await?;
+    let other = repository(&store, &temp.path().join("other")).await?;
+    let task = store
+        .create_project_task(project.project_id.clone(), "Evidence".into())
+        .await?;
+    let managed = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project.project_id.clone(),
+        task.id.clone(),
+        project.checkout_id.clone(),
+    )
+    .await?;
+    fs::create_dir_all(source.join(".git/info"))?;
+    fs::write(source.join(".git/info/exclude"), "ignored.txt\n")?;
+    fs::write(
+        managed.root.join("previous.txt"),
+        "Existing untracked data\n",
+    )?;
+    fs::write(
+        managed.root.join("file.sample"),
+        "Preexisting unstaged line\n",
+    )?;
+
+    let conversation = store
+        .create_conversation(project.checkout_id, "Parent".into())
+        .await?;
+    let runner = Arc::new(CandidateWriter);
+    let parent = store
+        .prepare_agent_attempt(
+            conversation.id,
+            conversation.context_id,
+            SessionScope {
+                provider: Provider::Codex,
+                profile_id: "writer".into(),
+                account_binding: None,
+                checkout: dunce::canonicalize(&source)?,
+                executable: std::env::current_exe()?,
+                cli_version: "0.169.0-alpha.11.1".into(),
+                runner: runner.identity().into(),
+                permission_revision: "writer-fixture".into(),
+                mode: SessionMode::ApprovedWrite,
+                model: None,
+                effort: None,
+            },
+            "Prepare fixture jobs".into(),
+        )
+        .await?;
+    store.mark_agent_running(parent.run.id.clone()).await?;
+    let env = AdmissionEnvironment {
+        runner: runner.identity().into(),
+        bridge_available: false,
+    };
+    let mut ids = Vec::new();
+    let mut artifacts = Vec::new();
+    for key in ["earlier", "later"] {
+        let job = store
+            .submit_agent_job(
+                parent.run.id.clone(),
+                key.into(),
+                JobRequest {
+                    checkout_id: Some(managed.checkout_id.clone()),
+                    task_id: Some(task.id.clone()),
+                    mode: SessionMode::ApprovedWrite,
+                    instructions: "Edit the fixture".into(),
+                    dependencies: Vec::new(),
+                    requires_bridge: false,
+                },
+            )
+            .await?;
+        let inspection = store
+            .inspect_job(project.project_id.clone(), job.id, env.clone())
+            .await?
+            .context("job not persisted")?;
+        let [AdmissionBlocker::Approval { approval_id }] = inspection.blockers.as_slice() else {
+            anyhow::bail!(
+                "expected pending job approval, got {:?}",
+                inspection.blockers
+            );
+        };
+        store
+            .decide_job_approval(project.project_id.clone(), approval_id.clone(), true)
+            .await?;
+        let attempt = store
+            .claim_next_job(env.clone())
+            .await?
+            .context("writer not claimed")?;
+        let run_id = attempt.run.id.clone();
+        let status = start_managed_turn(store.clone(), runner.clone(), attempt, None)
+            .wait()
+            .await?;
+        let evidence = store
+            .attempt_worktree_evidence(project.project_id.clone(), run_id.clone())
+            .await?
+            .context("attempt was not found")?;
+        let AttemptWorktreeEvidence::Saved { artifact } = evidence else {
+            anyhow::bail!("candidate was not saved for {key} ({status:?}): {evidence:?}");
+        };
+        assert_eq!(status, RunStatus::Succeeded);
+        ids.push(run_id);
+        artifacts.push(artifact);
+    }
+    let first = &artifacts[0];
+    let before = first
+        .start
+        .starting
+        .changes
+        .as_ref()
+        .context("starting changes missing")?;
+    assert_eq!(first.start.starting.head, managed.base_commit);
+    assert!(
+        String::from_utf8(STANDARD.decode(&before.unstaged_patch_base64)?)?
+            .contains("+Preexisting unstaged line")
+    );
+    assert_eq!(before.untracked[0].path, "previous.txt");
+    assert!(before.untracked[0].content_base64.is_none());
+    let changes = first
+        .candidate
+        .changes
+        .as_ref()
+        .context("candidate changes missing")?;
+    assert!(
+        String::from_utf8(STANDARD.decode(&changes.staged_patch_base64)?)?
+            .contains("+Staged by the CLI")
+    );
+    assert!(
+        String::from_utf8(STANDARD.decode(&changes.unstaged_patch_base64)?)?
+            .contains("+Unstaged by the CLI")
+    );
+    assert!(
+        String::from_utf8(STANDARD.decode(&first.committed_patch_base64)?)?
+            .contains("+Committed by the CLI")
+    );
+    assert_eq!(
+        changes
+            .untracked
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        ["candidate.bin", "previous.txt"]
+    );
+    assert_eq!(
+        STANDARD.decode(changes.untracked[0].content_base64.as_deref().unwrap())?,
+        [0, 255, 68, 13, 10]
+    );
+    assert_ne!(first.revision, artifacts[1].revision);
+    let reopened = Store::open(database)?;
+    assert_eq!(
+        reopened
+            .attempt_worktree_evidence(project.project_id.clone(), ids[0].clone())
+            .await?,
+        Some(AttemptWorktreeEvidence::Saved {
+            artifact: first.clone()
+        })
+    );
+    assert!(
+        reopened
+            .attempt_worktree_evidence(other.project_id.clone(), ids[0].clone())
+            .await?
+            .is_none()
+    );
+    assert!(
+        reopened
+            .live_managed_worktree(other.project_id, task.id.clone())
+            .await?
+            .is_none()
+    );
+    fs::write(managed.root.join("live-only.txt"), "Live checkout only\n")?;
+    let live = reopened
+        .live_managed_worktree(project.project_id, task.id)
+        .await?
+        .context("live checkout missing")?;
+    assert!(live.status.iter().any(|entry| entry == "? live-only.txt"));
+    assert!(
+        !first
+            .candidate
+            .status
+            .iter()
+            .any(|entry| entry.contains("live-only"))
     );
     Ok(())
 }

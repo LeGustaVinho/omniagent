@@ -27,6 +27,12 @@ pub struct LaunchRequest<'a> {
 pub trait RunControl: Send + Sync {
     fn cancel(&self) -> io::Result<bool>;
     fn wait(&self) -> io::Result<TerminalOutcome>;
+    fn confirm_quiescence(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the runner cannot confirm that all writers have stopped",
+        ))
+    }
 }
 
 pub trait Runner: Send + Sync {
@@ -137,5 +143,9 @@ impl RunControl for WindowsProcessControl {
 
     fn wait(&self) -> io::Result<TerminalOutcome> {
         self.wait()
+    }
+
+    fn confirm_quiescence(&self) -> io::Result<()> {
+        self.confirm_quiescence()
     }
 }
