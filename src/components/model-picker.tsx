@@ -1,4 +1,6 @@
-import { useId } from "react";
+import { Check, ChevronDown } from "lucide-react";
+import { DropdownMenu } from "radix-ui";
+import { useId, useState } from "react";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelRating } from "@/bindings/ModelRating";
 import type { ModelSelection } from "@/bindings/ModelSelection";
@@ -56,6 +58,50 @@ export function ModelRatingMeters({ rating }: { rating: ModelRating | null }) {
         API reference {apiPrice.format(rating.apiReferenceCents / 100)} / 1M tokens
       </span>
     </span>
+  );
+}
+
+export function ComposerModelPicker({ options, selected, onChange, loading }: {
+  options: readonly ModelOption[];
+  selected: ModelSelection | null;
+  onChange: (value: ModelSelection) => void;
+  loading?: boolean;
+}) {
+  const [inspected, setInspected] = useState<string>();
+  const value = selected ? modelKey(selected) : "";
+  const current = options.find((option) => modelKey(option.selection) === value);
+  const preview = options.find((option) => modelKey(option.selection) === inspected) ?? current ?? options.find(({ selectable }) => selectable);
+
+  return (
+    <DropdownMenu.Root onOpenChange={() => setInspected(undefined)}>
+      <DropdownMenu.Trigger className="conv-select conv-model-trigger" aria-label={current ? `Model · ${current.name}` : "Choose model"}>
+        <span>{current?.name ?? (loading ? "Loading models…" : "Choose model")}</span><ChevronDown size={13} aria-hidden />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="conv-model-menu" aria-label="Models" side="top" align="start" sideOffset={6} collisionPadding={10}>
+          <DropdownMenu.Label className="conv-model-heading">Model</DropdownMenu.Label>
+          <DropdownMenu.RadioGroup value={value} className="conv-model-list" onValueChange={(key) => {
+            const chosen = options.find((option) => modelKey(option.selection) === key);
+            if (chosen?.selectable) onChange(chosen.selection);
+          }}>
+            {options.map((option) => {
+              const key = modelKey(option.selection);
+              return <DropdownMenu.RadioItem className="conv-model-item" key={key} value={key} disabled={!option.selectable}
+                aria-label={option.selectable ? option.name : undefined}
+                textValue={option.name} onFocus={() => setInspected(key)} onPointerMove={() => setInspected(key)}>
+                <span className="conv-model-item-check"><DropdownMenu.ItemIndicator><Check size={14} aria-hidden /></DropdownMenu.ItemIndicator></span>
+                <span className="min-w-0">
+                  <span className="block truncate" title={option.name}>{option.name}</span>
+                  {!option.selectable && <small>{option.unavailableReason ?? "Unavailable in this profile"}</small>}
+                </span>
+              </DropdownMenu.RadioItem>;
+            })}
+          </DropdownMenu.RadioGroup>
+          {!options.length && <p className="conv-model-empty">{loading ? "Checking available models…" : "No models reported by this profile."}</p>}
+          {preview && <div className="conv-model-rating" aria-label={`Ratings for ${preview.name}`}><ModelRatingMeters rating={preview.rating} /></div>}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
 

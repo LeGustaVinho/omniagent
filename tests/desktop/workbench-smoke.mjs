@@ -163,6 +163,31 @@ async function checkSimulation(browser, checkout) {
   await browser.$('[role="menu"]').waitForDisplayed();
   await capture(browser, "01-context-menu");
   await browser.keys("Escape");
+  const conversation = browser.$(shown);
+  const composerHeight = () => browser.execute(() => document.querySelector(".work-deck:not([hidden]) .work-view:not([hidden]) .conv-composer")
+    .getBoundingClientRect().height);
+  const heightBefore = await composerHeight();
+  await click(conversation, ".conv-model-trigger");
+  const modelMenu = browser.$(".conv-model-menu");
+  await modelMenu.waitForDisplayed();
+  assert.equal(await composerHeight(), heightBefore);
+  await capture(browser, "01-composer-model-picker");
+  await browser.keys("Escape");
+  await conversation.$('select[aria-label="Conversation mode"]').selectByAttribute("value", "goal");
+  const draft = conversation.$('textarea[aria-label="Message draft"]');
+  await draft.setValue("Verify recovery instructions against the release checklist.");
+  await click(conversation, "button=Start goal");
+  await click(conversation, "button=Continue goal");
+  await click(conversation, 'button[aria-label="View goal objective"]');
+  const goalDialog = browser.$('.conv-dialog[role="dialog"]');
+  const objective = goalDialog.$("textarea");
+  assert.equal(await objective.getValue(), "Verify recovery instructions against the release checklist.");
+  await objective.setValue("Verify backup and recovery instructions against the release checklist.");
+  await capture(browser, "01-goal-editor");
+  await click(goalDialog, "button=Save objective");
+  assert.match(await conversation.$('.conv-goal [role="status"]').getText(), /Running · 1\/3 turns/);
+  await click(conversation, "button=Cancel goal");
+  await conversation.$('select[aria-label="Conversation mode"]').selectByAttribute("value", "plan");
   await click(browser, "button=Reply");
   await click(browser, "button=Approve implementation");
   await click(browser, "button=Open release task");
@@ -534,6 +559,13 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     await recoveredDraft.waitForEnabled();
     assert.equal(await recoveredDraft.getValue(), unsent);
     assert.deepEqual(await invoke(browser, "conversation_messages", { conversationId: conversation.id }), []);
+    const mode = browser.$(`section[aria-label="${conversation.title}"] select[aria-label="Conversation mode"]`);
+    await mode.selectByAttribute("value", "goal");
+    assert.equal(await browser.$("button=Start goal").isEnabled(), false);
+    await recoveredDraft.click();
+    await browser.keys(["Control", "Enter"]);
+    assert.equal(await invoke(browser, "latest_conversation_job", { conversationId: conversation.id }), null);
+    await mode.selectByAttribute("value", "read_only");
 
     if (process.env.OMNIAGENT_LIVE_CONVERSATION === "1") {
       const selector = `section[aria-label="${conversation.title}"]`;
@@ -541,53 +573,34 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       const models = await invoke(browser, "conversation_models", { provider: "codex" });
       const model = models.find(({ option }) => option.selection.modelId === "gpt-6-luna" && option.selectable);
       assert.ok(model, "the installed profile does not offer the qualified fixture model");
-      const summary = `${selector} form details summary`;
-      await browser.$(summary).waitForDisplayed();
-      await browser.execute((summary) => document.querySelector(summary).focus(), summary);
+      const modelTrigger = `${selector} .conv-model-trigger`;
+      await browser.$(modelTrigger).waitForDisplayed();
+      await browser.execute((trigger) => document.querySelector(trigger).focus(), modelTrigger);
       await browser.keys("Enter");
-      const radioSelector = `${selector} input[aria-label="${model.option.name}"]`;
+      const radioSelector = `.conv-model-menu [role="menuitemradio"][aria-label="${model.option.name}"]`;
       const modelRadio = browser.$(radioSelector);
       await modelRadio.waitForDisplayed();
       await browser.execute((radio) => document.querySelector(radio).focus(), radioSelector);
-      await browser.keys(" ");
-      await browser.waitUntil(() => modelRadio.isSelected());
       const rating = model.option.rating;
       assert.ok(rating);
-      const originalRating = await browser.execute((radio) => {
-        const option = document.querySelector(radio).closest("label");
+      await browser.waitUntil(() => browser.$(".conv-model-rating").getAttribute("aria-label").then((label) => label === `Ratings for ${model.option.name}`));
+      const originalRating = await browser.execute(() => {
+        const option = document.querySelector(".conv-model-rating");
         return {
           meters: [...option.querySelectorAll("meter")].map((meter) => [meter.getAttribute("aria-label"), meter.value]),
           price: [...option.querySelectorAll("span")].find((span) => span.childElementCount === 0
             && span.textContent.startsWith("API reference "))?.textContent,
         };
-      }, radioSelector);
+      });
       assert.deepEqual(originalRating.meters, [
         ["Intelligence", rating.intelligenceTenths / 10],
         ["Price score", rating.priceScore],
       ]);
       const rate = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(rating.apiReferenceCents / 100);
       assert.equal(originalRating.price, `API reference ${rate} / 1M tokens`);
-      const compact = await browser.execute((radio) => {
-        const picker = document.querySelector(radio).closest("details");
-        const selected = picker.querySelector("summary [aria-label='Selected models']");
-        picker.style.maxWidth = "315px";
-        try {
-          return {
-            width: picker.clientWidth,
-            scrollWidth: picker.scrollWidth,
-            meters: [...selected.querySelectorAll("meter")].map((meter) => [meter.getAttribute("aria-label"), meter.value]),
-            price: [...selected.querySelectorAll("span")].find((span) => span.childElementCount === 0
-              && span.textContent.startsWith("API reference "))?.textContent,
-          };
-        } finally {
-          picker.style.removeProperty("max-width");
-        }
-      }, radioSelector);
-      assert.ok(compact.width > 0 && compact.width <= 315);
-      assert.equal(compact.scrollWidth, compact.width);
-      assert.deepEqual(compact.meters, originalRating.meters);
-      assert.equal(compact.price, originalRating.price);
-      await panel.$('summary span[aria-label="Selected models"]').click();
+      await browser.keys("Enter");
+      await browser.$(".conv-model-menu").waitForExist({ reverse: true });
+      assert.equal(await browser.$(modelTrigger).getText(), model.option.name);
       const prompt = "Reply exactly OMNIAGENT_DESKTOP_REPLY without tools.";
       await recoveredDraft.setValue(prompt);
       await panel.$("button=Send").click();

@@ -1,12 +1,13 @@
 import {
-  Activity, ArrowDown, ArrowUp, FileText, GitFork, History, MessageSquare, Paperclip, Plus,
+  Activity, ArrowDown, ArrowUp, FileText, GitFork, History, MessageSquare, Paperclip, Pencil, Plus,
   Rows3, ShieldCheck, Target, X,
 } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
-import { ModelPicker } from "@/components/model-picker";
+import { ComposerModelPicker } from "@/components/model-picker";
+import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import {
   deliveryConversation, demoModels, fileSamples, previewPlan, providers,
@@ -58,9 +59,74 @@ function visibleDeliveryStatus(step: DeliveryStep) {
   }
 }
 
+function PreviewGoalCard({ goal, update }: { goal: PreviewGoal; update: (goal: PreviewGoal) => void }) {
+  const [open, setOpen] = useState(false);
+  const [objective, setObjective] = useState(goal.objective);
+  const active = goal.state === "Running" || goal.state === "Paused";
+  const revision = goal.previousObjectives.length + 1;
+
+  function save(event: FormEvent) {
+    event.preventDefault();
+    const next = objective.trim();
+    if (!active || !next || next === goal.objective) return;
+    update({ ...goal, objective: next, previousObjectives: [...goal.previousObjectives, goal.objective] });
+    setOpen(false);
+  }
+
+  return (
+    <section className="conv-goal" aria-label="Goal">
+      <Target size={16} aria-hidden />
+      <div className="conv-goal-summary">
+        <Dialog.Root open={open} onOpenChange={(next) => {
+          if (next) setObjective(goal.objective);
+          setOpen(next);
+        }}>
+          <Dialog.Trigger className="conv-goal-objective" type="button" aria-label="View goal objective" title={goal.objective}>
+            <strong>{goal.objective}</strong>{active && <Pencil size={13} aria-hidden />}
+          </Dialog.Trigger>
+          <Dialog.Portal>
+            <Dialog.Overlay className="conv-dialog-scrim" />
+            <Dialog.Content className="conv-dialog" aria-describedby={undefined}>
+              <Dialog.Title>Goal objective</Dialog.Title>
+              <form className="conv-dialog-form" onSubmit={save}>
+                <label>Objective
+                  <textarea rows={6} value={objective} readOnly={!active} onChange={(event) => setObjective(event.currentTarget.value)} />
+                </label>
+                <p className="text-xs text-muted-foreground">Revision {revision} · {goal.spent}/{goal.budget} turns · {goal.model}</p>
+                {goal.previousObjectives.length > 0 && <details className="conv-goal-revisions">
+                  <summary>Previous revisions</summary>
+                  <ol>{goal.previousObjectives.map((prior, index) => <li key={index}>
+                    <small>Revision {index + 1}</small><p>{prior}</p>
+                  </li>)}</ol>
+                </details>}
+                <footer>
+                  <Dialog.Close className="conv-quiet-button" type="button">Close</Dialog.Close>
+                  {active && <button type="submit" className="conv-primary-button"
+                    disabled={!objective.trim() || objective.trim() === goal.objective}>Save objective</button>}
+                </footer>
+              </form>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
+        <small role="status">{goal.state} · {goal.spent}/{goal.budget} turns · {goal.model} · Simulation</small>
+      </div>
+      <div className="conv-goal-actions">
+        {goal.state === "Running" && <>
+          <button type="button" className="conv-quiet-button" onClick={() => update({
+            ...goal, spent: goal.spent + 1, state: goal.spent + 1 === goal.budget ? "Budget reached" : "Running",
+          })}>Continue goal</button>
+          <button type="button" className="conv-quiet-button" onClick={() => update({ ...goal, state: "Paused" })}>Pause goal</button>
+        </>}
+        {goal.state === "Paused" && <button type="button" className="conv-quiet-button" onClick={() => update({ ...goal, state: "Running" })}>Resume goal</button>}
+        {active && <button type="button" className="conv-quiet-button" onClick={() => update({ ...goal, state: "Cancelled" })}>Cancel goal</button>}
+      </div>
+    </section>
+  );
+}
+
 export function PreviewConversationPanel(props: PanelProps) {
   const { conversation, simulation, update, onFork, onRewind, openWorkspace, openActivity, openChanges } = props;
-  const [mode, setMode] = useState("plan");
+  const [mode, setMode] = useState<ConversationMode>("plan");
   const [provider, setProvider] = useState<Provider>("codex");
   const [selection, setSelection] = useState<ModelSelection | null>(demoModels.find(({ selection }) => selection.provider === "codex")?.selection ?? null);
   const [effort, setEffort] = useState("Standard");
@@ -82,6 +148,11 @@ export function PreviewConversationPanel(props: PanelProps) {
   const activeRun = step === "running";
   const modelOptions = demoModels.filter(({ selection }) => selection.provider === provider);
   const { draft, goal, sideQuestion } = conversation;
+  const prompt = draft.trim();
+  const goalInput = goalCommand(draft);
+  const composingGoal = goalInput !== undefined || (mode === "goal" && prompt !== "/plan" && !prompt.startsWith("/btw "));
+  const goalActive = goal?.state === "Running" || goal?.state === "Paused";
+  const canSend = Boolean(draft.trim() && (goalInput === "" || (selection && (!composingGoal || !goalActive))));
   const isSlash = draft.startsWith("/") && !/\s/.test(draft);
   const isReference = draft.startsWith("@") && !draft.includes("\n") && !attachedReference;
   const suggestions = isSlash ? commandSuggestions.filter(({ title }) => title.includes(draft)) : [];
@@ -114,8 +185,21 @@ export function PreviewConversationPanel(props: PanelProps) {
 
   function send(event: FormEvent) {
     event.preventDefault();
-    const prompt = draft.trim();
+    if (goalInput === "") {
+      setMode("goal");
+      editDraft("");
+      return;
+    }
     if (!prompt || !selection) return;
+    if (composingGoal) {
+      const chosen = modelOptions.find(({ selection: option }) => option.modelId === selection.modelId && option.profileId === selection.profileId);
+      if (!goalActive && chosen?.selectable) {
+        setGoal({ objective: goalInput ?? prompt, previousObjectives: [], model: chosen.name, state: "Running", spent: 0, budget: 3 });
+        setMode("goal");
+        editDraft("");
+      }
+      return;
+    }
     stickToEnd.current = true;
     setShowJump(false);
     if (prompt === "/plan") {
@@ -126,11 +210,6 @@ export function PreviewConversationPanel(props: PanelProps) {
     if (prompt.startsWith("/btw ")) {
       update((current) => ({ ...current, sideQuestion: prompt.slice(5).trim(), draft: "" }));
       setShowSideQuestion(true);
-      return;
-    }
-    if (prompt.startsWith("/goal ")) {
-      setGoal({ objective: prompt.slice(6).trim(), state: "Running", spent: 0, budget: 3 });
-      editDraft("");
       return;
     }
     const references = attachedReference ? `\n\nReferenced: ${attachedReference.project} / ${attachedReference.title}` : "";
@@ -264,22 +343,6 @@ export function PreviewConversationPanel(props: PanelProps) {
                   </div>}
                 </article>}
               </section>}
-              {goal && <section className="conv-flow-card conv-example-flow" aria-label="Goal">
-                <div className="conv-flow-heading"><span><Target aria-hidden /> Goal</span><small>{goal.state}</small></div>
-                <p>{goal.objective}</p><progress value={goal.spent} max={goal.budget} aria-label="Goal turns used" />
-                <small>{goal.spent} of {goal.budget} turns used · Managed continuation · Read-only profile</small>
-                <div className="conv-route-actions">
-                  {goal.state === "Running" && <>
-                    <button type="button" className="conv-primary-button" onClick={() => setGoal({
-                      ...goal, spent: goal.spent + 1, state: goal.spent + 1 === goal.budget ? "Completed" : "Running",
-                    })}>Continue goal</button>
-                    <button type="button" className="conv-quiet-button" onClick={() => setGoal({ ...goal, state: "Paused" })}>Pause goal</button>
-                  </>}
-                  {goal.state === "Paused" && <button type="button" className="conv-primary-button" onClick={() => setGoal({ ...goal, state: "Running" })}>Resume goal</button>}
-                  {(goal.state === "Running" || goal.state === "Paused") && <button type="button" className="conv-quiet-button" onClick={() =>
-                    setGoal({ ...goal, state: "Cancelled" })}>Cancel goal</button>}
-                </div>
-              </section>}
             </div>
           </div>
           <div className="conv-composer-area">
@@ -288,6 +351,7 @@ export function PreviewConversationPanel(props: PanelProps) {
               stickToEnd.current = true;
               setShowJump(false);
             }}><ArrowDown aria-hidden /> Jump to latest</button>}
+            {goal && <PreviewGoalCard goal={goal} update={setGoal} />}
             {Boolean(conversation.queued.length) && <section className="conv-queued" aria-label="Queued instructions">
               <strong>Queued for next turn · {conversation.queued.length}</strong>
               {conversation.queued.map((entry, index) => <div key={index}>
@@ -322,13 +386,13 @@ export function PreviewConversationPanel(props: PanelProps) {
                   <button type="button" aria-label="Remove conversation reference" onClick={() => setAttachedReference(undefined)}><X aria-hidden /></button></span>}
               </div>}
               <textarea aria-label="Message draft" value={draft} onChange={(event) => editDraft(event.currentTarget.value)}
-                placeholder="Ask about this repository…"
+                placeholder={composingGoal ? (goalActive ? "A goal is already active" : "Describe the objective…") : "Ask about this repository…"}
                 onKeyDown={(event) => {
                   if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.nativeEvent.isComposing) {
                     event.preventDefault();
                     event.currentTarget.form?.requestSubmit();
                   }
-                  if (event.key === "Tab" && !event.shiftKey && !draft && !activeRun && conversation.messages.length) {
+                  if (event.key === "Tab" && !event.shiftKey && !draft && !activeRun && !composingGoal && conversation.messages.length) {
                     event.preventDefault();
                     editDraft(exampleSuggestion);
                   }
@@ -343,29 +407,27 @@ export function PreviewConversationPanel(props: PanelProps) {
                   editDraft("");
                 }}><strong>{reference.title}</strong><span>{reference.project}</span></button>)}
               </div>}
-              {!draft && !activeRun && conversation.messages.length > 0 && <button type="button" className="conv-suggestion"
+              {!draft && !activeRun && !composingGoal && conversation.messages.length > 0 && <button type="button" className="conv-suggestion"
                 onClick={() => editDraft(exampleSuggestion)}>{exampleSuggestion}<kbd>Tab</kbd></button>}
               <div className="conv-composer-toolbar">
                 <button type="button" className="conv-icon-button" title="Attach a file" aria-label="Attach a file" onClick={openAttachment}><Plus aria-hidden /></button>
                 <select aria-label="Provider" className="conv-select" value={provider} onChange={(event) => updateProfile(event.currentTarget.value as Provider)}>
                   {Object.entries(providers).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
                 </select>
-                <select aria-label="Profile" className="conv-select" value={mode} onChange={(event) => setMode(event.currentTarget.value)}>
-                  <option value="read_only">Read-only</option><option value="plan">Planning</option>
-                </select>
+                <ComposerModelPicker options={modelOptions} selected={selection} onChange={setSelection} />
+                <ConversationModeSelect mode={mode} onChange={setMode} />
                 <select aria-label="Thinking level" className="conv-select" value={effort} onChange={(event) => setEffort(event.currentTarget.value)}>
                   <option>Standard</option><option>High</option><option>Low</option>
                 </select>
-                {activeRun && <select aria-label="Delivery" className="conv-select" value={deliveryRoute} onChange={(event) => setDeliveryRoute(event.currentTarget.value)}>
+                {activeRun && !composingGoal && <select aria-label="Delivery" className="conv-select" value={deliveryRoute} onChange={(event) => setDeliveryRoute(event.currentTarget.value)}>
                   <option value="live" disabled={provider !== "codex"}>Send to active turn</option>
                   <option value="queued">Queue for next turn</option>
                 </select>}
                 {activeRun && <button type="button" className="conv-quiet-button" onClick={() => simulation?.advanceDelivery("interrupt")}>Stop</button>}
-                <button type="submit" className="conv-primary-button conv-send" disabled={!draft.trim() || !selection}>
-                  {activeRun && deliveryRoute === "queued" ? "Queue" : "Send"} <ArrowUp size={15} aria-hidden />
+                <button type="submit" className="conv-primary-button conv-send" disabled={!canSend}>
+                  {goalInput === "" ? "Open Goal Mode" : composingGoal ? "Start goal" : activeRun && deliveryRoute === "queued" ? "Queue" : "Send"} <ArrowUp size={15} aria-hidden />
                 </button>
               </div>
-              <div className="conv-model"><ModelPicker label="Model" options={modelOptions} selection={{ mode: "single", selected: selection, onChange: setSelection }} /></div>
               {queuedNotice && <p className="text-xs text-muted-foreground" role="status">{queuedNotice}</p>}
             </form>
           </div>

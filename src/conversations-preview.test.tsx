@@ -51,6 +51,40 @@ test("context actions target the clicked conversation while another conversation
   expect(invoke).not.toHaveBeenCalled();
 });
 
+test("starts and controls a goal separately from the transcript", async () => {
+  const user = userEvent.setup();
+  render(<Example />);
+  const composer = screen.getByRole("textbox", { name: "Message draft" });
+  await user.type(composer, "/goal");
+  await user.click(screen.getByRole("button", { name: "Open Goal Mode" }));
+  expect((screen.getByRole("combobox", { name: "Conversation mode" }) as HTMLSelectElement).value).toBe("goal");
+  await user.type(composer, "Review the recovery checklist");
+  await user.click(screen.getByRole("button", { name: "Start goal" }));
+  const goal = screen.getByRole("region", { name: "Goal" });
+  expect(within(goal).getByText("Review the recovery checklist")).toBeTruthy();
+  await user.click(within(goal).getByRole("button", { name: "Pause goal" }));
+  expect(within(goal).getByRole("status").textContent).toContain("Paused");
+  await user.click(within(goal).getByRole("button", { name: "Resume goal" }));
+  await user.click(within(goal).getByRole("button", { name: "Continue goal" }));
+  expect(within(goal).getByRole("status").textContent).toContain("1/3 turns");
+  await user.click(within(goal).getByRole("button", { name: "View goal objective" }));
+  const dialog = screen.getByRole("dialog", { name: "Goal objective" });
+  const objective = within(dialog).getByRole("textbox", { name: "Objective" }) as HTMLTextAreaElement;
+  expect(objective.value).toBe("Review the recovery checklist");
+  await user.clear(objective);
+  await user.type(objective, "Review the backup and recovery checks");
+  await user.click(within(dialog).getByRole("button", { name: "Save objective" }));
+  expect(within(goal).getByText("Review the backup and recovery checks")).toBeTruthy();
+  expect(within(goal).getByRole("status").textContent).toContain("Running · 1/3 turns");
+  await user.click(within(goal).getByRole("button", { name: "View goal objective" }));
+  expect(within(screen.getByRole("dialog", { name: "Goal objective" })).getByText("Review the recovery checklist")).toBeTruthy();
+  await user.keyboard("{Escape}");
+  await user.click(within(goal).getByRole("button", { name: "Cancel goal" }));
+  expect(within(goal).getByRole("status").textContent).toContain("Cancelled");
+  expect(screen.queryByText("/goal")).toBeNull();
+  expect(invoke).not.toHaveBeenCalled();
+});
+
 test("renders Markdown links and images as text inside agent messages", () => {
   const { container } = render(<ConversationMarkdown>{
     "[Docs](https://example.com/path)\n\n![Diagram](https://example.com/image.png)\n\n"

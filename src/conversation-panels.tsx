@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { IDockviewPanelProps } from "dockview-react";
-import { Activity, ArrowDown, ArrowUp, MessageSquare, Plus, RotateCcw, Search } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, MessageSquare, Plus, RotateCcw, Search, Target } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import type { Conversation } from "@/bindings/Conversation";
@@ -14,7 +14,8 @@ import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import type { RunRecord } from "@/bindings/RunRecord";
-import { ModelPicker } from "@/components/model-picker";
+import { ComposerModelPicker } from "@/components/model-picker";
+import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
 import { ConversationMarkdown } from "@/conversation-markdown";
@@ -193,7 +194,6 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
 
 type PanelParams = { conversationId: string; title: string };
 type DesktopModel = { option: ModelOption; efforts: string[] };
-type ProfileMode = "read_only" | "plan";
 const selectorClass = "conv-select";
 
 export function ConversationPanel({ params, api }: IDockviewPanelProps<PanelParams>) {
@@ -249,8 +249,9 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
   const [provider, setProvider] = useState<Provider>("codex");
   const [selection, setSelection] = useState<ModelSelection | null>(null);
   const [effort, setEffort] = useState("");
-  const [mode, setMode] = useState<ProfileMode>("read_only");
+  const [mode, setMode] = useState<ConversationMode>("read_only");
   const text = draft.data ?? "";
+  const goalUnavailable = mode === "goal" || goalCommand(text) !== undefined;
   const models = useQuery({
     queryKey: ["conversation-models", provider],
     queryFn: () => invoke<DesktopModel[]>("conversation_models", { provider }),
@@ -297,6 +298,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
   const send = useMutation({
     mutationFn: async (submitted: string) => {
       if (!selection) throw new Error("Choose a model");
+      if (mode === "goal" || goalCommand(submitted) !== undefined) throw new Error("Goal Mode is available in simulation.");
       await saveDraft(conversationId, submitted);
       return invoke<Job>("start_conversation_turn", {
         conversationId, selection, effort: effort || null, mode, text: submitted,
@@ -339,7 +341,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     });
   }
 
-  const canSend = Boolean(text.trim() && !busy && !latest.isPending && !latestJob.isPending && selected?.option.selectable && !send.isPending && !recover.isPending);
+  const canSend = Boolean(text.trim() && !goalUnavailable && !busy && !latest.isPending && !latestJob.isPending && selected?.option.selectable && !send.isPending && !recover.isPending);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -450,24 +452,21 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
                 <option value="claude">Claude Code</option>
                 <option value="antigravity">Antigravity</option>
               </select>
+              <ComposerModelPicker options={models.data?.map(({ option }) => option) ?? []} selected={selection} loading={models.isPending}
+                onChange={(selection) => { setSelection(selection); setEffort(""); }} />
+              <ConversationModeSelect mode={mode} onChange={setMode} />
               <select aria-label="Thinking level" className={selectorClass} value={effort} onChange={(event) => setEffort(event.target.value)}>
                 <option value="">Default effort</option>
                 {selected?.efforts.map((level) => <option key={level} value={level}>{level}</option>)}
               </select>
-              <select aria-label="Profile" className={selectorClass} value={mode} onChange={(event) => setMode(event.target.value as ProfileMode)}>
-                <option value="read_only">Read-only</option>
-                <option value="plan">Planning</option>
-              </select>
               {live ? <StopConversation {...activity} /> :
                 <Button type="submit" className="conv-send" disabled={!canSend}>
-                  {send.isPending ? "Starting…" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
+                  {send.isPending ? "Starting…" : goalUnavailable ? "Start goal" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
                 </Button>}
           </div>
-          <div className="conv-model">
-          <ModelPicker label="Model" options={models.data?.map(({ option }) => option) ?? []}
-            selection={{ mode: "single", selected: selection, onChange: (selection) => { setSelection(selection); setEffort(""); } }} />
-          </div>
-          {models.isPending && <p role="status" className="text-xs text-muted-foreground">Checking CLI models…</p>}
+          {goalUnavailable && <p className="conv-goal-note" role="status"><Target size={14} aria-hidden />
+            Goal Mode is available in Simulation while runtime integration is pending.
+          </p>}
           {models.error && <div className="flex flex-wrap items-center gap-2">
             <p role="alert" className="conv-alert">{String(models.error)}</p>
             <Button type="button" variant="outline" onClick={() => void models.refetch()}>Refresh models</Button>

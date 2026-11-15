@@ -5,7 +5,14 @@ import catalog from "../src-tauri/model-catalog/v1.json";
 export type PreviewMessage = { id: string; author: "user" | "assistant"; text: string };
 export type AttachmentRoute = "Native" | "Excerpt" | "Reference";
 export type PreviewAttachment = { path: string; route: AttachmentRoute };
-export type PreviewGoal = { objective: string; state: "Running" | "Paused" | "Completed" | "Cancelled"; spent: number; budget: number };
+export type PreviewGoal = {
+  objective: string;
+  previousObjectives: string[];
+  model: string;
+  state: "Running" | "Paused" | "Budget reached" | "Cancelled";
+  spent: number;
+  budget: number;
+};
 export type PreviewConversation = {
   id: string;
   title: string;
