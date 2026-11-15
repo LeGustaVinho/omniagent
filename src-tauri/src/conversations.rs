@@ -1635,7 +1635,9 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
                 .map(|item| (message.revision_id.clone(), item)),
         );
     }
-    if !attachments.is_empty() {
+    // The queued revision has passed admission. The runtime checks the entire
+    // assembled prompt against current limits before recording its dispatch.
+    if !matches!(history, AttemptHistory::QueuedInstruction { .. }) && !attachments.is_empty() {
         let limits = attachments::limits_for_checkout(db, &conversation.checkout_id)?;
         attachments::check_limits(
             limits,
@@ -5034,15 +5036,24 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_receives_only_the_first_compatible_instruction_after_restart() -> Result<()> {
-        exercise_pipeline_instruction_delivery(true).await
+        exercise_pipeline_instruction_delivery(true, false).await
     }
 
     #[tokio::test]
     async fn unconfirmed_owner_delivery_holds_later_turns_on_its_context() -> Result<()> {
-        exercise_pipeline_instruction_delivery(false).await
+        exercise_pipeline_instruction_delivery(false, false).await
     }
 
-    async fn exercise_pipeline_instruction_delivery(confirmed: bool) -> Result<()> {
+    #[tokio::test]
+    async fn stale_instruction_reference_does_not_stop_a_pipeline_continuation() -> Result<()> {
+        exercise_pipeline_instruction_delivery(true, true).await
+    }
+
+    async fn exercise_pipeline_instruction_delivery(
+        confirmed: bool,
+        stale_reference: bool,
+    ) -> Result<()> {
+        use crate::attachments::{AttachmentDelivery, AttachmentSource};
         use crate::jobs::{
             AdmissionBlocker, AdmissionEnvironment, InstructionDelivery, JobContext, JobRequest,
             PipelineDispatch, PipelineNodeKind, QueueState,
@@ -5152,7 +5163,34 @@ mod tests {
                     .await
             }
         };
-        let first_instruction = enqueue("Queued first").await?;
+        let first_instruction = if stale_reference {
+            let reference = scope.checkout.join("instruction.txt");
+            std::fs::write(&reference, b"old reference")?;
+            let preview = store
+                .preview_attachment(
+                    conversation.checkout_id.clone(),
+                    AttachmentSource::Checkout {
+                        relative_path: "instruction.txt".into(),
+                    },
+                    AttachmentDelivery::Reference,
+                )
+                .await?;
+            store
+                .save_conversation_draft(conversation.id.clone(), "Queued first".into())
+                .await?;
+            let queued = store
+                .enqueue_conversation_turn_with_attachments(
+                    context.clone(),
+                    scope.clone(),
+                    "Queued first".into(),
+                    vec![preview],
+                )
+                .await?;
+            std::fs::write(reference, b"new reference")?;
+            queued
+        } else {
+            enqueue("Queued first").await?
+        };
         let second_instruction = enqueue("Queued second").await?;
         let queue = store
             .pending_conversation_instructions(conversation.id.clone(), environment.clone())
@@ -5184,6 +5222,29 @@ mod tests {
             .await?
             .context("Missing owner continuation")?;
         assert_eq!(continuation.previous_run_id.as_ref(), Some(&first.run.id));
+        if stale_reference {
+            assert!(
+                continuation
+                    .input
+                    .iter()
+                    .all(|message| message.text != "Revised first")
+            );
+            assert!(continuation.attachments.is_empty());
+            store
+                .mark_agent_running(continuation.run.id.clone())
+                .await?;
+            store
+                .finish_agent_attempt(continuation.run.id, RunStatus::Succeeded, None)
+                .await?;
+            let pending = store
+                .pending_conversation_instructions(conversation.id, environment.clone())
+                .await?;
+            assert_eq!(pending[0].id, first_instruction.id);
+            assert!(pending[0].editable);
+            assert!(pending[0].blockers.iter().any(|blocker| matches!(blocker, AdmissionBlocker::Policy { reason } if reason.contains("Preview it again"))));
+            assert!(store.claim_next_job(environment).await?.is_none());
+            return Ok(());
+        }
         let instruction = continuation.input.last().context("Missing queued input")?;
         assert_eq!(instruction.text, "Revised first");
         assert!(
@@ -5494,7 +5555,7 @@ mod tests {
     #[tokio::test]
     async fn queue_recovers_an_ambiguous_dispatch_only_on_request_and_records_one_terminal_event()
     -> Result<()> {
-        use crate::jobs::{AdmissionEnvironment, JobContext, RecoveryAction};
+        use crate::jobs::{AdmissionBlocker, AdmissionEnvironment, JobContext, RecoveryAction};
 
         let (_dir, store, chat, mut scope) = setup().await?;
         scope.executable = std::env::current_exe()?;
@@ -5513,7 +5574,7 @@ mod tests {
                     conversation_id: chat.id.clone(),
                     context_id: chat.context_id,
                 },
-                scope,
+                scope.clone(),
                 prompt.into(),
             )
             .await?;
@@ -5530,11 +5591,37 @@ mod tests {
             .await?
             .context("prepared evidence missing")?;
         assert_eq!(before.delivery, Delivery::Prepared);
+        let current = store.conversation(chat.id.clone()).await?;
+        let next_prompt = "Wait for the uncertain instruction to be reviewed.";
+        store
+            .save_conversation_draft(chat.id.clone(), next_prompt.into())
+            .await?;
+        let later = store
+            .enqueue_conversation_turn(
+                JobContext {
+                    conversation_id: chat.id.clone(),
+                    context_id: current.context_id,
+                },
+                scope,
+                next_prompt.into(),
+            )
+            .await?;
         drop(store);
 
         let store = Store::open(database.clone())?;
         store.recover_agent_attempts_after_restart().await?;
         assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        let pending = store
+            .inspect_job(later.project_id, later.id, environment.clone())
+            .await?
+            .unwrap();
+        assert!(
+            pending
+                .blockers
+                .contains(&AdmissionBlocker::InstructionDeliveryUncertain {
+                    run_id: lost_run.clone()
+                })
+        );
         let interrupted = store
             .job(job.project_id.clone(), job.id.clone())
             .await?
@@ -5566,6 +5653,8 @@ mod tests {
         assert_eq!(resumed.previous_run_id, Some(lost_run));
         assert_eq!(resumed.input[0].text, prompt);
         store.mark_agent_running(resumed.run.id.clone()).await?;
+        let dispatch = prepare_fixture_dispatch(&store, &resumed).await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
         store
             .record_agent_observation(
                 resumed.run.id.clone(),
@@ -5611,6 +5700,14 @@ mod tests {
             .query_map([resumed.run.turn_id], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         assert_eq!(statuses, ["starting", "running", "succeeded"]);
+        let following = store
+            .claim_next_job(environment)
+            .await?
+            .context("confirmed recovery did not release the next instruction")?;
+        assert_eq!(following.input.last().unwrap().text, next_prompt);
+        store
+            .finish_agent_attempt(following.run.id, RunStatus::Cancelled, None)
+            .await?;
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -212,6 +212,41 @@ pub(super) fn parked_owner(
     ).optional()?)
 }
 
+pub(super) fn attachment_blocker(
+    db: &Connection,
+    job: &Job,
+    revision: &QueuedRevision,
+) -> Result<Option<&'static str>> {
+    let files = attachments::captured_for_revision(db, &revision.revision_id)?;
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let limits = attachments::limits_for_checkout(db, &job.checkout_id)?;
+    if attachments::check_limits(
+        limits,
+        files.iter().map(|file| (&file.metadata, file.delivery())),
+    )
+    .is_err()
+    {
+        return Ok(Some(
+            "An instruction attachment exceeds the current project limits. Edit the queued instruction.",
+        ));
+    }
+    let checkout = db.query_row(
+        "SELECT root FROM checkouts WHERE id = ?1 AND project_id = ?2",
+        params![job.checkout_id, job.project_id],
+        |row| row.get::<_, String>(0).map(PathBuf::from),
+    )?;
+    for file in &files {
+        if file.validate_reference(&checkout).is_err() {
+            return Ok(Some(
+                "An instruction reference changed or is unavailable. Preview it again before delivery.",
+            ));
+        }
+    }
+    Ok(None)
+}
+
 pub(super) fn fits_continuation(
     db: &Connection,
     instruction: &Job,
@@ -223,11 +258,11 @@ pub(super) fn fits_continuation(
         .context
         .as_ref()
         .context("Instruction has no destination")?;
-    let candidate_history = context_entries(db, conversation, &anchor.context_id)?;
+    if !preserves_destination(db, conversation, &anchor.context_id, boundary)? {
+        return Ok(false);
+    }
     let receiving_history = context_entries(db, conversation, boundary)?;
-    if !receiving_history.starts_with(&candidate_history)
-        || receiving_history.iter().any(|id| id == revision)
-    {
+    if receiving_history.iter().any(|id| id == revision) {
         return Ok(false);
     }
     let mut files = attachments::captured_for_revision(db, revision)?;

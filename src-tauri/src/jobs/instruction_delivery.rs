@@ -18,8 +18,8 @@ pub(super) struct InstructionClaim {
 impl InstructionClaim {
     pub(super) fn record(&self, db: &Connection, plan: &AttemptPlan) -> Result<()> {
         ensure!(
-            contains_revision(&plan.input, &self.revision_id),
-            "The receiving attempt is missing the claimed instruction"
+            has_single_revision(&plan.input, &self.revision_id),
+            "The receiving attempt must contain the claimed instruction exactly once"
         );
         db.execute(
             "INSERT INTO instruction_delivery_attempts (job_id, run_id, revision_id, policy_key, route)
@@ -30,8 +30,13 @@ impl InstructionClaim {
     }
 }
 
-fn contains_revision(input: &[MessageRevision], revision: &str) -> bool {
-    input.iter().any(|message| message.revision_id == revision)
+fn has_single_revision(input: &[MessageRevision], revision: &str) -> bool {
+    input
+        .iter()
+        .filter(|message| message.revision_id == revision)
+        .take(2)
+        .count()
+        == 1
 }
 
 pub(super) fn adopted_run(db: &Connection, job: &str) -> Result<Option<String>> {
@@ -70,10 +75,22 @@ pub(super) fn unconfirmed_in_context(
          JOIN json_each(c.entries) e
          JOIN instruction_delivery_attempts i ON i.revision_id = e.value
          WHERE c.id = ?1 AND c.conversation_id = ?2
-           AND i.route = 'continuation' AND i.superseded = 0
+           AND i.superseded = 0 AND i.route IN ('standalone', 'continuation')
+           AND (i.route = 'continuation' OR EXISTS (
+               SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
+               WHERE s.run_id = i.run_id AND d.ordinal = 1 AND d.delivery <> 'submitted'
+           ))
            AND NOT EXISTS (
                SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
                WHERE s.run_id = i.run_id AND d.ordinal = 1 AND d.delivery = 'submitted'
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM job_attempts original JOIN job_attempts recovery
+                 ON recovery.job_id = original.job_id AND recovery.ordinal > original.ordinal
+               JOIN context_snapshots s ON s.run_id = recovery.run_id
+               JOIN dispatches d ON d.snapshot_id = s.id
+               WHERE original.run_id = i.run_id AND original.job_id = i.job_id
+                 AND d.ordinal = 1 AND d.delivery = 'submitted'
            )
          ORDER BY e.key LIMIT 1",
             params![context, conversation],
@@ -122,8 +139,8 @@ pub(crate) fn validate_revisions(
     )?;
     for revision in revisions.query_map([run], |row| row.get::<_, String>(0))? {
         ensure!(
-            contains_revision(input, &revision?),
-            "snapshot does not contain the claimed instruction revision"
+            has_single_revision(input, &revision?),
+            "snapshot must contain the claimed instruction revision exactly once"
         );
     }
     Ok(())

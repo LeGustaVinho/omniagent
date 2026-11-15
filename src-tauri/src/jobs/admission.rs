@@ -1342,6 +1342,13 @@ fn evaluate(
             SubagentAllocation::default()
         }
     };
+    if job.latest_attempt.is_none()
+        && matches!(blockers.as_slice(), [] | [ContinuationOwner { .. }])
+        && let Some(revision) = &inputs.instruction
+        && let Some(reason) = instructions::attachment_blocker(db, job, revision)?
+    {
+        blockers.push(Policy { reason });
+    }
     Ok((blockers, allocation))
 }
 

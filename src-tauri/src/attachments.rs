@@ -411,6 +411,32 @@ impl CapturedAttachment {
             CapturedPayload::Reference { .. } => AttachmentDelivery::Reference,
         }
     }
+
+    pub(crate) fn validate_reference(&self, checkout: &Path) -> Result<()> {
+        if let CapturedPayload::Reference { reference_path } = &self.payload {
+            open_reference(checkout, &self.metadata, reference_path)?;
+        }
+        Ok(())
+    }
+}
+
+fn open_reference(
+    checkout: &Path,
+    metadata: &AttachmentMetadata,
+    captured_path: &Path,
+) -> Result<File> {
+    let path = authorized_path(checkout, &metadata.source)?;
+    ensure!(
+        path == captured_path,
+        "attachment reference target changed, preview it again"
+    );
+    let mut lock = open_locked_local_file(&path)?;
+    ensure!(
+        lock.metadata()?.len() == metadata.size
+            && inspect(&mut lock, &metadata.source)? == *metadata,
+        "attachment reference changed, preview it again"
+    );
+    Ok(lock)
 }
 
 pub(crate) fn capture(
@@ -736,17 +762,7 @@ impl StagedAttachments {
         metadata: &AttachmentMetadata,
         captured_path: &Path,
     ) -> Result<AttachmentReference> {
-        let path = authorized_path(scope.checkout, &metadata.source)?;
-        ensure!(
-            path == captured_path,
-            "attachment reference target changed, preview it again"
-        );
-        let mut lock = open_locked_local_file(&path)?;
-        ensure!(
-            lock.metadata()?.len() == metadata.size
-                && inspect(&mut lock, &metadata.source)? == *metadata,
-            "attachment reference changed, preview it again"
-        );
+        let mut lock = open_reference(scope.checkout, metadata, captured_path)?;
         let path = match &metadata.source {
             AttachmentSource::Checkout { relative_path } => {
                 let path = runner.attachment_reference(
