@@ -12,7 +12,7 @@ use omniagent::{
     dispatch::EventSource,
     jobs::{
         AdmissionBlocker, AdmissionEnvironment, DownstreamWaitState, JobContext, JobPermission,
-        JobRequest, JobRole, JobRule, JobWorkspace, PipelineDispatch, PipelineNodeKind,
+        JobRequest, JobRole, JobRule, JobWorkspace, PipelineDispatch, PipelineNodeKind, QueueState,
         RecoveryAction, ReleaseBlocker,
     },
     mcp_bridge::{HELPER_FLAG, RunBridge},
@@ -726,6 +726,234 @@ async fn run_bound_mcp_submits_jobs_idempotently_and_only_discloses_its_own_chil
         .await?;
     let (_helper, expired) = invoke_tool(helper, "get_job_status", json!({"jobId":id})).await?;
     assert!(expired["error"].is_object());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_children_inherit_the_parent_task_and_follow_operator_queue_controls() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("bridge.sqlite"))?;
+    let fixture = attempt(&store, directory.path().join("source")).await?;
+    store
+        .finish_agent_attempt(fixture.run.id, RunStatus::Cancelled, None)
+        .await?;
+    let project = fixture.run.project_id;
+    let checkout = fixture.run.checkout_id;
+    let task = store
+        .create_project_task(project.clone(), "Parent task".into())
+        .await?;
+    let pipeline = "delegation-fixture".to_owned();
+    store
+        .register_job_pipeline(project.clone(), pipeline.clone())
+        .await?;
+    store
+        .register_job_pipeline_node(
+            project.clone(),
+            pipeline.clone(),
+            "parent".into(),
+            PipelineNodeKind::Execution,
+        )
+        .await?;
+    store
+        .set_project_job_rules(
+            project.clone(),
+            vec![],
+            vec![JobRule {
+                role: JobRole::Agent,
+                operation: SessionMode::Plan,
+                workspace: JobWorkspace::Project,
+                permission: JobPermission::Allow,
+                requirements: Default::default(),
+            }],
+        )
+        .await?;
+    store
+        .submit_pipeline_agent_job(
+            PipelineDispatch {
+                pipeline_run_id: pipeline,
+                node_instance_id: "parent".into(),
+                plan_revision: None,
+                release_id: None,
+            },
+            fixture.scope,
+            JobRequest {
+                checkout_id: Some(checkout),
+                task_id: Some(task.id.clone()),
+                mode: SessionMode::ReadOnly,
+                instructions: "Delegate the selected task".into(),
+                dependencies: vec![],
+                requires_bridge: false,
+            },
+        )
+        .await?;
+    let environment = AdmissionEnvironment {
+        runner: DirectWindowsRunner.identity().into(),
+        bridge_available: true,
+    };
+    let parent = store
+        .claim_next_job(environment.clone())
+        .await?
+        .context("the parent did not start")?;
+    store.mark_agent_running(parent.run.id.clone()).await?;
+    let bridge = RunBridge::start(&store, parent.run.id.clone()).await?;
+    let helper = start_helper(bridge.ticket_path().into(), parent.scope.checkout).await?;
+    let request = json!({
+        "requestId":"allowed-child",
+        "request":{"mode":"plan","instructions":"Plan the inherited task"}
+    });
+    let (helper, submitted) = invoke_tool(helper, "submit_job", request.clone()).await?;
+    let child = submitted
+        .pointer("/result/structuredContent/jobId")
+        .and_then(Value::as_str)
+        .with_context(|| format!("child submission failed: {submitted}"))?
+        .to_owned();
+    let (helper, replay) = invoke_tool(helper, "submit_job", request).await?;
+    assert_eq!(replay["result"]["structuredContent"]["jobId"], child);
+    let (helper, status) = invoke_tool(helper, "get_job_status", json!({"jobId":child})).await?;
+    let status = &status["result"]["structuredContent"];
+    assert_eq!(status["taskId"], task.id);
+    assert_eq!(status["origin"]["runId"], parent.run.id);
+
+    let inspect = |id: String| store.inspect_job(project.clone(), id, environment.clone());
+    assert!(inspect(child.clone()).await?.unwrap().blockers.is_empty());
+    store.set_job_queue_paused(true).await?;
+    assert_eq!(
+        inspect(child.clone()).await?.unwrap().blockers,
+        [AdmissionBlocker::QueuePaused]
+    );
+    assert!(store.claim_next_job(environment.clone()).await?.is_none());
+    store
+        .set_pending_job_state(project.clone(), child.clone(), QueueState::Paused)
+        .await?;
+    store.set_job_queue_paused(false).await?;
+    assert_eq!(
+        inspect(child.clone()).await?.unwrap().blockers,
+        [AdmissionBlocker::JobPaused]
+    );
+    assert!(store.claim_next_job(environment.clone()).await?.is_none());
+    store
+        .set_pending_job_state(project.clone(), child.clone(), QueueState::Queued)
+        .await?;
+    let first = store
+        .claim_next_job(environment.clone())
+        .await?
+        .context("the allowed child did not start")?;
+    store.mark_agent_running(first.run.id.clone()).await?;
+    store
+        .request_job_interrupt(first.conversation_id, first.run.id.clone())
+        .await?;
+    let (mut helper, stopping) =
+        invoke_tool(helper, "get_job_status", json!({"jobId":child})).await?;
+    let live = &stopping["result"]["structuredContent"]["latestAttempt"];
+    assert_eq!(live["runId"], first.run.id);
+    assert_eq!(live["status"], "running");
+    assert_eq!(live["cancelRequested"], true);
+    store
+        .finish_agent_attempt(
+            first.run.id.clone(),
+            RunStatus::Cancelled,
+            Some("Partial child result".into()),
+        )
+        .await?;
+    assert_eq!(
+        inspect(child.clone()).await?.unwrap().recovery_actions,
+        [RecoveryAction::Retry, RecoveryAction::Resume]
+    );
+    store
+        .queue_job_recovery(
+            project.clone(),
+            child.clone(),
+            first.run.id.clone(),
+            RecoveryAction::Resume,
+        )
+        .await?;
+    let resumed = store
+        .claim_next_job(environment.clone())
+        .await?
+        .context("the child did not resume")?;
+    assert_eq!(resumed.previous_run_id, Some(first.run.id));
+    assert!(
+        resumed
+            .input
+            .iter()
+            .any(|message| message.text == "Partial child result")
+    );
+    store
+        .finish_agent_attempt(resumed.run.id.clone(), RunStatus::Failed, None)
+        .await?;
+    store
+        .queue_job_recovery(
+            project.clone(),
+            child.clone(),
+            resumed.run.id.clone(),
+            RecoveryAction::Retry,
+        )
+        .await?;
+    let retried = store
+        .claim_next_job(environment.clone())
+        .await?
+        .context("the child did not retry")?;
+    assert_eq!(retried.previous_run_id, Some(resumed.run.id));
+    assert_eq!(retried.input, resumed.input);
+    store.mark_agent_running(retried.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(retried.run.id, RunStatus::Succeeded, None)
+        .await?;
+
+    for (request_id, approved) in [("approved-child", true), ("declined-child", false)] {
+        let request = json!({"requestId":request_id, "request":{
+            "mode":"read_only", "instructions":"Read the inherited task"
+        }});
+        let (next_helper, submitted) = invoke_tool(helper, "submit_job", request).await?;
+        helper = next_helper;
+        let child = submitted
+            .pointer("/result/structuredContent/jobId")
+            .and_then(Value::as_str)
+            .with_context(|| format!("review submission failed: {submitted}"))?
+            .to_owned();
+        let pending = inspect(child.clone()).await?.unwrap();
+        assert_eq!(pending.job.task_id.as_deref(), Some(task.id.as_str()));
+        let [AdmissionBlocker::Approval { approval_id }] = pending.blockers.as_slice() else {
+            anyhow::bail!("the review child did not wait for approval");
+        };
+        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        store
+            .decide_job_approval(project.clone(), approval_id.clone(), approved)
+            .await?;
+        if approved {
+            let reviewed = store
+                .claim_next_job(environment.clone())
+                .await?
+                .context("the approved child did not start")?;
+            let current = inspect(child).await?.unwrap().job.latest_attempt.unwrap();
+            assert_eq!(current.run_id, reviewed.run.id);
+            store.mark_agent_running(reviewed.run.id.clone()).await?;
+            store
+                .finish_agent_attempt(reviewed.run.id, RunStatus::Succeeded, None)
+                .await?;
+        } else {
+            assert_eq!(
+                inspect(child.clone()).await?.unwrap().blockers,
+                [AdmissionBlocker::Policy {
+                    reason: "An operator declined this job",
+                }]
+            );
+            assert!(store.claim_next_job(environment.clone()).await?.is_none());
+            store
+                .set_pending_job_state(project.clone(), child.clone(), QueueState::Cancelled)
+                .await?;
+            let (next_helper, status) =
+                invoke_tool(helper, "get_job_status", json!({"jobId":child})).await?;
+            helper = next_helper;
+            assert_eq!(
+                status["result"]["structuredContent"]["queueState"],
+                "cancelled"
+            );
+        }
+    }
+    store
+        .finish_agent_attempt(parent.run.id, RunStatus::Succeeded, None)
+        .await?;
     Ok(())
 }
 
