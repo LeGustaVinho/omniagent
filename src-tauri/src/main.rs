@@ -2,6 +2,8 @@
 
 mod conversation_runtime;
 mod desktop;
+#[cfg(debug_assertions)]
+mod desktop_provider_fixture;
 mod fixture;
 mod fixture_runtime;
 mod ipc;
@@ -107,6 +109,13 @@ fn main() {
     if let Some(code) = fixture::run_from_args() {
         std::process::exit(code);
     }
+    let context = tauri::generate_context!();
+    #[cfg(debug_assertions)]
+    if context.config().identifier == desktop_provider_fixture::APP_IDENTIFIER
+        && let Some(code) = desktop_provider_fixture::run_from_args()
+    {
+        std::process::exit(code);
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
@@ -182,6 +191,6 @@ fn main() {
             fixture_runtime::send_fixture_input,
             fixture_runtime::cancel_fixture,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("failed to start OmniAgent");
 }
