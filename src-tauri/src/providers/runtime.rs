@@ -14,7 +14,7 @@ use crate::{
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
     process::TerminalOutcome,
     process_io::CapturedProcess,
-    repository,
+    repository::{self, CheckoutLayout},
     runner::{CONTRACT_VERSION, ExecutionPlatform, LaunchRequest, Runner},
     runs::RunStatus,
     store::Store,
@@ -300,11 +300,8 @@ impl TurnExecution {
         let checkout = self.app.block_on(repository::verify_checkout(
             &self.store,
             self.plan.run.checkout_id.clone(),
+            scope.checkout.clone(),
         ))?;
-        ensure!(
-            checkout == scope.checkout,
-            "checkout differs from admission"
-        );
         let adapter = scope.provider.adapter();
         let mut session = adapter.create_session(SessionRequest {
             checkout: scope.checkout.clone(),
@@ -329,7 +326,7 @@ impl TurnExecution {
         self.app
             .block_on(self.store.mark_agent_running(self.plan.run.id.clone()))?;
         let control = process.control.clone();
-        let run = self.drive(&mut process, session.as_mut(), commands);
+        let run = self.drive(&mut process, session.as_mut(), commands, &checkout);
         let stopped = control.cancel();
         let ended = control.wait();
         stopped?;
@@ -342,6 +339,7 @@ impl TurnExecution {
         process: &mut CapturedProcess,
         session: &mut dyn CliSession,
         commands: &mpsc::Receiver<Command>,
+        checkout: &CheckoutLayout,
     ) -> Result<RunStatus> {
         bounded_write(process, session.start()?.outbound)?;
         let startup_deadline = Instant::now() + Duration::from_secs(20);
@@ -381,7 +379,7 @@ impl TurnExecution {
                 && (inventory_complete
                     || inventory_deadline.is_some_and(|deadline| Instant::now() >= deadline))
             {
-                self.dispatch(process, session)?;
+                self.dispatch(process, session, checkout)?;
                 sent = true;
             }
             if !ready {
@@ -439,6 +437,7 @@ impl TurnExecution {
         &mut self,
         process: &mut CapturedProcess,
         session: &mut dyn CliSession,
+        checkout: &CheckoutLayout,
     ) -> Result<()> {
         let update = session.send(format_input(&self.plan.input)?)?;
         let native_history = match (&self.plan.intent, &self.plan.resume_cursor_id) {
@@ -454,11 +453,8 @@ impl TurnExecution {
             },
             _ => anyhow::bail!("inconsistent resume cursor"),
         };
-        let (configuration, filesystem_skills) = configuration::inspect(
-            self.plan.scope.provider,
-            &self.plan.scope.checkout,
-            self.reported.configuration_revision.as_deref(),
-        )?;
+        let (configuration, filesystem_skills, instructions) =
+            configuration::inspect(&self.plan.scope, checkout, &self.reported)?;
         let scope = CapabilityScope::from_dispatch(
             &self.plan.scope,
             self.plan.run.checkout_id.clone(),
@@ -484,7 +480,7 @@ impl TurnExecution {
             })
         });
         let snapshot = ContextSnapshot {
-            version: 3,
+            version: 4,
             context_id: self.plan.context_id.clone(),
             scope: self.plan.scope.clone(),
             base_commit: repository::base_commit(&self.plan.scope.checkout)?,
@@ -493,6 +489,7 @@ impl TurnExecution {
             capabilities: Some(capabilities),
             filesystem_skills,
             reported_skills: Some(reported_skills),
+            instructions: Some(instructions),
         };
         let frames = update
             .outbound

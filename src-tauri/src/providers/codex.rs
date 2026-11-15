@@ -189,9 +189,12 @@ impl CodexSession {
         };
         if let Some(error) = response.get("error") {
             if request == Request::ReadConfiguration {
-                return Ok(self.events(vec![
-                    self.event(ProviderEventData::ConfigurationReported { revision: None }),
-                ]));
+                return Ok(self.events(vec![self.event(
+                    ProviderEventData::ConfigurationReported {
+                        revision: None,
+                        codex_instructions: None,
+                    },
+                )]));
             }
             if request == Request::ListSkills {
                 let message = error["message"]
@@ -280,19 +283,28 @@ impl CodexSession {
                 })
             }
             Request::ReadConfiguration => {
+                let mut codex_instructions = None;
                 let revision = if let Some(mut config) = result
                     .get("config")
                     .filter(|value| value.is_object())
                     .cloned()
                 {
+                    if config.get("project_doc_fallback_filenames").is_some()
+                        || config.get("project_doc_max_bytes").is_some()
+                    {
+                        codex_instructions = serde_json::from_value(config.clone()).ok();
+                    }
                     config.sort_all_objects();
                     Some(capabilities::revision(&config)?)
                 } else {
                     None
                 };
-                Ok(self.events(vec![
-                    self.event(ProviderEventData::ConfigurationReported { revision }),
-                ]))
+                Ok(
+                    self.events(vec![self.event(ProviderEventData::ConfigurationReported {
+                        revision,
+                        codex_instructions,
+                    })]),
+                )
             }
             Request::ListSkills => {
                 let catalog = self.decode_skills(result)?;

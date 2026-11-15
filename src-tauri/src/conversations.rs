@@ -1,4 +1,7 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -255,7 +258,7 @@ impl Store {
             let registered: String = tx.query_row(
                 "SELECT root FROM checkouts WHERE id = ?1", [&conversation.checkout_id], |row| row.get(0),
             )?;
-            ensure!(dunce::canonicalize(registered)? == checkout, "admitted checkout differs from the conversation");
+            ensure!(checkout.starts_with(Path::new(&registered)), "working directory is outside the conversation checkout");
             let mut entries = context_entries(&tx, &conversation_id, &base_context_id)?;
             let previous = previous_attempt(&tx, &conversation_id)?;
             let continuity = match &previous {
@@ -716,6 +719,7 @@ mod tests {
                     capabilities: None,
                     filesystem_skills: Vec::new(),
                     reported_skills: None,
+                    instructions: None,
                 },
                 vec![b"{\"fixture\":true}\n".to_vec()],
             )
@@ -1013,6 +1017,8 @@ mod tests {
             frames: log.clone(),
         }));
         let first_prompt = "Primeira mensagem ☕\nsegunda linha";
+        let guide = scope.checkout.join("AGENTS.md");
+        std::fs::write(&guide, "Fixture repository instructions")?;
         let fixture_skill = scope
             .checkout
             .join(".agents")
@@ -1054,6 +1060,13 @@ mod tests {
             first_prompt
         );
         let assessment = first_dispatch.snapshot.capabilities.as_ref().unwrap();
+        let instructions = first_dispatch.snapshot.instructions.as_ref().unwrap();
+        assert!(instructions.sources.iter().any(|source| {
+            source.path == guide
+                && source.revision.is_some()
+                && source.selection
+                    == crate::providers::configuration::InstructionSelection::Expected
+        }));
         let skills = first_dispatch.snapshot.reported_skills.as_ref().unwrap();
         assert!(skills.reported);
         assert_eq!(skills.entries[0].name, "fixture");

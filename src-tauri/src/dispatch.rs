@@ -9,6 +9,7 @@ use crate::{
     providers::{
         ProviderEvent,
         capabilities::CapabilityAssessment,
+        configuration::InstructionInventory,
         skills::{SkillCatalog, SkillEntry},
     },
     store::Store,
@@ -29,6 +30,8 @@ pub struct ContextSnapshot {
     pub filesystem_skills: Vec<SkillEntry>,
     #[serde(default)]
     pub reported_skills: Option<SkillCatalog>,
+    #[serde(default)]
+    pub instructions: Option<InstructionInventory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

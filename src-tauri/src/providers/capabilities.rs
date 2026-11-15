@@ -289,6 +289,7 @@ pub(crate) struct ReportedCapabilities {
     pub effort: Option<String>,
     pub configuration_reported: bool,
     pub configuration_revision: Option<String>,
+    pub codex_instruction_settings: Option<super::configuration::CodexInstructionSettings>,
 }
 
 impl ReportedCapabilities {
@@ -297,9 +298,13 @@ impl ReportedCapabilities {
             ProviderEventData::Handshake { capabilities, .. } => {
                 self.available.extend(capabilities)
             }
-            ProviderEventData::ConfigurationReported { revision } => {
+            ProviderEventData::ConfigurationReported {
+                revision,
+                codex_instructions,
+            } => {
                 self.configuration_reported = true;
                 self.configuration_revision = revision.clone();
+                self.codex_instruction_settings = codex_instructions.clone();
             }
             ProviderEventData::SessionReady { model, effort }
             | ProviderEventData::ModelObserved { model, effort } => {

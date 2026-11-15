@@ -40,7 +40,17 @@ pub async fn checkout_root(store: &Store, checkout_id: String) -> Result<PathBuf
         .await
 }
 
-pub async fn verify_checkout(store: &Store, checkout_id: String) -> Result<PathBuf> {
+pub struct CheckoutLayout {
+    pub root: PathBuf,
+    pub primary_root: PathBuf,
+    pub cwd: PathBuf,
+}
+
+pub async fn verify_checkout(
+    store: &Store,
+    checkout_id: String,
+    cwd: PathBuf,
+) -> Result<CheckoutLayout> {
     let (root, git_dir, common): (String, String, String) = store
         .execute(move |db| {
             Ok(db.query_row(
@@ -52,14 +62,22 @@ pub async fn verify_checkout(store: &Store, checkout_id: String) -> Result<PathB
         })
         .await?;
     tokio::task::spawn_blocking(move || {
-        let observed = inspect(Path::new(&root))?;
+        ensure!(
+            dunce::canonicalize(&cwd)? == cwd,
+            "working directory changed after admission"
+        );
+        let observed = inspect(&cwd)?;
         if observed.checkout_root != root
             || observed.git_dir != git_dir
             || observed.git_common_dir != common
         {
             bail!("checkout identity changed after registration");
         }
-        Ok(PathBuf::from(root))
+        Ok(CheckoutLayout {
+            root: PathBuf::from(root),
+            primary_root: PathBuf::from(observed.repository_root),
+            cwd,
+        })
     })
     .await?
 }
@@ -261,11 +279,21 @@ mod tests {
 
         let store = Store::open(temp.path().join("db.sqlite"))?;
         assert!(register(&store, temp.path().to_path_buf()).await.is_err());
-        let first = register(&store, nested).await?;
+        let first = register(&store, nested.clone()).await?;
         let primary = register(&store, root.clone()).await?;
         assert_eq!(first.project_id, primary.project_id);
         assert_ne!(first.checkout_id, primary.checkout_id);
         assert_eq!(first.repository_root, primary.checkout_root);
+        let nested = dunce::canonicalize(nested)?;
+        let layout = verify_checkout(&store, first.checkout_id.clone(), nested.clone()).await?;
+        assert_eq!(layout.cwd, nested);
+        assert_eq!(layout.root, PathBuf::from(&first.checkout_root));
+        assert_eq!(layout.primary_root, PathBuf::from(&primary.checkout_root));
+        assert!(
+            verify_checkout(&store, first.checkout_id.clone(), layout.primary_root)
+                .await
+                .is_err()
+        );
 
         git_query(
             &git,

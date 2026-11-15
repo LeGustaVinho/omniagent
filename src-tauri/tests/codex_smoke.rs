@@ -84,7 +84,7 @@ fn run_turn(
                         .context("Codex did not request effective configuration")?;
                     process.input.send(probe.as_bytes())?;
                 }
-                ProviderEventData::ConfigurationReported { revision } => {
+                ProviderEventData::ConfigurationReported { revision, .. } => {
                     ensure!(
                         revision.is_some_and(|revision| revision.len() == 64),
                         "Codex did not report a configuration for the actual checkout"

@@ -21,103 +21,99 @@ use super::{
     capabilities::{ConfigurationEvidence, ConfigurationFile},
     skills::{SkillEntry, SkillSource},
 };
+use crate::{conversations::SessionScope, repository::CheckoutLayout};
+
+mod instructions;
+pub use instructions::{
+    CodexInstructionSettings, InstructionInventory, InstructionScope, InstructionSelection,
+    InstructionSource,
+};
 
 const REPARSE_POINT: u32 = 0x400;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_SKILL_ENTRIES: usize = 512;
 
 pub(crate) fn inspect(
-    provider: Provider,
-    checkout: &Path,
-    reported_revision: Option<&str>,
-) -> anyhow::Result<(ConfigurationEvidence, Vec<SkillEntry>)> {
+    scope: &SessionScope,
+    layout: &CheckoutLayout,
+    reported: &super::capabilities::ReportedCapabilities,
+) -> anyhow::Result<(ConfigurationEvidence, Vec<SkillEntry>, InstructionInventory)> {
+    let provider = scope.provider;
+    let checkout = &layout.root;
     let mut discovery = Discovery::default();
+    let mut instructions = InstructionInventory::new(layout);
     let home = configured_directory("USERPROFILE");
+    let directories = instructions::workspace_directories(layout);
     match provider {
         Provider::Codex => {
-            discovery.files(
-                checkout,
-                &[
-                    "AGENTS.override.md",
-                    "AGENTS.md",
-                    "CODEX.md",
-                    ".codex/config.toml",
-                ],
+            let profile = profile_root("CODEX_HOME", home.as_deref(), ".codex");
+            instructions.codex(
+                &mut discovery,
+                &directories,
+                profile.as_deref(),
+                reported.codex_instruction_settings.as_ref(),
             );
-            discovery.skills(checkout, ".agents/skills");
-            if let Some(profile) = profile_root("CODEX_HOME", home.as_deref(), ".codex") {
-                discovery.files(
-                    &profile,
-                    &[
-                        "config.toml",
-                        "AGENTS.override.md",
-                        "AGENTS.md",
-                        "hooks.json",
-                    ],
-                );
-                discovery.skills(&profile, "skills");
+            for directory in &directories {
+                discovery.skills(directory, ".agents/skills");
+            }
+            if let Some(profile) = &profile {
+                discovery.files(profile, &["hooks.json"]);
+                discovery.skills(profile, "skills");
             }
             if let Some(home) = &home {
                 discovery.skills(home, ".agents/skills");
             }
         }
         Provider::Claude => {
-            for directory in checkout.ancestors() {
+            let profile = profile_root("CLAUDE_CONFIG_DIR", home.as_deref(), ".claude");
+            let managed = configured_directory("ProgramFiles").map(|path| path.join("ClaudeCode"));
+            instructions.claude(
+                &mut discovery,
+                profile.as_deref(),
+                managed.as_deref(),
+                &scope.cli_version,
+            );
+            for directory in layout.cwd.ancestors() {
                 discovery.files(
                     directory,
                     &[
-                        "CLAUDE.md",
-                        "CLAUDE.local.md",
-                        ".claude/CLAUDE.md",
-                        "AGENTS.md",
-                        ".claude/AGENTS.md",
                         ".claude/settings.json",
                         ".claude/settings.local.json",
                         ".mcp.json",
                     ],
                 );
             }
-            discovery.skills(checkout, ".claude/skills");
-            if let Some(profile) = profile_root("CLAUDE_CONFIG_DIR", home.as_deref(), ".claude") {
+            for directory in &directories {
+                discovery.skills(directory, ".claude/skills");
+            }
+            if let Some(profile) = profile {
                 discovery.files(
                     &profile,
-                    &[
-                        "settings.json",
-                        "CLAUDE.md",
-                        "plugins/installed_plugins.json",
-                    ],
+                    &["settings.json", "plugins/installed_plugins.json"],
                 );
                 discovery.skills(&profile, "skills");
             }
             if let Some(home) = &home {
                 discovery.files(home, &[".claude.json"]);
             }
-            if let Some(program_files) = configured_directory("ProgramFiles") {
-                discovery.files(
-                    &program_files,
-                    &[
-                        "ClaudeCode/managed-settings.json",
-                        "ClaudeCode/managed-mcp.json",
-                        "ClaudeCode/CLAUDE.md",
-                    ],
-                );
+            if let Some(managed) = managed {
+                discovery.files(&managed, &["managed-settings.json", "managed-mcp.json"]);
             }
         }
         Provider::Antigravity => {
-            discovery.files(checkout, &["AGENTS.md", "GEMINI.md"]);
-            for directory in [".agents", ".agent", "_agents", "_agent"] {
-                discovery.antigravity_directory(&checkout.join(directory));
-            }
-            if let Some(home) = &home {
-                let gemini = home.join(".gemini");
-                discovery.files(&gemini, &["AGENTS.md", "GEMINI.md", "settings.json"]);
-                discovery.antigravity_directory(&gemini.join("config"));
+            let gemini = home.map(|home| home.join(".gemini"));
+            instructions.antigravity(&mut discovery, &directories, gemini.as_deref());
+            if let Some(gemini) = gemini {
+                discovery.files(&gemini, &["settings.json"]);
                 discovery.skills(&gemini, "antigravity-cli/skills");
                 discovery.skills(&gemini, "skills");
             }
         }
     }
-    let configuration = discovery.finish(checkout, reported_revision)?;
+    discovery
+        .unresolved
+        .extend(instructions.unresolved.iter().cloned());
+    let configuration = discovery.finish(checkout, reported.configuration_revision.as_deref())?;
     let skills = configuration
         .detected
         .iter()
@@ -148,7 +144,7 @@ pub(crate) fn inspect(
             }))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok((configuration, skills))
+    Ok((configuration, skills, instructions))
 }
 
 fn profile_root(variable: &str, home: Option<&Path>, fallback: &str) -> Option<PathBuf> {
@@ -219,16 +215,28 @@ impl Discovery {
     }
 
     fn file(&mut self, path: PathBuf) {
+        self.read(&path);
+    }
+
+    fn read(&mut self, path: &Path) -> Option<(Vec<u8>, String)> {
         match plain_metadata(&path) {
             Ok(Some(metadata)) if metadata.is_file() && metadata.len() <= MAX_FILE_BYTES => {
-                match local_file_revision(&path) {
-                    Ok(revision) => self.detected.push(ConfigurationFile { path, revision }),
-                    Err(_) => self.unresolved.push(path),
+                match read_local_file(path) {
+                    Ok(bytes) => {
+                        let revision = format!("{:x}", Sha256::digest(&bytes));
+                        self.detected.push(ConfigurationFile {
+                            path: path.to_path_buf(),
+                            revision: revision.clone(),
+                        });
+                        return Some((bytes, revision));
+                    }
+                    Err(_) => self.unresolved.push(path.to_path_buf()),
                 }
             }
             Ok(None) => {}
-            _ => self.unresolved.push(path),
+            _ => self.unresolved.push(path.to_path_buf()),
         }
+        None
     }
 
     fn skills(&mut self, root: &Path, relative: &str) {
@@ -257,14 +265,10 @@ impl Discovery {
         }
     }
 
-    fn antigravity_directory(&mut self, path: &Path) {
+    fn antigravity_settings(&mut self, path: &Path) {
         self.files(
             path,
             &[
-                "AGENTS.md",
-                "GEMINI.md",
-                "skills.json",
-                "rules.json",
                 "agents.json",
                 "plugins.json",
                 "hooks.json",
@@ -272,11 +276,10 @@ impl Discovery {
                 "workbench.json",
             ],
         );
-        self.skills(path, "skills");
     }
 }
 
-fn local_file_revision(path: &Path) -> io::Result<String> {
+fn read_local_file(path: &Path) -> io::Result<Vec<u8>> {
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
@@ -311,14 +314,14 @@ fn local_file_revision(path: &Path) -> io::Result<String> {
             "configuration path changed",
         ));
     }
-    let mut hash = Sha256::new();
-    if io::copy(&mut file.take(MAX_FILE_BYTES + 1), &mut hash)? > MAX_FILE_BYTES {
+    let mut bytes = Vec::new();
+    if file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)? as u64 > MAX_FILE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "configuration is too large",
         ));
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(bytes)
 }
 
 #[cfg(test)]

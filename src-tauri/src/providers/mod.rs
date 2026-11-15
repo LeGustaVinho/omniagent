@@ -238,6 +238,8 @@ pub enum ProviderEventData {
     },
     ConfigurationReported {
         revision: Option<String>,
+        #[serde(default)]
+        codex_instructions: Option<configuration::CodexInstructionSettings>,
     },
     SkillsReported {
         catalog: skills::SkillCatalog,
@@ -486,7 +488,7 @@ pub mod antigravity;
 pub mod capabilities;
 pub mod claude;
 pub mod codex;
-mod configuration;
+pub mod configuration;
 pub mod goal;
 pub mod plugins;
 pub mod profiles;
