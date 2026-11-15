@@ -80,11 +80,27 @@ async fn repository(store: &Store, path: &Path) -> Result<ProjectCheckout> {
 async fn provisions_one_worktree_per_task_with_a_project_override_and_executable_git_hooks_disabled()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let store = Store::open(temp.path().join("store.sqlite"))?;
+    let database = temp.path().join("store.sqlite");
+    let store = Store::open(database.clone())?;
+    let parallel = Store::open(database)?;
     let source = temp.path().join("source");
     let project = repository(&store, &source).await?;
     let base = git(&source, &["rev-parse", "HEAD"])?;
     let main_branch = git(&source, &["branch", "--show-current"])?;
+    let alternate = temp.path().join("alternate-source");
+    git(
+        &source,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("--detach"),
+            alternate.as_os_str(),
+            OsStr::new(&base),
+        ],
+    )?;
+    let alternate = repository::register(&parallel, alternate).await?;
+    assert_eq!(alternate.project_id, project.project_id);
+    assert_ne!(alternate.checkout_id, project.checkout_id);
     let hooks = source.join(".git/hooks");
     fs::create_dir_all(&hooks)?;
     fs::write(
@@ -135,16 +151,22 @@ async fn provisions_one_worktree_per_task_with_a_project_override_and_executable
         .create_project_task(project.project_id.clone(), "Implement".into())
         .await?;
     let default = temp.path().join("local-data/worktrees");
-    let provision = || {
+    let (first, concurrent) = tokio::join!(
         provision_task_worktree(
             &store,
             default.clone(),
             project.project_id.clone(),
             task.id.clone(),
             project.checkout_id.clone(),
+        ),
+        provision_task_worktree(
+            &parallel,
+            default.clone(),
+            project.project_id.clone(),
+            task.id.clone(),
+            alternate.checkout_id,
         )
-    };
-    let (first, concurrent) = tokio::join!(provision(), provision());
+    );
     let first = first?;
     assert_eq!(first, concurrent?);
     assert_ne!(first.checkout_id, project.checkout_id);
@@ -242,6 +264,31 @@ async fn resumes_a_pinned_provision_across_restart_and_refuses_a_replaced_manage
             project.checkout_id.clone(),
         )
     };
+    let tree = git(&source, &["rev-parse", "HEAD^{tree}"])?;
+    let moved = git(
+        &source,
+        &[
+            "-c",
+            "user.name=OmniAgent Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit-tree",
+            &tree,
+            "-p",
+            &base,
+            "-m",
+            "Concurrent ref update",
+        ],
+    )?;
+    let reference = format!("refs/heads/{branch}");
+    git(&source, &["update-ref", &reference, &moved, &base])?;
+    assert!(attach().await.is_err());
+    assert!(!root.join("file.sample").exists());
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, moved);
+    git(&source, &["update-ref", &reference, &base, &moved])?;
+
     let managed = attach().await?;
     assert_eq!(managed.root, root);
     assert_eq!(managed.base_commit, base);

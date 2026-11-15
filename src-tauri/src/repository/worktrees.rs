@@ -391,6 +391,8 @@ fn branch_head(git: &Path, root: &Path, branch: &str) -> Result<Option<String>> 
 }
 
 fn materialize(git: &Path, source: &Source, provision: &Provision) -> Result<CheckoutPaths> {
+    // The source may have changed while the provision intent was being saved.
+    validate_source(source)?;
     let root = &provision.root;
     if plain_metadata(root)?.is_none() {
         let existing_ref = branch_head(git, &source.root, &provision.branch)?;
