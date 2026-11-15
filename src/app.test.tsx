@@ -15,13 +15,14 @@ afterEach(() => {
 });
 
 it("requires a registered checkout and surfaces a Git validation error", async () => {
-  invoke.mockResolvedValueOnce("C:\\Temp\\Sem repositório").mockRejectedValueOnce("not a git repository");
+  invoke.mockResolvedValueOnce(null).mockResolvedValueOnce("C:\\Temp\\Sem repositório").mockRejectedValueOnce("not a git repository");
   const user = userEvent.setup();
   render(<App />);
   expect(screen.queryByRole("button", { name: "Start fixture" })).toBeNull();
-  await user.click(screen.getByRole("button", { name: "Open repository" }));
+  await user.click(await screen.findByRole("button", { name: "Open repository" }));
   expect((await screen.findByRole("alert")).textContent).toContain("not a git repository");
   expect(invoke.mock.calls).toEqual([
+    ["active_checkout"],
     ["choose_repository"],
     ["register_project", { directory: "C:\\Temp\\Sem repositório" }],
   ]);

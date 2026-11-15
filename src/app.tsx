@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
 import { useWorkspace } from "@/workspace-state";
@@ -9,7 +9,17 @@ const Workbench = lazy(() => import("./workbench"));
 export function App() {
   const { checkout, selectCheckout } = useWorkspace();
   const [choosing, setChoosing] = useState(false);
+  const [restoring, setRestoring] = useState(true);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    let disposed = false;
+    void invoke<ProjectCheckout | null>("active_checkout").then(
+      (selected) => { if (!disposed && selected) selectCheckout(selected); },
+      (failure: unknown) => { if (!disposed) setError(String(failure)); },
+    ).finally(() => { if (!disposed) setRestoring(false); });
+    return () => { disposed = true; };
+  }, [selectCheckout]);
 
   async function chooseRepository() {
     setChoosing(true);
@@ -18,6 +28,7 @@ export function App() {
       const directory = await invoke<string | null>("choose_repository");
       if (directory) {
         const selected = await invoke<ProjectCheckout>("register_project", { directory });
+        await invoke("select_active_checkout", { checkoutId: selected.checkoutId });
         selectCheckout(selected);
       }
     } catch (error) {
@@ -28,7 +39,7 @@ export function App() {
   }
 
   const openRepository = (
-    <Button className="shrink-0" variant={checkout ? "outline" : "default"} disabled={choosing} onClick={() => void chooseRepository()}>
+    <Button className="shrink-0" variant={checkout ? "outline" : "default"} disabled={choosing || restoring} onClick={() => void chooseRepository()}>
       {choosing ? "Opening…" : "Open repository"}
     </Button>
   );
@@ -48,7 +59,9 @@ export function App() {
         {checkout && openRepository}
       </header>
       {error && <p role="alert" className="border-b border-border px-5 py-3 text-sm text-red-300">{error}</p>}
-      {checkout ? (
+      {restoring ? (
+        <p role="status" className="p-6 text-sm text-muted-foreground">Restoring workspace…</p>
+      ) : checkout ? (
         <Suspense fallback={<p role="status" className="p-6 text-sm text-muted-foreground">Loading workspace…</p>}>
           <Workbench key={checkout.checkoutId} checkout={checkout} />
         </Suspense>

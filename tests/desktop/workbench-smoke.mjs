@@ -53,15 +53,19 @@ async function startSession(application) {
 }
 
 async function selectCheckout(browser, checkout) {
-  // WebDriver operates inside WebView2. Registration uses the real IPC command
-  // and the selection goes through the same persisted state as the file dialog.
-  await browser.execute((selected) => {
-    localStorage.setItem("omniagent-workspace-v1", JSON.stringify({
-      state: { checkout: selected }, version: 0,
-    }));
-  }, checkout);
+  // WebDriver operates inside WebView2. Use the same persisted selection command
+  // as the file dialog after registering a repository.
+  await invoke(browser, "select_active_checkout", { checkoutId: checkout.checkoutId });
   await browser.refresh();
   await browser.$("button=Start fixture").waitForDisplayed();
+}
+
+function readTabs(browser) {
+  return browser.execute(() => ({
+    groups: Array.from(document.querySelectorAll(".dv-groupview"), (group) =>
+      Array.from(group.querySelectorAll(".dv-default-tab-content"), (tab) => tab.textContent)),
+    active: document.querySelector(".dv-active-group .dv-active-tab .dv-default-tab-content")?.textContent ?? null,
+  }));
 }
 
 test("registers a Git checkout and runs a fixture in the Windows desktop", { timeout: 90_000 }, async (t) => {
@@ -108,12 +112,38 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     await input.waitForDisplayed();
     await input.setValue("Entrada de validação");
     await browser.$("button=Send input").click();
-    const events = browser.$('ol[aria-label="Run events"]');
-    await browser.waitUntil(async () => (await events.getText()).includes("Succeeded"));
+    const events = () => browser.$('ol[aria-label="Run events"]');
+    await browser.waitUntil(async () => (await events().getText()).includes("Succeeded"));
     await browser.$("button=Inspect protected input").click();
     const evidence = browser.$("pre");
     await evidence.waitForDisplayed();
     assert.equal(await evidence.getText(), "Entrada de validação");
+
+    await browser.$('button[aria-label="Move tab left"]').click();
+    const firstHeading = await browser.$(".dv-content-container h1").getText();
+    assert.deepEqual((await readTabs(browser)).groups, [[firstHeading, "Fixture runs"]]);
+    await browser.$('aside[aria-label="Workspace"] button').click();
+    await browser.$("button=Start fixture").click();
+    await browser.$("button=Cancel run").waitForDisplayed();
+    const secondHeading = await browser.$(".dv-content-container h1").getText();
+    assert.notEqual(firstHeading, secondHeading);
+    await browser.$("button=Cancel run").click();
+    await browser.waitUntil(async () => (await events().getText()).includes("Cancelled"));
+    await browser.$("button=Split right").click();
+    const expectedTabs = { groups: [[firstHeading, "Fixture runs"], [secondHeading]], active: secondHeading };
+    await browser.waitUntil(async () => (await readTabs(browser)).groups.length === 2);
+    assert.deepEqual(await readTabs(browser), expectedTabs);
+    await browser.waitUntil(async () => {
+      const saved = await invoke(browser, "workbench_layout", { checkoutId: checkout.checkoutId, workspace: "fixtures" });
+      return saved && JSON.parse(saved).grid.root.data.length === 2;
+    });
+
+    await browser.deleteSession();
+    browser = null;
+    browser = await startSession(application);
+    await browser.waitUntil(async () => (await readTabs(browser)).groups.length === 2);
+    assert.deepEqual(await readTabs(browser), expectedTabs);
+    assert.equal(await browser.$("header span[title]").getAttribute("title"), checkout.checkoutRoot);
   } finally {
     try {
       await browser?.deleteSession();

@@ -1,0 +1,88 @@
+use anyhow::{Result, ensure};
+use rusqlite::{OptionalExtension, params};
+use serde_json::Value;
+
+use crate::{repository::ProjectCheckout, store::Store};
+
+const ACTIVE_CHECKOUT: &str = "active_checkout";
+const MAX_LAYOUT_BYTES: usize = 512 * 1024;
+
+impl Store {
+    pub async fn active_checkout(&self) -> Result<Option<ProjectCheckout>> {
+        self.execute(|db| {
+            Ok(db
+                .query_row(
+                    "SELECT p.id, p.root, c.id, c.root
+                 FROM workspace_settings s
+                 JOIN checkouts c ON c.id = s.value
+                 JOIN projects p ON p.id = c.project_id
+                 WHERE s.key = ?1",
+                    [ACTIVE_CHECKOUT],
+                    |row| {
+                        Ok(ProjectCheckout {
+                            project_id: row.get(0)?,
+                            repository_root: row.get(1)?,
+                            checkout_id: row.get(2)?,
+                            checkout_root: row.get(3)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+        .await
+    }
+
+    pub async fn select_active_checkout(&self, checkout_id: String) -> Result<()> {
+        self.execute(move |db| {
+            let updated = db.execute(
+                "INSERT INTO workspace_settings (key, value)
+                 SELECT ?1, id FROM checkouts WHERE id = ?2
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![ACTIVE_CHECKOUT, checkout_id],
+            )?;
+            ensure!(updated == 1, "checkout is not registered");
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn workbench_layout(
+        &self,
+        checkout_id: String,
+        workspace: String,
+    ) -> Result<Option<String>> {
+        self.execute(move |db| {
+            Ok(db.query_row(
+                "SELECT layout FROM workbench_layouts WHERE checkout_id = ?1 AND workspace = ?2",
+                params![checkout_id, workspace],
+                |row| row.get(0),
+            ).optional()?)
+        })
+        .await
+    }
+
+    pub async fn save_workbench_layout(
+        &self,
+        checkout_id: String,
+        workspace: String,
+        layout: String,
+    ) -> Result<()> {
+        ensure!(
+            layout.len() <= MAX_LAYOUT_BYTES,
+            "workbench layout is too large"
+        );
+        ensure!(
+            serde_json::from_str::<Value>(&layout)?.is_object(),
+            "workbench layout must be a JSON object"
+        );
+        self.execute(move |db| {
+            db.execute(
+                "INSERT INTO workbench_layouts (checkout_id, workspace, layout) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (checkout_id, workspace) DO UPDATE SET layout = excluded.layout",
+                params![checkout_id, workspace, layout],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+}

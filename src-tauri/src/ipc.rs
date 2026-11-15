@@ -5,6 +5,7 @@ use std::{
 
 use omniagent::{
     evidence::FixtureInputEvidence,
+    repository::ProjectCheckout,
     runs::{RunSnapshot, SubscriptionUpdate},
     store::Store,
 };
@@ -14,6 +15,50 @@ use uuid::Uuid;
 
 #[derive(Default)]
 pub struct EventSubscriptions(Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>);
+
+#[tauri::command]
+pub async fn active_checkout(store: State<'_, Store>) -> Result<Option<ProjectCheckout>, String> {
+    store
+        .active_checkout()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn select_active_checkout(
+    store: State<'_, Store>,
+    checkout_id: String,
+) -> Result<(), String> {
+    store
+        .select_active_checkout(checkout_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn workbench_layout(
+    store: State<'_, Store>,
+    checkout_id: String,
+    workspace: String,
+) -> Result<Option<String>, String> {
+    store
+        .workbench_layout(checkout_id, workspace)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn save_workbench_layout(
+    store: State<'_, Store>,
+    checkout_id: String,
+    workspace: String,
+    layout: String,
+) -> Result<(), String> {
+    store
+        .save_workbench_layout(checkout_id, workspace, layout)
+        .await
+        .map_err(|error| error.to_string())
+}
 
 #[tauri::command]
 pub async fn run_snapshot(

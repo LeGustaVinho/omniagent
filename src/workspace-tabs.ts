@@ -5,10 +5,10 @@ function layoutKey({ projectId, checkoutId }: ProjectCheckout) {
   return `omniagent-layout-v1:${projectId}:${checkoutId}:fixtures`;
 }
 
-export function restoreFixtureLayout(api: DockviewApi, checkout: ProjectCheckout) {
+export function restoreFixtureLayout(api: DockviewApi, checkout: ProjectCheckout, stored?: string | null) {
   const key = layoutKey(checkout);
   try {
-    const saved = localStorage.getItem(key);
+    const saved = stored ?? localStorage.getItem(key);
     if (saved !== null) {
       api.fromJSON(JSON.parse(saved) as SerializedDockview);
       return;
@@ -19,14 +19,16 @@ export function restoreFixtureLayout(api: DockviewApi, checkout: ProjectCheckout
   openFixtureList(api);
 }
 
-export function persistFixtureLayout(api: DockviewApi, checkout: ProjectCheckout) {
+export function persistFixtureLayout(api: DockviewApi, checkout: ProjectCheckout, onChange?: (serialized: string) => void) {
   const key = layoutKey(checkout);
   const save = () => {
+    const serialized = JSON.stringify(api.toJSON());
     try {
-      localStorage.setItem(key, JSON.stringify(api.toJSON()));
+      localStorage.setItem(key, serialized);
     } catch {
       // A full or unavailable UI storage still allows layout changes in memory.
     }
+    onChange?.(serialized);
   };
   const layout = api.onDidLayoutChange(save);
   const selection = api.onDidActivePanelChange(save);
