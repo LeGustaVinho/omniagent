@@ -22,8 +22,9 @@ use super::{
     Job, JobKind, JobOrigin, QueueState,
     admission::recovery_scope,
     command::CommandInvocation,
+    history::{effective_release_blocker, uses_recorded_checkpoint},
     load_job,
-    pipeline::{load_attempt_job, release_blocker},
+    pipeline::load_attempt_job,
     policy::reconcile_approval,
 };
 
@@ -65,6 +66,7 @@ pub(super) struct RecoverySource {
     pub conversation_id: String,
     pub input_context_id: String,
     pub result_context_id: String,
+    pub recorded: bool,
     pub status: RunStatus,
     provider_terminal: Option<String>,
     session: Option<String>,
@@ -163,14 +165,23 @@ pub(super) fn recovery_source(db: &Connection, job: &Job) -> Result<Option<Recov
          JOIN job_attempts j ON j.run_id = a.run_id WHERE a.run_id = ?1",
         [&attempt.run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
     )?;
-    let Some(result_context_id) = conversations::recovery_checkpoint(
-        db,
-        &conversation_id,
-        &attempt.run_id,
-        &input_context_id,
-        sealed.as_deref(),
-    )?
-    else {
+    let recorded = uses_recorded_checkpoint(db, job, &attempt.run_id, &conversation_id)?;
+    let current_result = if recorded {
+        match sealed {
+            Some(id) => Some(id),
+            None => pending_recovery(db, job)?
+                .and_then(|(run, context)| (run == attempt.run_id).then_some(context).flatten()),
+        }
+    } else {
+        conversations::recovery_checkpoint(
+            db,
+            &conversation_id,
+            &attempt.run_id,
+            &input_context_id,
+            sealed.as_deref(),
+        )?
+    };
+    let Some(result_context_id) = current_result else {
         return Ok(None);
     };
     Ok(Some(RecoveryCheckpoint::Agent(Box::new(RecoverySource {
@@ -178,6 +189,7 @@ pub(super) fn recovery_source(db: &Connection, job: &Job) -> Result<Option<Recov
         conversation_id,
         input_context_id,
         result_context_id,
+        recorded,
         status: attempt.status,
         provider_terminal,
         session,
@@ -316,7 +328,7 @@ impl Store {
                     let job = load_job(db, &project, &id)?
                         .context("Job is unavailable in this project")?;
                     ensure!(job.downstream_wait.is_none(), "The job is waiting for downstream results");
-                    ensure!(release_blocker(db, &job)?.is_none(),
+                    ensure!(effective_release_blocker(db, &job)?.is_none(),
                         "The pipeline job needs an accepted release for the current plan and worktree");
                     let scope = recovery_scope(db, &job)?;
                     let refresh = job.origin == JobOrigin::Operator
@@ -383,7 +395,7 @@ impl Store {
                     "The job is waiting for downstream results"
                 );
                 ensure!(
-                    release_blocker(&tx, &job)?.is_none(),
+                    effective_release_blocker(&tx, &job)?.is_none(),
                     "The pipeline job needs an accepted release for the current plan and worktree"
                 );
                 let checkpoint = recovery_source(&tx, &job)?

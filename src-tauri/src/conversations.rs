@@ -60,6 +60,14 @@ pub struct MessageRevision {
     pub text: String,
 }
 
+#[derive(Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ConversationHistory {
+    pub context_id: String,
+    pub messages: Vec<MessageRevision>,
+}
+
 /// A resume scope comes from the effective profile and checkout at admission.
 /// An account that could not be identified does not qualify for native resume.
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -183,7 +191,8 @@ impl Store {
     ) -> Result<Option<RunRecord>> {
         self.execute(move |db| {
             let latest: Option<String> = db.query_row(
-                "SELECT run_id FROM agent_attempts WHERE conversation_id = ?1 ORDER BY ordinal DESC LIMIT 1",
+                "SELECT run_id FROM agent_attempts WHERE conversation_id = ?1 AND detached_context = 0
+                 ORDER BY ordinal DESC LIMIT 1",
                 [conversation_id],
                 |row| row.get(0),
             ).optional()?;
@@ -229,10 +238,20 @@ impl Store {
         &self,
         conversation_id: String,
     ) -> Result<Vec<MessageRevision>> {
+        Ok(self.conversation_history(conversation_id).await?.messages)
+    }
+
+    pub async fn conversation_history(
+        &self,
+        conversation_id: String,
+    ) -> Result<ConversationHistory> {
         self.execute(move |db| {
             let conversation = load_conversation(db, &conversation_id)?;
             let entries = context_entries(db, &conversation.id, &conversation.context_id)?;
-            load_messages(db, &conversation.id, &entries)
+            Ok(ConversationHistory {
+                messages: load_messages(db, &conversation.id, &entries)?,
+                context_id: conversation.context_id,
+            })
         })
         .await
     }
@@ -299,11 +318,41 @@ impl Store {
                 identities.len() == revisions.len(),
                 "context contains repeated messages"
             );
-            let context = activate_context(&tx, &conversation_id, &revisions)?;
+            let context = switch_history(&tx, &conversation_id, &revisions)?;
             tx.commit()?;
             Ok(context)
         })
         .await
+        .inspect(|_| {
+            self.job_signal.send_replace(());
+        })
+    }
+
+    pub async fn rewind_conversation_history(
+        &self,
+        conversation_id: String,
+        base_id: String,
+        through_revision: Option<String>,
+    ) -> Result<String> {
+        let context = self
+            .execute(move |db| {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                check_idle_base(&tx, &conversation_id, &base_id)?;
+                let mut entries = Vec::new();
+                if let Some(revision) = through_revision {
+                    entries = context_entries(&tx, &conversation_id, &base_id)?;
+                    let index = entries.iter().position(|id| *id == revision).context(
+                        "The selected message is outside the current conversation history",
+                    )?;
+                    entries.truncate(index + 1);
+                }
+                let context = switch_history(&tx, &conversation_id, &entries)?;
+                tx.commit()?;
+                Ok(context)
+            })
+            .await?;
+        self.job_signal.send_replace(());
+        Ok(context)
     }
 
     pub async fn replace_conversation_message(
@@ -495,6 +544,7 @@ impl Store {
                     question_route,
                     answer,
                     history: AttemptHistory::Automatic,
+                    recorded: None,
                 },
             )?;
             tx.commit()?;
@@ -839,7 +889,7 @@ impl Store {
             let context_id = if let Some(encrypted) = encrypted {
                 let mut entries = context_entries(&tx, &active.conversation_id, &active.context_id)?;
                 entries.push(insert_message(&tx, &active.conversation_id, MessageRole::Assistant, encrypted)?);
-                activate_context(&tx, &active.conversation_id, &entries)?
+                write_context(&tx, &active.conversation_id, &entries, !active.detached_context)?
             } else {
                 active.context_id
             };
@@ -937,6 +987,13 @@ struct PreparedAttempt {
     question_route: QuestionRoute,
     answer: Option<(QuestionOrigin, QuestionReply)>,
     history: AttemptHistory,
+    recorded: Option<RecordedAttempt>,
+}
+
+pub(crate) struct RecordedAttempt {
+    pub context_id: String,
+    pub previous_run_id: Option<String>,
+    pub question_route: QuestionRoute,
 }
 
 pub(crate) enum AttemptHistory {
@@ -983,6 +1040,7 @@ pub(crate) fn insert_job_attempt(
             question_route: QuestionRoute::Native,
             answer: None,
             history: AttemptHistory::Automatic,
+            recorded: None,
         },
     )
 }
@@ -992,7 +1050,11 @@ pub(crate) fn insert_job_recovery_attempt(
     conversation: Conversation,
     scope: SessionScope,
     history: AttemptHistory,
+    recorded: Option<RecordedAttempt>,
 ) -> Result<AttemptPlan> {
+    let question_route = recorded
+        .as_ref()
+        .map_or(QuestionRoute::Native, |r| r.question_route);
     let encrypted = if matches!(history, AttemptHistory::Resume { .. }) {
         Some(protection::protect(b"Continue the interrupted task from the recorded result. Check the work already completed before taking further action, and finish the remaining work.")?)
     } else {
@@ -1006,9 +1068,10 @@ pub(crate) fn insert_job_recovery_attempt(
             scope,
             encrypted,
             frozen: None,
-            question_route: QuestionRoute::Native,
+            question_route,
             answer: None,
             history,
+            recorded,
         },
     )
 }
@@ -1030,6 +1093,30 @@ pub(crate) fn insert_downstream_attempt(
             question_route: QuestionRoute::Native,
             answer: None,
             history: AttemptHistory::Downstream,
+            recorded: None,
+        },
+    )
+}
+
+pub(crate) fn insert_recorded_job_attempt(
+    db: &Connection,
+    conversation: Conversation,
+    scope: SessionScope,
+    recorded: RecordedAttempt,
+    text: &str,
+) -> Result<AttemptPlan> {
+    insert_attempt(
+        db,
+        PreparedAttempt {
+            conversation_id: conversation.id,
+            base_context_id: conversation.context_id,
+            scope,
+            encrypted: Some(protection::protect(text.as_bytes())?),
+            frozen: None,
+            question_route: recorded.question_route,
+            answer: None,
+            history: AttemptHistory::Downstream,
+            recorded: Some(recorded),
         },
     )
 }
@@ -1069,6 +1156,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         question_route,
         answer,
         history,
+        mut recorded,
     } = prepared;
     let serialized = serde_json::to_string(&scope)?;
     let checkout = &scope.checkout;
@@ -1079,6 +1167,17 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             validate_structured_reply(db, &conversation, &serialized, origin, reply)
         })
         .transpose()?;
+    if let (Some((origin, _)), Some((seq, _))) = (&answer, &answered_request) {
+        if let Some(context_id) =
+            crate::jobs::detached_question_context(db, &conversation_id, &origin.run_id, *seq)?
+        {
+            recorded = Some(RecordedAttempt {
+                context_id,
+                previous_run_id: Some(origin.run_id.clone()),
+                question_route: QuestionRoute::StructuredTurn,
+            });
+        }
+    }
     let registered: String = db.query_row(
         "SELECT root FROM checkouts WHERE id = ?1",
         [&conversation.checkout_id],
@@ -1096,12 +1195,14 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
     }
     let input_context_id = match &history {
         AttemptHistory::Retry { input_context_id } => input_context_id,
-        _ => &base_context_id,
+        _ => recorded
+            .as_ref()
+            .map_or(&base_context_id, |recorded| &recorded.context_id),
     };
     let mut entries = context_entries(db, &conversation_id, input_context_id)?;
     let previous = previous_attempt(db, &conversation_id)?;
-    let continuity = match (&history, &previous) {
-        (AttemptHistory::Automatic, Some(prior))
+    let continuity = match (&history, &previous, &recorded) {
+        (AttemptHistory::Automatic, Some(prior), None)
             if prior.scope == serialized
                 && scope
                     .account_binding
@@ -1115,6 +1216,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
                 native: Some(recovery),
             },
             Some(prior),
+            None,
         ) => {
             ensure!(
                 prior.run_id == recovery.source_run_id
@@ -1155,10 +1257,12 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         };
 
     let context_id = if let AttemptHistory::Retry { input_context_id } = &history {
-        db.execute(
-            "UPDATE conversations SET active_context_id = ?1 WHERE id = ?2",
-            params![input_context_id, conversation_id],
-        )?;
+        if recorded.is_none() {
+            db.execute(
+                "UPDATE conversations SET active_context_id = ?1 WHERE id = ?2",
+                params![input_context_id, conversation_id],
+            )?;
+        }
         input_context_id.clone()
     } else {
         let encrypted = if let (Some((_, reply)), Some((_, form))) = (&answer, &answered_request) {
@@ -1179,7 +1283,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             )?;
         }
         entries.push(revision);
-        activate_context(db, &conversation_id, &entries)?
+        write_context(db, &conversation_id, &entries, recorded.is_none())?
     };
     let input = load_messages(db, &conversation_id, &entries[consumed..])?;
     let mut attachments = Vec::new();
@@ -1211,11 +1315,19 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         )?;
     }
     let (run, _) = runs::insert_run(db, conversation.checkout_id, "agent")?;
-    let ordinal = previous.as_ref().map_or(1, |prior| prior.ordinal + 1);
-    let previous_run_id = previous.map(|prior| prior.run_id);
+    let ordinal: i64 = db.query_row(
+        "SELECT coalesce(max(ordinal), 0) + 1 FROM agent_attempts WHERE conversation_id = ?1",
+        [&conversation_id],
+        |row| row.get(0),
+    )?;
+    let previous_run_id = match &recorded {
+        Some(recorded) => recorded.previous_run_id.clone(),
+        None => previous.map(|prior| prior.run_id),
+    };
     db.execute(
         "INSERT INTO agent_attempts(run_id, turn_id, conversation_id, ordinal, agent_session_id,
-         previous_run_id, context_id, resume_cursor_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         previous_run_id, context_id, resume_cursor_id, detached_context)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             run.id,
             run.turn_id,
@@ -1224,7 +1336,8 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             agent_session_id,
             previous_run_id,
             context_id,
-            resume_cursor_id
+            resume_cursor_id,
+            recorded.is_some()
         ],
     )?;
     db.execute(
@@ -1347,9 +1460,9 @@ fn validate_structured_reply(
     origin: &QuestionOrigin,
     reply: &QuestionReply,
 ) -> Result<(i64, serde_json::Value)> {
-    let (seq, payload, original_scope): (i64, Vec<u8>, String) = db
+    let (seq, payload, original_scope, context_id): (i64, Vec<u8>, String, String) = db
         .query_row(
-            "SELECT q.request_event_seq, e.payload, s.scope
+            "SELECT q.request_event_seq, e.payload, s.scope, link.context_id
          FROM agent_questions q
          JOIN structured_question_continuations link ON link.request_event_seq = q.request_event_seq
          JOIN agent_events e ON e.seq = q.request_event_seq
@@ -1357,16 +1470,22 @@ fn validate_structured_reply(
          JOIN agent_sessions s ON s.id = a.agent_session_id
          WHERE q.run_id = ?1 AND q.request_key = ?2 AND q.route = 'structured_turn'
            AND q.delivery = 'pending' AND a.conversation_id = ?3
-           AND link.context_id = ?4 AND link.continuation_run_id IS NULL",
+           AND link.continuation_run_id IS NULL",
             params![
                 origin.run_id,
                 permission_key(&origin.request_id)?,
-                conversation.id,
-                conversation.context_id
+                conversation.id
             ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .context("structured planning question is absent, answered, or stale for this context")?;
+    ensure!(
+        context_id == conversation.context_id
+            || crate::jobs::detached_question_context(db, &conversation.id, &origin.run_id, seq)?
+                .as_deref()
+                == Some(context_id.as_str()),
+        "structured planning question is absent, answered, or stale for this context"
+    );
     ensure!(
         original_scope == scope,
         "the planning question belongs to another profile or checkout"
@@ -1434,15 +1553,35 @@ fn context_entries(
 }
 
 fn activate_context(db: &Connection, conversation_id: &str, entries: &[String]) -> Result<String> {
+    write_context(db, conversation_id, entries, true)
+}
+
+fn switch_history(db: &Connection, conversation_id: &str, entries: &[String]) -> Result<String> {
+    crate::jobs::apply_queue_history_policy(db, conversation_id)?;
+    db.execute(
+        "UPDATE agent_sessions SET cursor_context_id = NULL WHERE conversation_id = ?1",
+        [conversation_id],
+    )?;
+    activate_context(db, conversation_id, entries)
+}
+
+fn write_context(
+    db: &Connection,
+    conversation_id: &str,
+    entries: &[String],
+    activate: bool,
+) -> Result<String> {
     let id = new_id();
     db.execute(
         "INSERT INTO conversation_contexts(id, conversation_id, entries) VALUES (?1, ?2, ?3)",
         params![id, conversation_id, serde_json::to_string(entries)?],
     )?;
-    db.execute(
-        "UPDATE conversations SET active_context_id = ?1 WHERE id = ?2",
-        params![id, conversation_id],
-    )?;
+    if activate {
+        db.execute(
+            "UPDATE conversations SET active_context_id = ?1 WHERE id = ?2",
+            params![id, conversation_id],
+        )?;
+    }
     Ok(id)
 }
 
@@ -1501,7 +1640,6 @@ fn load_messages(
 
 struct PreviousAttempt {
     run_id: String,
-    ordinal: i64,
     session_id: String,
     scope: String,
     provider_session_id: Option<String>,
@@ -1511,18 +1649,17 @@ struct PreviousAttempt {
 fn previous_attempt(db: &Connection, conversation: &str) -> Result<Option<PreviousAttempt>> {
     Ok(db
         .query_row(
-            "SELECT a.run_id, a.ordinal, s.id, s.scope, s.provider_session_id, s.cursor_context_id
+            "SELECT a.run_id, s.id, s.scope, s.provider_session_id, s.cursor_context_id
          FROM agent_attempts a JOIN agent_sessions s ON s.id = a.agent_session_id
-         WHERE a.conversation_id = ?1 ORDER BY a.ordinal DESC LIMIT 1",
+         WHERE a.conversation_id = ?1 AND a.detached_context = 0 ORDER BY a.ordinal DESC LIMIT 1",
             [conversation],
             |row| {
                 Ok(PreviousAttempt {
                     run_id: row.get(0)?,
-                    ordinal: row.get(1)?,
-                    session_id: row.get(2)?,
-                    scope: row.get(3)?,
-                    provider_session_id: row.get(4)?,
-                    cursor: row.get(5)?,
+                    session_id: row.get(1)?,
+                    scope: row.get(2)?,
+                    provider_session_id: row.get(3)?,
+                    cursor: row.get(4)?,
                 })
             },
         )
@@ -1549,13 +1686,14 @@ struct ActiveAttempt {
     session_id: String,
     context_id: String,
     turn_id: String,
+    detached_context: bool,
 }
 
 fn active_attempt(db: &Connection, id: &str) -> Result<ActiveAttempt> {
     db.query_row(
-        "SELECT a.conversation_id, a.agent_session_id, a.context_id, a.turn_id
+        "SELECT a.conversation_id, a.agent_session_id, a.context_id, a.turn_id, a.detached_context
          FROM agent_attempts a JOIN active_agent_attempts l ON l.run_id = a.run_id WHERE a.run_id = ?1",
-        [id], |row| Ok(ActiveAttempt { conversation_id:row.get(0)?, session_id:row.get(1)?, context_id:row.get(2)?, turn_id:row.get(3)? }),
+        [id], |row| Ok(ActiveAttempt { conversation_id:row.get(0)?, session_id:row.get(1)?, context_id:row.get(2)?, turn_id:row.get(3)?, detached_context:row.get(4)? }),
     ).context("agent attempt is no longer active")
 }
 

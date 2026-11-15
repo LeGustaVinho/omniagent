@@ -6,9 +6,10 @@ use std::{
 
 use omniagent::{
     attachments::AttachmentLimits,
-    conversations::{Conversation, MessageRevision},
+    conversations::{Conversation, ConversationHistory, MessageRevision},
     customizations::CustomizationInventory,
     evidence::FixtureInputEvidence,
+    jobs::{QueueHistoryPolicy, QueueHistorySettings},
     providers::{
         Provider,
         plugins::{PluginInventory, probe_plugins},
@@ -91,6 +92,76 @@ pub async fn conversation_messages(
 ) -> Result<Vec<MessageRevision>, String> {
     store
         .conversation_messages(conversation_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn conversation_history(
+    store: State<'_, Store>,
+    conversation_id: String,
+) -> Result<ConversationHistory, String> {
+    store
+        .conversation_history(conversation_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn rewind_conversation_history(
+    store: State<'_, Store>,
+    conversation_id: String,
+    base_id: String,
+    through_revision: Option<String>,
+) -> Result<String, String> {
+    store
+        .rewind_conversation_history(conversation_id, base_id, through_revision)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn project_queue_history_policy(
+    store: State<'_, Store>,
+    project_id: String,
+) -> Result<QueueHistoryPolicy, String> {
+    store
+        .project_queue_history_policy(project_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_project_queue_history_policy(
+    store: State<'_, Store>,
+    project_id: String,
+    policy: QueueHistoryPolicy,
+) -> Result<(), String> {
+    store
+        .set_project_queue_history_policy(project_id, policy)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn conversation_queue_history_policy(
+    store: State<'_, Store>,
+    conversation_id: String,
+) -> Result<QueueHistorySettings, String> {
+    store
+        .conversation_queue_history_policy(conversation_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_conversation_queue_history_policy(
+    store: State<'_, Store>,
+    conversation_id: String,
+    policy: Option<QueueHistoryPolicy>,
+) -> Result<QueueHistorySettings, String> {
+    store
+        .set_conversation_queue_history_policy(conversation_id, policy)
         .await
         .map_err(|error| error.to_string())
 }

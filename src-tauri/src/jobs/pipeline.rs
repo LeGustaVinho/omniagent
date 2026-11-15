@@ -5,11 +5,14 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{
-    conversations::SessionScope, protection, providers::SessionMode,
-    repository::writers::writer_owner, store::Store,
+    conversations::SessionScope,
+    protection,
+    providers::{SessionMode, questions::QuestionRoute},
+    repository::writers::writer_owner,
+    store::Store,
 };
 
-use super::{Job, JobOrigin, JobRequest, insert_job, load_job};
+use super::{Job, JobContext, JobOrigin, JobRequest, history, insert_job, load_job};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineNodeKind {
@@ -311,7 +314,39 @@ impl Store {
         &self,
         binding: PipelineDispatch,
         scope: SessionScope,
+        request: JobRequest,
+    ) -> Result<Job> {
+        self.submit_pipeline_agent_job_with_context(binding, scope, request, None)
+            .await
+    }
+
+    pub async fn submit_pinned_pipeline_agent_job(
+        &self,
+        binding: PipelineDispatch,
+        scope: SessionScope,
+        request: JobRequest,
+        context: JobContext,
+        question_route: QuestionRoute,
+    ) -> Result<Job> {
+        ensure!(
+            question_route.is_native() || scope.mode == SessionMode::ReadOnly,
+            "structured planning needs a read-only profile"
+        );
+        self.submit_pipeline_agent_job_with_context(
+            binding,
+            scope,
+            request,
+            Some((context, question_route)),
+        )
+        .await
+    }
+
+    async fn submit_pipeline_agent_job_with_context(
+        &self,
+        binding: PipelineDispatch,
+        scope: SessionScope,
         mut request: JobRequest,
+        pinned: Option<(JobContext, QuestionRoute)>,
     ) -> Result<Job> {
         ensure!(
             scope.mode == request.mode
@@ -334,15 +369,28 @@ impl Store {
                     scope.checkout.starts_with(root),
                     "The CLI directory is outside the pipeline checkout"
                 );
+                if let Some((context, _)) = &pinned {
+                    let valid: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM conversation_contexts x
+                         JOIN conversations c ON c.id = x.conversation_id
+                         WHERE x.id = ?1 AND c.id = ?2 AND c.checkout_id = ?3)",
+                        params![context.context_id, context.conversation_id, checkout],
+                        |row| row.get(0),
+                    )?;
+                    ensure!(valid, "The pinned input is outside the pipeline checkout");
+                }
                 let job = insert_job(
                     &tx,
                     project,
-                    None,
+                    pinned.as_ref().map(|(context, _)| context.clone()),
                     JobOrigin::Pipeline,
                     request,
                     0,
                     Some(&binding),
                 )?;
+                if let Some((context, route)) = &pinned {
+                    history::bind_pipeline_context(&tx, &job.id, &context.context_id, *route)?;
+                }
                 tx.execute(
                     "UPDATE jobs SET operator_scope = ?1 WHERE id = ?2",
                     params![saved_scope, job.id],

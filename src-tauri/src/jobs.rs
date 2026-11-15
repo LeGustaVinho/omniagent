@@ -13,6 +13,7 @@ mod admission;
 mod command;
 mod downstream;
 mod failures;
+mod history;
 mod inspection;
 mod notices;
 mod pipeline;
@@ -30,6 +31,8 @@ pub(crate) use failures::record_job_failure;
 pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
+pub use history::{QueueHistoryPolicy, QueueHistorySettings};
+pub(crate) use history::{apply_queue_history_policy, detached_question_context};
 pub(crate) use inspection::{InspectionPolicy, InspectionQueue, load_inspection_queue};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use pipeline::{
@@ -285,27 +288,7 @@ impl Store {
         let job = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let changed = tx.execute(
-                    "UPDATE jobs SET queue_state = ?3 WHERE project_id = ?1 AND id = ?2
-                 AND queue_state IN ('queued', 'paused')
-                 AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = ?2)
-                      OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = ?2)
-                      OR EXISTS (SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
-                          WHERE a.job_id = ?2 AND w.state IN ('waiting', 'needs_review')))",
-                    params![project_id, id, state.as_sql()],
-                )?;
-                ensure!(changed == 1, "job is not pending in this project");
-                if state == QueueState::Cancelled {
-                    tx.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [&id])?;
-                    tx.execute("UPDATE job_downstream_waits SET state = 'cancelled'
-                        WHERE state IN ('waiting', 'needs_review') AND parent_run_id IN (
-                            SELECT run_id FROM job_attempts WHERE job_id = ?1
-                        )", [&id])?;
-                }
-                let job = load_job(&tx, &project_id, &id)?.context("job no longer exists")?;
-                if state == QueueState::Cancelled {
-                    downstream::observe_cancelled_job(&tx, &job)?;
-                }
+                let job = change_pending_job_state(&tx, &project_id, &id, state)?;
                 tx.commit()?;
                 Ok(job)
             })
@@ -313,6 +296,39 @@ impl Store {
         self.job_signal.send_replace(());
         Ok(job)
     }
+}
+
+fn change_pending_job_state(
+    db: &Connection,
+    project: &str,
+    job_id: &str,
+    state: QueueState,
+) -> Result<Job> {
+    let changed = db.execute(
+        "UPDATE jobs SET queue_state = ?3 WHERE project_id = ?1 AND id = ?2
+         AND queue_state IN ('queued', 'paused')
+         AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = ?2)
+              OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = ?2)
+              OR EXISTS (SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
+                  WHERE a.job_id = ?2 AND w.state IN ('waiting', 'needs_review')))",
+        params![project, job_id, state.as_sql()],
+    )?;
+    ensure!(changed == 1, "job is not pending in this project");
+    if state == QueueState::Cancelled {
+        db.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [job_id])?;
+        db.execute(
+            "UPDATE job_downstream_waits SET state = 'cancelled'
+             WHERE state IN ('waiting', 'needs_review') AND parent_run_id IN (
+                 SELECT run_id FROM job_attempts WHERE job_id = ?1
+             )",
+            [job_id],
+        )?;
+    }
+    let job = load_job(db, project, job_id)?.context("job no longer exists")?;
+    if state == QueueState::Cancelled {
+        downstream::observe_cancelled_job(db, &job)?;
+    }
+    Ok(job)
 }
 
 fn mode_key(mode: SessionMode) -> &'static str {

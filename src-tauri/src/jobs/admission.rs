@@ -7,12 +7,13 @@ use ts_rs::TS;
 
 use crate::{
     conversations::{
-        AttemptHistory, AttemptPlan, SessionScope, consume_matching_draft, insert_conversation,
-        insert_downstream_attempt, insert_job_attempt, insert_job_recovery_attempt,
-        load_conversation, recovery_checkpoint,
+        AttemptHistory, AttemptPlan, RecordedAttempt, SessionScope, consume_matching_draft,
+        insert_conversation, insert_downstream_attempt, insert_job_attempt,
+        insert_job_recovery_attempt, insert_recorded_job_attempt, load_conversation,
+        recovery_checkpoint,
     },
     protection,
-    providers::{Capability, SessionMode},
+    providers::{Capability, SessionMode, questions::QuestionRoute},
     repository::writers::{WriterConflict, writer_conflict, writer_owner},
     runs::{self, RunRecord, RunStatus},
     store::Store,
@@ -23,8 +24,8 @@ use super::{
     JobPermission, JobRequest, QueueState, RecoveryAction, ReleaseBlocker,
     command::{CommandAttempt, CommandInvocation, load_command},
     downstream::{continuation_prompt, record_continuation},
+    history::{effective_release_blocker, load_binding, uses_recorded_checkpoint},
     insert_job, load_job,
-    pipeline::release_blocker,
     policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
     recovery::{RecoveryCheckpoint, pending_recovery, recovery_source},
 };
@@ -171,6 +172,7 @@ impl Store {
                 let already_pending: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.conversation_id = ?1
                  AND j.origin_run_id IS NULL AND j.queue_state IN ('queued', 'paused')
+                 AND NOT EXISTS (SELECT 1 FROM job_history_bindings WHERE job_id = j.id)
                  AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
                       OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id)
                       OR EXISTS (SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
@@ -363,7 +365,8 @@ impl Store {
         self.execute(move |db| {
             let tx = db.transaction()?;
             let identity: Option<(String, String)> = tx.query_row(
-                "SELECT project_id, id FROM jobs WHERE conversation_id = ?1 AND origin_run_id IS NULL
+                "SELECT project_id, id FROM jobs j WHERE conversation_id = ?1 AND origin_run_id IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM job_history_bindings WHERE job_id = j.id)
                  ORDER BY sequence DESC LIMIT 1",
                 [conversation], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional()?;
@@ -544,10 +547,14 @@ fn build_attempt(
         .scope
         .context("Admitted job has no effective CLI profile")?;
     let mut plan = if let Some(wait) = &job.downstream_wait {
-        let conversation =
-            downstream_conversation(db, wait)?.context("The downstream wait context changed")?;
+        let (conversation, recorded) = downstream_conversation(db, job, wait)?
+            .context("The downstream wait context changed")?;
         let text = continuation_prompt(db, wait)?;
-        let plan = insert_downstream_attempt(db, conversation, scope, &text)?;
+        let plan = if let Some(recorded) = recorded {
+            insert_recorded_job_attempt(db, conversation, scope, recorded, &text)?
+        } else {
+            insert_downstream_attempt(db, conversation, scope, &text)?
+        };
         ensure!(
             plan.previous_run_id.as_ref() == Some(&wait.parent_run_id),
             "The continuation lost its waiting attempt"
@@ -557,6 +564,13 @@ fn build_attempt(
         match checkpoint {
             Some(RecoveryCheckpoint::Agent(checkpoint)) => {
                 let conversation = load_conversation(db, &checkpoint.conversation_id)?;
+                let question_route = load_binding(db, &job.id)?
+                    .map_or(QuestionRoute::Native, |binding| binding.question_route);
+                let recorded = checkpoint.recorded.then(|| RecordedAttempt {
+                    context_id: checkpoint.result_context_id.clone(),
+                    previous_run_id: Some(checkpoint.source_run_id.clone()),
+                    question_route,
+                });
                 let history = match job
                     .queued_recovery
                     .context("The recovery action is missing")?
@@ -565,10 +579,14 @@ fn build_attempt(
                         input_context_id: checkpoint.input_context_id.clone(),
                     },
                     RecoveryAction::Resume => AttemptHistory::Resume {
-                        native: checkpoint.native_resume(db, &scope)?,
+                        native: if recorded.is_some() {
+                            None
+                        } else {
+                            checkpoint.native_resume(db, &scope)?
+                        },
                     },
                 };
-                let plan = insert_job_recovery_attempt(db, conversation, scope, history)?;
+                let plan = insert_job_recovery_attempt(db, conversation, scope, history, recorded)?;
                 ensure!(
                     plan.previous_run_id.as_ref() == Some(&checkpoint.source_run_id),
                     "The recovered attempt lost its lineage"
@@ -579,18 +597,39 @@ fn build_attempt(
                 anyhow::bail!("The job has a command checkpoint")
             }
             None => {
-                let conversation = match (&job.origin, job.context.as_ref()) {
-                    (JobOrigin::Operator, Some(context)) => {
-                        load_conversation(db, &context.conversation_id)?
+                match (
+                    &job.origin,
+                    job.context.as_ref(),
+                    load_binding(db, &job.id)?,
+                ) {
+                    (JobOrigin::Operator | JobOrigin::Pipeline, _, Some(binding)) => {
+                        let conversation = load_conversation(db, &binding.context.conversation_id)?;
+                        insert_recorded_job_attempt(
+                            db,
+                            conversation,
+                            scope,
+                            RecordedAttempt {
+                                context_id: binding.context.context_id,
+                                previous_run_id: None,
+                                question_route: binding.question_route,
+                            },
+                            &inputs.request.instructions,
+                        )?
                     }
-                    _ => insert_conversation(
-                        db,
-                        job.checkout_id.clone(),
-                        "Background job".into(),
-                        true,
-                    )?,
-                };
-                insert_job_attempt(db, conversation, scope, &inputs.request.instructions)?
+                    (JobOrigin::Operator, Some(context), None) => {
+                        let conversation = load_conversation(db, &context.conversation_id)?;
+                        insert_job_attempt(db, conversation, scope, &inputs.request.instructions)?
+                    }
+                    _ => {
+                        let conversation = insert_conversation(
+                            db,
+                            job.checkout_id.clone(),
+                            "Background job".into(),
+                            true,
+                        )?;
+                        insert_job_attempt(db, conversation, scope, &inputs.request.instructions)?
+                    }
+                }
             }
         }
     };
@@ -600,25 +639,31 @@ fn build_attempt(
 
 fn downstream_conversation(
     db: &Connection,
+    job: &Job,
     wait: &DownstreamWait,
-) -> Result<Option<crate::conversations::Conversation>> {
+) -> Result<Option<(crate::conversations::Conversation, Option<RecordedAttempt>)>> {
     let Some(context) = wait.context_id.as_deref() else {
         return Ok(None);
     };
-    let conversation: String = db.query_row(
-        "SELECT conversation_id FROM agent_attempts WHERE run_id = ?1",
+    let (conversation, sealed): (String, Option<String>) = db.query_row(
+        "SELECT conversation_id, result_context_id FROM agent_attempts WHERE run_id = ?1",
         [&wait.parent_run_id],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    if recovery_checkpoint(
-        db,
-        &conversation,
-        &wait.parent_run_id,
-        context,
-        Some(context),
-    )?
-    .is_none()
-    {
+    let recorded = uses_recorded_checkpoint(db, job, &wait.parent_run_id, &conversation)?;
+    let matching = if recorded {
+        sealed.as_deref() == Some(context)
+    } else {
+        recovery_checkpoint(
+            db,
+            &conversation,
+            &wait.parent_run_id,
+            context,
+            Some(context),
+        )?
+        .is_some()
+    };
+    if !matching {
         return Ok(None);
     }
     let busy: bool = db.query_row(
@@ -629,7 +674,16 @@ fn downstream_conversation(
     if busy {
         return Ok(None);
     }
-    Ok(Some(load_conversation(db, &conversation)?))
+    let question_route =
+        load_binding(db, &job.id)?.map_or(QuestionRoute::Native, |binding| binding.question_route);
+    Ok(Some((
+        load_conversation(db, &conversation)?,
+        recorded.then(|| RecordedAttempt {
+            context_id: context.into(),
+            previous_run_id: Some(wait.parent_run_id.clone()),
+            question_route,
+        }),
+    )))
 }
 
 pub(super) fn recovery_scope(
@@ -825,7 +879,7 @@ fn evaluate(
                     .count() as u32,
                 needs_review: wait.state == DownstreamWaitState::NeedsReview,
             });
-        } else if downstream_conversation(db, wait)?.is_none() {
+        } else if downstream_conversation(db, job, wait)?.is_none() {
             blockers.push(ContextChanged {
                 context_id: wait
                     .context_id
@@ -849,21 +903,24 @@ fn evaluate(
                 },
             });
         }
-    } else if let (JobOrigin::Operator, Some(context)) = (&job.origin, &job.context) {
+        if let Some(attempt) = &job.latest_attempt {
+            if let Some(conversation) = &attempt.conversation_id {
+                if let Some(run_id) = active_conversation_run(db, conversation)? {
+                    blockers.push(ConversationBusy { run_id });
+                }
+            }
+        }
+    } else if let (JobOrigin::Operator | JobOrigin::Pipeline, Some(context)) =
+        (&job.origin, &job.context)
+    {
+        let binding = load_binding(db, &job.id)?;
         let conversation = load_conversation(db, &context.conversation_id)?;
-        if conversation.context_id != context.context_id {
+        if binding.is_none() && conversation.context_id != context.context_id {
             blockers.push(ContextChanged {
                 context_id: context.context_id.clone(),
             });
         }
-        if let Some(run_id) = db
-            .query_row(
-                "SELECT run_id FROM active_agent_attempts WHERE conversation_id = ?1",
-                [&context.conversation_id],
-                |row| row.get(0),
-            )
-            .optional()?
-        {
+        if let Some(run_id) = active_conversation_run(db, &context.conversation_id)? {
             blockers.push(ConversationBusy { run_id });
         }
     }
@@ -872,10 +929,10 @@ fn evaluate(
             capability: Capability::RunScopedMcp,
         });
     }
+    if let Some(reason) = effective_release_blocker(db, job)? {
+        blockers.push(PipelineRelease { reason });
+    }
     if job.mode == SessionMode::ApprovedWrite {
-        if let Some(reason) = release_blocker(db, job)? {
-            blockers.push(PipelineRelease { reason });
-        }
         let scope = job
             .task_id
             .as_deref()
@@ -913,4 +970,14 @@ fn evaluate(
         });
     }
     Ok(blockers)
+}
+
+fn active_conversation_run(db: &Connection, conversation: &str) -> Result<Option<String>> {
+    Ok(db
+        .query_row(
+            "SELECT run_id FROM active_agent_attempts WHERE conversation_id = ?1",
+            [conversation],
+            |row| row.get(0),
+        )
+        .optional()?)
 }

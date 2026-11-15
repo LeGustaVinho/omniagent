@@ -9,7 +9,7 @@ import type { AdmissionBlocker } from "@/bindings/AdmissionBlocker";
 import type { Job } from "@/bindings/Job";
 import type { JobInspection } from "@/bindings/JobInspection";
 import type { RecoveryAction } from "@/bindings/RecoveryAction";
-import type { MessageRevision } from "@/bindings/MessageRevision";
+import type { ConversationHistory } from "@/bindings/ConversationHistory";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
@@ -19,6 +19,7 @@ import { EffortSelect, type EffortSet } from "@/components/effort-select";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
+import { ConversationHistoryControls } from "@/conversation-history-controls";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
 import { WorktreeEvidence } from "@/worktree-evidence";
@@ -233,7 +234,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
   const historyKey = ["conversation", conversationId, "messages"];
   const history = useQuery({
     queryKey: historyKey,
-    queryFn: () => invoke<MessageRevision[]>("conversation_messages", { conversationId }),
+    queryFn: () => invoke<ConversationHistory>("conversation_history", { conversationId }),
   });
   const historyRegion = useRef<HTMLDivElement>(null);
   const historyContents = useRef<HTMLDivElement>(null);
@@ -378,10 +379,14 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
       <header className="conv-heading">
         <MessageSquare aria-hidden />
         <h1>{title}</h1>
-        {run && <button ref={activityButton} type="button" className="conv-quiet-button ml-auto" aria-expanded={Boolean(showingActivity)}
+        <div className="ml-auto flex items-center gap-1">
+        {run && <button ref={activityButton} type="button" className="conv-quiet-button" aria-expanded={Boolean(showingActivity)}
           onClick={() => showingActivity ? closeActivity() : setInspectedRun(run.id)}>
           <Activity aria-hidden /> Activity
         </button>}
+        <ConversationHistoryControls conversationId={conversationId} history={history.data}
+          disabled={live || isLiveRun(attempt) || send.isPending} />
+        </div>
       </header>
       <div className="conv-layout">
       <div className="conv-chat">
@@ -396,13 +401,13 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
         <div ref={historyContents} className="conv-reading">
         {history.isPending && <p role="status" className="text-sm text-muted-foreground">Loading messages…</p>}
         {history.error && <p role="alert" className="conv-alert">{String(history.error)}</p>}
-        {history.data?.length === 0 && !run && !queued && <div className="conv-empty">
+        {history.data?.messages.length === 0 && !live && !queued && <div className="conv-empty">
           <MessageSquare aria-hidden />
           <h2>Start a conversation</h2>
           <p>Choose a model and ask about this repository.</p>
         </div>}
         <ol className="conv-messages">
-          {history.data?.map((message) => (
+          {history.data?.messages.map((message) => (
             <li key={message.revisionId} className={message.role === "user" ? "conv-user" : "conv-assistant"}>
               <p className="sr-only">{message.role === "user" ? "You" : "Assistant"}</p>
               {message.role === "user" ? <p>{message.text}</p> : <ConversationMarkdown>{message.text}</ConversationMarkdown>}

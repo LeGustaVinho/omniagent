@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AppearanceSettings } from "@/bindings/AppearanceSettings";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
+import { ProjectQueueHistoryPolicy } from "@/conversation-history-controls";
 import { CustomizationsSettings } from "@/customizations-panel";
 import { ProjectAttachmentSettings } from "@/provider-settings";
 import { defaultAppearance, useAppearancePresentation, useEditableAppearance } from "@/settings-appearance";
@@ -207,6 +208,12 @@ function SettingsSession({
           : <CustomizationsSettings key={checkout?.checkoutId} checkoutId={checkout?.checkoutId} embedded />;
       case "system":
         return <SystemSettings simulated={simulation ? maintenance : undefined} startSimulation={simulate} />;
+      case "conversation":
+        if (simulation || !checkout) return policy("conversation");
+        return <>
+          <ProjectQueueHistoryPolicy key={checkout.projectId} projectId={checkout.projectId} />
+          <PolicyForm fields={policyFields.conversation.filter(({ id }) => id !== "queued-context")} stored={undefined} simulate={simulate} />
+        </>;
       default:
         return policy(currentPage.id);
     }

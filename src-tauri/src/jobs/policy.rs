@@ -10,7 +10,11 @@ use crate::{
     store::Store,
 };
 
-use super::{Job, JobOrigin, ReleaseBlocker, load_job, pipeline::release_blocker};
+use super::{
+    Job, JobOrigin, QueueState, ReleaseBlocker,
+    history::{effective_release_blocker, structured_job_run},
+    load_job,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -160,16 +164,19 @@ pub(super) fn bind_attempt_policy(db: &Connection, job: &Job, run: &str) -> Resu
     Ok(())
 }
 
-fn attempt_requirements(
+pub(super) fn attempt_requirements(
     db: &Connection,
     run: &str,
 ) -> Result<std::result::Result<JobRequirements, DispatchRejection>> {
+    let Some(source) = structured_job_run(db, run)? else {
+        return Ok(Ok(JobRequirements::default()));
+    };
     let row: Option<(String, String, String)> = db
         .query_row(
             "SELECT p.policy_key, j.project_id, j.id FROM job_attempt_policies p
          JOIN job_attempts a ON a.run_id = p.run_id JOIN jobs j ON j.id = a.job_id
          WHERE p.run_id = ?1",
-            [run],
+            [&source],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
@@ -177,11 +184,11 @@ fn attempt_requirements(
         return Ok(Ok(JobRequirements::default()));
     };
     let job = load_job(db, &project, &id)?.context("Job is unavailable")?;
-    if let Some(reason) = release_blocker(db, &job)? {
+    if let Some(reason) = effective_release_blocker(db, &job)? {
         return Ok(Err(DispatchRejection::PipelineRelease { reason }));
     }
     let policy = effective_policy(db, &job)?;
-    if accepted != policy.key {
+    if accepted != policy.key || job.queue_state == QueueState::Cancelled {
         return Ok(Err(DispatchRejection::PolicyChanged));
     }
     Ok(Ok(policy.requirements))
