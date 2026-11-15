@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -7,13 +10,18 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    conversations::SessionScope, mcp_bridge::Registration, protection, runner::ExecutionPlatform,
+    conversations::SessionScope,
+    mcp_bridge::{INSPECT_SCOPE, Registration, SERVER_NAME, VERSION},
+    protection,
+    runner::ExecutionPlatform,
     store::Store,
 };
 
-use super::{Capability, Provider, ProviderEventData, SessionMode, Transport};
+use super::{
+    Capability, Provider, ProviderEventData, SessionMode, Transport, configuration::mcp_identity,
+};
 
-pub const CAPABILITY_SCHEMA_VERSION: u16 = 1;
+pub const CAPABILITY_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -134,13 +142,14 @@ impl ResolvedCapability {
     pub fn status(&self) -> CapabilityStatus {
         if self.descriptor.blocker.is_some() {
             CapabilityStatus::Blocked
+        } else if self.descriptor.availability == Availability::Unavailable {
+            CapabilityStatus::Unavailable
         } else if self.evidence.as_ref().is_some_and(Verification::verified) {
             CapabilityStatus::Verified
         } else if self.descriptor.observed.is_some() {
             CapabilityStatus::Observed
         } else {
             match (self.descriptor.source, self.descriptor.availability) {
-                (_, Availability::Unavailable) => CapabilityStatus::Unavailable,
                 (DeclaredSource::Provider, Availability::Available) => CapabilityStatus::Reported,
                 _ => CapabilityStatus::Unverified,
             }
@@ -164,6 +173,10 @@ pub struct ConfigurationEvidence {
     /// Provider configuration plus detected source revisions. An unknown
     /// provider configuration cannot qualify for evidence reuse.
     pub effective_revision: Option<String>,
+    #[serde(default)]
+    pub environment_revision: Option<String>,
+    #[serde(default)]
+    pub tool_revisions: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +184,8 @@ pub struct ConfigurationEvidence {
 pub struct ConfigurationFile {
     pub path: PathBuf,
     pub revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) environment_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +246,29 @@ impl CapabilityScope {
         if !self.configuration.unresolved.is_empty() {
             return None;
         }
+        let (configuration, tool_revision) = match &descriptor.subject {
+            CapabilitySubject::Tool { id, .. } => (
+                self.configuration.environment_revision.as_deref()?,
+                Some(self.configuration.tool_revisions.get(id)?.as_str()),
+            ),
+            CapabilitySubject::Protocol {
+                capability: Capability::RunScopedMcp,
+            } => (
+                self.configuration.environment_revision.as_deref()?,
+                Some(
+                    self.configuration
+                        .tool_revisions
+                        .get(&mcp_identity(SERVER_NAME))?
+                        .as_str(),
+                ),
+            ),
+            CapabilitySubject::Protocol {
+                capability: Capability::WorkspaceWrite | Capability::ToolApprovals,
+            } => (self.configuration.effective_revision.as_deref()?, None),
+            CapabilitySubject::Protocol { .. } => {
+                (self.configuration.environment_revision.as_deref()?, None)
+            }
+        };
         Some(QualificationKey {
             subject: descriptor.subject.clone(),
             provider: self.provider,
@@ -247,7 +285,9 @@ impl CapabilityScope {
             platform: self.platform.as_ref()?,
             mode: self.mode,
             permission_revision: &self.permission_revision,
-            configuration: self.configuration.effective_revision.as_deref()?,
+            configuration,
+            tool_revision,
+            boundary: descriptor.boundary,
             checkout: (descriptor.boundary == EvidenceBoundary::ExactCheckout)
                 .then_some(&self.checkout),
         })
@@ -273,6 +313,8 @@ struct QualificationKey<'a> {
     mode: SessionMode,
     permission_revision: &'a str,
     configuration: &'a str,
+    tool_revision: Option<&'a str>,
+    boundary: EvidenceBoundary,
     checkout: Option<&'a CheckoutIdentity>,
 }
 
@@ -292,6 +334,7 @@ pub(crate) struct ReportedCapabilities {
     pub effort: Option<String>,
     pub configuration_reported: bool,
     pub configuration_revision: Option<String>,
+    pub configuration_qualification: Option<super::configuration::ReportedConfiguration>,
     pub codex_instruction_settings: Option<super::configuration::CodexInstructionSettings>,
     pub bridge_registration: Option<Registration>,
 }
@@ -302,18 +345,26 @@ impl ReportedCapabilities {
             ProviderEventData::BridgeRegistration { registration } => {
                 let changed = self.bridge_registration.as_ref() != Some(registration);
                 self.bridge_registration = Some(registration.clone());
-                return changed;
+                changed
             }
             ProviderEventData::Handshake { capabilities, .. } => {
-                self.available.extend(capabilities)
+                let before = self.available.len();
+                self.available.extend(capabilities);
+                before != self.available.len()
             }
             ProviderEventData::ConfigurationReported {
                 revision,
                 codex_instructions,
+                qualification,
             } => {
+                let changed = !self.configuration_reported
+                    || self.configuration_revision != *revision
+                    || self.configuration_qualification != *qualification;
                 self.configuration_reported = true;
                 self.configuration_revision = revision.clone();
+                self.configuration_qualification = qualification.clone();
                 self.codex_instruction_settings = codex_instructions.clone();
+                changed
             }
             ProviderEventData::SessionReady { model, effort }
             | ProviderEventData::ModelObserved { model, effort } => {
@@ -332,51 +383,44 @@ impl ReportedCapabilities {
                 if changed {
                     self.observed.clear();
                 }
-                return changed;
+                changed
             }
             ProviderEventData::ModelInventory { .. } | ProviderEventData::SessionOptions { .. } => {
-                self.observed.insert(Capability::ModelInventory);
+                self.observed.insert(Capability::ModelInventory)
             }
-            ProviderEventData::Reasoning { .. } => {
-                self.observed.insert(Capability::Reasoning);
-            }
-            ProviderEventData::Approval { .. } => {
-                self.observed.insert(Capability::ToolApprovals);
-            }
+            ProviderEventData::Reasoning { .. } => self.observed.insert(Capability::Reasoning),
+            ProviderEventData::Approval { .. } => self.observed.insert(Capability::ToolApprovals),
             ProviderEventData::Question { .. } => {
-                self.observed.insert(Capability::PlanningQuestions);
+                self.observed.insert(Capability::PlanningQuestions)
             }
             ProviderEventData::ChildActivity { .. } => {
-                self.observed.insert(Capability::SubagentEvents);
+                self.observed.insert(Capability::SubagentEvents)
             }
-            ProviderEventData::Compacted => {
-                self.observed.insert(Capability::NativeCompaction);
-            }
+            ProviderEventData::Compacted => self.observed.insert(Capability::NativeCompaction),
             ProviderEventData::Suggestion { .. } => {
-                self.observed.insert(Capability::NativeSuggestions);
+                self.observed.insert(Capability::NativeSuggestions)
             }
-            _ => {}
+            _ => false,
         }
-        false
     }
 
     pub(crate) fn descriptors(&self, scope: &CapabilityScope) -> Vec<CapabilityDescriptor> {
-        Capability::ALL
+        let bridge_availability = match self.bridge_registration {
+            Some(Registration::ToolsListed | Registration::ScopeVerified) => {
+                Availability::Available
+            }
+            Some(Registration::Unavailable { .. }) => Availability::Unavailable,
+            _ => Availability::Unknown,
+        };
+        let mut descriptors: Vec<_> = Capability::ALL
             .into_iter()
             .map(|capability| {
                 if capability == Capability::RunScopedMcp {
-                    let availability = match self.bridge_registration {
-                        Some(Registration::ToolsListed | Registration::ScopeVerified) => {
-                            Availability::Available
-                        }
-                        Some(Registration::Unavailable { .. }) => Availability::Unavailable,
-                        _ => Availability::Unknown,
-                    };
                     return CapabilityDescriptor {
                         subject: CapabilitySubject::Protocol { capability },
                         source: DeclaredSource::Adapter,
-                        availability,
-                        observed: (availability == Availability::Available)
+                        availability: bridge_availability,
+                        observed: (bridge_availability == Availability::Available)
                             .then_some(ObservedResult::Succeeded),
                         blocker: None,
                         boundary: EvidenceBoundary::ExactCheckout,
@@ -409,7 +453,23 @@ impl ReportedCapabilities {
                     },
                 }
             })
-            .collect()
+            .collect();
+        if self.bridge_registration.is_some() {
+            descriptors.push(CapabilityDescriptor {
+                subject: CapabilitySubject::Tool {
+                    id: mcp_identity(SERVER_NAME),
+                    version: format!("{}:{VERSION}", env!("CARGO_PKG_VERSION")),
+                    operation: INSPECT_SCOPE.into(),
+                },
+                source: DeclaredSource::Adapter,
+                availability: bridge_availability,
+                observed: (self.bridge_registration == Some(Registration::ScopeVerified))
+                    .then_some(ObservedResult::Succeeded),
+                blocker: None,
+                boundary: EvidenceBoundary::ExactCheckout,
+            });
+        }
+        descriptors
     }
 }
 
@@ -433,6 +493,11 @@ impl Store {
         ensure!(
             descriptor.blocker.is_none(),
             "blocked capability cannot be qualified"
+        );
+        ensure!(
+            descriptor.availability != Availability::Unavailable
+                || result == ObservedResult::Failed,
+            "an unavailable capability cannot be qualified as successful"
         );
         if let CapabilitySubject::Tool {
             id,
@@ -477,9 +542,13 @@ impl Store {
             let entries = descriptors
                 .into_iter()
                 .map(|descriptor| {
-                    let evidence = match scope.key(&descriptor) {
-                        Some(key) => latest_evidence(db, &revision(&key)?)?,
-                        None => None,
+                    let evidence = if descriptor.blocker.is_none()
+                        && descriptor.availability != Availability::Unavailable
+                        && let Some(key) = scope.key(&descriptor)
+                    {
+                        latest_evidence(db, &revision(&key)?)?
+                    } else {
+                        None
                     };
                     Ok(ResolvedCapability {
                         descriptor,
@@ -568,6 +637,11 @@ mod tests {
                 unresolved: Vec::new(),
                 provider_revision: Some("provider-config".into()),
                 effective_revision: Some("config-1".into()),
+                environment_revision: Some("environment-1".into()),
+                tool_revisions: BTreeMap::from([(
+                    "fixture/read_file".into(),
+                    "tool-config-1".into(),
+                )]),
             },
         }
     }
@@ -629,7 +703,13 @@ mod tests {
             |scope: &mut CapabilityScope| scope.platform.as_mut().unwrap().host.revision += 1,
             |scope: &mut CapabilityScope| scope.permission_revision = "readonly-2".into(),
             |scope: &mut CapabilityScope| {
-                scope.configuration.effective_revision = Some("config-2".into())
+                scope.configuration.environment_revision = Some("environment-2".into())
+            },
+            |scope: &mut CapabilityScope| {
+                scope
+                    .configuration
+                    .tool_revisions
+                    .insert("fixture/read_file".into(), "modified tool".into());
             },
             |scope: &mut CapabilityScope| {
                 scope
@@ -675,6 +755,74 @@ mod tests {
             .resolve_capability_assessment(fixture, vec![path_sensitive])
             .await?;
         assert_eq!(resolved.entries[0].evidence.as_ref().unwrap().id, narrow_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unrelated_tool_changes_do_not_discard_matching_evidence() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = Store::open(temp.path().join("capabilities.sqlite"))?;
+        let read = descriptor();
+        let browser = CapabilityDescriptor {
+            subject: CapabilitySubject::Tool {
+                id: "fixture/browser".into(),
+                version: "1".into(),
+                operation: "open".into(),
+            },
+            ..read.clone()
+        };
+        let mut profile = scope();
+        profile
+            .configuration
+            .tool_revisions
+            .insert("fixture/browser".into(), "browser-config-1".into());
+        let shared_read = store
+            .record_capability_evidence(
+                profile.clone(),
+                read.clone(),
+                EvidenceOrigin::ProtocolFixture,
+                ObservedResult::Succeeded,
+                "read-fixture".into(),
+            )
+            .await?;
+        let old_browser = store
+            .record_capability_evidence(
+                profile.clone(),
+                browser.clone(),
+                EvidenceOrigin::ProtocolFixture,
+                ObservedResult::Succeeded,
+                "browser-fixture".into(),
+            )
+            .await?;
+        let saved = store
+            .resolve_capability_assessment(profile.clone(), vec![read.clone(), browser.clone()])
+            .await?;
+        assert_eq!(
+            saved.entries[1].evidence.as_ref().map(|entry| &entry.id),
+            Some(&old_browser)
+        );
+        profile.configuration.effective_revision = Some("changed full configuration".into());
+        profile
+            .configuration
+            .tool_revisions
+            .insert("fixture/browser".into(), "browser-config-2".into());
+        let updated = store
+            .resolve_capability_assessment(profile.clone(), vec![read.clone(), browser])
+            .await?;
+        assert_eq!(
+            updated.entries[0].evidence.as_ref().map(|entry| &entry.id),
+            Some(&shared_read)
+        );
+        assert!(updated.entries[1].evidence.is_none());
+        let unavailable = CapabilityDescriptor {
+            availability: Availability::Unavailable,
+            ..read
+        };
+        let current = store
+            .resolve_capability_assessment(profile, vec![unavailable])
+            .await?;
+        assert_eq!(current.entries[0].status(), CapabilityStatus::Unavailable);
+        assert!(current.entries[0].evidence.is_none());
         Ok(())
     }
 

@@ -251,7 +251,7 @@ struct TurnExecution {
     reported_skills: Option<SkillCatalog>,
     plugin_inventory: Option<PluginInventory>,
     scoped_launch: Option<ScopedLaunchEvidence>,
-    capability_scope: Option<CapabilityScope>,
+    capability_scope: Option<(CapabilityScope, CheckoutLayout)>,
     executable_revision: Option<String>,
     platform: Option<ExecutionPlatform>,
 }
@@ -266,10 +266,11 @@ impl TurnExecution {
             {
                 scope_changed = self.reported.observe(&event.data);
             }
-            if source == EventSource::Provider {
-                if let ProviderEventData::SkillsReported { catalog } = &event.data {
-                    self.reported_skills = Some(catalog.clone());
-                }
+            if source == EventSource::Provider
+                && let ProviderEventData::SkillsReported { catalog } = &event.data
+            {
+                scope_changed |= self.reported_skills.as_ref() != Some(catalog);
+                self.reported_skills = Some(catalog.clone());
             }
             match &event.data {
                 ProviderEventData::AssistantDelta { text } => self.streamed_answer.push_str(text),
@@ -282,9 +283,20 @@ impl TurnExecution {
             source,
             event,
         ))?;
-        if scope_changed && let Some(scope) = &mut self.capability_scope {
+        if scope_changed && let Some((scope, checkout)) = &mut self.capability_scope {
             scope.reported_model = self.reported.model.clone();
             scope.reported_effort = self.reported.effort.clone();
+            scope.configuration.provider_revision = self.reported.configuration_revision.clone();
+            configuration::resolve_effective_configuration(
+                &mut scope.configuration,
+                checkout,
+                self.reported.configuration_qualification.as_ref(),
+                self.scoped_launch
+                    .as_ref()
+                    .context("missing scoped launch evidence")?,
+                self.plugin_inventory.as_ref(),
+                self.reported_skills.as_ref(),
+            )?;
             let descriptors = self.reported.descriptors(scope);
             let assessment = self.app.block_on(
                 self.store
@@ -341,6 +353,7 @@ impl TurnExecution {
             model: scope.model.clone(),
             effort: scope.effort.clone(),
         })?;
+        session.set_checkout_root(&checkout.root);
         let review = self.app.block_on(self.store.resolve_launch_review(
             self.plan.run.checkout_id.clone(),
             &checkout,
@@ -387,6 +400,7 @@ impl TurnExecution {
             session.arguments(),
             registration,
         )?;
+        launch.identify_mcp_executables(runner, &review, registration)?;
         if let Some(instructions) = launch.protocol_instructions.take() {
             session.set_workspace_instructions(instructions)?;
         }
@@ -591,8 +605,18 @@ impl TurnExecution {
             },
             _ => anyhow::bail!("inconsistent resume cursor"),
         };
-        let (configuration, filesystem_skills, instructions) =
+        let (mut configuration, filesystem_skills, instructions) =
             configuration::inspect(&self.plan.scope, checkout, &self.reported)?;
+        configuration::resolve_effective_configuration(
+            &mut configuration,
+            checkout,
+            self.reported.configuration_qualification.as_ref(),
+            self.scoped_launch
+                .as_ref()
+                .context("missing scoped launch evidence")?,
+            self.plugin_inventory.as_ref(),
+            self.reported_skills.as_ref(),
+        )?;
         let scope = CapabilityScope::from_dispatch(
             &self.plan.scope,
             self.plan.run.checkout_id.clone(),
@@ -607,7 +631,7 @@ impl TurnExecution {
             self.store
                 .resolve_capability_assessment(scope.clone(), descriptors),
         )?;
-        self.capability_scope = Some(scope);
+        self.capability_scope = Some((scope, checkout.clone()));
         let reported_skills = self.reported_skills.clone().unwrap_or_else(|| {
             SkillCatalog::unavailable(match self.plan.scope.provider {
                 Provider::Codex => "Codex did not report its skill inventory before dispatch",
@@ -625,7 +649,7 @@ impl TurnExecution {
             )
         });
         let snapshot = ContextSnapshot {
-            version: 6,
+            version: 7,
             context_id: self.plan.context_id.clone(),
             scope: self.plan.scope.clone(),
             base_commit: repository::base_commit(&self.plan.scope.checkout)?,

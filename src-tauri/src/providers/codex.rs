@@ -56,6 +56,8 @@ impl CliAdapter for CodexAdapter {
             "Codex checkout must be absolute"
         );
         Ok(Box::new(CodexSession {
+            checkout_root: request.checkout.clone(),
+            bridge: None,
             request,
             rpc: Rpc::new(false),
             handshake_started: false,
@@ -99,6 +101,8 @@ enum Approval {
 
 struct CodexSession {
     request: SessionRequest,
+    checkout_root: std::path::PathBuf,
+    bridge: Option<crate::mcp_bridge::BridgeLaunch>,
     rpc: Rpc<Request>,
     handshake_started: bool,
     session: Option<Session>,
@@ -198,6 +202,7 @@ impl CodexSession {
                     ProviderEventData::ConfigurationReported {
                         revision: None,
                         codex_instructions: None,
+                        qualification: None,
                     },
                 )]));
             }
@@ -289,6 +294,7 @@ impl CodexSession {
             }
             Request::ReadConfiguration => {
                 let mut codex_instructions = None;
+                let mut qualification = None;
                 let revision = if let Some(mut config) = result
                     .get("config")
                     .filter(|value| value.is_object())
@@ -300,6 +306,13 @@ impl CodexSession {
                         codex_instructions = serde_json::from_value(config.clone()).ok();
                     }
                     config.sort_all_objects();
+                    if let Some(fields) = config.as_object() {
+                        qualification = Some(crate::providers::configuration::codex_configuration(
+                            fields.clone(),
+                            &self.checkout_root,
+                            self.bridge.as_ref(),
+                        )?);
+                    }
                     Some(capabilities::revision(&config)?)
                 } else {
                     None
@@ -308,6 +321,7 @@ impl CodexSession {
                     self.events(vec![self.event(ProviderEventData::ConfigurationReported {
                         revision,
                         codex_instructions,
+                        qualification,
                     })]),
                 )
             }
@@ -735,6 +749,13 @@ impl CodexSession {
 }
 
 impl CliSession for CodexSession {
+    fn set_checkout_root(&mut self, root: &Path) {
+        self.checkout_root = root.to_owned();
+    }
+
+    fn configure_mcp_bridge(&mut self, launch: crate::mcp_bridge::BridgeLaunch) {
+        self.bridge = Some(launch);
+    }
     fn set_workspace_instructions(&mut self, instructions: String) -> Result<()> {
         ensure!(
             !self.handshake_started,

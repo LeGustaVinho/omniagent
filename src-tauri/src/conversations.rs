@@ -709,8 +709,12 @@ mod tests {
         dispatch::{ContextSnapshot, Delivery, NativeHistory},
         process::TerminalOutcome,
         process_io::{CapturedProcess, OutputFrame, ProcessInput, Stream},
-        providers::{ProviderLocation, runtime::start_managed_turn},
-        runner::{LaunchRequest, RunControl, Runner},
+        providers::{
+            Capability, ProviderLocation,
+            capabilities::{CapabilitySubject, EvidenceOrigin, ObservedResult},
+            runtime::start_managed_turn,
+        },
+        runner::{DirectWindowsRunner, ExecutionPlatform, LaunchRequest, RunControl, Runner},
     };
     use serde_json::{Value, json};
     use std::{
@@ -1200,6 +1204,12 @@ mod tests {
         fn identity(&self) -> &str {
             "fixture-runner"
         }
+        fn execution_platform(&self) -> Option<ExecutionPlatform> {
+            DirectWindowsRunner.execution_platform()
+        }
+        fn executable_revision(&self, _: &std::path::Path) -> Option<String> {
+            Some("scripted-codex-build".into())
+        }
         fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
             let (write, output) = mpsc::channel();
             if request.arguments == ["plugin", "list", "--json"].map(std::ffi::OsStr::new) {
@@ -1287,7 +1297,7 @@ mod tests {
             RunStatus::Succeeded
         );
         std::fs::write(&guide, "Revised fixture repository instructions")?;
-        let resumed = prepare(&store, &conversation.id, scope, "Second prompt").await?;
+        let resumed = prepare(&store, &conversation.id, scope.clone(), "Second prompt").await?;
         assert_eq!(resumed.agent_session_id, first_session);
         assert_eq!(resumed.previous_run_id.as_deref(), Some(first_run.as_str()));
         assert!(
@@ -1297,7 +1307,7 @@ mod tests {
         assert_eq!(resumed.input[0].text, "Second prompt");
         let resumed_run = resumed.run.id.clone();
         assert_eq!(
-            start_managed_turn(store.clone(), runner, resumed, None)
+            start_managed_turn(store.clone(), runner.clone(), resumed, None)
                 .wait()
                 .await?,
             RunStatus::Succeeded
@@ -1413,6 +1423,57 @@ mod tests {
                 == ProviderEventData::DispatchSubmitted {
                     dispatch_id: second_dispatch.id.clone()
                 }));
+        let subject = CapabilitySubject::Protocol {
+            capability: Capability::ModelInventory,
+        };
+        let descriptor = assessment
+            .entries
+            .iter()
+            .find(|entry| entry.descriptor.subject == subject)
+            .unwrap()
+            .descriptor
+            .clone();
+        let evidence = store
+            .record_capability_evidence(
+                assessment.scope.clone(),
+                descriptor,
+                EvidenceOrigin::ProtocolFixture,
+                ObservedResult::Succeeded,
+                first_run.clone(),
+            )
+            .await?;
+        std::fs::write(&guide, "Fixture repository instructions")?;
+        let third = prepare(&store, &conversation.id, scope, "Third prompt").await?;
+        let third_run = third.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), runner, third, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        let third = store
+            .agent_dispatch(conversation.id.clone(), third_run.clone())
+            .await?
+            .unwrap();
+        let attached_evidence =
+            |assessment: &crate::providers::capabilities::CapabilityAssessment| {
+                assessment
+                    .entries
+                    .iter()
+                    .find(|entry| entry.descriptor.subject == subject)
+                    .and_then(|entry| entry.evidence.as_ref())
+                    .map(|evidence| evidence.id.clone())
+            };
+        assert_eq!(
+            attached_evidence(third.snapshot.capabilities.as_ref().unwrap()),
+            Some(evidence)
+        );
+        let third_events = store
+            .agent_observations(conversation.id.clone(), third_run, 0)
+            .await?;
+        assert!(third_events.iter().any(|entry| matches!(&entry.event.data,
+            ProviderEventData::CapabilityAssessmentUpdated {assessment} if
+            assessment.scope.reported_model.as_deref() == Some("observed-later") && attached_evidence(assessment).is_none())));
         let active = store.conversation(conversation.id.clone()).await?;
         store
             .replace_conversation_message(
@@ -1466,7 +1527,7 @@ mod tests {
             .filter(|frame| frame["method"] == "turn/start")
             .map(|frame| frame["params"]["input"][0]["text"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(prompts, [first_prompt, "Second prompt"]);
+        assert_eq!(prompts, [first_prompt, "Second prompt", "Third prompt"]);
         assert!(
             frames
                 .iter()

@@ -24,10 +24,15 @@ use super::{
 use crate::{conversations::SessionScope, repository::CheckoutLayout};
 
 mod instructions;
+mod qualification;
 pub(crate) use instructions::normalize_path;
 pub use instructions::{
     CodexInstructionSettings, InstructionInventory, InstructionScope, InstructionSelection,
     InstructionSource,
+};
+pub use qualification::ReportedConfiguration;
+pub(crate) use qualification::{
+    codex_configuration, mcp_identity, resolve_effective_configuration,
 };
 
 const REPARSE_POINT: u32 = 0x400;
@@ -123,7 +128,7 @@ pub(crate) fn inspect(
     discovery
         .unresolved
         .extend(instructions.unresolved.iter().cloned());
-    let configuration = discovery.finish(checkout, reported.configuration_revision.as_deref())?;
+    let configuration = discovery.finish(reported.configuration_revision.as_deref());
     let skills = configuration
         .detected
         .iter()
@@ -269,38 +274,19 @@ struct Discovery {
 }
 
 impl Discovery {
-    fn finish(
-        mut self,
-        checkout: &Path,
-        reported_revision: Option<&str>,
-    ) -> anyhow::Result<ConfigurationEvidence> {
+    fn finish(mut self, reported_revision: Option<&str>) -> ConfigurationEvidence {
         self.detected.sort_by(|a, b| a.path.cmp(&b.path));
         self.detected.dedup_by(|a, b| a.path == b.path);
         self.unresolved.sort();
         self.unresolved.dedup();
-        let effective_revision = reported_revision
-            .filter(|_| self.unresolved.is_empty())
-            .map(|reported| {
-                let mut sources = self
-                    .detected
-                    .iter()
-                    .map(|file| {
-                        (
-                            file.path.strip_prefix(checkout).unwrap_or(&file.path),
-                            &file.revision,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                sources.sort_unstable();
-                super::capabilities::revision(&(reported, sources))
-            })
-            .transpose()?;
-        Ok(ConfigurationEvidence {
+        ConfigurationEvidence {
             detected: self.detected,
             unresolved: self.unresolved,
             provider_revision: reported_revision.map(str::to_owned),
-            effective_revision,
-        })
+            effective_revision: None,
+            environment_revision: None,
+            tool_revisions: Default::default(),
+        }
     }
 
     fn files(&mut self, root: &Path, names: &[&str]) {
@@ -322,6 +308,7 @@ impl Discovery {
                         self.detected.push(ConfigurationFile {
                             path: path.to_path_buf(),
                             revision: revision.clone(),
+                            environment_revision: None,
                         });
                         return Some((bytes, revision));
                     }
@@ -422,6 +409,12 @@ pub(crate) fn read_local_file(path: &Path) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::{
+        launch_scope::ScopedLaunchEvidence,
+        plugins::{PluginInventory, PluginInventoryStatus, PluginReport},
+        skills::SkillCatalog,
+    };
+    use serde_json::json;
 
     #[test]
     fn effective_revisions_follow_relative_scope_and_file_changes() -> anyhow::Result<()> {
@@ -434,23 +427,75 @@ mod tests {
             fs::create_dir(directory)?;
             fs::write(directory.join("AGENTS.md"), b"project rules")?;
         }
-        let assess = |checkout: &Path, reported| {
+        let layout = |checkout: &Path| CheckoutLayout {
+            root: checkout.into(),
+            primary_root: checkout.into(),
+            cwd: checkout.into(),
+        };
+        let launch = ScopedLaunchEvidence {
+            provider: Provider::Codex,
+            strategy: "codex_untrusted_project".into(),
+            approved: Default::default(),
+            excluded: Default::default(),
+            instruction_sources: Vec::new(),
+            inputs: Vec::new(),
+            mcp_sources: [(mcp_identity("reader"), "installed executable digest".into())].into(),
+            non_mcp_approvals: Default::default(),
+        };
+        let plugins = PluginInventory {
+            id: "fixture".into(),
+            checked_at: "fixture".into(),
+            report: PluginReport {
+                provider: Provider::Codex,
+                executable: None,
+                version: None,
+                status: PluginInventoryStatus::Reported,
+                plugins: Vec::new(),
+                load_telemetry_reported: false,
+            },
+        };
+        let skills = SkillCatalog {
+            entries: Vec::new(),
+            issues: Vec::new(),
+            reported: true,
+        };
+        let assess = |checkout: &Path, arguments: &str, use_report: bool| -> anyhow::Result<_> {
+            let config = json!({ "model": "fixture", "projects": { (checkout.to_str().unwrap()): {"trust_level":"untrusted"} },
+                "mcp_servers": { "reader": { "command": checkout.join("reader.exe"), "args": [arguments], "cwd": checkout } }});
+            let reported =
+                codex_configuration(config.as_object().unwrap().clone(), checkout, None)?;
             let mut discovery = Discovery::default();
             discovery.files(checkout, &["AGENTS.md"]);
             discovery.files(&profile, &["AGENTS.md"]);
-            discovery.finish(checkout, reported)
+            let mut evidence = discovery.finish(use_report.then_some("reported"));
+            resolve_effective_configuration(
+                &mut evidence,
+                &layout(checkout),
+                use_report.then_some(&reported),
+                &launch,
+                Some(&plugins),
+                Some(&skills),
+            )?;
+            Ok(evidence)
         };
-        let original = assess(&fixture, Some("reported"))?;
-        let matching = assess(&task, Some("reported"))?;
+        let original = assess(&fixture, "--first", true)?;
+        let matching = assess(&task, "--first", true)?;
         assert_eq!(original.detected.len(), 2, "{:?}", original.unresolved);
         assert!(original.effective_revision.is_some());
         assert_eq!(original.effective_revision, matching.effective_revision);
+        let tool_changed = assess(&task, "--second", true)?;
+        assert_eq!(
+            original.environment_revision,
+            tool_changed.environment_revision
+        );
+        assert_ne!(original.tool_revisions, tool_changed.tool_revisions);
+        assert_ne!(original.effective_revision, tool_changed.effective_revision);
         fs::write(task.join("AGENTS.md"), b"changed rules")?;
         assert_ne!(
             original.effective_revision,
-            assess(&task, Some("reported"))?.effective_revision
+            assess(&task, "--first", true)?.effective_revision
         );
-        let passive = assess(&task, None)?;
+        let passive = assess(&task, "--first", false)?;
         assert_eq!(passive.detected.len(), 2);
         assert!(passive.effective_revision.is_none());
         Ok(())

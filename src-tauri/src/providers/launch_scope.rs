@@ -13,6 +13,7 @@ use crate::{
     customizations::{CustomizationKind, LaunchReview, ReviewState},
     mcp_bridge::{BridgeLaunch, INSPECT_SCOPE, REQUEST_PERMISSION, SERVER_NAME},
     repository::CheckoutLayout,
+    runner::Runner,
 };
 
 use super::{
@@ -29,6 +30,10 @@ pub struct ScopedLaunchEvidence {
     pub excluded: BTreeMap<String, String>,
     pub instruction_sources: Vec<InstructionSource>,
     pub inputs: Vec<LaunchInput>,
+    #[serde(default)]
+    pub(crate) mcp_sources: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) non_mcp_approvals: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -63,6 +68,8 @@ impl ScopedLaunch {
                 excluded: BTreeMap::new(),
                 instruction_sources: Vec::new(),
                 inputs: Vec::new(),
+                mcp_sources: BTreeMap::new(),
+                non_mcp_approvals: BTreeMap::new(),
             },
             directory: None,
             protocol_instructions: None,
@@ -95,6 +102,46 @@ impl ScopedLaunch {
             }
         }
         Ok(launch)
+    }
+
+    pub(crate) fn identify_mcp_executables(
+        &mut self,
+        runner: &dyn Runner,
+        review: &LaunchReview,
+        bridge: Option<&BridgeLaunch>,
+    ) -> Result<()> {
+        for (entry, declaration) in &review.approved {
+            if entry.kind != CustomizationKind::McpServer {
+                continue;
+            }
+            let id = configuration::mcp_identity(&declaration.name);
+            let Some(source) = self.evidence.mcp_sources.get_mut(&id) else {
+                continue;
+            };
+            let overrides_search_path = declaration.body["env"]
+                .as_object()
+                .is_some_and(|env| env.keys().any(|key| key.eq_ignore_ascii_case("PATH")));
+            let launcher = entry.target.as_deref().map(Path::new).filter(|path| {
+                !overrides_search_path
+                    && path.is_absolute()
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+            });
+            if let Some(revision) = launcher.and_then(|path| runner.executable_revision(path)) {
+                *source = super::capabilities::revision(&(&*source, revision))?;
+            } else {
+                self.evidence.mcp_sources.remove(&id);
+            }
+        }
+        if let Some(bridge) = bridge
+            && let Some(revision) = runner.executable_revision(Path::new(&bridge.command))
+        {
+            self.evidence
+                .mcp_sources
+                .insert(configuration::mcp_identity(SERVER_NAME), revision);
+        }
+        Ok(())
     }
 
     fn claude(
@@ -134,6 +181,9 @@ impl ScopedLaunch {
                     hooks.entry(event).or_default().push(json!({
                         "matcher": declaration.body["matcher"], "hooks": [declaration.body["handler"]],
                     }));
+                    self.evidence
+                        .non_mcp_approvals
+                        .insert(entry.id.clone(), entry.fingerprint.clone());
                 }
                 CustomizationKind::McpServer => {
                     if bridge.is_some() && declaration.name == SERVER_NAME {
@@ -147,6 +197,10 @@ impl ScopedLaunch {
                         mcp.insert(declaration.name.clone(), declaration.body.clone())
                             .is_none(),
                         "Multiple approved Claude declarations use the same MCP server name"
+                    );
+                    self.evidence.mcp_sources.insert(
+                        configuration::mcp_identity(&declaration.name),
+                        entry.fingerprint.clone(),
                     );
                 }
                 _ => {
@@ -268,6 +322,10 @@ impl ScopedLaunch {
                 ensure!(
                     servers.insert(declaration.name.clone(), server).is_none(),
                     "Multiple approved Codex declarations use the same MCP server name"
+                );
+                self.evidence.mcp_sources.insert(
+                    configuration::mcp_identity(&declaration.name),
+                    entry.fingerprint.clone(),
                 );
                 self.evidence
                     .approved

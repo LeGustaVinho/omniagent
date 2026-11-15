@@ -248,6 +248,8 @@ pub enum ProviderEventData {
         revision: Option<String>,
         #[serde(default)]
         codex_instructions: Option<configuration::CodexInstructionSettings>,
+        #[serde(default)]
+        qualification: Option<configuration::ReportedConfiguration>,
     },
     SkillsReported {
         catalog: skills::SkillCatalog,
@@ -395,6 +397,7 @@ pub trait CliAdapter: Send + Sync {
 /// Methods advance one provider protocol per process. The runtime owns I/O and persistence.
 pub trait CliSession: Send {
     fn arguments(&self) -> Vec<OsString>;
+    fn set_checkout_root(&mut self, _root: &Path) {}
     fn configure_mcp_bridge(&mut self, _launch: crate::mcp_bridge::BridgeLaunch) {}
     fn set_workspace_instructions(&mut self, _instructions: String) -> anyhow::Result<()> {
         anyhow::bail!("this adapter does not accept protocol instruction projection")

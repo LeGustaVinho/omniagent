@@ -40,6 +40,7 @@ pub async fn checkout_root(store: &Store, checkout_id: String) -> Result<PathBuf
         .await
 }
 
+#[derive(Clone)]
 pub struct CheckoutLayout {
     pub root: PathBuf,
     pub primary_root: PathBuf,

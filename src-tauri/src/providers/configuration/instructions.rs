@@ -127,12 +127,24 @@ impl InstructionInventory {
             );
         for path in paths {
             if let Some((bytes, _)) = discovery.read(&path) {
-                match std::str::from_utf8(&bytes)
+                let parsed = std::str::from_utf8(&bytes)
                     .ok()
-                    .and_then(|text| toml::from_str(text).ok())
+                    .and_then(|text| toml::from_str::<toml::Table>(text).ok());
+                let Some(mut parsed) = parsed else {
+                    self.unresolved.push(path);
+                    continue;
+                };
+                if parsed.remove("mcp_servers").is_some()
+                    && let Some(file) = discovery
+                        .detected
+                        .last_mut()
+                        .filter(|file| file.path == path)
                 {
-                    Some(parsed) => settings.merge(parsed),
-                    None => self.unresolved.push(path),
+                    file.environment_revision = super::super::capabilities::revision(&parsed).ok();
+                }
+                match parsed.try_into() {
+                    Ok(parsed) => settings.merge(parsed),
+                    Err(_) => self.unresolved.push(path),
                 }
             }
         }

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
@@ -12,8 +13,9 @@ use omniagent::{
     conversations::SessionScope,
     dispatch::NativeHistory,
     providers::{
-        ApprovalDecision, Provider, ProviderEventData, SessionIntent, SessionMode, SessionRequest,
-        TurnInput, TurnOutcome,
+        ApprovalDecision, Capability, Provider, ProviderEventData, SessionIntent, SessionMode,
+        SessionRequest, TurnInput, TurnOutcome,
+        capabilities::{CapabilitySubject, EvidenceOrigin, ObservedResult},
         profiles::{ConfiguredExecutable, probe_cli},
         runtime::start_managed_turn,
     },
@@ -27,6 +29,135 @@ use uuid::Uuid;
 mod support;
 
 const INSTRUCTION_AUDIT: &str = "Instruction audit. Reply with the marker values from your instruction context. Do not read any files or use any tools. If there are no markers reply NONE.";
+
+#[tokio::test]
+#[ignore = "requires authenticated Codex App Server with gpt-6-luna"]
+async fn codex_reuses_equivalent_capability_evidence_in_a_linked_worktree() -> Result<()> {
+    let worktree = Worktree::new()?;
+    let store = Store::open(worktree._temporary.path().join("qualification.sqlite"))?;
+    let cli = probe_cli(ConfiguredExecutable {
+        provider: Provider::Codex,
+        executable: None,
+    })?;
+    let bridge = PathBuf::from(env!("CARGO_BIN_EXE_omniagent"));
+    let other_bridge = worktree._temporary.path().join("alternate-bridge.exe");
+    fs::copy(&bridge, &other_bridge)?;
+    let mut recorded = BTreeMap::new();
+    let mut first_tool = None;
+    for (root, helper, baseline, expect_exact) in [
+        (&worktree.primary, &bridge, true, false),
+        (&worktree.linked, &bridge, false, false),
+        (&worktree.primary, &bridge, false, true),
+        (&worktree.primary, &other_bridge, false, false),
+    ] {
+        let checkout = repository::register(&store, root.clone()).await?;
+        let conversation = store
+            .create_conversation(
+                checkout.checkout_id,
+                "Capability qualification fixture".into(),
+            )
+            .await?;
+        let scope = SessionScope {
+            provider: Provider::Codex,
+            profile_id: "codex-qualification-fixture".into(),
+            account_binding: Some("authorized-codex-fixture-account".into()),
+            checkout: root.clone(),
+            executable: cli
+                .executable
+                .clone()
+                .context("missing Codex executable")?
+                .into(),
+            cli_version: cli.version.clone().context("unknown Codex build")?,
+            runner: DirectWindowsRunner.identity().into(),
+            permission_revision: "read-only-fixture".into(),
+            mode: SessionMode::ReadOnly,
+            model: Some("gpt-6-luna".into()),
+            effort: None,
+        };
+        let turn = store.prepare_agent_attempt(conversation.id.clone(), conversation.context_id, scope,
+            "Call the inspect_run_scope tool on omniagent_runtime. Reply with the exact returned runId.".into()).await?;
+        let run = turn.run.id.clone();
+        let status = tokio::time::timeout(
+            Duration::from_secs(65),
+            start_managed_turn(
+                store.clone(),
+                Arc::new(DirectWindowsRunner),
+                turn,
+                Some(helper.clone()),
+            )
+            .wait(),
+        )
+        .await??;
+        assert_eq!(status, RunStatus::Succeeded);
+        let dispatch = store
+            .agent_dispatch(conversation.id.clone(), run.clone())
+            .await?
+            .context("missing qualification dispatch")?;
+        let assessment = dispatch
+            .snapshot
+            .capabilities
+            .context("missing assessment")?;
+        let tool = assessment
+            .scope
+            .configuration
+            .tool_revisions
+            .get("mcp/omniagent_runtime")
+            .context("missing qualified bridge revision")?;
+        if baseline {
+            first_tool = Some(tool.clone());
+        } else {
+            assert_eq!(
+                first_tool.as_ref() == Some(tool),
+                helper == &bridge,
+                "bridge ticket lifecycle or command path was not reflected in the tool revision"
+            );
+        }
+        let events = store
+            .agent_observations(conversation.id, run.clone(), 0)
+            .await?;
+        let catalog_reported = events.iter().any(|entry| matches!(&entry.event.data, ProviderEventData::ModelInventory { models } if !models.is_empty()));
+        assert!(catalog_reported);
+        assert!(events.iter().any(|entry| matches!(
+            &entry.event.data,
+            ProviderEventData::BridgeRegistration {
+                registration: omniagent::mcp_bridge::Registration::ScopeVerified
+            }
+        )));
+        for capability in [Capability::ModelInventory, Capability::RunScopedMcp] {
+            let entry = assessment
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry.descriptor.subject == CapabilitySubject::Protocol { capability }
+                })
+                .context("missing qualified capability")?;
+            if baseline {
+                let id = store
+                    .record_capability_evidence(
+                        assessment.scope.clone(),
+                        entry.descriptor.clone(),
+                        EvidenceOrigin::AuthenticatedFixture,
+                        ObservedResult::Succeeded,
+                        format!("{run}:{capability:?}"),
+                    )
+                    .await?;
+                recorded.insert(capability, id);
+            } else {
+                let expected = if expect_exact || capability == Capability::ModelInventory {
+                    recorded.get(&capability)
+                } else {
+                    None
+                };
+                assert_eq!(
+                    entry.evidence.as_ref().map(|entry| &entry.id),
+                    expected,
+                    "capability {capability:?} did not use matching evidence for {run}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
 
 struct Worktree {
     _temporary: tempfile::TempDir,
