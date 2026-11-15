@@ -15,6 +15,7 @@ use crate::protection;
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001-store.sql"),
     include_str!("../migrations/002-protected-drafts.sql"),
+    include_str!("../migrations/003-projects.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

@@ -2169,11 +2169,14 @@ name = "omniagent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dunce",
  "rusqlite",
+ "serde",
  "tauri",
  "tauri-build",
  "tempfile",
  "tokio",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 

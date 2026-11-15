@@ -2,12 +2,27 @@
 
 mod fixture;
 
-use omniagent::store::Store;
+use std::path::PathBuf;
+
+use omniagent::{
+    repository::{self, ProjectCheckout},
+    store::Store,
+};
 use tauri::Manager;
 
 #[tauri::command]
 fn runtime_status() -> &'static str {
     "Desktop runtime is ready."
+}
+
+#[tauri::command]
+async fn register_project(
+    store: tauri::State<'_, Store>,
+    directory: PathBuf,
+) -> Result<ProjectCheckout, String> {
+    repository::register(&store, directory)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn main() {
@@ -21,7 +36,7 @@ fn main() {
             app.manage(Store::open(path)?);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![runtime_status])
+        .invoke_handler(tauri::generate_handler![runtime_status, register_project])
         .run(tauri::generate_context!())
         .expect("failed to start OmniAgent");
 }
