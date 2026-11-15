@@ -5,7 +5,7 @@ import {
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   FileDialog, FileDock, FileSearch, FileSidebar, FileTree, FileUnavailable,
-  keepOnlyCleanClose, SidebarToggle, useFileDock, type FilePanelApi,
+  keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
 import { exampleNotes, exampleSources, fileName, findFileText, normalizeRepositoryPath } from "@/ide-knowledge-data";
 import type { CodeModel, CodeProblem } from "@/ide-code-editor";
@@ -41,7 +41,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const simulated = Boolean(simulation);
   const firstPath = target && !target.toLowerCase().endsWith(".md") ? normalizeRepositoryPath(target) : simulated ? "src/health.ts" : undefined;
   const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "ide", simulated, initialPath: firstPath });
-  const [sidebar, setSidebar] = useState(() => window.innerWidth >= 960);
+  const [sidebar, setSidebar] = useFileSidebar();
   const [navigator, setNavigator] = useState<"files" | "search">("files");
   const [query, setQuery] = useState("");
   const [files, setFiles] = useState(() => newBuffers(simulated, simulation?.scenario === "recovery"));

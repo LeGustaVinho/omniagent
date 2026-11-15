@@ -307,3 +307,15 @@ export function SidebarToggle({ open, setOpen, label }: { open: boolean; setOpen
       onClick={() => setOpen(!open)} title={label}><PanelLeftClose size={16} /></button>
   );
 }
+
+export function useFileSidebar() {
+  const [open, setOpen] = useState(() => window.innerWidth >= 960);
+  useEffect(() => {
+    const viewport = window.matchMedia?.("(min-width: 960px)");
+    if (!viewport) return;
+    const update = () => setOpen(viewport.matches);
+    viewport.addEventListener("change", update);
+    return () => viewport.removeEventListener("change", update);
+  }, []);
+  return [open, setOpen] as const;
+}

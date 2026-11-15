@@ -3,7 +3,7 @@ import {
   PanelLeft, RotateCcw, Settings,
 } from "lucide-react";
 import { Dialog } from "radix-ui";
-import { lazy, Suspense, useEffect, useState, type ComponentType, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { CheckoutSelector } from "@/checkout-selector";
 import { Button } from "@/components/ui/button";
@@ -90,6 +90,8 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
   const [realQueue, setRealQueue] = useState<"open" | "closed">();
   const [previewQueue, setPreviewQueue] = useState<"open" | "closed">();
   const [sidebarOverride, setSidebarOverride] = useState<boolean>();
+  const sideTrigger = useRef<HTMLElement | null>(null);
+  const sidebarTrigger = useRef<HTMLButtonElement>(null);
   const compact = useCompact();
   const sidebar = sidebarOverride ?? !compact;
   const { error, reconnect } = useRunSubscription(checkout);
@@ -134,6 +136,11 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
 
   function context(simulation: SimulationSession | null): WorkspaceProps {
     const setSide = simulation ? setPreviewSide : setRealSide;
+    function showSide(next: SidePane) {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && !active.closest(".work-inspector")) sideTrigger.current = active;
+      setSide(next);
+    }
     return {
       checkout: simulation ? exampleCheckout : checkout,
       simulation,
@@ -145,8 +152,8 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
           setRealNavigation((current) => show(workspace, target, current));
         }
       },
-      openActivity: (runId, conversationId) => setSide({ type: "activity", runId, conversationId }),
-      openChanges: (target) => setSide({ type: "changes", target }),
+      openActivity: (runId, conversationId) => showSide({ type: "activity", runId, conversationId }),
+      openChanges: (target) => showSide({ type: "changes", target }),
     };
   }
 
@@ -154,7 +161,19 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
   const simulated = preview && context({ scenario: preview.scenario, epoch: preview.epoch, delivery: preview.delivery, advanceDelivery });
   const current = simulated ?? real;
   const side = preview ? previewSide : realSide;
-  const closeSide = () => (preview ? setPreviewSide : setRealSide)(null);
+  function closeSide() {
+    (preview ? setPreviewSide : setRealSide)(null);
+    const trigger = sideTrigger.current;
+    requestAnimationFrame(() => {
+      if (trigger?.getClientRects().length) trigger.focus();
+      else document.querySelector<HTMLElement>('.work-rail-button[aria-current="page"]')?.focus();
+    });
+  }
+
+  function changeSidebar(visible: boolean) {
+    setSidebarOverride(visible);
+    if (!visible && compact) requestAnimationFrame(() => sidebarTrigger.current?.focus());
+  }
   const queue = (preview ? previewQueue : realQueue) === "open";
   const changeQueue = preview ? setPreviewQueue : setRealQueue;
   const currentArea = areas.find(({ id }) => id === nav.active)?.label ?? "Diagnostics";
@@ -164,8 +183,8 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
       <header className="work-titlebar">
         <div className="work-wordmark"><span className="work-mark" aria-hidden="true"><Blocks size={15} /></span>OmniAgent</div>
         <div className="work-breadcrumb">
-          {nav.active === "conversations" && !preview && <Button variant="ghost" className="p-1.5" aria-label="Toggle conversation navigation" aria-expanded={sidebar}
-            onClick={() => setSidebarOverride(!sidebar)} title="Toggle conversation navigation"><PanelLeft size={17} /></Button>}
+          {nav.active === "conversations" && !preview && <Button ref={sidebarTrigger} variant="ghost" className="p-1.5" aria-label="Toggle conversation navigation" aria-expanded={sidebar}
+            onClick={() => changeSidebar(!sidebar)} title="Toggle conversation navigation"><PanelLeft size={17} /></Button>}
           {preview ? <span className="truncate font-medium">Example repository</span> : <CheckoutSelector checkout={checkout} onSelect={onSelectCheckout} />}
           <span aria-hidden="true">/</span><span className="work-current-area">{currentArea}</span>
         </div>
@@ -206,16 +225,16 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
         </aside>
         <div className="work-decks">
           <div className="work-deck" hidden={Boolean(preview)}>
-            <WorkspaceViews nav={realNavigation} context={real} sidebar={!preview && sidebar} onSidebarChange={setSidebarOverride} compact={compact} />
+            <WorkspaceViews nav={realNavigation} context={real} sidebar={!preview && sidebar} onSidebarChange={changeSidebar} compact={compact} />
           </div>
-          {preview && simulated && <div className="work-deck" key={preview.epoch}>
-            <WorkspaceViews nav={preview.navigation} context={simulated} sidebar={sidebar} onSidebarChange={setSidebarOverride}
+          {preview && simulated && <div className="work-deck" key={"simulation-workspaces:" + preview.epoch}>
+            <WorkspaceViews nav={preview.navigation} context={simulated} sidebar={sidebar} onSidebarChange={changeSidebar}
               compact={compact} openSystem={() => showSettings("system")} />
           </div>}
           {realQueue && <div className="work-queue-panel" hidden={Boolean(preview) || realQueue !== "open"}>
             <Suspense fallback={loading}><QueuePanel {...real} active={!preview && realQueue === "open"} onClose={() => setRealQueue("closed")} /></Suspense>
           </div>}
-          {previewQueue && simulated && <div className="work-queue-panel" key={preview?.epoch} hidden={previewQueue !== "open"}>
+          {previewQueue && simulated && <div className="work-queue-panel" key={"simulation-queue:" + preview?.epoch} hidden={previewQueue !== "open"}>
             <Suspense fallback={loading}><QueuePanel {...simulated} onClose={() => setPreviewQueue("closed")} /></Suspense>
           </div>}
         </div>
@@ -283,7 +302,12 @@ function SideInspector({ side, compact, close, children, plan }: { side: SidePan
       </Dialog.Portal>
     </Dialog.Root>
   );
-  return <aside className="work-inspector" aria-label={title} data-kind={side.type} data-expanded={expanded}>
+  return <aside className="work-inspector" aria-label={title} data-kind={side.type} data-expanded={expanded} onKeyDown={(event) => {
+    if (event.key === "Escape" && !event.defaultPrevented) {
+      event.stopPropagation();
+      close();
+    }
+  }}>
     {tabs}
   </aside>;
 }

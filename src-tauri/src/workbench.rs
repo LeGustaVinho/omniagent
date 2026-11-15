@@ -15,20 +15,24 @@ impl Store {
     pub async fn inspect_conversation_run(
         &self,
         project_id: String,
-        conversation_id: String,
+        conversation_id: Option<String>,
         run_id: String,
-    ) -> Result<RunRecord> {
+    ) -> Result<(RunRecord, String)> {
         self.execute(move |db| {
-            let belongs: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1
+            let owner: Option<String> = db
+                .query_row(
+                    "SELECT c.id
                  FROM agent_attempts a JOIN conversations c ON c.id = a.conversation_id
                  JOIN checkouts w ON w.id = c.checkout_id
-                 WHERE a.run_id = ?1 AND c.id = ?2 AND w.project_id = ?3)",
-                params![run_id, conversation_id, project_id],
-                |row| row.get(0),
-            )?;
-            ensure!(belongs, "Run does not belong to this conversation and project");
-            load_run(db, &run_id)
+                 WHERE a.run_id = ?1 AND (?2 IS NULL OR c.id = ?2) AND w.project_id = ?3",
+                    params![run_id, conversation_id, project_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let owner = owner.ok_or_else(|| {
+                anyhow::anyhow!("Run does not belong to this conversation and project")
+            })?;
+            Ok((load_run(db, &run_id)?, owner))
         })
         .await
     }

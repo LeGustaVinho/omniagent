@@ -103,6 +103,35 @@ async function capture(browser, name) {
   await browser.saveScreenshot(join(directory, name + ".png"));
 }
 
+async function checkDisplayPreferences(browser) {
+  const endpoint = "http://127.0.0.1:" + (port + 1) + "/session/" + encodeURIComponent(browser.sessionId) + "/ms/cdp/execute";
+  async function emulate(cmd, params = {}) {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cmd, params }),
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.ok(response.ok, cmd + ": " + await response.text());
+  }
+  await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 1120, height: 760 } } });
+  for (const factor of [1.25, 1.5]) {
+    await emulate("Emulation.setDeviceMetricsOverride", {
+      width: Math.floor(1120 / factor), height: Math.floor(760 / factor), deviceScaleFactor: factor, mobile: false,
+    });
+    assert.equal(await browser.execute(() => window.devicePixelRatio), factor);
+    assert.equal(await browser.execute(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true);
+    await capture(browser, "06-scale-" + factor * 100);
+  }
+  await emulate("Emulation.clearDeviceMetricsOverride");
+  await emulate("Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "active" }] });
+  assert.equal(await browser.execute(() => matchMedia("(forced-colors: active)").matches), true);
+  assert.equal(await browser.execute(() =>
+    getComputedStyle(document.querySelector('.work-rail-button[aria-current="page"]')).borderTopWidth), "1px");
+  await capture(browser, "07-high-contrast");
+  await emulate("Emulation.setEmulatedMedia", { features: [] });
+}
+
 async function checkSimulation(browser, checkout) {
   const conversationScope = { checkoutId: checkout.checkoutId };
   const before = await invoke(browser, "list_conversations", conversationScope);
@@ -112,13 +141,18 @@ async function checkSimulation(browser, checkout) {
     assert.equal(await browser.$('button[aria-label="' + area + '"]').getAttribute("aria-current"), "page");
   }
   await click(browser, 'button[aria-label="Knowledge"]');
-  await click(browser, ".work-titlebar button=Simulate");
+  await click(browser, '.work-titlebar button[title="Try a workflow with example data"]');
   const simulation = browser.$('[aria-label="Simulation controls"]');
   await simulation.waitForDisplayed();
 
   await click(browser, "button=Plan from note");
   await browser.$("strong=Who should the recovery instructions address?").waitForDisplayed();
   await capture(browser, "01-conversations");
+  const conversationRow = browser.$(".conv-example-sidebar").$("button=Plan the release checklist");
+  await conversationRow.click({ button: "right" });
+  await browser.$('[role="menu"]').waitForDisplayed();
+  await capture(browser, "01-context-menu");
+  await browser.keys("Escape");
   await click(browser, "button=Reply");
   await click(browser, "button=Approve implementation");
   await click(browser, "button=Open release task");
@@ -128,7 +162,12 @@ async function checkSimulation(browser, checkout) {
   await click(browser, 'button[aria-label="Close queue"]');
   await click(browser, "button=Run verification");
   await click(browser, "button=Review saved diff");
+  await browser.$('[aria-label^="Diff editor for"] .monaco-diff-editor').waitForDisplayed();
+  await click(browser, 'button[aria-label="Expand side panel"]');
   await capture(browser, "02-saved-changes");
+  await click(browser, 'button[aria-label="Close changes"]');
+  await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent === "Review saved diff"));
+  await click(browser, "button=Review saved diff");
   await click(browser, "button=Accept diff");
   await click(browser, 'button[aria-label="Close changes"]');
 
@@ -145,11 +184,17 @@ async function checkSimulation(browser, checkout) {
   await click(browser, "button=Continue");
   await click(browser, "button=Continue");
   await click(browser, "button=Finish");
-  await capture(browser, "04-settings");
+  await capture(browser, "04-system-settings");
+  await click(browser, "button=Appearance");
+  await capture(browser, "04-appearance-settings");
   await click(browser, 'button[aria-label="Close settings"]');
   await click(browser, "button=Exit simulation");
   await simulation.waitForExist({ reverse: true });
   assert.equal(await browser.$('button[aria-label="Knowledge"]').getAttribute("aria-current"), "page");
+  assert.deepEqual(await browser.execute(() => {
+    const shown = [...document.querySelectorAll(".work-view")].filter((view) => view.getClientRects().length);
+    return shown.map((view) => view.querySelector("[aria-label]")?.getAttribute("aria-label"));
+  }), ["Knowledge workspace"]);
   assert.equal((await invoke(browser, "active_checkout")).checkoutId, checkout.checkoutId);
   assert.deepEqual(await invoke(browser, "list_conversations", conversationScope), before);
   assert.deepEqual(await invoke(browser, "appearance_settings"), settingsBefore);
@@ -159,6 +204,7 @@ async function checkSimulation(browser, checkout) {
     assert.equal(await browser.execute(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true);
     await capture(browser, "05-workspace-" + width);
   }
+  if (process.env.OMNIAGENT_UI_TEST_DISPLAY === "1") await checkDisplayPreferences(browser);
 }
 
 function killTestApplication(application) {
@@ -273,6 +319,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     await browser.deleteSession();
     browser = null;
     browser = await startSession(application);
+    await click(browser, 'button[aria-label="Diagnostics"]');
     await browser.waitUntil(async () => (await readTabs(browser)).groups.length === 2);
     assert.deepEqual(await readTabs(browser), expectedTabs);
     assert.equal(await browser.$("header span[title]").getAttribute("title"), checkout.checkoutRoot);
@@ -471,6 +518,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       await panel.$('section[aria-label="Exact provider input"] pre').waitForDisplayed();
       const wire = JSON.parse(await panel.$('section[aria-label="Exact provider input"] pre').getText());
       assert.equal(wire.params.input[0].text, prompt);
+      await panel.$('button[aria-label="Close activity"]').click();
 
       await panel.$('select:has(option[value="plan"])').selectByAttribute("value", "plan");
       const researchRows = Array.from({ length: 40 }, (_, index) => `Research row ${index + 1}`).join("\n");

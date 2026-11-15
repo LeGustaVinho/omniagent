@@ -57,6 +57,8 @@
 }
 
 .delivery-tab:focus-visible,
+.delivery-filter.delivery-search { padding-inline-start: 2rem; }
+
 .delivery-filter:focus-visible,
 .delivery-card:focus-visible {
   outline: 2px solid var(--ring);

@@ -13,6 +13,7 @@ type EventData =
   | { type: "tool"; name: string; phase: string }
   | { type: "reasoning"; text: string; summary: boolean }
   | { type: "usage"; input: number | null; output: number | null; cached_input: number | null }
+  | { type: "context_window_usage"; used: number; size: number }
   | ChildActivity;
 type Page = {
   cursor: string;
@@ -29,6 +30,7 @@ type Projection = {
   reasoning: Extract<EventData, { type: "reasoning" }>[];
   tools: Extract<EventData, { type: "tool" }>[];
   usage?: Extract<EventData, { type: "usage" }>;
+  contextWindow?: Extract<EventData, { type: "context_window_usage" }>;
 };
 const emptyProjection: Projection = {
   cursor: "0", streamed: "", final: "", plan: "", error: "", reasoning: [], tools: [],
@@ -81,6 +83,7 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
           if (data.type === "reasoning") current.reasoning.push(data);
           if (data.type === "tool") current.tools.push(data);
           if (data.type === "usage") current.usage = data;
+          if (data.type === "context_window_usage") current.contextWindow = data;
         }
       } while (page.more);
       return current;
@@ -175,6 +178,10 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
           <dt>Input tokens</dt><dd>{usage.input?.toLocaleString() ?? "Unavailable"}</dd>
           <dt>Output tokens</dt><dd>{usage.output?.toLocaleString() ?? "Unavailable"}</dd>
           <dt>Cached input</dt><dd>{usage.cached_input?.toLocaleString() ?? "Unavailable"}</dd>
+        </>}
+        {projection?.contextWindow && <>
+          <dt>Context tokens</dt>
+          <dd>{projection.contextWindow.used.toLocaleString()} / {projection.contextWindow.size.toLocaleString()}</dd>
         </>}
       </dl>
       {projection && <ConversationChildren delegation={projection.delegation} />}

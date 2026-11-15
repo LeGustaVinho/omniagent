@@ -197,9 +197,9 @@ pub async fn cli_plugin_inventory(
 pub async fn inspect_conversation_run(
     store: State<'_, Store>,
     project_id: String,
-    conversation_id: String,
+    conversation_id: Option<String>,
     run_id: String,
-) -> Result<RunRecord, String> {
+) -> Result<(RunRecord, String), String> {
     store
         .inspect_conversation_run(project_id, conversation_id, run_id)
         .await

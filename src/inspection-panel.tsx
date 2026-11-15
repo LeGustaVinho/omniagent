@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, CircleDot, FlaskConical, LibraryBig } from "lucide-react";
+import { CircleDot, FlaskConical, LibraryBig } from "lucide-react";
 import { useState } from "react";
 import type { RunRecord } from "@/bindings/RunRecord";
 import { Button } from "@/components/ui/button";
@@ -19,14 +19,10 @@ type InspectorPage = (typeof inspectorPages)[number];
 
 type InspectorProps = WorkspaceProps & { runId: string; conversationId?: string; onClose: () => void };
 
-export function RunInspector({ runId, conversationId, onClose, checkout, simulation, startSimulation, openWorkspace, openChanges }: InspectorProps) {
+export function RunInspector({ runId, conversationId, onClose, checkout, simulation, openWorkspace, openChanges }: InspectorProps) {
   const [page, setPage] = useState<InspectorPage>("Overview");
-  if (!simulation && conversationId) return <RecordedConversationRun projectId={checkout.projectId} runId={runId}
+  if (!simulation) return <RecordedConversationRun projectId={checkout.projectId} runId={runId}
     conversationId={conversationId} onClose={onClose} />;
-  if (!simulation) return <div className="work-empty">
-    <Activity size={22} /><h2>Run inspector</h2><p>Integration pending for this run.</p>
-    <Button variant="outline" onClick={() => startSimulation()}>Simulate</Button>
-  </div>;
 
   const step = simulation.delivery;
   const status = steps[step];
@@ -68,23 +64,24 @@ export function RunInspector({ runId, conversationId, onClose, checkout, simulat
 }
 
 function RecordedConversationRun({ conversationId, projectId, runId, onClose }: {
-  conversationId: string;
+  conversationId?: string;
   projectId: string;
   runId: string;
   onClose: () => void;
 }) {
   const current = useQuery({
     queryKey: ["inspect-conversation-run", projectId, conversationId, runId],
-    queryFn: () => invoke<RunRecord>("inspect_conversation_run", { projectId, conversationId, runId }),
-    refetchInterval: (query) => isLiveRun(query.state.data) ? 400 : false,
+    queryFn: () => invoke<[RunRecord, string]>("inspect_conversation_run", { projectId, conversationId, runId }),
+    refetchInterval: (query) => isLiveRun(query.state.data?.[0]) ? 400 : false,
   });
-  const activity = useConversationRun(conversationId, current.data, false);
+  const [run, owner] = current.data ?? [];
+  const activity = useConversationRun(owner ?? "", run, false);
   if (current.error) return <p className="work-progress" role="alert">{String(current.error)}</p>;
-  if (!current.data) return <p className="work-progress" role="status">Loading execution…</p>;
+  if (!run || !owner) return <p className="work-progress" role="status">Loading execution…</p>;
   return <div className="h-full overflow-auto">
-    <ConversationActivity embedded conversationId={conversationId} run={current.data} projection={activity.projection} onClose={onClose} />
+    <ConversationActivity embedded conversationId={owner} run={run} projection={activity.projection} onClose={onClose} />
     <div className="work-inspection-body">
-      <ConversationRequests conversationId={conversationId} runId={runId} activity={activity} />
+      <ConversationRequests conversationId={owner} runId={runId} activity={activity} />
       {activity.live && <StopConversation {...activity} />}
       {activity.error && <p role="alert">{String(activity.error)}</p>}
     </div>

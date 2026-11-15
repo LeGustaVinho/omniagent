@@ -5,7 +5,7 @@ import {
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FileDialog, FileDock, FileSearch, FileSidebar, FileTree, FileUnavailable,
-  keepOnlyCleanClose, SidebarToggle, useFileDock, type FilePanelApi,
+  keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
 import { deliveryNote, exampleNotes, fileName, findFileText, normalizeRepositoryPath } from "@/ide-knowledge-data";
 import {
@@ -65,7 +65,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const initialPath = target ? normalizeRepositoryPath(target) : simulated ? deliveryNote : undefined;
   const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "knowledge", simulated, initialPath });
   const [notes, setNotes] = useState(() => initialNotes(simulated, simulation?.scenario === "recovery"));
-  const [sidebar, setSidebar] = useState(() => window.innerWidth >= 960);
+  const [sidebar, setSidebar] = useFileSidebar();
   const [display, setDisplay] = useState<"tree" | "search">("tree");
   const [query, setQuery] = useState("");
   const [graph, setGraph] = useState(false);

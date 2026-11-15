@@ -313,7 +313,7 @@ export default function TasksWorkspace(props: WorkspaceProps) {
         </Button>
       </header>
       <div className="delivery-toolbar min-h-0 py-2">
-        <label className="relative min-w-35 max-w-65 flex-1"><Search className="pointer-events-none absolute left-2.5 top-1.5 text-muted-foreground" size={15} /><input className="delivery-filter w-full pl-8" placeholder="Find a task" aria-label="Find a task" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+        <label className="relative min-w-35 max-w-65 flex-1"><Search className="pointer-events-none absolute left-2.5 top-1.5 text-muted-foreground" size={15} /><input className="delivery-filter delivery-search w-full" placeholder="Find a task" aria-label="Find a task" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
         <select className="delivery-filter" aria-label="Filter tasks by state" value={stateFilter} onChange={(event) => setStateFilter(event.target.value)}><option value="">All states</option>{taskStates.map((state) => <option key={state}>{state}</option>)}</select>
         <select className="delivery-filter" aria-label="Filter tasks by provider" value={providerFilter} onChange={(event) => setProviderFilter(event.target.value)}><option value="">All providers</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="antigravity">Antigravity</option></select>
         <select className="delivery-filter" aria-label="Filter tasks by agent" disabled={!simulation} value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}><option value="">All agents</option>{agents.map((agent) => <option key={agent}>{agent}</option>)}</select>

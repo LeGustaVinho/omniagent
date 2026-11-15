@@ -243,6 +243,9 @@ pub async fn conversation_events(
                     | ProviderEventData::PlanProposed { .. }
                     | ProviderEventData::Error { .. }
                     | ProviderEventData::Tool { .. }
+                    | ProviderEventData::Reasoning { .. }
+                    | ProviderEventData::Usage { .. }
+                    | ProviderEventData::ContextWindowUsage { .. }
                     | ProviderEventData::ChildActivity { .. }
             )
         })
