@@ -20,6 +20,7 @@ mod pipeline;
 mod policy;
 mod recovery;
 mod scheduler;
+mod subagents;
 pub use admission::{
     AdmissionBlocker, AdmissionEnvironment, JobInspection, ProjectQueue, QueueSettings,
 };
@@ -47,6 +48,13 @@ pub use recovery::RecoveryAction;
 pub(crate) use recovery::requeue_unlaunched_job;
 pub use scheduler::JobScheduler;
 pub(crate) use scheduler::LaunchGate;
+pub use subagents::{
+    ConversationSubagentQuota, NativeSubagentCounts, ProjectSubagentPolicy, SubagentCounts,
+    SubagentLimitMode,
+};
+pub(crate) use subagents::{
+    check_conversation_subagent_controls, migrate_subagent_observations, record_native_subagent,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -402,6 +410,9 @@ fn insert_job(
             context.as_ref().map(|context| &context.conversation_id), context.as_ref().map(|context| &context.context_id),
             run_id, request_id, mode_key(request.mode), encrypted, priority],
     )?;
+    if let Some(run) = run_id {
+        subagents::record_delegation_owner(db, &id, run)?;
+    }
     if let Some(binding) = pipeline_binding {
         pipeline::bind_job(db, &project_id, &id, binding)?;
     }

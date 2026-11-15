@@ -838,6 +838,27 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     assert.notEqual(cleared.contextId, conversation.contextId);
     assert.deepEqual(cleared.messages, []);
     assert.equal(await invoke(browser, "conversation_draft", { conversationId: conversation.id }), unsent);
+    await click(browser, 'button[aria-label="Settings"]');
+    await click(browser, "button=Execution policies");
+    const projectSubagentLimit = browser.$('input[id="subagent-cap"]');
+    await projectSubagentLimit.waitForEnabled();
+    await projectSubagentLimit.setValue("2");
+    await click(browser, "button=Save subagent policy");
+    await browser.waitUntil(async () => (await invoke(browser, "project_subagent_policy", { projectId: main.projectId })).maximum === 2);
+    await browser.keys("Escape");
+    await click(browser, 'button[aria-label="Subagent limits"]');
+    const subagentDialog = browser.$('.conv-dialog[role="dialog"]');
+    const requested = subagentDialog.$('input[type="number"]');
+    await requested.waitForEnabled();
+    await requested.setValue("5");
+    await click(browser, "button=Save limit");
+    await browser.waitUntil(async () => (await invoke(browser, "conversation_subagent_quota", { conversationId: conversation.id })).requested === 5);
+    const authorized = subagentDialog.$('.//dt[normalize-space()="Authorized simultaneous subagents"]/following-sibling::dd[1]');
+    assert.equal(await authorized.getText(), "2");
+    assert.ok((await subagentDialog.getText()).includes("No native subagent activity has been reported."));
+    const closeSubagentDialog = subagentDialog.$("button=Close");
+    await closeSubagentDialog.waitForEnabled();
+    await closeSubagentDialog.click();
     const otherConversation = await invoke(browser, "create_conversation", { checkoutId: main.checkoutId, title: "Other conversation" });
 
     killTestApplication(application);
@@ -865,6 +886,10 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
       projectDefault: "recorded",
       conversationOverride: "cancel",
     });
+    const persistedQuota = await invoke(browser, "conversation_subagent_quota", { conversationId: conversation.id });
+    assert.equal(persistedQuota.requested, 5);
+    assert.equal(persistedQuota.authorized, 2);
+    assert.deepEqual(persistedQuota.managed, { active: 0, queued: 0, historical: 0 });
     const mode = browser.$(`section[aria-label="${conversation.title}"] select[aria-label="Conversation mode"]`);
     await mode.selectByAttribute("value", "goal");
     assert.equal(await browser.$("button=Start goal").isEnabled(), false);

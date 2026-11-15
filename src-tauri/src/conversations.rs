@@ -530,6 +530,7 @@ impl Store {
         };
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            crate::jobs::check_conversation_subagent_controls(&tx, &conversation_id)?;
             if consume_draft {
                 consume_matching_draft(&tx, &conversation_id, &text)?;
             }
@@ -689,6 +690,9 @@ impl Store {
                 && matches!(&event.data, ProviderEventData::Diagnostic { .. } | ProviderEventData::Error { .. });
             tx.execute("INSERT INTO agent_events(run_id, source, payload, inspect_diagnostic) VALUES (?1, ?2, ?3, ?4)",
                 params![run_id, source.as_sql(), payload, diagnostic])?;
+            if source == EventSource::Provider {
+                crate::jobs::record_native_subagent(&tx, &run_id, tx.last_insert_rowid(), &event.data)?;
+            }
             if source == EventSource::Application && let ProviderEventData::CapabilityAssessmentUpdated { assessment } = &event.data {
                 crate::runtime_inspection::save_capability_summary(&tx, &run_id, assessment)?;
             }

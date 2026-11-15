@@ -12,6 +12,7 @@ import { SettingRow } from "@/settings-controls";
 import { PolicyForm, policyFields } from "@/settings-policies";
 import { ProviderProfiles, useProviderExamples } from "@/settings-provider-profiles";
 import { SystemSettings, useMaintenanceSimulation } from "@/settings-system";
+import { ProjectSubagentControls } from "@/subagent-quota";
 import type { WorkspaceProps } from "@/workbench-contract";
 import "./settings-dialog.css";
 
@@ -213,6 +214,13 @@ function SettingsSession({
         return <>
           <ProjectQueueHistoryPolicy key={checkout.projectId} projectId={checkout.projectId} />
           <PolicyForm fields={policyFields.conversation.filter(({ id }) => id !== "queued-context")} stored={undefined} simulate={simulate} />
+        </>;
+      case "execution":
+        if (simulation || !checkout) return policy("execution");
+        return <>
+          <ProjectSubagentControls key={checkout.projectId} projectId={checkout.projectId} />
+          <PolicyForm fields={policyFields.execution.filter(({ id }) => id !== "subagent-policy" && id !== "subagent-cap")}
+            stored={undefined} simulate={simulate} />
         </>;
       default:
         return policy(currentPage.id);

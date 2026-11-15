@@ -89,5 +89,6 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
     case "app_writer": return "Waiting for an app write to finish.";
     case "pending_worktree_changes": return `The worktree has pending changes for task scope ${blocker.scopeTaskId}.`;
     case "capacity": return `Waiting for an execution slot (${blocker.active} of ${blocker.limit} in use).`;
+    case "subagent_quota": return `Conversation subagent limit reached (${blocker.active} of ${blocker.limit} in use).`;
   }
 }

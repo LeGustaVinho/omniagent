@@ -46,6 +46,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/031-runtime-inspection.sql"),
     include_str!("../migrations/032-downstream-job-waits.sql"),
     include_str!("../migrations/033-conversation-history-policy.sql"),
+    include_str!("../migrations/034-subagent-quotas.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -226,6 +227,9 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
             .with_context(|| format!("apply schema migration {}", index + 1))?;
         if index + 1 == 25 {
             crate::repository::writers::migrate_writer_evidence(&tx)?;
+        }
+        if index + 1 == 34 {
+            crate::jobs::migrate_subagent_observations(&tx)?;
         }
         tx.pragma_update(None, "user_version", (index + 1) as u32)?;
     }

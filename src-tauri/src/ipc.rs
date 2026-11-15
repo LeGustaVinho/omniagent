@@ -9,7 +9,10 @@ use omniagent::{
     conversations::{Conversation, ConversationHistory, MessageRevision},
     customizations::CustomizationInventory,
     evidence::FixtureInputEvidence,
-    jobs::{QueueHistoryPolicy, QueueHistorySettings},
+    jobs::{
+        ConversationSubagentQuota, ProjectSubagentPolicy, QueueHistoryPolicy, QueueHistorySettings,
+        SubagentLimitMode,
+    },
     providers::{
         Provider,
         plugins::{PluginInventory, probe_plugins},
@@ -162,6 +165,53 @@ pub async fn set_conversation_queue_history_policy(
 ) -> Result<QueueHistorySettings, String> {
     store
         .set_conversation_queue_history_policy(conversation_id, policy)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn project_subagent_policy(
+    store: State<'_, Store>,
+    project_id: String,
+) -> Result<ProjectSubagentPolicy, String> {
+    store
+        .project_subagent_policy(project_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_project_subagent_policy(
+    store: State<'_, Store>,
+    project_id: String,
+    policy: ProjectSubagentPolicy,
+) -> Result<(), String> {
+    store
+        .set_project_subagent_policy(project_id, policy)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn conversation_subagent_quota(
+    store: State<'_, Store>,
+    conversation_id: String,
+) -> Result<ConversationSubagentQuota, String> {
+    store
+        .conversation_subagent_quota(conversation_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_conversation_subagent_quota(
+    store: State<'_, Store>,
+    conversation_id: String,
+    mode_override: Option<SubagentLimitMode>,
+    requested: u32,
+) -> Result<ConversationSubagentQuota, String> {
+    store
+        .set_conversation_subagent_quota(conversation_id, mode_override, requested)
         .await
         .map_err(|error| error.to_string())
 }

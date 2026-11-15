@@ -6,8 +6,8 @@ use omniagent::{
     jobs::{
         AdmissionBlocker, AdmissionEnvironment, Job, JobContext, JobNoticeKind, JobOrigin,
         JobPermission, JobRequest, JobRequestConflict, JobRole, JobRule, JobWorkspace,
-        PipelineDispatch, PipelineNodeKind, QueueHistoryPolicy, QueueSettings, QueueState,
-        RecoveryAction,
+        PipelineDispatch, PipelineNodeKind, ProjectSubagentPolicy, QueueHistoryPolicy,
+        QueueSettings, QueueState, RecoveryAction, SubagentCounts, SubagentLimitMode,
     },
     providers::{Capability, Provider, SessionIntent, SessionMode},
     repository,
@@ -576,6 +576,277 @@ async fn approve(store: &Store, job: &Job) -> Result<()> {
     store
         .decide_job_approval(job.project_id.clone(), approval, true)
         .await
+}
+
+#[tokio::test]
+async fn managed_quota_serializes_claims_and_shares_capacity_with_nested_children() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let path = temporary.path().join("quota.sqlite");
+    let store = Store::open(path.clone())?;
+    let parent = origin(&store, &temporary.path().join("project")).await?;
+    let project = &parent.run.project_id;
+    let root = &parent.conversation_id;
+    let second_chat = store
+        .create_conversation(
+            parent.run.checkout_id.clone(),
+            "Another conversation".into(),
+        )
+        .await?;
+    let second = store
+        .prepare_agent_attempt(
+            second_chat.id.clone(),
+            second_chat.context_id,
+            parent.scope.clone(),
+            "Second conversation".into(),
+        )
+        .await?;
+    store.mark_agent_running(second.run.id.clone()).await?;
+    store.set_job_queue_capacity(4).await?;
+    store
+        .set_project_subagent_policy(
+            project.clone(),
+            ProjectSubagentPolicy {
+                mode: SubagentLimitMode::Managed,
+                maximum: 1,
+            },
+        )
+        .await?;
+    let quota = store
+        .set_conversation_subagent_quota(root.clone(), None, 8)
+        .await?;
+    assert_eq!((quota.requested, quota.authorized), (8, 1));
+
+    let first = store
+        .submit_agent_job(parent.run.id.clone(), "first".into(), request())
+        .await?;
+    let waiting = store
+        .submit_agent_job(parent.run.id, "same-chat".into(), request())
+        .await?;
+    let independent = store
+        .submit_agent_job(second.run.id, "independent".into(), request())
+        .await?;
+    for job in [&first, &waiting, &independent] {
+        approve(&store, job).await?;
+    }
+
+    let concurrent = Store::open(path.clone())?;
+    let (a, b) = tokio::join!(
+        store.claim_next_job(environment(false)),
+        concurrent.claim_next_job(environment(false)),
+    );
+    let first_claim = a?.context("First claim lost")?;
+    let second_claim = b?.context("Independent conversation should have a slot")?;
+    let current = store
+        .job(project.clone(), first.id.clone())
+        .await?
+        .unwrap()
+        .latest_attempt
+        .unwrap();
+    let other_run = store
+        .job(project.clone(), independent.id)
+        .await?
+        .unwrap()
+        .latest_attempt
+        .unwrap();
+    assert!([&first_claim.run.id, &second_claim.run.id].contains(&&current.run_id));
+    assert!([&first_claim.run.id, &second_claim.run.id].contains(&&other_run.run_id));
+    assert!(
+        store
+            .job(project.clone(), waiting.id.clone())
+            .await?
+            .unwrap()
+            .latest_attempt
+            .is_none()
+    );
+    let counts = store
+        .conversation_subagent_quota(root.clone())
+        .await?
+        .managed;
+    assert_eq!(
+        counts,
+        SubagentCounts {
+            active: 1,
+            queued: 1,
+            historical: 0
+        }
+    );
+    assert_eq!(
+        store
+            .conversation_subagent_quota(second_chat.id)
+            .await?
+            .managed
+            .active,
+        1
+    );
+
+    store.mark_agent_running(current.run_id.clone()).await?;
+    let grandchild = store
+        .submit_agent_job(current.run_id.clone(), "nested".into(), request())
+        .await?;
+    approve(&store, &grandchild).await?;
+    let blocked = store
+        .inspect_job(project.clone(), grandchild.id.clone(), environment(false))
+        .await?
+        .unwrap();
+    assert!(blocked.blockers.contains(&AdmissionBlocker::SubagentQuota {
+        conversation_id: root.clone(),
+        active: 1,
+        limit: 1,
+    }));
+    store
+        .set_project_subagent_policy(
+            project.clone(),
+            ProjectSubagentPolicy {
+                mode: SubagentLimitMode::Managed,
+                maximum: 0,
+            },
+        )
+        .await?;
+    assert_eq!(
+        store
+            .conversation_subagent_quota(root.clone())
+            .await?
+            .managed
+            .active,
+        1
+    );
+    store
+        .finish_agent_attempt(current.run_id, RunStatus::Cancelled, None)
+        .await?;
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    assert_eq!(
+        store
+            .conversation_subagent_quota(root.clone())
+            .await?
+            .managed,
+        SubagentCounts {
+            active: 0,
+            queued: 2,
+            historical: 1,
+        }
+    );
+    store
+        .set_pending_job_state(project.clone(), waiting.id, QueueState::Paused)
+        .await?;
+    store
+        .set_project_subagent_policy(
+            project.clone(),
+            ProjectSubagentPolicy {
+                mode: SubagentLimitMode::Managed,
+                maximum: 1,
+            },
+        )
+        .await?;
+    let nested = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("Released slot was not reused")?;
+    assert_eq!(
+        store
+            .job(project.clone(), grandchild.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap()
+            .run_id,
+        nested.run.id
+    );
+
+    let strict = store
+        .set_conversation_subagent_quota(root.clone(), Some(SubagentLimitMode::Strict), 8)
+        .await?;
+    assert_eq!(strict.authorized, 1);
+    let restarted = Store::open(path)?;
+    let saved = restarted.conversation_subagent_quota(root.clone()).await?;
+    assert_eq!(saved.mode_override, Some(SubagentLimitMode::Strict));
+    assert_eq!(saved.managed.active, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -> Result<()> {
+    use omniagent::{
+        dispatch::EventSource,
+        providers::{ProviderEvent, ProviderEventData},
+    };
+
+    let temporary = tempfile::tempdir()?;
+    let path = temporary.path().join("old-evidence.sqlite");
+    let store = Store::open(path.clone())?;
+    let parent = origin(&store, &temporary.path().join("project")).await?;
+    let child = store
+        .submit_agent_job(parent.run.id.clone(), "legacy-child".into(), request())
+        .await?;
+    approve(&store, &child).await?;
+    let nested = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("Missing child")?;
+    store.mark_agent_running(nested.run.id.clone()).await?;
+    for (run, id, status) in [
+        (&parent.run.id, Some("same-child-id"), Some("pendingInit")),
+        (&parent.run.id, Some("same-child-id"), Some("running")),
+        (&parent.run.id, Some("same-child-id"), Some("completed")),
+        (&parent.run.id, Some("same-child-id"), None),
+        (&nested.run.id, Some("same-child-id"), Some("running")),
+        (&nested.run.id, Some("queued-child"), Some("pendingInit")),
+        (
+            &nested.run.id,
+            Some("missing-native-state"),
+            Some("notFound"),
+        ),
+        (&nested.run.id, None, Some("task_started")),
+    ] {
+        store
+            .record_agent_observation(
+                run.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: Default::default(),
+                    data: ProviderEventData::ChildActivity {
+                        child_id: id.map(str::to_owned),
+                        status: status.map(str::to_owned),
+                        details: None,
+                    },
+                },
+            )
+            .await?;
+    }
+    let root = parent.conversation_id;
+    let snapshot = store.conversation_subagent_quota(root.clone()).await?;
+    assert_eq!(snapshot.native.len(), 1);
+    let native = &snapshot.native[0];
+    assert_eq!(native.provider, Provider::Codex);
+    assert_eq!(
+        native.reported,
+        SubagentCounts {
+            active: 1,
+            queued: 1,
+            historical: 1
+        }
+    );
+    assert_eq!((native.unknown_state, native.unidentified_events), (1, 1));
+    let nested_scope = store
+        .conversation_subagent_quota(nested.conversation_id)
+        .await?;
+    assert!(nested_scope.native.is_empty());
+    assert_eq!(snapshot.managed.active, 1);
+    drop(store);
+
+    // Recreate the previous schema with history intact and verify the upgrade.
+    let db = rusqlite::Connection::open(&path)?;
+    db.execute_batch(
+        "DROP VIEW managed_subagent_states;
+         DROP TABLE native_subagent_observations;
+         DROP TABLE job_delegation_owners;
+         DROP TABLE project_subagent_policies;
+         DROP TABLE conversation_subagent_quotas;
+         PRAGMA user_version = 33;",
+    )?;
+    drop(db);
+    let upgraded = Store::open(path)?;
+    assert_eq!(upgraded.conversation_subagent_quota(root).await?, snapshot);
+    Ok(())
 }
 
 #[tokio::test]

@@ -28,6 +28,7 @@ use super::{
     insert_job, load_job,
     policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
     recovery::{RecoveryCheckpoint, pending_recovery, recovery_source},
+    subagents::job_quota_blocker,
 };
 
 #[derive(Debug, Clone)]
@@ -100,6 +101,11 @@ pub enum AdmissionBlocker {
         producing_run_id: Option<String>,
     },
     Capacity {
+        active: u32,
+        limit: u32,
+    },
+    SubagentQuota {
+        conversation_id: String,
         active: u32,
         limit: u32,
     },
@@ -968,6 +974,9 @@ fn evaluate(
             active,
             limit: settings.capacity,
         });
+    }
+    if let Some(quota) = job_quota_blocker(db, job)? {
+        blockers.push(quota);
     }
     Ok(blockers)
 }

@@ -85,7 +85,9 @@ impl From<AdmissionBlocker> for QueueBlockerKind {
             AdmissionBlocker::Writer { .. }
             | AdmissionBlocker::AppWriter { .. }
             | AdmissionBlocker::PendingWorktreeChanges { .. } => Self::Writer,
-            AdmissionBlocker::Capacity { .. } => Self::Capacity,
+            AdmissionBlocker::Capacity { .. } | AdmissionBlocker::SubagentQuota { .. } => {
+                Self::Capacity
+            }
         }
     }
 }

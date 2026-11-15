@@ -20,6 +20,7 @@ import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/co
 import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
 import { ConversationHistoryControls } from "@/conversation-history-controls";
+import { ConversationSubagentControls } from "@/subagent-quota";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
 import { WorktreeEvidence } from "@/worktree-evidence";
@@ -386,6 +387,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
         </button>}
         <ConversationHistoryControls conversationId={conversationId} history={history.data}
           disabled={live || isLiveRun(attempt) || send.isPending} />
+        <ConversationSubagentControls conversationId={conversationId} />
         </div>
       </header>
       <div className="conv-layout">
