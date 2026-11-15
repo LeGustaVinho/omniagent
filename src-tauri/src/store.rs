@@ -35,6 +35,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/020-job-queue.sql"),
     include_str!("../migrations/021-job-admission.sql"),
     include_str!("../migrations/022-job-recovery.sql"),
+    include_str!("../migrations/023-managed-worktrees.sql"),
+    include_str!("../migrations/024-attempt-worktree-evidence.sql"),
+    include_str!("../migrations/025-worktree-writers.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -193,6 +196,9 @@ fn migrate(db: &mut Connection) -> Result<()> {
     for (index, script) in MIGRATIONS.iter().enumerate().skip(version as usize) {
         tx.execute_batch(script)
             .with_context(|| format!("apply schema migration {}", index + 1))?;
+        if index + 1 == 25 {
+            crate::repository::writers::migrate_writer_evidence(&tx)?;
+        }
         tx.pragma_update(None, "user_version", (index + 1) as u32)?;
     }
     tx.commit()?;

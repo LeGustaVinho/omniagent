@@ -49,7 +49,9 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
     case "context_changed": return `The conversation changed since context ${blocker.contextId} was queued.`;
     case "conversation_busy": return "Waiting for the active conversation run.";
     case "missing_capability": return `Required capability unavailable: ${blocker.capability.replaceAll("_", " ")}.`;
-    case "writer": return "Waiting for the worktree writer.";
+    case "writer": return blocker.needsReview ? "The previous worktree writer needs review." : "Waiting for the worktree writer.";
+    case "app_writer": return "Waiting for an app write to finish.";
+    case "pending_worktree_changes": return `The worktree has pending changes for task scope ${blocker.scopeTaskId}.`;
     case "capacity": return `Waiting for an execution slot (${blocker.active} of ${blocker.limit} in use).`;
   }
 }

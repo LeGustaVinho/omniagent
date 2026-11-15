@@ -562,6 +562,10 @@ impl TurnExecution {
             self.app
                 .block_on(self.store.save_plugin_inventory(plugins))?,
         );
+        let managed_writer = self.app.block_on(repository::capture_worktree_start(
+            &self.store,
+            self.plan.run.id.clone(),
+        ))?;
         if !self.app.block_on(
             self.store
                 .record_agent_launch_intent(self.plan.run.id.clone()),
@@ -574,20 +578,30 @@ impl TurnExecution {
             checkout: &scope.checkout,
             arguments: &args,
         })?;
-        self.app
-            .block_on(self.store.mark_agent_running(self.plan.run.id.clone()))?;
         let control = process.control.clone();
         let endpoint = bridge.as_ref().map(|(endpoint, _)| endpoint);
-        let run = self.drive(
-            &mut process,
-            session.as_mut(),
-            commands,
-            &checkout,
-            endpoint,
-            runner,
-        );
+        let run = self
+            .app
+            .block_on(self.store.mark_agent_running(self.plan.run.id.clone()))
+            .and_then(|()| {
+                self.drive(
+                    &mut process,
+                    session.as_mut(),
+                    commands,
+                    &checkout,
+                    endpoint,
+                    runner,
+                )
+            });
         let stopped = control.cancel();
         let ended = control.wait();
+        if managed_writer {
+            control.confirm_quiescence()?;
+            self.app.block_on(repository::save_worktree_candidate(
+                &self.store,
+                self.plan.run.id.clone(),
+            ))?;
+        }
         stopped?;
         ended?;
         if let Some(endpoint) = endpoint {

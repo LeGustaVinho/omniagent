@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::{protection, providers::SessionMode, runs::RunStatus, store::Store};
+use crate::{
+    protection, providers::SessionMode, repository::writers::writer_owner, runs::RunStatus,
+    store::Store,
+};
 
 mod admission;
 mod recovery;
@@ -98,6 +101,7 @@ pub struct Job {
     pub project_id: String,
     pub checkout_id: String,
     pub task_id: Option<String>,
+    pub worktree_owner_task_id: Option<String>,
     pub origin: JobOrigin,
     pub context: Option<JobContext>,
     pub mode: SessionMode,
@@ -145,30 +149,32 @@ impl Store {
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let (project, checkout, context, inherited_task, active) = tx
-                .query_row(
-                    "SELECT c.project_id, c.id, a.conversation_id, a.context_id, parent.task_id,
+                    .query_row(
+                        "SELECT c.project_id, c.id, a.conversation_id, a.context_id,
+                        coalesce(scope.scope_task_id, parent.task_id),
                         EXISTS(SELECT 1 FROM active_agent_attempts WHERE run_id = a.run_id)
                  FROM agent_attempts a JOIN runs r ON r.id = a.run_id
                  JOIN checkouts c ON c.id = r.checkout_id
                  LEFT JOIN job_attempts attempt ON attempt.run_id = a.run_id
                  LEFT JOIN jobs parent ON parent.id = attempt.job_id
+                 LEFT JOIN job_worktree_scopes scope ON scope.job_id = parent.id
                  WHERE a.run_id = ?1",
-                    [&run_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            JobContext {
-                                conversation_id: row.get(2)?,
-                                context_id: row.get(3)?,
-                            },
-                            row.get::<_, Option<String>>(4)?,
-                            row.get::<_, bool>(5)?,
-                        ))
-                    },
-                )
-                .optional()?
-                .context("job origin run is unknown")?;
+                        [&run_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                JobContext {
+                                    conversation_id: row.get(2)?,
+                                    context_id: row.get(3)?,
+                                },
+                                row.get::<_, Option<String>>(4)?,
+                                row.get::<_, bool>(5)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+                    .context("job origin run is unknown")?;
                 request.normalize(&checkout)?;
                 request.task_id = request.task_id.or(inherited_task);
                 let prior: Option<(String, Vec<u8>)> = tx
@@ -299,21 +305,20 @@ fn insert_job(
         )?;
         ensure!(valid_task, "job task is outside the project");
     }
-    let writer = if request.mode == SessionMode::ApprovedWrite {
-        let managed: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM managed_task_worktrees
-             WHERE project_id = ?1 AND task_id = ?2 AND checkout_id = ?3)",
-            params![project_id, request.task_id, checkout_id],
-            |row| row.get(0),
-        )?;
-        ensure!(
-            managed,
-            "a repository-writing job requires its task's managed worktree"
-        );
-        Some(&checkout_id)
+    let writer_owner = if request.mode == SessionMode::ApprovedWrite {
+        let scope = request
+            .task_id
+            .as_deref()
+            .context("a repository writer requires a task")?;
+        Some(
+            writer_owner(db, &project_id, scope, &checkout_id)?
+                .context("a repository-writing job requires an assigned managed worktree")?,
+        )
     } else {
         None
     };
+    let writer_checkout = writer_owner.as_ref().map(|_| &checkout_id);
+    let stored_task = writer_owner.as_ref().or(request.task_id.as_ref());
     let (run_id, request_id) = match &origin {
         JobOrigin::Operator => (None, None),
         JobOrigin::Agent { run_id, request_id } => (Some(run_id), Some(request_id)),
@@ -323,10 +328,18 @@ fn insert_job(
         "INSERT INTO jobs(id, project_id, checkout_id, task_id, writer_checkout_id, conversation_id,
              context_id, origin_run_id, request_id, mode, request, priority)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        params![id, project_id, checkout_id, request.task_id, writer,
+        params![id, project_id, checkout_id, stored_task, writer_checkout,
             context.as_ref().map(|context| &context.conversation_id), context.as_ref().map(|context| &context.context_id),
             run_id, request_id, mode_key(request.mode), encrypted, priority],
     )?;
+    if let (Some(owner), Some(scope)) = (&writer_owner, &request.task_id)
+        && owner != scope
+    {
+        db.execute(
+            "INSERT INTO job_worktree_scopes VALUES (?1, ?2, ?3)",
+            params![id, project_id, scope],
+        )?;
+    }
     if matches!(origin, JobOrigin::Agent { .. }) || request.mode == SessionMode::ApprovedWrite {
         db.execute(
             "INSERT INTO job_approvals VALUES (?1, ?2, 'pending')",
@@ -346,10 +359,13 @@ fn insert_job(
 
 fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> {
     let mut query = db.prepare(
-        "SELECT j.checkout_id, j.task_id, j.conversation_id, j.context_id, j.origin_run_id, j.request_id,
+        "SELECT j.checkout_id, coalesce(scope.scope_task_id, j.task_id),
+                j.conversation_id, j.context_id, j.origin_run_id, j.request_id,
                 j.mode, j.priority, j.queue_state, a.ordinal, a.run_id, r.status, a.cancel_requested,
-                a.previous_run_id, a.kind, recovery.action
+                a.previous_run_id, a.kind, recovery.action,
+                CASE WHEN j.writer_checkout_id IS NOT NULL THEN j.task_id END
          FROM jobs j
+         LEFT JOIN job_worktree_scopes scope ON scope.job_id = j.id
          LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (
              SELECT max(ordinal) FROM job_attempts WHERE job_id = j.id
          )
@@ -394,6 +410,7 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
         project_id: project_id.into(),
         checkout_id: row.get(0)?,
         task_id: row.get(1)?,
+        worktree_owner_task_id: row.get(16)?,
         origin,
         context,
         mode: read_mode(row.get_ref(6)?.as_str()?)?,
@@ -408,9 +425,11 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
     }))
 }
 
-pub(crate) fn release_writer(db: &Connection, run_id: &str) -> Result<()> {
+pub(crate) fn release_settled_writer(db: &Connection, run_id: &str) -> Result<()> {
     db.execute(
-        "DELETE FROM job_writer_reservations WHERE run_id = ?1",
+        "DELETE FROM job_writer_reservations WHERE run_id = ?1
+         AND (EXISTS (SELECT 1 FROM job_attempts WHERE run_id = ?1 AND process_launch_requested = 0)
+           OR EXISTS (SELECT 1 FROM job_worktree_candidates WHERE run_id = ?1 AND capture_confirmed = 1))",
         [run_id],
     )?;
     Ok(())

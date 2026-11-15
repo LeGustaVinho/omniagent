@@ -17,7 +17,7 @@ const checkout = { projectId, checkoutId, repositoryRoot: "C:/repository", check
 
 const queuedJob: JobInspection = {
   job: {
-    id: "job-2", projectId, checkoutId, taskId: null, origin: { type: "operator" },
+    id: "job-2", projectId, checkoutId, taskId: null, worktreeOwnerTaskId: null, origin: { type: "operator" },
     context: { conversationId: "conversation-2", contextId: "context-2" }, mode: "read_only",
     priority: 10, queueState: "queued", latestAttempt: null, queuedRecovery: null,
   },

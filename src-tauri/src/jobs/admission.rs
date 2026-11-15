@@ -12,6 +12,7 @@ use crate::{
     },
     protection,
     providers::{Capability, SessionMode},
+    repository::writers::{WriterConflict, writer_conflict, writer_owner},
     runs::RunStatus,
     store::Store,
 };
@@ -68,6 +69,16 @@ pub enum AdmissionBlocker {
     Writer {
         checkout_id: String,
         run_id: String,
+        needs_review: bool,
+    },
+    AppWriter {
+        checkout_id: String,
+        operation_id: String,
+    },
+    PendingWorktreeChanges {
+        checkout_id: String,
+        scope_task_id: String,
+        producing_run_id: Option<String>,
     },
     Capacity {
         active: u32,
@@ -552,18 +563,33 @@ fn evaluate(
         });
     }
     if job.mode == SessionMode::ApprovedWrite {
-        let holder = db
-            .query_row(
-                "SELECT run_id FROM job_writer_reservations WHERE checkout_id = ?1",
-                [&job.checkout_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(run_id) = holder {
-            blockers.push(Writer {
-                checkout_id: job.checkout_id.clone(),
-                run_id,
+        let scope = job
+            .task_id
+            .as_deref()
+            .context("the writer has no work scope")?;
+        let owner = writer_owner(db, &job.project_id, scope, &job.checkout_id)?;
+        if owner.is_none() || owner != job.worktree_owner_task_id {
+            blockers.push(Policy {
+                reason: "The worktree is no longer assigned to the job's scope",
             });
+        }
+        let checkout_id = job.checkout_id.clone();
+        match writer_conflict(db, &checkout_id, scope)? {
+            Some(WriterConflict::Run { id, needs_review }) => blockers.push(Writer {
+                checkout_id,
+                run_id: id,
+                needs_review,
+            }),
+            Some(WriterConflict::App(operation_id)) => blockers.push(AppWriter {
+                checkout_id,
+                operation_id,
+            }),
+            Some(WriterConflict::Pending { scope, run }) => blockers.push(PendingWorktreeChanges {
+                checkout_id,
+                scope_task_id: scope,
+                producing_run_id: run,
+            }),
+            None => {}
         }
     }
     let active = occupancy(db)?;

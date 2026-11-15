@@ -9,7 +9,9 @@ use std::{
     },
     path::Path,
     ptr::{null, null_mut},
-    sync::Mutex,
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 use windows_sys::Win32::{
     Foundation::{HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT},
@@ -17,8 +19,9 @@ use windows_sys::Win32::{
     System::{
         JobObjects::{
             CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, TerminateJobObject,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+            QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
         },
         Pipes::CreatePipe,
         Threading::{
@@ -48,22 +51,30 @@ pub struct WindowsProcess {
 }
 
 pub struct WindowsProcessControl {
-    process: OwnedHandle,
     job: OwnedHandle,
-    cancelled: Mutex<bool>,
+    state: Mutex<ProcessState>,
+}
+
+struct ProcessState {
+    process: Option<Arc<OwnedHandle>>,
+    cancelled: bool,
+    outcome: Option<TerminalOutcome>,
 }
 
 impl WindowsProcessControl {
     pub fn cancel(&self) -> io::Result<bool> {
-        let mut cancelled = self.cancelled.lock().expect("process state lock");
-        if *cancelled {
+        let mut state = self.state.lock().expect("process state lock");
+        let Some(process) = state.process.as_ref() else {
+            return Ok(false);
+        };
+        if state.cancelled {
             return Ok(false);
         }
-        match unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) } {
+        match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
             WAIT_OBJECT_0 => Ok(false),
             WAIT_TIMEOUT => {
                 self.terminate_job()?;
-                *cancelled = true;
+                state.cancelled = true;
                 Ok(true)
             }
             _ => Err(io::Error::last_os_error()),
@@ -71,19 +82,60 @@ impl WindowsProcessControl {
     }
 
     pub fn wait(&self) -> io::Result<TerminalOutcome> {
-        if unsafe { WaitForSingleObject(self.process.as_raw_handle(), INFINITE) } != WAIT_OBJECT_0 {
+        let process = {
+            let state = self.state.lock().expect("process state lock");
+            if let Some(outcome) = state.outcome {
+                return Ok(outcome);
+            }
+            state.process.clone().expect("running process handle")
+        };
+        if unsafe { WaitForSingleObject(process.as_raw_handle(), INFINITE) } != WAIT_OBJECT_0 {
             return Err(io::Error::last_os_error());
         }
-        let cancelled = self.cancelled.lock().expect("process state lock");
+        let mut state = self.state.lock().expect("process state lock");
+        if let Some(outcome) = state.outcome {
+            return Ok(outcome);
+        }
         let mut code = 0;
-        checked(unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &mut code) })?;
+        checked(unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) })?;
         // A descendant can otherwise keep output pipes open after the main process exits.
         self.terminate_job()?;
-        Ok(if *cancelled {
+        let outcome = if state.cancelled {
             TerminalOutcome::Cancelled(code)
         } else {
             TerminalOutcome::Exited(code)
-        })
+        };
+        state.outcome = Some(outcome);
+        state.process.take();
+        Ok(outcome)
+    }
+
+    pub(crate) fn confirm_quiescence(&self) -> io::Result<()> {
+        self.wait()?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // TerminateJobObject requests termination. Wait until the non-breakaway job has drained.
+        loop {
+            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            checked(unsafe {
+                QueryInformationJobObject(
+                    self.job.as_raw_handle(),
+                    JobObjectBasicAccountingInformation,
+                    (&raw mut accounting).cast(),
+                    size_of_val(&accounting) as u32,
+                    null_mut(),
+                )
+            })?;
+            if accounting.ActiveProcesses == 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "CLI job did not drain",
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn terminate_job(&self) -> io::Result<()> {
@@ -155,9 +207,14 @@ pub fn launch(executable: &Path, cwd: &Path, args: &[&OsStr]) -> io::Result<Wind
         stdout: File::from(parent_stdout),
         stderr: File::from(parent_stderr),
         control: WindowsProcessControl {
-            process: unsafe { OwnedHandle::from_raw_handle(process.hProcess) },
             job,
-            cancelled: Mutex::new(false),
+            state: Mutex::new(ProcessState {
+                process: Some(Arc::new(unsafe {
+                    OwnedHandle::from_raw_handle(process.hProcess)
+                })),
+                cancelled: false,
+                outcome: None,
+            }),
         },
     })
 }

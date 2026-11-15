@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
+import { WorktreeEvidence } from "@/worktree-evidence";
 import { openConversation } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
 import "./conversation.css";
@@ -41,7 +42,11 @@ function waitReason(blocker: AdmissionBlocker | undefined): string {
     case "policy": return blocker.reason;
     case "dependency": return "Waiting for a required job to complete.";
     case "approval": return "Waiting for approval.";
-    case "writer": return "Waiting for the worktree writer.";
+    case "writer": return blocker.needsReview
+      ? "The previous worktree writer needs review."
+      : "Waiting for the worktree writer.";
+    case "app_writer": return "Waiting for an app write to finish.";
+    case "pending_worktree_changes": return "The worktree has pending changes for another task scope.";
     case "missing_capability": return "The selected runner is missing a required capability.";
     case "job_cancelled": return "Job cancelled.";
     default: return "Waiting to start.";
@@ -395,6 +400,9 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           <ConversationMarkdown>{activity.output}</ConversationMarkdown>
         </div>}
         {run && <ConversationRequests activity={activity} conversationId={conversationId} runId={run.id} />}
+        {job?.job.mode === "approved_write" && attempt && !isLiveRun(attempt) && (
+          <WorktreeEvidence key={attempt.runId} projectId={job.job.projectId} runId={attempt.runId} ownerTaskId={job.job.worktreeOwnerTaskId} />
+        )}
         {job && attempt && !busy && job.recoveryActions.length > 0 && (
           <section className="conv-recovery" aria-label="Recover job">
             <div className="conv-recovery-message"><RotateCcw size={16} aria-hidden="true" /><div>

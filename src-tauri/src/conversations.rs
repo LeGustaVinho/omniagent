@@ -840,7 +840,7 @@ impl Store {
             }
             close_permissions(&tx, &run_id)?;
             close_native_questions(&tx, &run_id)?;
-            crate::jobs::release_writer(&tx, &run_id)?;
+            crate::jobs::release_settled_writer(&tx, &run_id)?;
             tx.execute("DELETE FROM active_agent_attempts WHERE run_id = ?1", [&run_id])?;
             tx.commit()?;
             Ok(())
@@ -868,7 +868,7 @@ impl Store {
                     "UPDATE agent_attempts SET result_context_id = context_id WHERE run_id = ?1",
                     [&id],
                 )?;
-                crate::jobs::release_writer(&tx, &id)?;
+                crate::jobs::release_settled_writer(&tx, &id)?;
             }
             tx.execute(
                 "UPDATE dispatches SET delivery = 'unconfirmed' WHERE delivery = 'prepared'",
