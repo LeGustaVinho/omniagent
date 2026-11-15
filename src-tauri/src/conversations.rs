@@ -5679,6 +5679,12 @@ mod tests {
         fn attachment_path(&self, path: &std::path::Path) -> Option<PathBuf> {
             DirectWindowsRunner.attachment_path(path)
         }
+        fn attachment_staging(
+            &self,
+            scope: &crate::runner::AttachmentRunScope<'_>,
+        ) -> io::Result<Box<dyn crate::runner::AttachmentStaging>> {
+            DirectWindowsRunner.attachment_staging(scope)
+        }
         fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
             self.launch_with_config(
                 request,

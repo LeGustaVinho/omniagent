@@ -27,7 +27,7 @@ use crate::{
     process::TerminalOutcome,
     process_io::CapturedProcess,
     repository::{self, CheckoutLayout},
-    runner::{CONTRACT_VERSION, ExecutionPlatform, LaunchRequest, Runner},
+    runner::{AttachmentRunScope, CONTRACT_VERSION, ExecutionPlatform, LaunchRequest, Runner},
     runs::RunStatus,
     store::Store,
 };
@@ -656,9 +656,10 @@ impl TurnExecution {
                     AttachmentSource::SelectedFile { .. }
                 ) && matches!(attachment.payload, CapturedPayload::Reference { .. })
             })
-            && let Ok(directory) = self
-                .staged_attachments
-                .configure_claude_read_directory(runner)
+            && let Ok(directory) = self.staged_attachments.configure_claude_read_directory(
+                runner,
+                &AttachmentRunScope::for_attempt(&self.plan.run, &checkout.root),
+            )
         {
             launch
                 .arguments
@@ -739,12 +740,15 @@ impl TurnExecution {
                 return Ok(RunStatus::Cancelled);
             }
             runner
-                .launch(LaunchRequest {
-                    version: CONTRACT_VERSION,
-                    executable: &scope.executable,
-                    checkout: &scope.checkout,
-                    arguments: &args,
-                })
+                .launch_attempt(
+                    &AttachmentRunScope::for_attempt(&self.plan.run, &checkout.root),
+                    LaunchRequest {
+                        version: CONTRACT_VERSION,
+                        executable: &scope.executable,
+                        checkout: &scope.checkout,
+                        arguments: &args,
+                    },
+                )
                 .inspect_err(|_| self.failure.cause = Some(FailureCause::LaunchRejected))?
         };
         let control = process.control.clone();
@@ -1589,6 +1593,7 @@ impl TurnExecution {
         };
         let mut attachments = Vec::new();
         let mut budget = AttachmentBudget::new(project);
+        let destination = AttachmentRunScope::for_attempt(&self.plan.run, &checkout.root);
         for (index, (revision, attachment)) in self.plan.attachments.iter().enumerate() {
             let delivery = attachment.delivery();
             let metadata = &attachment.metadata;
@@ -1614,6 +1619,7 @@ impl TurnExecution {
                     runner,
                     session,
                     checkout,
+                    &destination,
                     capabilities,
                     attachment,
                 )
@@ -1912,6 +1918,7 @@ fn prepare_attachment(
     runner: &dyn Runner,
     session: &dyn CliSession,
     checkout: &CheckoutLayout,
+    destination: &AttachmentRunScope<'_>,
     capabilities: &CapabilityAssessment,
     attachment: &CapturedAttachment,
 ) -> Result<(AttachmentInput, Option<String>)> {
@@ -1932,7 +1939,8 @@ fn prepare_attachment(
                 .and_then(|entry| entry.evidence.as_ref())
                 .filter(|evidence| Verification::verified(evidence))
                 .context("native delivery is unverified for this profile and checkout")?;
-            let native = staging.native(runner, &attachment.metadata, content, encoding)?;
+            let native =
+                staging.native(runner, destination, &attachment.metadata, content, encoding)?;
             (
                 AttachmentInput::Native(native),
                 Some(qualification.id.clone()),
@@ -1953,7 +1961,7 @@ fn prepare_attachment(
             }
             let reference = staging.reference(
                 runner,
-                &checkout.root,
+                destination,
                 scope.provider,
                 &attachment.metadata,
                 reference_path,

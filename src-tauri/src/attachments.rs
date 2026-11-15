@@ -1,6 +1,7 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom},
+    os::windows::fs::OpenOptionsExt,
     path::{Component, Path, PathBuf},
 };
 
@@ -17,7 +18,9 @@ use crate::{
         Provider,
         configuration::{open_locked_local_file, plain_metadata},
     },
-    runner::Runner,
+    runner::{
+        AttachmentRunScope, AttachmentStaging, CheckoutAttachment, Runner, StagedAttachmentFile,
+    },
 };
 
 mod limits;
@@ -668,7 +671,7 @@ impl TurnAttachment {
 #[derive(Default)]
 pub(crate) struct StagedAttachments {
     locks: Vec<File>,
-    directory: Option<tempfile::TempDir>,
+    directory: Option<Box<dyn AttachmentStaging>>,
     claude_read_directory: Option<PathBuf>,
 }
 
@@ -676,8 +679,9 @@ impl StagedAttachments {
     pub(crate) fn configure_claude_read_directory(
         &mut self,
         runner: &dyn Runner,
+        scope: &AttachmentRunScope<'_>,
     ) -> Result<PathBuf> {
-        let directory = runner_path(runner, &self.directory()?)?;
+        let directory = self.directory(runner, scope)?.directory().to_owned();
         self.claude_read_directory = Some(directory.clone());
         Ok(directory)
     }
@@ -685,15 +689,19 @@ impl StagedAttachments {
     pub(crate) fn native(
         &mut self,
         runner: &dyn Runner,
+        scope: &AttachmentRunScope<'_>,
         metadata: &AttachmentMetadata,
         content: &str,
         encoding: NativeAttachmentEncoding,
     ) -> Result<TurnAttachment> {
         let path = if encoding == NativeAttachmentEncoding::CodexLocalImage {
-            Some(self.stage(runner, metadata, |output| {
-                output.write_all(&STANDARD.decode(content)?)?;
-                Ok(())
-            })?)
+            let bytes = STANDARD.decode(content)?;
+            ensure!(
+                bytes.len() as u64 == metadata.size
+                    && format!("{:x}", Sha256::digest(&bytes)) == metadata.sha256,
+                "frozen native attachment changed"
+            );
+            Some(self.stage(runner, scope, metadata, &mut bytes.as_slice())?)
         } else {
             None
         };
@@ -710,12 +718,12 @@ impl StagedAttachments {
     pub(crate) fn reference(
         &mut self,
         runner: &dyn Runner,
-        checkout: &Path,
+        scope: &AttachmentRunScope<'_>,
         provider: Provider,
         metadata: &AttachmentMetadata,
         captured_path: &Path,
     ) -> Result<AttachmentReference> {
-        let path = authorized_path(checkout, &metadata.source)?;
+        let path = authorized_path(scope.checkout, &metadata.source)?;
         ensure!(
             path == captured_path,
             "attachment reference target changed, preview it again"
@@ -727,27 +735,34 @@ impl StagedAttachments {
             "attachment reference changed, preview it again"
         );
         let path = match &metadata.source {
-            AttachmentSource::Checkout { .. } => {
-                let path = runner_path(runner, &path)?;
+            AttachmentSource::Checkout { relative_path } => {
+                let path = runner.attachment_reference(
+                    scope,
+                    CheckoutAttachment {
+                        relative_path,
+                        size: metadata.size,
+                        sha256: &metadata.sha256,
+                    },
+                )?;
+                ensure!(path.is_absolute(), "runner reference must be absolute");
                 self.locks.push(lock);
                 path
             }
             AttachmentSource::SelectedFile { .. } => {
-                let staged = self.stage(runner, metadata, |output| {
-                    std::io::copy(&mut lock, output)?;
-                    Ok(())
-                })?;
                 if provider == Provider::Claude {
-                    let directory = self
-                        .claude_read_directory
-                        .as_deref()
-                        .context("Claude has no scoped staging directory in this runner")?;
                     ensure!(
-                        staged.parent() == Some(directory),
-                        "the mapped attachment is outside Claude's staged read directory"
+                        self.claude_read_directory.is_some(),
+                        "Claude has no scoped staging directory in this runner"
                     );
                 }
-                staged
+                let path = self.stage(runner, scope, metadata, &mut lock)?;
+                if provider == Provider::Claude {
+                    ensure!(
+                        path.parent() == self.claude_read_directory.as_deref(),
+                        "the attachment is outside Claude's staged read directory"
+                    );
+                }
+                path
             }
         };
         let uri = if provider == Provider::Antigravity {
@@ -775,48 +790,273 @@ impl StagedAttachments {
     fn stage(
         &mut self,
         runner: &dyn Runner,
+        scope: &AttachmentRunScope<'_>,
         metadata: &AttachmentMetadata,
-        write: impl FnOnce(&mut File) -> Result<()>,
+        bytes: &mut dyn Read,
     ) -> Result<PathBuf> {
-        let path = self.directory()?.join(format!(
-            "{}.{}",
-            uuid::Uuid::new_v4(),
-            metadata.format.extension()
-        ));
-        write(
-            &mut OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&path)?,
+        let name = format!("{}.{}", uuid::Uuid::new_v4(), metadata.format.extension());
+        let directory = self.directory(runner, scope)?;
+        directory.stage_read_only(
+            StagedAttachmentFile {
+                name: &name,
+                size: metadata.size,
+                sha256: &metadata.sha256,
+            },
+            &mut bytes.take(metadata.size),
         )?;
-        let mut lock = open_locked_local_file(&path)?;
-        let mut digest = Sha256::new();
-        std::io::copy(&mut lock, &mut digest)?;
-        ensure!(
-            format!("{:x}", digest.finalize()) == metadata.sha256,
-            "staged attachment changed"
-        );
-        let mapped = runner_path(runner, &path)?;
-        self.locks.push(lock);
-        Ok(mapped)
+        Ok(directory.directory().join(name))
     }
 
-    fn directory(&mut self) -> Result<PathBuf> {
+    fn directory(
+        &mut self,
+        runner: &dyn Runner,
+        scope: &AttachmentRunScope<'_>,
+    ) -> Result<&mut dyn AttachmentStaging> {
         if self.directory.is_none() {
-            self.directory = Some(
-                tempfile::Builder::new()
-                    .prefix("omniagent-attachments-")
-                    .tempdir()?,
+            let staging = runner.attachment_staging(scope)?;
+            ensure!(
+                staging.directory().is_absolute(),
+                "runner has no absolute read-only attachment staging path"
             );
+            self.directory = Some(staging);
         }
-        let directory = self.directory.as_ref().expect("attachment staging exists");
-        Ok(dunce::canonicalize(directory.path())?)
+        Ok(self
+            .directory
+            .as_mut()
+            .expect("attachment staging exists")
+            .as_mut())
     }
 }
 
-fn runner_path(runner: &dyn Runner, path: &Path) -> Result<PathBuf> {
-    runner
-        .attachment_path(path)
-        .filter(|path| path.is_absolute())
-        .context("runner has no read-only attachment path mapping")
+struct LocalAttachmentStaging {
+    locks: Vec<File>,
+    _directory: tempfile::TempDir,
+    canonical: PathBuf,
+}
+
+pub(crate) fn local_attachment_staging(
+    scope: &AttachmentRunScope<'_>,
+) -> io::Result<Box<dyn AttachmentStaging>> {
+    let run = uuid::Uuid::parse_str(scope.run_id).map_err(io::Error::other)?;
+    let directory = tempfile::Builder::new()
+        .prefix(&format!("omniagent-attachments-{run}-"))
+        .tempdir()?;
+    let canonical = dunce::canonicalize(directory.path())?;
+    Ok(Box::new(LocalAttachmentStaging {
+        locks: vec![],
+        _directory: directory,
+        canonical,
+    }))
+}
+
+impl AttachmentStaging for LocalAttachmentStaging {
+    fn directory(&self) -> &Path {
+        &self.canonical
+    }
+
+    fn stage_read_only(
+        &mut self,
+        file: StagedAttachmentFile<'_>,
+        bytes: &mut dyn Read,
+    ) -> io::Result<()> {
+        let mut components = Path::new(file.name).components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid staged attachment name",
+            ));
+        }
+        let path = self.canonical.join(file.name);
+        {
+            let mut output = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .share_mode(0)
+                .open(&path)?;
+            io::copy(bytes, &mut output)?;
+        }
+        let mut lock = open_locked_local_file(&path)?;
+        let mut digest = Sha256::new();
+        if io::copy(&mut lock, &mut digest)? != file.size
+            || format!("{:x}", digest.finalize()) != file.sha256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "staged attachment changed",
+            ));
+        }
+        self.locks.push(lock);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct IsolatedAttachmentFixture {
+        staging_root: PathBuf,
+        checkout: PathBuf,
+    }
+
+    impl Runner for IsolatedAttachmentFixture {
+        fn identity(&self) -> &str {
+            "isolated-attachment-fixture"
+        }
+
+        fn launch(
+            &self,
+            _: crate::runner::LaunchRequest<'_>,
+        ) -> io::Result<crate::process_io::CapturedProcess> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "attachment fixture has no CLI",
+            ))
+        }
+
+        fn attachment_staging(
+            &self,
+            scope: &AttachmentRunScope<'_>,
+        ) -> io::Result<Box<dyn AttachmentStaging>> {
+            assert_eq!(
+                (scope.project_id, scope.checkout_id),
+                ("attachment-project", "attachment-checkout")
+            );
+            let staging = tempfile::Builder::new()
+                .prefix(&format!("{}-", scope.run_id))
+                .tempdir_in(&self.staging_root)?;
+            Ok(Box::new(LocalAttachmentStaging {
+                locks: vec![],
+                canonical: dunce::canonicalize(staging.path())?,
+                _directory: staging,
+            }))
+        }
+
+        fn attachment_reference(
+            &self,
+            scope: &AttachmentRunScope<'_>,
+            file: CheckoutAttachment<'_>,
+        ) -> io::Result<PathBuf> {
+            assert_ne!(scope.checkout, self.checkout);
+            let destination = self.checkout.join(file.relative_path);
+            let mut input = File::open(&destination)?;
+            let mut hash = Sha256::new();
+            if io::copy(&mut input, &mut hash)? != file.size
+                || format!("{:x}", hash.finalize()) != file.sha256
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the runner checkout revision changed",
+                ));
+            }
+            Ok(destination)
+        }
+    }
+
+    #[test]
+    fn isolated_staging_transfers_only_selected_bytes_and_maps_checkout_references() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = dunce::canonicalize(temp.path())?;
+        let checkout = root.join("host-checkout");
+        let guest_checkout = root.join("runner-checkout");
+        let staging_root = root.join("runner-files");
+        for directory in [&checkout, &guest_checkout, &staging_root] {
+            std::fs::create_dir(directory)?;
+        }
+        let external = root.join("selected.txt");
+        std::fs::write(&external, b"selected attachment")?;
+        std::fs::write(root.join("unselected.txt"), b"unselected file")?;
+        for directory in [&checkout, &guest_checkout] {
+            std::fs::write(directory.join("reference.txt"), b"same repository revision")?;
+        }
+        let selected = AttachmentPreview::read_with_delivery(
+            &checkout,
+            AttachmentSource::SelectedFile {
+                path: external.clone(),
+            },
+            AttachmentDelivery::Reference,
+        )?
+        .capture(&checkout, AttachmentLimits::default())?;
+        let reference = AttachmentPreview::read_with_delivery(
+            &checkout,
+            AttachmentSource::Checkout {
+                relative_path: "reference.txt".into(),
+            },
+            AttachmentDelivery::Reference,
+        )?
+        .capture(&checkout, AttachmentLimits::default())?;
+        let run = uuid::Uuid::new_v4().to_string();
+        let scope = AttachmentRunScope {
+            project_id: "attachment-project",
+            run_id: &run,
+            checkout_id: "attachment-checkout",
+            checkout: &checkout,
+        };
+        let runner = IsolatedAttachmentFixture {
+            staging_root: staging_root.clone(),
+            checkout: guest_checkout.clone(),
+        };
+        let mut staging = StagedAttachments::default();
+        let CapturedPayload::Reference { reference_path } = &reference.payload else {
+            anyhow::bail!("expected a repository reference")
+        };
+        let mapped = staging.reference(
+            &runner,
+            &scope,
+            Provider::Codex,
+            &reference.metadata,
+            reference_path,
+        )?;
+        assert_eq!(mapped.path, guest_checkout.join("reference.txt"));
+        assert_eq!(std::fs::read_dir(&staging_root)?.count(), 0);
+        std::fs::write(&mapped.path, b"different destination revision")?;
+        let stale = staging
+            .reference(
+                &runner,
+                &scope,
+                Provider::Codex,
+                &reference.metadata,
+                reference_path,
+            )
+            .unwrap_err();
+        assert!(stale.to_string().contains("checkout revision changed"));
+
+        let CapturedPayload::Reference { reference_path } = &selected.payload else {
+            anyhow::bail!("expected a selected file reference")
+        };
+        let staged = staging.reference(
+            &runner,
+            &scope,
+            Provider::Codex,
+            &selected.metadata,
+            reference_path,
+        )?;
+        let directory = staged.path.parent().unwrap();
+        assert!(directory.starts_with(&staging_root));
+        assert!(
+            directory
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with(&run)
+        );
+        assert_eq!(std::fs::read(&staged.path)?, b"selected attachment");
+        assert_eq!(std::fs::read_dir(directory)?.count(), 1);
+        assert!(OpenOptions::new().write(true).open(&staged.path).is_err());
+        std::fs::write(external, b"changed after selection")?;
+        assert!(
+            staging
+                .reference(
+                    &runner,
+                    &scope,
+                    Provider::Codex,
+                    &selected.metadata,
+                    reference_path
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(directory)?.count(), 1);
+        Ok(())
+    }
 }

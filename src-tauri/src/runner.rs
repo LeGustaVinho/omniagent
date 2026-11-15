@@ -13,6 +13,7 @@ use windows_sys::Win32::System::SystemInformation::GetNativeSystemInfo;
 use crate::{
     process::{self, TerminalOutcome, WindowsProcessControl},
     process_io::{CapturedProcess, capture},
+    runs::RunRecord,
 };
 
 pub const CONTRACT_VERSION: u16 = 1;
@@ -22,6 +23,47 @@ pub struct LaunchRequest<'a> {
     pub executable: &'a Path,
     pub checkout: &'a Path,
     pub arguments: &'a [&'a OsStr],
+}
+
+pub struct AttachmentRunScope<'a> {
+    pub project_id: &'a str,
+    pub run_id: &'a str,
+    pub checkout_id: &'a str,
+    pub checkout: &'a Path,
+}
+
+impl<'a> AttachmentRunScope<'a> {
+    pub(crate) fn for_attempt(run: &'a RunRecord, checkout: &'a Path) -> Self {
+        Self {
+            project_id: &run.project_id,
+            run_id: &run.id,
+            checkout_id: &run.checkout_id,
+            checkout,
+        }
+    }
+}
+
+pub struct CheckoutAttachment<'a> {
+    pub relative_path: &'a Path,
+    pub size: u64,
+    pub sha256: &'a str,
+}
+
+pub struct StagedAttachmentFile<'a> {
+    pub name: &'a str,
+    pub size: u64,
+    pub sha256: &'a str,
+}
+
+/// A private directory for one attempt. A runner must verify the size and digest
+/// before making the file readable, and keep it read-only for the lease's lifetime.
+pub trait AttachmentStaging: Send {
+    fn directory(&self) -> &Path;
+    fn stage_read_only(
+        &mut self,
+        file: StagedAttachmentFile<'_>,
+        bytes: &mut dyn io::Read,
+    ) -> io::Result<()>;
 }
 
 pub trait RunControl: Send + Sync {
@@ -45,6 +87,37 @@ pub trait Runner: Send + Sync {
     }
     fn attachment_path(&self, _staged: &Path) -> Option<PathBuf> {
         None
+    }
+    /// Resolves the verified reference in the destination checkout. A runner
+    /// with its own checkout must verify the size and digest there.
+    fn attachment_reference(
+        &self,
+        scope: &AttachmentRunScope<'_>,
+        file: CheckoutAttachment<'_>,
+    ) -> io::Result<PathBuf> {
+        if self.attachment_path(scope.checkout).as_deref() == Some(scope.checkout) {
+            return Ok(scope.checkout.join(file.relative_path));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "runner cannot verify a reference in the selected checkout",
+        ))
+    }
+    fn attachment_staging(
+        &self,
+        _scope: &AttachmentRunScope<'_>,
+    ) -> io::Result<Box<dyn AttachmentStaging>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the runner has no read-only attachment staging",
+        ))
+    }
+    fn launch_attempt(
+        &self,
+        _scope: &AttachmentRunScope<'_>,
+        request: LaunchRequest<'_>,
+    ) -> io::Result<CapturedProcess> {
+        self.launch(request)
     }
     fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess>;
 }
@@ -106,6 +179,13 @@ impl Runner for DirectWindowsRunner {
 
     fn attachment_path(&self, staged: &Path) -> Option<PathBuf> {
         Some(staged.to_owned())
+    }
+
+    fn attachment_staging(
+        &self,
+        scope: &AttachmentRunScope<'_>,
+    ) -> io::Result<Box<dyn AttachmentStaging>> {
+        crate::attachments::local_attachment_staging(scope)
     }
 
     fn execution_platform(&self) -> Option<ExecutionPlatform> {
