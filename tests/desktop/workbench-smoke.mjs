@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { access, copyFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -553,6 +553,137 @@ async function verifyDetachedJob(browser, application, scratch) {
   }
 }
 
+async function verifyQuestionContinuation(browser, application, scratch) {
+  const repo = join(scratch, "Question continuation checkout");
+  git(scratch, "init", "-q", repo);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Fixture");
+  const checkout = await invoke(browser, "register_project", { directory: repo });
+  const project = { projectId: checkout.projectId };
+  await selectCheckout(browser, checkout);
+  const page = await browser.getUrl();
+  const { settings } = await invoke(browser, "project_job_queue", project);
+  const profile = (await invoke(browser, "cli_executables")).find(({ provider }) => provider === "codex");
+  assert.ok(profile);
+  await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
+  await invoke(browser, "set_job_queue_capacity", { capacity: 1 });
+  let detached = false;
+  try {
+    const models = await invoke(browser, "conversation_models", { provider: "codex" });
+    const fixture = models.find(({ option }) => option.selection.modelId === "desktop-fixture" && option.selectable);
+    assert.ok(fixture);
+    const submit = async (title, text, mode = "plan") => {
+      const chat = await invoke(browser, "create_conversation", { checkoutId: checkout.checkoutId, title });
+      const scope = { conversationId: chat.id };
+      await invoke(browser, "save_conversation_draft", { ...scope, text });
+      const job = await invoke(browser, "start_conversation_turn", { ...scope, selection: fixture.option.selection, mode, text });
+      return { title, scope, job };
+    };
+    const latest = ({ scope }) => invoke(browser, "latest_conversation_run", scope);
+    const open = async ({ title }) => {
+      await chooseConversations(browser);
+      await click(browser, `button=${title}`);
+      return browser.$(`section[aria-label="${title}"]`);
+    };
+    const reopen = async () => {
+      const visible = () => invoke(browser, "plugin:window|is_visible", { label: "main" });
+      await invoke(browser, "plugin:window|close", { label: "main" });
+      await browser.waitUntil(async () => !(await visible()));
+      detached = true;
+      await browser.url("about:blank");
+      assert.equal(await browser.getUrl(), "about:blank");
+      await browser.url(page);
+      await waitForRuntime(browser);
+      await showTestApplication(browser, application);
+      detached = false;
+    };
+    const waitForQuestion = async (chat) => {
+      let run;
+      await browser.waitUntil(async () => {
+        run = await latest(chat);
+        return run?.status === "waiting_for_input";
+      }, { timeout: 30_000, timeoutMsg: "The CLI did not open its native question" });
+      return { ...chat.scope, runId: run.id };
+    };
+    const reply = async (card, value) => {
+      const select = card.$("select");
+      await select.waitForEnabled();
+      await select.selectByAttribute("value", value);
+      await card.$("button=Reply").click();
+    };
+
+    const live = await submit("Live question across window close", "Ask desktop question live");
+    const liveOrigin = await waitForQuestion(live);
+    await reopen();
+    assert.equal((await latest(live)).id, liveOrigin.runId);
+    const livePanel = await open(live);
+    await reply(livePanel.$('[aria-label="Pending requests"] form'), "Markdown");
+    await livePanel.$("p=The live turn received Markdown.").waitForDisplayed({ timeout: 30_000 });
+    await assert.rejects(invoke(browser, "answer_conversation_question", {
+      ...liveOrigin, requestId: 71, answer: { action: "accept", values: { format: "Markdown" } },
+    }));
+    assert.equal((await readFile(join(repo, "desktop-live-question-reply"), "utf8")).trim(), "Markdown");
+    assert.equal((await latest(live)).id, liveOrigin.runId);
+
+    assert.equal(await invoke(browser, "project_question_timeout", project), 10);
+    for (const [kind, minutes] of [["default", 10], ["custom", 2]]) {
+      if (kind === "custom") await invoke(browser, "set_project_question_timeout", { ...project, minutes });
+      const source = await submit(`Expiring ${kind} planning question`, `Ask desktop question ${kind}`);
+      const origin = await waitForQuestion(source);
+      const probe = await submit(`Slot probe after ${kind}`, "Complete desktop slot probe", "read_only");
+      const queue = await invoke(browser, "project_job_queue", project);
+      assert.equal(queue.active, 1);
+      assert.deepEqual(queue.jobs.find(({ job }) => job.id === probe.job.id).blockers,
+        [{ type: "capacity", active: 1, limit: 1 }]);
+
+      // Advance the first request's stored wall-clock timestamps. A second provider
+      // request makes the running supervisor re-read both deadlines.
+      const db = new DatabaseSync(join(process.env.LOCALAPPDATA, identifier, "omniagent.sqlite3"));
+      try {
+        db.exec("PRAGMA busy_timeout = 5000");
+        const deadline = db.prepare(`SELECT w.request_event_seq AS seq, deadline_ms - opened_ms AS duration
+          FROM native_question_waits w JOIN agent_questions q USING (request_event_seq) WHERE q.run_id = ?`).get(origin.runId);
+        assert.equal(deadline.duration, minutes * 60_000);
+        assert.equal(db.prepare(`UPDATE native_question_waits SET opened_ms = opened_ms - ?, deadline_ms = deadline_ms - ?
+          WHERE request_event_seq = ? AND state = 'live'`).run(deadline.duration, deadline.duration, deadline.seq).changes, 1);
+      } finally {
+        db.close();
+      }
+      await writeFile(join(repo, `advance-${kind}-question`), "");
+      await browser.waitUntil(async () => (await latest(probe))?.status === "succeeded",
+        { timeout: 30_000, timeoutMsg: "A queued turn could not use the expired question's slot" });
+      await reopen();
+      const saved = await invoke(browser, "saved_conversation_questions", origin);
+      assert.deepEqual(saved.map(({ event, state, reason }) => [event.data.request_id, state, reason]),
+        [[71, "saved", "timeout"], [72, "saved", "turn_stopped"]]);
+      assert.equal((await latest(source)).id, origin.runId);
+      const panel = await open(source);
+      const format = panel.$('.//form[.//option[@value="Markdown"]]');
+      await reply(format, "Markdown");
+      await panel.$("p=Answer recorded").waitForDisplayed();
+      assert.equal((await latest(source)).id, origin.runId);
+      const summary = panel.$('.//form[.//option[@value="Yes"]]');
+      await reply(summary, "Yes");
+      await panel.$("p=The linked planning turn received both answers.").waitForDisplayed({ timeout: 30_000 });
+      const followup = (await invoke(browser, "latest_conversation_job", source.scope)).job.latestAttempt;
+      assert.equal(followup.previousRunId, origin.runId);
+      assert.equal(followup.ordinal, 2);
+      await assert.rejects(invoke(browser, "answer_saved_conversation_question", {
+        ...origin, requestId: 71, answer: { action: "accept", values: { format: "Markdown" } },
+      }));
+    }
+  } finally {
+    await Promise.all(["default", "custom"].map((kind) => writeFile(join(repo, `advance-${kind}-question`), "")));
+    if (detached) {
+      await browser.url(page);
+      await waitForRuntime(browser);
+      await showTestApplication(browser, application);
+    }
+    await invoke(browser, "set_job_queue_capacity", { capacity: settings.capacity });
+    await invoke(browser, "set_cli_executable", { provider: "codex", executable: profile.executable });
+  }
+}
+
 async function verifyJobPolicy(browser, application, scratch) {
   const repo = join(scratch, "Policy checkout");
   git(scratch, "init", "-q", repo);
@@ -1074,6 +1205,9 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     });
     await t.test("dispatches queued work while the WebView is detached and restores the same attempt", async () => {
       await verifyDetachedJob(browser, application, scratch);
+    });
+    await t.test("answers live and expired questions after reopening the desktop", async () => {
+      await verifyQuestionContinuation(browser, application, scratch);
     });
   } catch (error) {
     if (browser && process.env.OMNIAGENT_UI_CAPTURE_DIR) {

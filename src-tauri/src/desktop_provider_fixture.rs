@@ -67,23 +67,68 @@ fn run() -> Result<()> {
                     json!({"id":request["id"],"result":{"turn":{"id":TURN}}})
                 )?;
                 stdout.flush()?;
-                let answer = complete(&root, &request)?;
-                writeln!(
-                    stdout,
-                    "{}",
-                    json!({"method":"item/completed","params":{
-                        "threadId":SESSION,"turnId":TURN,
-                        "item":{"type":"agentMessage","id":"answer","text":answer}
-                    }})
+                let text = request
+                    .pointer("/params/input/0/text")
+                    .and_then(Value::as_str)
+                    .context("the fixture turn did not receive a text prompt")?;
+                if text.contains("The user answered questions from the original turn.") {
+                    ensure!(
+                        text.contains("\"format\":\"Markdown\"")
+                            && text.contains("\"summary\":\"Yes\""),
+                        "the linked turn did not receive both typed answers"
+                    );
+                    finished(
+                        &mut stdout,
+                        "completed",
+                        Some("The linked planning turn received both answers."),
+                    )?;
+                } else if let Some(kind) = text.strip_prefix("Ask desktop question ") {
+                    ensure!(
+                        matches!(kind, "live" | "default" | "custom"),
+                        "unknown question fixture"
+                    );
+                    question(
+                        &mut stdout,
+                        71,
+                        "format",
+                        "Which format?",
+                        &["Markdown", "JSON"],
+                    )?;
+                    if kind != "live" {
+                        wait_for_file(&root.join(format!("advance-{kind}-question")))?;
+                        question(
+                            &mut stdout,
+                            72,
+                            "summary",
+                            "Include a summary?",
+                            &["Yes", "No"],
+                        )?;
+                    }
+                } else {
+                    finished(&mut stdout, "completed", Some(complete(&root, text)?))?;
+                }
+                continue;
+            }
+            Some("turn/interrupt") => {
+                writeln!(stdout, "{}", json!({"id":request["id"],"result":{}}))?;
+                finished(&mut stdout, "interrupted", None)?;
+                continue;
+            }
+            None if request["id"] == 71 => {
+                ensure!(
+                    request.pointer("/result/answers/format/answers/0") == Some(&json!("Markdown")),
+                    "the live question missed its typed answer"
+                );
+                let mut receipt = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(root.join("desktop-live-question-reply"))?;
+                writeln!(receipt, "Markdown")?;
+                finished(
+                    &mut stdout,
+                    "completed",
+                    Some("The live turn received Markdown."),
                 )?;
-                writeln!(
-                    stdout,
-                    "{}",
-                    json!({"method":"turn/completed","params":{
-                        "threadId":SESSION,"turn":{"id":TURN,"status":"completed"}
-                    }})
-                )?;
-                stdout.flush()?;
                 continue;
             }
             _ => bail!("unexpected method in the desktop provider fixture"),
@@ -94,22 +139,71 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn complete(root: &Path, request: &Value) -> Result<&'static str> {
-    let prompt = request
-        .pointer("/params/input/0/text")
-        .and_then(Value::as_str)
-        .context("the fixture turn did not receive a text prompt")?;
+fn question(
+    output: &mut impl Write,
+    id: i64,
+    field: &str,
+    label: &str,
+    options: &[&str],
+) -> Result<()> {
+    let choices = options
+        .iter()
+        .map(|label| json!({"label":label}))
+        .collect::<Vec<_>>();
+    writeln!(
+        output,
+        "{}",
+        json!({"id":id,"method":"item/tool/requestUserInput","params":{
+            "threadId":SESSION,"turnId":TURN,"itemId":field,
+            "questions":[{"id":field,"question":label,"options":choices}]
+        }})
+    )?;
+    output.flush()?;
+    Ok(())
+}
+
+fn finished(output: &mut impl Write, status: &str, answer: Option<&str>) -> Result<()> {
+    if let Some(answer) = answer {
+        writeln!(
+            output,
+            "{}",
+            json!({"method":"item/completed","params":{
+                "threadId":SESSION,"turnId":TURN,
+                "item":{"type":"agentMessage","id":"answer","text":answer}
+            }})
+        )?;
+    }
+    writeln!(
+        output,
+        "{}",
+        json!({"method":"turn/completed","params":{
+            "threadId":SESSION,"turn":{"id":TURN,"status":status}
+        }})
+    )?;
+    output.flush()?;
+    Ok(())
+}
+
+fn wait_for_file(path: &Path) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while !path.is_file() {
+        ensure!(
+            Instant::now() < deadline,
+            "desktop test did not release the fixture"
+        );
+        thread::sleep(Duration::from_millis(30));
+    }
+    Ok(())
+}
+
+fn complete(root: &Path, prompt: &str) -> Result<&'static str> {
+    if prompt == "Complete desktop slot probe" {
+        return Ok("The freed slot ran the probe.");
+    }
     if let Some(slot) = prompt.strip_prefix("Hold desktop slot ") {
         let slot = slot.parse::<u32>()?;
         fs::write(root.join(format!("desktop-slot-{slot}")), [])?;
-        let deadline = Instant::now() + Duration::from_secs(90);
-        while !root.join(RELEASE).is_file() {
-            ensure!(
-                Instant::now() < deadline,
-                "desktop test did not release the held job"
-            );
-            thread::sleep(Duration::from_millis(30));
-        }
+        wait_for_file(&root.join(RELEASE))?;
         return Ok("Released the held desktop job.");
     }
     ensure!(
