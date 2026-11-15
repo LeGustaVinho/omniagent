@@ -450,8 +450,7 @@ impl Store {
             let candidates = {
                 let mut query = tx.prepare(
                     "SELECT project_id, id FROM jobs j WHERE queue_state = 'queued'
-                    AND NOT EXISTS (SELECT 1 FROM instruction_delivery_attempts
-                        WHERE job_id = j.id AND route = 'continuation' AND superseded = 0)
+                    AND NOT EXISTS (SELECT 1 FROM borrowed_instruction_deliveries WHERE job_id = j.id)
                     AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
                          OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id)
                          OR EXISTS (SELECT 1 FROM ready_question_continuations WHERE job_id = j.id)

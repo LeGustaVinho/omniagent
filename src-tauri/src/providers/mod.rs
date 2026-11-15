@@ -632,6 +632,7 @@ pub trait CliSession: Send {
     ) -> anyhow::Result<AdapterUpdate> {
         Ok(target.rejected(input.message_id, steering::SteerOutcome::Unavailable))
     }
+    fn abandon_unsent_steering(&mut self) {}
     fn request_side(&mut self, input: side::SideInput) -> anyhow::Result<AdapterUpdate> {
         Ok(input
             .reply(side::SideOutcome::Unavailable {

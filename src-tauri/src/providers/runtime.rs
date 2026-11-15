@@ -927,9 +927,21 @@ impl TurnExecution {
                     )?;
                 }
                 Ok(Command::Steer(target, input, reply)) => {
-                    let update = session.steer(target, input);
+                    let message_id = input.message_id.clone();
+                    let update = session.steer(target.clone(), input);
                     if let Ok(update) = update {
                         let applied = self.write_steering(process, update);
+                        if applied.as_ref().is_err_and(|error| {
+                            error.is::<crate::jobs::SteeringPreparationRejected>()
+                        }) {
+                            session.abandon_unsent_steering();
+                            let settled = self.record(
+                                target.settlement(message_id, SteerOutcome::Unavailable),
+                                EventSource::Application,
+                            );
+                            let _ = reply.send(settled);
+                            continue;
+                        }
                         let _ = reply.send(
                             applied
                                 .as_ref()
@@ -1499,6 +1511,13 @@ impl TurnExecution {
                 ],
                 [wire],
             ) if frame == wire.as_bytes() => {
+                self.app
+                    .block_on(repository::verify_checkout(
+                        &self.store,
+                        self.plan.run.checkout_id.clone(),
+                        self.plan.scope.checkout.clone(),
+                    ))
+                    .map_err(|_| crate::jobs::SteeringPreparationRejected)?;
                 self.record(event.clone(), EventSource::Application)?;
                 let delivery = bounded_write(process, outbound);
                 if delivery.is_err() {

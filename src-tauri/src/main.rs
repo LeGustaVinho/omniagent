@@ -199,6 +199,8 @@ fn main() {
             conversation_runtime::latest_conversation_run,
             conversation_runtime::latest_conversation_job,
             conversation_runtime::pending_conversation_instructions,
+            conversation_runtime::steer_pending_instruction,
+            conversation_runtime::resolve_uncertain_steering,
             conversation_runtime::revise_pending_instruction,
             conversation_runtime::remove_pending_instruction,
             conversation_runtime::project_job_queue,

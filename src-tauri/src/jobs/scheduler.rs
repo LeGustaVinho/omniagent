@@ -130,6 +130,33 @@ impl JobScheduler {
             .context("This conversation run is no longer active")
     }
 
+    /// Reports whether the scheduler attempted the native route. Delivery settles in run events.
+    pub async fn steer_pending_instruction(
+        &self,
+        store: &Store,
+        conversation: String,
+        run: String,
+        instruction: String,
+        revision: String,
+    ) -> Result<bool> {
+        let Ok(control) = self.active_turn(&conversation, &run) else {
+            return Ok(false);
+        };
+        let Some(delivery) = store
+            .claim_native_instruction(conversation, instruction, revision.clone(), run.clone())
+            .await?
+        else {
+            return Ok(false);
+        };
+        if let Err(error) = control.steer(delivery.target, delivery.input).await {
+            if store.release_unsent_steering(run, revision).await? {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        Ok(true)
+    }
+
     pub async fn stop_admission(&self) -> bool {
         let Some(_boundary) = self.admission.enter().await else {
             return false;

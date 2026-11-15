@@ -326,8 +326,8 @@ impl Store {
                     "SELECT EXISTS(SELECT 1 FROM queued_conversation_instructions i WHERE i.message_id = ?1
                         AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = i.job_id)
                         AND NOT EXISTS (
-                            SELECT 1 FROM instruction_delivery_attempts
-                            WHERE job_id = i.job_id AND route = 'continuation' AND superseded = 0
+                            SELECT 1 FROM borrowed_instruction_deliveries
+                            WHERE job_id = i.job_id AND (route = 'continuation' OR delivered)
                         ))",
                     [message], |row| row.get(0),
                 )?;
@@ -660,6 +660,7 @@ impl Store {
                 | ProviderEventData::Question { .. }
                 | ProviderEventData::QuestionClosed { .. }
                 | ProviderEventData::QuestionReplySettled { .. }
+                | ProviderEventData::SteeringSettled { .. }
         );
         let payload = protection::protect(&serde_json::to_vec(&event)?)?;
         self.execute(move |db| {
@@ -700,6 +701,7 @@ impl Store {
                 && matches!(&event.data, ProviderEventData::Diagnostic { .. } | ProviderEventData::Error { .. });
             tx.execute("INSERT INTO agent_events(run_id, source, payload, inspect_diagnostic) VALUES (?1, ?2, ?3, ?4)",
                 params![run_id, source.as_sql(), payload, diagnostic])?;
+            crate::jobs::record_steering_event(&tx, &active.conversation_id, &run_id, source, tx.last_insert_rowid(), &event.data)?;
             if source == EventSource::Provider {
                 crate::jobs::record_native_subagent(&tx, &run_id, tx.last_insert_rowid(), &event.data)?;
             }
@@ -923,13 +925,7 @@ impl Store {
             };
             runs::advance_run(&tx, &run, outcome)?;
             crate::jobs::record_job_failure(&tx, &run_id, outcome, failure)?;
-            let context_id = if let Some(encrypted) = encrypted {
-                let mut entries = context_entries(&tx, &active.conversation_id, &active.context_id)?;
-                entries.push(insert_message(&tx, &active.conversation_id, MessageRole::Assistant, encrypted)?);
-                write_context(&tx, &active.conversation_id, &entries, !active.detached_context)?
-            } else {
-                active.context_id
-            };
+            let context_id = seal_attempt_context(&tx, &run_id, &active, encrypted)?;
             tx.execute("UPDATE agent_attempts SET result_context_id = ?1 WHERE run_id = ?2", params![context_id, run_id])?;
             crate::jobs::release_settled_writer(&tx, &run_id)?;
             let saved_input = crate::jobs::settle_question_waits(&tx, &run_id, &context_id, quiescence_confirmed)?;
@@ -945,7 +941,8 @@ impl Store {
                     AND EXISTS(SELECT 1 FROM agent_attempts a
                         JOIN context_snapshots s ON s.run_id = a.run_id
                         JOIN dispatches d ON d.snapshot_id = s.id
-                        WHERE a.run_id = ?3 AND a.provider_terminal = 'completed' AND d.delivery = 'submitted')",
+                        WHERE a.run_id = ?3 AND a.provider_terminal = 'completed' AND d.delivery = 'submitted')
+                    AND NOT EXISTS (SELECT 1 FROM borrowed_instruction_deliveries WHERE run_id = ?3 AND uncertain)",
                     params![context_id, active.session_id, run_id])?;
                 tx.execute(
                     "INSERT INTO structured_question_continuations(request_event_seq, context_id)
@@ -980,6 +977,7 @@ impl Store {
                     .collect::<rusqlite::Result<Vec<_>>>()?
             };
             for id in active {
+                let attempt = active_attempt(&tx, &id)?;
                 let run = runs::load_run(&tx, &id)?;
                 runs::advance_run(&tx, &run, RunStatus::Interrupted)?;
                 crate::jobs::record_job_failure(
@@ -995,16 +993,12 @@ impl Store {
                 close_permissions(&tx, &id)?;
                 close_unfinished_structured_questions(&tx, &id)?;
                 crate::jobs::settle_subagent_audit(&tx, &id, false)?;
+                let context = seal_attempt_context(&tx, &id, &attempt, None)?;
                 tx.execute(
-                    "UPDATE agent_attempts SET result_context_id = context_id WHERE run_id = ?1",
-                    [&id],
+                    "UPDATE agent_attempts SET result_context_id = ?1 WHERE run_id = ?2",
+                    params![context, id],
                 )?;
                 crate::jobs::release_settled_writer(&tx, &id)?;
-                let context: String = tx.query_row(
-                    "SELECT context_id FROM agent_attempts WHERE run_id = ?1",
-                    [&id],
-                    |r| r.get(0),
-                )?;
                 crate::jobs::restart_question_waits(&tx, &id, &context)?;
                 close_native_questions(&tx, &id)?;
                 if !crate::jobs::recover_waiting_parent(&tx, &id)? {
@@ -1027,6 +1021,35 @@ impl Store {
         self.job_signal.send_replace(());
         Ok(())
     }
+}
+
+fn seal_attempt_context(
+    db: &Connection,
+    run: &str,
+    active: &ActiveAttempt,
+    response: Option<Vec<u8>>,
+) -> Result<String> {
+    crate::jobs::settle_steering_at_stop(db, run)?;
+    let steering = crate::jobs::accepted_steering_revisions(db, run)?;
+    if response.is_none() && steering.is_empty() {
+        return Ok(active.context_id.clone());
+    }
+    let mut entries = context_entries(db, &active.conversation_id, &active.context_id)?;
+    entries.extend(steering);
+    if let Some(response) = response {
+        entries.push(insert_message(
+            db,
+            &active.conversation_id,
+            MessageRole::Assistant,
+            response,
+        )?);
+    }
+    write_context(
+        db,
+        &active.conversation_id,
+        &entries,
+        !active.detached_context,
+    )
 }
 
 struct PreparedAttempt {
@@ -2518,6 +2541,14 @@ mod tests {
     }
 
     async fn prepare_fixture_dispatch(store: &Store, attempt: &AttemptPlan) -> Result<String> {
+        prepare_fixture_dispatch_with_capabilities(store, attempt, None).await
+    }
+
+    async fn prepare_fixture_dispatch_with_capabilities(
+        store: &Store,
+        attempt: &AttemptPlan,
+        capabilities: Option<crate::providers::capabilities::CapabilityAssessment>,
+    ) -> Result<String> {
         let native_history = match (&attempt.intent, &attempt.resume_cursor_id) {
             (
                 SessionIntent::Resume {
@@ -2540,7 +2571,7 @@ mod tests {
                     base_commit: None,
                     submitted_messages: attempt.input.clone(),
                     native_history,
-                    capabilities: None,
+                    capabilities,
                     filesystem_skills: Vec::new(),
                     reported_skills: None,
                     instructions: None,
@@ -2554,6 +2585,303 @@ mod tests {
                 vec![b"{\"fixture\":true}\n".to_vec()],
             )
             .await
+    }
+
+    #[tokio::test]
+    async fn steering_preserves_receipts_and_requires_review_for_uncertain_delivery() -> Result<()>
+    {
+        use crate::{
+            jobs::{AdmissionEnvironment, InstructionDelivery, JobContext},
+            providers::{
+                capabilities::{
+                    Availability, CapabilityAssessment, CapabilityDescriptor, CapabilityScope,
+                    DeclaredSource, EvidenceBoundary, ResolvedCapability, Verification,
+                },
+                steering::{SteerOutcome, SteerTarget},
+            },
+        };
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let env = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: false,
+        };
+        let enqueue = |store: Store, text: &'static str| {
+            let (conversation, scope, env) = (conversation.id.clone(), scope.clone(), env.clone());
+            async move {
+                let current = store.conversation(conversation.clone()).await?;
+                store
+                    .save_conversation_draft(conversation.clone(), text.into())
+                    .await?;
+                let job = store
+                    .enqueue_conversation_turn(
+                        JobContext {
+                            conversation_id: conversation.clone(),
+                            context_id: current.context_id,
+                        },
+                        scope,
+                        text.into(),
+                    )
+                    .await?;
+                let pending = store
+                    .pending_conversation_instructions(conversation, env)
+                    .await?;
+                pending
+                    .into_iter()
+                    .find(|entry| entry.id == job.id)
+                    .context("Queued instruction disappeared")
+            }
+        };
+        enqueue(store.clone(), "Initial prompt").await?;
+        let original = store
+            .claim_next_job(env.clone())
+            .await?
+            .context("Initial turn was not admitted")?;
+        store.mark_agent_running(original.run.id.clone()).await?;
+        let capability_scope = CapabilityScope::from_dispatch(
+            &scope,
+            conversation.checkout_id.clone(),
+            None,
+            None,
+            serde_json::from_value(
+                json!({"detected":[],"unresolved":[],"providerRevision":null,"effectiveRevision":null}),
+            )?,
+            None,
+            None,
+        );
+        let dispatch = prepare_fixture_dispatch_with_capabilities(
+            &store,
+            &original,
+            Some(CapabilityAssessment {
+                version: 1,
+                scope: capability_scope,
+                entries: vec![ResolvedCapability {
+                    descriptor: CapabilityDescriptor {
+                        subject: CapabilitySubject::Protocol {
+                            capability: Capability::LiveSteering,
+                        },
+                        source: DeclaredSource::Provider,
+                        availability: Availability::Available,
+                        observed: None,
+                        blocker: None,
+                        boundary: EvidenceBoundary::ExactCheckout,
+                    },
+                    evidence: Some(Verification {
+                        id: "observed-steer".into(),
+                        checked_at: "fixture".into(),
+                        artifact_id: "verified-recording".into(),
+                        origin: EvidenceOrigin::AuthenticatedFixture,
+                        result: ObservedResult::Succeeded,
+                        attachment_limits: None,
+                    }),
+                }],
+            }),
+        )
+        .await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        let target = SteerTarget {
+            session_id: "thread".into(),
+            turn_id: "source-turn".into(),
+        };
+        store
+            .record_agent_observation(
+                original.run.id.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: ProviderLocation {
+                        session_id: Some(target.session_id.clone()),
+                        turn_id: Some(target.turn_id.clone()),
+                        ..Default::default()
+                    },
+                    data: ProviderEventData::SessionReady {
+                        model: None,
+                        effort: None,
+                    },
+                },
+            )
+            .await?;
+        let claim = |store: Store, id: String, revision: String| {
+            let (conversation, run) = (conversation.id.clone(), original.run.id.clone());
+            async move {
+                store
+                    .claim_native_instruction(conversation, id, revision, run)
+                    .await
+            }
+        };
+        let prepare = |store: Store, message_id: String| {
+            let (run, target) = (original.run.id.clone(), target.clone());
+            async move {
+                store
+                    .record_agent_observation(
+                        run,
+                        EventSource::Application,
+                        ProviderEvent {
+                            location: ProviderLocation::default(),
+                            data: ProviderEventData::SteeringPrepared {
+                                message_id,
+                                target,
+                                frame: b"fixture-steer".to_vec(),
+                            },
+                        },
+                    )
+                    .await
+            }
+        };
+        let settled = |target: &SteerTarget, message_id, outcome| ProviderEvent {
+            location: ProviderLocation::default(),
+            data: ProviderEventData::SteeringSettled {
+                target: target.clone(),
+                message_id,
+                outcome,
+            },
+        };
+
+        let rejected = enqueue(store.clone(), "Definitively rejected").await?;
+        assert!(
+            claim(
+                store.clone(),
+                rejected.id.clone(),
+                rejected.revision_id.clone()
+            )
+            .await?
+            .is_some()
+        );
+        prepare(store.clone(), rejected.revision_id.clone()).await?;
+        store
+            .record_agent_observation(
+                original.run.id.clone(),
+                EventSource::Provider,
+                settled(
+                    &target,
+                    rejected.revision_id.clone(),
+                    SteerOutcome::ProviderRejected,
+                ),
+            )
+            .await?;
+        let queued = store
+            .pending_conversation_instructions(conversation.id.clone(), env.clone())
+            .await?;
+        assert_eq!(queued[0].id, rejected.id);
+        assert_eq!(queued[0].delivery, InstructionDelivery::Queued);
+        assert_eq!(queued[0].revision_id, rejected.revision_id);
+        store
+            .remove_pending_instruction(conversation.id.clone(), rejected.id, rejected.revision_id)
+            .await?;
+
+        let accepted = enqueue(store.clone(), "Original revision").await?;
+        store
+            .revise_pending_instruction(
+                conversation.id.clone(),
+                accepted.id.clone(),
+                accepted.revision_id.clone(),
+                "Accepted revision".into(),
+                None,
+            )
+            .await?;
+        assert!(
+            claim(store.clone(), accepted.id.clone(), accepted.revision_id)
+                .await?
+                .is_none()
+        );
+        let pending = store
+            .pending_conversation_instructions(conversation.id.clone(), env.clone())
+            .await?;
+        let revision = pending[0].revision_id.clone();
+        let selected = claim(store.clone(), accepted.id.clone(), revision.clone())
+            .await?
+            .context("No steering claim")?;
+        assert_eq!(selected.target, target);
+        assert_eq!(selected.input.text, "Accepted revision");
+        assert!(
+            claim(store.clone(), accepted.id, revision.clone())
+                .await?
+                .is_none()
+        );
+        prepare(store.clone(), revision.clone()).await?;
+        let wrong = SteerTarget {
+            session_id: target.session_id.clone(),
+            turn_id: "wrong-turn".into(),
+        };
+        assert!(
+            store
+                .record_agent_observation(
+                    original.run.id.clone(),
+                    EventSource::Provider,
+                    settled(&wrong, revision.clone(), SteerOutcome::Accepted)
+                )
+                .await
+                .is_err()
+        );
+        store
+            .record_agent_observation(
+                original.run.id.clone(),
+                EventSource::Provider,
+                settled(&target, revision.clone(), SteerOutcome::Accepted),
+            )
+            .await?;
+
+        let uncertain = enqueue(store.clone(), "Pending confirmation").await?;
+        assert!(
+            claim(
+                store.clone(),
+                uncertain.id.clone(),
+                uncertain.revision_id.clone()
+            )
+            .await?
+            .is_some()
+        );
+        prepare(store.clone(), uncertain.revision_id.clone()).await?;
+        drop(store);
+        let store = Store::open(scope.checkout.join("store.sqlite"))?;
+        store.recover_agent_attempts_after_restart().await?;
+        let original_dispatch = store
+            .agent_dispatch(conversation.id.clone(), original.run.id.clone())
+            .await?
+            .unwrap();
+        assert_eq!(original_dispatch.snapshot.submitted_messages.len(), 1);
+        let history = store.conversation_history(conversation.id.clone()).await?;
+        assert_eq!(
+            history
+                .messages
+                .iter()
+                .map(|m| m.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Initial prompt", "Accepted revision"]
+        );
+        let pending = store
+            .pending_conversation_instructions(conversation.id.clone(), env.clone())
+            .await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, uncertain.id);
+        assert_eq!(pending[0].delivery, InstructionDelivery::NeedsReview);
+        assert_eq!(pending[0].run_id.as_deref(), Some(original.run.id.as_str()));
+        assert!(store.claim_next_job(env.clone()).await?.is_none());
+        store
+            .resolve_uncertain_steering(
+                conversation.id,
+                uncertain.id,
+                uncertain.revision_id.clone(),
+                original.run.id,
+                true,
+            )
+            .await?;
+        let retry = store
+            .claim_next_job(env)
+            .await?
+            .context("Reviewed instruction did not rejoin the queue")?;
+        assert_eq!(
+            retry.input.last().unwrap().revision_id,
+            uncertain.revision_id
+        );
+        assert_eq!(
+            retry
+                .input
+                .iter()
+                .filter(|m| m.revision_id == revision)
+                .count(),
+            1
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -3715,6 +4043,15 @@ mod tests {
             request: LaunchRequest<'_>,
             config: Value,
         ) -> io::Result<CapturedProcess> {
+            self.launch_fixture(request, config, false)
+        }
+
+        fn launch_fixture(
+            &self,
+            request: LaunchRequest<'_>,
+            config: Value,
+            wait_for_steering: bool,
+        ) -> io::Result<CapturedProcess> {
             let (write, output) = mpsc::channel();
             if request.arguments == ["plugin", "list", "--json"].map(std::ffi::OsStr::new) {
                 write.send(Ok(OutputFrame {
@@ -3756,6 +4093,9 @@ mod tests {
                 json!({"method":"turn/completed","params":{"threadId":"native-session",
                     "turn":{"id":"native-turn","status":"completed"}}}),
             ] {
+                if wait_for_steering && data["method"] == "turn/completed" {
+                    continue;
+                }
                 write
                     .send(Ok(OutputFrame {
                         stream: Stream::Stdout,
@@ -3764,11 +4104,234 @@ mod tests {
                     .unwrap();
             }
             Ok(CapturedProcess {
-                input: ProcessInput::new(self.0.clone()),
+                input: if wait_for_steering {
+                    ProcessInput::new(SteeringWire {
+                        log: self.0.clone(),
+                        output: write,
+                    })
+                } else {
+                    ProcessInput::new(self.0.clone())
+                },
                 output,
                 control: Arc::new(CompletedProcess),
             })
         }
+    }
+
+    struct SteeringWire {
+        log: WireLog,
+        output: mpsc::Sender<io::Result<OutputFrame>>,
+    }
+
+    impl io::Write for SteeringWire {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let written = self.log.write(bytes)?;
+            let frame: Value = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+            if frame["method"] == "turn/steer" {
+                let conversation = self.log.conversation.clone();
+                let expected_frame = bytes.to_vec();
+                self.log.runtime.block_on(self.log.store.execute(move |db| {
+                    let payload: Vec<u8> = db.query_row(
+                        "SELECT e.payload FROM instruction_delivery_attempts i JOIN agent_events e ON e.seq = i.prepared_event_seq
+                         JOIN active_agent_attempts active ON active.run_id = i.run_id
+                         WHERE active.conversation_id = ?1 AND i.steering_state = 'prepared'",
+                        [conversation], |row| row.get(0),
+                    ).context("Steering reached the wire before its receipt was durable")?;
+                    let event: ProviderEvent = serde_json::from_slice(&protection::unprotect(&payload)?)?;
+                    assert!(matches!(event.data, ProviderEventData::SteeringPrepared { frame, .. } if frame == expected_frame));
+                    Ok(())
+                })).map_err(io::Error::other)?;
+                assert_eq!(frame["params"]["expectedTurnId"], "native-turn");
+                for response in [
+                    json!({"id":frame["id"],"result":{"turnId":"native-turn"}}),
+                    json!({"method":"turn/completed","params":{"threadId":"native-session",
+                        "turn":{"id":"native-turn","status":"completed"}}}),
+                ] {
+                    self.output
+                        .send(Ok(OutputFrame {
+                            stream: Stream::Stdout,
+                            data: response.to_string(),
+                        }))
+                        .map_err(io::Error::other)?;
+                }
+            }
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct HeldSteeringRunner(FixtureRunner);
+
+    impl Runner for HeldSteeringRunner {
+        fn identity(&self) -> &str {
+            self.0.identity()
+        }
+        fn execution_platform(&self) -> Option<ExecutionPlatform> {
+            self.0.execution_platform()
+        }
+        fn executable_revision(&self, path: &Path) -> Option<String> {
+            self.0.executable_revision(path)
+        }
+        fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
+            self.0.launch_fixture(
+                request,
+                json!({"approval_policy":"never","sandbox_mode":"read-only"}),
+                true,
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_steering_records_the_exact_wire_before_the_cli_acknowledges() -> Result<()> {
+        use crate::jobs::{JobContext, JobScheduler};
+
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        std::fs::write(&scope.executable, b"fixture")?;
+        // Keep the same authenticated profile and fingerprint for qualification and delivery.
+        scope.effort = None;
+        let log = WireLog {
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            conversation: conversation.id.clone(),
+            frames: Arc::new(Mutex::new(Vec::new())),
+        };
+        let baseline = prepare(
+            &store,
+            &conversation.id,
+            scope.clone(),
+            "Check the fixture scope",
+        )
+        .await?;
+        let baseline_id = baseline.run.id.clone();
+        assert_eq!(
+            start_managed_turn(
+                store.clone(),
+                Arc::new(FixtureRunner(log.clone())),
+                baseline,
+                None
+            )
+            .wait()
+            .await?,
+            RunStatus::Succeeded
+        );
+        let assessment = store
+            .agent_dispatch(conversation.id.clone(), baseline_id.clone())
+            .await?
+            .unwrap()
+            .snapshot
+            .capabilities
+            .unwrap();
+        let descriptor = assessment
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.descriptor.subject
+                    == CapabilitySubject::Protocol {
+                        capability: Capability::LiveSteering,
+                    }
+            })
+            .context("Missing fixture steering capability")?
+            .descriptor
+            .clone();
+        store
+            .record_capability_evidence(
+                assessment.scope,
+                descriptor,
+                EvidenceOrigin::AuthenticatedFixture,
+                ObservedResult::Succeeded,
+                baseline_id,
+            )
+            .await?;
+
+        let scheduler = JobScheduler::start(
+            store.clone(),
+            Arc::new(HeldSteeringRunner(FixtureRunner(log))),
+            None,
+        );
+        let enqueue = |text: &'static str| {
+            let (store, conversation, scope) =
+                (store.clone(), conversation.id.clone(), scope.clone());
+            async move {
+                let owner = store.conversation(conversation.clone()).await?;
+                store
+                    .save_conversation_draft(conversation.clone(), text.into())
+                    .await?;
+                store
+                    .enqueue_conversation_turn(
+                        JobContext {
+                            conversation_id: conversation,
+                            context_id: owner.context_id,
+                        },
+                        scope,
+                        text.into(),
+                    )
+                    .await
+            }
+        };
+        let owner = enqueue("Run with native steering").await?;
+        let run = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(attempt) = store.job(owner.project_id.clone(), owner.id.clone()).await?.and_then(|job| job.latest_attempt) {
+                    let ready: bool = store.execute({
+                        let run = attempt.run_id.clone();
+                        move |db| Ok(db.query_row("SELECT provider_turn_id IS NOT NULL FROM agent_attempts WHERE run_id = ?1", [run], |row| row.get(0))?)
+                    }).await?;
+                    if ready { break Ok::<_, anyhow::Error>(attempt.run_id); }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await??;
+        let followup = enqueue("Handle this instruction now").await?;
+        let pending = store
+            .pending_conversation_instructions(conversation.id.clone(), scheduler.environment())
+            .await?;
+        let instruction = pending
+            .into_iter()
+            .find(|entry| entry.id == followup.id)
+            .context("Missing pending steering instruction")?;
+        assert!(
+            scheduler
+                .steer_pending_instruction(
+                    &store,
+                    conversation.id.clone(),
+                    run.clone(),
+                    followup.id.clone(),
+                    instruction.revision_id.clone()
+                )
+                .await?
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let messages = store.conversation_messages(conversation.id.clone()).await?;
+                if messages
+                    .iter()
+                    .any(|message| message.revision_id == instruction.revision_id)
+                {
+                    break Ok::<_, anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await??;
+        let linked = store
+            .job(followup.project_id, followup.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap();
+        assert_eq!(linked.run_id, run);
+        assert_eq!(linked.status, RunStatus::Succeeded);
+        assert!(
+            store
+                .pending_conversation_instructions(conversation.id, scheduler.environment())
+                .await?
+                .is_empty()
+        );
+        scheduler.shutdown().await?;
+        Ok(())
     }
 
     struct NativeQuotaFixture {

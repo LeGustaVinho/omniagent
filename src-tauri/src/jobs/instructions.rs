@@ -141,8 +141,7 @@ pub(super) fn predecessor(db: &Connection, job: &Job) -> Result<Option<String>> 
            ON j.conversation_id = current.conversation_id AND j.sequence < current.sequence
          JOIN queued_conversation_instructions earlier ON earlier.job_id = j.id
          WHERE current.id = ?1 AND j.queue_state <> 'cancelled'
-           AND NOT EXISTS (SELECT 1 FROM instruction_delivery_attempts
-               WHERE job_id = j.id AND route = 'continuation' AND superseded = 0)
+           AND NOT EXISTS (SELECT 1 FROM borrowed_instruction_deliveries WHERE job_id = j.id)
            AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
                 OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id))
            AND (EXISTS (SELECT 1 FROM job_history_bindings WHERE job_id = j.id)) =
@@ -351,6 +350,7 @@ impl Store {
                 "SELECT j.project_id, j.id, i.revision_id, coalesce(h.context_id, j.context_id), h.job_id IS NOT NULL,
                         j.checkout_id, j.operator_scope, m.content, i.attachment_labels, coalesce(a.run_id, delivery.run_id),
                         CASE WHEN a.run_id IS NULL AND delivery.run_id IS NULL THEN j.queue_state
+                             WHEN delivery.uncertain THEN 'needs_review'
                              WHEN EXISTS (SELECT 1 FROM active_agent_attempts WHERE run_id = coalesce(a.run_id, delivery.run_id)) THEN 'delivering'
                              WHEN delivery.run_id IS NOT NULL THEN 'needs_review'
                              WHEN EXISTS (SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
@@ -361,14 +361,12 @@ impl Store {
                  JOIN message_revisions m ON m.id = i.revision_id
                  LEFT JOIN job_history_bindings h ON h.job_id = j.id
                  LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (SELECT max(ordinal) FROM job_attempts WHERE job_id = j.id)
-                 LEFT JOIN instruction_delivery_attempts delivery ON delivery.job_id = j.id
-                     AND delivery.route = 'continuation' AND delivery.superseded = 0
+                 LEFT JOIN borrowed_instruction_deliveries delivery ON delivery.job_id = j.id
                  WHERE j.conversation_id = ?1 AND j.queue_state <> 'cancelled'
                    AND NOT EXISTS (SELECT 1 FROM job_attempts prior
                                    JOIN context_snapshots s ON s.run_id = prior.run_id JOIN dispatches d ON d.snapshot_id = s.id
                                    WHERE prior.job_id = j.id AND d.ordinal = 1 AND d.delivery = 'submitted')
-                   AND NOT EXISTS (SELECT 1 FROM context_snapshots x JOIN dispatches d ON d.snapshot_id = x.id
-                                   WHERE x.run_id = delivery.run_id AND d.ordinal = 1 AND d.delivery = 'submitted')
+                   AND coalesce(delivery.delivered, 0) = 0
                  ORDER BY j.sequence",
             )?;
             let mut rows = statement.query([&conversation])?;

@@ -25,6 +25,7 @@ mod question_answers;
 mod question_waits;
 mod recovery;
 mod scheduler;
+mod steering_delivery;
 mod subagent_audit;
 mod subagents;
 pub use admission::{
@@ -68,6 +69,10 @@ pub use recovery::RecoveryAction;
 pub(crate) use recovery::requeue_unlaunched_job;
 pub use scheduler::JobScheduler;
 pub(crate) use scheduler::LaunchGate;
+pub(crate) use steering_delivery::{
+    SteeringPreparationRejected, accepted_revisions as accepted_steering_revisions,
+    record_event as record_steering_event, settle_interrupted as settle_steering_at_stop,
+};
 pub use subagent_audit::{
     ConversationSubagentAudit, SubagentAuditField, SubagentAuditGap, SubagentAuditPolicy,
     SubagentAuditSource,
@@ -344,8 +349,7 @@ fn change_pending_job_state(
     let changed = db.execute(
         "UPDATE jobs SET queue_state = ?3 WHERE project_id = ?1 AND id = ?2
          AND queue_state IN ('queued', 'paused')
-         AND NOT EXISTS (SELECT 1 FROM instruction_delivery_attempts
-             WHERE job_id = ?2 AND route = 'continuation' AND superseded = 0)
+         AND NOT EXISTS (SELECT 1 FROM borrowed_instruction_deliveries WHERE job_id = ?2)
          AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = ?2)
               OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = ?2)
               OR EXISTS (SELECT 1 FROM open_agent_questions q JOIN job_attempts a ON a.run_id = q.run_id
@@ -477,7 +481,9 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
                 j.conversation_id, j.context_id, j.origin_run_id, j.request_id,
                 j.mode, j.priority, j.queue_state,
                 coalesce(a.ordinal, CASE WHEN instruction.run_id IS NOT NULL THEN 1 END),
-                coalesce(a.run_id, instruction.run_id), r.status, coalesce(a.cancel_requested, 0),
+                coalesce(a.run_id, instruction.run_id),
+                CASE WHEN instruction.uncertain THEN 'interrupted' ELSE r.status END,
+                coalesce(a.cancel_requested, 0),
                 a.previous_run_id, coalesce(a.kind, 'initial'), recovery.action,
                 CASE WHEN j.writer_checkout_id IS NOT NULL THEN j.task_id END, attempt.conversation_id,
                 EXISTS(SELECT 1 FROM job_commands command WHERE command.job_id = j.id),
@@ -487,8 +493,7 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
          LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (
              SELECT max(ordinal) FROM job_attempts WHERE job_id = j.id
          )
-         LEFT JOIN instruction_delivery_attempts instruction ON instruction.job_id = j.id
-             AND instruction.route = 'continuation' AND instruction.superseded = 0
+         LEFT JOIN borrowed_instruction_deliveries instruction ON instruction.job_id = j.id
          LEFT JOIN runs r ON r.id = coalesce(a.run_id, instruction.run_id)
          LEFT JOIN agent_attempts attempt ON attempt.run_id = r.id
          LEFT JOIN job_recoveries recovery ON recovery.job_id = j.id

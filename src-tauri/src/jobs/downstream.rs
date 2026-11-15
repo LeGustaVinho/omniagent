@@ -185,9 +185,9 @@ pub(crate) fn observe_child_run(db: &Connection, run: &str) -> Result<()> {
     let mut tracked = db.prepare(
         "SELECT j.project_id, j.id FROM jobs j
          WHERE (EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id AND run_id = ?1)
-             OR EXISTS (SELECT 1 FROM instruction_delivery_attempts delivery
+             OR EXISTS (SELECT 1 FROM borrowed_instruction_deliveries delivery
                         WHERE delivery.job_id = j.id AND delivery.run_id = ?1
-                          AND delivery.superseded = 0 AND delivery.route = 'continuation'
+                          AND (delivery.route = 'continuation' OR delivery.delivered)
                           AND NOT EXISTS (SELECT 1 FROM job_recoveries WHERE source_run_id = ?1)))
            AND EXISTS (SELECT 1 FROM job_downstream_inputs WHERE child_job_id = j.id AND status IS NULL)",
     )?;

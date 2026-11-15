@@ -135,6 +135,42 @@ pub async fn pending_conversation_instructions(
 }
 
 #[tauri::command]
+pub async fn steer_pending_instruction(
+    store: State<'_, Store>,
+    scheduler: State<'_, JobScheduler>,
+    conversation_id: String,
+    run_id: String,
+    instruction_id: String,
+    revision_id: String,
+) -> Result<bool, String> {
+    scheduler
+        .steer_pending_instruction(&store, conversation_id, run_id, instruction_id, revision_id)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn resolve_uncertain_steering(
+    store: State<'_, Store>,
+    conversation_id: String,
+    run_id: String,
+    instruction_id: String,
+    revision_id: String,
+    confirmed_undelivered: bool,
+) -> Result<(), String> {
+    store
+        .resolve_uncertain_steering(
+            conversation_id,
+            instruction_id,
+            revision_id,
+            run_id,
+            confirmed_undelivered,
+        )
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
 pub async fn revise_pending_instruction(
     store: State<'_, Store>,
     conversation_id: String,

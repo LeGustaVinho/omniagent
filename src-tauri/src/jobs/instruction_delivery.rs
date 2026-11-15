@@ -35,11 +35,13 @@ fn contains_revision(input: &[MessageRevision], revision: &str) -> bool {
 }
 
 pub(super) fn adopted_run(db: &Connection, job: &str) -> Result<Option<String>> {
-    Ok(db.query_row(
-        "SELECT run_id FROM instruction_delivery_attempts WHERE job_id = ?1 AND route = 'continuation' AND superseded = 0",
-        [job],
-        |row| row.get(0),
-    ).optional()?)
+    Ok(db
+        .query_row(
+            "SELECT run_id FROM borrowed_instruction_deliveries WHERE job_id = ?1",
+            [job],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 pub(super) fn unconfirmed_adoption(db: &Connection, run: &str) -> Result<bool> {
@@ -50,6 +52,7 @@ pub(super) fn unconfirmed_adoption(db: &Connection, run: &str) -> Result<bool> {
             JOIN dispatches d ON d.snapshot_id = s.id
             WHERE i.run_id = ?1 AND i.route = 'continuation' AND i.superseded = 0
               AND d.ordinal = 1 AND d.delivery <> 'submitted'
+            UNION ALL SELECT 1 FROM borrowed_instruction_deliveries WHERE run_id = ?1 AND uncertain
          )",
         [run],
         |row| row.get(0),
@@ -86,7 +89,7 @@ pub(super) fn carry_unsent_instruction(
 ) -> Result<()> {
     let claim = db.query_row(
         "SELECT job_id, revision_id, policy_key, route FROM instruction_delivery_attempts i
-         WHERE i.run_id = ?1 AND i.superseded = 0 AND NOT EXISTS (
+         WHERE i.run_id = ?1 AND i.route <> 'steering' AND i.superseded = 0 AND NOT EXISTS (
              SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id WHERE s.run_id = i.run_id
          )",
         [previous],
@@ -113,7 +116,7 @@ pub(crate) fn validate_revisions(
     input: &[MessageRevision],
 ) -> Result<()> {
     let mut revisions = db.prepare(
-        "SELECT revision_id FROM instruction_delivery_attempts WHERE run_id = ?1 AND superseded = 0
+        "SELECT revision_id FROM instruction_delivery_attempts WHERE run_id = ?1 AND route <> 'steering' AND superseded = 0
          UNION SELECT i.revision_id FROM job_attempts a JOIN queued_conversation_instructions i ON i.job_id = a.job_id
                WHERE a.run_id = ?1 AND a.kind = 'initial'",
     )?;

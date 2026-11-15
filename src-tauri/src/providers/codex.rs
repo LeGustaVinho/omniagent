@@ -1442,6 +1442,12 @@ impl CliSession for CodexSession {
         })
     }
 
+    fn abandon_unsent_steering(&mut self) {
+        if let Some(pending) = self.pending_steer.take() {
+            self.rpc.take_request(&pending.request_id);
+        }
+    }
+
     fn steer(&mut self, target: SteerTarget, input: TurnInput) -> Result<AdapterUpdate> {
         let Some((session, active)) = self.session.as_ref().zip(self.active.as_ref()) else {
             return Ok(target.rejected(input.message_id, SteerOutcome::StaleTurn));

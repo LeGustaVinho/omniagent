@@ -58,7 +58,7 @@ fn project_policy(db: &Connection, project: &str) -> Result<QueueHistoryPolicy> 
     QueueHistoryPolicy::from_sql(value)
 }
 
-fn conversation_policy(
+pub(super) fn conversation_policy(
     db: &Connection,
     conversation: &str,
 ) -> Result<(String, QueueHistorySettings)> {
@@ -237,8 +237,7 @@ pub(crate) fn apply_queue_history_policy(db: &Connection, conversation: &str) ->
              LEFT JOIN conversation_contexts wait_context ON wait_context.id = w.context_id
              LEFT JOIN ready_question_continuations question ON question.job_id = j.id
              WHERE j.project_id = ?1 AND j.queue_state IN ('queued', 'paused')
-               AND NOT EXISTS (SELECT 1 FROM instruction_delivery_attempts
-                   WHERE job_id = j.id AND route = 'continuation' AND superseded = 0)
+               AND NOT EXISTS (SELECT 1 FROM borrowed_instruction_deliveries WHERE job_id = j.id)
                AND (j.conversation_id = ?2 OR retry_context.conversation_id = ?2 OR wait_context.conversation_id = ?2
                     OR question.conversation_id = ?2)
                AND (latest.run_id IS NULL OR recovery.job_id IS NOT NULL OR w.id IS NOT NULL OR question.job_id IS NOT NULL)
@@ -260,23 +259,31 @@ pub(crate) fn apply_queue_history_policy(db: &Connection, conversation: &str) ->
         if pipeline_pin_is_valid(db, &job)? {
             continue;
         }
-        match policy {
-            QueueHistoryPolicy::Cancel => {
-                change_pending_job_state(db, &project, &id, QueueState::Cancelled)?;
-            }
-            QueueHistoryPolicy::Review | QueueHistoryPolicy::Recorded => {
-                db.execute(
-                    "INSERT INTO job_history_bindings(job_id, context_id, pipeline_pin) VALUES (?1, ?2, 0)
-                     ON CONFLICT(job_id) DO UPDATE SET context_id = excluded.context_id WHERE ?3 AND pipeline_pin = 0",
-                    params![id, context, answered_question],
-                )?;
-                if policy == QueueHistoryPolicy::Review {
-                    change_pending_job_state(db, &project, &id, QueueState::Paused)?;
-                }
-            }
-        }
+        apply_job_history_policy(db, &job, &context, answered_question, policy)?;
     }
     archive_superseded_questions(db, conversation)
+}
+
+pub(super) fn apply_job_history_policy(
+    db: &Connection,
+    job: &Job,
+    context: &str,
+    answered_question: bool,
+    policy: QueueHistoryPolicy,
+) -> Result<()> {
+    if policy == QueueHistoryPolicy::Cancel {
+        change_pending_job_state(db, &job.project_id, &job.id, QueueState::Cancelled)?;
+    } else {
+        db.execute(
+            "INSERT INTO job_history_bindings(job_id, context_id, pipeline_pin) VALUES (?1, ?2, 0)
+             ON CONFLICT(job_id) DO UPDATE SET context_id = excluded.context_id WHERE ?3 AND pipeline_pin = 0",
+            params![job.id, context, answered_question],
+        )?;
+        if policy == QueueHistoryPolicy::Review {
+            change_pending_job_state(db, &job.project_id, &job.id, QueueState::Paused)?;
+        }
+    }
+    Ok(())
 }
 
 fn archive_superseded_questions(db: &Connection, conversation: &str) -> Result<()> {

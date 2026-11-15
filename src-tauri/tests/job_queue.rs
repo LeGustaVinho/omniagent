@@ -1194,6 +1194,7 @@ async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -
          DROP TABLE active_goals;
          DROP TABLE goal_revisions;
          DROP TABLE goals;
+         DROP VIEW borrowed_instruction_deliveries;
          DROP TABLE instruction_delivery_attempts;
          ALTER TABLE conversations DROP COLUMN history_generation;
          ALTER TABLE conversation_contexts DROP COLUMN history_generation;
@@ -1804,6 +1805,7 @@ async fn queued_conversation_draft_and_snapshot_survive_reopen_without_creating_
          DROP TABLE active_goals;
          DROP TABLE goal_revisions;
          DROP TABLE goals;
+         DROP VIEW borrowed_instruction_deliveries;
          DROP TABLE instruction_delivery_attempts;
          ALTER TABLE conversations DROP COLUMN history_generation;
          ALTER TABLE conversation_contexts DROP COLUMN history_generation;
