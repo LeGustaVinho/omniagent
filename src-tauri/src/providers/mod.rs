@@ -163,6 +163,18 @@ pub struct ProviderEvent {
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportedModel {
+    pub id: String,
+    pub canonical_id: Option<String>,
+    pub name: String,
+    pub input_modalities: Option<Vec<String>>,
+    pub effort_levels: Option<Vec<String>>,
+    pub default_effort: Option<String>,
+    pub selectable: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderEventData {
     Handshake {
@@ -175,6 +187,9 @@ pub enum ProviderEventData {
     SessionReady {
         model: Option<String>,
         effort: Option<String>,
+    },
+    ModelInventory {
+        models: Vec<ReportedModel>,
     },
     TurnStarted,
     AssistantDelta {
@@ -360,6 +375,7 @@ mod tests {
         Ok(())
     }
 }
+pub mod claude;
 pub mod codex;
 pub mod goal;
 mod rpc;
