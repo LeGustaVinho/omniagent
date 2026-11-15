@@ -459,7 +459,22 @@ async fn scheduled_writer_records_worktree_identity_and_git_state_before_launch(
     .await?;
     fs::write(managed.root.join("staged.txt"), b"Staged content\n")?;
     git(&managed.root, &["add", "--", "staged.txt"])?;
-    fs::write(managed.root.join("file.sample"), b"Edited content\n")?;
+    let tracked = managed.root.join("file.sample");
+    let original_mtime = fs::metadata(&tracked)?.modified()?;
+    fs::write(&tracked, b"Edited content\n")?;
+    let original_times = fs::FileTimes::new().set_modified(original_mtime);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&tracked)?
+        .set_times(original_times)?;
+    let index = git(
+        &managed.root,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    )?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(index)?
+        .set_times(original_times)?;
     fs::write(
         managed.root.join("untracked-private-marker.txt"),
         b"Existing file\n",
@@ -553,7 +568,9 @@ async fn scheduled_writer_records_worktree_identity_and_git_state_before_launch(
                 .starting
                 .status
                 .iter()
-                .any(|entry| entry.ends_with(file))
+                .any(|entry| entry.ends_with(file)),
+            "captured Git status omitted {file}: {:?}",
+            start.starting.status,
         );
     }
     assert_ne!(

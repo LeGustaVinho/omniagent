@@ -128,10 +128,12 @@ impl IsolatedGit {
 }
 
 fn copy_file(source: &Path, destination: &Path) -> Result<()> {
-    std::io::copy(
-        &mut open_locked_local_file(source)?,
-        &mut fs::File::create(destination)?,
-    )?;
+    let mut source = open_locked_local_file(source)?;
+    let modified = source.metadata()?.modified()?;
+    let mut destination = fs::File::create(destination)?;
+    std::io::copy(&mut source, &mut destination)?;
+    // Git uses the index mtime to detect edits that match its cached file stats.
+    destination.set_times(fs::FileTimes::new().set_modified(modified))?;
     Ok(())
 }
 
