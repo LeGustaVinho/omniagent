@@ -224,7 +224,8 @@ pub(crate) fn apply_queue_history_policy(db: &Connection, conversation: &str) ->
         .unwrap_or(settings.project_default);
     let pending = {
         let mut query = db.prepare(
-            "SELECT j.id, coalesce(w.context_id, recovery.context_id, j.context_id)
+            "SELECT j.id, coalesce(question.context_id, w.context_id, recovery.context_id, j.context_id),
+                    question.context_id IS NOT NULL
              FROM jobs j
              LEFT JOIN job_recoveries recovery ON recovery.job_id = j.id
              LEFT JOIN conversation_contexts retry_context ON retry_context.id = recovery.context_id
@@ -234,19 +235,25 @@ pub(crate) fn apply_queue_history_policy(db: &Connection, conversation: &str) ->
              LEFT JOIN job_downstream_waits w ON w.parent_run_id = latest.run_id
                  AND w.state IN ('waiting', 'needs_review')
              LEFT JOIN conversation_contexts wait_context ON wait_context.id = w.context_id
+             LEFT JOIN ready_question_continuations question ON question.job_id = j.id
              WHERE j.project_id = ?1 AND j.queue_state IN ('queued', 'paused')
-               AND (j.conversation_id = ?2 OR retry_context.conversation_id = ?2 OR wait_context.conversation_id = ?2)
-               AND (latest.run_id IS NULL OR recovery.job_id IS NOT NULL OR w.id IS NOT NULL)
+               AND (j.conversation_id = ?2 OR retry_context.conversation_id = ?2 OR wait_context.conversation_id = ?2
+                    OR question.conversation_id = ?2)
+               AND (latest.run_id IS NULL OR recovery.job_id IS NOT NULL OR w.id IS NOT NULL OR question.job_id IS NOT NULL)
                AND NOT EXISTS (SELECT 1 FROM active_agent_attempts WHERE run_id = latest.run_id)
              ORDER BY j.sequence",
         )?;
         query
             .query_map(params![project, conversation], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
-    for (id, context) in pending {
+    for (id, context, answered_question) in pending {
         let job = load_job(db, &project, &id)?.context("Pending job disappeared")?;
         if pipeline_pin_is_valid(db, &job)? {
             continue;
@@ -258,8 +265,8 @@ pub(crate) fn apply_queue_history_policy(db: &Connection, conversation: &str) ->
             QueueHistoryPolicy::Review | QueueHistoryPolicy::Recorded => {
                 db.execute(
                     "INSERT INTO job_history_bindings(job_id, context_id, pipeline_pin) VALUES (?1, ?2, 0)
-                     ON CONFLICT(job_id) DO NOTHING",
-                    params![id, context],
+                     ON CONFLICT(job_id) DO UPDATE SET context_id = excluded.context_id WHERE ?3 AND pipeline_pin = 0",
+                    params![id, context, answered_question],
                 )?;
                 if policy == QueueHistoryPolicy::Review {
                     change_pending_job_state(db, &project, &id, QueueState::Paused)?;
@@ -332,7 +339,18 @@ pub(crate) fn detached_question_context(
         return Ok(None);
     }
     let pinned = load_binding(db, &job.id)?.is_some_and(|binding| binding.pipeline_pin);
-    Ok(((pinned || detached) && attempt_requirements(db, &origin)?.is_ok()).then_some(context))
+    let recorded_answer: bool = db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM job_history_bindings h JOIN ready_question_continuations q
+         ON q.job_id = h.job_id AND q.context_id = h.context_id
+         WHERE h.pipeline_pin = 0 AND q.run_id = ?1 AND q.context_id = ?2
+         AND EXISTS (SELECT 1 FROM recorded_question_answers WHERE request_event_seq = ?3))",
+        params![run, context, seq],
+        |r| r.get(0),
+    )?;
+    Ok(
+        ((pinned || detached || recorded_answer) && attempt_requirements(db, &origin)?.is_ok())
+            .then_some(context),
+    )
 }
 
 pub(super) fn structured_job_run(db: &Connection, run: &str) -> Result<Option<String>> {

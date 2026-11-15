@@ -92,11 +92,12 @@ function FieldControl({ field, value, update }: {
   );
 }
 
-export function PendingInput({ input, conversationId, runId, onResolved }: {
+export function PendingInput({ input, conversationId, runId, onResolved, savedReason }: {
   input: ConversationPendingInput;
   conversationId: string;
   runId: string;
   onResolved: () => void;
+  savedReason?: string;
 }) {
   const request = input.data;
   const form = request.type === "question" ? request.normalized : undefined;
@@ -122,7 +123,7 @@ export function PendingInput({ input, conversationId, runId, onResolved }: {
     }
   }
 
-  const answer = (action: QuestionAction) => submit("answer_conversation_question", {
+  const answer = (action: QuestionAction) => submit(savedReason ? "answer_saved_conversation_question" : "answer_conversation_question", {
     answer: { action, values: action === "accept" ? values : {} },
   });
   function accept(event: FormEvent) {
@@ -152,6 +153,7 @@ export function PendingInput({ input, conversationId, runId, onResolved }: {
       ) : form ? (
         <form onSubmit={accept} className="grid gap-2">
           <p className="text-sm font-medium">{form.message || "Input requested"}</p>
+          {savedReason && <p className="text-xs text-muted-foreground">{savedReason}</p>}
           {form.fields.map((field) => <FieldControl key={field.id} field={field} value={values[field.id]}
             update={(value) => setValues((current) => ({ ...current, [field.id]: value }))} />)}
           <div className="flex flex-wrap gap-2">

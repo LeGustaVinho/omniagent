@@ -108,8 +108,9 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
     ?? (job.origin.type === "operator" ? job.context?.conversationId : undefined);
   const requestingRunId = job.origin.type === "agent" ? job.origin.runId : undefined;
   const pending = job.queueState !== "cancelled" && (!attempt || job.queuedRecovery !== null ||
-    Boolean(job.downstreamWait && job.downstreamWait.state !== "yielding"));
+    Boolean(job.downstreamWait && job.downstreamWait.state !== "yielding") || inspection.queuedQuestion);
   const running = attempt && ["starting", "running", "waiting_for_input"].includes(attempt.status);
+  const savedQuestions = inspection.questionWait && !running && !pending && job.queueState !== "cancelled";
 
   return (
     <aside className="delivery-detail" aria-label="Selected job">
@@ -169,8 +170,12 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
               {job.queueState === "paused" ? "Resume job" : "Pause job"}
             </Button>
             <Button type="button" variant="outline" className={buttonClass} disabled={busy}
-              onClick={() => onAction({ type: "pending_state", jobId: job.id, state: "cancelled" })}>Cancel pending job</Button>
+              onClick={() => onAction({ type: "pending_state", jobId: job.id, state: "cancelled" })}>
+              {inspection.queuedQuestion ? "Cancel queued answer" : "Cancel pending job"}
+            </Button>
           </>}
+          {savedQuestions && <Button type="button" variant="outline" className={buttonClass} disabled={busy}
+            onClick={() => onAction({ type: "pending_state", jobId: job.id, state: "cancelled" })}>Cancel saved questions</Button>}
           {running && <Button type="button" variant="outline" className={buttonClass} disabled={busy || attempt.cancelRequested}
             onClick={() => onAction({ type: "interrupt", jobId: job.id, runId: attempt.runId })}>
             {attempt.cancelRequested ? "Interrupting…" : "Interrupt attempt"}

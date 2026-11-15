@@ -27,6 +27,7 @@ use super::{
     history::{effective_release_blocker, load_binding, uses_recorded_checkpoint},
     insert_job, load_job,
     policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
+    question_answers::{self, QuestionContinuation, load_continuation},
     question_waits::{QuestionWaitSummary, has_open_questions, question_wait_summary},
     recovery::{RecoveryCheckpoint, pending_recovery, recovery_source},
     subagents::{SubagentAllocation, job_subagent_allocation},
@@ -125,6 +126,9 @@ pub struct JobInspection {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub question_wait: Option<QuestionWaitSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub queued_question: Option<bool>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -188,6 +192,7 @@ impl Store {
                  AND NOT EXISTS (SELECT 1 FROM job_history_bindings WHERE job_id = j.id)
                  AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
                       OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id)
+                      OR EXISTS (SELECT 1 FROM ready_question_continuations WHERE job_id = j.id)
                       OR EXISTS (SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
                           WHERE a.job_id = j.id AND w.state IN ('waiting', 'needs_review'))))",
                     [&context.conversation_id],
@@ -415,6 +420,7 @@ impl Store {
                     "SELECT project_id, id FROM jobs j WHERE queue_state = 'queued'
                     AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
                          OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id)
+                         OR EXISTS (SELECT 1 FROM ready_question_continuations WHERE job_id = j.id)
                          OR EXISTS (SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
                              WHERE a.job_id = j.id AND w.state = 'waiting'))
                     ORDER BY priority DESC, sequence",
@@ -442,15 +448,17 @@ impl Store {
                             .context("The recovery checkpoint is no longer current")
                     })
                     .transpose()?;
-                let plan = build_attempt(&tx, &job, inputs, checkpoint.as_ref(), allocation)?;
                 let wait = job.downstream_wait.as_ref();
-                let previous_run = wait.map(|wait| wait.parent_run_id.as_str())
+                let question_run = inputs.question.as_ref().map(|question| question.run.clone());
+                let plan = build_attempt(&tx, &job, inputs, checkpoint.as_ref(), allocation)?;
+                let previous_run = question_run.as_deref()
+                    .or_else(|| wait.map(|wait| wait.parent_run_id.as_str()))
                     .or_else(|| checkpoint.as_ref().map(RecoveryCheckpoint::run_id));
                 let ordinal = job
                     .latest_attempt
                     .as_ref()
                     .map_or(1, |previous| previous.ordinal + 1);
-                let kind = if wait.is_some() { "resume" } else { job.queued_recovery.map_or("initial", RecoveryAction::key) };
+                let kind = if wait.is_some() || question_run.is_some() { "resume" } else { job.queued_recovery.map_or("initial", RecoveryAction::key) };
                 if checkpoint.is_some() {
                     tx.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [&job.id])?;
                 }
@@ -549,6 +557,7 @@ struct Inputs {
     request: JobRequest,
     scope: Option<SessionScope>,
     command: Option<CommandInvocation>,
+    question: Option<QuestionContinuation>,
 }
 
 fn build_attempt(
@@ -568,7 +577,14 @@ fn build_attempt(
     let scope = inputs
         .scope
         .context("Admitted job has no effective CLI profile")?;
-    let mut plan = if let Some(wait) = &job.downstream_wait {
+    let mut plan = if let Some(question) = &inputs.question {
+        let downstream = job
+            .downstream_wait
+            .as_ref()
+            .map(|wait| continuation_prompt(db, wait))
+            .transpose()?;
+        question_answers::insert_attempt(db, question, scope, downstream, allocation)?
+    } else if let Some(wait) = &job.downstream_wait {
         let (conversation, recorded) = downstream_conversation(db, job, wait)?
             .context("The downstream wait context changed")?;
         let text = continuation_prompt(db, wait)?;
@@ -803,6 +819,7 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
         request,
         scope,
         command,
+        question: load_continuation(db, job)?,
     })
 }
 
@@ -811,7 +828,9 @@ pub(super) fn inspect(
     job: Job,
     env: &AdmissionEnvironment,
 ) -> Result<JobInspection> {
-    let awaiting_recovery = job.queued_recovery.is_some() || job.downstream_wait.is_some();
+    let queued_question = load_continuation(db, &job)?.is_some();
+    let awaiting_recovery =
+        job.queued_recovery.is_some() || job.downstream_wait.is_some() || queued_question;
     let question_wait = job
         .latest_attempt
         .as_ref()
@@ -839,6 +858,7 @@ pub(super) fn inspect(
         blockers,
         recovery_actions,
         question_wait,
+        queued_question: queued_question.then_some(true),
     })
 }
 
@@ -919,6 +939,16 @@ fn evaluate(
         }
         _ => {}
     }
+    if let Some(question) = &inputs.question {
+        if !question_answers::current(db, question, inputs.scope.as_ref())? {
+            blockers.push(Policy {
+                reason: "The saved question's context, profile or authorization changed",
+            });
+        }
+        if let Some(run_id) = active_conversation_run(db, &question.conversation)? {
+            blockers.push(ConversationBusy { run_id });
+        }
+    }
     if let Some(wait) = &job.downstream_wait {
         if !wait.ready() {
             blockers.push(Downstream {
@@ -930,6 +960,10 @@ fn evaluate(
                     .count() as u32,
                 needs_review: wait.state == DownstreamWaitState::NeedsReview,
             });
+        } else if inputs.question.is_none() && has_open_questions(db, &wait.parent_run_id)? {
+            blockers.push(ConversationBusy {
+                run_id: wait.parent_run_id.clone(),
+            });
         } else if downstream_conversation(db, job, wait)?.is_none() {
             blockers.push(ContextChanged {
                 context_id: wait
@@ -938,7 +972,7 @@ fn evaluate(
                     .context("A waiting job has no recorded context")?,
             });
         }
-    } else if let Some(action) = job.queued_recovery {
+    } else if let (None, Some(action)) = (&inputs.question, job.queued_recovery) {
         let (source_run, context_id) =
             pending_recovery(db, job)?.context("Missing queued recovery")?;
         let matching = recovery_source(db, job)?.is_some_and(|source| {
@@ -961,8 +995,8 @@ fn evaluate(
                 }
             }
         }
-    } else if let (JobOrigin::Operator | JobOrigin::Pipeline, Some(context)) =
-        (&job.origin, &job.context)
+    } else if let (None, JobOrigin::Operator | JobOrigin::Pipeline, Some(context)) =
+        (&inputs.question, &job.origin, &job.context)
     {
         let binding = load_binding(db, &job.id)?;
         let conversation = load_conversation(db, &context.conversation_id)?;

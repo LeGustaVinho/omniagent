@@ -39,6 +39,7 @@ pub struct SavedConversationQuestion {
     pub event: ProviderEvent,
     pub reason: String,
     pub state: String,
+    pub answer_recorded: bool,
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -129,20 +130,22 @@ impl Store {
     ) -> Result<Vec<SavedConversationQuestion>> {
         self.execute(move |db| {
             let mut query = db.prepare(
-                "SELECT q.request_event_seq, e.payload, q.reason, q.state FROM open_agent_questions q
+                "SELECT q.request_event_seq, e.payload, q.reason, q.state, answer.request_event_seq IS NOT NULL
+                 FROM open_agent_questions q
                  JOIN agent_events e ON e.seq = q.request_event_seq
+                 LEFT JOIN recorded_question_answers answer ON answer.request_event_seq = q.request_event_seq
                  WHERE q.conversation_id = ?1 AND q.run_id = ?2 AND q.state <> 'live' ORDER BY e.seq",
             )?;
             let rows = query.query_map(params![conversation, run], |row| Ok((
                 row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+                row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?,
             )))?;
             rows.map(|row| {
-                let (seq, payload, reason, mut state) = row?;
+                let (seq, payload, reason, mut state, answer_recorded) = row?;
                 if state == "saved" && !saved_checkpoint_is_current(db, &run, seq)? {
                     state = "needs_review".into();
                 }
-                Ok(SavedConversationQuestion { event: serde_json::from_slice(&protection::unprotect(&payload)?)?, reason, state })
+                Ok(SavedConversationQuestion { event: serde_json::from_slice(&protection::unprotect(&payload)?)?, reason, state, answer_recorded })
             }).collect()
         }).await
     }

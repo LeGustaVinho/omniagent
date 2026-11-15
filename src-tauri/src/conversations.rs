@@ -18,7 +18,7 @@ use crate::{
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionIntent,
         SessionMode, TurnOutcome,
-        questions::{QuestionAction, QuestionOrigin, QuestionReply, QuestionRoute},
+        questions::{QuestionAction, QuestionForm, QuestionOrigin, QuestionReply, QuestionRoute},
     },
     runs::{self, RunRecord, RunStatus},
     store::{DraftKey, Store},
@@ -627,20 +627,8 @@ impl Store {
                     action,
                 },
             };
-            let payload = protection::protect(&serde_json::to_vec(&event)?)?;
-            tx.execute(
-                "INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)",
-                params![origin.run_id, EventSource::Application.as_sql(), payload],
-            )?;
-            let changed = tx.execute(
-                "UPDATE agent_questions SET delivery = 'closed'
-                 WHERE request_event_seq = ?1 AND delivery = 'pending'",
-                [seq],
-            )?;
-            ensure!(
-                changed == 1,
-                "structured planning question is no longer pending"
-            );
+            save_question_event(&tx, &origin.run_id, event)?;
+            close_saved_question(&tx, seq)?;
             tx.commit()?;
             Ok(())
         })
@@ -724,12 +712,14 @@ impl Store {
                         && event.location.parent_item_id.is_none() && !route.is_native()) =>
                 {
                     let request_event_seq = tx.last_insert_rowid();
-                    tx.execute(
+                    let inserted = tx.execute(
                         "INSERT INTO agent_questions(request_event_seq, run_id, turn_id, request_key, route, delivery)
-                         VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+                         SELECT ?1, ?2, ?3, ?4, ?5, 'pending'
+                         WHERE NOT EXISTS (SELECT 1 FROM agent_questions WHERE run_id = ?2 AND request_key = ?4)",
                         params![request_event_seq, run_id, active.turn_id, permission_key(request_id)?,
                             if route.is_native() { "native" } else { "structured_turn" }],
                     )?;
+                    ensure!(inserted == 1, "The provider reused a question identity in this turn");
                     if route.is_native() {
                         crate::jobs::open_native_question(&tx, &run_id, request_event_seq)?;
                     }
@@ -1043,6 +1033,7 @@ pub(crate) enum AttemptHistory {
     Automatic,
     Retry { input_context_id: String },
     Resume { native: Option<NativeJobRecovery> },
+    Question { origin_run_id: String },
     Downstream,
 }
 
@@ -1170,6 +1161,81 @@ pub(crate) fn insert_recorded_job_attempt(
             allocation,
         },
     )
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecordedQuestionAnswer {
+    pub origin: QuestionOrigin,
+    pub form: QuestionForm,
+    pub schema: serde_json::Value,
+    pub reply: QuestionReply,
+}
+
+pub(crate) struct LinkedQuestionInput {
+    pub context: String,
+    pub route: QuestionRoute,
+    pub answers: Vec<(i64, RecordedQuestionAnswer)>,
+    pub earlier_replies: Vec<RecordedQuestionAnswer>,
+    pub downstream: Option<String>,
+}
+
+pub(crate) fn insert_linked_question_job_attempt(
+    db: &Connection,
+    conversation: Conversation,
+    scope: SessionScope,
+    input: LinkedQuestionInput,
+    allocation: SubagentAllocation,
+) -> Result<AttemptPlan> {
+    let LinkedQuestionInput {
+        context,
+        route,
+        answers,
+        earlier_replies,
+        downstream,
+    } = input;
+    let (_, first) = answers.first().context("Missing recorded answers")?;
+    let origin = first.origin.clone();
+    let detached = context != conversation.context_id;
+    let recorded = detached.then(|| RecordedAttempt {
+        context_id: context,
+        previous_run_id: Some(origin.run_id.clone()),
+        question_route: route,
+    });
+    let sets = serde_json::json!({
+        "earlierReplies": earlier_replies,
+        "answers": answers.iter().map(|(_, answer)| answer).collect::<Vec<_>>(),
+    });
+    let mut prompt = format!(
+        "The user answered questions from the original turn. Continue the original task from the saved context using these answers.\n{}",
+        serde_json::to_string(&sets)?
+    );
+    if let Some(downstream) = downstream {
+        prompt.push_str("\n\n");
+        prompt.push_str(&downstream);
+    }
+    let mut plan = insert_attempt(
+        db,
+        PreparedAttempt {
+            conversation_id: conversation.id,
+            base_context_id: conversation.context_id,
+            scope,
+            encrypted: Some(protection::protect(prompt.as_bytes())?),
+            frozen: None,
+            question_route: route,
+            answer: None,
+            history: AttemptHistory::Question {
+                origin_run_id: origin.run_id.clone(),
+            },
+            recorded,
+            allocation,
+        },
+    )?;
+    for (seq, answer) in answers {
+        link_question_reply(db, &plan.run.id, seq, &answer.origin, answer.reply)?;
+    }
+    plan.answered_question = Some(origin);
+    Ok(plan)
 }
 
 pub(crate) fn attempt_output(
@@ -1380,9 +1446,10 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         [&conversation_id],
         |row| row.get(0),
     )?;
-    let previous_run_id = match &recorded {
-        Some(recorded) => recorded.previous_run_id.clone(),
-        None => previous.map(|prior| prior.run_id),
+    let previous_run_id = match (&recorded, &history) {
+        (_, AttemptHistory::Question { origin_run_id }) => Some(origin_run_id.clone()),
+        (Some(recorded), _) => recorded.previous_run_id.clone(),
+        (None, _) => previous.map(|prior| prior.run_id),
     };
     db.execute(
         "INSERT INTO agent_attempts(run_id, turn_id, conversation_id, ordinal, agent_session_id,
@@ -1420,41 +1487,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
     crate::jobs::pin_attempt_audit(db, &run.id, &allocation.audit)?;
     let mut answered_question = None;
     if let (Some((origin, reply)), Some((request_event_seq, _))) = (answer, answered_request) {
-        let event = ProviderEvent {
-            location: Default::default(),
-            data: ProviderEventData::StructuredQuestionReplyLinked {
-                origin: origin.clone(),
-                reply,
-                continuation_run_id: run.id.clone(),
-            },
-        };
-        let payload = protection::protect(&serde_json::to_vec(&event)?)?;
-        db.execute(
-            "INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)",
-            params![origin.run_id, EventSource::Application.as_sql(), payload],
-        )?;
-        let reply_event_seq = db.last_insert_rowid();
-        let changed = db.execute(
-            "UPDATE structured_question_continuations SET continuation_run_id = ?1, reply_event_seq = ?2
-             WHERE request_event_seq = ?3 AND continuation_run_id IS NULL",
-            params![run.id, reply_event_seq, request_event_seq],
-        )?;
-        ensure!(
-            changed == 1,
-            "structured planning question has already been answered"
-        );
-        let changed = db.execute(
-            "UPDATE agent_questions SET delivery = 'closed'
-             WHERE request_event_seq = ?1 AND (delivery = 'pending' OR EXISTS (
-                SELECT 1 FROM native_question_waits w WHERE w.request_event_seq = ?1 AND w.state = 'saved'
-             ))",
-            [request_event_seq],
-        )?;
-        ensure!(
-            changed == 1,
-            "structured planning question is no longer pending"
-        );
-        crate::jobs::archive_saved_question(db, request_event_seq)?;
+        link_question_reply(db, &run.id, request_event_seq, &origin, reply)?;
         answered_question = Some(origin);
     }
     let native_job_recovery = match history {
@@ -1479,6 +1512,52 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         native_subagent_limit: allocation.native_allowance,
         subagent_audit: allocation.audit,
     })
+}
+
+fn link_question_reply(
+    db: &Connection,
+    continuation: &str,
+    seq: i64,
+    origin: &QuestionOrigin,
+    reply: QuestionReply,
+) -> Result<()> {
+    let event = ProviderEvent {
+        location: Default::default(),
+        data: ProviderEventData::StructuredQuestionReplyLinked {
+            origin: origin.clone(),
+            reply,
+            continuation_run_id: continuation.into(),
+        },
+    };
+    let event_seq = save_question_event(db, &origin.run_id, event)?;
+    let changed = db.execute(
+        "UPDATE structured_question_continuations SET continuation_run_id = ?1, reply_event_seq = ?2
+         WHERE request_event_seq = ?3 AND continuation_run_id IS NULL",
+        params![continuation, event_seq, seq],
+    )?;
+    ensure!(changed == 1, "This question already has a continuation");
+    close_saved_question(db, seq)
+}
+
+pub(crate) fn save_question_event(db: &Connection, run: &str, event: ProviderEvent) -> Result<i64> {
+    let payload = protection::protect(&serde_json::to_vec(&event)?)?;
+    db.execute(
+        "INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)",
+        params![run, EventSource::Application.as_sql(), payload],
+    )?;
+    Ok(db.last_insert_rowid())
+}
+
+pub(crate) fn close_saved_question(db: &Connection, seq: i64) -> Result<()> {
+    let changed = db.execute(
+        "UPDATE agent_questions SET delivery = 'closed'
+         WHERE request_event_seq = ?1 AND (delivery = 'pending' OR EXISTS (
+            SELECT 1 FROM native_question_waits w WHERE w.request_event_seq = ?1 AND w.state = 'saved'
+         ))",
+        [seq],
+    )?;
+    ensure!(changed == 1, "This saved question is no longer pending");
+    crate::jobs::archive_saved_question(db, seq)
 }
 
 pub(crate) fn recovery_checkpoint(
@@ -1540,7 +1619,38 @@ fn validate_structured_reply(
     origin: &QuestionOrigin,
     reply: &QuestionReply,
 ) -> Result<(i64, serde_json::Value)> {
-    let (seq, payload, original_scope, context_id): (i64, Vec<u8>, String, String) = db
+    let selected = validate_saved_question(db, &conversation.id, origin, reply)?;
+    ensure!(
+        selected.scope == scope,
+        "the planning question belongs to another profile or checkout"
+    );
+    let queued: bool = db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM recorded_question_answers WHERE request_event_seq = ?1)",
+        [selected.seq],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        !queued,
+        "This recorded answer already belongs to the job queue"
+    );
+    Ok((selected.seq, selected.answer.schema))
+}
+
+pub(crate) struct ValidatedSavedQuestion {
+    pub seq: i64,
+    pub context: String,
+    pub scope: String,
+    pub route: QuestionRoute,
+    pub answer: RecordedQuestionAnswer,
+}
+
+pub(crate) fn validate_saved_question(
+    db: &Connection,
+    conversation: &str,
+    origin: &QuestionOrigin,
+    reply: &QuestionReply,
+) -> Result<ValidatedSavedQuestion> {
+    let (seq, payload, scope, context): (i64, Vec<u8>, String, String) = db
         .query_row(
             "SELECT q.request_event_seq, e.payload, s.scope, link.context_id
          FROM agent_questions q
@@ -1555,22 +1665,11 @@ fn validate_structured_reply(
             params![
                 origin.run_id,
                 permission_key(&origin.request_id)?,
-                conversation.id
+                conversation,
             ],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        .context("structured planning question is absent, answered, or stale for this context")?;
-    ensure!(
-        context_id == conversation.context_id
-            || crate::jobs::detached_question_context(db, &conversation.id, &origin.run_id, seq)?
-                .as_deref()
-                == Some(context_id.as_str()),
-        "structured planning question is absent, answered, or stale for this context"
-    );
-    ensure!(
-        original_scope == scope,
-        "the planning question belongs to another profile or checkout"
-    );
+        .context("The saved question is absent, answered, or stale for this context")?;
     ensure!(
         crate::jobs::saved_checkpoint_is_current(db, &origin.run_id, seq)?,
         "The saved question needs checkpoint or authorization review"
@@ -1578,9 +1677,9 @@ fn validate_structured_reply(
     let event: ProviderEvent = serde_json::from_slice(&protection::unprotect(&payload)?)?;
     let ProviderEventData::Question {
         request_id,
-        form,
+        form: schema,
         normalized: Some(normalized),
-        ..
+        route,
     } = event.data
     else {
         anyhow::bail!("saved structured question has no validated form")
@@ -1590,7 +1689,18 @@ fn validate_structured_reply(
         "saved structured question identity changed"
     );
     normalized.validate(reply)?;
-    Ok((seq, form))
+    Ok(ValidatedSavedQuestion {
+        seq,
+        context,
+        scope,
+        route,
+        answer: RecordedQuestionAnswer {
+            origin: origin.clone(),
+            form: normalized,
+            schema,
+            reply: reply.clone(),
+        },
+    })
 }
 
 pub(crate) fn load_conversation(db: &Connection, id: &str) -> Result<Conversation> {

@@ -29,6 +29,7 @@ type SavedQuestion = {
   event: ConversationPendingInput;
   state: "saving" | "saved" | "needs_review";
   reason: "timeout" | "provider_expired" | "turn_stopped" | "runtime_restart" | "transport_closed" | "structured_output";
+  answerRecorded: boolean;
 };
 const saveReasons: Record<SavedQuestion["reason"], string> = {
   timeout: "The live reply deadline expired.",
@@ -122,7 +123,7 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
   const saved = useQuery({
     queryKey: ["conversation-run", runId, "saved-questions", live],
     enabled: Boolean(runId),
-    refetchInterval: live ? 200 : false,
+    refetchInterval: (query) => live ? 200 : query.state.data?.length ? 800 : false,
     queryFn: () => invoke<SavedQuestion[]>("saved_conversation_questions", target),
   });
   const currentStop = stopState?.runId === runId ? stopState : undefined;
@@ -143,7 +144,13 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
     error: currentStop?.error || result.data?.error || result.error || inputs.error || saved.error,
     inputs: live ? inputs.data ?? [] : [],
     savedQuestions: saved.data ?? [],
-    refreshInputs: () => void inputs.refetch(),
+    refreshRequests: () => {
+      if (live) void inputs.refetch();
+      void saved.refetch();
+      void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-job"] });
+      void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-run"] });
+      void queryClient.invalidateQueries({ queryKey: ["project-job-queue"] });
+    },
     live,
     stop,
     stopping,
@@ -164,24 +171,30 @@ export function ConversationRequests({ activity, conversationId, runId }: {
   if (!activity.inputs.length && !activity.savedQuestions.length) return null;
   const needsReview = !activity.inputs.length &&
     activity.savedQuestions.every((question) => question.state === "needs_review");
+  const answered = activity.savedQuestions.length > 0 && !activity.inputs.length &&
+    activity.savedQuestions.every((question) => question.answerRecorded);
   const savedIds = new Set(activity.savedQuestions.map(({ event }) => event.data.request_id));
   return (
     <section aria-label="Pending requests" className="conv-requests" tabIndex={-1}>
-      <p className="conv-waiting" role="status">{needsReview ? "Question needs review" : "Waiting for input"}</p>
+      <p className="conv-waiting" role="status">{needsReview ? "Question needs review" : answered ? "Waiting to continue" : "Waiting for input"}</p>
       {activity.inputs.filter(({ data }) => !savedIds.has(data.request_id)).map((request) => <PendingInput key={JSON.stringify(request.data.request_id)}
-        input={request} conversationId={conversationId} runId={runId} onResolved={activity.refreshInputs} />)}
-      {activity.savedQuestions.map(({ event, state, reason }) => event.data.type === "question" &&
+        input={request} conversationId={conversationId} runId={runId} onResolved={activity.refreshRequests} />)}
+      {activity.savedQuestions.map(({ event, state, reason, answerRecorded }) => event.data.type === "question" && (
+        state === "saved" && !answerRecorded
+          ? <PendingInput key={JSON.stringify(event.data.request_id)} input={event} savedReason={saveReasons[reason]}
+              conversationId={conversationId} runId={runId} onResolved={activity.refreshRequests} />
+          :
         <div key={JSON.stringify(event.data.request_id)} className="grid gap-2 rounded-md border border-border bg-card p-3">
           <p className="text-sm font-medium">{event.data.normalized?.message || "Input requested"}</p>
-          <p className="text-xs text-muted-foreground">{state === "saving" ? "Saving the turn checkpoint…" : saveReasons[reason]}</p>
-          {event.data.normalized?.fields.map((field) => <div key={field.id} className="grid gap-1 text-sm">
+          <p className="text-xs text-muted-foreground">{answerRecorded ? "Answer recorded" : state === "saving" ? "Saving the turn checkpoint…" : saveReasons[reason]}</p>
+          {!answerRecorded && event.data.normalized?.fields.map((field) => <div key={field.id} className="grid gap-1 text-sm">
             <p>{field.label}</p>
             {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}
             {field.input.kind === "choice" && <ul className="list-disc pl-5 text-xs">
               {field.input.options.map(({ id, label }) => <li key={id}>{label}</li>)}
             </ul>}
           </div>)}
-        </div>)}
+        </div>))}
     </section>
   );
 }

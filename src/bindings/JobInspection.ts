@@ -4,4 +4,4 @@ import type { Job } from "./Job";
 import type { QuestionWaitSummary } from "./QuestionWaitSummary";
 import type { RecoveryAction } from "./RecoveryAction";
 
-export type JobInspection = { job: Job, blockers: Array<AdmissionBlocker>, recoveryActions: Array<RecoveryAction>, questionWait?: QuestionWaitSummary, };
+export type JobInspection = { job: Job, blockers: Array<AdmissionBlocker>, recoveryActions: Array<RecoveryAction>, questionWait?: QuestionWaitSummary, queuedQuestion?: boolean, };

@@ -18,6 +18,7 @@ mod inspection;
 mod notices;
 mod pipeline;
 mod policy;
+mod question_answers;
 mod question_waits;
 mod recovery;
 mod scheduler;
@@ -334,6 +335,8 @@ fn change_pending_job_state(
          AND queue_state IN ('queued', 'paused')
          AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = ?2)
               OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = ?2)
+              OR EXISTS (SELECT 1 FROM open_agent_questions q JOIN job_attempts a ON a.run_id = q.run_id
+                  WHERE a.job_id = ?2 AND q.state IN ('saved', 'needs_review'))
               OR EXISTS (SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
                   WHERE a.job_id = ?2 AND w.state IN ('waiting', 'needs_review')))",
         params![project, job_id, state.as_sql()],

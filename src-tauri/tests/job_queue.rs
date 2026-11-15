@@ -1187,11 +1187,14 @@ async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -
         "DROP TABLE attempt_subagent_audit;
          DROP TABLE native_subagent_audit_candidates;
          DROP VIEW deliverable_job_notices;
+         DROP VIEW ready_question_continuations;
          DROP VIEW open_agent_questions;
          DROP VIEW unconfirmed_question_stops;
          DROP TRIGGER notice_structured_question;
          DROP TRIGGER notice_job_outcome;
          DROP INDEX agent_questions_by_run;
+         DROP INDEX question_continuations_by_run;
+         DROP TABLE recorded_question_answers;
          DROP TABLE native_question_waits;
          DROP TABLE project_question_timeouts;
          DROP TABLE project_subagent_audit;
@@ -1397,7 +1400,7 @@ async fn history_switch_archives_old_questions_and_keeps_the_pinned_stage_wait()
         .await?;
 
     let scope = first.scope;
-    let record_question = |attempt: &AttemptPlan| {
+    let record_question = |attempt: &AttemptPlan, multiple| {
         let origin = QuestionOrigin {
             run_id: attempt.run.id.clone(),
             request_id: RequestId::Text(format!("question:{}", attempt.run.turn_id)),
@@ -1435,8 +1438,27 @@ async fn history_switch_archives_old_questions_and_keeps_the_pinned_stage_wait()
         async move {
             store.mark_agent_running(origin.run_id.clone()).await?;
             store
-                .record_agent_observation(origin.run_id.clone(), EventSource::Application, event)
+                .record_agent_observation(
+                    origin.run_id.clone(),
+                    EventSource::Application,
+                    event.clone(),
+                )
                 .await?;
+            if multiple {
+                for id in [42, 43] {
+                    let mut other = event.clone();
+                    if let ProviderEventData::Question { request_id, .. } = &mut other.data {
+                        *request_id = RequestId::Number(id);
+                    }
+                    store
+                        .record_agent_observation(
+                            origin.run_id.clone(),
+                            EventSource::Application,
+                            other,
+                        )
+                        .await?;
+                }
+            }
             store
                 .finish_agent_attempt(
                     origin.run_id.clone(),
@@ -1457,7 +1479,7 @@ async fn history_switch_archives_old_questions_and_keeps_the_pinned_stage_wait()
             Vec::new(),
         )
         .await?;
-    let old_question = record_question(&abandoned).await?;
+    let old_question = record_question(&abandoned, false).await?;
     let recorded = store.conversation_history(chat.clone()).await?;
     let pipeline = "history-pipeline".to_owned();
     store
@@ -1531,7 +1553,7 @@ async fn history_switch_archives_old_questions_and_keeps_the_pinned_stage_wait()
         .context("Approved stage stayed blocked")?;
     assert!(execution.input.starts_with(&recorded.messages));
     assert!(matches!(execution.intent, SessionIntent::Start));
-    let pinned_question = record_question(&execution).await?;
+    let pinned_question = record_question(&execution, true).await?;
 
     let clear_again = store
         .rewind_conversation_history(chat.clone(), clear, None)
@@ -1567,7 +1589,7 @@ async fn history_switch_archives_old_questions_and_keeps_the_pinned_stage_wait()
     )?
     .query_row(
         "SELECT delivery FROM agent_questions WHERE run_id = ?1",
-        [old_question.run_id],
+        [&old_question.run_id],
         |row| row.get(0),
     )?;
     assert_eq!(delivery, "closed");
@@ -1587,18 +1609,103 @@ async fn history_switch_archives_old_questions_and_keeps_the_pinned_stage_wait()
         "The originating question lost its notification after the clear"
     );
 
-    let followup = store
-        .prepare_structured_planning_reply(
+    let second_question = QuestionOrigin {
+        run_id: pinned_question.run_id.clone(),
+        request_id: RequestId::Number(42),
+    };
+    let invalid = QuestionReply {
+        action: QuestionAction::Accept,
+        values: [("summary".into(), serde_json::json!("true"))]
+            .into_iter()
+            .collect(),
+    };
+    assert!(
+        store
+            .answer_saved_question(chat.clone(), pinned_question.clone(), invalid)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .answer_saved_question(chat.clone(), old_question.clone(), reply.clone())
+            .await
+            .is_err()
+    );
+    store
+        .answer_saved_question(chat.clone(), pinned_question.clone(), reply.clone())
+        .await?;
+    store
+        .answer_saved_question(chat.clone(), pinned_question.clone(), reply.clone())
+        .await?;
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    let other_reply = QuestionReply {
+        action: QuestionAction::Accept,
+        values: [("summary".into(), serde_json::json!(false))]
+            .into_iter()
+            .collect(),
+    };
+    assert!(
+        store
+            .answer_saved_question(chat.clone(), pinned_question.clone(), other_reply.clone())
+            .await
+            .is_err()
+    );
+    store
+        .answer_saved_question(chat.clone(), second_question, other_reply)
+        .await?;
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    store
+        .answer_saved_question(
             chat.clone(),
-            clear_again.clone(),
-            scope.clone(),
-            pinned_question.clone(),
-            reply.clone(),
+            QuestionOrigin {
+                run_id: pinned_question.run_id.clone(),
+                request_id: RequestId::Number(43),
+            },
+            QuestionReply {
+                action: QuestionAction::Cancel,
+                values: Default::default(),
+            },
         )
         .await?;
+    store.set_job_queue_paused(true).await?;
+    let reopened = Store::open(database.clone())?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    let inspected = reopened
+        .inspect_job(project.clone(), stage.id.clone(), environment(false))
+        .await?
+        .unwrap();
+    assert_eq!(inspected.queued_question, Some(true));
+    assert!(reopened.claim_next_job(environment(false)).await?.is_none());
+    reopened.set_job_queue_paused(false).await?;
+    let (first, second) = tokio::join!(
+        store.claim_next_job(environment(false)),
+        reopened.claim_next_job(environment(false))
+    );
+    let (first, second) = (first?, second?);
+    assert_ne!(
+        first.is_some(),
+        second.is_some(),
+        "exactly one linked turn should be claimed"
+    );
+    let followup = first
+        .or(second)
+        .context("The recorded answers did not continue the job")?;
     assert!(matches!(followup.intent, SessionIntent::Start));
     assert_eq!(followup.previous_run_id.as_ref(), Some(&execution.run.id));
     assert!(followup.input.starts_with(&execution.input));
+    let sent = &followup.input.last().unwrap().text;
+    assert!(sent.contains("\"summary\":true") && sent.contains("\"summary\":false"));
+    assert!(sent.contains("\"action\":\"cancel\""));
+    let linked: u32 = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?
+    .query_row(
+        "SELECT count(*) FROM structured_question_continuations WHERE continuation_run_id = ?1",
+        [&followup.run.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(linked, 2);
     store.mark_agent_running(followup.run.id.clone()).await?;
     store
         .finish_agent_attempt(
@@ -1609,13 +1716,7 @@ async fn history_switch_archives_old_questions_and_keeps_the_pinned_stage_wait()
         .await?;
     assert!(
         store
-            .prepare_structured_planning_reply(
-                chat.clone(),
-                clear_again.clone(),
-                scope,
-                pinned_question,
-                reply,
-            )
+            .answer_saved_question(chat.clone(), pinned_question, reply)
             .await
             .is_err()
     );

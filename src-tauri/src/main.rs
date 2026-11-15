@@ -217,6 +217,7 @@ fn main() {
             conversation_runtime::stop_conversation_turn,
             conversation_runtime::approve_conversation_input,
             conversation_runtime::answer_conversation_question,
+            conversation_runtime::answer_saved_conversation_question,
             conversation_runtime::pending_conversation_inputs,
             conversation_runtime::saved_conversation_questions,
             conversation_runtime::conversation_events,

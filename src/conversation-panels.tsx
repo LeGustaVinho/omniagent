@@ -32,7 +32,7 @@ const draftWrites = new Map<string, Promise<void>>();
 const historyOffsets = new Map<string, number>();
 
 function pendingJob(inspection: JobInspection | null | undefined) {
-  return Boolean(inspection && (!inspection.job.latestAttempt || inspection.job.queuedRecovery ||
+  return Boolean(inspection && (!inspection.job.latestAttempt || inspection.job.queuedRecovery || inspection.queuedQuestion ||
     (inspection.job.downstreamWait && inspection.job.downstreamWait.state !== "yielding")) &&
     inspection.job.queueState !== "cancelled");
 }
@@ -452,14 +452,14 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           const request = historyRegion.current?.querySelector<HTMLElement>('[aria-label="Pending requests"]');
           request?.scrollIntoView({ block: "nearest" });
           (request?.querySelector<HTMLElement>("button, input, select") ?? request)?.focus({ preventScroll: true });
-        }}>Waiting for input <ArrowUp aria-hidden /></button>}
+        }}>{job?.queuedQuestion ? "View answer" : "Waiting for input"} <ArrowUp aria-hidden /></button>}
         {queued && job && <div className="conv-queued">
-          <strong>{job.job.downstreamWait ? "Waiting for downstream jobs" : "Queued message"}</strong>
+          <strong>{job.job.downstreamWait ? "Waiting for downstream jobs" : job.queuedQuestion ? "Queued answer" : "Queued message"}</strong>
           <div>
             <p role="status" className="text-muted-foreground">{waitReason(job.blockers[0])}</p>
             <button type="button" className="conv-quiet-button" disabled={cancelQueued.isPending}
               onClick={() => cancelQueued.mutate(job.job.id)}>
-              {cancelQueued.isPending ? "Cancelling…" : job.job.downstreamWait ? "Cancel downstream wait" : "Cancel queued message"}
+              {cancelQueued.isPending ? "Cancelling…" : job.queuedQuestion ? "Cancel queued answer" : job.job.downstreamWait ? "Cancel downstream wait" : "Cancel queued message"}
             </button>
           </div>
         </div>}

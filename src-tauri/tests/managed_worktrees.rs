@@ -21,7 +21,11 @@ use omniagent::{
         RecoveryAction, ReleaseBlocker,
     },
     process_io::CapturedProcess,
-    providers::{Provider, SessionMode, questions::QuestionRoute, runtime::start_managed_turn},
+    providers::{
+        Provider, RequestId, SessionMode,
+        questions::{QuestionAction, QuestionOrigin, QuestionReply, QuestionRoute},
+        runtime::start_managed_turn,
+    },
     repository::{
         self, AttemptWorktreeEvidence, ManagedWorktree, ProjectCheckout, provision_task_worktree,
         with_managed_worktree_writer,
@@ -319,7 +323,15 @@ fn candidate_fixture_worker() -> Result<()> {
                     .pointer("/params/input/0/text")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let report = if text.contains("\"selectedResults\"") {
+                let report = if text.contains("The user answered questions from the original turn.")
+                {
+                    ensure!(
+                        text.contains("\"target\":\"This worktree\""),
+                        "The linked writer missed the typed answer"
+                    );
+                    fs::write(root.join("fixture-continued"), [])?;
+                    Some("Continued the original write with the answer")
+                } else if text.contains("\"selectedResults\"") {
                     ensure!(
                         text.contains("Selected downstream report"),
                         "The continuation missed the selected report"
@@ -1344,7 +1356,7 @@ async fn expired_writer_question_retains_partial_work_and_releases_the_slot() ->
     fs::create_dir_all(source.join(".git/info"))?;
     fs::write(
         source.join(".git/info/exclude"),
-        "ignored.txt\nfixture-expire-question\nfixture-interrupted\n",
+        "ignored.txt\nfixture-expire-question\nfixture-interrupted\nfixture-continued\n",
     )?;
     fs::write(tree.root.join("fixture-expire-question"), [])?;
     let runner = Arc::new(CandidateWriter);
@@ -1355,7 +1367,7 @@ async fn expired_writer_question_retains_partial_work_and_releases_the_slot() ->
     };
     let job =
         queue_approved_writer(&store, &env, &tree, &parent, &task.id, "question-writer").await?;
-    let scheduler = JobScheduler::start(store.clone(), runner, None);
+    let scheduler = JobScheduler::start(store.clone(), runner.clone(), None);
     let queue = tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let queue = store
@@ -1395,7 +1407,7 @@ async fn expired_writer_question_retains_partial_work_and_releases_the_slot() ->
     ));
     with_managed_worktree_writer(
         &store,
-        project.project_id,
+        project.project_id.clone(),
         tree.checkout_id,
         task.id,
         |_| Ok(()),
@@ -1405,13 +1417,81 @@ async fn expired_writer_question_retains_partial_work_and_releases_the_slot() ->
     let reopened = Store::open(database)?;
     reopened.recover_agent_attempts_after_restart().await?;
     let saved = reopened
-        .saved_conversation_questions(owner, attempt.run_id)
+        .saved_conversation_questions(owner.clone(), attempt.run_id.clone())
         .await?;
     assert_eq!(saved.len(), 1);
     assert_eq!(
         (&*saved[0].state, &*saved[0].reason),
         ("saved", "provider_expired")
     );
+    let origin = QuestionOrigin {
+        run_id: attempt.run_id.clone(),
+        request_id: RequestId::Number(71),
+    };
+    let reply = QuestionReply {
+        action: QuestionAction::Accept,
+        values: [("target".into(), json!("This worktree"))]
+            .into_iter()
+            .collect(),
+    };
+    reopened
+        .answer_saved_question(owner.clone(), origin.clone(), reply.clone())
+        .await?;
+    let candidate = tree.root.join("candidate.bin");
+    let original = fs::read(&candidate)?;
+    fs::write(&candidate, b"Edited after answering")?;
+    let scheduler = JobScheduler::start(reopened.clone(), runner, None);
+    let settled = |ordinal| {
+        let store = &reopened;
+        let project = &project.project_id;
+        let job = &job;
+        async move {
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    let current = store
+                        .job(project.clone(), job.id.clone())
+                        .await?
+                        .context("missing writer job")?;
+                    if let Some(attempt) = current.latest_attempt
+                        && attempt.ordinal == ordinal
+                        && attempt.status.is_terminal()
+                    {
+                        break Ok::<_, anyhow::Error>(attempt);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            })
+            .await?
+        }
+    };
+    let rejected = settled(2).await?;
+    assert_eq!(rejected.status, RunStatus::Failed);
+    assert_eq!(rejected.previous_run_id, Some(attempt.run_id));
+    assert!(
+        reopened
+            .agent_dispatch(owner.clone(), rejected.run_id.clone())
+            .await?
+            .is_none()
+    );
+    assert!(!tree.root.join("fixture-continued").exists());
+    assert!(
+        reopened
+            .answer_saved_question(owner, origin, reply)
+            .await
+            .is_err()
+    );
+    fs::write(&candidate, original)?;
+    reopened
+        .queue_job_recovery(
+            project.project_id.clone(),
+            job.id.clone(),
+            rejected.run_id,
+            RecoveryAction::Retry,
+        )
+        .await?;
+    assert_eq!(settled(3).await?.status, RunStatus::Succeeded);
+    assert!(tree.root.join("fixture-continued").is_file());
+    scheduler.shutdown().await?;
     Ok(())
 }
 

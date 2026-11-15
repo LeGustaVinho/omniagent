@@ -529,11 +529,22 @@ pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Res
             }
             let checkpoint = if writes {
                 db.query_row(
-                    "SELECT c.evidence, c.capture_confirmed
+                    "WITH RECURSIVE lineage(run_id) AS (
+                         SELECT ?1
+                         UNION
+                         SELECT previous.run_id FROM lineage current
+                         JOIN job_attempts a ON a.run_id = current.run_id
+                         JOIN job_attempts previous ON previous.run_id = a.previous_run_id
+                         WHERE previous.process_launch_requested = 0
+                           AND NOT EXISTS (SELECT 1 FROM structured_question_continuations
+                                           WHERE continuation_run_id = current.run_id)
+                     )
+                     SELECT c.evidence, c.capture_confirmed
                      FROM structured_question_continuations l
+                     JOIN lineage ON lineage.run_id = l.continuation_run_id
                      JOIN agent_questions q ON q.request_event_seq = l.request_event_seq
                      LEFT JOIN job_worktree_candidates c ON c.run_id = q.run_id
-                     WHERE l.continuation_run_id = ?1",
+                     ORDER BY l.request_event_seq LIMIT 1",
                     [&run], |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?, row.get::<_, Option<bool>>(1)?)),
                 ).optional()?
             } else {

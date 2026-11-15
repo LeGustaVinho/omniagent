@@ -9,6 +9,7 @@ use omniagent::{
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionMode,
         profiles::{DESKTOP_PERMISSION_REVISION, DesktopModel, DesktopProfile, desktop_profile},
+        questions::{QuestionOrigin, QuestionReply},
     },
     repository,
     runner::{DirectWindowsRunner, Runner},
@@ -228,6 +229,24 @@ pub async fn answer_conversation_question(
         .active_turn(&conversation_id, &run_id)
         .map_err(ui_error)?;
     control.answer(request_id, answer).await.map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn answer_saved_conversation_question(
+    store: State<'_, Store>,
+    conversation_id: String,
+    run_id: String,
+    request_id: RequestId,
+    answer: QuestionReply,
+) -> Result<(), String> {
+    store
+        .answer_saved_question(
+            conversation_id,
+            QuestionOrigin { run_id, request_id },
+            answer,
+        )
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]
