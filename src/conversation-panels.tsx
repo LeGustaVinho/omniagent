@@ -3,6 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type { IDockviewPanelProps } from "dockview-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import type { Conversation } from "@/bindings/Conversation";
+import type { AdmissionBlocker } from "@/bindings/AdmissionBlocker";
+import type { Job } from "@/bindings/Job";
+import type { JobInspection } from "@/bindings/JobInspection";
 import type { MessageRevision } from "@/bindings/MessageRevision";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
@@ -16,6 +19,27 @@ import { useWorkspace } from "@/workspace-state";
 
 const draftWrites = new Map<string, Promise<void>>();
 const historyOffsets = new Map<string, number>();
+
+function pendingJob(inspection: JobInspection | null | undefined) {
+  return Boolean(inspection && !inspection.job.latestAttempt && inspection.job.queueState !== "cancelled");
+}
+
+function waitReason(blocker: AdmissionBlocker | undefined): string {
+  switch (blocker?.type) {
+    case "queue_paused": return "The job queue is paused.";
+    case "job_paused": return "This job is paused.";
+    case "context_changed": return "The conversation changed since this message was queued.";
+    case "conversation_busy": return "Waiting for the active conversation run.";
+    case "capacity": return `Waiting for an execution slot (${blocker.active} of ${blocker.limit} in use).`;
+    case "policy": return blocker.reason;
+    case "dependency": return "Waiting for a required job to complete.";
+    case "approval": return "Waiting for approval.";
+    case "writer": return "Waiting for the worktree writer.";
+    case "missing_capability": return "The selected runner is missing a required capability.";
+    case "job_cancelled": return "Job cancelled.";
+    default: return "Waiting to start.";
+  }
+}
 
 function saveDraft(conversationId: string, text: string) {
   const pending = draftWrites.get(conversationId);
@@ -124,6 +148,15 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     staleTime: 60_000,
   });
   const selected = models.data?.find(({ option }) => option.selection.modelId === selection?.modelId && option.selection.provider === selection?.provider);
+  const jobKey = ["conversation", conversationId, "latest-job"];
+  const latestJob = useQuery({
+    queryKey: jobKey,
+    queryFn: () => invoke<JobInspection | null>("latest_conversation_job", { conversationId }),
+    refetchInterval: (query) => pendingJob(query.state.data) || isLiveRun(query.state.data?.job.latestAttempt) ? 250 : false,
+  });
+  const job = latestJob.data;
+  const queued = pendingJob(job);
+  const attempt = job?.job.latestAttempt;
   const runKey = ["conversation", conversationId, "latest-run"];
   const latest = useQuery({
     queryKey: runKey,
@@ -131,7 +164,10 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     refetchInterval: (query) => isLiveRun(query.state.data) ? 250 : false,
   });
   const run = latest.data;
-  const live = isLiveRun(run);
+  const busy = queued || isLiveRun(run) || isLiveRun(attempt);
+  useEffect(() => {
+    if (attempt?.runId) void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-run"] });
+  }, [attempt?.runId, conversationId, queryClient]);
   useEffect(() => {
     if (run?.status) void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "messages"] });
   }, [run?.id, run?.status, conversationId, queryClient]);
@@ -139,18 +175,22 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     mutationFn: async (submitted: string) => {
       if (!selection) throw new Error("Choose a model");
       await saveDraft(conversationId, submitted);
-      return invoke<RunRecord>("start_conversation_turn", {
+      return invoke<Job>("start_conversation_turn", {
         conversationId, selection, effort: effort || null, mode, text: submitted,
       });
     },
-    onSuccess: (run, submitted) => {
+    onSuccess: (queuedJob, submitted) => {
       activeEdit.current++;
       queryClient.setQueryData<string>(draftKey, (current) => current === submitted ? "" : current);
       setDraftStatus("");
       setDraftError("");
-      queryClient.setQueryData(runKey, run);
-      void queryClient.invalidateQueries({ queryKey: historyKey });
+      queryClient.setQueryData<JobInspection>(jobKey, { job: queuedJob, blockers: [] });
+      void queryClient.invalidateQueries({ queryKey: jobKey });
     },
+  });
+  const cancelQueued = useMutation({
+    mutationFn: (jobId: string) => invoke("cancel_conversation_job", { conversationId, jobId }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: jobKey }),
   });
 
   function editDraft(text: string) {
@@ -170,7 +210,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!live && text.trim() && selected?.option.selectable && !send.isPending) send.mutate(text);
+    if (!busy && text.trim() && selected?.option.selectable && !send.isPending) send.mutate(text);
   }
 
   return (
@@ -192,8 +232,13 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
             </li>
           ))}
         </ol>
+        {queued && job && <div className="mx-auto mt-4 flex max-w-3xl flex-wrap items-center gap-2">
+          <p role="status" className="text-sm text-muted-foreground">{waitReason(job.blockers[0])}</p>
+          <Button variant="outline" disabled={cancelQueued.isPending} onClick={() => cancelQueued.mutate(job.job.id)}>Cancel queued message</Button>
+        </div>}
+        {(latestJob.error || cancelQueued.error) && <p role="alert" className="text-sm text-red-300">{String(latestJob.error || cancelQueued.error)}</p>}
         {latest.error && <p role="alert" className="text-sm text-red-300">{String(latest.error)}</p>}
-        {run && <ConversationRun key={run.id} conversationId={conversationId} run={run} />}
+        {run && <ConversationRun key={run.id} conversationId={conversationId} run={run} cancelRequested={attempt?.runId === run.id && attempt.cancelRequested} />}
       </div>
       <form onSubmit={submit} className="max-h-[55%] overflow-auto border-t border-border p-4">
         <div className="mx-auto grid max-w-3xl gap-2">
@@ -233,7 +278,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           <textarea id={`draft-${conversationId}`} className="min-h-24 rounded-md border border-input bg-background p-3 text-sm focus-visible:outline-ring"
             value={text} onChange={(event) => editDraft(event.target.value)} disabled={draft.isPending || Boolean(draft.error) || send.isPending} />
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <Button type="submit" disabled={!text.trim() || live || latest.isPending || !selected?.option.selectable || send.isPending}>
+            <Button type="submit" disabled={!text.trim() || busy || latest.isPending || latestJob.isPending || !selected?.option.selectable || send.isPending}>
               {send.isPending ? "Starting…" : "Send"}
             </Button>
             {draftStatus && <p role="status" className="text-xs text-muted-foreground">{draftStatus}</p>}

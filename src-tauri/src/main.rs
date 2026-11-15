@@ -6,10 +6,12 @@ mod fixture;
 mod fixture_runtime;
 mod ipc;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use omniagent::{
+    jobs::JobScheduler,
     repository::{self, ProjectCheckout},
+    runner::DirectWindowsRunner,
     store::Store,
 };
 use tauri::Manager;
@@ -48,10 +50,17 @@ fn main() {
             let path = app.path().app_local_data_dir()?.join("omniagent.sqlite3");
             let store = Store::open(path)?;
             tauri::async_runtime::block_on(store.recover_agent_attempts_after_restart())?;
+            let scheduler = tauri::async_runtime::block_on(async {
+                JobScheduler::start(
+                    store.clone(),
+                    Arc::new(DirectWindowsRunner),
+                    std::env::current_exe().ok(),
+                )
+            });
             app.manage(store);
+            app.manage(scheduler);
             app.manage(ipc::EventSubscriptions::default());
             app.manage(fixture_runtime::FixtureRuns::default());
-            app.manage(conversation_runtime::ConversationRuns::default());
             desktop::create_tray(app)?;
             Ok(())
         })
@@ -80,6 +89,8 @@ fn main() {
             conversation_runtime::conversation_models,
             conversation_runtime::start_conversation_turn,
             conversation_runtime::latest_conversation_run,
+            conversation_runtime::latest_conversation_job,
+            conversation_runtime::cancel_conversation_job,
             conversation_runtime::stop_conversation_turn,
             conversation_runtime::approve_conversation_input,
             conversation_runtime::answer_conversation_question,

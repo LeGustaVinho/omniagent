@@ -27,11 +27,11 @@ const labels = {
 };
 const liveStatuses = new Set(["starting", "running", "waiting_for_input"]);
 
-export function isLiveRun(run: RunRecord | null | undefined) {
+export function isLiveRun(run: Pick<RunRecord, "status"> | null | undefined) {
   return Boolean(run && liveStatuses.has(run.status));
 }
 
-export function ConversationRun({ conversationId, run }: { conversationId: string; run: RunRecord }) {
+export function ConversationRun({ conversationId, run, cancelRequested }: { conversationId: string; run: RunRecord; cancelRequested?: boolean }) {
   const queryClient = useQueryClient();
   const runId = run.id;
   const target = { conversationId, runId };
@@ -99,7 +99,7 @@ export function ConversationRun({ conversationId, run }: { conversationId: strin
     <section className="mx-auto mt-4 grid max-w-3xl gap-2" aria-label="Conversation run">
       <div className="flex flex-wrap items-center gap-2">
         <span role="status" className="text-xs text-muted-foreground">{labels[run.status]}</span>
-        {live && <Button variant="outline" disabled={stopping} onClick={() => void stop()}>{stopping ? "Stopping…" : "Stop"}</Button>}
+        {live && <Button variant="outline" disabled={stopping || cancelRequested} onClick={() => void stop()}>{stopping || cancelRequested ? "Stopping…" : "Stop"}</Button>}
         <Button variant="outline" aria-expanded={showInput} onClick={() => setShowInput((visible) => !visible)}>Exact input</Button>
       </div>
       {error && <p role="alert" className="text-sm text-red-300">{String(error)}</p>}

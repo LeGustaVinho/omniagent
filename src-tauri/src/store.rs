@@ -33,6 +33,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/018-structured-question-continuations.sql"),
     include_str!("../migrations/019-project-tasks.sql"),
     include_str!("../migrations/020-job-queue.sql"),
+    include_str!("../migrations/021-job-admission.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -41,6 +42,7 @@ type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
 pub struct Store {
     writer: mpsc::Sender<DatabaseJob>,
     pub(crate) event_signal: watch::Sender<()>,
+    pub(crate) job_signal: watch::Sender<()>,
 }
 
 pub enum DraftKey {
@@ -87,6 +89,7 @@ impl Store {
         Ok(Self {
             writer,
             event_signal: watch::channel(()).0,
+            job_signal: watch::channel(()).0,
         })
     }
 
