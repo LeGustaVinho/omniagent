@@ -7,13 +7,18 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     conversations::{Conversation, SessionScope},
     customizations::{CustomizationInventory, CustomizationKind},
     dispatch::NativeHistory,
     mcp_bridge::Registration,
     providers::{
-        ApprovalDecision, Provider, ProviderEventData, SessionMode,
+        ApprovalDecision, Capability, Provider, ProviderEventData, SessionMode,
+        capabilities::{
+            Availability, CapabilityDescriptor, CapabilityStatus, CapabilitySubject,
+            DeclaredSource, EvidenceBoundary, EvidenceOrigin, ObservedResult,
+        },
         profiles::{ConfiguredExecutable, probe_cli},
         runtime::start_managed_turn,
     },
@@ -22,6 +27,7 @@ use omniagent::{
     runs::RunStatus,
     store::Store,
 };
+use sha2::{Digest, Sha256};
 
 struct Fixture {
     _temporary: tempfile::TempDir,
@@ -487,6 +493,177 @@ args = ["./pending.js"]
         .await?
         .unwrap();
     assert_eq!(dispatch.snapshot.scoped_launch.unwrap().approved.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Codex App Server with gpt-6-luna and Node.js"]
+async fn codex_qualifies_audio_from_an_explicitly_approved_fixture_tool() -> Result<()> {
+    let fixture = Fixture::new()?;
+    fs::create_dir(fixture.path.join(".codex"))?;
+    fs::write(
+        fixture.path.join("generate-tone.cjs"),
+        include_str!("fixtures/providers/generate-tone.cjs"),
+    )?;
+    fs::write(
+        fixture.path.join(".codex/config.toml"),
+        r#"
+[mcp_servers.fixture_media]
+command = "node"
+args = ["./generate-tone.cjs"]
+"#,
+    )?;
+    let (store, checkout) = fixture.register().await?;
+    let inventory = store
+        .saved_checkout_customizations(checkout.checkout_id.clone())
+        .await?;
+    approve(
+        &store,
+        &checkout,
+        inventory,
+        "fixture_media",
+        CustomizationKind::McpServer,
+    )
+    .await?;
+    let conversation = store
+        .create_conversation(
+            checkout.checkout_id,
+            "Tool-backed audio qualification".into(),
+        )
+        .await?;
+    let (run, status) = turn_with_prompt(
+        &store, &conversation, scope(Provider::Codex, "gpt-6-luna", &fixture.path)?,
+        "Call the fixture_media MCP tool generate_tone with no arguments. Use only that tool. Copy its exact text result into your final answer, including the producer name and base64, as plain text.",
+    ).await?;
+    assert_eq!(status, RunStatus::Succeeded);
+    let mut events = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let page = store
+            .agent_observations(conversation.id.clone(), run.clone(), cursor)
+            .await?;
+        let Some(last) = page.last() else { break };
+        cursor = last.seq;
+        events.extend(page);
+    }
+    const PRODUCER: &str = "omniagent-phase02-tone/1";
+    ensure!(events.iter().any(|entry| matches!(&entry.event.data,
+        ProviderEventData::Tool { name, phase } if name == "generate_tone" && phase == "completed")),
+        "the projected media tool did not complete: {:?}", events.iter().filter_map(|entry| match &entry.event.data {
+            event @ (ProviderEventData::Tool { .. } | ProviderEventData::AssistantMessage { .. }
+                | ProviderEventData::Diagnostic { .. } | ProviderEventData::Error { .. }) => Some(event),
+            _ => None,
+        }).collect::<Vec<_>>());
+    let final_answer = events
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.event.data {
+            ProviderEventData::AssistantMessage { text } => Some(text),
+            _ => None,
+        })
+        .context("missing final assistant event")?;
+    let (producer, audio) = final_answer
+        .trim()
+        .split_once(' ')
+        .context("expected producer and audio bytes")?;
+    assert_eq!(producer, PRODUCER, "unexpected response: {final_answer:?}");
+    let bytes = STANDARD.decode(audio)?;
+    assert_eq!(bytes.len(), 44 + 2 * 16);
+    assert_eq!(&bytes[..4], b"RIFF");
+    assert_eq!(&bytes[8..16], b"WAVEfmt ");
+    assert_eq!(&bytes[24..28], &8000u32.to_le_bytes());
+    assert_eq!(&bytes[36..40], b"data");
+    let samples = bytes[44..]
+        .chunks_exact(2)
+        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]));
+    for (index, sample) in samples.enumerate() {
+        assert_eq!(
+            sample,
+            (4096.0 * (std::f64::consts::TAU * 440.0 * index as f64 / 8000.0).sin()).round() as i16
+        );
+    }
+
+    let snapshot = store
+        .agent_dispatch(conversation.id, run.clone())
+        .await?
+        .context("missing audio qualification dispatch")?
+        .snapshot;
+    let assessment = snapshot
+        .capabilities
+        .context("missing audio qualification scope")?;
+    let policy = assessment
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.descriptor.subject
+                == CapabilitySubject::Protocol {
+                    capability: Capability::WorkspaceWrite,
+                }
+        })
+        .context("missing workspace write policy")?;
+    assert_eq!(policy.status(), CapabilityStatus::Blocked);
+    ensure!(
+        assessment
+            .scope
+            .configuration
+            .environment_revision
+            .is_some(),
+        "missing effective media fixture environment ({} unresolved sources, configuration reported {}, plugin inventory {:?}, skill issues {:?})",
+        assessment.scope.configuration.unresolved.len(),
+        assessment.scope.configuration.provider_revision.is_some(),
+        snapshot
+            .plugin_inventory
+            .as_ref()
+            .map(|inventory| &inventory.report.status),
+        snapshot
+            .reported_skills
+            .as_ref()
+            .map(|catalog| &catalog.issues)
+    );
+    ensure!(
+        assessment
+            .scope
+            .configuration
+            .tool_revisions
+            .contains_key("mcp/fixture_media"),
+        "the effective profile did not fingerprint the projected media tool"
+    );
+    let descriptor = CapabilityDescriptor {
+        subject: CapabilitySubject::Tool {
+            id: "mcp/fixture_media".into(),
+            version: PRODUCER.into(),
+            operation: "generate_tone".into(),
+        },
+        source: DeclaredSource::Provider,
+        availability: Availability::Available,
+        observed: Some(ObservedResult::Succeeded),
+        blocker: None,
+        boundary: EvidenceBoundary::EquivalentConfiguration,
+    };
+    let artifact = format!(
+        "{run}:mcp/fixture_media/generate_tone:sha256:{:x}",
+        Sha256::digest(&bytes)
+    );
+    let verification = store
+        .record_capability_evidence(
+            assessment.scope.clone(),
+            descriptor.clone(),
+            EvidenceOrigin::AuthenticatedFixture,
+            ObservedResult::Succeeded,
+            artifact.clone(),
+        )
+        .await?;
+    let resolved = store
+        .resolve_capability_assessment(assessment.scope, vec![descriptor])
+        .await?;
+    assert_eq!(resolved.entries[0].status(), CapabilityStatus::Verified);
+    let saved = resolved.entries[0]
+        .evidence
+        .as_ref()
+        .context("missing tool verification")?;
+    assert_eq!(saved.id, verification);
+    assert_eq!(saved.artifact_id, artifact);
+    println!("{PRODUCER} {artifact}");
     Ok(())
 }
 
