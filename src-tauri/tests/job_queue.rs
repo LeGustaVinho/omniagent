@@ -18,9 +18,12 @@ use omniagent::{
     store::Store,
 };
 
-fn remove_side_request_schema(db: &rusqlite::Connection) -> Result<()> {
+fn remove_recent_schema(db: &rusqlite::Connection) -> Result<()> {
     db.execute_batch(
-        "DROP TABLE side_validation_evidence;
+        "DROP TABLE project_checklists;
+         DROP TABLE project_task_memberships;
+         DROP TABLE project_epics;
+         DROP TABLE side_validation_evidence;
          DROP TRIGGER discard_suggestion_on_draft_insert;
          DROP TRIGGER discard_suggestion_on_draft_edit;
          DROP TRIGGER discard_suggestion_on_context_change;
@@ -1510,7 +1513,7 @@ async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -
 
     // Recreate the previous schema with history intact and verify the upgrade.
     let db = rusqlite::Connection::open(&path)?;
-    remove_side_request_schema(&db)?;
+    remove_recent_schema(&db)?;
     db.execute_batch(
         "DROP TABLE attempt_subagent_audit;
          DROP TABLE native_subagent_audit_candidates;
@@ -2138,7 +2141,7 @@ async fn queued_conversation_draft_and_snapshot_survive_reopen_without_creating_
     drop(store);
     // A pending conversation job from the previous schema already owns its prompt and scope.
     let db = rusqlite::Connection::open(&database)?;
-    remove_side_request_schema(&db)?;
+    remove_recent_schema(&db)?;
     db.execute_batch(
         "DROP TABLE conversation_forks;
          DROP VIEW unconfirmed_agent_stops;
