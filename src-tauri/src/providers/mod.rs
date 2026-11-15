@@ -191,6 +191,9 @@ pub enum ProviderEventData {
     ModelInventory {
         models: Vec<ReportedModel>,
     },
+    AvailableCommands {
+        names: Vec<String>,
+    },
     TurnStarted,
     AssistantDelta {
         text: String,
@@ -375,6 +378,7 @@ mod tests {
         Ok(())
     }
 }
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod goal;
