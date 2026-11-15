@@ -1,9 +1,9 @@
 use std::{
     env,
     ffi::OsStr,
-    io::{BufRead, BufReader},
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     path::Path,
+    time::{Duration, Instant},
 };
 
 use omniagent::process::{TerminalOutcome, launch};
@@ -15,16 +15,37 @@ use windows_sys::Win32::{
 };
 
 #[test]
-fn cancelled_job_terminates_the_owned_grandchild() {
+fn noisy_job_streams_and_cancel_terminates_its_owned_grandchild() {
     let process = launch(
         Path::new(env!("CARGO_BIN_EXE_omniagent")),
         &env::current_dir().unwrap(),
-        &[OsStr::new("--fixture"), OsStr::new("--grandchild")],
+        &[
+            OsStr::new("--fixture"),
+            OsStr::new("--grandchild"),
+            OsStr::new("--stderr-flood"),
+        ],
     )
     .unwrap();
-    let mut stdout = BufReader::new(process.stdout).lines();
-    let child_identity = stdout.next().unwrap().unwrap();
+    let process = capture(process).unwrap();
+    let mut pid_line = None;
+    let mut ready = false;
+    let mut stderr_bytes = 0;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(ready && pid_line.is_some() && stderr_bytes >= 64 * 1_024) {
+        let frame = process
+            .output
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("stdout and stderr continue before input")
+            .unwrap();
+        match frame.stream {
+            Stream::Stderr => stderr_bytes += frame.data.len(),
+            Stream::Stdout if frame.data.contains(r#""type":"ready""#) => ready = true,
+            Stream::Stdout => pid_line = Some(frame.data),
+        }
+    }
+    let child_identity = pid_line.unwrap();
     let pid: u32 = child_identity
+        .trim_end()
         .strip_prefix(r#"{"type":"grandchild","pid":"#)
         .unwrap()
         .strip_suffix('}')
