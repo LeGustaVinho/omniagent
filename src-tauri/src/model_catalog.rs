@@ -1,11 +1,13 @@
 use std::sync::LazyLock;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::providers::Provider;
 
-#[derive(Debug, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct ModelRating {
     pub intelligence_tenths: u16,
     pub api_reference_cents: u16,
@@ -50,6 +52,27 @@ pub struct RatedOption<'a> {
     pub reference: Option<&'a RatedModel>,
 }
 
+#[derive(Debug, Clone, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ModelSelection {
+    pub provider: Provider,
+    pub profile_id: String,
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ModelOption {
+    pub selection: ModelSelection,
+    pub name: String,
+    pub selectable: bool,
+    pub unavailable_reason: Option<String>,
+    pub rating: Option<ModelRating>,
+    pub catalog_version: u16,
+}
+
 pub static MODEL_CATALOG: LazyLock<ModelCatalog> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../model-catalog/v1.json"))
         .expect("valid bundled model catalog")
@@ -79,6 +102,29 @@ impl ModelCatalog {
                     model,
                     reference: self.lookup(provider, id),
                 }
+            })
+            .collect()
+    }
+
+    pub fn project_options(
+        &self,
+        provider: Provider,
+        profile_id: &str,
+        inventory: &[ObservedModel],
+    ) -> Vec<ModelOption> {
+        self.join(provider, inventory)
+            .into_iter()
+            .map(|option| ModelOption {
+                selection: ModelSelection {
+                    provider,
+                    profile_id: profile_id.to_owned(),
+                    model_id: option.model.id.clone(),
+                },
+                name: option.model.name.clone(),
+                selectable: option.model.selectable,
+                unavailable_reason: option.model.unavailable_reason.clone(),
+                rating: option.reference.map(|reference| reference.rating.clone()),
+                catalog_version: self.version,
             })
             .collect()
     }
@@ -141,5 +187,12 @@ mod tests {
         assert!(!options[0].model.selectable);
         assert_eq!(options[0].reference.unwrap().name, "Gemini 4 Argon");
         assert!(options[1].reference.is_none());
+        let projected =
+            MODEL_CATALOG.project_options(Provider::Antigravity, "workspace-profile", &inventory);
+        assert_eq!(projected[0].selection.model_id, "gemini-4-argon-high");
+        assert_eq!(projected[0].selection.profile_id, "workspace-profile");
+        assert_eq!(projected[0].rating.as_ref().unwrap().price_score, 65);
+        assert!(!projected[0].selectable);
+        assert_eq!(projected[1].rating, None);
     }
 }
