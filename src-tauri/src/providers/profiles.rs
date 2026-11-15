@@ -190,7 +190,7 @@ pub fn probe_cli(configured: ConfiguredExecutable) -> Result<CliProbe> {
     Ok(check)
 }
 
-fn published_version(provider: Provider, output: &str) -> Option<String> {
+pub(super) fn published_version(provider: Provider, output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let candidate = match provider {
             Provider::Codex => line.trim().strip_prefix("codex-cli ")?,
@@ -201,14 +201,28 @@ fn published_version(provider: Provider, output: &str) -> Option<String> {
     })
 }
 
-struct CommandOutput {
-    status: TerminalOutcome,
-    stdout: String,
-    stderr: String,
+pub(super) struct CommandOutput {
+    pub status: TerminalOutcome,
+    pub stdout: String,
+    pub stderr: String,
 }
 
-fn command_probe(executable: &Path, cwd: &Path, args: Vec<OsString>) -> Result<CommandOutput> {
-    run_probe(executable, cwd, &args, |process, deadline| {
+pub(super) fn command_probe(
+    executable: &Path,
+    cwd: &Path,
+    args: Vec<OsString>,
+) -> Result<CommandOutput> {
+    command_probe_with_limits(executable, cwd, args, PROBE_TIME, MAX_PROBE_OUTPUT)
+}
+
+pub(super) fn command_probe_with_limits(
+    executable: &Path,
+    cwd: &Path,
+    args: Vec<OsString>,
+    time_limit: Duration,
+    output_limit: usize,
+) -> Result<CommandOutput> {
+    run_probe(executable, cwd, &args, time_limit, |process, deadline| {
         let CapturedProcess {
             input,
             output,
@@ -221,7 +235,7 @@ fn command_probe(executable: &Path, cwd: &Path, args: Vec<OsString>) -> Result<C
             match output.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok(Ok(frame)) => {
                     ensure!(
-                        stdout.len() + stderr.len() + frame.data.len() <= MAX_PROBE_OUTPUT,
+                        stdout.len() + stderr.len() + frame.data.len() <= output_limit,
                         "CLI probe output exceeded its limit"
                     );
                     match frame.stream {
@@ -259,6 +273,7 @@ fn handshake_probe(
         executable,
         cwd,
         &session.arguments(),
+        PROBE_TIME,
         |mut process, deadline| {
             for frame in session.start()?.outbound {
                 process.input.send(frame.as_bytes())?;
@@ -295,6 +310,7 @@ fn run_probe<T>(
     executable: &Path,
     cwd: &Path,
     args: &[OsString],
+    time_limit: Duration,
     collect: impl FnOnce(CapturedProcess, Instant) -> Result<T>,
 ) -> Result<T> {
     let arguments = args
@@ -309,7 +325,7 @@ fn run_probe<T>(
     })?;
     let control = process.control.clone();
     let timeout_control = control.clone();
-    let deadline = Instant::now() + PROBE_TIME;
+    let deadline = Instant::now() + time_limit;
     let (finished, done) = mpsc::channel();
     thread::scope(|scope| {
         let watchdog = scope.spawn(move || {

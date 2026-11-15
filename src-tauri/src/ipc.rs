@@ -8,6 +8,7 @@ use omniagent::{
     evidence::FixtureInputEvidence,
     providers::{
         Provider,
+        plugins::{PluginInventory, probe_plugins},
         profiles::{CliProbe, ConfiguredExecutable, probe_cli},
     },
     repository::ProjectCheckout,
@@ -59,6 +60,33 @@ pub async fn probe_cli_executable(
     tauri::async_runtime::spawn_blocking(move || probe_cli(configured))
         .await
         .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn cli_plugin_inventory(
+    store: State<'_, Store>,
+    provider: Provider,
+    refresh: bool,
+) -> Result<Option<PluginInventory>, String> {
+    if !refresh {
+        return store
+            .latest_plugin_inventory(provider)
+            .await
+            .map_err(|error| error.to_string());
+    }
+    let configured = store
+        .configured_executable(provider)
+        .await
+        .map_err(|error| error.to_string())?;
+    let report = tauri::async_runtime::spawn_blocking(move || probe_plugins(configured))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    store
+        .save_plugin_inventory(report)
+        .await
+        .map(Some)
         .map_err(|error| error.to_string())
 }
 

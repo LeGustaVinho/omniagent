@@ -482,6 +482,7 @@ pub mod claude;
 pub mod codex;
 mod configuration;
 pub mod goal;
+pub mod plugins;
 pub mod profiles;
 mod rpc;
 pub mod runtime;

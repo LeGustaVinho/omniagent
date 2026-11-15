@@ -205,6 +205,17 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       const providers = await invoke(browser, "cli_executables");
       return providers.find((provider) => provider.provider === "codex")?.executable === null;
     });
+    if (process.env.OMNIAGENT_LIVE_PLUGIN_INVENTORY === "1") {
+      await form.$("button=Check plugins").click();
+      const summary = browser.$("summary*=Installed plugins");
+      await summary.waitForDisplayed({ timeout: 45_000 });
+      const inventory = await invoke(browser, "cli_plugin_inventory", { provider: "codex", refresh: false });
+      assert.equal(inventory.report.status, "reported");
+      assert.ok(inventory.report.version);
+      assert.equal(await summary.getText(), `Installed plugins (${inventory.report.plugins.length})`);
+      await summary.click();
+      await browser.$("p*=In-session plugin loads are unconfirmed").waitForDisplayed();
+    }
   } finally {
     try {
       await browser?.deleteSession();
