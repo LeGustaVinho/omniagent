@@ -405,6 +405,15 @@ pub enum ProviderEventData {
     QuestionClosed {
         request_id: RequestId,
     },
+    StructuredQuestionReplyLinked {
+        origin: questions::QuestionOrigin,
+        reply: questions::QuestionReply,
+        continuation_run_id: String,
+    },
+    StructuredQuestionDismissed {
+        origin: questions::QuestionOrigin,
+        action: questions::QuestionAction,
+    },
     PlanningModeConfirmed {
         mode: planning::PlanningMode,
     },

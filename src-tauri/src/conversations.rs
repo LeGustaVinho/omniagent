@@ -16,7 +16,8 @@ use crate::{
     protection,
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionIntent,
-        SessionMode, TurnOutcome, questions::QuestionRoute,
+        SessionMode, TurnOutcome,
+        questions::{QuestionAction, QuestionOrigin, QuestionReply, QuestionRoute},
     },
     runs::{self, RunRecord, RunStatus},
     store::Store,
@@ -90,6 +91,19 @@ pub struct AttemptPlan {
     pub input: Vec<MessageRevision>,
     pub(crate) attachments: Vec<(String, CapturedAttachment)>,
     pub(crate) question_route: QuestionRoute,
+    pub(crate) answered_question: Option<QuestionOrigin>,
+}
+
+enum AttemptInput {
+    Message {
+        text: String,
+        previews: Vec<AttachmentPreview>,
+        question_route: QuestionRoute,
+    },
+    StructuredReply {
+        origin: QuestionOrigin,
+        reply: QuestionReply,
+    },
 }
 
 pub(crate) enum PermissionRoute {
@@ -278,8 +292,51 @@ impl Store {
         text: String,
         previews: Vec<AttachmentPreview>,
     ) -> Result<AttemptPlan> {
+        self.admit_agent_attempt(
+            conversation_id,
+            base_context_id,
+            scope,
+            AttemptInput::Message {
+                text,
+                previews,
+                question_route: QuestionRoute::Native,
+            },
+        )
+        .await
+    }
+
+    async fn admit_agent_attempt(
+        &self,
+        conversation_id: String,
+        base_context_id: String,
+        scope: SessionScope,
+        input: AttemptInput,
+    ) -> Result<AttemptPlan> {
+        let (text, previews, question_route, answer) = match input {
+            AttemptInput::Message {
+                text,
+                previews,
+                question_route,
+            } => (text, previews, question_route, None),
+            AttemptInput::StructuredReply { origin, reply } => {
+                ensure!(
+                    reply.action == QuestionAction::Accept,
+                    "continuing a structured question requires an accepted answer"
+                );
+                (
+                    String::new(),
+                    Vec::new(),
+                    QuestionRoute::StructuredTurn,
+                    Some((origin, reply)),
+                )
+            }
+        };
         ensure!(
-            !text.trim().is_empty() || !previews.is_empty(),
+            question_route.is_native() || scope.mode == SessionMode::ReadOnly,
+            "structured planning needs a read-only profile"
+        );
+        ensure!(
+            answer.is_some() || !text.trim().is_empty() || !previews.is_empty(),
             "message is empty"
         );
         let checkout = dunce::canonicalize(&scope.checkout)?;
@@ -296,7 +353,10 @@ impl Store {
             "incomplete session scope"
         );
         let serialized = serde_json::to_string(&scope)?;
-        let encrypted = protection::protect(text.as_bytes())?;
+        let encrypted = answer
+            .is_none()
+            .then(|| protection::protect(text.as_bytes()))
+            .transpose()?;
         let frozen = if previews.is_empty() {
             None
         } else {
@@ -323,6 +383,9 @@ impl Store {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let conversation = check_idle_base(&tx, &conversation_id, &base_context_id)?;
+            let answered_request = answer.as_ref().map(|(origin, reply)| {
+                validate_structured_reply(&tx, &conversation, &serialized, origin, reply)
+            }).transpose()?;
             let registered: String = tx.query_row(
                 "SELECT root FROM checkouts WHERE id = ?1", [&conversation.checkout_id], |row| row.get(0),
             )?;
@@ -348,6 +411,16 @@ impl Store {
                 (id, None, SessionIntent::Start, 0)
             };
 
+            let encrypted = if let (Some((_, reply)), Some((_, form))) = (&answer, &answered_request) {
+                let values = serde_json::json!({"question": form, "answer": reply.values});
+                let text = format!(
+                    "The user answered this saved planning question. Continue the original planning task with the supplied values.\n{}",
+                    serde_json::to_string(&values)?
+                );
+                protection::protect(text.as_bytes())?
+            } else {
+                encrypted.context("missing admitted message content")?
+            };
             let revision = insert_message(&tx, &conversation_id, MessageRole::User, encrypted)?;
             if let Some((_, payload)) = frozen {
                 tx.execute("INSERT INTO message_attachments(message_revision_id, payload) VALUES (?1, ?2)", params![revision, payload])?;
@@ -378,9 +451,35 @@ impl Store {
                     previous_run_id, context_id, resume_cursor_id],
             )?;
             tx.execute("INSERT INTO active_agent_attempts VALUES (?1, ?2)", params![conversation_id, run.id])?;
+            let mut answered_question = None;
+            if let (Some((origin, reply)), Some((request_event_seq, _))) = (answer, answered_request) {
+                let event = ProviderEvent {
+                    location: Default::default(),
+                    data: ProviderEventData::StructuredQuestionReplyLinked {
+                        origin: origin.clone(), reply, continuation_run_id: run.id.clone(),
+                    },
+                };
+                let payload = protection::protect(&serde_json::to_vec(&event)?)?;
+                tx.execute("INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)",
+                    params![origin.run_id, EventSource::Application.as_sql(), payload])?;
+                let reply_event_seq = tx.last_insert_rowid();
+                let changed = tx.execute(
+                    "UPDATE structured_question_continuations SET continuation_run_id = ?1, reply_event_seq = ?2
+                     WHERE request_event_seq = ?3 AND continuation_run_id IS NULL",
+                    params![run.id, reply_event_seq, request_event_seq],
+                )?;
+                ensure!(changed == 1, "structured planning question has already been answered");
+                let changed = tx.execute(
+                    "UPDATE agent_questions SET delivery = 'closed'
+                     WHERE request_event_seq = ?1 AND delivery = 'pending'",
+                    [request_event_seq],
+                )?;
+                ensure!(changed == 1, "structured planning question is no longer pending");
+                answered_question = Some(origin);
+            }
             tx.commit()?;
             Ok(AttemptPlan { run, conversation_id, agent_session_id, previous_run_id, context_id,
-                resume_cursor_id, intent, scope, input, attachments, question_route: QuestionRoute::Native })
+                resume_cursor_id, intent, scope, input, attachments, question_route, answered_question })
         }).await
     }
 
@@ -392,21 +491,82 @@ impl Store {
         text: String,
         previews: Vec<AttachmentPreview>,
     ) -> Result<AttemptPlan> {
-        ensure!(
-            scope.mode == SessionMode::ReadOnly,
-            "structured planning needs a read-only profile"
-        );
-        let mut attempt = self
-            .prepare_agent_attempt_with_attachments(
-                conversation_id,
-                base_context_id,
-                scope,
+        self.admit_agent_attempt(
+            conversation_id,
+            base_context_id,
+            scope,
+            AttemptInput::Message {
                 text,
                 previews,
-            )
-            .await?;
-        attempt.question_route = QuestionRoute::StructuredTurn;
-        Ok(attempt)
+                question_route: QuestionRoute::StructuredTurn,
+            },
+        )
+        .await
+    }
+
+    pub async fn prepare_structured_planning_reply(
+        &self,
+        conversation_id: String,
+        base_context_id: String,
+        scope: SessionScope,
+        origin: QuestionOrigin,
+        reply: QuestionReply,
+    ) -> Result<AttemptPlan> {
+        self.admit_agent_attempt(
+            conversation_id,
+            base_context_id,
+            scope,
+            AttemptInput::StructuredReply { origin, reply },
+        )
+        .await
+    }
+
+    pub async fn dismiss_structured_planning_question(
+        &self,
+        conversation_id: String,
+        base_context_id: String,
+        scope: SessionScope,
+        origin: QuestionOrigin,
+        action: QuestionAction,
+    ) -> Result<()> {
+        ensure!(
+            action != QuestionAction::Accept,
+            "an accepted answer needs a continuation"
+        );
+        let scope = serde_json::to_string(&scope)?;
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let conversation = check_idle_base(&tx, &conversation_id, &base_context_id)?;
+            let reply = QuestionReply {
+                action,
+                values: Default::default(),
+            };
+            let (seq, _) = validate_structured_reply(&tx, &conversation, &scope, &origin, &reply)?;
+            let event = ProviderEvent {
+                location: Default::default(),
+                data: ProviderEventData::StructuredQuestionDismissed {
+                    origin: origin.clone(),
+                    action,
+                },
+            };
+            let payload = protection::protect(&serde_json::to_vec(&event)?)?;
+            tx.execute(
+                "INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)",
+                params![origin.run_id, EventSource::Application.as_sql(), payload],
+            )?;
+            let changed = tx.execute(
+                "UPDATE agent_questions SET delivery = 'closed'
+                 WHERE request_event_seq = ?1 AND delivery = 'pending'",
+                [seq],
+            )?;
+            ensure!(
+                changed == 1,
+                "structured planning question is no longer pending"
+            );
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn record_agent_observation(
@@ -628,6 +788,14 @@ impl Store {
                         JOIN dispatches d ON d.snapshot_id = s.id
                         WHERE a.run_id = ?3 AND a.provider_terminal = 'completed' AND d.delivery = 'submitted')",
                     params![context_id, active.session_id, run_id])?;
+                tx.execute(
+                    "INSERT INTO structured_question_continuations(request_event_seq, context_id)
+                     SELECT request_event_seq, ?1 FROM agent_questions
+                     WHERE run_id = ?2 AND route = 'structured_turn' AND delivery = 'pending'",
+                    params![context_id, run_id],
+                )?;
+            } else {
+                close_unfinished_structured_questions(&tx, &run_id)?;
             }
             close_permissions(&tx, &run_id)?;
             close_native_questions(&tx, &run_id)?;
@@ -651,6 +819,7 @@ impl Store {
                 runs::advance_run(&tx, &run, RunStatus::Interrupted)?;
                 close_permissions(&tx, &id)?;
                 close_native_questions(&tx, &id)?;
+                close_unfinished_structured_questions(&tx, &id)?;
             }
             tx.execute(
                 "UPDATE dispatches SET delivery = 'unconfirmed' WHERE delivery = 'prepared'",
@@ -666,6 +835,56 @@ impl Store {
 
 fn new_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+fn validate_structured_reply(
+    db: &Connection,
+    conversation: &Conversation,
+    scope: &str,
+    origin: &QuestionOrigin,
+    reply: &QuestionReply,
+) -> Result<(i64, serde_json::Value)> {
+    let (seq, payload, original_scope): (i64, Vec<u8>, String) = db
+        .query_row(
+            "SELECT q.request_event_seq, e.payload, s.scope
+         FROM agent_questions q
+         JOIN structured_question_continuations link ON link.request_event_seq = q.request_event_seq
+         JOIN agent_events e ON e.seq = q.request_event_seq
+         JOIN agent_attempts a ON a.run_id = q.run_id
+         JOIN agent_sessions s ON s.id = a.agent_session_id
+         WHERE q.run_id = ?1 AND q.request_key = ?2 AND q.route = 'structured_turn'
+           AND q.delivery = 'pending' AND a.conversation_id = ?3
+           AND link.context_id = ?4 AND link.continuation_run_id IS NULL",
+            params![
+                origin.run_id,
+                permission_key(&origin.request_id)?,
+                conversation.id,
+                conversation.context_id
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .context("structured planning question is absent, answered, or stale for this context")?;
+    ensure!(
+        original_scope == scope,
+        "the planning question belongs to another profile or checkout"
+    );
+    let event: ProviderEvent = serde_json::from_slice(&protection::unprotect(&payload)?)?;
+    let ProviderEventData::Question {
+        request_id,
+        form,
+        normalized: Some(normalized),
+        route: QuestionRoute::StructuredTurn,
+        ..
+    } = event.data
+    else {
+        anyhow::bail!("saved structured question has no validated form")
+    };
+    ensure!(
+        request_id == origin.request_id,
+        "saved structured question identity changed"
+    );
+    normalized.validate(reply)?;
+    Ok((seq, form))
 }
 
 fn load_conversation(db: &Connection, id: &str) -> Result<Conversation> {
@@ -851,6 +1070,15 @@ fn close_native_questions(db: &Connection, run_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn close_unfinished_structured_questions(db: &Connection, run_id: &str) -> Result<()> {
+    db.execute(
+        "UPDATE agent_questions SET delivery = 'closed'
+         WHERE run_id = ?1 AND route = 'structured_turn' AND delivery = 'pending'",
+        [run_id],
+    )?;
+    Ok(())
+}
+
 fn close_permissions(db: &Connection, run_id: &str) -> Result<()> {
     db.execute(
         "UPDATE agent_permissions SET delivery = CASE delivery WHEN 'pending' THEN 'closed' ELSE 'unconfirmed' END
@@ -924,6 +1152,107 @@ mod tests {
         store
             .prepare_agent_attempt(current.id, current.context_id, scope, text.into())
             .await
+    }
+
+    #[tokio::test]
+    async fn dismissing_a_saved_planning_question_keeps_the_completed_turn_closed() -> Result<()> {
+        use crate::providers::questions::QuestionForm;
+
+        let (_dir, store, chat, scope) = setup().await?;
+        let attempt = store
+            .prepare_structured_planning_attempt(
+                chat.id.clone(),
+                chat.context_id.clone(),
+                scope.clone(),
+                "Plan a report".into(),
+                Vec::new(),
+            )
+            .await?;
+        let origin = QuestionOrigin {
+            run_id: attempt.run.id.clone(),
+            request_id: RequestId::Text(format!("structured:{}", attempt.run.turn_id)),
+        };
+        let schema = json!({"type":"object","properties":{"summary":{"type":"boolean"}},"required":["summary"]});
+        let message = "Include a summary?";
+        store.mark_agent_running(origin.run_id.clone()).await?;
+        store
+            .record_agent_observation(
+                origin.run_id.clone(),
+                EventSource::Application,
+                ProviderEvent {
+                    location: Default::default(),
+                    data: ProviderEventData::Question {
+                        request_id: origin.request_id.clone(),
+                        form: json!({"message":message,"schema":schema}),
+                        normalized: Some(QuestionForm::schema(message.into(), &schema)?),
+                        route: QuestionRoute::StructuredTurn,
+                    },
+                },
+            )
+            .await?;
+        store
+            .finish_agent_attempt(
+                origin.run_id.clone(),
+                RunStatus::Succeeded,
+                Some(message.into()),
+            )
+            .await?;
+        let base = store.conversation(chat.id.clone()).await?.context_id;
+        assert!(
+            store
+                .dismiss_structured_planning_question(
+                    chat.id.clone(),
+                    chat.context_id,
+                    scope.clone(),
+                    origin.clone(),
+                    QuestionAction::Cancel,
+                )
+                .await
+                .is_err()
+        );
+        store
+            .dismiss_structured_planning_question(
+                chat.id.clone(),
+                base.clone(),
+                scope.clone(),
+                origin.clone(),
+                QuestionAction::Cancel,
+            )
+            .await?;
+        assert!(
+            store
+                .prepare_structured_planning_reply(
+                    chat.id.clone(),
+                    base.clone(),
+                    scope,
+                    origin.clone(),
+                    QuestionReply {
+                        action: QuestionAction::Accept,
+                        values: [("summary".into(), json!(true))].into_iter().collect()
+                    },
+                )
+                .await
+                .is_err()
+        );
+        let events = store
+            .agent_observations(chat.id.clone(), origin.run_id.clone(), 0)
+            .await?;
+        assert!(events.iter().any(|entry| matches!(
+            &entry.event.data, ProviderEventData::StructuredQuestionDismissed { origin: saved, action: QuestionAction::Cancel }
+                if saved == &origin
+        )));
+        assert_eq!(store.conversation(chat.id.clone()).await?.context_id, base);
+        let attempts: i64 = store
+            .execute(move |db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FROM agent_attempts WHERE conversation_id = ?1",
+                    [chat.id],
+                    |row| row.get(0),
+                )?)
+            })
+            .await?;
+        assert_eq!(attempts, 1);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1207,6 +1536,7 @@ mod tests {
                     plugin_inventory: None,
                     attachments: Vec::new(),
                     question_route: QuestionRoute::Native,
+                    answered_question: None,
                 },
                 vec![b"{\"fixture\":true}\n".to_vec()],
             )

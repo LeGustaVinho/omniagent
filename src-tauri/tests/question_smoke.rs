@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use omniagent::{
     conversations::SessionScope,
+    dispatch::RecordedAgentEvent,
     process_io::{CapturedProcess, ProcessInput},
     providers::{
         ApprovalDecision, Capability, Provider, ProviderEventData, RequestId, SessionMode,
@@ -16,7 +17,10 @@ use omniagent::{
         capabilities::{CapabilityStatus, CapabilitySubject, EvidenceOrigin, ObservedResult},
         planning::{PlanSource, PlanningMode},
         profiles::{ConfiguredExecutable, probe_cli},
-        questions::{QuestionForm, QuestionInput, QuestionRoute},
+        questions::{
+            QuestionAction, QuestionForm, QuestionInput, QuestionOrigin, QuestionReply,
+            QuestionRoute,
+        },
         runtime::start_managed_turn,
     },
     repository::{self, ProjectCheckout},
@@ -79,6 +83,25 @@ struct Exchange {
     review_requested: bool,
 }
 
+async fn all_observations(
+    store: &Store,
+    conversation: &str,
+    run: &str,
+) -> Result<Vec<RecordedAgentEvent>> {
+    let mut all = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let page = store
+            .agent_observations(conversation.into(), run.into(), cursor)
+            .await?;
+        let Some(last) = page.last() else {
+            return Ok(all);
+        };
+        cursor = last.seq;
+        all.extend(page);
+    }
+}
+
 async fn fixture(
     provider: Provider,
     model: &str,
@@ -122,7 +145,8 @@ async fn exchange(
     provider: Provider,
     model: &str,
     prompt: &str,
-    reply: impl Fn(&QuestionForm) -> Result<(Value, Value)>,
+    expected_rounds: usize,
+    reply: impl Fn(usize, &QuestionForm) -> Result<(Value, Value)>,
 ) -> Result<Exchange> {
     let (_sandbox, store, project, scope) = fixture(provider, model, SessionMode::Plan).await?;
     let checkout_path = scope.checkout.clone();
@@ -136,13 +160,13 @@ async fn exchange(
     let run_id = attempt.run.id.clone();
     let worker = start_managed_turn(store.clone(), runner.clone(), attempt, None);
     let mut cursor = 0;
-    let mut answered = None;
+    let mut answered = Vec::<(RequestId, Value, Value, Value)>::new();
     let mut output = String::new();
     let mut mode = None;
     let mut proposal = None;
     let mut review = None;
-    let mut submitted = None;
-    let mut prepared = None;
+    let mut submitted = Vec::new();
+    let mut prepared = Vec::new();
     tokio::time::timeout(Duration::from_secs(75), async {
         loop {
             let mut outcome = None;
@@ -165,13 +189,13 @@ async fn exchange(
                         request_id,
                         action: omniagent::providers::questions::QuestionAction::Accept,
                         delivery: omniagent::dispatch::Delivery::Submitted,
-                    } => submitted = Some(request_id),
+                    } => submitted.push(request_id),
                     ProviderEventData::QuestionReplyPrepared {
                         request_id,
                         reply,
                         frame,
                     } => {
-                        prepared = Some((request_id, reply, frame));
+                        prepared.push((request_id, reply, frame));
                     }
                     ProviderEventData::Question {
                         request_id,
@@ -180,12 +204,21 @@ async fn exchange(
                         ..
                     } => {
                         ensure!(
-                            answered.is_none(),
+                            answered.len() < expected_rounds,
                             "fixture asked an unexpected extra question"
                         );
-                        let (reply, expected) = reply(&normalized)?;
-                        worker.answer(request_id.clone(), reply).await?;
-                        answered = Some((request_id, form, expected));
+                        if let Some((prior, stale_reply, _, _)) = answered.last() {
+                            assert_ne!(prior, &request_id);
+                            assert!(
+                                worker
+                                    .answer(prior.clone(), stale_reply.clone())
+                                    .await
+                                    .is_err()
+                            );
+                        }
+                        let (reply, expected) = reply(answered.len(), &normalized)?;
+                        worker.answer(request_id.clone(), reply.clone()).await?;
+                        answered.push((request_id, reply, form, expected));
                     }
                     ProviderEventData::AssistantMessage { text } => output.push_str(&text),
                     ProviderEventData::Approval { request_id, .. } => {
@@ -213,18 +246,13 @@ async fn exchange(
     .await
     .context("planning question fixture timed out")??;
     assert_eq!(worker.wait().await?, RunStatus::Succeeded);
-    let (id, raw_form, expected) = answered.with_context(|| {
-        format!("{provider:?} did not deliver a native question. Output: {output}")
-    })?;
-    assert_eq!(submitted, Some(id.clone()));
-    let (prepared_id, typed, reply_frame) =
-        prepared.context("the question reply was not recorded before delivery")?;
-    assert_eq!(prepared_id, id);
-    assert_eq!(
-        typed.action,
-        omniagent::providers::questions::QuestionAction::Accept
+    ensure!(
+        answered.len() == expected_rounds,
+        "{provider:?} delivered {} of {expected_rounds} native question rounds. Output: {output}",
+        answered.len()
     );
-    assert!(runner.0.lock().unwrap().contains(&reply_frame));
+    assert_eq!(submitted.len(), expected_rounds);
+    assert_eq!(prepared.len(), expected_rounds);
     let frames = runner
         .0
         .lock()
@@ -232,7 +260,15 @@ async fn exchange(
         .iter()
         .map(|frame| serde_json::from_slice::<Value>(frame))
         .collect::<serde_json::Result<Vec<_>>>()?;
-    verify_response(provider, &frames, &id, &raw_form, &expected)?;
+    for (((id, _, raw_form, expected), submitted), (prepared_id, typed, reply_frame)) in
+        answered.into_iter().zip(submitted).zip(prepared)
+    {
+        assert_eq!(submitted, id);
+        assert_eq!(prepared_id, id);
+        assert_eq!(typed.action, QuestionAction::Accept);
+        assert!(runner.0.lock().unwrap().contains(&reply_frame));
+        verify_response(provider, &frames, &id, &raw_form, &expected)?;
+    }
     if let Some(id) = &review {
         let denial = frames
             .iter()
@@ -344,7 +380,7 @@ async fn claude_plan_transmits_the_verified_multiselect_encoding() -> Result<()>
         Provider::Claude,
         "claude-haiku-5-5",
         "Do not guess my selection. Use the native AskUserQuestion tool now with exactly one question and multiSelect true to choose which nuts to include in a plan. Offer options named Cashew, Walnut, Almond, and Pecan. After I answer, call ExitPlanMode to offer the plan for review. Put the complete proposed plan in the reply, using the selected names. Do not write any files.",
-        |form| {
+        1, |_, form| {
             ensure!(form.fields.len() == 1, "expected one Claude question");
             let field = &form.fields[0];
             let QuestionInput::Choice {
@@ -384,7 +420,7 @@ async fn antigravity_plan_uses_an_opaque_acp_choice_value() -> Result<()> {
         Provider::Antigravity,
         "gemini-3.8-flash",
         "/plan Plan a one-file naming exercise. Use your native structured question tool first. Ask whether to name it Cashew or Walnut and wait for the selected name. Propose a short plan using that selection. Do not modify any files.",
-        |form| {
+        1, |_, form| {
             let (field, choice) = form
                 .fields
                 .iter()
@@ -423,13 +459,92 @@ async fn antigravity_plan_uses_an_opaque_acp_choice_value() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore = "requires authenticated Antigravity with Gemini 3.8 Flash"]
+async fn cancelling_acp_planning_closes_an_unanswered_native_request() -> Result<()> {
+    let (_sandbox, store, project, scope) =
+        fixture(Provider::Antigravity, "gemini-3.8-flash", SessionMode::Plan).await?;
+    let chat = store
+        .create_conversation(project.checkout_id, "Cancel planning".into())
+        .await?;
+    let attempt = store.prepare_agent_attempt(
+        chat.id.clone(), chat.context_id, scope,
+        "/plan Ask a native structured question first to choose whether to write a report about Cashew or Walnut. Wait for the answer. Do not modify files.".into(),
+    ).await?;
+    let run_id = attempt.run.id.clone();
+    let runner = Arc::new(RecordingRunner::default());
+    let worker = start_managed_turn(store.clone(), runner.clone(), attempt, None);
+    let question_id = tokio::time::timeout(Duration::from_secs(45), async {
+        let mut cursor = 0;
+        loop {
+            for entry in store
+                .agent_observations(chat.id.clone(), run_id.clone(), cursor)
+                .await?
+            {
+                cursor = entry.seq;
+                match entry.event.data {
+                    ProviderEventData::Question {
+                        request_id,
+                        route: QuestionRoute::Native,
+                        ..
+                    } => return Ok::<_, anyhow::Error>(request_id),
+                    ProviderEventData::Error { message } => bail!("ACP planning failed: {message}"),
+                    ProviderEventData::TurnFinished { .. } => {
+                        bail!("ACP turn finished without a pending question")
+                    }
+                    _ => {}
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    })
+    .await
+    .context("ACP question did not arrive")??;
+    worker.interrupt()?;
+    let stale = tokio::time::timeout(
+        Duration::from_secs(15),
+        worker.answer(question_id.clone(), json!({"action":"decline"})),
+    )
+    .await?;
+    assert!(stale.is_err());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(15), worker.wait()).await??,
+        RunStatus::Cancelled
+    );
+    let id = serde_json::to_value(question_id)?;
+    let frames = runner
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|frame| serde_json::from_slice::<Value>(frame))
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["method"] == "session/cancel")
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["id"] == id && frame["result"]["action"] == "cancel")
+    );
+    let events = store.agent_observations(chat.id, run_id, 0).await?;
+    assert!(!events.iter().any(|entry| matches!(
+        entry.event.data,
+        ProviderEventData::QuestionReplyPrepared { .. }
+    )));
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires authenticated Codex with gpt-6-luna"]
 async fn codex_plan_delivers_a_native_question_and_authoritative_plan_item() -> Result<()> {
     let answer = exchange(
         Provider::Codex,
         "gpt-6-luna",
-        "Create a short plan for naming a file without editing the repository. Before suggesting a plan, use the native request_user_input tool with one question asking which name to use. Offer Cashew, Walnut, and Almond. Do not guess my answer. After I select a name, emit the final plan with the selected name using the proposed_plan block.",
-        |form| {
+        "Create a short plan for naming a file without editing the repository. Use the native request_user_input tool twice, with exactly one question per call. First ask which base name to use and offer Cashew, Walnut, and Almond. Wait for this answer before making the second call. Then ask for the file format and offer Markdown, Plain text, and JSON. Only after both answers, emit the plan with the resulting filename in a proposed_plan block. Do not guess or combine the questions.",
+        2, |round, form| {
+            let label = ["Walnut", "Markdown"][round];
             let (field, choice) = form
                 .fields
                 .iter()
@@ -446,7 +561,7 @@ async fn codex_plan_delivers_a_native_question_and_authoritative_plan_item() -> 
                         field,
                         options
                             .iter()
-                            .find(|option| option.label.contains("Walnut"))?,
+                            .find(|option| option.label.contains(label))?,
                     ))
                 })
                 .context("Codex did not publish the requested named choices")?;
@@ -459,8 +574,8 @@ async fn codex_plan_delivers_a_native_question_and_authoritative_plan_item() -> 
     assert_eq!(answer.mode, PlanningMode::CodexCollaboration);
     assert_eq!(answer.proposal.0, PlanSource::CodexPlanItem);
     ensure!(
-        answer.proposal.1.to_ascii_lowercase().contains("walnut"),
-        "Codex did not use the selected option"
+        answer.proposal.1.to_ascii_lowercase().contains("walnut.md"),
+        "Codex did not combine the two selected options"
     );
     Ok(())
 }
@@ -474,8 +589,8 @@ async fn read_only_turn_records_a_validated_structured_question_after_completion
         .create_conversation(project.checkout_id, "Structured planning fallback".into())
         .await?;
     let attempt = store.prepare_structured_planning_attempt(
-        chat.id.clone(), chat.context_id, scope,
-        "You are planning a report and cannot continue until the user decides whether to include a summary. Ask as a required Boolean field named include_summary. Do not assume an answer or edit any files.".into(),
+        chat.id.clone(), chat.context_id, scope.clone(),
+        "You are planning a report and cannot continue until the user decides whether to include a summary. Ask as a required Boolean field named include_summary. When answered, return the complete plan with the exact token SUMMARY_INCLUDED for true or SUMMARY_OMITTED for false. Do not assume an answer or edit any files.".into(),
         Vec::new(),
     ).await?;
     let run_id = attempt.run.id.clone();
@@ -485,9 +600,7 @@ async fn read_only_turn_records_a_validated_structured_question_after_completion
         start_managed_turn(store.clone(), Arc::new(DirectWindowsRunner), attempt, None).wait(),
     )
     .await??;
-    let events = store
-        .agent_observations(chat.id.clone(), run_id.clone(), 0)
-        .await?;
+    let events = all_observations(&store, &chat.id, &run_id).await?;
     ensure!(
         finished == RunStatus::Succeeded,
         "structured planner failed: {:?}",
@@ -535,7 +648,7 @@ async fn read_only_turn_records_a_validated_structured_question_after_completion
                 && field.input == QuestionInput::Boolean)
     );
     let saved = store
-        .agent_dispatch(chat.id, run_id)
+        .agent_dispatch(chat.id.clone(), run_id.clone())
         .await?
         .context("missing structured planner dispatch")?;
     assert_eq!(saved.snapshot.question_route, QuestionRoute::StructuredTurn);
@@ -545,6 +658,110 @@ async fn read_only_turn_records_a_validated_structured_question_after_completion
             .as_str()
             .unwrap()
             .contains("Read-only planning response format.")
+    );
+    let origin = QuestionOrigin {
+        run_id: run_id.clone(),
+        request_id: question.1.clone(),
+    };
+    let active = store.conversation(chat.id.clone()).await?;
+    store.recover_agent_attempts_after_restart().await?;
+    let reply = |value| QuestionReply {
+        action: QuestionAction::Accept,
+        values: [("include_summary".into(), value)].into_iter().collect(),
+    };
+    assert!(
+        store
+            .prepare_structured_planning_reply(
+                chat.id.clone(),
+                active.context_id.clone(),
+                scope.clone(),
+                origin.clone(),
+                reply(json!("true")),
+            )
+            .await
+            .is_err()
+    );
+    let mut other_profile = scope.clone();
+    other_profile.profile_id = "different-planning-profile".into();
+    assert!(
+        store
+            .prepare_structured_planning_reply(
+                chat.id.clone(),
+                active.context_id.clone(),
+                other_profile,
+                origin.clone(),
+                reply(json!(true)),
+            )
+            .await
+            .is_err()
+    );
+    let continuation = store
+        .prepare_structured_planning_reply(
+            chat.id.clone(),
+            active.context_id,
+            scope.clone(),
+            origin.clone(),
+            reply(json!(true)),
+        )
+        .await?;
+    let linked_run = continuation.run.id.clone();
+    assert_eq!(
+        continuation.previous_run_id.as_deref(),
+        Some(run_id.as_str())
+    );
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            start_managed_turn(
+                store.clone(),
+                Arc::new(DirectWindowsRunner),
+                continuation,
+                None
+            )
+            .wait(),
+        )
+        .await??,
+        RunStatus::Succeeded
+    );
+    let saved = store
+        .agent_dispatch(chat.id.clone(), linked_run.clone())
+        .await?
+        .unwrap();
+    assert_eq!(saved.snapshot.answered_question.as_ref(), Some(&origin));
+    assert!(
+        saved
+            .snapshot
+            .submitted_messages
+            .last()
+            .unwrap()
+            .text
+            .contains(r#""include_summary":true"#)
+    );
+    let linked_events = all_observations(&store, &chat.id, &linked_run).await?;
+    ensure!(linked_events.iter().any(|entry| matches!(
+        &entry.event.data, ProviderEventData::PlanProposed { source: PlanSource::StructuredTurn, text }
+            if text.contains("SUMMARY_INCLUDED")
+    )), "linked planner did not use the accepted answer: {:?}", linked_events.iter().filter_map(|entry| match &entry.event.data {
+        data @ (ProviderEventData::PlanProposed { .. } | ProviderEventData::Question { .. } | ProviderEventData::AssistantMessage { .. }) => Some(data),
+        _ => None,
+    }).collect::<Vec<_>>());
+    let source_events = all_observations(&store, &chat.id, &run_id).await?;
+    assert!(source_events.iter().any(|entry| matches!(
+        &entry.event.data, ProviderEventData::StructuredQuestionReplyLinked { origin: saved, continuation_run_id, reply: answer }
+            if saved == &origin && continuation_run_id == &linked_run && answer == &reply(json!(true))
+    )));
+    let active = store.conversation(chat.id.clone()).await?;
+    assert!(
+        store
+            .prepare_structured_planning_reply(
+                chat.id,
+                active.context_id,
+                scope,
+                origin,
+                reply(json!(true)),
+            )
+            .await
+            .is_err()
     );
     Ok(())
 }

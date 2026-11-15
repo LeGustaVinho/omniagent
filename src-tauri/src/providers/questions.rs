@@ -93,6 +93,13 @@ pub struct QuestionReply {
     pub values: Map<String, Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionOrigin {
+    pub run_id: String,
+    pub request_id: RequestId,
+}
+
 pub(crate) fn encoded_reply(
     id: &RequestId,
     reply: QuestionReply,

@@ -782,6 +782,7 @@ impl TurnExecution {
             plugin_inventory: self.plugin_inventory.clone(),
             attachments,
             question_route: self.plan.question_route,
+            answered_question: self.plan.answered_question.clone(),
         };
         let frames = update
             .outbound
