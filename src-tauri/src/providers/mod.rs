@@ -503,6 +503,9 @@ pub enum ProviderEventData {
         target: steering::SteerTarget,
         outcome: steering::SteerOutcome,
     },
+    SideResponse {
+        response: side::SideResponse,
+    },
     Suggestion {
         text: String,
     },
@@ -564,6 +567,13 @@ pub trait CliSession: Send {
         input: TurnInput,
     ) -> anyhow::Result<AdapterUpdate> {
         Ok(target.rejected(input.message_id, steering::SteerOutcome::Unavailable))
+    }
+    fn request_side(&mut self, input: side::SideInput) -> anyhow::Result<AdapterUpdate> {
+        Ok(input
+            .reply(side::SideOutcome::Unavailable {
+                reason: side::SideUnavailable::NativeRouteUnavailable,
+            })
+            .update())
     }
     fn compact_native(&mut self) -> anyhow::Result<AdapterUpdate> {
         anyhow::bail!("this adapter has no qualified manual native compaction route")
@@ -691,5 +701,6 @@ pub mod profiles;
 pub mod questions;
 mod rpc;
 pub mod runtime;
+pub mod side;
 pub mod skills;
 pub mod steering;

@@ -538,6 +538,11 @@ impl ReportedCapabilities {
             ProviderEventData::Suggestion { .. } => {
                 self.observed.insert(Capability::NativeSuggestions)
             }
+            ProviderEventData::SideResponse { response }
+                if matches!(response.outcome, super::side::SideOutcome::Answered { .. }) =>
+            {
+                self.observed.insert(Capability::SideRequest)
+            }
             _ => false,
         }
     }

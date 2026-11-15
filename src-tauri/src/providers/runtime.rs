@@ -1243,7 +1243,7 @@ fn format_input(input: &[MessageRevision]) -> Result<TurnInput> {
     })
 }
 
-fn bounded_write(process: &mut CapturedProcess, frames: Vec<WireMessage>) -> Result<()> {
+pub(super) fn bounded_write(process: &mut CapturedProcess, frames: Vec<WireMessage>) -> Result<()> {
     if frames.is_empty() {
         return Ok(());
     }

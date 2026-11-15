@@ -15,6 +15,7 @@ use super::{
     SessionRequest, Transport, TurnInput, TurnOutcome, WireMessage, capabilities,
     goal::{NativeGoalObservation, NativeGoalState, NativeGoalSupport},
     rpc::{self, Rpc},
+    side::{SideInput, SideOutcome, SideRoute, SideUnavailable, SideUsage},
     skills::{SkillCatalog, SkillCatalogIssue, SkillEntry, SkillSource},
     steering::{SteerOutcome, SteerTarget},
 };
@@ -81,6 +82,8 @@ impl CliAdapter for CodexAdapter {
             goal_command: None,
             active: None,
             pending_steer: None,
+            pending_sample: None,
+            sample_ids: HashSet::new(),
             model_pages: Vec::new(),
             workspace_instructions: None,
             model_cursors: HashSet::new(),
@@ -101,6 +104,7 @@ enum Request {
     ModelPage,
     StartTurn,
     Steer,
+    Sample,
     StartCompaction,
     Interrupt,
 }
@@ -146,6 +150,8 @@ struct CodexSession {
     goal_command: Option<bool>,
     active: Option<ActiveTurn>,
     pending_steer: Option<PendingSteer>,
+    pending_sample: Option<SideInput>,
+    sample_ids: HashSet<String>,
     model_pages: Vec<ReportedModel>,
     workspace_instructions: Option<String>,
     model_cursors: HashSet<String>,
@@ -256,6 +262,9 @@ impl CodexSession {
             }
             let events = self.finish_steering(response);
             return Ok(self.events(events));
+        }
+        if request == Request::Sample {
+            return Ok(self.finish_sample(response));
         }
         if let Some(error) = response.get("error") {
             if request == Request::ReadConfiguration {
@@ -463,6 +472,7 @@ impl CodexSession {
                 Ok(self.events(events))
             }
             Request::Steer => unreachable!("steering replies are handled before other responses"),
+            Request::Sample => unreachable!("sample replies are handled before other responses"),
             Request::StartCompaction => {
                 if let Some(progress) = self
                     .active
@@ -662,6 +672,58 @@ impl CodexSession {
             SteerOutcome::Unconfirmed
         };
         vec![pending.target.settlement(pending.message_id, outcome)]
+    }
+
+    fn finish_sample(&mut self, response: &Value) -> AdapterUpdate {
+        let Some(input) = self.pending_sample.take() else {
+            return AdapterUpdate::default();
+        };
+        let error = &response["error"];
+        if error.is_object() {
+            let outcome = match error["code"].as_i64() {
+                Some(-32601) => SideOutcome::Unavailable {
+                    reason: SideUnavailable::NativeRouteUnavailable,
+                },
+                Some(-32600)
+                    if error["message"]
+                        .as_str()
+                        .is_some_and(|message| message.starts_with("sample source turn")) =>
+                {
+                    SideOutcome::Unavailable {
+                        reason: SideUnavailable::SourceBoundaryUnavailable,
+                    }
+                }
+                _ => SideOutcome::Failed,
+            };
+            return input.reply(outcome).update();
+        }
+        let result = &response["result"];
+        let matched = input
+            .pin
+            .provider_source
+            .as_ref()
+            .is_some_and(|source| result["sourceTurnId"].as_str() == Some(&source.turn_id));
+        let Ok(response_id) = required_string(result, "responseId") else {
+            return input.reply(SideOutcome::Failed).update();
+        };
+        if !matched {
+            return input.reply(SideOutcome::Failed).update();
+        }
+        let outcome = result["text"]
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+            .map_or(SideOutcome::NoText, |text| SideOutcome::Answered {
+                route: SideRoute::CodexSample,
+                text: text.to_owned(),
+                provider_response_id: Some(response_id.into()),
+            });
+        let mut reply = input.reply(outcome);
+        reply.usage = Some(SideUsage {
+            input: result["inputTokens"].as_u64(),
+            output: result["outputTokens"].as_u64(),
+            cached_input: result["cachedInputTokens"].as_u64(),
+        });
+        reply.update()
     }
 
     fn finish_compaction(&mut self, outcome: TurnOutcome) -> Vec<ProviderEvent> {
@@ -1261,6 +1323,40 @@ impl CliSession for CodexSession {
         })
     }
 
+    fn request_side(&mut self, input: SideInput) -> Result<AdapterUpdate> {
+        let unavailable = |input: SideInput, reason| {
+            Ok(input.reply(SideOutcome::Unavailable { reason }).update())
+        };
+        if !input.is_valid() {
+            return unavailable(input, SideUnavailable::InvalidInput);
+        }
+        let Some(source) = input.pin.provider_source.as_ref() else {
+            return unavailable(input, SideUnavailable::SourceBoundaryUnavailable);
+        };
+        if self
+            .session
+            .as_ref()
+            .is_none_or(|session| session.id != source.session_id)
+            || source.turn_id.trim().is_empty()
+            || self.active.is_some()
+        {
+            return unavailable(input, SideUnavailable::SourceBoundaryUnavailable);
+        }
+        if self.pending_sample.is_some() || self.sample_ids.contains(&input.request_id) {
+            return unavailable(input, SideUnavailable::Busy);
+        }
+        let message = self.rpc.request("thread/sample", json!({
+            "threadId":source.session_id,"expectedTurnId":source.turn_id,
+            "prompt":input.question,"allowInProgressTurn":false,"disableMcp":true,"interruptOnCancel":true,
+        }), Request::Sample)?;
+        self.sample_ids.insert(input.request_id.clone());
+        self.pending_sample = Some(input);
+        Ok(AdapterUpdate {
+            outbound: vec![message],
+            events: Vec::new(),
+        })
+    }
+
     fn receive(&mut self, frame: OutputFrame) -> Result<AdapterUpdate> {
         if frame.stream == Stream::Stderr {
             return Ok(self.diagnostic(&frame.data));
@@ -1380,11 +1476,21 @@ impl CliSession for CodexSession {
     }
 
     fn process_finished(&mut self, outcome: TerminalOutcome) -> AdapterUpdate {
+        let mut events = if let Some(input) = self.pending_sample.take() {
+            let outcome = if matches!(outcome, TerminalOutcome::Cancelled(_)) {
+                SideOutcome::Cancelled
+            } else {
+                SideOutcome::Failed
+            };
+            input.reply(outcome).update().events
+        } else {
+            Vec::new()
+        };
         let outcome = match outcome {
             TerminalOutcome::Cancelled(_) => TurnOutcome::Interrupted,
             TerminalOutcome::Exited(_) => TurnOutcome::Failed,
         };
-        let events = if self
+        let turn_events = if self
             .active
             .as_ref()
             .is_some_and(|turn| turn.compaction.is_some())
@@ -1393,6 +1499,7 @@ impl CliSession for CodexSession {
         } else {
             self.finish_turn(outcome)
         };
+        events.extend(turn_events);
         self.events(events)
     }
 }
