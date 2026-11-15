@@ -4,7 +4,8 @@ use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::SessionScope,
     providers::{
-        Provider, ProviderEventData, SessionMode, TurnOutcome,
+        Capability, Provider, ProviderEventData, SessionMode, TurnOutcome,
+        capabilities::{CapabilityStatus, CapabilitySubject},
         profiles::{ConfiguredExecutable, probe_cli},
         runtime::{start_managed_turn, start_managed_turn_with_native_suggestions},
         suggestions::{PromptSuggestion, SuggestionOutcome},
@@ -57,10 +58,14 @@ async fn suggest(
     let chat = store
         .create_conversation(project.checkout_id, "Suggestion fixture".into())
         .await?;
-    let attempt = store.prepare_agent_attempt(
-        chat.id.clone(), chat.context_id, scope,
-        "We need a SQLite-backed job scheduler. Compare two ways to claim jobs atomically. Recommend one and ask which option I want to use. Do not run tools.".into(),
-    ).await?;
+    let prompt = if provider == Provider::Antigravity {
+        "Reply exactly READY without tools."
+    } else {
+        "We need a SQLite-backed job scheduler. Compare two ways to claim jobs atomically. Recommend one and ask which option I want to use. Do not run tools."
+    };
+    let attempt = store
+        .prepare_agent_attempt(chat.id.clone(), chat.context_id, scope, prompt.into())
+        .await?;
     let message_id = attempt
         .input
         .last()
@@ -105,11 +110,39 @@ async fn suggest(
                         source.session_id.as_ref()
                     );
                     assert_eq!(suggestion.source.provider_turn_id, source.turn_id);
+                    assert_eq!(suggestion.source.provider_result_id, source.item_id);
                     assert!(prediction.replace(suggestion).is_none());
                 }
                 _ => {}
             }
         }
+    }
+    let transcript = store.conversation_messages(chat.id.clone()).await?;
+    assert_eq!(
+        transcript.len(),
+        2,
+        "suggestion changed the main transcript"
+    );
+    assert_eq!(transcript[0].text, prompt);
+    if provider == Provider::Antigravity {
+        let dispatch = store
+            .agent_dispatch(chat.id, run)
+            .await?
+            .context("missing ACP dispatch")?;
+        let capabilities = dispatch
+            .snapshot
+            .capabilities
+            .context("missing ACP capability matrix")?;
+        assert!(
+            capabilities
+                .entries
+                .iter()
+                .any(|entry| entry.descriptor.subject
+                    == (CapabilitySubject::Protocol {
+                        capability: Capability::NativeSuggestions
+                    })
+                    && entry.status() == CapabilityStatus::Unavailable)
+        );
     }
     Ok(prediction)
 }
@@ -140,5 +173,16 @@ async fn codex_reports_the_deployed_prediction_method_as_unavailable() -> Result
         .context("no Codex prediction settlement")?;
     assert!(result.source.provider_turn_id.is_some());
     assert_eq!(result.outcome, SuggestionOutcome::Unavailable);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Antigravity ACP with Gemini 3.8 Flash"]
+async fn antigravity_preserves_a_completed_turn_without_a_native_suggestion_route() -> Result<()> {
+    assert!(
+        suggest(Provider::Antigravity, "gemini-3.8-flash", true)
+            .await?
+            .is_none()
+    );
     Ok(())
 }
