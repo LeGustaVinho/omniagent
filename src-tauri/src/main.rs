@@ -205,6 +205,7 @@ fn main() {
             ipc::save_conversation_draft,
             conversation_runtime::conversation_models,
             conversation_runtime::start_conversation_turn,
+            conversation_runtime::enqueue_managed_agent_job,
             conversation_runtime::latest_conversation_run,
             conversation_runtime::latest_conversation_job,
             conversation_runtime::pending_conversation_instructions,

@@ -538,7 +538,7 @@ impl Store {
                     ensure!(effective_release_blocker(db, &job)?.is_none(),
                         "The pipeline job needs an accepted release for the current plan and worktree");
                     let scope = recovery_scope(db, &job)?;
-                    let refresh = job.origin == JobOrigin::Operator
+                    let refresh = (job.origin == JobOrigin::Operator || job.operator_requested == Some(true))
                         && matches!(&scope, RecoveryProfile::Agent(profile)
                             if profile.permission_revision == DESKTOP_PERMISSION_REVISION && profile.account_binding.is_none());
                     let writer_checkpoint = writer_checkpoint_for_recovery(db, &job, &run, action, revision.as_deref())?;

@@ -58,6 +58,39 @@ afterEach(() => {
 });
 
 describe("project queue", () => {
+  it.each([false, true])("queues an operator-selected model with reference scores (subagent %s)", async (child) => {
+    const selection = { provider: "codex", profileId: "desktop-direct:codex", modelId: "gpt-6-luna" };
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "project_job_queue") return { settings: { paused: false, capacity: 3 }, active: 1, jobs: [runningJob] };
+      if (command === "conversation_models") return [{ option: {
+        selection, name: "GPT‑6 Luna", selectable: true, unavailableReason: null, catalogVersion: 1,
+        rating: { intelligenceTenths: 169, apiReferenceCents: 20, priceScore: 12 },
+      } }];
+      if (command === "enqueue_managed_agent_job") return queuedJob.job;
+    });
+    const user = userEvent.setup();
+    renderQueue();
+    if (child) {
+      await user.click(await screen.findByRole("button", { name: "Agent job" }));
+      await user.click(screen.getByRole("button", { name: "Add subagent" }));
+      expect(screen.queryByRole("option", { name: "Repository write" })).toBeNull();
+    } else {
+      await user.click(screen.getByRole("button", { name: "Add job" }));
+    }
+    await user.type(screen.getByLabelText("Instructions"), "Review the generated candidate.");
+    await user.selectOptions(screen.getByLabelText("Operation"), "plan");
+    await user.click(await screen.findByRole("button", { name: "Model · Choose model" }));
+    const picker = screen.getByRole("menu", { name: "Model" });
+    expect(within(picker).getByText("16.9/100")).toBeDefined();
+    expect(within(picker).getByText("12/100")).toBeDefined();
+    await user.click(within(picker).getByRole("menuitemradio", { name: "GPT‑6 Luna" }));
+    await user.click(screen.getByRole("button", { name: child ? "Queue subagent" : "Queue job" }));
+    expect(invoke).toHaveBeenCalledWith("enqueue_managed_agent_job", {
+      projectId, checkoutId, parentRunId: child ? "run-1" : null, selection,
+      mode: "plan", instructions: "Review the generated candidate.",
+    });
+  });
+
   it("reads the selected project and exposes the scheduler blockers and linked attempt", async () => {
     vi.mocked(invoke).mockResolvedValue({ settings: { paused: false, capacity: 2 }, active: 2, jobs: [queuedJob, runningJob] });
     const user = userEvent.setup();

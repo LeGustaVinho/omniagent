@@ -71,6 +71,122 @@ fn request() -> JobRequest {
 }
 
 #[tokio::test]
+async fn selected_models_use_the_same_agent_admission_and_delegation_scope() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("queue.sqlite"))?;
+    let parent = origin(&store, &temp.path().join("project")).await?;
+    let project = parent.run.project_id.clone();
+    let checkout = parent.run.checkout_id.clone();
+    let mut scope = parent.scope.clone();
+    scope.provider = Provider::Claude;
+    scope.profile_id = "selected-claude-profile".into();
+    scope.model = Some("selected-claude-model".into());
+    scope.mode = SessionMode::Plan;
+    let parent_run = Some(parent.run.id.clone());
+
+    let raised = SessionScope {
+        mode: SessionMode::ApprovedWrite,
+        ..scope.clone()
+    };
+    let error = store
+        .enqueue_selected_agent_job(
+            project.clone(),
+            checkout.clone(),
+            parent_run.clone(),
+            raised,
+            "Escalate past parent".into(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot delegate repository writes")
+    );
+    assert!(
+        store
+            .enqueue_selected_agent_job(
+                "another-project".into(),
+                checkout.clone(),
+                parent_run.clone(),
+                scope.clone(),
+                "Cross-project child".into()
+            )
+            .await
+            .is_err()
+    );
+
+    let child = store
+        .enqueue_selected_agent_job(
+            project.clone(),
+            checkout.clone(),
+            parent_run,
+            scope.clone(),
+            "Managed child prompt".into(),
+        )
+        .await?;
+    assert_eq!(child.operator_requested, Some(true));
+    let standalone = store
+        .enqueue_selected_agent_job(
+            project.clone(),
+            checkout,
+            None,
+            scope.clone(),
+            "Standalone job prompt".into(),
+        )
+        .await?;
+    let env = environment(false);
+    let pending = store
+        .inspect_job(project.clone(), child.id.clone(), env.clone())
+        .await?
+        .context("Missing child")?;
+    let approval = pending
+        .blockers
+        .iter()
+        .find_map(|blocker| match blocker {
+            AdmissionBlocker::Approval { approval_id } => Some(approval_id.clone()),
+            _ => None,
+        })
+        .context("The selected child bypassed agent approval")?;
+    let plan = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("Missing standalone job")?;
+    assert!(plan.scope == scope);
+    assert_eq!(plan.input.last().unwrap().text, "Standalone job prompt");
+    assert_eq!(
+        store
+            .job(project.clone(), standalone.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap()
+            .run_id,
+        plan.run.id
+    );
+    assert!(store.claim_next_job(env.clone()).await?.is_none());
+    store
+        .finish_agent_attempt(plan.run.id, RunStatus::Cancelled, None)
+        .await?;
+    store.decide_job_approval(project, approval, true).await?;
+    let delegated = store
+        .claim_next_job(env)
+        .await?
+        .context("Missing approved child")?;
+    assert!(delegated.scope == scope);
+    assert_eq!(delegated.input.last().unwrap().text, "Managed child prompt");
+    assert_eq!(
+        store
+            .conversation_subagent_quota(parent.conversation_id)
+            .await?
+            .managed
+            .active,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn queue_rejects_an_unsupported_os_sandbox_and_preserves_cli_only_work() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = Store::open(temp.path().join("queue.sqlite"))?;

@@ -5,8 +5,8 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{
-    protection, providers::SessionMode, repository::writers::writer_owner, runs::RunStatus,
-    store::Store,
+    conversations::SessionScope, protection, providers::SessionMode,
+    repository::writers::writer_owner, runs::RunStatus, store::Store,
 };
 
 mod admission;
@@ -200,6 +200,9 @@ pub struct Job {
     pub task_id: Option<String>,
     pub worktree_owner_task_id: Option<String>,
     pub origin: JobOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub operator_requested: Option<bool>,
     pub kind: JobKind,
     pub pipeline: Option<PipelineJobOrigin>,
     pub context: Option<JobContext>,
@@ -240,7 +243,18 @@ impl Store {
         &self,
         run_id: String,
         request_id: String,
+        request: JobRequest,
+    ) -> Result<Job> {
+        self.submit_agent_job_with_scope(run_id, request_id, request, None)
+            .await
+    }
+
+    async fn submit_agent_job_with_scope(
+        &self,
+        run_id: String,
+        request_id: String,
         mut request: JobRequest,
+        selected: Option<(String, SessionScope)>,
     ) -> Result<Job> {
         ensure!(
             !request_id.trim().is_empty() && request_id.len() <= 256,
@@ -279,28 +293,41 @@ impl Store {
                     .context("job origin run is unknown")?;
                 request.normalize(&checkout)?;
                 request.task_id = request.task_id.or(inherited_task);
-                let prior: Option<(String, Vec<u8>)> = tx
+                let selected_profile = selected.as_ref().map(|(_, scope)| serde_json::to_vec(scope)).transpose()?;
+                let prior: Option<(String, Vec<u8>, Option<Vec<u8>>)> = tx
                     .query_row(
-                        "SELECT id, request FROM jobs WHERE origin_run_id = ?1 AND request_id = ?2",
+                        "SELECT id, request, operator_scope FROM jobs WHERE origin_run_id = ?1 AND request_id = ?2",
                         params![run_id, request_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .optional()?;
-                if let Some((id, encrypted)) = prior {
+                if let Some((id, encrypted, prior_profile)) = prior {
                     let previous: JobRequest =
                         serde_json::from_slice(&protection::unprotect(&encrypted)?)?;
-                    ensure!(previous == request, JobRequestConflict);
+                    let prior_profile = prior_profile.as_deref().map(protection::unprotect).transpose()?;
+                    ensure!(previous == request && prior_profile == selected_profile, JobRequestConflict);
                     return load_job(&tx, &project, &id)?
                         .context("job request points to a missing job");
                 }
                 ensure!(active, "job origin run is no longer active");
+                if let Some((selected_project, scope)) = &selected {
+                    ensure!(*selected_project == project && request.checkout_id.as_deref() == Some(checkout.as_str()), "The selected parent is outside this project and checkout");
+                    validate_operator_scope(&tx, &project, &checkout, scope)?;
+                    if scope.mode == SessionMode::ApprovedWrite {
+                        let mode: String = tx.query_row(
+                            "SELECT json_extract(s.scope, '$.mode') FROM agent_attempts a JOIN agent_sessions s ON s.id = a.agent_session_id WHERE a.run_id = ?1",
+                            [&run_id], |row| row.get(0),
+                        )?;
+                        ensure!(mode == "approved_write", "The parent profile cannot delegate repository writes");
+                    }
+                }
                 if let Some(reason) = goals::new_delegation_blocker(&tx, &run_id)? {
                     anyhow::bail!(reason);
                 }
                 let pipeline = pipeline::load_attempt_job(&tx, &run_id)?
                     .and_then(|parent| parent.pipeline)
                     .map(|origin| origin.binding());
-                let job = insert_job(
+                let mut job = insert_job(
                     &tx,
                     project,
                     Some(context),
@@ -309,10 +336,59 @@ impl Store {
                     0,
                     pipeline.as_ref(),
                 )?;
+                if let Some(profile) = selected_profile {
+                    tx.execute("UPDATE jobs SET operator_scope = ?2 WHERE id = ?1", params![job.id, protection::protect(&profile)?])?;
+                    job.operator_requested = Some(true);
+                }
                 tx.commit()?;
                 Ok(job)
             })
             .await?;
+        self.job_signal.send_replace(());
+        Ok(job)
+    }
+
+    pub async fn enqueue_selected_agent_job(
+        &self,
+        project: String,
+        checkout: String,
+        parent: Option<String>,
+        scope: SessionScope,
+        instructions: String,
+    ) -> Result<Job> {
+        let mut request = JobRequest {
+            checkout_id: Some(checkout.clone()),
+            task_id: None,
+            mode: scope.mode,
+            instructions,
+            dependencies: Vec::new(),
+            requires_bridge: false,
+        };
+        request.normalize(&checkout)?;
+        if let Some(parent) = parent {
+            return self
+                .submit_agent_job_with_scope(
+                    parent,
+                    Uuid::new_v4().to_string(),
+                    request,
+                    Some((project, scope)),
+                )
+                .await;
+        }
+        let job = self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            validate_operator_scope(&tx, &project, &checkout, &scope)?;
+            if scope.mode == SessionMode::ApprovedWrite {
+                request.task_id = tx.query_row(
+                    "SELECT task_id FROM managed_task_worktrees WHERE project_id = ?1 AND checkout_id = ?2",
+                    params![project, checkout], |row| row.get(0),
+                ).optional()?;
+            }
+            let job = insert_job(&tx, project, None, JobOrigin::Operator, request, 0, None)?;
+            tx.execute("UPDATE jobs SET operator_scope = ?2 WHERE id = ?1", params![job.id, protection::protect(&serde_json::to_vec(&scope)?)?])?;
+            tx.commit()?;
+            Ok(job)
+        }).await?;
         self.job_signal.send_replace(());
         Ok(job)
     }
@@ -395,6 +471,28 @@ fn change_pending_job_state(
         downstream::observe_cancelled_job(db, &job)?;
     }
     Ok(job)
+}
+
+fn validate_operator_scope(
+    db: &Connection,
+    project: &str,
+    checkout: &str,
+    scope: &SessionScope,
+) -> Result<()> {
+    let root: String = db
+        .query_row(
+            "SELECT root FROM checkouts WHERE id = ?1 AND project_id = ?2",
+            params![checkout, project],
+            |row| row.get(0),
+        )
+        .context("The checkout is unavailable in this project")?;
+    ensure!(
+        scope.checkout == std::path::Path::new(&root)
+            && scope.executable.is_absolute()
+            && !scope.runner.is_empty(),
+        "The selected CLI profile does not match this checkout"
+    );
+    Ok(())
 }
 
 fn mode_key(mode: SessionMode) -> &'static str {
@@ -507,7 +605,7 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
                 a.previous_run_id, coalesce(a.kind, 'initial'), recovery.action,
                 CASE WHEN j.writer_checkout_id IS NOT NULL THEN j.task_id END, attempt.conversation_id,
                 EXISTS(SELECT 1 FROM job_commands command WHERE command.job_id = j.id),
-                instruction.run_id IS NOT NULL
+                instruction.run_id IS NOT NULL, j.origin_run_id IS NOT NULL AND j.operator_scope IS NOT NULL
          FROM jobs j
          LEFT JOIN job_worktree_scopes scope ON scope.job_id = j.id
          LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (
@@ -573,6 +671,7 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
         task_id: row.get(1)?,
         worktree_owner_task_id: row.get(16)?,
         origin,
+        operator_requested: row.get::<_, bool>(20)?.then_some(true),
         kind: if row.get(18)? {
             JobKind::Command
         } else {

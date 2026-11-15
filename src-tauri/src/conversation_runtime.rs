@@ -38,6 +38,43 @@ fn ui_error(error: anyhow::Error) -> String {
     diagnostics::preview(&error.to_string())
 }
 
+async fn selected_scope(
+    store: &Store,
+    checkout_id: String,
+    selection: ModelSelection,
+    effort: Option<String>,
+    mode: SessionMode,
+) -> Result<SessionScope> {
+    let DesktopProfile {
+        executable,
+        version,
+        models,
+    } = profile(store, selection.provider, Some(selection.model_id.clone())).await?;
+    let selected = models
+        .into_iter()
+        .find(|model| model.option.selection == selection && model.option.selectable)
+        .context("The selected model is no longer available")?;
+    ensure!(
+        effort
+            .as_ref()
+            .is_none_or(|value| selected.efforts.contains(value)),
+        "The selected thinking level is no longer available"
+    );
+    Ok(SessionScope {
+        provider: selection.provider,
+        profile_id: selection.profile_id,
+        account_binding: None,
+        checkout: repository::checkout_root(store, checkout_id).await?,
+        executable,
+        cli_version: version,
+        runner: DirectWindowsRunner.identity().into(),
+        permission_revision: DESKTOP_PERMISSION_REVISION.into(),
+        mode,
+        model: Some(selection.model_id),
+        effort,
+    })
+}
+
 #[tauri::command]
 pub async fn conversation_models(
     store: State<'_, Store>,
@@ -66,35 +103,8 @@ pub async fn start_conversation_turn(
             "Direct conversation turns require a read-only or planning profile"
         );
         let conversation = store.conversation(conversation_id.clone()).await?;
-        let DesktopProfile {
-            executable,
-            version,
-            models,
-        } = profile(&store, selection.provider, Some(selection.model_id.clone())).await?;
-        let selected = models
-            .into_iter()
-            .find(|model| model.option.selection == selection && model.option.selectable)
-            .context("The selected model is no longer available")?;
-        ensure!(
-            effort
-                .as_ref()
-                .is_none_or(|value| selected.efforts.contains(value)),
-            "The selected thinking level is no longer available"
-        );
-        let checkout = repository::checkout_root(&store, conversation.checkout_id).await?;
-        let scope = SessionScope {
-            provider: selection.provider,
-            profile_id: selection.profile_id,
-            account_binding: None,
-            checkout,
-            executable,
-            cli_version: version,
-            runner: DirectWindowsRunner.identity().into(),
-            permission_revision: DESKTOP_PERMISSION_REVISION.into(),
-            mode,
-            model: Some(selection.model_id),
-            effort,
-        };
+        let scope =
+            selected_scope(&store, conversation.checkout_id, selection, effort, mode).await?;
         store
             .enqueue_conversation_turn(
                 JobContext {
@@ -104,6 +114,26 @@ pub async fn start_conversation_turn(
                 scope,
                 text,
             )
+            .await
+    }
+    .await
+    .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn enqueue_managed_agent_job(
+    store: State<'_, Store>,
+    project_id: String,
+    checkout_id: String,
+    parent_run_id: Option<String>,
+    selection: ModelSelection,
+    mode: SessionMode,
+    instructions: String,
+) -> Result<Job, String> {
+    async {
+        let scope = selected_scope(&store, checkout_id.clone(), selection, None, mode).await?;
+        store
+            .enqueue_selected_agent_job(project_id, checkout_id, parent_run_id, scope, instructions)
             .await
     }
     .await

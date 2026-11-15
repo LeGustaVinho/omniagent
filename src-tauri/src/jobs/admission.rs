@@ -920,13 +920,10 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let request: JobRequest = serde_json::from_slice(&protection::unprotect(&request)?)?;
-    let scope: Option<SessionScope> = match &job.origin {
-        JobOrigin::Operator | JobOrigin::Pipeline => operator_scope
-            .map(|bytes| {
-                Ok::<_, anyhow::Error>(serde_json::from_slice(&protection::unprotect(&bytes)?)?)
-            })
-            .transpose()?,
-        JobOrigin::Agent { run_id, .. } => {
+    let scope: Option<SessionScope> = match (&job.origin, operator_scope) {
+        (_, Some(bytes)) => Some(serde_json::from_slice(&protection::unprotect(&bytes)?)?),
+        (JobOrigin::Operator | JobOrigin::Pipeline, None) => None,
+        (JobOrigin::Agent { run_id, .. }, None) => {
             let serialized: String = db.query_row(
                 "SELECT s.scope FROM agent_attempts a
                 JOIN agent_sessions s ON s.id = a.agent_session_id WHERE a.run_id = ?1",
