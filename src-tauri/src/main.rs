@@ -7,6 +7,7 @@ mod desktop_provider_fixture;
 mod fixture;
 mod fixture_runtime;
 mod ipc;
+mod queue_runtime;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -171,6 +172,7 @@ fn main() {
             ipc::run_snapshot,
             ipc::inspect_conversation_run,
             ipc::list_conversations,
+            ipc::checkout_conversation,
             ipc::create_conversation,
             ipc::rename_conversation,
             ipc::conversation_messages,
@@ -181,6 +183,12 @@ fn main() {
             conversation_runtime::latest_conversation_run,
             conversation_runtime::latest_conversation_job,
             conversation_runtime::project_job_queue,
+            queue_runtime::set_job_queue_paused,
+            queue_runtime::set_pending_job_state,
+            queue_runtime::pending_job_approval_request,
+            queue_runtime::decide_job_approval,
+            queue_runtime::interrupt_queued_job_attempt,
+            queue_runtime::queue_job_recovery,
             conversation_runtime::cancel_conversation_job,
             conversation_runtime::recover_conversation_job,
             conversation_runtime::stop_conversation_turn,

@@ -158,9 +158,8 @@ export function RealConversations({
     const existing = api.getPanel("conversation:" + target);
     if (existing) return existing.api.setActive();
     let cancelled = false;
-    void invoke<Conversation[]>("list_conversations", { checkoutId: checkout.checkoutId }).then((conversations) => {
-      const match = conversations.find((conversation) => conversation.id === target);
-      if (!cancelled && match) openConversation(api, match);
+    void invoke<Conversation>("checkout_conversation", { checkoutId: checkout.checkoutId, conversationId: target }).then((conversation) => {
+      if (!cancelled) openConversation(api, conversation);
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [checkout.checkoutId, dock.api, dock.ready, target]);

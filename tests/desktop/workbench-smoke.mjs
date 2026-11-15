@@ -419,6 +419,7 @@ async function verifyDetachedJob(browser, application, scratch) {
   await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
 
   let detached = false;
+  let pausedByTest = false;
   try {
     const models = await invoke(browser, "conversation_models", { provider: "codex" });
     const fixture = models.find(({ option }) => option.selection.modelId === "desktop-fixture" && option.selectable);
@@ -460,12 +461,37 @@ async function verifyDetachedJob(browser, application, scratch) {
     assert.equal(waiting.job.latestAttempt, null);
     assert.equal(await invoke(browser, "latest_conversation_run", { conversationId: chat.id }), null);
 
+    await browser.$('button[aria-label="Queue"]').click();
+    const queuePanel = browser.$('section[aria-label="Execution queue"]');
+    await queuePanel.$("button=Pause queue").waitForEnabled();
+    pausedByTest = true;
+    await queuePanel.$("button=Pause queue").click();
+    await browser.waitUntil(async () => (await queue()).settings.paused);
+    assert.equal((await queue()).active, capacity);
+    await queuePanel.$("button=Resume queue").waitForEnabled();
+    await queuePanel.$("button=Resume queue").click();
+    await browser.waitUntil(async () => !(await queue()).settings.paused);
+    pausedByTest = false;
+
+    const waitingRow = queuePanel.$('.//tr[td[contains(., "Waiting for an execution slot")]]');
+    await waitingRow.$("button=Conversation turn").waitForDisplayed();
+    await waitingRow.$("button=Conversation turn").click();
+    const pending = async () => (await queue()).jobs.find((entry) => entry.job.id === job.id);
+    await queuePanel.$("button=Pause job").click();
+    await browser.waitUntil(async () => (await pending()).job.queueState === "paused");
+    assert.ok((await pending()).blockers.some((blocker) => blocker.type === "job_paused"));
+    await queuePanel.$("button=Resume job").waitForEnabled();
+    await queuePanel.$("button=Resume job").click();
+    await browser.waitUntil(async () => (await pending()).job.queueState === "queued");
+    assert.deepEqual((await pending()).blockers, [{ type: "capacity", active: capacity, limit: capacity }]);
+    await queuePanel.$("button=Open conversation").click();
+
     async function openConversation() {
       await chooseConversations(browser);
       await browser.$(`button=${chat.title}`).click();
       return browser.$(`section[aria-label="${chat.title}"]`);
     }
-    const before = await openConversation();
+    const before = browser.$(`section[aria-label="${chat.title}"]`);
     await before.$(`p=Waiting for an execution slot (${capacity} of ${capacity} in use).`).waitForDisplayed();
 
     const visible = () => invoke(browser, "plugin:window|is_visible", { label: "main" });
@@ -522,6 +548,7 @@ async function verifyDetachedJob(browser, application, scratch) {
       await browser.url(page);
       await waitForRuntime(browser);
     }
+    if (pausedByTest) await invoke(browser, "set_job_queue_paused", { paused: false });
     await invoke(browser, "set_cli_executable", { provider: "codex", executable: profile.executable });
   }
 }

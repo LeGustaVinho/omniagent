@@ -1,8 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowRight, ListTodo, RefreshCw, X } from "lucide-react";
+import { ArrowRight, ListTodo, Pause, Play, RefreshCw, X } from "lucide-react";
 import { useState } from "react";
 import type { JobInspection } from "@/bindings/JobInspection";
+import type { QueueState } from "@/bindings/QueueState";
+import type { RecoveryAction } from "@/bindings/RecoveryAction";
 import { Button } from "@/components/ui/button";
 import { matchesQueueView, queueBlockerReason, queueJobState, queueViews, type QueueView } from "@/queue-model";
 import { DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
@@ -12,6 +14,28 @@ interface ProjectQueue {
   settings: { paused: boolean; capacity: number };
   active: number;
   jobs: JobInspection[];
+}
+
+type QueueAction =
+  | { type: "pause_queue"; paused: boolean }
+  | { type: "pending_state"; jobId: string; state: QueueState }
+  | { type: "approval"; approvalId: string; approved: boolean }
+  | { type: "interrupt"; jobId: string; runId: string }
+  | { type: "recovery"; jobId: string; runId: string; action: RecoveryAction };
+
+function applyQueueAction(projectId: string, action: QueueAction) {
+  switch (action.type) {
+    case "pause_queue":
+      return invoke("set_job_queue_paused", { paused: action.paused });
+    case "pending_state":
+      return invoke("set_pending_job_state", { projectId, jobId: action.jobId, state: action.state });
+    case "approval":
+      return invoke("decide_job_approval", { projectId, approvalId: action.approvalId, approved: action.approved });
+    case "interrupt":
+      return invoke("interrupt_queued_job_attempt", { projectId, jobId: action.jobId, runId: action.runId });
+    case "recovery":
+      return invoke("queue_job_recovery", { projectId, jobId: action.jobId, runId: action.runId, action: action.action });
+  }
 }
 
 function jobTitle({ job }: JobInspection) {
@@ -34,17 +58,48 @@ function firstWaitReason(inspection: JobInspection) {
   return "—";
 }
 
-function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity, onDependency }: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace"> & {
+const buttonClass = "px-2.5 py-1.5 text-xs";
+
+function ApprovalReview({ projectId, approvalId, busy, onAction }: {
+  projectId: string;
+  approvalId: string;
+  busy: boolean;
+  onAction: (action: QueueAction) => void;
+}) {
+  const request = useQuery({
+    queryKey: ["job-approval-request", projectId, approvalId],
+    queryFn: () => invoke<{ instructions: string }>("pending_job_approval_request", { projectId, approvalId }),
+  });
+  return (
+    <div className="grid gap-2">
+      {request.isPending && <p role="status">Loading the approval request…</p>}
+      {request.isError && <p role="alert">{String(request.error)}</p>}
+      {request.data && <pre aria-label="Requested instructions" className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2">{request.data.instructions}</pre>}
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" className={buttonClass} disabled={busy || !request.isSuccess}
+          onClick={() => onAction({ type: "approval", approvalId, approved: true })}>Approve job</Button>
+        <Button type="button" variant="outline" className={buttonClass} disabled={busy}
+          onClick={() => onAction({ type: "approval", approvalId, approved: false })}>Decline job</Button>
+      </div>
+    </div>
+  );
+}
+
+function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity, onDependency, onAction, busy }: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace"> & {
   inspection: JobInspection;
   onClose: () => void;
   onDependency: (id: string) => void;
+  onAction: (action: QueueAction) => void;
+  busy: boolean;
 }) {
   const { job, blockers } = inspection;
   const attempt = job.latestAttempt;
   const ownCheckout = job.checkoutId === checkout.checkoutId;
-  const conversationId = job.context?.conversationId;
+  const conversationId = attempt?.conversationId
+    ?? (job.origin.type === "operator" ? job.context?.conversationId : undefined);
   const requestingRunId = job.origin.type === "agent" ? job.origin.runId : undefined;
-  const buttonClass = "px-2.5 py-1.5 text-xs";
+  const pending = job.queueState !== "cancelled" && (!attempt || job.queuedRecovery !== null);
+  const running = attempt && ["starting", "running", "waiting_for_input"].includes(attempt.status);
 
   return (
     <aside className="delivery-detail" aria-label="Selected job">
@@ -67,18 +122,35 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
           <ul className="divide-y divide-border rounded border border-border">
             {blockers.map((blocker, index) => <li key={`${blocker.type}-${index}`} className="grid gap-1.5 p-2 text-xs leading-5">
               <p className="break-words">{queueBlockerReason(blocker)}</p>
+              {blocker.type === "approval" && <ApprovalReview projectId={job.projectId} approvalId={blocker.approvalId} busy={busy} onAction={onAction} />}
               {blocker.type === "dependency" && <button type="button" className="justify-self-start text-primary hover:underline" onClick={() => onDependency(blocker.jobId)}>Inspect dependency</button>}
               {(blocker.type === "conversation_busy" || blocker.type === "writer") && <button type="button" className="justify-self-start text-primary hover:underline" onClick={() => openActivity(blocker.runId, blocker.type === "conversation_busy" ? conversationId : undefined)}>Inspect blocking run</button>}
             </li>)}
           </ul>
         </section>}
         <div className="flex flex-wrap gap-2">
+          {pending && <>
+            <Button type="button" variant="outline" className={buttonClass} disabled={busy}
+              onClick={() => onAction({ type: "pending_state", jobId: job.id, state: job.queueState === "paused" ? "queued" : "paused" })}>
+              {job.queueState === "paused" ? "Resume job" : "Pause job"}
+            </Button>
+            <Button type="button" variant="outline" className={buttonClass} disabled={busy}
+              onClick={() => onAction({ type: "pending_state", jobId: job.id, state: "cancelled" })}>Cancel pending job</Button>
+          </>}
+          {running && <Button type="button" variant="outline" className={buttonClass} disabled={busy || attempt.cancelRequested}
+            onClick={() => onAction({ type: "interrupt", jobId: job.id, runId: attempt.runId })}>
+            {attempt.cancelRequested ? "Interrupting…" : "Interrupt attempt"}
+          </Button>}
+          {attempt && inspection.recoveryActions.map((action) => <Button type="button" variant="outline" key={action}
+            className={buttonClass} disabled={busy} onClick={() => onAction({ type: "recovery", jobId: job.id, runId: attempt.runId, action })}>
+            {action === "retry" ? "Retry saved input" : "Resume from checkpoint"}
+          </Button>)}
           {conversationId && ownCheckout && <Button className={buttonClass} type="button" variant="outline" onClick={() => openWorkspace("conversations", conversationId)}>Open conversation <ArrowRight size={13} /></Button>}
           {conversationId && !ownCheckout && <p className="w-full text-xs text-muted-foreground">Select the linked worktree to open this conversation.</p>}
           {job.taskId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openWorkspace("tasks", job.taskId ?? undefined)}>Open task <ArrowRight size={13} /></Button>}
           {attempt && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(attempt.runId, conversationId)}>Inspect attempt</Button>}
           {attempt?.previousRunId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(attempt.previousRunId!, conversationId)}>Inspect previous attempt</Button>}
-          {requestingRunId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(requestingRunId)}>Open requesting run</Button>}
+          {requestingRunId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(requestingRunId, job.context?.conversationId)}>Open requesting run</Button>}
         </div>
       </div>
     </aside>
@@ -86,6 +158,7 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
 }
 
 export default function LiveQueue({ checkout, openActivity, openWorkspace, onClose, active = true }: WorkspaceProps & { onClose?: () => void; active?: boolean }) {
+  const queryClient = useQueryClient();
   const [view, setView] = useState<QueueView>("All");
   const [selected, setSelected] = useState<string>();
   const query = useQuery({
@@ -97,6 +170,11 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
   });
   const visible = query.data?.jobs.filter((job) => matchesQueueView(queueJobState(job), view)) ?? [];
   const selectedJob = query.data?.jobs.find(({ job }) => job.id === selected);
+  const settings = query.data?.settings;
+  const control = useMutation({
+    mutationFn: (action: QueueAction) => applyQueueAction(checkout.projectId, action),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["project-job-queue"] }),
+  });
 
   return (
     <section className="delivery-view" aria-label="Execution queue">
@@ -105,10 +183,15 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
         {query.data && <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground tabular-nums" title="Scheduler occupancy across projects">{query.data.active} / {query.data.settings.capacity} slots</span>}
         {query.data?.settings.paused && <DeliveryStatus>Paused</DeliveryStatus>}
         <div className="ml-auto flex items-center gap-1.5">
+          {settings && <Button type="button" variant="outline" className={buttonClass} disabled={control.isPending}
+            onClick={() => control.mutate({ type: "pause_queue", paused: !settings.paused })}>
+            {settings.paused ? <><Play size={14} aria-hidden="true" /> Resume queue</> : <><Pause size={14} aria-hidden="true" /> Pause queue</>}
+          </Button>}
           <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs" disabled={query.isFetching} onClick={() => void query.refetch()} aria-label="Refresh queue"><RefreshCw size={14} aria-hidden="true" /> Refresh</Button>
           {onClose && <button type="button" aria-label="Close queue" className="rounded p-1 text-muted-foreground hover:bg-muted" onClick={onClose}><X size={17} /></button>}
         </div>
       </header>
+      {control.isError && <div className="px-3 py-2"><InlineIssue>{String(control.error)}</InlineIssue></div>}
       <nav className="flex gap-0.5 overflow-x-auto border-b border-border px-3 py-1" aria-label="Queue states">
         {queueViews.map((entry) => <button type="button" key={entry} className="delivery-tab" aria-pressed={view === entry} onClick={() => setView(entry)}>{entry}</button>)}
       </nav>
@@ -135,7 +218,8 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
         </div>
         {selectedJob && <JobDetails inspection={selectedJob} checkout={checkout} onClose={() => setSelected(undefined)}
           openActivity={openActivity} openWorkspace={(workspace, target) => { openWorkspace(workspace, target); onClose?.(); }}
-          onDependency={(id) => { setView("All"); setSelected(id); }} />}
+          onDependency={(id) => { setView("All"); setSelected(id); }}
+          onAction={control.mutate} busy={control.isPending} />}
       </div>
     </section>
   );

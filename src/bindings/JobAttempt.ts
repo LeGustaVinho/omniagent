@@ -2,4 +2,4 @@
 import type { RecoveryAction } from "./RecoveryAction";
 import type { RunStatus } from "./RunStatus";
 
-export type JobAttempt = { ordinal: number, runId: string, status: RunStatus, cancelRequested: boolean, previousRunId: string | null, recovery: RecoveryAction | null, };
+export type JobAttempt = { ordinal: number, runId: string, conversationId: string, status: RunStatus, cancelRequested: boolean, previousRunId: string | null, recovery: RecoveryAction | null, };

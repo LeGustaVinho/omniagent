@@ -67,6 +67,125 @@ fn request() -> JobRequest {
 }
 
 #[tokio::test]
+async fn queue_controls_review_and_interrupt_only_the_selected_project_attempt() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("queue.sqlite"))?;
+    let parent = origin(&store, &temp.path().join("project")).await?;
+    let other = origin(&store, &temp.path().join("other")).await?;
+    let job = store
+        .submit_agent_job(parent.run.id, "queue-control".into(), request())
+        .await?;
+    let env = environment(false);
+    let inspection = store
+        .inspect_job(job.project_id.clone(), job.id.clone(), env.clone())
+        .await?
+        .context("queued job missing")?;
+    let [AdmissionBlocker::Approval { approval_id }] = inspection.blockers.as_slice() else {
+        anyhow::bail!("queued job did not surface its approval")
+    };
+    let review = store
+        .pending_job_approval_request(job.project_id.clone(), approval_id.clone())
+        .await?;
+    assert_eq!(review.instructions, request().instructions);
+    assert!(
+        store
+            .pending_job_approval_request(other.run.project_id.clone(), approval_id.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .decide_job_approval(other.run.project_id.clone(), approval_id.clone(), true)
+            .await
+            .is_err()
+    );
+    store
+        .decide_job_approval(job.project_id.clone(), approval_id.clone(), true)
+        .await?;
+    assert!(
+        store
+            .pending_job_approval_request(job.project_id.clone(), approval_id.clone())
+            .await
+            .is_err()
+    );
+
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: false,
+            capacity: 7,
+        })
+        .await?;
+    assert_eq!(
+        store.set_job_queue_paused(true).await?,
+        QueueSettings {
+            paused: true,
+            capacity: 7
+        }
+    );
+    assert!(store.claim_next_job(env.clone()).await?.is_none());
+    store
+        .set_pending_job_state(job.project_id.clone(), job.id.clone(), QueueState::Paused)
+        .await?;
+    assert_eq!(
+        store.set_job_queue_paused(false).await?,
+        QueueSettings {
+            paused: false,
+            capacity: 7
+        }
+    );
+    assert!(store.claim_next_job(env.clone()).await?.is_none());
+    store
+        .set_pending_job_state(job.project_id.clone(), job.id.clone(), QueueState::Queued)
+        .await?;
+    let plan = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("resumed job was not admitted")?;
+    assert_ne!(plan.conversation_id, parent.conversation_id);
+    let run = plan.run.id;
+    store.mark_agent_running(run.clone()).await?;
+    assert!(
+        store
+            .request_project_job_interrupt(other.run.project_id, job.id.clone(), run.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .request_project_job_interrupt(
+                job.project_id.clone(),
+                "another-job".into(),
+                run.clone()
+            )
+            .await
+            .is_err()
+    );
+    store
+        .request_project_job_interrupt(job.project_id.clone(), job.id.clone(), run.clone())
+        .await?;
+    let current = store
+        .inspect_job(job.project_id.clone(), job.id.clone(), env)
+        .await?
+        .context("admitted job missing")?
+        .job
+        .latest_attempt
+        .context("attempt missing")?;
+    assert_eq!(current.conversation_id, plan.conversation_id);
+    assert_eq!(current.run_id, run);
+    assert!(current.cancel_requested);
+    store
+        .finish_agent_attempt(run.clone(), RunStatus::Cancelled, None)
+        .await?;
+    assert!(
+        store
+            .request_project_job_interrupt(job.project_id, job.id, run)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_job_notices_survive_reopen_and_skip_obsolete_approvals() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let database = temp.path().join("queue.sqlite");

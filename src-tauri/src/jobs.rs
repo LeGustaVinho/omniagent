@@ -121,6 +121,7 @@ pub struct Job {
 pub struct JobAttempt {
     pub ordinal: u32,
     pub run_id: String,
+    pub conversation_id: String,
     pub status: RunStatus,
     pub cancel_requested: bool,
     pub previous_run_id: Option<String>,
@@ -367,13 +368,14 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
                 j.conversation_id, j.context_id, j.origin_run_id, j.request_id,
                 j.mode, j.priority, j.queue_state, a.ordinal, a.run_id, r.status, a.cancel_requested,
                 a.previous_run_id, a.kind, recovery.action,
-                CASE WHEN j.writer_checkout_id IS NOT NULL THEN j.task_id END
+                CASE WHEN j.writer_checkout_id IS NOT NULL THEN j.task_id END, attempt.conversation_id
          FROM jobs j
          LEFT JOIN job_worktree_scopes scope ON scope.job_id = j.id
          LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (
              SELECT max(ordinal) FROM job_attempts WHERE job_id = j.id
          )
          LEFT JOIN runs r ON r.id = a.run_id
+         LEFT JOIN agent_attempts attempt ON attempt.run_id = a.run_id
          LEFT JOIN job_recoveries recovery ON recovery.job_id = j.id
          WHERE j.project_id = ?1 AND j.id = ?2",
     )?;
@@ -401,6 +403,7 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
             Some(JobAttempt {
                 ordinal,
                 run_id: row.get(10)?,
+                conversation_id: row.get(17)?,
                 status,
                 cancel_requested: row.get::<_, bool>(12)? && !status.is_terminal(),
                 previous_run_id: row.get(13)?,

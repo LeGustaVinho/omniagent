@@ -189,6 +189,46 @@ impl Store {
         Ok(())
     }
 
+    pub async fn set_job_queue_paused(&self, paused: bool) -> Result<QueueSettings> {
+        let settings = self
+            .execute(move |db| {
+                Ok(db.query_row(
+                    "UPDATE job_queue_settings SET paused = ?1 WHERE id = 1 RETURNING capacity",
+                    [paused],
+                    |row| {
+                        Ok(QueueSettings {
+                            paused,
+                            capacity: row.get(0)?,
+                        })
+                    },
+                )?)
+            })
+            .await?;
+        self.job_signal.send_replace(());
+        Ok(settings)
+    }
+
+    pub async fn pending_job_approval_request(
+        &self,
+        project_id: String,
+        approval_id: String,
+    ) -> Result<JobRequest> {
+        self.execute(move |db| {
+            let request: Vec<u8> = db
+                .query_row(
+                    "SELECT j.request FROM job_approvals p JOIN jobs j ON j.id = p.job_id
+                 WHERE j.project_id = ?1 AND p.id = ?2 AND p.decision = 'pending'
+                   AND j.queue_state IN ('queued', 'paused')",
+                    params![project_id, approval_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .context("job approval is no longer pending in this project")?;
+            Ok(serde_json::from_slice(&protection::unprotect(&request)?)?)
+        })
+        .await
+    }
+
     pub async fn decide_job_approval(
         &self,
         project_id: String,
@@ -379,6 +419,30 @@ impl Store {
             ensure!(changed == 1, "job attempt is no longer active in this conversation");
             Ok(())
         }).await?;
+        self.job_signal.send_replace(());
+        Ok(())
+    }
+
+    pub async fn request_project_job_interrupt(
+        &self,
+        project_id: String,
+        job_id: String,
+        run_id: String,
+    ) -> Result<()> {
+        self.execute(move |db| {
+            let changed = db.execute(
+                "UPDATE job_attempts SET cancel_requested = 1 WHERE run_id = ?1 AND job_id = ?2
+                 AND EXISTS (SELECT 1 FROM jobs WHERE id = ?2 AND project_id = ?3)
+                 AND EXISTS (SELECT 1 FROM active_agent_attempts WHERE run_id = ?1)",
+                params![run_id, job_id, project_id],
+            )?;
+            ensure!(
+                changed == 1,
+                "job attempt is no longer active in this project"
+            );
+            Ok(())
+        })
+        .await?;
         self.job_signal.send_replace(());
         Ok(())
     }

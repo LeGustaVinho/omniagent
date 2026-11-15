@@ -37,6 +37,22 @@ pub async fn list_conversations(
 }
 
 #[tauri::command]
+pub async fn checkout_conversation(
+    store: State<'_, Store>,
+    checkout_id: String,
+    conversation_id: String,
+) -> Result<Conversation, String> {
+    let conversation = store
+        .conversation(conversation_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    if conversation.checkout_id != checkout_id {
+        return Err("Conversation does not belong to this checkout".into());
+    }
+    Ok(conversation)
+}
+
+#[tauri::command]
 pub async fn create_conversation(
     store: State<'_, Store>,
     checkout_id: String,
