@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod desktop;
 mod fixture;
+mod fixture_runtime;
 mod ipc;
 
 use std::path::PathBuf;
@@ -32,18 +34,31 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            desktop::show(app)
+        }))
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .on_window_event(desktop::hide_main_on_close)
         .setup(|app| {
             let path = app.path().app_local_data_dir()?.join("omniagent.sqlite3");
             app.manage(Store::open(path)?);
             app.manage(ipc::EventSubscriptions::default());
+            app.manage(fixture_runtime::FixtureRuns::default());
+            desktop::create_tray(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             runtime_status,
             register_project,
+            desktop::choose_repository,
             ipc::run_snapshot,
+            ipc::fixture_input_evidence,
             ipc::subscribe_events,
             ipc::unsubscribe_events,
+            fixture_runtime::start_fixture,
+            fixture_runtime::send_fixture_input,
+            fixture_runtime::cancel_fixture,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start OmniAgent");

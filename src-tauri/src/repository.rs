@@ -27,6 +27,19 @@ pub struct ProjectCheckout {
     pub checkout_root: String,
 }
 
+pub async fn checkout_root(store: &Store, checkout_id: String) -> Result<PathBuf> {
+    store
+        .execute(move |db| {
+            let path: String = db.query_row(
+                "SELECT root FROM checkouts WHERE id = ?1",
+                [checkout_id],
+                |row| row.get(0),
+            )?;
+            Ok(path.into())
+        })
+        .await
+}
+
 pub async fn register(store: &Store, directory: PathBuf) -> Result<ProjectCheckout> {
     let repository = tokio::task::spawn_blocking(move || inspect(&directory)).await??;
     store

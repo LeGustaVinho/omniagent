@@ -4,6 +4,7 @@ use std::{
 };
 
 use omniagent::{
+    evidence::FixtureInputEvidence,
     runs::{RunSnapshot, SubscriptionUpdate},
     store::Store,
 };
@@ -73,6 +74,18 @@ pub fn subscribe_events(
             .remove(&subscription_id);
     });
     Ok(id)
+}
+
+#[tauri::command]
+pub async fn fixture_input_evidence(
+    store: State<'_, Store>,
+    checkout_id: String,
+    run_id: String,
+) -> Result<Option<FixtureInputEvidence>, String> {
+    store
+        .fixture_input(checkout_id, run_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

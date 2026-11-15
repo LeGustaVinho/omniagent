@@ -5,7 +5,7 @@ use tokio::sync::watch;
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::store::Store;
+use crate::{diagnostics, store::Store};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -200,7 +200,14 @@ impl Store {
         .await
     }
 
-    pub async fn record_run_event(&self, run_id: String, data: RunEventData) -> Result<RunEvent> {
+    pub async fn record_run_event(
+        &self,
+        run_id: String,
+        mut data: RunEventData,
+    ) -> Result<RunEvent> {
+        if let RunEventData::Output { preview, .. } = &mut data {
+            *preview = diagnostics::preview(preview);
+        }
         let wake = self.event_signal.clone();
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;

@@ -1,3 +1,5 @@
+mod diagnostics;
+pub mod evidence;
 pub mod process;
 pub mod process_io;
 mod protection;
