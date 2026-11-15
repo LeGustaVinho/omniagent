@@ -48,6 +48,12 @@ pub struct GitStartingState {
     pub changes: Option<GitChanges>,
 }
 
+impl GitStartingState {
+    pub(super) fn holds_scope_since(&self, starting: &Self) -> bool {
+        self.head != starting.head || !self.status.is_empty() || !starting.status.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeStart {
@@ -204,8 +210,9 @@ pub async fn provision_task_worktree(
         let (project, task, saved) = (project_id.clone(), task_id.clone(), provision.clone());
         store
             .execute(move |db| {
-                db.execute(
-                    "INSERT INTO worktree_provisions VALUES (?1, ?2, ?3, ?4, ?5)",
+                let recorded = db.execute(
+                    "INSERT INTO worktree_provisions SELECT ?1, ?2, ?3, ?4, ?5
+                     WHERE NOT EXISTS (SELECT 1 FROM shared_worktree_scopes WHERE project_id = ?1 AND scope_task_id = ?2)",
                     params![
                         project,
                         task,
@@ -217,6 +224,7 @@ pub async fn provision_task_worktree(
                         saved.base_commit
                     ],
                 )?;
+                ensure!(recorded == 1, "the scope already shares a managed worktree");
                 Ok(())
             })
             .await?;

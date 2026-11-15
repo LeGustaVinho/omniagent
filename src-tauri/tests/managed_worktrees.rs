@@ -14,10 +14,13 @@ use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     conversations::SessionScope,
-    jobs::{AdmissionBlocker, AdmissionEnvironment, JobRequest},
+    jobs::{AdmissionBlocker, AdmissionEnvironment, Job, JobRequest},
     process_io::CapturedProcess,
     providers::{Provider, SessionMode, runtime::start_managed_turn},
-    repository::{self, AttemptWorktreeEvidence, ProjectCheckout, provision_task_worktree},
+    repository::{
+        self, AttemptWorktreeEvidence, ManagedWorktree, ProjectCheckout, provision_task_worktree,
+        with_managed_worktree_writer,
+    },
     runner::{DirectWindowsRunner, LaunchRequest, Runner},
     runs::RunStatus,
     store::Store,
@@ -527,6 +530,46 @@ async fn candidate_parent(
     Ok(parent.run.id)
 }
 
+async fn queue_approved_writer(
+    store: &Store,
+    env: &AdmissionEnvironment,
+    checkout: &ManagedWorktree,
+    origin: &str,
+    scope: &str,
+    key: &str,
+) -> Result<Job> {
+    let job = store
+        .submit_agent_job(
+            origin.into(),
+            key.into(),
+            JobRequest {
+                checkout_id: Some(checkout.checkout_id.clone()),
+                task_id: Some(scope.into()),
+                mode: SessionMode::ApprovedWrite,
+                instructions: "Edit the fixture".into(),
+                dependencies: Vec::new(),
+                requires_bridge: false,
+            },
+        )
+        .await?;
+    let inspection = store
+        .inspect_job(job.project_id.clone(), job.id.clone(), env.clone())
+        .await?
+        .context("job not persisted")?;
+    let approval = inspection
+        .blockers
+        .iter()
+        .find_map(|blocker| match blocker {
+            AdmissionBlocker::Approval { approval_id } => Some(approval_id),
+            _ => None,
+        })
+        .context("expected pending writer approval")?;
+    store
+        .decide_job_approval(job.project_id.clone(), approval.clone(), true)
+        .await?;
+    Ok(job)
+}
+
 #[tokio::test]
 async fn same_agent_and_branch_keep_worktree_evidence_scoped_to_project_and_attempt() -> Result<()>
 {
@@ -561,6 +604,16 @@ async fn same_agent_and_branch_keep_worktree_evidence_scoped_to_project_and_atte
         other.checkout_id.clone(),
     )
     .await?;
+    let shared = store
+        .create_project_task(project.project_id.clone(), "Shared scope".into())
+        .await?;
+    store
+        .assign_shared_worktree(
+            project.project_id.clone(),
+            shared.id.clone(),
+            managed.checkout_id.clone(),
+        )
+        .await?;
     assert_eq!(managed.branch, sibling.branch);
     assert_ne!(managed.checkout_id, sibling.checkout_id);
     assert_ne!(managed.root, sibling.root);
@@ -591,38 +644,17 @@ async fn same_agent_and_branch_keep_worktree_evidence_scoped_to_project_and_atte
     };
     let mut ids = Vec::new();
     let mut artifacts = Vec::new();
-    for (target, origin, key) in [
-        (&managed, &parent, "earlier"),
-        (&sibling, &other_parent, "earlier"),
-        (&managed, &parent, "later"),
+    for (target, origin, scope, key) in [
+        (&managed, &parent, &shared.id, "earlier"),
+        (&sibling, &other_parent, &task.id, "earlier"),
+        (&managed, &parent, &shared.id, "later"),
     ] {
-        let job = store
-            .submit_agent_job(
-                origin.clone(),
-                key.into(),
-                JobRequest {
-                    checkout_id: Some(target.checkout_id.clone()),
-                    task_id: Some(task.id.clone()),
-                    mode: SessionMode::ApprovedWrite,
-                    instructions: "Edit the fixture".into(),
-                    dependencies: Vec::new(),
-                    requires_bridge: false,
-                },
-            )
-            .await?;
-        let inspection = store
-            .inspect_job(target.project_id.clone(), job.id, env.clone())
-            .await?
-            .context("job not persisted")?;
-        let [AdmissionBlocker::Approval { approval_id }] = inspection.blockers.as_slice() else {
-            anyhow::bail!(
-                "expected pending job approval, got {:?}",
-                inspection.blockers
-            );
-        };
-        store
-            .decide_job_approval(target.project_id.clone(), approval_id.clone(), true)
-            .await?;
+        let job = queue_approved_writer(&store, &env, target, origin, scope, key).await?;
+        assert_eq!(job.task_id.as_ref(), Some(scope));
+        assert_eq!(
+            job.worktree_owner_task_id.as_ref(),
+            Some(&target.owner_task_id)
+        );
         let attempt = store
             .claim_next_job(env.clone())
             .await?
@@ -643,6 +675,22 @@ async fn same_agent_and_branch_keep_worktree_evidence_scoped_to_project_and_atte
         ids.push(run_id);
         artifacts.push(artifact);
     }
+    let competing =
+        queue_approved_writer(&store, &env, &managed, &parent, &task.id, "owner").await?;
+    let blockers = store
+        .inspect_job(project.project_id.clone(), competing.id, env.clone())
+        .await?
+        .context("competing job missing")?
+        .blockers;
+    assert_eq!(
+        blockers,
+        [AdmissionBlocker::PendingWorktreeChanges {
+            checkout_id: managed.checkout_id.clone(),
+            scope_task_id: shared.id,
+            producing_run_id: Some(ids[0].clone()),
+        }]
+    );
+    assert!(store.claim_next_job(env).await?.is_none());
     let first = &artifacts[0];
     let before = first
         .start
@@ -762,5 +810,148 @@ async fn same_agent_and_branch_keep_worktree_evidence_scoped_to_project_and_atte
             .iter()
             .any(|entry| entry.contains("live-only"))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn app_and_cli_writers_share_reservations_and_keep_uncertain_writes_after_restart()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("store.sqlite");
+    let store = Store::open(database.clone())?;
+    let project = repository(&store, &temp.path().join("source")).await?;
+    let owner = store
+        .create_project_task(project.project_id.clone(), "Owner".into())
+        .await?;
+    let scope = store
+        .create_project_task(project.project_id.clone(), "Shared".into())
+        .await?;
+    let tree = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project.project_id.clone(),
+        owner.id.clone(),
+        project.checkout_id.clone(),
+    )
+    .await?;
+    store
+        .assign_shared_worktree(
+            project.project_id.clone(),
+            scope.id.clone(),
+            tree.checkout_id.clone(),
+        )
+        .await?;
+    let runner = CandidateWriter;
+    let parent = candidate_parent(&store, &project, &runner).await?;
+    let env = AdmissionEnvironment {
+        runner: runner.identity().into(),
+        bridge_available: false,
+    };
+    let owner_job = queue_approved_writer(&store, &env, &tree, &parent, &owner.id, "owner").await?;
+    let (entered, wait_entered) = tokio::sync::oneshot::channel();
+    let (proceed, wait_proceed) = std::sync::mpsc::channel();
+    let app = tokio::spawn({
+        let (store, tree, scope) = (store.clone(), tree.clone(), scope.id.clone());
+        async move {
+            with_managed_worktree_writer(
+                &store,
+                tree.project_id,
+                tree.checkout_id,
+                scope,
+                move |worktree| {
+                    entered.send(()).map_err(|_| {
+                        anyhow::anyhow!("test did not observe the active app write")
+                    })?;
+                    wait_proceed.recv_timeout(std::time::Duration::from_secs(20))?;
+                    fs::write(
+                        worktree.root.join("app-change.txt"),
+                        "App write from the shared scope\n",
+                    )?;
+                    Ok(())
+                },
+            )
+            .await
+        }
+    });
+    wait_entered.await?;
+    let inspect_owner = || {
+        store.inspect_job(
+            project.project_id.clone(),
+            owner_job.id.clone(),
+            env.clone(),
+        )
+    };
+    assert!(
+        matches!(inspect_owner().await?.unwrap().blockers.as_slice(),
+        [AdmissionBlocker::AppWriter { checkout_id, .. }] if checkout_id == &tree.checkout_id)
+    );
+    assert!(store.claim_next_job(env.clone()).await?.is_none());
+    proceed.send(())?;
+    app.await??;
+    assert!(
+        matches!(inspect_owner().await?.unwrap().blockers.as_slice(),
+        [AdmissionBlocker::PendingWorktreeChanges { scope_task_id, producing_run_id: None, .. }] if scope_task_id == &scope.id)
+    );
+
+    queue_approved_writer(
+        &store,
+        &env,
+        &tree,
+        &parent,
+        &scope.id,
+        "cancel-before-launch",
+    )
+    .await?;
+    let before_launch = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("same scope was blocked")?;
+    let app_attempt = || {
+        with_managed_worktree_writer(
+            &store,
+            project.project_id.clone(),
+            tree.checkout_id.clone(),
+            scope.id.clone(),
+            |_| Ok(()),
+        )
+    };
+    assert!(
+        app_attempt()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains(&before_launch.run.id)
+    );
+    store
+        .finish_agent_attempt(before_launch.run.id, RunStatus::Cancelled, None)
+        .await?;
+    app_attempt().await?;
+
+    queue_approved_writer(&store, &env, &tree, &parent, &scope.id, "lost-after-launch").await?;
+    let uncertain = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("uncertain fixture could not claim")?;
+    store.mark_agent_running(uncertain.run.id.clone()).await?;
+    let reopened = Store::open(database)?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    let blockers = reopened
+        .inspect_job(project.project_id.clone(), owner_job.id, env.clone())
+        .await?
+        .context("owner job missing after restart")?
+        .blockers;
+    assert!(matches!(blockers.as_slice(),
+        [AdmissionBlocker::Writer { run_id, needs_review: true, .. }] if run_id == &uncertain.run.id));
+    assert!(reopened.claim_next_job(env).await?.is_none());
+    let rejected = with_managed_worktree_writer(
+        &reopened,
+        project.project_id,
+        tree.checkout_id,
+        scope.id,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap_err();
+    assert!(rejected.to_string().contains(&uncertain.run.id));
     Ok(())
 }

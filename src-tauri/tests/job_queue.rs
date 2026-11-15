@@ -664,6 +664,7 @@ async fn an_occupied_managed_worktree_and_a_declined_approval_block_the_same_job
         [AdmissionBlocker::Writer {
             checkout_id: worktree.checkout_id.clone(),
             run_id: claimed.run.id.clone(),
+            needs_review: false,
         }]
     );
     assert!(
@@ -703,7 +704,7 @@ async fn an_occupied_managed_worktree_and_a_declined_approval_block_the_same_job
             .queue_job_recovery(
                 second.project_id,
                 second.id,
-                next.run.id,
+                next.run.id.clone(),
                 RecoveryAction::Retry
             )
             .await
@@ -712,9 +713,16 @@ async fn an_occupied_managed_worktree_and_a_declined_approval_block_the_same_job
     assert!(store.claim_next_job(environment(false)).await?.is_none());
     assert_eq!(
         inspect(&declined).await?.unwrap().blockers,
-        [AdmissionBlocker::Policy {
-            reason: "An operator declined this job"
-        }]
+        [
+            AdmissionBlocker::Policy {
+                reason: "An operator declined this job"
+            },
+            AdmissionBlocker::Writer {
+                checkout_id: worktree.checkout_id,
+                run_id: next.run.id,
+                needs_review: true,
+            },
+        ]
     );
     Ok(())
 }

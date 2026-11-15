@@ -6,4 +6,4 @@ import type { QueueState } from "./QueueState";
 import type { RecoveryAction } from "./RecoveryAction";
 import type { SessionMode } from "./SessionMode";
 
-export type Job = { id: string, projectId: string, checkoutId: string, taskId: string | null, origin: JobOrigin, context: JobContext | null, mode: SessionMode, priority: number, queueState: QueueState, latestAttempt: JobAttempt | null, queuedRecovery: RecoveryAction | null, };
+export type Job = { id: string, projectId: string, checkoutId: string, taskId: string | null, worktreeOwnerTaskId: string | null, origin: JobOrigin, context: JobContext | null, mode: SessionMode, priority: number, queueState: QueueState, latestAttempt: JobAttempt | null, queuedRecovery: RecoveryAction | null, };

@@ -36,7 +36,11 @@ function waitReason(blocker: AdmissionBlocker | undefined): string {
     case "policy": return blocker.reason;
     case "dependency": return "Waiting for a required job to complete.";
     case "approval": return "Waiting for approval.";
-    case "writer": return "Waiting for the worktree writer.";
+    case "writer": return blocker.needsReview
+      ? "The previous worktree writer needs review."
+      : "Waiting for the worktree writer.";
+    case "app_writer": return "Waiting for an app write to finish.";
+    case "pending_worktree_changes": return "The worktree has pending changes for another task scope.";
     case "missing_capability": return "The selected runner is missing a required capability.";
     case "job_cancelled": return "Job cancelled.";
     default: return "Waiting to start.";
@@ -250,7 +254,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
         {latest.error && <p role="alert" className="text-sm text-red-300">{String(latest.error)}</p>}
         {run && <ConversationRun key={run.id} conversationId={conversationId} run={run} cancelRequested={attempt?.runId === run.id && attempt.cancelRequested} />}
         {job?.job.mode === "approved_write" && attempt && !isLiveRun(attempt) && (
-          <WorktreeEvidence key={attempt.runId} projectId={job.job.projectId} runId={attempt.runId} ownerTaskId={job.job.taskId} />
+          <WorktreeEvidence key={attempt.runId} projectId={job.job.projectId} runId={attempt.runId} ownerTaskId={job.job.worktreeOwnerTaskId} />
         )}
         {job && attempt && !busy && job.recoveryActions.length > 0 && (
           <div className="mx-auto mt-3 flex max-w-3xl flex-wrap gap-2" aria-label="Recover job">

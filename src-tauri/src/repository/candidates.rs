@@ -12,6 +12,7 @@ use super::{
     GitStartingState, ManagedWorktree, WorktreeStart, base_commit,
     isolated_git::IsolatedGit,
     worktrees::{load_worktree, verify_managed},
+    writers::{WriterSource, retain_pending_changes},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,24 +173,56 @@ pub(crate) async fn save_worktree_candidate(store: &Store, run_id: String) -> Re
         }
     })
     .await?;
+    let confirmed = matches!(evidence, AttemptWorktreeEvidence::Saved { .. });
+    let pending = match &evidence {
+        AttemptWorktreeEvidence::Saved { artifact } => artifact
+            .candidate
+            .holds_scope_since(&artifact.start.starting),
+        AttemptWorktreeEvidence::Unavailable { .. } => false,
+    };
     let payload = protection::protect(&serde_json::to_vec(&evidence)?)?;
     store
         .execute(move |db| {
-            let recorded = db.execute(
-                "INSERT INTO job_worktree_candidates (run_id, evidence)
-                 SELECT ?1, ?2 FROM job_writer_reservations WHERE run_id = ?1
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let recorded = tx.execute(
+                "INSERT INTO job_worktree_candidates (run_id, evidence, capture_confirmed)
+                 SELECT ?1, ?2, ?3 FROM job_writer_reservations WHERE run_id = ?1
                  ON CONFLICT(run_id) DO NOTHING",
-                params![run_id, payload],
+                params![run_id, payload, confirmed],
             )?;
             ensure!(
                 recorded == 1
-                    || db.query_row(
+                    || tx.query_row(
                         "SELECT EXISTS(SELECT 1 FROM job_worktree_candidates WHERE run_id = ?1)",
                         [&run_id],
                         |row| row.get::<_, bool>(0),
                     )?,
                 "the worktree writer reservation ended before candidate capture"
             );
+            if recorded == 1 && pending {
+                let (project, checkout, scope) = tx.query_row(
+                    "SELECT j.project_id, w.checkout_id, coalesce(s.scope_task_id, j.task_id)
+                     FROM job_attempts a JOIN jobs j ON j.id = a.job_id
+                     JOIN job_writer_reservations w ON w.run_id = a.run_id
+                     LEFT JOIN job_worktree_scopes s ON s.job_id = j.id WHERE a.run_id = ?1",
+                    [&run_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )?;
+                retain_pending_changes(
+                    &tx,
+                    &project,
+                    &checkout,
+                    &scope,
+                    WriterSource::Run(&run_id),
+                )?;
+            }
+            tx.commit()?;
             Ok(())
         })
         .await

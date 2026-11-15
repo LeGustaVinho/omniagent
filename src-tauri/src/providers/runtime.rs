@@ -275,7 +275,6 @@ fn start_turn(
             platform: None,
             staged_attachments: StagedAttachments::default(),
             native_suggestions,
-            writer_handoff_allowed: true,
         };
         let outcome = execution
             .run(runner.as_ref(), &receiver, bridge_executable)
@@ -308,11 +307,10 @@ fn start_turn(
         });
         execution
             .app
-            .block_on(execution.store.finish_supervised_attempt(
+            .block_on(execution.store.finish_agent_attempt(
                 execution.plan.run.id,
                 status,
                 Some(answer),
-                execution.writer_handoff_allowed,
             ))?;
         Ok(status)
     });
@@ -324,7 +322,6 @@ fn start_turn(
 }
 
 struct TurnExecution {
-    writer_handoff_allowed: bool,
     app: Handle,
     store: Store,
     plan: AttemptPlan,
@@ -581,7 +578,6 @@ impl TurnExecution {
             checkout: &scope.checkout,
             arguments: &args,
         })?;
-        self.writer_handoff_allowed = !managed_writer;
         let control = process.control.clone();
         let endpoint = bridge.as_ref().map(|(endpoint, _)| endpoint);
         let run = self
@@ -605,7 +601,6 @@ impl TurnExecution {
                 &self.store,
                 self.plan.run.id.clone(),
             ))?;
-            self.writer_handoff_allowed = true;
         }
         stopped?;
         ended?;
