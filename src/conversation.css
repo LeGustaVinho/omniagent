@@ -197,43 +197,6 @@
 .conv-select { display: block; max-width: 100%; }
 .conv-stop, .conv-send { margin-left: auto; padding: .35rem .6rem; min-height: 1.85rem; font-size: .75rem; }
 .conv-send { border-radius: .75rem; }
-.conv-model-trigger { display: inline-flex; max-width: min(10rem, 100%); min-width: 0; color: var(--foreground); }
-.conv-model-trigger span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.conv-model-trigger[data-state="open"] { background: var(--muted); }
-.conv-model-menu {
-  z-index: 78;
-  display: flex;
-  flex-direction: column;
-  width: min(19rem, var(--radix-dropdown-menu-content-available-width, 100vw));
-  max-height: min(21rem, var(--radix-dropdown-menu-content-available-height, 90dvh));
-  padding: .26rem;
-  border: 1px solid var(--border);
-  border-radius: .65rem;
-  background: var(--card);
-  box-shadow: 0 10px 28px #0006;
-  font-size: .8125rem;
-  outline: none;
-}
-.conv-model-heading, .conv-model-empty { padding: .45rem .6rem; color: var(--muted-foreground); font-size: .72rem; }
-.conv-model-list { min-height: 0; overflow: auto; }
-.conv-model-item {
-  display: flex;
-  align-items: center;
-  gap: .45rem;
-  min-height: 1.9rem;
-  padding: .3rem .45rem;
-  border-radius: .32rem;
-  cursor: default;
-  outline: none;
-}
-.conv-model-item[data-highlighted] { background: var(--muted); }
-.conv-model-item[data-disabled], .conv-model-item small { color: var(--muted-foreground); }
-.conv-model-item small { display: block; font-size: .69rem; overflow-wrap: anywhere; }
-.conv-model-item-check { display: grid; place-items: center; width: 1rem; flex: none; color: var(--primary); }
-.conv-model-rating { padding: .35rem .6rem .48rem; border-top: 1px solid var(--border); }
-.conv-model-rating > span { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.conv-model-rating > span > :last-child { grid-column: 1 / -1; }
-.conv-model-rating meter { height: .24rem; }
 .conv-goal, .conv-goal-note { display: flex; align-items: start; gap: .5rem; }
 .conv-goal {
   align-items: center;
@@ -256,9 +219,6 @@
 .conv-goal-revisions { max-height: 10rem; overflow: auto; color: var(--muted-foreground); font-size: .75rem; }
 .conv-goal-revisions summary { cursor: pointer; }
 .conv-goal-revisions li { margin-top: .4rem; padding: .35rem .55rem; border-inline-start: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; }
-@media (forced-colors: active) {
-  .conv-model-item[data-highlighted] { outline: 1px solid Highlight; outline-offset: -1px; }
-}
 
 .conv-activity {
   position: absolute;

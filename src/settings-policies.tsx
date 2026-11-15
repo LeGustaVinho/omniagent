@@ -223,7 +223,7 @@ function PolicyInput({ field, value, change, available }: {
 }) {
   if (field.kind === "model") {
     return <div>
-      <ModelPicker label={field.label} options={available ? exampleSettingsModels : []}
+      <ModelPicker label={field.label} options={available ? exampleSettingsModels : []} disabled={!available}
         selection={{ mode: "single", selected: exampleSettingsModels.find(({ selection }) => selection.modelId === value)?.selection ?? null,
           onChange: ({ modelId }) => change(modelId) }} />
       {value && <button type="button" className="mt-1 underline" onClick={() => change("")}>Use conversation model</button>}

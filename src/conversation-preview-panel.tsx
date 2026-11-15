@@ -6,7 +6,7 @@ import { Dialog } from "radix-ui";
 import { useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
-import { ComposerModelPicker } from "@/components/model-picker";
+import { ModelPicker } from "@/components/model-picker";
 import { EffortSelect } from "@/components/effort-select";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { exampleModelEfforts } from "@/model-effort-examples";
@@ -417,7 +417,8 @@ export function PreviewConversationPanel(props: PanelProps) {
                 <select aria-label="Provider" className="conv-select" value={provider} onChange={(event) => updateProfile(event.currentTarget.value as Provider)}>
                   {Object.entries(providers).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
                 </select>
-                <ComposerModelPicker options={modelOptions} selected={selection} onChange={(model) => { setSelection(model); setEffort(""); }} />
+                <ModelPicker label="Model" layout="inline" options={modelOptions}
+                  selection={{ mode: "single", selected: selection, onChange: (model) => { setSelection(model); setEffort(""); } }} />
                 <ConversationModeSelect mode={mode} onChange={setMode} />
                 <EffortSelect capabilities={exampleModelEfforts(selection)} className="conv-select" value={effort} onChange={setEffort} />
                 {activeRun && !composingGoal && <select aria-label="Delivery" className="conv-select" value={deliveryRoute} onChange={(event) => setDeliveryRoute(event.currentTarget.value)}>

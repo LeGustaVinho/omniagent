@@ -484,7 +484,9 @@ export default function TasksWorkspace(props: WorkspaceProps) {
         <select className="delivery-filter" aria-label="Filter tasks by state" value={stateFilter} onChange={(event) => setStateFilter(event.target.value)}><option value="">All states</option>{taskStates.map((state) => <option key={state}>{state}</option>)}</select>
         <select className="delivery-filter" aria-label="Filter tasks by provider" value={providerFilter} onChange={(event) => setProviderFilter(event.target.value)}><option value="">All providers</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="antigravity">Antigravity</option></select>
         <select className="delivery-filter" aria-label="Filter tasks by agent" disabled={!simulation} value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}><option value="">All agents</option>{agents.map((agent) => <option key={agent}>{agent}</option>)}</select>
-        <select className="delivery-filter" disabled={!simulation} aria-label="Filter tasks by model" value={modelFilter} onChange={(event) => setModelFilter(event.target.value)}><option value="">All models</option>{simulation && deliveryModels.map((model) => <option key={model.selection.modelId} value={model.selection.modelId}>{model.name}</option>)}</select>
+        <ModelPicker label="Filter tasks by model" layout="inline" options={deliveryModels}
+          selection={{ mode: "single", selected: deliveryModels.find(({ selection }) => selection.modelId === modelFilter)?.selection ?? null,
+            onChange: ({ modelId }) => setModelFilter(modelId), reset: { label: "All models", onSelect: () => setModelFilter("") } }} />
         {(filter || stateFilter || providerFilter || agentFilter || modelFilter) && <button className="delivery-tab" type="button" onClick={() => {
           setQuery(""); setStateFilter(""); setProviderFilter(""); setAgentFilter(""); setModelFilter("");
         }}>Clear filters</button>}

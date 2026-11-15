@@ -1,9 +1,10 @@
 import { Check, ChevronDown } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelRating } from "@/bindings/ModelRating";
 import type { ModelSelection } from "@/bindings/ModelSelection";
+import "./model-picker.css";
 
 const apiPrice = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -13,13 +14,21 @@ const apiPrice = new Intl.NumberFormat("en-US", {
 });
 
 type PickerSelection =
-  | { mode: "single"; selected: ModelSelection | null; onChange: (value: ModelSelection) => void }
+  | {
+    mode: "single";
+    selected: ModelSelection | null;
+    onChange: (value: ModelSelection) => void;
+    reset?: { label: string; onSelect: () => void };
+  }
   | { mode: "multiple"; selected: readonly ModelSelection[]; onChange: (value: ModelSelection[]) => void };
 
 interface ModelPickerProps {
   label: string;
   options: readonly ModelOption[];
   selection: PickerSelection;
+  layout?: "inline" | "field";
+  loading?: boolean;
+  disabled?: boolean;
 }
 
 function modelKey({ provider, profileId, modelId }: ModelSelection) {
@@ -61,111 +70,95 @@ export function ModelRatingMeters({ rating }: { rating: ModelRating | null }) {
   );
 }
 
-export function ComposerModelPicker({ options, selected, onChange, loading }: {
-  options: readonly ModelOption[];
-  selected: ModelSelection | null;
-  onChange: (value: ModelSelection) => void;
-  loading?: boolean;
-}) {
+export function ModelPicker({ label, options, selection, layout = "field", loading, disabled }: ModelPickerProps) {
+  const labelId = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
   const [inspected, setInspected] = useState<string>();
-  const value = selected ? modelKey(selected) : "";
-  const current = options.find((option) => modelKey(option.selection) === value);
-  const preview = options.find((option) => modelKey(option.selection) === inspected) ?? current ?? options.find(({ selectable }) => selectable);
+  const [theme, setTheme] = useState<string>();
+  const selected = selection.mode === "multiple" ? selection.selected : selection.selected ? [selection.selected] : [];
+  const selectedKeys = new Set(selected.map(modelKey));
+  const selectedOptions = options.filter((option) => selectedKeys.has(modelKey(option.selection)));
+  const preview = options.find((option) => modelKey(option.selection) === inspected) ?? selectedOptions[0] ?? options.find(({ selectable }) => selectable);
+  const reset = selection.mode === "single" ? selection.reset : undefined;
+  let summary = selectedOptions[0]?.name ?? reset?.label ?? "Choose model";
+  if (selection.mode === "multiple") summary = selectedOptions.length ? `${selectedOptions.length} selected` : "Choose models";
+  if (loading) summary = "Loading models…";
 
-  return (
-    <DropdownMenu.Root onOpenChange={() => setInspected(undefined)}>
-      <DropdownMenu.Trigger className="conv-select conv-model-trigger" aria-label={current ? `Model · ${current.name}` : "Choose model"}>
-        <span>{current?.name ?? (loading ? "Loading models…" : "Choose model")}</span><ChevronDown size={13} aria-hidden />
+  const menu = (
+    <DropdownMenu.Root onOpenChange={(open) => {
+      setInspected(undefined);
+      if (open) {
+        const scope = trigger.current?.closest("[data-app-theme]");
+        setTheme(scope && scope !== document.documentElement ? scope.getAttribute("data-app-theme") ?? undefined : undefined);
+      }
+    }}>
+      <DropdownMenu.Trigger ref={trigger} type="button" className="model-picker-trigger" data-layout={layout} disabled={disabled}
+        aria-label={`${label} · ${summary}`} title={selectedOptions.map(({ name }) => name).join(", ") || undefined}>
+        <span>{summary}</span><ChevronDown size={13} aria-hidden />
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content className="conv-model-menu" aria-label="Models" side="top" align="start" sideOffset={6} collisionPadding={10}>
-          <DropdownMenu.Label className="conv-model-heading">Model</DropdownMenu.Label>
-          <DropdownMenu.RadioGroup value={value} className="conv-model-list" onValueChange={(key) => {
-            const chosen = options.find((option) => modelKey(option.selection) === key);
-            if (chosen?.selectable) onChange(chosen.selection);
-          }}>
-            {options.map((option) => {
+        <DropdownMenu.Content className="model-picker-menu" data-app-theme={theme} aria-labelledby={labelId}
+          side={layout === "inline" ? "top" : "bottom"} align="start" sideOffset={6} collisionPadding={10}>
+          <DropdownMenu.Label id={labelId} className="model-picker-heading">{label}</DropdownMenu.Label>
+          <div className="model-picker-list">
+            {selection.mode === "single" ? (
+              <DropdownMenu.RadioGroup value={selection.selected ? modelKey(selection.selected) : ""} onValueChange={(key) => {
+                if (!key) return reset?.onSelect();
+                const chosen = options.find((option) => modelKey(option.selection) === key);
+                if (chosen?.selectable) selection.onChange(chosen.selection);
+              }}>
+                {reset && <DropdownMenu.RadioItem className="model-picker-item" value="">
+                  <ModelCheck />{reset.label}
+                </DropdownMenu.RadioItem>}
+                {options.map((option) => {
+                  const key = modelKey(option.selection);
+                  return <DropdownMenu.RadioItem key={key} value={key} {...itemProps(option, () => setInspected(key))}>
+                    <ModelCheck /><ModelOptionLabel option={option} />
+                  </DropdownMenu.RadioItem>;
+                })}
+              </DropdownMenu.RadioGroup>
+            ) : options.map((option) => {
               const key = modelKey(option.selection);
-              return <DropdownMenu.RadioItem className="conv-model-item" key={key} value={key} disabled={!option.selectable}
-                aria-label={option.selectable ? option.name : undefined}
-                textValue={option.name} onFocus={() => setInspected(key)} onPointerMove={() => setInspected(key)}>
-                <span className="conv-model-item-check"><DropdownMenu.ItemIndicator><Check size={14} aria-hidden /></DropdownMenu.ItemIndicator></span>
-                <span className="min-w-0">
-                  <span className="block truncate" title={option.name}>{option.name}</span>
-                  {!option.selectable && <small>{option.unavailableReason ?? "Unavailable in this profile"}</small>}
-                </span>
-              </DropdownMenu.RadioItem>;
+              return <DropdownMenu.CheckboxItem key={key} checked={selectedKeys.has(key)}
+                {...itemProps(option, () => setInspected(key))}
+                onSelect={(event) => event.preventDefault()}
+                onCheckedChange={(checked) => selection.onChange(checked
+                  ? [...selection.selected, option.selection]
+                  : selection.selected.filter((current) => modelKey(current) !== key))}>
+                <ModelCheck /><ModelOptionLabel option={option} />
+              </DropdownMenu.CheckboxItem>;
             })}
-          </DropdownMenu.RadioGroup>
-          {!options.length && <p className="conv-model-empty">{loading ? "Checking available models…" : "No models reported by this profile."}</p>}
-          {preview && <div className="conv-model-rating" aria-label={`Ratings for ${preview.name}`}><ModelRatingMeters rating={preview.rating} /></div>}
+          </div>
+          {!options.length && <p className="model-picker-empty">{loading ? "Checking available models…" : "No models reported by this profile."}</p>}
+          {preview && <div className="model-picker-rating" aria-label={`Ratings for ${preview.name}`}><ModelRatingMeters rating={preview.rating} /></div>}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
   );
+
+  return layout === "inline" ? menu : <div className="model-picker-field"><span className="model-picker-label">{label}</span>{menu}</div>;
 }
 
-export function ModelPicker({ label, options, selection }: ModelPickerProps) {
-  const group = useId();
-  const selected = selection.mode === "multiple" ? selection.selected : selection.selected ? [selection.selected] : [];
-  const selectedKeys = new Set(selected.map(modelKey));
-  const selectedOptions = options.filter((option) => selectedKeys.has(modelKey(option.selection)));
+function itemProps(option: ModelOption, inspect: () => void) {
+  return {
+    className: "model-picker-item",
+    disabled: !option.selectable,
+    "aria-label": option.selectable ? option.name : undefined,
+    textValue: option.name,
+    onFocus: inspect,
+    onPointerMove: inspect,
+  };
+}
 
-  function select(option: ModelOption) {
-    if (!option.selectable) return;
-    if (selection.mode === "single") {
-      selection.onChange(option.selection);
-      return;
-    }
-    const key = modelKey(option.selection);
-    selection.onChange(selectedKeys.has(key)
-      ? selection.selected.filter((current) => modelKey(current) !== key)
-      : [...selection.selected, option.selection]);
-  }
+function ModelCheck() {
+  return <span className="model-picker-check"><DropdownMenu.ItemIndicator><Check size={14} aria-hidden /></DropdownMenu.ItemIndicator></span>;
+}
 
+function ModelOptionLabel({ option }: { option: ModelOption }) {
   return (
-    <details className="w-full min-w-0 rounded-md border border-border bg-card">
-      <summary className="cursor-pointer px-3 py-2 focus-visible:outline-ring">
-        <span className="text-sm font-medium">{label}</span>
-        {selectedOptions.length === 0 && <span className="ml-2 text-sm text-muted-foreground">Choose {selection.mode === "single" ? "a model" : "models"}</span>}
-        {selectedOptions.length > 0 && (
-          <span aria-label="Selected models" className="mt-2 grid gap-2">
-            {selectedOptions.map((option) => (
-              <span key={modelKey(option.selection)} className="min-w-0 break-words text-sm">
-                {option.name}
-                <ModelRatingMeters rating={option.rating} />
-              </span>
-            ))}
-          </span>
-        )}
-      </summary>
-      <fieldset className="max-h-80 min-w-0 overflow-y-auto border-t border-border p-2">
-        <legend className="sr-only">{label}</legend>
-        {options.length === 0 && <p className="p-2 text-sm text-muted-foreground">No models reported by this profile.</p>}
-        {options.map((option) => {
-          const key = modelKey(option.selection);
-          return (
-            <label key={key} className="flex min-w-0 gap-2 rounded-md px-2 py-3 hover:bg-muted has-disabled:cursor-not-allowed">
-              <input
-                className="mt-1 self-start accent-primary"
-                name={group}
-                type={selection.mode === "single" ? "radio" : "checkbox"}
-                checked={selectedKeys.has(key)}
-                disabled={!option.selectable}
-                aria-label={option.name}
-                onChange={() => select(option)}
-              />
-              <span className="min-w-0 flex-1 break-words">
-                <span className="text-sm font-medium">{option.name}</span>
-                {!option.selectable && (
-                  <span className="ml-2 text-xs text-muted-foreground">{option.unavailableReason ?? "Unavailable in this profile"}</span>
-                )}
-                <ModelRatingMeters rating={option.rating} />
-              </span>
-            </label>
-          );
-        })}
-      </fieldset>
-    </details>
+    <span className="min-w-0">
+      <span className="block truncate" title={option.name}>{option.name}</span>
+      {!option.selectable && <small>{option.unavailableReason ?? "Unavailable in this profile"}</small>}
+    </span>
   );
 }

@@ -167,12 +167,12 @@ async function checkSimulation(browser, checkout) {
   const composerHeight = () => browser.execute(() => document.querySelector(".work-deck:not([hidden]) .work-view:not([hidden]) .conv-composer")
     .getBoundingClientRect().height);
   const heightBefore = await composerHeight();
-  await click(conversation, ".conv-model-trigger");
-  const modelMenu = browser.$(".conv-model-menu");
+  await click(conversation, ".model-picker-trigger");
+  const modelMenu = browser.$(".model-picker-menu");
   await modelMenu.waitForDisplayed();
   assert.equal(await composerHeight(), heightBefore);
   await capture(browser, "01-composer-model-picker");
-  await click(browser, '.conv-model-menu [role="menuitemradio"][aria-label="GPT‑6.1 Sol"]');
+  await click(browser, '.model-picker-menu [role="menuitemradio"][aria-label="GPT‑6.1 Sol"]');
   const effortValues = () => browser.execute(() => {
     const composer = document.querySelector(".work-deck:not([hidden]) .work-view:not([hidden]) .conv-composer");
     return Array.from(composer.querySelector('select[aria-label="Effort"]').options, (option) => option.value);
@@ -180,14 +180,14 @@ async function checkSimulation(browser, checkout) {
   assert.deepEqual(await effortValues(), ["", "low", "medium", "high", "xhigh", "max", "ultra"]);
   const effort = conversation.$('select[aria-label="Effort"]');
   await effort.selectByAttribute("value", "ultra");
-  await click(conversation, ".conv-model-trigger");
-  await click(browser, '.conv-model-menu [role="menuitemradio"][aria-label="GPT‑6 Luna"]');
+  await click(conversation, ".model-picker-trigger");
+  await click(browser, '.model-picker-menu [role="menuitemradio"][aria-label="GPT‑6 Luna"]');
   assert.deepEqual(await effortValues(), ["", "low", "medium", "high", "xhigh", "max"]);
   assert.equal(await effort.getValue(), "");
   await conversation.$('select[aria-label="Provider"]').selectByAttribute("value", "antigravity");
   assert.deepEqual(await effortValues(), ["", "low", "medium", "high"]);
-  await click(conversation, ".conv-model-trigger");
-  await click(browser, '.conv-model-menu [role="menuitemradio"][aria-label="Gemini 4 Hydrogen"]');
+  await click(conversation, ".model-picker-trigger");
+  await click(browser, '.model-picker-menu [role="menuitemradio"][aria-label="Gemini 4 Hydrogen"]');
   assert.deepEqual(await effortValues(), ["", "low", "medium", "high", "xhigh"]);
   await conversation.$('select[aria-label="Provider"]').selectByAttribute("value", "codex");
   await conversation.$('select[aria-label="Conversation mode"]').selectByAttribute("value", "goal");
@@ -208,6 +208,13 @@ async function checkSimulation(browser, checkout) {
   await click(browser, "button=Reply");
   await click(browser, "button=Approve implementation");
   await click(browser, "button=Open release task");
+  const taskModel = 'button[aria-label^="Filter tasks by model ·"]';
+  await click(browser.$(shown), taskModel);
+  await click(browser, '.model-picker-menu [aria-label="GPT-6.1 Sol"]');
+  assert.equal(await browser.$(shown).$(taskModel).getText(), "GPT-6.1 Sol");
+  await click(browser.$(shown), taskModel);
+  await click(browser.$(".model-picker-menu"), 'div=All models');
+  assert.equal(await browser.$(shown).$(taskModel).getText(), "All models");
   await capture(browser, "09-agile-kanban");
   await click(browser.$(shown), "button=Table");
   const agile = browser.$(shown).$(".agile-table");
@@ -260,6 +267,22 @@ async function checkSimulation(browser, checkout) {
   await scenario.selectByAttribute("value", "pipelines");
   await browser.$(".react-flow").waitForDisplayed();
   await capture(browser, "03-pipelines");
+  await click(browser.$(shown), "button=Roles & templates");
+  const roles = browser.$(shown).$(".pipeline-view:not([hidden])");
+  const roleModel = 'button[aria-label^="Default model ·"]';
+  await click(roles, roleModel);
+  await browser.$('.model-picker-menu [aria-label="GPT‑6.1 Sol"][aria-checked="true"]').waitForDisplayed();
+  await capture(browser, "03-role-model-picker");
+  await click(browser, '.model-picker-menu [aria-label="GPT‑6 Luna"]');
+  assert.equal(await roles.$(roleModel).getText(), "GPT‑6 Luna");
+  await click(roles, roleModel);
+  await click(browser, '.model-picker-menu [aria-label="GPT‑6.1 Sol"]');
+  await click(browser.$(shown), "button=Compare");
+  await click(browser.$(shown).$(".pipeline-view:not([hidden])"), 'button[aria-label="Select models · 3 selected"]');
+  await click(browser, '.model-picker-menu [role="menuitemcheckbox"][aria-label="GPT‑6 Luna"]');
+  assert.equal(await browser.$('.model-picker-menu [role="menuitemcheckbox"][aria-label="GPT‑6 Luna"]').getAttribute("aria-checked"), "false");
+  await click(browser, '.model-picker-menu [role="menuitemcheckbox"][aria-label="GPT‑6 Luna"]');
+  await browser.keys("Escape");
   await click(browser.$(shown), "button=Library");
   const catalog = browser.$(shown).$(".pipeline-view:not([hidden])");
   await catalog.$('input[aria-label="Search pipeline nodes"]').setValue("verified source commit");
@@ -300,6 +323,10 @@ async function checkSimulation(browser, checkout) {
   await click(browser, "button=Continue");
   await click(browser, "button=Finish");
   await capture(browser, "04-system-settings");
+  await click(browser, "button=Execution policies");
+  await click(browser.$('.settings-dialog'), 'button[aria-label^="Planning model ·"]');
+  await click(browser, '.model-picker-menu [aria-label="GPT‑6.1 Sol"]');
+  assert.equal(await browser.$('.settings-dialog button[aria-label^="Planning model ·"]').getText(), "GPT‑6.1 Sol");
   await click(browser, "button=Appearance");
   await capture(browser, "04-appearance-settings");
   await click(browser, 'button[aria-label="Close settings"]');
@@ -600,19 +627,19 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       const models = await invoke(browser, "conversation_models", { provider: "codex" });
       const model = models.find(({ option }) => option.selection.modelId === "gpt-6-luna" && option.selectable);
       assert.ok(model, "the installed profile does not offer the qualified fixture model");
-      const modelTrigger = `${selector} .conv-model-trigger`;
+      const modelTrigger = `${selector} .model-picker-trigger`;
       await browser.$(modelTrigger).waitForDisplayed();
       await browser.execute((trigger) => document.querySelector(trigger).focus(), modelTrigger);
       await browser.keys("Enter");
-      const radioSelector = `.conv-model-menu [role="menuitemradio"][aria-label="${model.option.name}"]`;
+      const radioSelector = `.model-picker-menu [role="menuitemradio"][aria-label="${model.option.name}"]`;
       const modelRadio = browser.$(radioSelector);
       await modelRadio.waitForDisplayed();
       await browser.execute((radio) => document.querySelector(radio).focus(), radioSelector);
       const rating = model.option.rating;
       assert.ok(rating);
-      await browser.waitUntil(() => browser.$(".conv-model-rating").getAttribute("aria-label").then((label) => label === `Ratings for ${model.option.name}`));
+      await browser.waitUntil(() => browser.$(".model-picker-rating").getAttribute("aria-label").then((label) => label === `Ratings for ${model.option.name}`));
       const originalRating = await browser.execute(() => {
-        const option = document.querySelector(".conv-model-rating");
+        const option = document.querySelector(".model-picker-rating");
         return {
           meters: [...option.querySelectorAll("meter")].map((meter) => [meter.getAttribute("aria-label"), meter.value]),
           price: [...option.querySelectorAll("span")].find((span) => span.childElementCount === 0
@@ -626,7 +653,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       const rate = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(rating.apiReferenceCents / 100);
       assert.equal(originalRating.price, `API reference ${rate} / 1M tokens`);
       await browser.keys("Enter");
-      await browser.$(".conv-model-menu").waitForExist({ reverse: true });
+      await browser.$(".model-picker-menu").waitForExist({ reverse: true });
       assert.equal(await browser.$(modelTrigger).getText(), model.option.name);
       const prompt = "Reply exactly OMNIAGENT_DESKTOP_REPLY without tools.";
       await recoveredDraft.setValue(prompt);

@@ -1,4 +1,4 @@
-.settings-dialog[data-app-theme="light"] {
+:is(.settings-dialog, .model-picker-menu)[data-app-theme="light"] {
   color-scheme: light;
   --background: #fcfcfd;
   --foreground: #25242a;
@@ -11,7 +11,7 @@
   --ring: #574ccc;
 }
 
-.settings-dialog[data-app-theme="dark"] {
+:is(.settings-dialog, .model-picker-menu)[data-app-theme="dark"] {
   color-scheme: dark;
   --background: #191919;
   --foreground: #f1f1f1;

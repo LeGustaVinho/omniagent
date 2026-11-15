@@ -14,7 +14,7 @@ import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import type { RunRecord } from "@/bindings/RunRecord";
-import { ComposerModelPicker } from "@/components/model-picker";
+import { ModelPicker } from "@/components/model-picker";
 import { EffortSelect, type EffortSet } from "@/components/effort-select";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { Button } from "@/components/ui/button";
@@ -471,8 +471,8 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
                 <option value="claude">Claude Code</option>
                 <option value="antigravity">Antigravity</option>
               </select>
-              <ComposerModelPicker options={models.data?.map(({ option }) => option) ?? []} selected={selection} loading={models.isPending}
-                onChange={(selection) => { setSelection(selection); setEffort(""); }} />
+              <ModelPicker label="Model" layout="inline" options={models.data?.map(({ option }) => option) ?? []} loading={models.isPending}
+                selection={{ mode: "single", selected: selection, onChange: (model) => { setSelection(model); setEffort(""); } }} />
               <ConversationModeSelect mode={mode} onChange={setMode} />
               <EffortSelect capabilities={efforts} loading={Boolean(antigravityModel && modelEfforts.isPending)}
                 className={selectorClass} value={effort} onChange={setEffort} />
