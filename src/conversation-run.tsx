@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { useState } from "react";
+import { Activity, Square, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { RunRecord } from "@/bindings/RunRecord";
 import { Button } from "@/components/ui/button";
 import { ConversationChildren, recordChildActivity, type ChildActivity, type ChildLocation, type Delegation } from "@/conversation-children";
@@ -9,16 +10,28 @@ import { PendingInput, type ConversationPendingInput } from "@/conversation-inpu
 type EventData =
   | { type: "assistant_delta" | "assistant_message" | "plan_proposed"; text: string }
   | { type: "error"; message: string }
-  | { type: "tool" }
+  | { type: "tool"; name: string; phase: string }
+  | { type: "reasoning"; text: string; summary: boolean }
+  | { type: "usage"; input: number | null; output: number | null; cached_input: number | null }
   | ChildActivity;
 type Page = {
   cursor: string;
   more: boolean;
   events: { data: EventData; location: ChildLocation }[];
 };
-type Projection = { cursor: string; streamed: string; final: string; plan: string; error: string; delegation: Delegation };
+type Projection = {
+  cursor: string;
+  streamed: string;
+  final: string;
+  plan: string;
+  error: string;
+  delegation: Delegation;
+  reasoning: Extract<EventData, { type: "reasoning" }>[];
+  tools: Extract<EventData, { type: "tool" }>[];
+  usage?: Extract<EventData, { type: "usage" }>;
+};
 const emptyProjection: Projection = {
-  cursor: "0", streamed: "", final: "", plan: "", error: "",
+  cursor: "0", streamed: "", final: "", plan: "", error: "", reasoning: [], tools: [],
   delegation: { children: {}, parentActivity: {} },
 };
 const labels = {
@@ -31,18 +44,17 @@ export function isLiveRun(run: RunRecord | null | undefined) {
   return Boolean(run && liveStatuses.has(run.status));
 }
 
-export function ConversationRun({ conversationId, run }: { conversationId: string; run: RunRecord }) {
+export function useConversationRun(conversationId: string, run: RunRecord | null | undefined) {
   const queryClient = useQueryClient();
-  const runId = run.id;
+  const runId = run?.id;
   const target = { conversationId, runId };
   const live = isLiveRun(run);
   const projectionKey = ["conversation-run", runId, "output", live];
   const inputKey = ["conversation-run", runId, "pending"];
-  const [showInput, setShowInput] = useState(false);
-  const [stopping, setStopping] = useState(false);
-  const [stopError, setStopError] = useState("");
+  const [stopState, setStopState] = useState<{ runId: string; error?: string }>();
   const result = useQuery({
     queryKey: projectionKey,
+    enabled: Boolean(runId),
     refetchInterval: live ? 200 : false,
     queryFn: async () => {
       const prior = queryClient.getQueryData<Projection>(projectionKey)
@@ -50,6 +62,8 @@ export function ConversationRun({ conversationId, run }: { conversationId: strin
         ?? emptyProjection;
       const current = {
         ...prior,
+        reasoning: [...prior.reasoning],
+        tools: [...prior.tools],
         delegation: { children: { ...prior.delegation.children }, parentActivity: { ...prior.delegation.parentActivity } },
       };
       let page: Page;
@@ -64,6 +78,9 @@ export function ConversationRun({ conversationId, run }: { conversationId: strin
           if (data.type === "assistant_message") current.final += data.text;
           if (data.type === "plan_proposed") current.plan = data.text;
           if (data.type === "error") current.error = data.message;
+          if (data.type === "reasoning") current.reasoning.push(data);
+          if (data.type === "tool") current.tools.push(data);
+          if (data.type === "usage") current.usage = data;
         }
       } while (page.more);
       return current;
@@ -75,43 +92,100 @@ export function ConversationRun({ conversationId, run }: { conversationId: strin
     refetchInterval: live ? 200 : false,
     queryFn: () => invoke<ConversationPendingInput[]>("pending_conversation_inputs", target),
   });
-  const input = useQuery({
-    queryKey: ["conversation-run", runId, "input"],
-    enabled: showInput,
-    refetchInterval: showInput && live ? 400 : false,
-    queryFn: () => invoke<{ delivery: string; frames: string[] } | null>("conversation_input", target),
-  });
-
   async function stop() {
-    setStopping(true);
-    setStopError("");
+    if (!runId) return;
+    setStopState({ runId });
     try {
       await invoke("stop_conversation_turn", target);
     } catch (error) {
-      setStopping(false);
-      setStopError(String(error));
+      setStopState({ runId, error: String(error) });
     }
   }
 
-  const output = result.data?.plan || result.data?.final || result.data?.streamed;
-  const error = stopError || result.data?.error || result.error || inputs.error;
+  const currentStop = stopState?.runId === runId ? stopState : undefined;
+  return {
+    projection: result.data,
+    output: result.data?.plan || result.data?.final || result.data?.streamed,
+    error: currentStop?.error || result.data?.error || result.error || inputs.error,
+    inputs: inputs.data ?? [],
+    refreshInputs: () => void inputs.refetch(),
+    live,
+    stop,
+    stopping: Boolean(currentStop && !currentStop.error),
+  };
+}
+
+export function StopConversation({ stop, stopping }: ReturnType<typeof useConversationRun>) {
+  return <Button type="button" variant="outline" className="conv-stop" disabled={stopping} onClick={() => void stop()}>
+    <Square className="size-3.5" aria-hidden /> {stopping ? "Stopping…" : "Stop"}
+  </Button>;
+}
+
+export function ConversationRequests({ activity, conversationId, runId }: {
+  activity: ReturnType<typeof useConversationRun>;
+  conversationId: string;
+  runId: string;
+}) {
+  if (!activity.live || !activity.inputs.length) return null;
   return (
-    <section className="mx-auto mt-4 grid max-w-3xl gap-2" aria-label="Conversation run">
-      <div className="flex flex-wrap items-center gap-2">
-        <span role="status" className="text-xs text-muted-foreground">{labels[run.status]}</span>
-        {live && <Button variant="outline" disabled={stopping} onClick={() => void stop()}>{stopping ? "Stopping…" : "Stop"}</Button>}
-        <Button variant="outline" aria-expanded={showInput} onClick={() => setShowInput((visible) => !visible)}>Exact input</Button>
-      </div>
-      {error && <p role="alert" className="text-sm text-red-300">{String(error)}</p>}
-      {live && output && (
-        <div className="rounded-md border border-border bg-card px-4 py-3" aria-label="Streaming response">
-          <p className="mb-1 text-xs font-medium text-muted-foreground">Assistant</p>
-          <p className="whitespace-pre-wrap break-words text-sm">{output}</p>
-        </div>
-      )}
-      {result.data && <ConversationChildren delegation={result.data.delegation} />}
-      {live && inputs.data?.map((request) => <PendingInput key={JSON.stringify(request.data.request_id)}
-        input={request} conversationId={conversationId} runId={runId} onResolved={() => void inputs.refetch()} />)}
+    <section aria-label="Pending requests" className="conv-requests">
+      <p className="conv-waiting" role="status">Waiting for input</p>
+      {activity.inputs.map((request) => <PendingInput key={JSON.stringify(request.data.request_id)}
+        input={request} conversationId={conversationId} runId={runId} onResolved={activity.refreshInputs} />)}
+    </section>
+  );
+}
+
+export function ConversationActivity({ conversationId, run, projection, onClose }: {
+  conversationId: string;
+  run: RunRecord;
+  projection?: Projection;
+  onClose: () => void;
+}) {
+  const [showInput, setShowInput] = useState(false);
+  const heading = useRef<HTMLButtonElement>(null);
+  const live = isLiveRun(run);
+  useEffect(() => { heading.current?.focus(); }, []);
+  const input = useQuery({
+    queryKey: ["conversation-run", run.id, "input"],
+    enabled: showInput,
+    refetchInterval: showInput && live ? 400 : false,
+    queryFn: () => invoke<{ delivery: string; frames: string[] } | null>("conversation_input", { conversationId, runId: run.id }),
+  });
+  const usage = projection?.usage;
+  return (
+    <aside className="conv-activity" aria-label="Conversation activity" onKeyDown={(event) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      onClose();
+    }}>
+      <header className="conv-activity-heading">
+        <Activity className="size-4" aria-hidden /><h2>Activity</h2>
+        <button ref={heading} type="button" className="conv-icon-button ml-auto" aria-label="Close activity" onClick={onClose}>
+          <X aria-hidden />
+        </button>
+      </header>
+      <div className="conv-activity-content">
+      <dl>
+        <dt>Execution</dt><dd role="status">{labels[run.status]}</dd>
+        <dt>Run ID</dt><dd className="break-all font-mono">{run.id}</dd>
+        {usage && <>
+          <dt>Input tokens</dt><dd>{usage.input?.toLocaleString() ?? "Unavailable"}</dd>
+          <dt>Output tokens</dt><dd>{usage.output?.toLocaleString() ?? "Unavailable"}</dd>
+          <dt>Cached input</dt><dd>{usage.cached_input?.toLocaleString() ?? "Unavailable"}</dd>
+        </>}
+      </dl>
+      {projection && <ConversationChildren delegation={projection.delegation} />}
+      {Boolean(projection?.tools.length) && <details>
+        <summary>Tool activity</summary>
+        <ol>{projection?.tools.map((tool, index) => <li key={index}>{tool.name} · {tool.phase}</li>)}</ol>
+      </details>}
+      {Boolean(projection?.reasoning.length) && <details>
+        <summary>Reported reasoning</summary>
+        <ol>{projection?.reasoning.map((entry, index) =>
+          <li key={index}><small>{entry.summary ? "Summary" : "Provider reasoning"}</small><p>{entry.text}</p></li>)}</ol>
+      </details>}
+      <Button type="button" variant="outline" aria-expanded={showInput} onClick={() => setShowInput((visible) => !visible)}>Exact input</Button>
       {showInput && (
         <section className="min-w-0 rounded-md border border-border bg-card p-3" aria-label="Exact provider input">
           {input.isPending && <p className="text-xs text-muted-foreground">Loading input…</p>}
@@ -123,6 +197,7 @@ export function ConversationRun({ conversationId, run }: { conversationId: strin
           </>}
         </section>
       )}
-    </section>
+      </div>
+    </aside>
   );
 }

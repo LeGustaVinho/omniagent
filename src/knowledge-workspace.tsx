@@ -1,0 +1,394 @@
+import {
+  AlertCircle, BookOpen, BookOpenText, FilePenLine, FileText, GitFork, Link2,
+  ListTree, Network, PanelRight, Paperclip, Save, Search, SplitSquareHorizontal, Wand2,
+} from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FileDialog, FileDock, FileSearch, FileSidebar, FileTree, FileUnavailable,
+  keepOnlyCleanClose, SidebarToggle, useFileDock, type FilePanelApi,
+} from "@/ide-file-workspace";
+import { deliveryNote, exampleNotes, fileName, findFileText, normalizeRepositoryPath } from "@/ide-knowledge-data";
+import {
+  anchorLine, getProperties, headings, repairWikiAddress, resolveWiki, rewriteNoteReferences,
+  updateProperty, wikiLinks, type NoteLocation, type NoteTarget,
+} from "@/knowledge-document";
+import { AttachmentPreview, noteAttachments, type NoteAttachment } from "@/knowledge-media";
+import type { NoteJump } from "@/knowledge-editor";
+import type { WorkspaceProps } from "@/workbench-contract";
+
+const Editor = lazy(() => import("@/knowledge-editor").then(({ MarkdownEditor }) => ({ default: MarkdownEditor })));
+const Reading = lazy(() => import("@/knowledge-reading").then(({ NoteReading }) => ({ default: NoteReading })));
+const NoteGraph = lazy(() => import("@/knowledge-graph"));
+
+type NoteMode = "source" | "live" | "reading";
+type Inspector = "outline" | "links" | "properties" | "attachments";
+
+interface Note {
+  content: string;
+  saved: string;
+  revision: number;
+}
+
+interface RewrittenNote {
+  path: string;
+  before: string;
+  after: string;
+}
+
+type KnowledgeDialog =
+  | { kind: "close"; path: string; api: FilePanelApi }
+  | { kind: "conflict"; path: string; external: string }
+  | { kind: "rename"; path: string }
+  | { kind: "rewrite"; path: string; destination: string; edits: RewrittenNote[] }
+  | { kind: "link"; from: string; link: NoteTarget; matches: NoteLocation[] }
+  | { kind: "attachment"; attachment: NoteAttachment };
+
+function initialNotes(simulated: boolean, recovery: boolean): Record<string, Note> {
+  return Object.fromEntries((simulated ? exampleNotes : []).map(({ path, content }) => [path, {
+    content: recovery && path === deliveryNote ? content + "\n\n## Recovered buffer\n\nConfirm startup after an interrupted launch.\n" : content,
+    saved: content,
+    revision: 1,
+  }]));
+}
+
+function isDirty(note?: Note) {
+  return Boolean(note && note.content !== note.saved);
+}
+
+export default function KnowledgeWorkspace(props: WorkspaceProps) {
+  return <KnowledgeSurface key={`${props.checkout.checkoutId}:${props.simulation?.epoch ?? "real"}`} {...props} />;
+}
+
+function KnowledgeSurface({ checkout, target, simulation, startSimulation, openWorkspace }: WorkspaceProps) {
+  const simulated = Boolean(simulation);
+  const initialPath = target ? normalizeRepositoryPath(target) : simulated ? deliveryNote : undefined;
+  const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "knowledge", simulated, initialPath });
+  const [notes, setNotes] = useState(() => initialNotes(simulated, simulation?.scenario === "recovery"));
+  const [sidebar, setSidebar] = useState(() => window.innerWidth >= 960);
+  const [display, setDisplay] = useState<"tree" | "search">("tree");
+  const [query, setQuery] = useState("");
+  const [graph, setGraph] = useState(false);
+  const [inspector, setInspector] = useState<Inspector | null>(window.innerWidth >= 1180 ? "outline" : null);
+  const [modes, setModes] = useState<Record<string, NoteMode>>({});
+  const [jumps, setJumps] = useState<Record<string, NoteJump>>({});
+  const [dialog, setDialog] = useState<KnowledgeDialog>();
+  const [destination, setDestination] = useState("");
+  const [status, setStatus] = useState(simulation?.scenario === "recovery" ? "Recovered an unsaved Markdown buffer." : "");
+  const [problem, setProblem] = useState("");
+  const [selection, setSelection] = useState("");
+  const lastTarget = useRef(initialPath);
+  const active = dock.path;
+  const note = active ? notes[active] : undefined;
+  const source = note?.content ?? "";
+  const activeMode = active ? modes[active] ?? "live" : "live";
+  const catalog = useMemo(() => Object.entries(notes).map(([path, value]) => ({ path, content: value.content })), [notes]);
+  const matches = findFileText(catalog, query, true);
+  const outgoing = wikiLinks(source);
+  const backlinks = active ? catalog.flatMap(({ path, content }) => {
+    if (path === active) return [];
+    const inbound = wikiLinks(content).filter((link) => {
+      const resolved = resolveWiki(link, path, catalog);
+      return resolved.length === 1 && resolved[0]?.path === active;
+    });
+    return inbound.length ? [{ path, count: inbound.length }] : [];
+  }) : [];
+
+  const open = useCallback((path: string, line?: number, anchor?: string) => {
+    if (line || anchor) setJumps((before) => ({ ...before, [path]: { line, anchor, token: (before[path]?.token ?? 0) + 1 } }));
+    setGraph(false);
+    dock.open(path);
+  }, [dock.open]);
+
+  useEffect(() => {
+    if (!target || !dock.ready) return;
+    const next = normalizeRepositoryPath(target);
+    if (next && next !== lastTarget.current) {
+      lastTarget.current = next;
+      open(next);
+    }
+  }, [dock.ready, open, target]);
+
+  const update = (path: string, content: string) => {
+    setNotes((before) => {
+      const current = before[path];
+      return current && current.content !== content ? { ...before, [path]: { ...current, content } } : before;
+    });
+  };
+  const save = (path: string) => {
+    setNotes((before) => {
+      const current = before[path];
+      if (!current || !isDirty(current)) return before;
+      return { ...before, [path]: { ...current, saved: current.content, revision: current.revision + 1 } };
+    });
+    setStatus(`Saved ${path}`);
+  };
+  const close = (path: string, api: FilePanelApi) => {
+    if (!isDirty(notes[path]) || !dock.api || keepOnlyCleanClose(dock.api, path, api)) api.close();
+    else setDialog({ kind: "close", path, api });
+  };
+  const closeDialog = () => { setDialog(undefined); setProblem(""); };
+
+  const navigateLocation = ({ path, anchor }: NoteLocation) => {
+    const targetSource = notes[path]?.content ?? "";
+    open(path, anchor ? anchorLine(targetSource, anchor) : undefined, anchor);
+  };
+  const navigateLink = (from: string, link: NoteTarget) => {
+    const attachment = noteAttachments.find(({ name }) => link.target === name);
+    if (attachment) { setDialog({ kind: "attachment", attachment }); return; }
+    const targets = resolveWiki(link, from, catalog);
+    const only = targets[0];
+    if (targets.length === 1 && only && (!only.anchor || anchorLine(notes[only.path]?.content ?? "", only.anchor))) {
+      navigateLocation(only);
+      return;
+    }
+    setSelection(targets[0]?.path ?? "");
+    setDialog({ kind: "link", from, link, matches: targets });
+  };
+
+  const previewRename = (path: string) => {
+    const to = normalizeRepositoryPath(destination.trim());
+    if (!to?.toLowerCase().endsWith(".md")) { setProblem("Enter a relative Markdown path ending in .md."); return; }
+    if (catalog.some((file) => file.path.toLowerCase() === to.toLowerCase())) { setProblem("A note already uses that path."); return; }
+    const edits = catalog.flatMap((file) => {
+      const after = rewriteNoteReferences(file.content, file.path, path, to, catalog);
+      return after === file.content ? [] : [{ path: file.path, before: file.content, after }];
+    });
+    setProblem("");
+    setDialog({ kind: "rewrite", path, destination: to, edits });
+  };
+  const finishRename = (proposal: Extract<KnowledgeDialog, { kind: "rewrite" }>) => {
+    const moved = notes[proposal.path];
+    if (!moved) return;
+    const changed = { ...notes };
+    const skipped: string[] = [];
+    for (const edit of proposal.edits) {
+      const current = changed[edit.path];
+      if (!current || current.content !== edit.before) { skipped.push(edit.path); continue; }
+      changed[edit.path] = { content: edit.after, saved: edit.after, revision: current.revision + 1 };
+    }
+    if (skipped.includes(proposal.path)) {
+      setProblem("The source note changed. Close and review a fresh rename preview.");
+      return;
+    }
+    const updated = changed[proposal.path] ?? moved;
+    delete changed[proposal.path];
+    changed[proposal.destination] = updated;
+    setNotes(changed);
+    for (const id of [`editor:${proposal.path}`, `reading:${proposal.path}`, `split:${proposal.path}`]) dock.api?.getPanel(id)?.api.close();
+    open(proposal.destination);
+    setStatus(skipped.length ? `Renamed ${proposal.destination}. ${skipped.length} link rewrites skipped after an external change.`
+      : `Renamed ${proposal.destination} and rewrote links in ${proposal.edits.length} notes.`);
+    closeDialog();
+  };
+
+  return (
+    <section className="file-workspace knowledge-workspace" aria-label="Knowledge workspace" onKeyDown={(event) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      if (event.key.toLowerCase() === "s" && active && note) { event.preventDefault(); save(active); }
+      if (event.key.toLowerCase() === "p") { event.preventDefault(); setSidebar(true); setDisplay("search"); }
+    }}>
+      {sidebar && <FileSidebar name="Knowledge navigation">
+        <div className="file-sidebar-heading">
+          <BookOpen size={16} /><h2>Notes</h2>
+          <div className="file-toolbar">
+            <button type="button" className="fw-icon" aria-label="Show notes" title="Show notes" aria-pressed={display === "tree"} onClick={() => setDisplay("tree")}><ListTree size={15} /></button>
+            <button type="button" className="fw-icon" aria-label="Search notes" title="Search notes" aria-pressed={display === "search"} onClick={() => setDisplay("search")}><Search size={15} /></button>
+          </div>
+        </div>
+        <div className="file-sidebar-scroll">
+          {display === "search" ? <FileSearch query={query} setQuery={setQuery} results={matches} unavailable={!simulated}
+            placeholder="Find notes and content" onOpen={open} />
+            : simulated ? <FileTree paths={catalog.map(({ path }) => path)} active={active} onOpen={open} />
+              : <p className="file-sidebar-note">Repository note indexing is pending for this checkout.</p>}
+        </div>
+      </FileSidebar>}
+      <div className="file-workspace-main">
+        <header className="file-workspace-header">
+          <SidebarToggle open={sidebar} setOpen={setSidebar} label="Toggle Knowledge navigation" />
+          <BookOpenText size={17} /><h1>Knowledge</h1>
+          <div className="file-toolbar">
+            <button type="button" className="fw-btn note-graph-toggle" aria-pressed={graph} onClick={() => setGraph(!graph)}><Network size={15} />Graph</button>
+            <button type="button" className="fw-icon" title="Note details" aria-label="Note details" aria-expanded={Boolean(inspector)} onClick={() => setInspector(inspector ? null : "outline")}><PanelRight size={16} /></button>
+          </div>
+        </header>
+        {dock.error && <p role="alert" className="file-status"><AlertCircle size={15} />{dock.error}</p>}
+        {status && <p role="status" className="file-status">{status}</p>}
+        {!graph && <div className="note-mode-bar">
+          <div className="note-modes" aria-label="Note display modes">
+            {([["source", "Source"], ["live", "Live Preview"], ["reading", "Reading"]] as const).map(([mode, label]) => (
+              <button key={mode} type="button" className="fw-btn" disabled={!note} aria-pressed={activeMode === mode} onClick={() => {
+                if (active) {
+                  dock.open(active);
+                  setModes((before) => ({ ...before, [active]: mode }));
+                }
+              }}>{label}</button>
+            ))}
+          </div>
+          <div className="file-toolbar">
+            <button type="button" className="fw-icon" title="Save note (Ctrl+S)" aria-label="Save note" disabled={!isDirty(note)}
+              onClick={() => { if (active) save(active); }}><Save size={15} /></button>
+            <button type="button" className="fw-icon" title="Split Reading view" aria-label="Split Reading view" disabled={!note}
+              onClick={() => { if (active) { setModes((before) => ({ ...before, [active]: "live" })); dock.split(active, "reading"); } }}><SplitSquareHorizontal size={15} /></button>
+            <button type="button" className="fw-icon" title="Rename note" aria-label="Rename note" disabled={!note}
+              onClick={() => { if (active) { setDestination(active); setDialog({ kind: "rename", path: active }); } }}><FilePenLine size={15} /></button>
+          </div>
+        </div>}
+        <div className="note-body">
+          <div className="file-dock-body" hidden={graph}>
+            <FileDock onReady={dock.onReady} context={{
+              renderFile: (path, view) => {
+                const entry = notes[path];
+                if (!entry) return <FileUnavailable title="Note unavailable" detail={simulated ? path : `${path} · note integration is pending.`} />;
+                const selectedMode = view === "reading" ? "reading" : modes[path] ?? "live";
+                const onLink = (link: NoteTarget) => navigateLink(path, link);
+                return (
+                  <div className="note-file-view">
+                    <div className="ide-file-caption">
+                      <span>{path.replaceAll("/", " / ")}</span>
+                      <span>{isDirty(entry) ? "Unsaved · " : ""}r{entry.revision}</span>
+                    </div>
+                    <Suspense fallback={<p role="status" className="file-help">Loading note view…</p>}>
+                      {selectedMode === "reading" ? <Reading path={path} content={entry.content} files={catalog} jump={jumps[path]} onLink={onLink} onAttachment={(attachment) => setDialog({ kind: "attachment", attachment })} />
+                        : <Editor mode={selectedMode} path={path} source={entry.content} files={catalog} jump={jumps[path]} onChange={(content) => update(path, content)} onLink={onLink} />}
+                    </Suspense>
+                  </div>
+                );
+              },
+              empty: <FileUnavailable title={simulated ? "Open a note" : "Note integration pending"}
+                detail={simulated ? "Choose a note from the tree or search by title and content." : "Explore Markdown editing, backlinks and graph navigation with example notes."}
+                onSimulate={simulated ? undefined : () => startSimulation()} />,
+              dirty: (path) => isDirty(notes[path]),
+              requestClose: close,
+            }} />
+          </div>
+          {graph && <div className="note-graph-host">
+            {simulated ? <Suspense fallback={<p role="status" className="file-help">Loading note graph…</p>}>
+              <NoteGraph files={catalog} selected={active} onOpen={open} />
+            </Suspense> : <FileUnavailable title="Graph integration pending" detail="The graph will use indexed notes from the active checkout." onSimulate={() => startSimulation()} />}
+          </div>}
+          {inspector && !graph && <aside className="note-inspector" aria-label="Note details">
+            <div className="note-inspector-views">
+              {([[ListTree, "outline", "Outline"], [Link2, "links", "Links"], [FileText, "properties", "Properties"], [Paperclip, "attachments", "Attachments"]] as const)
+                .map(([Icon, view, label]) => <button type="button" key={view} className="fw-icon" aria-label={label} aria-pressed={view === inspector} title={label}
+                  onClick={() => setInspector(view)}><Icon size={16} /></button>)}
+            </div>
+            <div className="note-inspector-content">
+              {!active || !note ? <p className="file-help">Open a note to see its details.</p> : <>
+                {inspector === "outline" && <section aria-label="Outline">
+                  <h3>Outline</h3>
+                  {headings(source).map((entry) => <button type="button" key={entry.line} title={entry.label}
+                    style={{ paddingLeft: Math.min(entry.level - 1, 4) * 10 + 5 }} onClick={() => open(active, entry.line, entry.anchor)}>{entry.label}</button>)}
+                </section>}
+                {inspector === "links" && <>
+                  <section aria-label="Outgoing links"><h3>Outgoing links</h3>
+                    {outgoing.length ? outgoing.map((link, index) => {
+                      const found = resolveWiki(link, active, catalog);
+                      return <button type="button" key={`${link.raw}:${index}`} onClick={() => navigateLink(active, link)}>
+                        {link.alias ?? link.target} {found.length === 1 ? "" : found.length ? " · Ambiguous" : " · Missing"}
+                      </button>;
+                    }) : <p className="file-help">No outgoing links</p>}
+                  </section>
+                  <section aria-label="Backlinks"><h3>Backlinks</h3>
+                    {backlinks.length ? backlinks.map(({ path, count }) => <button type="button" key={path} onClick={() => open(path)} title={path}>{fileName(path)} · {count}</button>)
+                      : <p className="file-help">No backlinks</p>}
+                  </section>
+                </>}
+                {inspector === "properties" && <section aria-label="Properties"><h3>Properties</h3>
+                  {getProperties(source).map(({ key, value }) => <label className="note-property-row" key={key}>{key}
+                    <input value={value} onChange={(event) => update(active, updateProperty(source, key, event.target.value))} />
+                  </label>)}
+                  {getProperties(source).length === 0 && <p className="file-help">This note has no frontmatter properties.</p>}
+                </section>}
+                {inspector === "attachments" && <section aria-label="Attachments"><h3>Attachments</h3>
+                  {noteAttachments.map((attachment) => <button type="button" className="note-attachment-row" key={attachment.name} onClick={() => setDialog({ kind: "attachment", attachment })}>
+                    <strong>{attachment.name}</strong><small>{attachment.detail}</small>
+                  </button>)}
+                </section>}
+              </>}
+            </div>
+          </aside>}
+        </div>
+
+        {simulated && active && note && !graph && <footer className="ide-statusbar note-statusbar">
+          <button type="button" className="fw-btn" onClick={() => setDialog({
+            kind: "conflict", path: active, external: note.saved + "\n\n> External review added a new readiness note.\n",
+          })}>Simulate external change</button>
+          {active === deliveryNote && simulation?.delivery === "note" && <button type="button" className="fw-btn fw-primary" disabled={isDirty(note)}
+            title={isDirty(note) ? "Save this note before planning from its revision" : "Start Plan Mode from the saved note"}
+            onClick={() => { simulation.advanceDelivery("start"); openWorkspace("conversations", "plan"); }}><Wand2 size={14} />Plan from note</button>}
+          {active === deliveryNote && simulation?.delivery !== "note" && <button type="button" className="fw-btn" onClick={() => openWorkspace("tasks", "release")}><GitFork size={14} />Open linked task</button>}
+        </footer>}
+      </div>
+
+      {dialog?.kind === "close" && <FileDialog title="Save note before closing?" description={`${dialog.path} has unsaved changes.`} onClose={closeDialog}>
+        <div className="file-dialog-footer">
+          <button type="button" className="fw-btn" onClick={closeDialog}>Cancel</button>
+          <button type="button" className="fw-btn fw-destructive" onClick={() => { update(dialog.path, notes[dialog.path]?.saved ?? ""); dialog.api.close(); closeDialog(); }}>Discard changes</button>
+          <button type="button" className="fw-btn fw-primary" onClick={() => { save(dialog.path); dialog.api.close(); closeDialog(); }}>Save and close</button>
+        </div>
+      </FileDialog>}
+      {dialog?.kind === "conflict" && <FileDialog title="Note revision conflict" description={`Review the local and external versions of ${dialog.path}.`} onClose={closeDialog}>
+        <div className="file-dialog-comparison">
+          <div><h3>Local buffer</h3><pre>{notes[dialog.path]?.content}</pre></div>
+          <div><h3>External version</h3><pre>{dialog.external}</pre></div>
+        </div>
+        <div className="file-dialog-footer">
+          <button type="button" className="fw-btn" onClick={closeDialog}>Review later</button>
+          <button type="button" className="fw-btn fw-outlined" onClick={() => {
+            const { path, external } = dialog;
+            setNotes((before) => ({ ...before, [path]: { content: external, saved: external, revision: (before[path]?.revision ?? 0) + 1 } }));
+            setStatus(`Loaded external revision of ${path}`);
+            closeDialog();
+          }}>Load external version</button>
+          <button type="button" className="fw-btn fw-primary" onClick={() => {
+            const { path, external } = dialog;
+            setNotes((before) => {
+              const current = before[path];
+              return current ? { ...before, [path]: { ...current, saved: external, revision: current.revision + 1 } } : before;
+            });
+            setStatus(`Kept local edits for reconciliation with ${path}`);
+            closeDialog();
+          }}>Keep local edits</button>
+        </div>
+      </FileDialog>}
+      {dialog?.kind === "rename" && <FileDialog title="Rename note" description={`Choose a new repository path for ${dialog.path}.`} onClose={closeDialog}>
+        <label>New path<input value={destination} onChange={(event) => setDestination(event.target.value)} /></label>
+        {problem && <p role="alert">{problem}</p>}
+        <div className="file-dialog-footer"><button type="button" className="fw-btn fw-primary" onClick={() => previewRename(dialog.path)}>Preview link rewrites</button></div>
+      </FileDialog>}
+      {dialog?.kind === "rewrite" && <FileDialog title="Review link rewrites" description={`${dialog.path} → ${dialog.destination}`} onClose={closeDialog}>
+        <ul className="note-rewrite-list">{dialog.edits.map((edit) => <li key={edit.path}>
+          <details><summary>{edit.path}</summary><div className="file-dialog-comparison"><div><h3>Current</h3><pre>{edit.before}</pre></div><div><h3>Proposed</h3><pre>{edit.after}</pre></div></div></details>
+        </li>)}</ul>
+        {dialog.edits.length === 0 && <p>No links need to change.</p>}
+        {problem && <p role="alert">{problem}</p>}
+        <div className="file-dialog-footer">
+          {dialog.edits.some((edit) => edit.path !== dialog.path) && <button type="button" className="fw-btn" onClick={() => {
+            const affected = dialog.edits.find((edit) => edit.path !== dialog.path);
+            if (affected) update(affected.path, (notes[affected.path]?.content ?? "") + "\nExternal edit.\n");
+          }}>Simulate concurrent edit</button>}
+          <button type="button" className="fw-btn fw-primary" onClick={() => finishRename(dialog)}>Apply reviewed changes</button>
+        </div>
+      </FileDialog>}
+      {dialog?.kind === "link" && <FileDialog title={dialog.matches.length > 1 ? "Choose a note" : "Repair note link"}
+        description={`Resolve [[${dialog.link.raw}]] from ${dialog.from}.`} onClose={closeDialog}>
+        <label>Target note<select value={selection} onChange={(event) => setSelection(event.target.value)}>
+          <option value="">Select a note</option>
+          {(dialog.matches.length > 1 ? dialog.matches : catalog).map(({ path }) => <option key={path} value={path}>{path}</option>)}
+        </select></label>
+        <div className="file-dialog-footer">
+          <button type="button" className="fw-btn fw-outlined" disabled={!selection} onClick={() => { navigateLocation({ path: selection, anchor: dialog.link.anchor }); closeDialog(); }}>Open note</button>
+          <button type="button" className="fw-btn fw-primary" disabled={!selection} onClick={() => {
+            const current = notes[dialog.from];
+            if (current) update(dialog.from, repairWikiAddress(current.content, dialog.link.raw, selection));
+            setStatus(`Updated reference in ${dialog.from}`);
+            closeDialog();
+          }}>Update link</button>
+        </div>
+      </FileDialog>}
+      {dialog?.kind === "attachment" && <FileDialog title={dialog.attachment.name} description={dialog.attachment.detail} onClose={closeDialog}>
+        <AttachmentPreview attachment={dialog.attachment} />
+      </FileDialog>}
+    </section>
+  );
+}

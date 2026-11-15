@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { remote } from "webdriverio";
 
-const identifier = "io.github.legustavinho.omniagent.desktop-tests";
+const identifier = process.env.OMNIAGENT_DESKTOP_IDENTIFIER ?? "io.github.legustavinho.omniagent.desktop-tests";
 const port = Number(process.env.OMNIAGENT_WEBDRIVER_PORT ?? 4444);
 
 async function waitForDriver(driver) {
@@ -65,15 +65,100 @@ async function selectCheckout(browser, checkout) {
   // as the file dialog after registering a repository.
   await invoke(browser, "select_active_checkout", { checkoutId: checkout.checkoutId });
   await browser.refresh();
-  await browser.$("button=Start fixture").waitForDisplayed();
+  await browser.$('button[aria-label="Diagnostics"]').waitForDisplayed();
 }
 
 function readTabs(browser) {
-  return browser.execute(() => ({
-    groups: Array.from(document.querySelectorAll(".dv-groupview"), (group) =>
-      Array.from(group.querySelectorAll(".dv-default-tab-content"), (tab) => tab.textContent)),
-    active: document.querySelector(".dv-active-group .dv-active-tab .dv-default-tab-content")?.textContent ?? null,
-  }));
+  return browser.execute(() => {
+    const view = document.querySelector(".work-deck:not([hidden]) .work-view:not([hidden])");
+    return {
+      groups: Array.from(view?.querySelectorAll(".dv-groupview") ?? [], (group) =>
+        Array.from(group.querySelectorAll(".dv-default-tab-content"), (tab) => tab.textContent)),
+      active: view?.querySelector(".dv-active-group .dv-active-tab .dv-default-tab-content")?.textContent ?? null,
+    };
+  });
+}
+
+async function chooseConversations(browser) {
+  await browser.$('button[aria-label="Conversations"]').click();
+  const create = browser.$('button[aria-label="New conversation"]');
+  if (!(await create.isDisplayed())) {
+    const sidebar = browser.$('button[aria-label="Toggle conversation navigation"]');
+    if ((await sidebar.getAttribute("aria-expanded")) === "false") await sidebar.click();
+  }
+  await create.waitForDisplayed();
+}
+
+async function click(browser, selector) {
+  const control = browser.$(selector);
+  await control.waitForDisplayed();
+  await control.waitForEnabled();
+  await control.click();
+}
+
+async function capture(browser, name) {
+  const directory = process.env.OMNIAGENT_UI_CAPTURE_DIR;
+  if (!directory) return;
+  await mkdir(directory, { recursive: true });
+  await browser.saveScreenshot(join(directory, name + ".png"));
+}
+
+async function checkSimulation(browser, checkout) {
+  const conversationScope = { checkoutId: checkout.checkoutId };
+  const before = await invoke(browser, "list_conversations", conversationScope);
+  const settingsBefore = await invoke(browser, "appearance_settings");
+  for (const area of ["IDE", "Tasks", "Pipelines", "Knowledge", "Git"]) {
+    await click(browser, 'button[aria-label="' + area + '"]');
+    assert.equal(await browser.$('button[aria-label="' + area + '"]').getAttribute("aria-current"), "page");
+  }
+  await click(browser, 'button[aria-label="Knowledge"]');
+  await click(browser, ".work-titlebar button=Simulate");
+  const simulation = browser.$('[aria-label="Simulation controls"]');
+  await simulation.waitForDisplayed();
+
+  await click(browser, "button=Plan from note");
+  await browser.$("legend=Who should the recovery instructions address?").waitForExist();
+  await capture(browser, "01-conversations");
+  await click(browser, "button=Reply");
+  await click(browser, "button=Approve implementation");
+  await click(browser, "button=Open release task");
+  await click(browser, 'button[aria-label="Queue"]');
+  await click(browser, "button=Start attempt");
+  await click(browser, "button=Capture candidate");
+  await click(browser, 'button[aria-label="Close queue"]');
+  await click(browser, "button=Run verification");
+  await click(browser, "button=Review saved diff");
+  await capture(browser, "02-saved-changes");
+  await click(browser, "button=Accept diff");
+  await click(browser, 'button[aria-label="Close changes"]');
+
+  const scenario = simulation.$("select");
+  await scenario.selectByAttribute("value", "recovery");
+  await click(browser, 'button[aria-label="Queue"]');
+  await click(browser, "button=Resume from checkpoint");
+  await browser.$("button=Start attempt").waitForEnabled();
+  await scenario.selectByAttribute("value", "pipelines");
+  await browser.$(".react-flow").waitForDisplayed();
+  await capture(browser, "03-pipelines");
+  await scenario.selectByAttribute("value", "windows");
+  await click(browser, "button=Create backup");
+  await click(browser, "button=Continue");
+  await click(browser, "button=Continue");
+  await click(browser, "button=Finish");
+  await capture(browser, "04-settings");
+  await click(browser, 'button[aria-label="Close settings"]');
+  await click(browser, "button=Exit simulation");
+  await simulation.waitForExist({ reverse: true });
+  assert.equal(await browser.$('button[aria-label="Knowledge"]').getAttribute("aria-current"), "page");
+  assert.equal((await invoke(browser, "active_checkout")).checkoutId, checkout.checkoutId);
+  assert.deepEqual(await invoke(browser, "list_conversations", conversationScope), before);
+  assert.deepEqual(await invoke(browser, "appearance_settings"), settingsBefore);
+  for (const [width, height] of [[1440, 900], [1120, 760], [640, 440]]) {
+    await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width, height } } });
+    await browser.waitUntil(() => browser.execute((wanted) => Math.abs(window.innerWidth - wanted) <= 4, width));
+    assert.equal(await browser.execute(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true);
+    await capture(browser, "05-workspace-" + width);
+  }
 }
 
 function killTestApplication(application) {
@@ -144,10 +229,15 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     await assert.rejects(invoke(browser, "register_project", { directory: scratch }), /git repository/i);
     const main = await invoke(browser, "register_project", { directory: repo });
     const checkout = await invoke(browser, "register_project", { directory: linked });
+    const registered = await invoke(browser, "registered_checkouts");
+    assert.ok(registered.some((item) => item.checkoutId === main.checkoutId));
+    assert.ok(registered.some((item) => item.checkoutId === checkout.checkoutId));
     assert.equal(main.projectId, checkout.projectId);
     assert.notEqual(main.checkoutId, checkout.checkoutId);
     assert.equal(await realpath(checkout.checkoutRoot), await realpath(linked));
     await selectCheckout(browser, checkout);
+    await browser.$('button[aria-label="Diagnostics"]').click();
+    await browser.$("button=Start fixture").waitForDisplayed();
 
     await browser.$("button=Start fixture").click();
     const input = await browser.$("form input");
@@ -164,7 +254,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     await browser.$('button[aria-label="Move tab left"]').click();
     const firstHeading = await browser.$(".dv-content-container h1").getText();
     assert.deepEqual((await readTabs(browser)).groups, [[firstHeading, "Fixture runs"]]);
-    await browser.$('aside[aria-label="Workspace"]').$("button=Fixture runs").click();
+    await browser.$("button=Fixture runs").click();
     await browser.$("button=Start fixture").click();
     await browser.$("button=Cancel run").waitForDisplayed();
     const secondHeading = await browser.$(".dv-content-container h1").getText();
@@ -176,7 +266,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     await browser.waitUntil(async () => (await readTabs(browser)).groups.length === 2);
     assert.deepEqual(await readTabs(browser), expectedTabs);
     await browser.waitUntil(async () => {
-      const saved = await invoke(browser, "workbench_layout", { checkoutId: checkout.checkoutId, workspace: "fixtures" });
+      const saved = await invoke(browser, "workbench_layout", { checkoutId: checkout.checkoutId, workspace: "diagnostics" });
       return saved && JSON.parse(saved).grid.root.data.length === 2;
     });
 
@@ -187,7 +277,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     assert.deepEqual(await readTabs(browser), expectedTabs);
     assert.equal(await browser.$("header span[title]").getAttribute("title"), checkout.checkoutRoot);
 
-    await browser.$('aside[aria-label="Workspace"]').$("button=Fixture runs").click();
+    await browser.$("button=Fixture runs").click();
     await browser.$("button=Start fixture").click();
     await browser.$("form input").waitForDisplayed();
     const scope = { checkoutId: checkout.checkoutId };
@@ -223,6 +313,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     assert.equal((await runRows(browser, runId)).length, history.length);
 
     await selectCheckout(browser, main);
+    await browser.$('button[aria-label="Settings"]').click();
     await browser.$("button=Customizations").click();
     const reviewScope = { checkoutId: main.checkoutId };
     const initial = await invoke(browser, "review_checkout_customizations", reviewScope);
@@ -248,7 +339,9 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     await assert.rejects(access(join(repo, "hook-marker")), { code: "ENOENT" });
     await assert.rejects(access(join(repo, "mcp-marker")), { code: "ENOENT" });
 
-    await browser.$("button=Provider settings").click();
+    const settingsBack = browser.$("button.settings-back");
+    if (await settingsBack.isDisplayed()) await settingsBack.click();
+    await browser.$("button=Providers").click();
     const executable = browser.$('input[name="codex"]');
     await executable.waitForDisplayed();
     await executable.setValue(application);
@@ -275,8 +368,9 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       await browser.$("p*=In-session plugin loads are unconfirmed").waitForDisplayed();
     }
 
-    await browser.$("button=Conversations").click();
-    await browser.$("button=New conversation").click();
+    await browser.$('button[aria-label="Close settings"]').click();
+    await chooseConversations(browser);
+    await browser.$('button[aria-label="New conversation"]').click();
     const draft = browser.$('textarea[id^="draft-"]');
     await draft.waitForEnabled();
     const unsent = "Rascunho — revisar depois ☕";
@@ -292,17 +386,17 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     browser = await startSession(application);
     assert.equal((await invoke(browser, "active_checkout"))?.checkoutId, main.checkoutId);
     try {
-      await browser.$("button=Conversations").waitForEnabled({ timeout: 15_000 });
+      await browser.$('button[aria-label="Conversations"]').waitForEnabled({ timeout: 15_000 });
     } catch (error) {
       const screen = await browser.execute(() => document.body.innerText.slice(0, 500));
       throw new Error(`Workspace did not reopen: ${screen}`, { cause: error });
     }
-    await browser.$("button=Conversations").click();
+    await chooseConversations(browser);
     await browser.$("button=Other conversation").click();
     const otherDraft = browser.$(`textarea[id="draft-${otherConversation.id}"]`);
     await otherDraft.waitForEnabled();
     assert.equal(await otherDraft.getValue(), "");
-    await browser.$("button=Conversations").click();
+    await chooseConversations(browser);
     await browser.$(`button=${conversation.title}`).click();
     const recoveredDraft = browser.$(`textarea[id="draft-${conversation.id}"]`);
     await recoveredDraft.waitForEnabled();
@@ -372,6 +466,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       assert.equal(await invoke(browser, "conversation_draft", { conversationId: conversation.id }), "");
       const messages = await invoke(browser, "conversation_messages", { conversationId: conversation.id });
       assert.deepEqual(messages.map(({ text }) => text), [prompt, "OMNIAGENT_DESKTOP_REPLY"]);
+      await panel.$("button=Activity").click();
       await panel.$("button=Exact input").click();
       await panel.$('section[aria-label="Exact provider input"] pre').waitForDisplayed();
       const wire = JSON.parse(await panel.$('section[aria-label="Exact provider input"] pre').getText());
@@ -390,7 +485,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       }, historySelector));
       await browser.execute((historySelector) => { document.querySelector(historySelector).scrollTop = 60; }, historySelector);
 
-      await browser.$("button=Conversations").click();
+      await chooseConversations(browser);
       await browser.$("button=Other conversation").click();
       const otherText = "Rascunho na segunda conversa";
       await otherDraft.setValue(otherText);
@@ -399,7 +494,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       assert.ok(["running", "waiting_for_input"].includes(whileSwitched.status));
       assert.equal(await invoke(browser, "latest_conversation_run", { conversationId: otherConversation.id }), null);
 
-      await browser.$("button=Conversations").click();
+      await chooseConversations(browser);
       await browser.$(`button=${conversation.title}`).click();
       await panel.$('div[aria-label="Streaming response"]').waitForDisplayed();
       await panel.$("button=Reply").waitForDisplayed({ timeout: 15_000 });
@@ -409,7 +504,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
 
       await browser.$(".dv-active-group .dv-active-tab .dv-default-tab-action").click();
       await panel.waitForExist({ reverse: true });
-      await browser.$("button=Conversations").click();
+      await chooseConversations(browser);
       await browser.$(`button=${conversation.title}`).click();
       await panel.$('div[aria-label="Streaming response"]').waitForDisplayed();
       assert.equal((await invoke(browser, "latest_conversation_run", { conversationId: conversation.id })).id, activeRun);
@@ -422,6 +517,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
         return ["cancelled", "interrupted"].includes(run?.status);
       }, { timeout: 15_000 });
     }
+    await checkSimulation(browser, main);
   } finally {
     try {
       await browser?.deleteSession();

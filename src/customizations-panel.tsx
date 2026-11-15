@@ -32,6 +32,10 @@ export function useCustomizationInventory(checkoutId: string | undefined) {
 
 export function CustomizationsPanel() {
   const checkoutId = useWorkspace().checkout?.checkoutId;
+  return <CustomizationsSettings checkoutId={checkoutId} />;
+}
+
+export function CustomizationsSettings({ checkoutId, embedded = false }: { checkoutId?: string; embedded?: boolean }) {
   const client = useQueryClient();
   const inventory = useCustomizationInventory(checkoutId);
   const approve = useMutation({
@@ -42,7 +46,7 @@ export function CustomizationsPanel() {
   });
   const data = inventory.data;
   return (
-    <section className="h-full overflow-auto p-6">
+    <section className={embedded ? undefined : "h-full overflow-auto p-6"} data-setting="customization-inventory">
       <div className="mb-4 flex max-w-3xl items-center justify-between gap-3">
         <h1 className="text-xl font-semibold tracking-tight">Repository customizations</h1>
         <Button variant="outline" disabled={inventory.isFetching || approve.isPending}

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useId, useState, type FormEvent } from "react";
+import { useId, useRef, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 
 type RequestId = string | number;
@@ -38,15 +38,18 @@ function FieldControl({ field, value, update }: {
     const selected = Array.isArray(value) ? value : [];
     const optionIds = new Set(input.options.map((option) => option.id));
     const custom = selected.find((choice) => !optionIds.has(choice));
-    control = (
-      <>
-        <select id={id} multiple className={inputClass} value={selected.filter((choice) => optionIds.has(choice))}
-          onChange={(event) => update([...Array.from(event.currentTarget.selectedOptions, (option) => option.value), ...(custom ? [custom] : [])])}>
-          {input.options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-        </select>
+    return (
+      <fieldset className="grid gap-1.5">
+        <legend className="mb-1 text-xs font-medium">{field.label}</legend>
+        {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}
+        {input.options.map((option) => <label key={option.id} className="conv-checkbox text-sm">
+          <input type="checkbox" checked={selected.includes(option.id)}
+            onChange={(event) => update(event.currentTarget.checked ? [...selected, option.id] : selected.filter((choice) => choice !== option.id))} />
+          {option.label}
+        </label>)}
         {input.allowCustom && <input className={inputClass} aria-label={`Other ${field.label}`} value={custom ?? ""}
           onChange={(event) => update([...selected.filter((choice) => optionIds.has(choice)), ...(event.target.value ? [event.target.value] : [])])} />}
-      </>
+      </fieldset>
     );
   } else if (input.kind === "choice" && input.allowCustom) {
     control = (
@@ -100,16 +103,20 @@ export function PendingInput({ input, conversationId, runId, onResolved }: {
   const [values, setValues] = useState<Record<string, FieldValue | undefined>>(() =>
     Object.fromEntries(form?.fields.map((field) => [field.id, field.default ?? undefined]) ?? []));
   const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
   const [error, setError] = useState("");
   const target = { conversationId, runId, requestId: request.request_id };
 
   async function submit(command: string, data: object) {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setBusy(true);
     setError("");
     try {
       await invoke(command, { ...target, ...data });
       onResolved();
     } catch (error) {
+      inFlight.current = false;
       setError(String(error));
       setBusy(false);
     }
@@ -120,6 +127,14 @@ export function PendingInput({ input, conversationId, runId, onResolved }: {
   });
   function accept(event: FormEvent) {
     event.preventDefault();
+    const missing = form?.fields.find((field) => {
+      const value = values[field.id];
+      return field.required && (value === undefined || value === "" || (Array.isArray(value) && value.length === 0));
+    });
+    if (missing) {
+      setError(`Choose a value for ${missing.label}.`);
+      return;
+    }
     void answer("accept");
   }
 

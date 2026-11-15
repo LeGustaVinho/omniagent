@@ -1,0 +1,247 @@
+import { useState } from "react";
+import { ModelPicker } from "@/components/model-picker";
+import { Button } from "@/components/ui/button";
+import { IntegrationNotice, SettingRow } from "@/settings-controls";
+import { exampleSettingsModels } from "@/settings-models";
+import type { WorkspaceProps } from "@/workbench-contract";
+
+type Choice = readonly [value: string, label: string];
+
+type Field = {
+  id: string;
+  label: string;
+  description: string;
+  initial: string;
+} & (
+  | { kind: "choice"; options: readonly Choice[] }
+  | { kind: "number"; min: number; max: number }
+  | { kind: "text"; placeholder?: string }
+  | { kind: "toggle" }
+  | { kind: "model" }
+);
+
+export const policyFields = {
+  capacity: [
+    {
+      id: "managed-capacity", label: "Simultaneous managed runs", kind: "number",
+      description: "Limit ordinary jobs, managed subagents and isolated side requests across this device.",
+      min: 1, max: 32, initial: "3",
+    },
+    {
+      id: "notifications", label: "Desktop notifications", kind: "toggle", initial: "true",
+      description: "Notify when work needs input, waits for approval or finishes.",
+    },
+  ],
+  execution: [
+    {
+      id: "planning-model", label: "Planning model", kind: "model", initial: "",
+      description: "Use this verified read-only profile for plans and context compaction.",
+    },
+    {
+      id: "implementation-model", label: "Implementation model", kind: "model", initial: "",
+      description: "Use this model in new implementation stages when the worktree and approval allow writes.",
+    },
+    {
+      id: "worktree-root", label: "Managed worktree location", kind: "text", initial: "",
+      description: "The app creates task worktrees here. Existing worktrees keep their paths.",
+      placeholder: "Use the OmniAgent data directory",
+    },
+    {
+      id: "writer-admission", label: "Repository writes", kind: "choice", initial: "approval",
+      description: "Scope checked when an implementation job requests permission to write.",
+      options: [["approval", "Approved task worktree"], ["read-only", "Read-only"]],
+    },
+    {
+      id: "subagent-policy", label: "Subagent concurrency policy", kind: "choice", initial: "managed",
+      description: "A strict total requires verified control over provider-native delegation.",
+      options: [["managed", "Managed slots"], ["strict", "Strict total"]],
+    },
+    {
+      id: "subagent-cap", label: "Subagent limit", kind: "number", initial: "3", min: 0, max: 32,
+      description: "Maximum concurrent subagents admitted for one conversation.",
+    },
+    {
+      id: "subagent-audit", label: "Subagent audit evidence", kind: "choice", initial: "available",
+      description: "Require complete evidence to record each child’s input, provenance and response.",
+      options: [["available", "Show available evidence"], ["complete", "Require complete evidence"]],
+    },
+    {
+      id: "live-wait", label: "Live question timeout (minutes)", kind: "number", initial: "10", min: 1, max: 120,
+      description: "Release the execution slot at a safe boundary and preserve the pending question.",
+    },
+  ],
+  conversation: [
+    {
+      id: "queued-context", label: "Queued work after context changes", kind: "choice", initial: "review",
+      description: "Applies after rewinding or clearing an active conversation.",
+      options: [["review", "Pause for review"], ["recorded", "Use recorded context"], ["cancel", "Cancel pending jobs"]],
+    },
+    {
+      id: "fork-checkout", label: "Default fork checkout", kind: "choice", initial: "ask",
+      description: "The fork confirmation previews the base and effective write permissions.",
+      options: [["ask", "Ask each time"], ["same", "Reuse this checkout"], ["worktree", "Create a linked worktree"]],
+    },
+    {
+      id: "continuation", label: "When session continuation is unavailable", kind: "choice", initial: "ask",
+      description: "Choose how conversation history is seeded after a provider or model change.",
+      options: [["ask", "Ask each time"], ["here", "Continue here"], ["fork", "Fork with context"], ["fresh", "Start fresh"]],
+    },
+    {
+      id: "suggestions", label: "Composer suggestions", kind: "choice", initial: "native",
+      description: "Eligible requests can consume provider account usage.",
+      options: [["off", "Off"], ["native", "Native when available"], ["omniagent", "Use OmniAgent when native is unavailable"]],
+    },
+    {
+      id: "auto-compact", label: "Automatically compact context", kind: "toggle", initial: "true",
+      description: "Create a summary from a recorded prefix before sending a turn over the threshold.",
+    },
+    {
+      id: "compact-threshold", label: "Compaction threshold (%)", kind: "number", min: 10, max: 100, initial: "80",
+      description: "Percentage of the available dialogue budget, accounting for required context and reserved output.",
+    },
+  ],
+  git: [
+    {
+      id: "after-acceptance", label: "After accepting a diff", kind: "choice", initial: "manual",
+      description: "Each operation rechecks that the accepted candidate and verified destination still match.",
+      options: [["manual", "User commits and merges"], ["commit", "Automatic commit and user merge"], ["merge", "Automatic local commit and merge"]],
+    },
+    {
+      id: "destination-drift", label: "When the destination moves", kind: "choice", initial: "pause",
+      description: "A changed candidate goes through checks and any applicable approval again.",
+      options: [["pause", "Pause and review the update"], ["prepare", "Prepare a conflict-free update and rerun checks"]],
+    },
+    {
+      id: "completion-milestone", label: "Task completion milestone", kind: "choice", initial: "accepted",
+      description: "Controls when accepted work reaches Completed.",
+      options: [["accepted", "Diff accepted"], ["merged", "Merged into destination"]],
+    },
+  ],
+  automation: [
+    {
+      id: "implementation-release", label: "Implementation release", kind: "choice", initial: "human",
+      description: "An effective release binds the accepted plan revision, project, checkout and applicable rule.",
+      options: [["human", "Human decision"], ["rules", "Use configured rules"]],
+    },
+    {
+      id: "settings-proposals", label: "Settings and template proposals", kind: "choice", initial: "review",
+      description: "Automatic edits apply only when every proposed field matches this project’s user-managed allowlist.",
+      options: [["review", "Review every proposal"], ["allowlist", "Automatically apply allowlisted fields"]],
+    },
+    {
+      id: "allowed-settings-fields", label: "Allowlisted fields", kind: "text", initial: "",
+      description: "Comma-separated keys eligible for automatic changes in this project.",
+      placeholder: "Example: template.name, template.description",
+    },
+  ],
+  attachments: [
+    {
+      id: "attachment-limit-count", label: "Files per turn", kind: "number", min: 0, max: 25, initial: "5",
+      description: "Limit the number of attached files per turn.",
+    },
+    {
+      id: "attachment-limit-file", label: "Bytes per file", kind: "number", min: 0, max: Number.MAX_SAFE_INTEGER, initial: "5242880",
+      description: "Applies to native and staged attachments.",
+    },
+    {
+      id: "attachment-limit-turn", label: "Total bytes per turn", kind: "number", min: 0, max: Number.MAX_SAFE_INTEGER, initial: "10485760",
+      description: "Maximum combined size of native and staged attachments.",
+    },
+    {
+      id: "attachment-limit-excerpt", label: "UTF-8 bytes per excerpt", kind: "number", min: 0, max: Number.MAX_SAFE_INTEGER, initial: "8192",
+      description: "Text beyond the limit requires a smaller excerpt or another permitted route.",
+    },
+  ],
+} satisfies Record<string, readonly Field[]>;
+
+export function PolicyForm({
+  fields,
+  stored,
+  save,
+  simulate,
+}: {
+  fields: readonly Field[];
+  stored: Record<string, string> | undefined;
+  save?: (settings: Record<string, string>) => void;
+  simulate?: WorkspaceProps["startSimulation"];
+}) {
+  const [draft, setDraft] = useState<Record<string, string>>(() =>
+    stored ?? Object.fromEntries(fields.map(({ id, initial }) => [id, initial])));
+  const [saved, setSaved] = useState(false);
+  function edit(id: string, value: string) {
+    setDraft((current) => ({ ...current, [id]: value }));
+    setSaved(false);
+  }
+
+  return (
+    <>
+      {!save && (
+        <IntegrationNotice start={simulate}>
+          This page is ready for the project and scheduler policies API.
+        </IntegrationNotice>
+      )}
+      <form onSubmit={(event) => {
+        event.preventDefault();
+        save?.(draft);
+        setSaved(true);
+      }}>
+        <fieldset disabled={!save}>
+          {fields.map((field) => {
+            const input = <PolicyInput available={Boolean(save)} field={field}
+              value={save ? draft[field.id] ?? field.initial : ""} change={(value) => edit(field.id, value)} />;
+            return field.kind === "model"
+              ? <div className="settings-model-row" key={field.id} data-setting={field.id}>
+                  {input}
+                  <p>{field.description}</p>
+                </div>
+              : <SettingRow key={field.id} id={field.id} label={field.label} description={field.description}>
+                  {input}
+                </SettingRow>;
+          })}
+          <div className="settings-save">
+            <Button type="submit">Save</Button>
+            {saved && <span role="status">Saved for this simulation.</span>}
+          </div>
+        </fieldset>
+      </form>
+    </>
+  );
+}
+
+function PolicyInput({ field, value, change, available }: {
+  field: Field; value: string; change: (value: string) => void; available: boolean;
+}) {
+  if (field.kind === "model") {
+    return <div>
+      <ModelPicker label={field.label} options={available ? exampleSettingsModels : []}
+        selection={{ mode: "single", selected: exampleSettingsModels.find(({ selection }) => selection.modelId === value)?.selection ?? null,
+          onChange: ({ modelId }) => change(modelId) }} />
+      {value && <button type="button" className="mt-1 underline" onClick={() => change("")}>Use conversation model</button>}
+    </div>;
+  }
+
+  const description = `${field.id}-description`;
+  if (field.kind === "toggle") {
+    return (
+      <input id={field.id} type="checkbox" aria-describedby={description} checked={value === "true"}
+        onChange={(event) => change(String(event.target.checked))} />
+    );
+  }
+  if (field.kind === "choice") {
+    return (
+      <select id={field.id} aria-describedby={description} value={value} onChange={(event) => change(event.target.value)}>
+        {value === "" && <option value="">Unavailable</option>}
+        {field.options.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+      </select>
+    );
+  }
+  return (
+    <input id={field.id} aria-describedby={description} value={value}
+      type={field.kind === "number" ? "number" : "text"}
+      required={field.kind === "number"}
+      min={field.kind === "number" ? field.min : undefined}
+      max={field.kind === "number" ? field.max : undefined}
+      placeholder={field.kind === "text" ? field.placeholder : undefined}
+      onChange={(event) => change(event.target.value)} />
+  );
+}

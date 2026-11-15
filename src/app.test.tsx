@@ -7,6 +7,7 @@ import { useWorkspace } from "@/workspace-state";
 
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@/settings-appearance", () => ({ useAppAppearance: () => undefined }));
 
 afterEach(() => {
   cleanup();

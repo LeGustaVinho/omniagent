@@ -49,6 +49,26 @@ pub async fn create_conversation(
 }
 
 #[tauri::command]
+pub async fn rename_conversation(
+    store: State<'_, Store>,
+    checkout_id: String,
+    conversation_id: String,
+    title: String,
+) -> Result<Conversation, String> {
+    let conversation = store
+        .conversation(conversation_id.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    if conversation.checkout_id != checkout_id {
+        return Err("Conversation does not belong to this checkout".into());
+    }
+    store
+        .rename_conversation(conversation_id, title.trim().to_owned())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn conversation_messages(
     store: State<'_, Store>,
     conversation_id: String,
@@ -170,6 +190,14 @@ pub async fn cli_plugin_inventory(
         .save_plugin_inventory(report)
         .await
         .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn registered_checkouts(store: State<'_, Store>) -> Result<Vec<ProjectCheckout>, String> {
+    store
+        .registered_checkouts()
+        .await
         .map_err(|error| error.to_string())
 }
 

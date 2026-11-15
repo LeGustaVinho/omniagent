@@ -1,0 +1,428 @@
+import { useEffect, useMemo, useState } from "react";
+import {
+  Background, Controls, Handle, MarkerType, Position, ReactFlow, addEdge, applyEdgeChanges, applyNodeChanges, useUpdateNodeInternals,
+} from "@xyflow/react";
+import type { Node, NodeProps } from "@xyflow/react";
+import { ArrowUpRight, Check, ChevronRight, CircleAlert, CirclePlay, GitBranch, GitMerge, Layers3, ListChecks, Plus, Save, ShieldCheck, Workflow } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { ModelPicker } from "@/components/model-picker";
+import type { WorkspaceProps } from "@/workbench-contract";
+import {
+  advancePipelineRun, beginPipelineRun, createDeliveryWorkflow, createStage, declineStage, interruptStage, resolveStage,
+  retryStage, runStatus, sampleModels, snapshotWorkflow, stageAttempt, stageKinds, validateWorkflow,
+} from "./pipelines-model";
+import type { PipelineRun, Stage, StageEdge, StageKind, StageStatus, WorkflowRevision } from "./pipelines-model";
+import { ComparisonView, PendingPipeline, PipelineMaintenance, RoleEditor, TemplateHistory } from "./pipelines-secondary";
+import "@xyflow/react/dist/style.css";
+import "./pipelines-workspace.css";
+
+const panels = ["Builder", "Runs", "Roles & templates", "Compare", "Maintenance"] as const;
+type View = typeof panels[number];
+type RenderNode = Node<Stage & { status?: StageStatus; inputSide?: Position; outputSide?: Position }, "stage">;
+
+const stageIcons = {
+  plan: ListChecks, condition: GitBranch, review: ListChecks, join: GitMerge, task: Layers3,
+  approval: ShieldCheck, implementation: Workflow, verify: Check, accept: ShieldCheck,
+};
+
+function StageCard({ id, data, selected }: NodeProps<RenderNode>) {
+  const Icon = stageIcons[data.kind];
+  const update = useUpdateNodeInternals();
+  useEffect(() => update(id), [id, data.inputSide, data.outputSide, update]);
+  return (
+    <div className="pipeline-node" data-selected={selected} data-status={data.status ?? "draft"}>
+      <Handle type="target" position={data.inputSide ?? Position.Left} />
+      <div className="pipeline-node-title"><Icon size={14} /><strong>{data.title || "Untitled stage"}</strong></div>
+      <small>{data.status ?? data.mode}</small>
+      <Handle type="source" position={data.outputSide ?? Position.Right} />
+    </div>
+  );
+}
+
+const nodeTypes = { stage: StageCard };
+const edgeOptions = {
+  markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: "#828294" },
+  style: { stroke: "#828294", strokeWidth: 1.5 },
+};
+
+function handleSide(node: Pick<Node, "position">, other: Pick<Node, "position"> | undefined, fallback: Position) {
+  if (!other) return fallback;
+  const x = other.position.x - node.position.x;
+  const y = other.position.y - node.position.y;
+  if (Math.abs(x) >= Math.abs(y) * 0.6) return x < 0 ? Position.Left : Position.Right;
+  return y < 0 ? Position.Top : Position.Bottom;
+}
+
+const viewTargets: Record<string, View> = { comparison: "Compare", compare: "Compare", maintenance: "Maintenance", runs: "Runs", roles: "Roles & templates", builder: "Builder" };
+
+function StageConfiguration({ draft, activeId, onPatch, onConnect }: {
+  draft: WorkflowRevision; activeId: string; onPatch: (patch: Partial<Stage>) => void;
+  onConnect: (source: string, branch?: "migration") => void;
+}) {
+  const [dependency, setDependency] = useState("");
+  const [conditional, setConditional] = useState(false);
+  const stage = draft.nodes.find((node) => node.id === activeId)?.data;
+  if (!stage) return <p className="pipeline-note">Select a stage to inspect its inputs and outputs.</p>;
+  const selectedDependency = draft.nodes.find((node) => node.id === dependency);
+  const isManual = stage.kind === "approval" && stage.release === "human";
+  const effectiveModel = stage.model ?? draft.roles.find((role) => role.id === stage.roleId)?.model;
+  const capabilityOptions = ["Interactive questions", "Repository read", "Image generation", "Audio generation", "Windows host control"];
+
+  return (
+    <div className="pipeline-form pipeline-stack">
+      <label>Stage name<input value={stage.title} onChange={(event) => onPatch({ title: event.currentTarget.value })} /></label>
+      <label>Role<select value={stage.roleId} onChange={(event) => onPatch({ roleId: event.currentTarget.value })}><option value="">Workflow step</option>{draft.roles.map((role) => <option value={role.id} key={role.id}>{role.title}</option>)}</select></label>
+      <label>Permission profile<select value={stage.mode} onChange={(event) => onPatch({ mode: event.currentTarget.value as Stage["mode"] })}><option>read-only</option><option>plan</option><option>write</option></select></label>
+      <ModelPicker label="Model override" options={sampleModels} selection={{ mode: "single", selected: stage.model, onChange: (model) => onPatch({ model }) }} />
+      {stage.model && <Button variant="outline" onClick={() => onPatch({ model: null })}>Use role default</Button>}
+      <div className="pipeline-form-pair">
+        <label>Timeout (minutes)<input type="number" min={1} value={stage.timeoutMinutes || ""} onChange={(event) => onPatch({ timeoutMinutes: Number(event.currentTarget.value) })} /></label>
+        <label>Retry limit<input type="number" min={0} value={stage.retryLimit} onChange={(event) => onPatch({ retryLimit: Number(event.currentTarget.value) })} /></label>
+      </div>
+      <label>Typed output<select value={stage.output} onChange={(event) => onPatch({ output: event.currentTarget.value as Stage["output"] })}>{["plan", "review", "task", "release", "patch", "checks", "decision"].map((output) => <option key={output}>{output}</option>)}</select></label>
+      <label>Required capability<select value={stage.requiredCapability} onChange={(event) => onPatch({ requiredCapability: event.currentTarget.value })}><option value="">None</option>{capabilityOptions.map((capability) => <option key={capability}>{capability}</option>)}</select></label>
+      {stage.requiredCapability && <p className="pipeline-meta">Example profile · {stage.requiredCapability === "Windows host control" ? "Unverified" : "Qualified"}</p>}
+      <label>Max subagents<input type="number" min={0} value={stage.subagents} onChange={(event) => onPatch({ subagents: Number(event.currentTarget.value) })} /></label>
+      {stage.kind === "approval" && <fieldset className="pipeline-stack">
+        <legend>Implementation release</legend>
+        <label>Decision source<select value={stage.release} onChange={(event) => onPatch({ release: event.currentTarget.value as Stage["release"] })}><option value="human">Human decision</option><option value="rule">User-defined rule</option></select></label>
+        {!isManual && <label>Predicate<select value={stage.predicate} onChange={(event) => onPatch({ predicate: event.currentTarget.value as Stage["predicate"] })}><option value="reviews-passed">Plan present and an upstream review passed</option><option value="plan-present">Pinned plan is present</option></select></label>}
+      </fieldset>}
+      {stage.kind === "condition" && <p className="pipeline-meta">Conditional edges labeled “If migration” read the Boolean migration answer from the pinned plan.</p>}
+      <fieldset className="pipeline-stack">
+        <legend>Stage goal</legend>
+        <label>Objective<input value={stage.goal} onChange={(event) => onPatch({ goal: event.currentTarget.value })} /></label>
+        {stage.goal && <>
+          <label>Completion evidence<textarea rows={2} value={stage.evidence} onChange={(event) => onPatch({ evidence: event.currentTarget.value })} /></label>
+          <label>Time budget (minutes)<input type="number" min={1} value={stage.goalMinutes} onChange={(event) => onPatch({ goalMinutes: Number(event.currentTarget.value) })} /></label>
+          <label>Continuation<select value={stage.goalContinuation} onChange={(event) => onPatch({ goalContinuation: event.currentTarget.value as Stage["goalContinuation"] })}><option value="managed">OmniAgent-managed</option><option value="native">Provider-native</option></select></label>
+          {stage.goalContinuation === "native" && <p className="pipeline-meta">Native goal control · {effectiveModel?.provider === "codex" ? "Qualified for this example" : "Unverified for this profile"}</p>}
+        </>}
+      </fieldset>
+      <fieldset className="pipeline-stack">
+        <legend>Dependencies</legend>
+        <ul className="pipeline-dependencies">
+          {draft.edges.filter((edge) => edge.target === activeId).map((edge) => <li key={edge.id}>{draft.nodes.find((node) => node.id === edge.source)?.data.title}{edge.label && typeof edge.label === "string" ? " · " + edge.label : ""}</li>)}
+        </ul>
+        <label>Upstream stage<select value={dependency} onChange={(event) => { setDependency(event.currentTarget.value); setConditional(false); }}>
+          <option value="">Select stage</option>
+          {draft.nodes.filter((node) => node.id !== activeId && !draft.edges.some((edge) => edge.source === node.id && edge.target === activeId)).map((node) => <option key={node.id} value={node.id}>{node.data.title}</option>)}
+        </select></label>
+        {selectedDependency?.data.kind === "condition" && <label className="pipeline-checkline"><input type="checkbox" checked={conditional} onChange={(event) => setConditional(event.currentTarget.checked)} /> Run only if the plan requires a migration</label>}
+        <Button variant="outline" disabled={!dependency} onClick={() => { onConnect(dependency, conditional ? "migration" : undefined); setDependency(""); setConditional(false); }}>Add dependency</Button>
+      </fieldset>
+    </div>
+  );
+}
+
+function StageRunDetails({ run, activeId, actions, links }: {
+  run: PipelineRun; activeId: string; actions: { resolve: (migration?: boolean) => void; decline: () => void; retry: () => void; interrupt: () => void };
+  links: Pick<WorkspaceProps, "openWorkspace" | "openChanges" | "openActivity">;
+}) {
+  const [migration, setMigration] = useState(false);
+  const node = run.workflow.nodes.find((item) => item.id === activeId);
+  const attempt = stageAttempt(run, activeId);
+  if (!attempt || !node) return <p className="pipeline-note">Select a stage to view its attempts.</p>;
+  const data = node.data;
+  const role = run.workflow.roles.find((item) => item.id === data.roleId);
+  const canRetry = attempt.status === "failed" && attempt.number <= data.retryLimit;
+  return (
+    <div className="pipeline-stack">
+      <span className="pipeline-status pipeline-self-start" data-status={attempt.status}>{attempt.status}</span>
+      <p>{attempt.detail}</p>
+      <dl className="pipeline-data"><dt>Workflow revision</dt><dd>{run.workflow.revision}</dd><dt>Attempt</dt><dd>{attempt.number}</dd><dt>Profile</dt><dd>{data.mode}</dd><dt>Output contract</dt><dd>{data.output}</dd></dl>
+      {attempt.status === "waiting" && data.kind === "plan" && (
+        <form className="pipeline-form pipeline-stack pipeline-evidence" onSubmit={(event) => { event.preventDefault(); actions.resolve(migration); }}>
+          <fieldset className="pipeline-checks">
+            <legend>Does this release need a migration?</legend>
+            <label><input type="radio" checked={!migration} onChange={() => setMigration(false)} /> No, documentation only</label>
+            <label><input type="radio" checked={migration} onChange={() => setMigration(true)} /> Yes, include migration review</label>
+          </fieldset>
+          <Button type="submit">Answer question</Button>
+        </form>
+      )}
+      {attempt.status === "waiting" && (data.kind === "approval" || data.kind === "accept") && (
+        <section className="pipeline-evidence pipeline-stack">
+          <strong>{data.kind === "approval" ? "Review implementation scope" : "Review candidate evidence"}</strong>
+          <dl className="pipeline-data"><dt>Plan revision</dt><dd>docs/release.md · 41ac02e</dd><dt>Worktree</dt><dd>release/notes</dd><dt>Decision</dt><dd>Human confirmation</dd></dl>
+          <div className="pipeline-actions"><Button onClick={() => actions.resolve()}>{data.kind === "approval" ? "Approve implementation" : "Accept diff"}</Button>{data.kind === "accept" && <Button variant="outline" onClick={() => links.openChanges("saved")}>Open saved diff</Button>}<Button variant="outline" onClick={actions.decline}>Decline</Button></div>
+        </section>
+      )}
+      {attempt.status === "waiting" && data.goal && data.kind !== "plan" && data.kind !== "approval" && data.kind !== "accept" && (
+        <section className="pipeline-evidence pipeline-stack"><strong>{data.goal}</strong><p>{data.evidence}</p><p className="pipeline-meta">{data.goalContinuation === "native" ? "Provider-native" : "OmniAgent-managed"} · {data.goalMinutes} min limit</p><Button onClick={() => actions.resolve()}>Confirm goal evidence</Button></section>
+      )}
+      <div className="pipeline-actions">
+        {canRetry && <Button onClick={actions.retry}>Retry stage</Button>}
+        {(attempt.status === "running" || attempt.status === "waiting") && <Button variant="outline" onClick={actions.interrupt}>Interrupt stage</Button>}
+        {data.kind === "task" && attempt.status === "succeeded" && <Button variant="outline" onClick={() => links.openWorkspace("tasks", "release")}>Open task <ArrowUpRight size={14} /></Button>}
+        {data.output === "patch" && attempt.status === "succeeded" && <Button variant="outline" onClick={() => links.openChanges("saved")}>Open saved diff</Button>}
+        {data.kind === "implementation" && <Button variant="outline" onClick={() => links.openActivity("release")}>Activity</Button>}
+      </div>
+      <details className="pipeline-evidence"><summary>Context and exact input</summary><p className="pipeline-meta">Context 41ac02e · release/notes · pinned role requirements</p><pre>{role?.instructions || "Structured input from the recorded upstream stages."}</pre></details>
+      <details className="pipeline-evidence" open={attempt.number > 1}><summary>Attempt history</summary><ol className="pipeline-attempts">{run.attempts[activeId]?.map((record) => <li key={record.number}><strong>Attempt {record.number} · {record.status}</strong><p>{record.detail}</p></li>)}</ol></details>
+    </div>
+  );
+}
+
+export default function PipelinesWorkspace(props: WorkspaceProps) {
+  const { simulation, target, startSimulation } = props;
+  const [view, setView] = useState<View>("Builder");
+  const [draft, setDraft] = useState<WorkflowRevision | null>(() => simulation ? createDeliveryWorkflow() : null);
+  const [revisions, setRevisions] = useState<WorkflowRevision[]>(() => draft ? [draft] : []);
+  const [runs, setRuns] = useState<PipelineRun[]>([]);
+  const [runId, setRunId] = useState<number | null>(null);
+  const [selectedId, setSelectedId] = useState("plan");
+  const [kind, setKind] = useState<StageKind>("review");
+  const [status, setStatus] = useState("");
+  const [issues, setIssues] = useState<string[]>([]);
+
+  const activeRun = runs.find((run) => run.id === runId);
+  const inspectingRun = view === "Runs" ? activeRun : undefined;
+  const graph = inspectingRun?.workflow ?? draft;
+  const activeNode = graph?.nodes.find((node) => node.id === selectedId);
+  const resultLinks = graph?.comparisonRuns ?? [];
+  const latestRun = runs.at(-1);
+  const live = latestRun && ["queued", "running", "waiting"].includes(runStatus(latestRun));
+  const actionableStage = activeRun?.workflow.nodes.find((node) => stageAttempt(activeRun, node.id)?.status === "waiting");
+  const failedStage = activeRun?.workflow.nodes.find((node) => stageAttempt(activeRun, node.id)?.status === "failed");
+  const canvasView = view === "Builder" || view === "Runs";
+  const [theme, setTheme] = useState<"light" | "dark">(() => document.documentElement.dataset.appTheme === "light" ? "light" : "dark");
+
+  useEffect(() => {
+    const attributes = new MutationObserver(() => setTheme(document.documentElement.dataset.appTheme === "light" ? "light" : "dark"));
+    attributes.observe(document.documentElement, { attributes: true, attributeFilter: ["data-app-theme"] });
+    return () => attributes.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (target && viewTargets[target]) setView(viewTargets[target]);
+  }, [target]);
+
+  useEffect(() => {
+    if (!latestRun) return;
+    const next = advancePipelineRun(latestRun);
+    if (next === latestRun) return;
+    const timer = window.setTimeout(() => setRuns((items) => items.map((item) => item === latestRun ? next : item)), 650);
+    return () => window.clearTimeout(timer);
+  }, [latestRun]);
+
+  useEffect(() => {
+    if (!latestRun || simulation?.scenario !== "pipelines") return;
+    const release = stageAttempt(latestRun, "approval")?.status;
+    const implementation = stageAttempt(latestRun, "implementation")?.status;
+    const verification = stageAttempt(latestRun, "verify")?.status;
+    const acceptance = stageAttempt(latestRun, "accept")?.status;
+    switch (simulation.delivery) {
+      case "plan":
+        if (release === "succeeded") simulation.advanceDelivery("approve");
+        break;
+      case "queued":
+        if (implementation === "running" || implementation === "succeeded") simulation.advanceDelivery("dispatch");
+        break;
+      case "running":
+        if (implementation === "succeeded") simulation.advanceDelivery("finish");
+        if (implementation === "failed") simulation.advanceDelivery("fail");
+        break;
+      case "failed":
+        if (implementation === "queued" || implementation === "running") simulation.advanceDelivery("retry");
+        break;
+      case "review":
+        if (verification === "succeeded") simulation.advanceDelivery("verify");
+        break;
+      case "verified":
+        if (acceptance === "succeeded") simulation.advanceDelivery("accept");
+        break;
+    }
+  }, [latestRun, simulation]);
+
+  function simulate() {
+    startSimulation("pipelines");
+  }
+
+  function patchStage(patch: Partial<Stage>) {
+    setDraft((document) => document && ({
+      ...document,
+      nodes: document.nodes.map((node) => node.id === selectedId ? { ...node, ariaLabel: patch.title ?? node.ariaLabel, data: { ...node.data, ...patch } } : node),
+    }));
+    setIssues([]);
+  }
+
+  function addStage() {
+    if (!draft) return;
+    const stage = createStage(kind, crypto.randomUUID(), 30 + (draft.nodes.length % 4) * 200, 40 + Math.floor(draft.nodes.length / 4) * 110);
+    setDraft({ ...draft, nodes: [...draft.nodes, stage] });
+    setSelectedId(stage.id);
+    setIssues([]);
+  }
+
+  function save() {
+    if (!draft) return;
+    const latestRevision = revisions.at(-1)?.revision ?? 0;
+    const revision = snapshotWorkflow({ ...draft, label: draft.label.trim() || "Untitled workflow", revision: latestRevision + 1 });
+    setRevisions([...revisions, revision]);
+    setDraft(revision);
+    setStatus("Saved revision " + revision.revision + ".");
+  }
+
+  function updateRun(update: (run: PipelineRun) => PipelineRun) {
+    if (runId === null) return;
+    setRuns((items) => items.map((item) => item.id === runId ? update(item) : item));
+  }
+
+  function start() {
+    if (!draft || (latestRun && ["queued", "running", "waiting"].includes(runStatus(latestRun)))) return;
+    const validation = validateWorkflow(draft);
+    if (validation.length) {
+      setIssues(validation);
+      return;
+    }
+    const snapshot = snapshotWorkflow(draft);
+    const previous = revisions.find((revision) => revision.revision === draft.revision);
+    const unchanged = previous && JSON.stringify(snapshotWorkflow(previous)) === JSON.stringify(snapshot);
+    const pinned = unchanged ? previous : { ...snapshot, revision: (revisions.at(-1)?.revision ?? 0) + 1 };
+    if (!unchanged) {
+      setRevisions([...revisions, pinned]);
+      setDraft(pinned);
+    }
+    const run = beginPipelineRun(runs.length + 1, pinned);
+    setRuns([...runs, run]);
+    setRunId(run.id);
+    setSelectedId(pinned.nodes[0]?.id ?? "");
+    setView("Runs");
+    setIssues([]);
+    setStatus("Run #" + run.id + " pinned to revision " + pinned.revision + ".");
+  }
+
+  const nodes = useMemo<RenderNode[]>(() => graph?.nodes.map((node) => {
+    const input = graph.edges.find((edge) => edge.target === node.id);
+    const output = graph.edges.find((edge) => edge.source === node.id);
+    return {
+      ...node,
+      selected: node.id === selectedId,
+      data: {
+        ...node.data,
+        status: inspectingRun ? stageAttempt(inspectingRun, node.id)?.status : undefined,
+        inputSide: handleSide(node, graph.nodes.find((peer) => peer.id === input?.source), Position.Left),
+        outputSide: handleSide(node, graph.nodes.find((peer) => peer.id === output?.target), Position.Right),
+      },
+    };
+  }) ?? [], [graph, selectedId, inspectingRun]);
+
+  return (
+    <section className="pipelines-workspace" aria-label="Pipelines workspace">
+      <header className="pipeline-workspace-heading">
+        <div className="pipeline-title"><div className="pipeline-heading-icon"><Workflow size={18} /></div><div><h1>Pipelines</h1><p>{props.checkout.checkoutRoot.split(/[\\/]/).at(-1) || "Project"} <ChevronRight size={12} /> Workflows</p></div></div>
+        {view === "Builder" && <div className="pipeline-actions"><Button variant="outline" onClick={save} disabled={!draft}><Save size={15} /> Save revision</Button><Button onClick={start} disabled={!draft || Boolean(live)}><CirclePlay size={15} /> Run pipeline</Button></div>}
+      </header>
+      <nav className="pipeline-tabs" aria-label="Pipelines views">
+        {panels.map((panel) => <button key={panel} type="button" aria-current={view === panel ? "page" : undefined} onClick={() => setView(panel)}>{panel}</button>)}
+      </nav>
+      <div className="pipeline-view" hidden={!canvasView}>
+        <div className="pipeline-toolbar">
+          {view === "Runs" ? <label className="pipeline-inline-field">Execution
+            <select value={runId ?? ""} onChange={(event) => {
+              const id = Number(event.currentTarget.value);
+              const run = runs.find((item) => item.id === id);
+              if (run) { setRunId(id); setSelectedId(run.workflow.nodes[0]?.id ?? ""); }
+            }}>
+              {!runs.length && <option value="">No runs</option>}
+              {[...runs].reverse().map((run) => <option key={run.id} value={run.id}>Run #{run.id} · revision {run.workflow.revision}</option>)}
+            </select>
+          </label> : <label className="pipeline-inline-field">Template
+            <input aria-label="Template name" disabled={!draft} value={draft?.label ?? ""} placeholder="No template selected" onChange={(event) => setDraft(draft && { ...draft, label: event.currentTarget.value })} />
+          </label>}
+          {view === "Builder" && <div className="pipeline-actions">
+            <label className="pipeline-inline-field"><span className="sr-only">Stage type</span><select disabled={!draft} value={kind} onChange={(event) => setKind(event.currentTarget.value as StageKind)}>{Object.entries(stageKinds).map(([id, title]) => <option key={id} value={id}>{title}</option>)}</select></label>
+            <Button variant="outline" onClick={addStage} disabled={!draft}><Plus size={15} /> Add stage</Button>
+          </div>}
+          {inspectingRun && <div className="pipeline-actions">
+            {actionableStage && <Button variant="outline" onClick={() => setSelectedId(actionableStage.id)}>View waiting stage</Button>}
+            {failedStage && <Button variant="outline" onClick={() => setSelectedId(failedStage.id)}>View failed stage</Button>}
+            <span className="pipeline-status" data-status={runStatus(inspectingRun)}>{runStatus(inspectingRun)}</span>
+          </div>}
+        </div>
+        {(status || resultLinks.length > 0) && <p className="pipeline-banner" role="status">{status}{resultLinks.length > 0 ? " Comparison inputs · " + resultLinks.join(", ") : ""}</p>}
+        {issues.length > 0 && <div className="pipeline-banner pipeline-warning" role="alert"><CircleAlert size={17} /><ul>{issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul></div>}
+        <div className="pipeline-editor">
+          <div className="pipeline-canvas">
+            {graph && (view === "Builder" || inspectingRun) ? (
+              <ReactFlow<RenderNode, StageEdge>
+                key={view}
+                nodes={nodes}
+                edges={graph.edges}
+                nodeTypes={nodeTypes}
+                defaultEdgeOptions={edgeOptions}
+                colorMode={theme}
+                fitView
+                fitViewOptions={{ padding: 0.18, maxZoom: 1 }}
+                minZoom={0.2}
+                maxZoom={2}
+                nodesDraggable={view === "Builder"}
+                nodesConnectable={view === "Builder"}
+                deleteKeyCode={view === "Builder" ? ["Backspace", "Delete"] : null}
+                edgesFocusable
+                onNodeClick={(_, node) => setSelectedId(node.id)}
+                onNodesChange={(changes) => {
+                  for (const change of changes) {
+                    if (change.type === "select" && change.selected) setSelectedId(change.id);
+                  }
+                  if (view === "Builder") setDraft((document) => document && { ...document, nodes: applyNodeChanges(changes, document.nodes) });
+                }}
+                onEdgesChange={(changes) => {
+                  if (view === "Builder") setDraft((document) => document && { ...document, edges: applyEdgeChanges(changes, document.edges) });
+                }}
+                onConnect={(connection) => {
+                  if (view === "Builder") setDraft((document) => document && { ...document, edges: addEdge(connection, document.edges) });
+                }}
+              >
+                <Background gap={18} size={1} />
+                <Controls position="bottom-left" showInteractive={view === "Builder"} />
+              </ReactFlow>
+            ) : (
+              <div className="pipeline-grid">
+                {simulation
+                  ? <div className="pipeline-empty"><div className="pipeline-empty-icon"><CirclePlay size={22} /></div><h3>No runs yet</h3><p>Run a workflow in the builder to pin its stages and decisions.</p><Button variant="outline" onClick={() => setView("Builder")}>Open builder</Button></div>
+                  : <PendingPipeline label={view === "Runs" ? "No pipeline runs" : "No pipeline selected"} onSimulate={simulate} />}
+              </div>
+            )}
+          </div>
+          <aside className="pipeline-inspector" aria-label="Stage inspector">
+            <header>
+              <small>{view === "Runs" ? "Execution details" : "Stage properties"}</small><h2>{activeNode?.data.title || "No stage selected"}</h2>
+              {graph && graph.nodes.length > 0 && <label className="pipeline-stage-jump"><span className="sr-only">Inspect stage</span><select value={activeNode?.id ?? ""} onChange={(event) => setSelectedId(event.currentTarget.value)}>
+                {!activeNode && <option value="">Select a stage</option>}
+                {graph.nodes.map((stage) => <option value={stage.id} key={stage.id}>{stage.data.title || "Untitled stage"}</option>)}
+              </select></label>}
+            </header>
+            {inspectingRun ? (
+              <StageRunDetails key={inspectingRun.id + ":" + selectedId} run={inspectingRun} activeId={selectedId} links={props}
+                actions={{ resolve: (migration) => updateRun((run) => resolveStage(run, selectedId, migration)), decline: () => updateRun((run) => declineStage(run, selectedId)), retry: () => updateRun((run) => retryStage(run, selectedId)), interrupt: () => updateRun((run) => interruptStage(run, selectedId)) }} />
+            ) : draft && view === "Builder" ? (
+              <StageConfiguration key={selectedId} draft={draft} activeId={selectedId} onPatch={patchStage} onConnect={(source, branch) => setDraft({
+                ...draft, edges: addEdge({ id: source + "-" + selectedId, source, target: selectedId, label: branch ? "If migration" : undefined, data: { branch } }, draft.edges),
+              })} />
+            ) : <p className="pipeline-note">Stage properties appear here when a workflow is open.</p>}
+          </aside>
+        </div>
+      </div>
+      <div className="pipeline-view pipeline-view-content" hidden={view !== "Roles & templates"}>
+        <div className="pipeline-section-heading"><div><h2>Roles & templates</h2><p>Set reusable instructions, tools and review requirements.</p></div><Layers3 size={20} /></div>
+        {draft ? <div className="pipeline-stack">
+          <div className="pipeline-actions"><Button variant="outline" onClick={() => {
+            setDraft({ label: "Untitled workflow", revision: revisions.at(-1)?.revision ?? 0, nodes: [], edges: [], roles: draft.roles });
+            setStatus("New template draft.");
+            setView("Builder");
+          }}><Plus size={15} /> New template</Button><Button variant="outline" onClick={save}><Save size={15} /> Save revision</Button></div>
+          <TemplateHistory revisions={revisions} onLoad={(revision) => { setDraft(revision); setSelectedId(revision.nodes[0]?.id ?? ""); setView("Builder"); setStatus("Opened saved revision " + revision.revision + "."); }} />
+          <RoleEditor roles={draft.roles} onChange={(roles) => setDraft({ ...draft, roles })} />
+        </div> : <PendingPipeline label="No role or template revisions" onSimulate={simulate} />}
+      </div>
+      <div className="pipeline-view pipeline-view-content" hidden={view !== "Compare"}>
+        <ComparisonView simulated={Boolean(simulation)} onSimulate={simulate} onUse={(ids) => { setDraft((document) => document && { ...document, comparisonRuns: ids }); setView("Builder"); setStatus("Selected comparison responses linked to the workflow draft."); }} />
+      </div>
+      <div className="pipeline-view pipeline-view-content" hidden={view !== "Maintenance"}>
+        <PipelineMaintenance simulation={simulation} startSimulation={startSimulation} openWorkspace={props.openWorkspace} openChanges={props.openChanges} />
+      </div>
+    </section>
+  );
+}

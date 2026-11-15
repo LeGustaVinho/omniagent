@@ -2,8 +2,27 @@ import type { DockviewApi, SerializedDockview } from "dockview-react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { Conversation } from "@/bindings/Conversation";
 
-function layoutKey({ projectId, checkoutId }: ProjectCheckout) {
-  return `omniagent-layout-v1:${projectId}:${checkoutId}:fixtures`;
+function layoutKey({ projectId, checkoutId }: ProjectCheckout, workspace = "fixtures") {
+  return `omniagent-layout-v1:${projectId}:${checkoutId}:${workspace}`;
+}
+
+export type DesktopDockArea = "conversations" | "diagnostics";
+
+export function restoreDesktopLayout(api: DockviewApi, checkout: ProjectCheckout, area: DesktopDockArea, stored: string | null, legacy: string | null) {
+  try {
+    const saved = stored ?? localStorage.getItem(layoutKey(checkout, area)) ?? legacy ?? localStorage.getItem(layoutKey(checkout));
+    if (saved !== null) {
+      api.fromJSON(JSON.parse(saved) as SerializedDockview);
+      for (const panel of [...api.panels]) {
+        const keep = area === "diagnostics" ? panel.id.startsWith("fixture:") : panel.id.startsWith("conversation:") && panel.id !== "conversation:list";
+        if (!keep) api.removePanel(panel);
+      }
+      if (!api.activePanel) api.panels[0]?.api.setActive();
+    }
+  } catch {
+    api.clear();
+  }
+  if (area === "diagnostics" && api.panels.length === 0) openFixtureList(api);
 }
 
 export function restoreFixtureLayout(api: DockviewApi, checkout: ProjectCheckout, stored?: string | null) {
@@ -20,8 +39,8 @@ export function restoreFixtureLayout(api: DockviewApi, checkout: ProjectCheckout
   openFixtureList(api);
 }
 
-export function persistFixtureLayout(api: DockviewApi, checkout: ProjectCheckout, onChange?: (serialized: string) => void) {
-  const key = layoutKey(checkout);
+export function persistFixtureLayout(api: DockviewApi, checkout: ProjectCheckout, onChange?: (serialized: string) => void, workspace = "fixtures") {
+  const key = layoutKey(checkout, workspace);
   const save = () => {
     const serialized = JSON.stringify(api.toJSON());
     try {

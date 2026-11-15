@@ -39,21 +39,29 @@ const PLUGIN_STATUS: Record<PluginInventoryStatus, string> = {
 
 export function ProviderSettingsPanel() {
   const projectId = useWorkspace((state) => state.checkout?.projectId);
+  return (
+    <section className="h-full overflow-auto p-6">
+      <h1 className="mb-5 text-xl font-semibold tracking-tight">Provider settings</h1>
+      <div className="grid max-w-3xl gap-4">
+        {projectId && <ProjectAttachmentSettings key={projectId} projectId={projectId} />}
+        <ProviderSettings />
+      </div>
+    </section>
+  );
+}
+
+export function ProviderSettings() {
   const profiles = useQuery({
     queryKey: ["cli-executables"],
     queryFn: () => invoke<ConfiguredExecutable[]>("cli_executables"),
     staleTime: Infinity,
   });
   return (
-    <section className="h-full overflow-auto p-6">
-      <h1 className="mb-5 text-xl font-semibold tracking-tight">Provider settings</h1>
+    <div className="grid max-w-3xl gap-4" data-setting="provider-paths">
       {profiles.isPending && <p role="status" className="text-sm text-muted-foreground">Loading executable paths…</p>}
       {profiles.isError && <p role="alert" className="text-sm text-red-300">{String(profiles.error)}</p>}
-      <div className="grid max-w-3xl gap-4">
-        {projectId && <ProjectAttachmentSettings key={projectId} projectId={projectId} />}
-        {profiles.data?.map((profile) => <ExecutableSettings key={profile.provider} profile={profile} />)}
-      </div>
-    </section>
+      {profiles.data?.map((profile) => <ExecutableSettings key={profile.provider} profile={profile} />)}
+    </div>
   );
 }
 
@@ -65,7 +73,7 @@ const ATTACHMENT_FIELDS = {
 } satisfies Record<keyof AttachmentLimits, string>;
 const ATTACHMENT_KEYS = Object.keys(ATTACHMENT_FIELDS) as (keyof AttachmentLimits)[];
 
-function ProjectAttachmentSettings({ projectId }: { projectId: string }) {
+export function ProjectAttachmentSettings({ projectId }: { projectId: string }) {
   const queryClient = useQueryClient();
   const queryKey = ["project-attachment-limits", projectId];
   const settings = useQuery({
@@ -85,7 +93,7 @@ function ProjectAttachmentSettings({ projectId }: { projectId: string }) {
   }
 
   return (
-    <section className="rounded-lg border border-border bg-card p-4">
+    <section className="rounded-lg border border-border bg-card p-4" data-setting="attachment-limits">
       <h2 className="text-base font-semibold">Project attachment limits</h2>
       {settings.isPending && <p role="status" className="mt-2 text-sm text-muted-foreground">Loading limits…</p>}
       {settings.isError && <p role="alert" className="mt-2 text-sm text-red-300">{String(settings.error)}</p>}

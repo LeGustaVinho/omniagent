@@ -1,131 +1,292 @@
 import {
-  DockviewReact,
-  themeDark,
-  type DockviewApi,
-  type DockviewReadyEvent,
-  type IDockviewHeaderActionsProps,
-} from "dockview-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+  Activity, Blocks, BookOpen, ClipboardList, Code2, FlaskConical, GitBranch, ListChecks, MessageSquare,
+  PanelLeft, RotateCcw, Settings,
+} from "lucide-react";
+import { Dialog } from "radix-ui";
+import { lazy, Suspense, useEffect, useState, type ComponentType, type ReactNode } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
+import { CheckoutSelector } from "@/checkout-selector";
 import { Button } from "@/components/ui/button";
-import { ConversationListPanel, ConversationPanel } from "@/conversation-panels";
-import { CustomizationsPanel, useCustomizationInventory } from "@/customizations-panel";
-import { FixtureListPanel, FixtureRunPanel } from "@/fixture-panels";
-import { ProviderSettingsPanel } from "@/provider-settings";
+import { RealConversations, RealDiagnostics } from "@/desktop-dock";
+import { GitSimulationProvider } from "@/git-simulation";
+import { RunInspector, SimulationDiagnostics } from "@/inspection-panel";
+import { InspectorTabs } from "@/inspector-tabs";
 import { useRunSubscription } from "@/run-projection";
-import { openConversations, openCustomizations, openFixtureList, openProviderSettings, persistFixtureLayout, restoreFixtureLayout } from "@/workspace-tabs";
-import "dockview/dist/styles/dockview.css";
+import {
+  exampleCheckout, nextDeliveryStep, scenarios,
+  type DeliveryAction, type DeliveryStep, type ScenarioId, type SimulationSession, type WorkspaceId, type WorkspaceProps,
+} from "@/workbench-contract";
 
-const panels = {
-  fixtures: FixtureListPanel, run: FixtureRunPanel, providerSettings: ProviderSettingsPanel,
-  customizations: CustomizationsPanel, conversations: ConversationListPanel, conversation: ConversationPanel,
+const ConversationsPreview = lazy(() => import("@/conversations-preview"));
+const SettingsDialog = lazy(() => import("@/settings-dialog"));
+const QueuePanel = lazy(() => import("@/queue-panel"));
+const ChangesPanel = lazy(() => import("@/changes-panel"));
+const workspaceComponents: Partial<Record<WorkspaceId, ComponentType<WorkspaceProps>>> = {
+  ide: lazy(() => import("@/ide-workspace")),
+  tasks: lazy(() => import("@/tasks-workspace")),
+  pipelines: lazy(() => import("@/pipelines-workspace")),
+  knowledge: lazy(() => import("@/knowledge-workspace")),
+  git: lazy(() => import("@/git-workspace")),
 };
+const areas = [
+  { id: "conversations", label: "Conversations", icon: MessageSquare },
+  { id: "ide", label: "IDE", icon: Code2 },
+  { id: "tasks", label: "Tasks", icon: ClipboardList },
+  { id: "pipelines", label: "Pipelines", icon: Blocks },
+  { id: "knowledge", label: "Knowledge", icon: BookOpen },
+  { id: "git", label: "Git", icon: GitBranch },
+] as const;
 
-function TabActions({ activePanel, panels, group }: IDockviewHeaderActionsProps) {
-  if (!activePanel || panels.length < 2) return null;
-  const index = panels.indexOf(activePanel);
-  return (
-    <div className="flex items-center gap-1 px-1">
-      <Button className="px-2 py-0 text-xs" aria-label="Move tab left" disabled={index <= 0} variant="outline"
-        onClick={() => activePanel.api.moveTo({ group, position: "center", index: index - 1 })}>←</Button>
-      <Button className="px-2 py-0 text-xs" aria-label="Move tab right" disabled={index < 0 || index >= panels.length - 1} variant="outline"
-        onClick={() => activePanel.api.moveTo({ group, position: "center", index: index + 1 })}>→</Button>
-      <Button className="px-2 py-0 text-xs" variant="outline"
-        onClick={() => activePanel.api.moveTo({ group, position: "right" })}>Split right</Button>
-    </div>
-  );
+type Navigation = { active: WorkspaceId; visited: Partial<Record<WorkspaceId, { target?: string }>> };
+type SimulationState = { scenario: ScenarioId; epoch: number; delivery: DeliveryStep; navigation: Navigation };
+type SidePane = { type: "activity"; runId: string } | { type: "changes"; target: "saved" | "working" };
+
+function show(workspace: WorkspaceId, target?: string, prior?: Navigation): Navigation {
+  return { active: workspace, visited: { ...prior?.visited, [workspace]: target === undefined ? prior?.visited[workspace] ?? {} : { target } } };
 }
 
-export default function Workbench({ checkout }: { checkout: ProjectCheckout }) {
-  const [view, setView] = useState<DockviewApi>();
-  const restored = useRef<DockviewApi>(null);
-  const [layoutReady, setLayoutReady] = useState(false);
-  const [layoutError, setLayoutError] = useState("");
-  const { error, reconnect } = useRunSubscription(checkout);
-  const customizations = useCustomizationInventory(checkout.checkoutId);
-  const reviewCount = customizations.data?.entries.filter(({ review }) =>
-    review === "pending" || review === "changed" || review === "unresolved").length ?? 0;
-  const onReady = useCallback(({ api }: DockviewReadyEvent) => {
-    setView(api);
-  }, []);
+function readNavigation(key: string): Navigation {
+  try {
+    const stored = localStorage.getItem(key);
+    if (stored === "diagnostics") return show(stored);
+    const area = areas.find(({ id }) => id === stored);
+    if (area) return show(area.id);
+  } catch {
+    // The workbench still opens if local UI storage is unavailable.
+  }
+  return show("conversations");
+}
+
+function useCompact() {
+  const query = "(max-width: 959px)";
+  const [compact, setCompact] = useState(() => window.matchMedia?.(query).matches ?? false);
   useEffect(() => {
-    if (!view) return;
-    let disposed = false;
-    let release: (() => void) | undefined;
-    let pending: string | undefined;
-    let writing = false;
-    const scope = { checkoutId: checkout.checkoutId, workspace: "fixtures" };
+    const media = window.matchMedia?.(query);
+    if (!media) return;
+    const update = () => setCompact(media.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return compact;
+}
 
-    async function save(layout: string) {
-      pending = layout;
-      if (writing) return;
-      writing = true;
-      try {
-        while (pending !== undefined) {
-          const next = pending;
-          pending = undefined;
-          await invoke("save_workbench_layout", { ...scope, layout: next });
-        }
-        if (!disposed) setLayoutError("");
-      } catch (error) {
-        if (!disposed) setLayoutError(String(error));
-      } finally {
-        writing = false;
-      }
+const loading = <p className="work-progress" role="status">Loading workspace…</p>;
+
+export default function Workbench({ checkout, openRepository, onSelectCheckout }: {
+  checkout: ProjectCheckout;
+  openRepository: ReactNode;
+  onSelectCheckout: (checkout: ProjectCheckout) => Promise<void>;
+}) {
+  const lastAreaKey = "omniagent-workspace-area:" + checkout.checkoutId;
+  const [realNavigation, setRealNavigation] = useState(() => readNavigation(lastAreaKey));
+  const [preview, setPreview] = useState<SimulationState | null>(null);
+  const [epoch, setEpoch] = useState(0);
+  const [settingsPage, setSettingsPage] = useState<string>();
+  const [settingsVisited, setSettingsVisited] = useState(false);
+  const [realSide, setRealSide] = useState<SidePane | null>(null);
+  const [previewSide, setPreviewSide] = useState<SidePane | null>(null);
+  const [realQueue, setRealQueue] = useState<"open" | "closed">();
+  const [previewQueue, setPreviewQueue] = useState<"open" | "closed">();
+  const [sidebarOverride, setSidebarOverride] = useState<boolean>();
+  const compact = useCompact();
+  const sidebar = sidebarOverride ?? !compact;
+  const { error, reconnect } = useRunSubscription(checkout);
+  const nav = preview?.navigation ?? realNavigation;
+
+  function showSettings(page: string) {
+    setSettingsVisited(true);
+    setSettingsPage(page);
+  }
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(lastAreaKey, realNavigation.active);
+    } catch {
+      // Navigation remains available in memory.
     }
+  }, [lastAreaKey, realNavigation.active]);
 
-    void invoke<string | null>("workbench_layout", scope).catch((error: unknown) => {
-      if (!disposed) setLayoutError(String(error));
-      return null;
-    }).then((saved) => {
-      if (disposed) return;
-      if (restored.current !== view) {
-        restoreFixtureLayout(view, checkout, saved);
-        restored.current = view;
-      }
-      release = persistFixtureLayout(view, checkout, (layout) => { void save(layout); });
-      setLayoutReady(true);
-    });
-    return () => {
-      disposed = true;
-      release?.();
+  function startSimulation(choice?: ScenarioId) {
+    const scenario = choice ?? (nav.active === "pipelines" ? "pipelines" : "delivery");
+    const example = scenarios[scenario];
+    const destination = choice ? example.workspace : nav.active;
+    const target = choice ? example.target : nav.visited[destination]?.target;
+    setEpoch(epoch + 1);
+    setPreview({ scenario, epoch: epoch + 1, delivery: example.initialStep, navigation: show(destination, target) });
+    setPreviewSide(null);
+    setPreviewQueue(undefined);
+    if (scenario === "windows") showSettings("system");
+    else setSettingsPage(undefined);
+  }
+
+  function leaveSimulation() {
+    setSettingsPage(undefined);
+    setPreviewSide(null);
+    setPreviewQueue(undefined);
+    setPreview(null);
+  }
+
+  function advanceDelivery(action: DeliveryAction) {
+    setPreview((current) => current && ({ ...current, delivery: nextDeliveryStep(current.delivery, action) }));
+  }
+
+  function context(simulation: SimulationSession | null): WorkspaceProps {
+    const setSide = simulation ? setPreviewSide : setRealSide;
+    return {
+      checkout: simulation ? exampleCheckout : checkout,
+      simulation,
+      startSimulation,
+      openWorkspace: (workspace, target) => {
+        if (simulation) {
+          setPreview((current) => current && ({ ...current, navigation: show(workspace, target, current.navigation) }));
+        } else {
+          setRealNavigation((current) => show(workspace, target, current));
+        }
+      },
+      openActivity: (runId) => setSide({ type: "activity", runId }),
+      openChanges: (target) => setSide({ type: "changes", target }),
     };
-  }, [checkout, view]);
+  }
+
+  const real = context(null);
+  const simulated = preview && context({ scenario: preview.scenario, epoch: preview.epoch, delivery: preview.delivery, advanceDelivery });
+  const current = simulated ?? real;
+  const side = preview ? previewSide : realSide;
+  const closeSide = () => (preview ? setPreviewSide : setRealSide)(null);
+  const queue = (preview ? previewQueue : realQueue) === "open";
+  const changeQueue = preview ? setPreviewQueue : setRealQueue;
+  const currentArea = areas.find(({ id }) => id === nav.active)?.label ?? "Diagnostics";
 
   return (
-    <div className="flex min-h-0 flex-1">
-      <aside aria-label="Workspace" className="w-35 shrink-0 border-r border-border bg-card p-2.5">
-        <Button className="mb-2 w-full justify-start px-2" variant="outline" disabled={!layoutReady}
-          onClick={() => { if (view) openConversations(view); }}>
-          Conversations
-        </Button>
-        <Button className="w-full justify-start" variant="outline" disabled={!layoutReady} onClick={() => { if (view) openFixtureList(view); }}>
-          Fixture runs
-        </Button>
-        <Button className="mt-2 w-full justify-start px-2" variant="outline" disabled={!layoutReady}
-          onClick={() => { if (view) openProviderSettings(view); }}>
-          Provider settings
-        </Button>
-        <Button className="mt-2 w-full justify-start px-2" variant="outline" disabled={!layoutReady}
-          onClick={() => { if (view) openCustomizations(view); }}>
-          Customizations
-        </Button>
-        {reviewCount > 0 && <p className="px-2 pt-1 text-xs text-muted-foreground">{reviewCount} to review</p>}
-      </aside>
-      <section aria-label="Workspace tabs" className="flex min-w-0 flex-1 flex-col">
-        {layoutError && <p role="status" className="px-4 py-2 text-sm text-muted-foreground">Layout storage: {layoutError}</p>}
-        {error && (
-          <div role="alert" className="flex items-center justify-between gap-3 border-b border-border px-4 py-2 text-sm text-red-300">
-            <span>{error}</span>
-            <Button variant="outline" onClick={reconnect}>Reconnect</Button>
-          </div>
-        )}
-        <div className="workspace-dock min-h-0 flex-1">
-          <DockviewReact components={panels} onReady={onReady} theme={themeDark} disableFloatingGroups
-            rightHeaderActionsComponent={TabActions} />
+    <div className="work-shell flex min-h-0 flex-1 flex-col">
+      <header className="work-titlebar">
+        <div className="work-wordmark"><span className="work-mark" aria-hidden="true"><Blocks size={15} /></span>OmniAgent</div>
+        <div className="work-breadcrumb">
+          {nav.active === "conversations" && !preview && <Button variant="ghost" className="p-1.5" aria-label="Toggle conversation navigation" aria-expanded={sidebar}
+            onClick={() => setSidebarOverride(!sidebar)} title="Toggle conversation navigation"><PanelLeft size={17} /></Button>}
+          {preview ? <span className="truncate font-medium">Example repository</span> : <CheckoutSelector checkout={checkout} onSelect={onSelectCheckout} />}
+          <span aria-hidden="true">/</span><span className="work-current-area">{currentArea}</span>
         </div>
-      </section>
+        {!preview && <div className="flex shrink-0 items-center gap-2">
+          <Button variant="ghost" className="px-2.5" onClick={() => startSimulation()} title="Try a workflow with example data"><FlaskConical size={15} />Simulate</Button>
+          {openRepository}
+        </div>}
+      </header>
+      {preview && <div className="work-simulation" role="region" aria-label="Simulation controls">
+        <span className="work-simulation-label"><FlaskConical size={15} />Simulation · example data</span>
+        <label className="flex min-w-0 items-center gap-2">
+          <span className="sr-only">Scenario</span>
+          <select value={preview.scenario} onChange={(event) => startSimulation(event.target.value as ScenarioId)}>
+            {Object.entries(scenarios).map(([id, entry]) => <option key={id} value={id}>{entry.name}</option>)}
+          </select>
+        </label>
+        <Button variant="ghost" className="ml-auto" onClick={() => startSimulation(preview.scenario)}><RotateCcw size={14} />Reset simulation</Button>
+        <Button variant="outline" onClick={leaveSimulation}>Exit simulation</Button>
+      </div>}
+      {!preview && error && (
+        <div className="work-banner" role="alert"><span>{error}</span><Button variant="outline" onClick={reconnect}>Reconnect</Button></div>
+      )}
+      <GitSimulationProvider epoch={preview?.epoch}>
+      <div className="work-body">
+        <aside aria-label="Workspace" className="work-rail">
+          <nav aria-label="Workspaces" className="grid gap-1">
+            {areas.map(({ id, icon: Icon, label }) => (
+              <button key={id} type="button" className="work-rail-button" aria-label={label} title={label}
+                aria-current={nav.active === id ? "page" : undefined} onClick={() => current.openWorkspace(id)}><Icon size={18} /></button>
+            ))}
+          </nav>
+          <div className="work-rail-end">
+            <button type="button" className="work-rail-button" aria-label="Queue" title="Queue" aria-pressed={queue} onClick={() => changeQueue(queue ? "closed" : "open")}><ListChecks size={18} /></button>
+            <button type="button" className="work-rail-button" aria-label="Diagnostics" title="Diagnostics"
+              aria-current={nav.active === "diagnostics" ? "page" : undefined} onClick={() => current.openWorkspace("diagnostics")}><Activity size={18} /></button>
+            <button type="button" className="work-rail-button" aria-label="Settings" title="Settings" onClick={() => showSettings("appearance")}><Settings size={18} /></button>
+          </div>
+        </aside>
+        <div className="work-decks">
+          <div className="work-deck" hidden={Boolean(preview)}>
+            <WorkspaceViews nav={realNavigation} context={real} sidebar={!preview && sidebar} onSidebarChange={setSidebarOverride} compact={compact} />
+          </div>
+          {preview && simulated && <div className="work-deck" key={preview.epoch}>
+            <WorkspaceViews nav={preview.navigation} context={simulated} sidebar={sidebar} onSidebarChange={setSidebarOverride}
+              compact={compact} openSystem={() => showSettings("system")} />
+          </div>}
+          {realQueue && <div className="work-queue-panel" hidden={Boolean(preview) || realQueue !== "open"}>
+            <Suspense fallback={loading}><QueuePanel {...real} onClose={() => setRealQueue("closed")} /></Suspense>
+          </div>}
+          {previewQueue && simulated && <div className="work-queue-panel" key={preview?.epoch} hidden={previewQueue !== "open"}>
+            <Suspense fallback={loading}><QueuePanel {...simulated} onClose={() => setPreviewQueue("closed")} /></Suspense>
+          </div>}
+        </div>
+        {side && <SideInspector key={side.type === "activity" ? side.runId : side.target} side={side} compact={compact} close={closeSide}
+          plan={simulated && side.type === "changes" && side.target === "saved" && <SavedPlan />}>
+          <Suspense fallback={loading}>
+            {side.type === "activity" ? <RunInspector {...current} runId={side.runId} /> : <ChangesPanel {...current} target={side.target} />}
+          </Suspense>
+        </SideInspector>}
+      </div>
+      {settingsVisited && <Suspense fallback={null}><SettingsDialog key={preview?.epoch ?? "real"} {...current} open={Boolean(settingsPage)} initialPage={settingsPage}
+        onOpenChange={(open) => { if (!open) setSettingsPage(undefined); }} /></Suspense>}
+      </GitSimulationProvider>
     </div>
   );
 }
-import { invoke } from "@tauri-apps/api/core";
+
+function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, openSystem }: {
+  nav: Navigation;
+  context: WorkspaceProps;
+  sidebar: boolean;
+  onSidebarChange: (visible: boolean) => void;
+  compact: boolean;
+  openSystem?: () => void;
+}) {
+  return Object.entries(nav.visited).map(([id, state]) => {
+    const workspace = id as WorkspaceId;
+    const View = workspaceComponents[workspace];
+    const visible = nav.active === workspace;
+    const target = state?.target;
+    return <div key={id} className="work-view" hidden={!visible}>
+      <Suspense fallback={loading}>
+        {workspace === "conversations" ? context.simulation
+          ? <ConversationsPreview {...context} target={target} />
+          : <RealConversations checkout={context.checkout} target={target} sidebar={visible && sidebar} onSidebarChange={onSidebarChange}
+            compact={compact} onSimulate={() => context.startSimulation()} />
+          : workspace === "diagnostics" ? context.simulation
+            ? <SimulationDiagnostics {...context} openSystem={openSystem} />
+            : <RealDiagnostics checkout={context.checkout} />
+            : View && <View {...context} target={target} />}
+      </Suspense>
+    </div>;
+  });
+}
+
+function SavedPlan() {
+  return <article className="work-inspection-body max-h-full overflow-auto">
+    <p className="font-mono text-xs">Plan revision 2 · docs/release.md</p>
+    <h3>Update the release checklist</h3>
+    <ol className="list-decimal space-y-2 pl-5">
+      <li>Add a Recovery section with a rollback checkpoint.</li>
+      <li>Verify links and Markdown rendering.</li>
+      <li>Review the saved patch before accepting the change.</li>
+    </ol>
+  </article>;
+}
+
+function SideInspector({ side, compact, close, children, plan }: { side: SidePane; compact: boolean; close: () => void; children: ReactNode; plan?: ReactNode }) {
+  const [expanded, setExpanded] = useState(false);
+  const title = side.type === "changes" ? "Changes" : "Activity";
+  const tabs = <InspectorTabs title={title} content={children} plan={plan} expanded={expanded} onExpand={() => setExpanded(!expanded)} onClose={close} />;
+  if (compact) return (
+    <Dialog.Root open onOpenChange={(open) => { if (!open) close(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="work-shade" />
+        <Dialog.Content className="work-inspector work-inspector-drawer" aria-describedby={undefined} data-kind={side.type} data-expanded={expanded}>
+          <Dialog.Title className="sr-only">{title}</Dialog.Title>
+          {tabs}
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+  return <aside className="work-inspector" aria-label={title} data-kind={side.type} data-expanded={expanded}>
+    {tabs}
+  </aside>;
+}

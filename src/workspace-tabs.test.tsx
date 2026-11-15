@@ -3,7 +3,7 @@ import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { DockviewReact, type DockviewApi } from "dockview-react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
-import { openConversation, openConversations, openFixtureRun, persistFixtureLayout, restoreFixtureLayout } from "@/workspace-tabs";
+import { openConversation, openConversations, openFixtureRun, persistFixtureLayout, restoreDesktopLayout, restoreFixtureLayout } from "@/workspace-tabs";
 
 const checkout: ProjectCheckout = {
   projectId: "project",
@@ -92,4 +92,28 @@ it("keys conversation panels by ID and focuses the existing panel from the list"
   expect(dock.api.activePanel?.id).toBe("conversation:alpha");
   expect(dock.api.getPanel("conversation:bravo")).toBeDefined();
   dock.close();
+});
+
+it("restores each destination from the shared legacy layout while retaining its split tabs", async () => {
+  const starting = await openDock(checkout);
+  act(() => {
+    openConversations(starting.api);
+    openConversation(starting.api, { id: "alpha", title: "Alpha", checkoutId: checkout.checkoutId, contextId: "one" });
+    openConversation(starting.api, { id: "bravo", title: "Bravo", checkoutId: checkout.checkoutId, contextId: "two" });
+    const alpha = starting.api.getPanel("conversation:alpha")!;
+    alpha.api.moveTo({ group: alpha.api.group, position: "right" });
+    alpha.api.setActive();
+  });
+  const legacy = JSON.stringify(starting.api.toJSON());
+  starting.close();
+
+  const destination = await openDock(checkout);
+  act(() => restoreDesktopLayout(destination.api, checkout, "conversations", null, legacy));
+  expect(destination.api.groups.map((group) => group.panels.map((panel) => panel.id))).toEqual([
+    ["conversation:bravo"], ["conversation:alpha"],
+  ]);
+  expect(destination.api.activePanel?.id).toBe("conversation:alpha");
+  act(() => restoreDesktopLayout(destination.api, checkout, "diagnostics", null, legacy));
+  expect(destination.api.panels.map((panel) => panel.id)).toEqual(["fixture:list"]);
+  destination.close();
 });

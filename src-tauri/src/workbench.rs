@@ -8,6 +8,26 @@ const ACTIVE_CHECKOUT: &str = "active_checkout";
 const MAX_LAYOUT_BYTES: usize = 512 * 1024;
 
 impl Store {
+    pub async fn registered_checkouts(&self) -> Result<Vec<ProjectCheckout>> {
+        self.execute(|db| {
+            let mut statement = db.prepare(
+                "SELECT p.id, p.root, c.id, c.root
+                 FROM projects p JOIN checkouts c ON c.project_id = p.id
+                 ORDER BY p.root COLLATE NOCASE, c.root COLLATE NOCASE",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(ProjectCheckout {
+                    project_id: row.get(0)?,
+                    repository_root: row.get(1)?,
+                    checkout_id: row.get(2)?,
+                    checkout_root: row.get(3)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
     pub async fn active_checkout(&self) -> Result<Option<ProjectCheckout>> {
         self.execute(|db| {
             Ok(db

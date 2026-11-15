@@ -5,7 +5,7 @@
       "capabilities": [{
         "identifier": "desktop-tests",
         "windows": ["main"],
-        "permissions": ["core:default", "core:window:allow-close", "core:window:allow-is-visible"]
+        "permissions": ["core:default", "core:window:allow-close", "core:window:allow-is-visible", "core:window:allow-set-size"]
       }]
     }
   }
