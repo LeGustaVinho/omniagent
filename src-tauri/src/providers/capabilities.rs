@@ -483,9 +483,12 @@ impl ReportedCapabilities {
             ProviderEventData::Question { .. } => {
                 self.observed.insert(Capability::PlanningQuestions)
             }
-            ProviderEventData::QuestionAnswerSubmitted { .. } => {
-                self.observed.insert(Capability::PlanningAnswers)
-            }
+            ProviderEventData::QuestionAnswerSubmitted { .. }
+            | ProviderEventData::QuestionReplySettled {
+                action: super::questions::QuestionAction::Accept,
+                delivery: crate::dispatch::Delivery::Submitted,
+                ..
+            } => self.observed.insert(Capability::PlanningAnswers),
             ProviderEventData::PlanningModeConfirmed { .. } => {
                 self.observed.insert(Capability::NativePlanMode)
             }

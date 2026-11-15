@@ -13,6 +13,7 @@ use crate::{
         configuration::InstructionInventory,
         launch_scope::ScopedLaunchEvidence,
         plugins::PluginInventory,
+        questions::QuestionRoute,
         skills::{SkillCatalog, SkillEntry, SkillRequest},
     },
     store::Store,
@@ -43,6 +44,8 @@ pub struct ContextSnapshot {
     pub plugin_inventory: Option<PluginInventory>,
     #[serde(default)]
     pub attachments: Vec<AttachmentDispatch>,
+    #[serde(default, skip_serializing_if = "QuestionRoute::is_native")]
+    pub question_route: QuestionRoute,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

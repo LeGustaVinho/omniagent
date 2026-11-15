@@ -66,6 +66,7 @@ impl CliAdapter for AntigravityAdapter {
             turn: None,
             permissions: HashMap::new(),
             questions: HashMap::new(),
+            question_route: Default::default(),
             available_commands: None,
             plan_command_available: false,
             bridge: None,
@@ -237,6 +238,7 @@ struct AcpSession {
     turn: Option<Turn>,
     permissions: HashMap<RequestId, Vec<PermissionOption>>,
     questions: HashMap<RequestId, super::questions::QuestionForm>,
+    question_route: super::questions::QuestionRoute,
     available_commands: Option<(String, Vec<String>)>,
     plan_command_available: bool,
     bridge: Option<crate::mcp_bridge::BridgeLaunch>,
@@ -769,6 +771,13 @@ impl AcpSession {
     }
 
     fn question(&mut self, id: RequestId, params: &Value) -> Result<AdapterUpdate> {
+        if !self.question_route.is_native() {
+            return outbound(self.rpc.error(
+                &id,
+                -32601,
+                "this attempt collects questions at turn completion",
+            )?);
+        }
         if self.turn.as_ref().is_none_or(|turn| turn.cancel_requested)
             || params["sessionId"].as_str().is_none()
             || self.session_id.as_deref() != params["sessionId"].as_str()
@@ -792,7 +801,10 @@ impl AcpSession {
                         self.rpc
                             .error(&id, -32602, "unsupported ACP question form")?,
                     ],
-                    events: self.diagnostic(&error.to_string()).events,
+                    events: vec![self.event(ProviderEventData::QuestionUnavailable {
+                        request_id: Some(id),
+                        reason: diagnostics::preview(&error.to_string()),
+                    })],
                 });
             }
         };
@@ -801,6 +813,7 @@ impl AcpSession {
             request_id: id,
             form: params.clone(),
             normalized: Some(normalized),
+            route: self.question_route,
         });
         event.location.item_id = string(params, "toolCallId");
         Ok(events([event]))
@@ -808,6 +821,10 @@ impl AcpSession {
 }
 
 impl CliSession for AcpSession {
+    fn set_question_route(&mut self, route: super::questions::QuestionRoute) {
+        self.question_route = route;
+    }
+
     fn attachment_encoding(
         &self,
         format: crate::attachments::AttachmentFormat,
@@ -836,10 +853,15 @@ impl CliSession for AcpSession {
     fn start(&mut self) -> Result<AdapterUpdate> {
         ensure!(!self.handshake_started, "ACP handshake already started");
         self.handshake_started = true;
+        let client_capabilities = if self.question_route.is_native() {
+            json!({"elicitation": {"form": {}}})
+        } else {
+            json!({})
+        };
         outbound(self.rpc.request(
             "initialize",
             json!({
-                "protocolVersion": ACP_VERSION, "clientCapabilities": {"elicitation": {"form": {}}},
+                "protocolVersion": ACP_VERSION, "clientCapabilities": client_capabilities,
                 "clientInfo": {"name":"omniagent", "version":env!("CARGO_PKG_VERSION")},
             }),
             Request::Initialize,
@@ -974,7 +996,7 @@ impl CliSession for AcpSession {
         };
         let response = self.rpc.result(id, result)?;
         self.questions.remove(id);
-        outbound(response)
+        Ok(super::questions::encoded_reply(id, reply, response))
     }
 
     fn interrupt(&mut self) -> Result<Interrupt> {
@@ -1372,6 +1394,7 @@ mod tests {
             request_id,
             form,
             normalized: Some(normalized),
+            ..
         } = &event.data
         else {
             panic!("missing normalized ACP question");
@@ -1405,6 +1428,24 @@ mod tests {
             json!({"jsonrpc":"2.0","id":134,"result":{"action":"accept","content":answer["values"]}})
         );
         assert!(session.respond_question(request_id, answer).is_err());
+        let mut second = request;
+        second["id"] = json!("second-form");
+        receive(&mut *session, second.clone())?;
+        let id = RequestId::Text("second-form".into());
+        let decline = session.respond_question(&id, json!({"action":"decline"}))?;
+        assert_eq!(message(&decline)?["result"], json!({"action":"decline"}));
+        assert!(
+            session
+                .respond_question(&id, json!({"action":"cancel"}))
+                .is_err()
+        );
+        second["id"] = json!("pending-on-cancel");
+        receive(&mut *session, second)?;
+        let cancelled = session.interrupt()?;
+        assert_eq!(
+            serde_json::from_slice::<Value>(cancelled.outbound[1].as_bytes())?,
+            json!({"jsonrpc":"2.0","id":"pending-on-cancel","result":{"action":"cancel"}})
+        );
         Ok(())
     }
 

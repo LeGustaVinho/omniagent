@@ -16,10 +16,10 @@ use omniagent::{
         capabilities::{CapabilityStatus, CapabilitySubject, EvidenceOrigin, ObservedResult},
         planning::{PlanSource, PlanningMode},
         profiles::{ConfiguredExecutable, probe_cli},
-        questions::{QuestionForm, QuestionInput},
+        questions::{QuestionForm, QuestionInput, QuestionRoute},
         runtime::start_managed_turn,
     },
-    repository,
+    repository::{self, ProjectCheckout},
     runner::{DirectWindowsRunner, ExecutionPlatform, LaunchRequest, Runner},
     runs::RunStatus,
     store::Store,
@@ -79,12 +79,11 @@ struct Exchange {
     review_requested: bool,
 }
 
-async fn exchange(
+async fn fixture(
     provider: Provider,
     model: &str,
-    prompt: &str,
-    reply: impl Fn(&QuestionForm) -> Result<(Value, Value)>,
-) -> Result<Exchange> {
+    mode: SessionMode,
+) -> Result<(tempfile::TempDir, Store, ProjectCheckout, SessionScope)> {
     let sandbox = tempfile::tempdir()?;
     let checkout_path = sandbox.path().join("checkout");
     fs::create_dir(&checkout_path)?;
@@ -99,33 +98,40 @@ async fn exchange(
     );
     let store = Store::open(sandbox.path().join("fixture.sqlite"))?;
     let project = repository::register(&store, checkout_path.clone()).await?;
-    let chat = store
-        .create_conversation(project.checkout_id.clone(), "Planning qualification".into())
-        .await?;
     let probe = probe_cli(ConfiguredExecutable {
         provider,
         executable: None,
     })?;
+    let scope = SessionScope {
+        provider,
+        profile_id: "planning-qualification".into(),
+        account_binding: Some("authenticated-vendor-fixture".into()),
+        checkout: checkout_path,
+        executable: PathBuf::from(probe.executable.context("missing CLI executable")?),
+        cli_version: probe.version.context("missing CLI version")?,
+        runner: DirectWindowsRunner.identity().into(),
+        permission_revision: "read-only-planning-fixture".into(),
+        mode,
+        model: Some(model.into()),
+        effort: None,
+    };
+    Ok((sandbox, store, project, scope))
+}
+
+async fn exchange(
+    provider: Provider,
+    model: &str,
+    prompt: &str,
+    reply: impl Fn(&QuestionForm) -> Result<(Value, Value)>,
+) -> Result<Exchange> {
+    let (_sandbox, store, project, scope) = fixture(provider, model, SessionMode::Plan).await?;
+    let checkout_path = scope.checkout.clone();
+    let chat = store
+        .create_conversation(project.checkout_id.clone(), "Planning qualification".into())
+        .await?;
     let runner = Arc::new(RecordingRunner::default());
     let attempt = store
-        .prepare_agent_attempt(
-            chat.id.clone(),
-            chat.context_id,
-            SessionScope {
-                provider,
-                profile_id: "planning-qualification".into(),
-                account_binding: Some("authenticated-vendor-fixture".into()),
-                checkout: checkout_path.clone(),
-                executable: PathBuf::from(probe.executable.context("missing CLI executable")?),
-                cli_version: probe.version.context("missing CLI version")?,
-                runner: runner.identity().into(),
-                permission_revision: "read-only-planning-fixture".into(),
-                mode: SessionMode::Plan,
-                model: Some(model.into()),
-                effort: None,
-            },
-            prompt.into(),
-        )
+        .prepare_agent_attempt(chat.id.clone(), chat.context_id, scope, prompt.into())
         .await?;
     let run_id = attempt.run.id.clone();
     let worker = start_managed_turn(store.clone(), runner.clone(), attempt, None);
@@ -136,6 +142,7 @@ async fn exchange(
     let mut proposal = None;
     let mut review = None;
     let mut submitted = None;
+    let mut prepared = None;
     tokio::time::timeout(Duration::from_secs(75), async {
         loop {
             let mut outcome = None;
@@ -154,13 +161,23 @@ async fn exchange(
                     ProviderEventData::PlanProposed { text, source } => {
                         proposal = Some((source, text))
                     }
-                    ProviderEventData::QuestionAnswerSubmitted { request_id } => {
-                        submitted = Some(request_id)
+                    ProviderEventData::QuestionReplySettled {
+                        request_id,
+                        action: omniagent::providers::questions::QuestionAction::Accept,
+                        delivery: omniagent::dispatch::Delivery::Submitted,
+                    } => submitted = Some(request_id),
+                    ProviderEventData::QuestionReplyPrepared {
+                        request_id,
+                        reply,
+                        frame,
+                    } => {
+                        prepared = Some((request_id, reply, frame));
                     }
                     ProviderEventData::Question {
                         request_id,
                         form,
                         normalized: Some(normalized),
+                        ..
                     } => {
                         ensure!(
                             answered.is_none(),
@@ -200,6 +217,14 @@ async fn exchange(
         format!("{provider:?} did not deliver a native question. Output: {output}")
     })?;
     assert_eq!(submitted, Some(id.clone()));
+    let (prepared_id, typed, reply_frame) =
+        prepared.context("the question reply was not recorded before delivery")?;
+    assert_eq!(prepared_id, id);
+    assert_eq!(
+        typed.action,
+        omniagent::providers::questions::QuestionAction::Accept
+    );
+    assert!(runner.0.lock().unwrap().contains(&reply_frame));
     let frames = runner
         .0
         .lock()
@@ -436,6 +461,90 @@ async fn codex_plan_delivers_a_native_question_and_authoritative_plan_item() -> 
     ensure!(
         answer.proposal.1.to_ascii_lowercase().contains("walnut"),
         "Codex did not use the selected option"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Claude Code with Haiku 5.5"]
+async fn read_only_turn_records_a_validated_structured_question_after_completion() -> Result<()> {
+    let (_sandbox, store, project, scope) =
+        fixture(Provider::Claude, "claude-haiku-5-5", SessionMode::ReadOnly).await?;
+    let chat = store
+        .create_conversation(project.checkout_id, "Structured planning fallback".into())
+        .await?;
+    let attempt = store.prepare_structured_planning_attempt(
+        chat.id.clone(), chat.context_id, scope,
+        "You are planning a report and cannot continue until the user decides whether to include a summary. Ask as a required Boolean field named include_summary. Do not assume an answer or edit any files.".into(),
+        Vec::new(),
+    ).await?;
+    let run_id = attempt.run.id.clone();
+    let turn_id = attempt.run.turn_id.clone();
+    let finished = tokio::time::timeout(
+        Duration::from_secs(60),
+        start_managed_turn(store.clone(), Arc::new(DirectWindowsRunner), attempt, None).wait(),
+    )
+    .await??;
+    let events = store
+        .agent_observations(chat.id.clone(), run_id.clone(), 0)
+        .await?;
+    ensure!(
+        finished == RunStatus::Succeeded,
+        "structured planner failed: {:?}",
+        events
+            .iter()
+            .map(|entry| &entry.event.data)
+            .collect::<Vec<_>>()
+    );
+    let terminal = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.event.data,
+                ProviderEventData::TurnFinished {
+                    outcome: TurnOutcome::Completed
+                }
+            )
+        })
+        .context("missing provider turn completion")?;
+    let question = events
+        .iter()
+        .find_map(|entry| match &entry.event.data {
+            ProviderEventData::Question {
+                request_id,
+                normalized: Some(form),
+                route,
+                ..
+            } => Some((entry, request_id, form, route)),
+            _ => None,
+        })
+        .context("missing structured question")?;
+    assert!(question.0.seq > terminal.seq);
+    assert_eq!(
+        question.1,
+        &RequestId::Text(format!("structured:{turn_id}"))
+    );
+    assert_eq!(*question.3, QuestionRoute::StructuredTurn);
+    assert!(
+        question
+            .2
+            .fields
+            .iter()
+            .any(|field| field.id == "include_summary"
+                && field.required
+                && field.input == QuestionInput::Boolean)
+    );
+    let saved = store
+        .agent_dispatch(chat.id, run_id)
+        .await?
+        .context("missing structured planner dispatch")?;
+    assert_eq!(saved.snapshot.question_route, QuestionRoute::StructuredTurn);
+    let wire: Value = serde_json::from_slice(&saved.frames[0])?;
+    assert!(
+        wire["message"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Read-only planning response format.")
     );
     Ok(())
 }

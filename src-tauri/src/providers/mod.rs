@@ -382,8 +382,27 @@ pub enum ProviderEventData {
         form: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         normalized: Option<questions::QuestionForm>,
+        #[serde(default, skip_serializing_if = "questions::QuestionRoute::is_native")]
+        route: questions::QuestionRoute,
+    },
+    QuestionUnavailable {
+        request_id: Option<RequestId>,
+        reason: String,
     },
     QuestionAnswerSubmitted {
+        request_id: RequestId,
+    },
+    QuestionReplyPrepared {
+        request_id: RequestId,
+        reply: questions::QuestionReply,
+        frame: Vec<u8>,
+    },
+    QuestionReplySettled {
+        request_id: RequestId,
+        action: questions::QuestionAction,
+        delivery: crate::dispatch::Delivery,
+    },
+    QuestionClosed {
         request_id: RequestId,
     },
     PlanningModeConfirmed {
@@ -448,6 +467,7 @@ pub trait CliSession: Send {
         None
     }
     fn set_checkout_root(&mut self, _root: &Path) {}
+    fn set_question_route(&mut self, _route: questions::QuestionRoute) {}
     fn configure_mcp_bridge(&mut self, _launch: crate::mcp_bridge::BridgeLaunch) {}
     fn set_workspace_instructions(&mut self, _instructions: String) -> anyhow::Result<()> {
         anyhow::bail!("this adapter does not accept protocol instruction projection")

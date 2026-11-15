@@ -68,6 +68,7 @@ impl CliAdapter for CodexAdapter {
             model_cursors: HashSet::new(),
             approvals: HashMap::new(),
             questions: HashMap::new(),
+            question_route: Default::default(),
         }))
     }
 }
@@ -112,6 +113,7 @@ struct CodexSession {
     model_cursors: HashSet<String>,
     approvals: HashMap<RequestId, Approval>,
     questions: HashMap<RequestId, super::questions::QuestionForm>,
+    question_route: super::questions::QuestionRoute,
 }
 
 impl CodexSession {
@@ -534,6 +536,13 @@ impl CodexSession {
         }
         let delta = || required_string(params, "delta").map(str::to_owned);
         let data = match method {
+            "serverRequest/resolved" => {
+                let id = serde_json::from_value::<RequestId>(params["requestId"].clone())?;
+                if self.questions.remove(&id).is_none() {
+                    return Ok(AdapterUpdate::default());
+                }
+                ProviderEventData::QuestionClosed { request_id: id }
+            }
             "thread/settings/updated" => {
                 let settings = &params["threadSettings"];
                 ProviderEventData::ModelObserved {
@@ -717,6 +726,16 @@ impl CodexSession {
         );
         let approval = match method {
             "item/tool/requestUserInput" => {
+                if !self.question_route.is_native() {
+                    return Ok(AdapterUpdate {
+                        outbound: vec![self.rpc.error(
+                            &id,
+                            -32601,
+                            "this attempt collects questions at turn completion",
+                        )?],
+                        events: Vec::new(),
+                    });
+                }
                 let normalized = match super::questions::QuestionForm::codex(&params["questions"]) {
                     Ok(form) => form,
                     Err(error) => {
@@ -726,8 +745,9 @@ impl CodexSession {
                                 -32602,
                                 "unsupported Codex question form",
                             )?],
-                            events: vec![self.event(ProviderEventData::Diagnostic {
-                                message: diagnostics::preview(&error.to_string()),
+                            events: vec![self.event(ProviderEventData::QuestionUnavailable {
+                                request_id: Some(id),
+                                reason: diagnostics::preview(&error.to_string()),
                             })],
                         });
                     }
@@ -737,6 +757,7 @@ impl CodexSession {
                     request_id: id,
                     form: params["questions"].clone(),
                     normalized: Some(normalized),
+                    route: self.question_route,
                 });
                 event.location.item_id = string(params, "itemId");
                 event.location.turn_id = string(params, "turnId");
@@ -772,6 +793,10 @@ impl CodexSession {
 }
 
 impl CliSession for CodexSession {
+    fn set_question_route(&mut self, route: super::questions::QuestionRoute) {
+        self.question_route = route;
+    }
+
     fn attachment_encoding(
         &self,
         format: crate::attachments::AttachmentFormat,
@@ -950,15 +975,12 @@ impl CliSession for CodexSession {
         questions.validate(&reply)?;
         let answers: serde_json::Map<_, _> = reply
             .values
-            .into_iter()
-            .map(|(field, value)| (field, json!({"answers":[value]})))
+            .iter()
+            .map(|(field, value)| (field.clone(), json!({"answers":[value]})))
             .collect();
         let result = self.rpc.result(id, json!({"answers": answers}))?;
         self.questions.remove(id);
-        Ok(AdapterUpdate {
-            outbound: vec![result],
-            events: vec![],
-        })
+        Ok(super::questions::encoded_reply(id, reply, result))
     }
 
     fn interrupt(&mut self) -> Result<Interrupt> {
@@ -1325,6 +1347,33 @@ mod tests {
         let answer = json!({"answers":{"q-1":{"answers":["free text"]}}});
         let response = session.respond_question(&RequestId::Number(91), answer.clone())?;
         assert_eq!(outbound(&response, 0)?["result"], answer);
+        inbound(
+            &mut *session,
+            json!({
+                "id":92, "method":"item/tool/requestUserInput",
+                "params":{"threadId":"session","turnId":"turn","questions":[{"id":"q-2","question":"Another?"}]}
+            }),
+        )?;
+        let closed = inbound(
+            &mut *session,
+            json!({
+                "method":"serverRequest/resolved", "params":{"threadId":"session","requestId":92}
+            }),
+        )?;
+        assert_eq!(
+            closed.events[0].data,
+            ProviderEventData::QuestionClosed {
+                request_id: RequestId::Number(92)
+            }
+        );
+        assert!(
+            session
+                .respond_question(
+                    &RequestId::Number(92),
+                    json!({"action":"accept","values":{"q-2":"yes"}})
+                )
+                .is_err()
+        );
         Ok(())
     }
 }

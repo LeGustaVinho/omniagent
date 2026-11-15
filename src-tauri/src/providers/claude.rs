@@ -69,6 +69,7 @@ impl CliAdapter for ClaudeAdapter {
             turn: None,
             pending: HashMap::new(),
             completed_turn: false,
+            question_route: Default::default(),
         }))
     }
 }
@@ -81,6 +82,7 @@ struct ClaudeSession {
     turn: Option<Turn>,
     pending: HashMap<RequestId, PendingInput>,
     completed_turn: bool,
+    question_route: super::questions::QuestionRoute,
 }
 
 #[derive(Default)]
@@ -441,16 +443,26 @@ impl ClaudeSession {
             });
         }
         let data = if name == "AskUserQuestion" {
+            if !self.question_route.is_native() {
+                return outbound(control_error(
+                    id,
+                    "this attempt collects questions at turn completion",
+                )?);
+            }
             let form = input["questions"].clone();
             let normalized = match super::questions::QuestionForm::claude(&form) {
                 Ok(normalized) => normalized,
                 Err(error) => {
                     return Ok(AdapterUpdate {
-                        outbound: vec![control_error(id, "unsupported Claude question form")?],
+                        outbound: vec![control_error(
+                            id.clone(),
+                            "unsupported Claude question form",
+                        )?],
                         events: vec![self.event(
                             frame,
-                            ProviderEventData::Diagnostic {
-                                message: diagnostics::preview(&error.to_string()),
+                            ProviderEventData::QuestionUnavailable {
+                                request_id: Some(id),
+                                reason: diagnostics::preview(&error.to_string()),
                             },
                         )],
                     });
@@ -467,6 +479,7 @@ impl ClaudeSession {
                 request_id: id,
                 form,
                 normalized: Some(normalized),
+                route: self.question_route,
             }
         } else {
             self.pending
@@ -538,6 +551,10 @@ impl ClaudeSession {
 }
 
 impl CliSession for ClaudeSession {
+    fn set_question_route(&mut self, route: super::questions::QuestionRoute) {
+        self.question_route = route;
+    }
+
     fn attachment_encoding(
         &self,
         format: crate::attachments::AttachmentFormat,
@@ -646,6 +663,18 @@ impl CliSession for ClaudeSession {
         match frame["type"].as_str() {
             Some("control_response") => self.start_handshake(&frame),
             Some("control_request") => self.request_input(&frame),
+            Some("control_cancel_request") => {
+                let id = RequestId::Text(field(&frame, "request_id")?.to_owned());
+                if matches!(self.pending.get(&id), Some(PendingInput::Question { .. })) {
+                    self.pending.remove(&id);
+                    Ok(events([self.event(
+                        &frame,
+                        ProviderEventData::QuestionClosed { request_id: id },
+                    )]))
+                } else {
+                    Ok(AdapterUpdate::default())
+                }
+            }
             Some("system") if frame["subtype"] == "init" => self.session_init(&frame),
             Some("system")
                 if matches!(
@@ -798,16 +827,16 @@ impl CliSession for ClaudeSession {
         let response = if reply.action == QuestionAction::Accept {
             let answers: serde_json::Map<_, _> = reply
                 .values
-                .into_iter()
+                .iter()
                 .map(|(field, value)| {
                     if let Value::Array(selected) = value {
                         let labels = selected
                             .iter()
                             .filter_map(Value::as_str)
                             .collect::<Vec<_>>();
-                        (field, Value::String(labels.join(", ")))
+                        (field.clone(), Value::String(labels.join(", ")))
                     } else {
-                        (field, value)
+                        (field.clone(), value.clone())
                     }
                 })
                 .collect();
@@ -822,7 +851,7 @@ impl CliSession for ClaudeSession {
         };
         let message = control_success(id, response)?;
         self.pending.remove(id);
-        outbound(message)
+        Ok(super::questions::encoded_reply(id, reply, message))
     }
 
     fn interrupt(&mut self) -> Result<Interrupt> {

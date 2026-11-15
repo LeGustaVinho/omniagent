@@ -5,12 +5,30 @@ use rmcp::model::StringFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 
+use super::{
+    AdapterUpdate, ProviderEvent, ProviderEventData, ProviderLocation, RequestId, WireMessage,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionForm {
     pub message: Option<String>,
     pub fields: Vec<QuestionField>,
     pub actions: Vec<QuestionAction>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionRoute {
+    #[default]
+    Native,
+    StructuredTurn,
+}
+
+impl QuestionRoute {
+    pub(crate) fn is_native(&self) -> bool {
+        *self == Self::Native
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +91,25 @@ pub struct QuestionReply {
     pub action: QuestionAction,
     #[serde(default)]
     pub values: Map<String, Value>,
+}
+
+pub(crate) fn encoded_reply(
+    id: &RequestId,
+    reply: QuestionReply,
+    frame: WireMessage,
+) -> AdapterUpdate {
+    let event = ProviderEvent {
+        location: ProviderLocation::default(),
+        data: ProviderEventData::QuestionReplyPrepared {
+            request_id: id.clone(),
+            reply,
+            frame: frame.as_bytes().to_vec(),
+        },
+    };
+    AdapterUpdate {
+        outbound: vec![frame],
+        events: vec![event],
+    }
 }
 
 impl QuestionForm {
@@ -166,7 +203,11 @@ impl QuestionForm {
             "ACP only supports forms in a conversation"
         );
         let message = required_string(params, "message")?;
-        let schema = &params["requestedSchema"];
+        Self::schema(message, &params["requestedSchema"])
+    }
+
+    pub(crate) fn schema(message: String, schema: &Value) -> Result<Self> {
+        ensure!(!message.trim().is_empty(), "question message is empty");
         check_keys(
             schema,
             &[

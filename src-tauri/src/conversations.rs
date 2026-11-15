@@ -16,7 +16,7 @@ use crate::{
     protection,
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionIntent,
-        SessionMode, TurnOutcome,
+        SessionMode, TurnOutcome, questions::QuestionRoute,
     },
     runs::{self, RunRecord, RunStatus},
     store::Store,
@@ -89,6 +89,7 @@ pub struct AttemptPlan {
     /// Suffix after the provider cursor, or the full effective context for a fresh session.
     pub input: Vec<MessageRevision>,
     pub(crate) attachments: Vec<(String, CapturedAttachment)>,
+    pub(crate) question_route: QuestionRoute,
 }
 
 pub(crate) enum PermissionRoute {
@@ -379,8 +380,33 @@ impl Store {
             tx.execute("INSERT INTO active_agent_attempts VALUES (?1, ?2)", params![conversation_id, run.id])?;
             tx.commit()?;
             Ok(AttemptPlan { run, conversation_id, agent_session_id, previous_run_id, context_id,
-                resume_cursor_id, intent, scope, input, attachments })
+                resume_cursor_id, intent, scope, input, attachments, question_route: QuestionRoute::Native })
         }).await
+    }
+
+    pub async fn prepare_structured_planning_attempt(
+        &self,
+        conversation_id: String,
+        base_context_id: String,
+        scope: SessionScope,
+        text: String,
+        previews: Vec<AttachmentPreview>,
+    ) -> Result<AttemptPlan> {
+        ensure!(
+            scope.mode == SessionMode::ReadOnly,
+            "structured planning needs a read-only profile"
+        );
+        let mut attempt = self
+            .prepare_agent_attempt_with_attachments(
+                conversation_id,
+                base_context_id,
+                scope,
+                text,
+                previews,
+            )
+            .await?;
+        attempt.question_route = QuestionRoute::StructuredTurn;
+        Ok(attempt)
     }
 
     pub async fn record_agent_observation(
@@ -437,6 +463,55 @@ impl Store {
                 tx.execute("INSERT INTO agent_permissions(request_event_seq, run_id, turn_id, request_key, delivery, route)
                     VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
                     params![tx.last_insert_rowid(), run_id, active.turn_id, permission_key(request_id)?, route.as_sql()])?;
+            }
+            match &event.data {
+                ProviderEventData::Question { request_id, normalized: Some(_), route, .. }
+                    if (source == EventSource::Provider && route.is_native())
+                        || (source == EventSource::Application && !route.is_native()) =>
+                {
+                    tx.execute(
+                        "INSERT INTO agent_questions(request_event_seq, run_id, turn_id, request_key, route, delivery)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+                        params![tx.last_insert_rowid(), run_id, active.turn_id, permission_key(request_id)?,
+                            if route.is_native() { "native" } else { "structured_turn" }],
+                    )?;
+                }
+                ProviderEventData::QuestionReplyPrepared { request_id, reply, .. } if source == EventSource::Application => {
+                    let key = permission_key(request_id)?;
+                    let open: Vec<u8> = tx.query_row(
+                        "SELECT e.payload FROM agent_questions q JOIN agent_events e ON e.seq = q.request_event_seq
+                         WHERE q.run_id = ?1 AND q.turn_id = ?2 AND q.request_key = ?3 AND q.route = 'native' AND q.delivery = 'pending'",
+                        params![run_id, active.turn_id, key],
+                        |row| row.get(0),
+                    ).context("question request is absent or stale for this turn")?;
+                    let question: ProviderEvent = serde_json::from_slice(&protection::unprotect(&open)?)?;
+                    let ProviderEventData::Question { normalized: Some(form), .. } = question.data else {
+                        anyhow::bail!("saved native question has no validated form");
+                    };
+                    form.validate(reply)?;
+                    tx.execute(
+                        "UPDATE agent_questions SET delivery = 'prepared', reply_event_seq = ?4
+                         WHERE run_id = ?1 AND turn_id = ?2 AND request_key = ?3 AND route = 'native' AND delivery = 'pending'",
+                        params![run_id, active.turn_id, key, tx.last_insert_rowid()],
+                    )?;
+                }
+                ProviderEventData::QuestionReplySettled { request_id, delivery, .. } if source == EventSource::Application => {
+                    ensure!(*delivery != Delivery::Prepared, "question reply must have a delivery result");
+                    let changed = tx.execute(
+                        "UPDATE agent_questions SET delivery = ?4
+                         WHERE run_id = ?1 AND turn_id = ?2 AND request_key = ?3 AND route = 'native' AND delivery = 'prepared'",
+                        params![run_id, active.turn_id, permission_key(request_id)?, delivery.as_sql()],
+                    )?;
+                    ensure!(changed == 1, "question reply is no longer prepared");
+                }
+                ProviderEventData::QuestionClosed { request_id } if source == EventSource::Provider => {
+                    tx.execute(
+                        "UPDATE agent_questions SET delivery = 'closed'
+                         WHERE run_id = ?1 AND turn_id = ?2 AND request_key = ?3 AND route = 'native' AND delivery = 'pending'",
+                        params![run_id, active.turn_id, permission_key(request_id)?],
+                    )?;
+                }
+                _ => {}
             }
             tx.commit()?;
             Ok(())
@@ -555,6 +630,7 @@ impl Store {
                     params![context_id, active.session_id, run_id])?;
             }
             close_permissions(&tx, &run_id)?;
+            close_native_questions(&tx, &run_id)?;
             tx.execute("DELETE FROM active_agent_attempts WHERE run_id = ?1", [&run_id])?;
             tx.commit()?;
             Ok(())
@@ -574,6 +650,7 @@ impl Store {
                 let run = runs::load_run(&tx, &id)?;
                 runs::advance_run(&tx, &run, RunStatus::Interrupted)?;
                 close_permissions(&tx, &id)?;
+                close_native_questions(&tx, &id)?;
             }
             tx.execute(
                 "UPDATE dispatches SET delivery = 'unconfirmed' WHERE delivery = 'prepared'",
@@ -764,6 +841,16 @@ fn permission_key(id: &RequestId) -> Result<[u8; 32]> {
     Ok(Sha256::digest(serde_json::to_vec(id)?).into())
 }
 
+fn close_native_questions(db: &Connection, run_id: &str) -> Result<()> {
+    db.execute(
+        "UPDATE agent_questions
+         SET delivery = CASE delivery WHEN 'prepared' THEN 'unconfirmed' ELSE 'closed' END
+         WHERE run_id = ?1 AND route = 'native' AND delivery IN ('pending', 'prepared')",
+        [run_id],
+    )?;
+    Ok(())
+}
+
 fn close_permissions(db: &Connection, run_id: &str) -> Result<()> {
     db.execute(
         "UPDATE agent_permissions SET delivery = CASE delivery WHEN 'pending' THEN 'closed' ELSE 'unconfirmed' END
@@ -837,6 +924,90 @@ mod tests {
         store
             .prepare_agent_attempt(current.id, current.context_id, scope, text.into())
             .await
+    }
+
+    #[tokio::test]
+    async fn native_question_replies_are_scoped_and_recover_as_unconfirmed() -> Result<()> {
+        use crate::providers::questions::{QuestionAction, QuestionForm, QuestionReply};
+
+        let (_dir, store, chat, scope) = setup().await?;
+        let other = store
+            .create_conversation(chat.checkout_id.clone(), "Another run".into())
+            .await?;
+        let first = prepare(&store, &chat.id, scope.clone(), "First question").await?;
+        let second = prepare(&store, &other.id, scope, "Another question").await?;
+        let id = RequestId::Text("provider-question".into());
+        let raw = json!([{"id":"choice","question":"Which option?","options":[{"label":"Bound answer"}]}]);
+        let question = ProviderEvent {
+            location: ProviderLocation::default(),
+            data: ProviderEventData::Question {
+                request_id: id.clone(),
+                normalized: Some(QuestionForm::codex(&raw)?),
+                form: raw,
+                route: QuestionRoute::Native,
+            },
+        };
+        store
+            .record_agent_observation(
+                first.run.id.clone(),
+                EventSource::Provider,
+                question.clone(),
+            )
+            .await?;
+        let prepared = ProviderEvent {
+            location: ProviderLocation::default(),
+            data: ProviderEventData::QuestionReplyPrepared {
+                request_id: id,
+                reply: QuestionReply {
+                    action: QuestionAction::Accept,
+                    values: serde_json::from_value(json!({"choice":"Bound answer"}))?,
+                },
+                frame: b"{\"id\":\"provider-question\",\"result\":{\"answers\":{\"choice\":{\"answers\":[\"Bound answer\"]}}}}\n".to_vec(),
+            },
+        };
+        assert!(
+            store
+                .record_agent_observation(
+                    second.run.id.clone(),
+                    EventSource::Application,
+                    prepared.clone(),
+                )
+                .await
+                .is_err()
+        );
+        store
+            .record_agent_observation(second.run.id.clone(), EventSource::Provider, question)
+            .await?;
+        store
+            .record_agent_observation(
+                first.run.id.clone(),
+                EventSource::Application,
+                prepared.clone(),
+            )
+            .await?;
+        assert!(
+            store
+                .record_agent_observation(first.run.id.clone(), EventSource::Application, prepared)
+                .await
+                .is_err()
+        );
+        store.recover_agent_attempts_after_restart().await?;
+        let decisions = store.execute(move |db| {
+            let row = |run: &str| db.query_row(
+                "SELECT q.delivery, e.payload FROM agent_questions q LEFT JOIN agent_events e ON e.seq = q.reply_event_seq WHERE q.run_id = ?1",
+                [run], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
+            );
+            Ok((row(&first.run.id)?, row(&second.run.id)?))
+        }).await?;
+        assert_eq!(decisions.0.0, "unconfirmed");
+        let encrypted = decisions.0.1.unwrap();
+        assert!(
+            !encrypted
+                .windows(b"Bound answer".len())
+                .any(|range| range == b"Bound answer")
+        );
+        assert_eq!(decisions.1, ("closed".into(), None));
+        Ok(())
     }
 
     #[tokio::test]
@@ -1035,6 +1206,7 @@ mod tests {
                     requested_skill: None,
                     plugin_inventory: None,
                     attachments: Vec::new(),
+                    question_route: QuestionRoute::Native,
                 },
                 vec![b"{\"fixture\":true}\n".to_vec()],
             )

@@ -37,6 +37,7 @@ use super::{
     },
     configuration,
     launch_scope::{ScopedLaunch, ScopedLaunchEvidence},
+    planning::{PlanSource, STRUCTURED_PLANNING_PROMPT, StructuredPlan},
     plugins::{PluginInventory, probe_run_plugins},
     skills::{SkillCatalog, explicit_skill_request},
 };
@@ -146,8 +147,7 @@ enum Command {
 
 enum Decision {
     Permission(RequestId, ApprovalDecision),
-    QuestionAnswer(RequestId),
-    QuestionDismissal,
+    Question(RequestId),
 }
 
 pub struct ManagedTurn {
@@ -212,6 +212,7 @@ pub fn start_managed_turn(
             final_answer: String::new(),
             streamed_answer: String::new(),
             proposed_plan: None,
+            last_parent_message: None,
             reported: ReportedCapabilities::default(),
             reported_skills: None,
             plugin_inventory: None,
@@ -221,7 +222,14 @@ pub fn start_managed_turn(
             platform: None,
             staged_attachments: StagedAttachments::default(),
         };
-        let outcome = execution.run(runner.as_ref(), &receiver, bridge_executable);
+        let outcome = execution
+            .run(runner.as_ref(), &receiver, bridge_executable)
+            .and_then(|status| {
+                if status == RunStatus::Succeeded && !execution.plan.question_route.is_native() {
+                    execution.complete_structured_planning()?;
+                }
+                Ok(status)
+            });
         let status = match outcome {
             Ok(status) => status,
             Err(error) => {
@@ -266,6 +274,7 @@ struct TurnExecution {
     final_answer: String,
     streamed_answer: String,
     proposed_plan: Option<String>,
+    last_parent_message: Option<String>,
     reported: ReportedCapabilities,
     reported_skills: Option<SkillCatalog>,
     plugin_inventory: Option<PluginInventory>,
@@ -285,7 +294,7 @@ impl TurnExecution {
                 || matches!(
                     event.data,
                     ProviderEventData::BridgeRegistration { .. }
-                        | ProviderEventData::QuestionAnswerSubmitted { .. }
+                        | ProviderEventData::QuestionReplySettled { .. }
                 )
             {
                 scope_changed = self.reported.observe(&event.data);
@@ -298,8 +307,15 @@ impl TurnExecution {
             }
             match &event.data {
                 ProviderEventData::AssistantDelta { text } => self.streamed_answer.push_str(text),
-                ProviderEventData::AssistantMessage { text } => self.final_answer.push_str(text),
-                ProviderEventData::PlanProposed { text, .. } => {
+                ProviderEventData::AssistantMessage { text } => {
+                    self.final_answer.push_str(text);
+                    if !self.plan.question_route.is_native() {
+                        self.last_parent_message = Some(text.clone());
+                    }
+                }
+                ProviderEventData::PlanProposed { text, source }
+                    if *source != PlanSource::StructuredTurn =>
+                {
                     self.proposed_plan = Some(text.clone())
                 }
                 _ => {}
@@ -381,6 +397,7 @@ impl TurnExecution {
             effort: scope.effort.clone(),
         })?;
         session.set_checkout_root(&checkout.root);
+        session.set_question_route(self.plan.question_route);
         let review = self.app.block_on(self.store.resolve_launch_review(
             self.plan.run.checkout_id.clone(),
             &checkout,
@@ -558,15 +575,10 @@ impl TurnExecution {
                     )?;
                 }
                 Ok(Command::Question(id, answer, reply)) => {
-                    let decision = if answer.get("action").is_none_or(|action| action == "accept") {
-                        Decision::QuestionAnswer(id.clone())
-                    } else {
-                        Decision::QuestionDismissal
-                    };
                     self.deliver_decision(
                         process,
                         session.respond_question(&id, answer),
-                        decision,
+                        Decision::Question(id),
                         reply,
                     )?;
                 }
@@ -689,6 +701,10 @@ impl TurnExecution {
                 .resolve_capability_assessment(scope.clone(), descriptors),
         )?;
         let mut input = format_input(&self.plan.input)?;
+        if !self.plan.question_route.is_native() {
+            input.text.push_str("\n\n");
+            input.text.push_str(STRUCTURED_PLANNING_PROMPT);
+        }
         let (mut assessment, attachments) =
             self.prepare_attachments(runner, session, checkout, &capabilities, &native_history)?;
         if let Some(blocked) = assessment.take_if(|report| !report.blockers.is_empty()) {
@@ -751,7 +767,7 @@ impl TurnExecution {
             )
         });
         let snapshot = ContextSnapshot {
-            version: 9,
+            version: 10,
             context_id: self.plan.context_id.clone(),
             scope: self.plan.scope.clone(),
             base_commit: repository::base_commit(&self.plan.scope.checkout)?,
@@ -765,6 +781,7 @@ impl TurnExecution {
             requested_skill,
             plugin_inventory: self.plugin_inventory.clone(),
             attachments,
+            question_route: self.plan.question_route,
         };
         let frames = update
             .outbound
@@ -796,6 +813,46 @@ impl TurnExecution {
             self.record(event, EventSource::Application)?;
         }
         Ok(())
+    }
+
+    fn complete_structured_planning(&mut self) -> Result<()> {
+        let text = self
+            .last_parent_message
+            .as_deref()
+            .unwrap_or(&self.streamed_answer);
+        let result = StructuredPlan::decode(text);
+        let data = match result {
+            Ok(StructuredPlan::Question { form, normalized }) => ProviderEventData::Question {
+                request_id: RequestId::Text(format!("structured:{}", self.plan.run.turn_id)),
+                form,
+                normalized: Some(normalized),
+                route: self.plan.question_route,
+            },
+            Ok(StructuredPlan::Plan(text)) => ProviderEventData::PlanProposed {
+                text,
+                source: PlanSource::StructuredTurn,
+            },
+            Err(error) => {
+                self.record(
+                    ProviderEvent {
+                        location: ProviderLocation::default(),
+                        data: ProviderEventData::QuestionUnavailable {
+                            request_id: None,
+                            reason: diagnostics::preview(&format!("{error:#}")),
+                        },
+                    },
+                    EventSource::Application,
+                )?;
+                return Err(error).context("invalid structured planning result");
+            }
+        };
+        self.record(
+            ProviderEvent {
+                location: ProviderLocation::default(),
+                data,
+            },
+            EventSource::Application,
+        )
     }
 
     fn prepare_attachments(
@@ -942,43 +999,29 @@ impl TurnExecution {
     ) -> Result<()> {
         match update {
             Ok(update) => {
-                let applied: Result<()> = (|| {
-                    let request_event_seq = if let Decision::Permission(id, approval) = &decision {
-                        Some(self.app.block_on(self.store.prepare_permission_decision(
+                let applied: Result<()> = match decision {
+                    Decision::Permission(id, approval) => (|| {
+                        let seq = self.app.block_on(self.store.prepare_permission_decision(
                             self.plan.run.id.clone(),
                             self.plan.run.turn_id.clone(),
-                            id.clone(),
-                            *approval,
+                            id,
+                            approval,
                             PermissionRoute::Native,
-                        ))?)
-                    } else {
-                        None
-                    };
-                    let applied = self.record_update(process, update, EventSource::Application);
-                    let settled = if let Some(seq) = request_event_seq {
+                        ))?;
+                        let applied = self.record_update(process, update, EventSource::Application);
                         let delivery = if applied.is_ok() {
                             Delivery::Submitted
                         } else {
                             Delivery::Unconfirmed
                         };
-                        self.app
-                            .block_on(self.store.settle_permission_decision(seq, delivery))
-                    } else {
-                        Ok(())
-                    };
-                    applied?;
-                    settled?;
-                    if let Decision::QuestionAnswer(request_id) = decision {
-                        self.record(
-                            ProviderEvent {
-                                location: ProviderLocation::default(),
-                                data: ProviderEventData::QuestionAnswerSubmitted { request_id },
-                            },
-                            EventSource::Application,
-                        )?;
-                    }
-                    Ok(())
-                })();
+                        let settled = self
+                            .app
+                            .block_on(self.store.settle_permission_decision(seq, delivery));
+                        applied?;
+                        settled
+                    })(),
+                    Decision::Question(id) => self.write_question_reply(process, update, id),
+                };
                 let _ = reply.send(
                     applied
                         .as_ref()
@@ -992,6 +1035,50 @@ impl TurnExecution {
             }
         }
         Ok(())
+    }
+    fn write_question_reply(
+        &mut self,
+        process: &mut CapturedProcess,
+        update: AdapterUpdate,
+        id: RequestId,
+    ) -> Result<()> {
+        let AdapterUpdate { outbound, events } = update;
+        let [event] = events.as_slice() else {
+            anyhow::bail!("expected one question reply record")
+        };
+        let ProviderEventData::QuestionReplyPrepared {
+            request_id,
+            reply,
+            frame,
+        } = &event.data
+        else {
+            anyhow::bail!("adapter omitted question reply evidence")
+        };
+        ensure!(
+            *request_id == id
+                && matches!(outbound.as_slice(), [outbound] if frame == outbound.as_bytes()),
+            "adapter question response does not match its request or recorded frame"
+        );
+        let action = reply.action;
+        self.record(event.clone(), EventSource::Application)?;
+        let write = bounded_write(process, outbound);
+        let delivery = if write.is_ok() {
+            Delivery::Submitted
+        } else {
+            Delivery::Unconfirmed
+        };
+        self.record(
+            ProviderEvent {
+                location: ProviderLocation::default(),
+                data: ProviderEventData::QuestionReplySettled {
+                    request_id: id,
+                    action,
+                    delivery,
+                },
+            },
+            EventSource::Application,
+        )?;
+        write
     }
 }
 
