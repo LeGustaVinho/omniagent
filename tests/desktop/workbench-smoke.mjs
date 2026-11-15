@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { access, copyFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { remote } from "webdriverio";
@@ -49,6 +50,11 @@ async function startSession(application) {
     capabilities: { browserName: "webview2", "tauri:options": { application } },
   });
   await browser.setTimeout({ script: 8_000 });
+  await waitForRuntime(browser);
+  return browser;
+}
+
+async function waitForRuntime(browser) {
   await browser.waitUntil(() => browser.execute(async () => {
     if (location.origin === "null" || typeof window.__TAURI_INTERNALS__?.invoke !== "function") return false;
     try {
@@ -57,7 +63,20 @@ async function startSession(application) {
       return false;
     }
   }), { timeout: 15_000 });
-  return browser;
+}
+
+async function showTestApplication(browser, application) {
+  const reopen = spawn(application, [], { stdio: "ignore", windowsHide: true });
+  const stopped = new Promise((resolve, reject) => {
+    reopen.once("error", reject);
+    reopen.once("exit", resolve);
+  });
+  try {
+    await browser.waitUntil(() => invoke(browser, "plugin:window|is_visible", { label: "main" }));
+    assert.equal(await stopped, 0);
+  } finally {
+    if (reopen.exitCode === null) reopen.kill();
+  }
 }
 
 async function selectCheckout(browser, checkout) {
@@ -386,7 +405,128 @@ function runRows(browser, runId) {
   }, runId.slice(0, 8));
 }
 
-test("registers a Git checkout and runs a fixture in the Windows desktop", { timeout: 150_000 }, async (t) => {
+async function verifyDetachedJob(browser, application, scratch) {
+  const repo = join(scratch, "Detached queue checkout");
+  git(scratch, "init", "-q", repo);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Fixture");
+  const checkout = await invoke(browser, "register_project", { directory: repo });
+  await selectCheckout(browser, checkout);
+  const page = await browser.getUrl();
+  const release = join(repo, "release-desktop-jobs");
+  const profile = (await invoke(browser, "cli_executables")).find(({ provider }) => provider === "codex");
+  assert.ok(profile);
+  await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
+
+  let detached = false;
+  try {
+    const models = await invoke(browser, "conversation_models", { provider: "codex" });
+    const fixture = models.find(({ option }) => option.selection.modelId === "desktop-fixture" && option.selectable);
+    assert.ok(fixture, "the desktop fixture must supply the configured provider");
+    const queue = () => invoke(browser, "project_job_queue", { projectId: checkout.projectId });
+    const initial = await queue();
+    assert.equal(initial.settings.paused, false);
+    assert.equal(initial.active, 0);
+    const capacity = initial.settings.capacity;
+    assert.ok(capacity > 0);
+
+    async function enqueue(title, text) {
+      const chat = await invoke(browser, "create_conversation", { checkoutId: checkout.checkoutId, title });
+      await invoke(browser, "save_conversation_draft", { conversationId: chat.id, text });
+      const job = await invoke(browser, "start_conversation_turn", {
+        conversationId: chat.id, selection: fixture.option.selection, mode: "read_only", text,
+      });
+      return { chat, job };
+    }
+
+    const holders = [];
+    for (let slot = 1; slot <= capacity; slot++) {
+      holders.push((await enqueue(`Holder ${slot}`, `Hold desktop slot ${slot}`)).job);
+    }
+    const markers = holders.map((_, index) => join(repo, `desktop-slot-${index + 1}`));
+    await browser.waitUntil(async () => {
+      const ready = await Promise.all(markers.map((marker) => access(marker).then(() => true, () => false)));
+      return ready.every(Boolean);
+    }, { timeout: 45_000, timeoutMsg: "The fixture jobs did not fill the execution capacity" });
+
+    const { chat, job } = await enqueue("Detached queued job", "Run the queued job while detached");
+    const blocked = await queue();
+    assert.equal(blocked.active, capacity);
+    assert.ok(holders.every((holder) =>
+      blocked.jobs.find((entry) => entry.job.id === holder.id)?.job.latestAttempt?.status === "running"
+    ));
+    const waiting = blocked.jobs.find((entry) => entry.job.id === job.id);
+    assert.deepEqual(waiting.blockers, [{ type: "capacity", active: capacity, limit: capacity }]);
+    assert.equal(waiting.job.latestAttempt, null);
+    assert.equal(await invoke(browser, "latest_conversation_run", { conversationId: chat.id }), null);
+
+    async function openConversation() {
+      await chooseConversations(browser);
+      await browser.$(`button=${chat.title}`).click();
+      return browser.$(`section[aria-label="${chat.title}"]`);
+    }
+    const before = await openConversation();
+    await before.$(`p=Waiting for an execution slot (${capacity} of ${capacity} in use).`).waitForDisplayed();
+
+    const visible = () => invoke(browser, "plugin:window|is_visible", { label: "main" });
+    await invoke(browser, "plugin:window|close", { label: "main" });
+    await browser.waitUntil(async () => !(await visible()));
+    detached = true;
+    await browser.url("about:blank");
+    assert.equal(await browser.getUrl(), "about:blank");
+    assert.equal(await browser.execute(() => document.getElementById("root") === null), true);
+    await assert.rejects(access(join(repo, "detached-job-dispatched")), { code: "ENOENT" });
+
+    // After unloading the application's document, use the test fixture's file gate and
+    // committed SQLite rows as witnesses. No app IPC or UI subscriber drives this job.
+    await writeFile(release, "");
+    const database = new DatabaseSync(join(process.env.LOCALAPPDATA, identifier, "omniagent.sqlite3"), { readOnly: true });
+    let runtime;
+    try {
+      const attempt = database.prepare(`
+        SELECT attempts.run_id AS runId, attempts.ordinal, runs.status
+        FROM job_attempts AS attempts JOIN runs ON runs.id = attempts.run_id
+        WHERE attempts.job_id = ? ORDER BY attempts.ordinal DESC LIMIT 1
+      `);
+      await browser.waitUntil(() => {
+        runtime = attempt.get(job.id);
+        return ["succeeded", "failed", "cancelled", "interrupted"].includes(runtime?.status);
+      }, { timeout: 45_000, timeoutMsg: "No terminal result was committed with the WebView detached" });
+    } finally {
+      database.close();
+    }
+    assert.equal(runtime.status, "succeeded");
+    assert.equal(runtime.ordinal, 1);
+    await access(join(repo, "detached-job-dispatched"));
+    assert.equal(await browser.getUrl(), "about:blank");
+
+    await browser.url(page);
+    detached = false;
+    await waitForRuntime(browser);
+    await showTestApplication(browser, application);
+    const restored = await queue();
+    const completed = restored.jobs.find((entry) => entry.job.id === job.id);
+    assert.deepEqual(completed.blockers, []);
+    assert.equal(completed.job.latestAttempt.runId, runtime.runId);
+    assert.equal(completed.job.latestAttempt.ordinal, runtime.ordinal);
+    assert.equal(completed.job.latestAttempt.status, runtime.status);
+    const after = await openConversation();
+    await after.$("p=The queued job ran with the WebView detached.").waitForDisplayed();
+    await after.$("button=Activity").click();
+    const status = browser.$('[aria-label="Conversation activity"] dl [role="status"]');
+    await status.waitForDisplayed();
+    assert.equal(await status.getText(), "Completed");
+  } finally {
+    await writeFile(release, "");
+    if (detached) {
+      await browser.url(page);
+      await waitForRuntime(browser);
+    }
+    await invoke(browser, "set_cli_executable", { provider: "codex", executable: profile.executable });
+  }
+}
+
+test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => {
   assert.equal(process.platform, "win32");
   const root = await realpath(tmpdir());
   const scratch = await mkdtemp(join(root, "omniagent-webdriver-"));
@@ -496,17 +636,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     });
     // Starting the same executable forwards to the visible window in the
     // existing single instance. The attached WebDriver session keeps its page.
-    const reopen = spawn(application, [], { stdio: "ignore", windowsHide: true });
-    const stopped = new Promise((resolve, reject) => {
-      reopen.once("error", reject);
-      reopen.once("exit", resolve);
-    });
-    try {
-      await browser.waitUntil(visible);
-      assert.equal(await stopped, 0);
-    } finally {
-      if (reopen.exitCode === null) reopen.kill();
-    }
+    await showTestApplication(browser, application);
     await browser.waitUntil(async () => (await runRows(browser, runId)).includes("Succeeded"));
     const history = (await invoke(browser, "run_snapshot", scope)).recentEvents.filter((event) => event.runId === runId);
     assert.equal(new Set(history.map((event) => event.seq)).size, history.length);
@@ -742,6 +872,9 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       }, { timeout: 15_000 });
     }
     await checkSimulation(browser, main);
+    await t.test("dispatches queued work while the WebView is detached and restores the same attempt", async () => {
+      await verifyDetachedJob(browser, application, scratch);
+    });
   } catch (error) {
     if (browser && process.env.OMNIAGENT_UI_CAPTURE_DIR) {
       await capture(browser, "failure").catch(() => undefined);
