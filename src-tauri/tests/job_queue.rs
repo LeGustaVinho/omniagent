@@ -640,6 +640,15 @@ async fn an_occupied_managed_worktree_and_a_declined_approval_block_the_same_job
         .claim_next_job(environment(false))
         .await?
         .context("first writer did not claim")?;
+    let snapshot = store
+        .inspect_project_queue(worktree.project_id.clone(), environment(false))
+        .await?;
+    assert_eq!(snapshot.active, 1);
+    assert_eq!(snapshot.settings.capacity, 3);
+    assert_eq!(snapshot.jobs.len(), 3);
+    for (entry, job) in snapshot.jobs.iter().zip([&first, &second, &declined]) {
+        assert_eq!(entry, &inspect(job).await?.unwrap());
+    }
     assert_eq!(
         inspect(&first)
             .await?

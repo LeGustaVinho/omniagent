@@ -80,6 +80,14 @@ pub struct JobInspection {
     pub blockers: Vec<AdmissionBlocker>,
 }
 
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectQueue {
+    pub settings: QueueSettings,
+    pub active: u32,
+    pub jobs: Vec<JobInspection>,
+}
+
 impl Store {
     pub async fn enqueue_conversation_turn(
         &self,
@@ -196,6 +204,35 @@ impl Store {
             load_job(&tx, &project, &id)?
                 .map(|job| inspect(&tx, job, &env))
                 .transpose()
+        })
+        .await
+    }
+
+    pub async fn inspect_project_queue(
+        &self,
+        project_id: String,
+        env: AdmissionEnvironment,
+    ) -> Result<ProjectQueue> {
+        self.execute(move |db| {
+            let tx = db.transaction()?;
+            let settings = queue_settings(&tx)?;
+            let active = occupancy(&tx)?;
+            let mut statement = tx.prepare(
+                "SELECT id FROM jobs WHERE project_id = ?1 ORDER BY priority DESC, sequence",
+            )?;
+            let jobs = statement
+                .query_map([&project_id], |row| row.get::<_, String>(0))?
+                .map(|id| {
+                    let job = load_job(&tx, &project_id, &id?)?
+                        .context("job disappeared from queue snapshot")?;
+                    inspect(&tx, job, &env)
+                })
+                .collect::<Result<_>>()?;
+            Ok(ProjectQueue {
+                settings,
+                active,
+                jobs,
+            })
         })
         .await
     }

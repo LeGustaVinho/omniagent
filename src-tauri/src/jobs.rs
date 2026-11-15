@@ -8,7 +8,9 @@ use crate::{protection, providers::SessionMode, runs::RunStatus, store::Store};
 
 mod admission;
 mod scheduler;
-pub use admission::{AdmissionBlocker, AdmissionEnvironment, JobInspection, QueueSettings};
+pub use admission::{
+    AdmissionBlocker, AdmissionEnvironment, JobInspection, ProjectQueue, QueueSettings,
+};
 pub use scheduler::JobScheduler;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

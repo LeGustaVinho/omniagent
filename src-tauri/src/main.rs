@@ -90,6 +90,7 @@ fn main() {
             conversation_runtime::start_conversation_turn,
             conversation_runtime::latest_conversation_run,
             conversation_runtime::latest_conversation_job,
+            conversation_runtime::project_job_queue,
             conversation_runtime::cancel_conversation_job,
             conversation_runtime::stop_conversation_turn,
             conversation_runtime::approve_conversation_input,

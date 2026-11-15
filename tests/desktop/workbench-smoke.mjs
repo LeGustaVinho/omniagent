@@ -383,6 +383,11 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       await panel.$("button=Send").click();
       await panel.$('div[aria-label="Streaming response"]').waitForDisplayed({ timeout: 45_000 });
       const { id: activeRun } = await invoke(browser, "latest_conversation_run", { conversationId: conversation.id });
+      const conversationJob = await invoke(browser, "latest_conversation_job", { conversationId: conversation.id });
+      assert.equal(conversationJob.job.latestAttempt.runId, activeRun);
+      const queue = await invoke(browser, "project_job_queue", { projectId: checkout.projectId });
+      assert.ok(queue.active >= 1);
+      assert.equal(queue.jobs.find(({ job }) => job.id === conversationJob.job.id).job.latestAttempt.runId, activeRun);
       const historySelector = `${selector} [aria-label="Conversation history"]`;
       await browser.waitUntil(() => browser.execute((historySelector) => {
         const history = document.querySelector(historySelector);

@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::SessionScope,
     diagnostics,
-    jobs::{Job, JobContext, JobInspection, JobScheduler, QueueState},
+    jobs::{Job, JobContext, JobInspection, JobScheduler, ProjectQueue, QueueState},
     model_catalog::ModelSelection,
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionMode,
@@ -104,6 +104,18 @@ pub async fn latest_conversation_job(
 ) -> Result<Option<JobInspection>, String> {
     store
         .latest_conversation_job(conversation_id, scheduler.environment())
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn project_job_queue(
+    store: State<'_, Store>,
+    scheduler: State<'_, JobScheduler>,
+    project_id: String,
+) -> Result<ProjectQueue, String> {
+    store
+        .inspect_project_queue(project_id, scheduler.environment())
         .await
         .map_err(ui_error)
 }
