@@ -392,6 +392,7 @@ impl ClaudeSession {
                 operation: name.to_owned(),
                 description: string(request, "decision_reason")
                     .map(|text| diagnostics::preview(&text)),
+                prompt: None,
             }
         };
         let mut event = self.event(frame, data);

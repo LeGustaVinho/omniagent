@@ -1,4 +1,5 @@
 use std::{
+    path::PathBuf,
     sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
@@ -9,9 +10,10 @@ use serde_json::Value;
 use tokio::{runtime::Handle, sync::oneshot, task::JoinHandle};
 
 use crate::{
-    conversations::{AttemptPlan, MessageRevision, MessageRole},
+    conversations::{AttemptPlan, MessageRevision, MessageRole, PermissionRoute},
     diagnostics,
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
+    mcp_bridge::{PERMISSION_PREFIX, Registration, RunBridge},
     process::TerminalOutcome,
     process_io::CapturedProcess,
     repository::{self, CheckoutLayout},
@@ -22,8 +24,8 @@ use crate::{
 
 use super::{
     AdapterUpdate, ApprovalDecision, CliSession, Provider, ProviderEvent, ProviderEventData,
-    ProviderLocation, RequestId, SessionIntent, SessionRequest, TurnInput, TurnOutcome,
-    WireMessage,
+    ProviderLocation, RequestId, SessionIntent, SessionMode, SessionRequest, TurnInput,
+    TurnOutcome, WireMessage,
     capabilities::{CapabilityScope, ReportedCapabilities},
     configuration,
     launch_scope::{ScopedLaunch, ScopedLaunchEvidence},
@@ -178,7 +180,12 @@ impl ManagedTurn {
 
 /// Launch one process for the admitted attempt. The caller retains the handle
 /// to submit decisions or cancel. Dropping it requests a stop.
-pub fn start_managed_turn(store: Store, runner: Arc<dyn Runner>, plan: AttemptPlan) -> ManagedTurn {
+pub fn start_managed_turn(
+    store: Store,
+    runner: Arc<dyn Runner>,
+    plan: AttemptPlan,
+    bridge_executable: Option<PathBuf>,
+) -> ManagedTurn {
     let id = plan.run.id.clone();
     let handle = Handle::current();
     let (commands, receiver) = mpsc::sync_channel(16);
@@ -196,7 +203,7 @@ pub fn start_managed_turn(store: Store, runner: Arc<dyn Runner>, plan: AttemptPl
             executable_revision: None,
             platform: None,
         };
-        let outcome = execution.run(runner.as_ref(), &receiver);
+        let outcome = execution.run(runner.as_ref(), &receiver, bridge_executable);
         let status = match outcome {
             Ok(status) => status,
             Err(error) => {
@@ -251,8 +258,12 @@ impl TurnExecution {
         let mut scope_changed = false;
         // Child traffic belongs to the run timeline, not the parent transcript.
         if event.location.parent_item_id.is_none() {
-            if source == EventSource::Provider {
+            if source == EventSource::Provider
+                || matches!(event.data, ProviderEventData::BridgeRegistration { .. })
+            {
                 scope_changed = self.reported.observe(&event.data);
+            }
+            if source == EventSource::Provider {
                 if let ProviderEventData::SkillsReported { catalog } = &event.data {
                     self.reported_skills = Some(catalog.clone());
                 }
@@ -290,10 +301,24 @@ impl TurnExecution {
         Ok(())
     }
 
+    fn record_bridge_registration(&mut self, registration: Registration) -> Result<()> {
+        if self.reported.bridge_registration.as_ref() != Some(&registration) {
+            self.record(
+                ProviderEvent {
+                    location: ProviderLocation::default(),
+                    data: ProviderEventData::BridgeRegistration { registration },
+                },
+                EventSource::Application,
+            )?;
+        }
+        Ok(())
+    }
+
     fn run(
         &mut self,
         runner: &dyn Runner,
         commands: &mpsc::Receiver<Command>,
+        bridge_executable: Option<PathBuf>,
     ) -> Result<RunStatus> {
         let scope = self.plan.scope.clone();
         ensure!(
@@ -318,12 +343,46 @@ impl TurnExecution {
             &checkout,
             scope.provider,
         ))?;
+        let bridge = bridge_executable
+            .map(|executable| -> Result<_> {
+                let bridge = self.app.block_on(RunBridge::start_for_run(
+                    &self.store,
+                    self.plan.run.id.clone(),
+                    scope.provider == Provider::Claude && scope.mode == SessionMode::ApprovedWrite,
+                ))?;
+                let registration = bridge.launch(&executable)?;
+                Ok((bridge, registration))
+            })
+            .transpose();
+        let bridge = match bridge {
+            Ok(Some((bridge, registration))) => {
+                self.record_bridge_registration(bridge.registration())?;
+                Some((bridge, registration))
+            }
+            Ok(None) => {
+                self.record_bridge_registration(Registration::Unavailable {
+                    reason: "The selected runner has no MCP helper".into(),
+                })?;
+                None
+            }
+            Err(error) => {
+                self.record_bridge_registration(Registration::Unavailable {
+                    reason: diagnostics::preview(&error.to_string()),
+                })?;
+                None
+            }
+        };
+        let registration = bridge.as_ref().map(|(_, registration)| registration);
+        if let Some(registration) = registration {
+            session.configure_mcp_bridge(registration.clone());
+        }
         let mut launch = ScopedLaunch::prepare(
             scope.provider,
             &scope.cli_version,
             &checkout,
             &review,
             session.arguments(),
+            registration,
         )?;
         if let Some(instructions) = launch.protocol_instructions.take() {
             session.set_workspace_instructions(instructions)?;
@@ -354,11 +413,29 @@ impl TurnExecution {
         self.app
             .block_on(self.store.mark_agent_running(self.plan.run.id.clone()))?;
         let control = process.control.clone();
-        let run = self.drive(&mut process, session.as_mut(), commands, &checkout);
+        let endpoint = bridge.as_ref().map(|(endpoint, _)| endpoint);
+        let run = self.drive(
+            &mut process,
+            session.as_mut(),
+            commands,
+            &checkout,
+            endpoint,
+        );
         let stopped = control.cancel();
         let ended = control.wait();
         stopped?;
         ended?;
+        if let Some(endpoint) = endpoint {
+            let registration = match endpoint.registration() {
+                Registration::Configured if matches!(run, Ok(RunStatus::Succeeded)) => {
+                    Registration::Unavailable {
+                        reason: "The CLI did not list the scoped tools during this attempt".into(),
+                    }
+                }
+                registration => registration,
+            };
+            self.record_bridge_registration(registration)?;
+        }
         run
     }
 
@@ -368,6 +445,7 @@ impl TurnExecution {
         session: &mut dyn CliSession,
         commands: &mpsc::Receiver<Command>,
         checkout: &CheckoutLayout,
+        bridge: Option<&RunBridge>,
     ) -> Result<RunStatus> {
         bounded_write(process, session.start()?.outbound)?;
         let startup_deadline = Instant::now() + Duration::from_secs(20);
@@ -377,6 +455,9 @@ impl TurnExecution {
         let mut wait_for_configuration = false;
         let mut wait_for_skills = false;
         loop {
+            if let Some(bridge) = bridge {
+                self.record_bridge_registration(bridge.registration())?;
+            }
             let command = commands.try_recv();
             match command {
                 Ok(Command::Interrupt) | Err(mpsc::TryRecvError::Disconnected) => {
@@ -392,6 +473,17 @@ impl TurnExecution {
                     });
                 }
                 Ok(Command::Approval(id, answer, reply)) => {
+                    if matches!(&id, RequestId::Text(id) if id.starts_with(PERMISSION_PREFIX)) {
+                        let result = self.app.block_on(self.store.prepare_permission_decision(
+                            self.plan.run.id.clone(),
+                            self.plan.run.turn_id.clone(),
+                            id,
+                            answer,
+                            PermissionRoute::ClaudePrompt,
+                        ));
+                        let _ = reply.send(result.map(|_| ()));
+                        continue;
+                    }
                     self.deliver_decision(
                         process,
                         session.respond_approval(&id, answer),
@@ -596,6 +688,7 @@ impl TurnExecution {
                                 self.plan.run.turn_id.clone(),
                                 id,
                                 decision,
+                                PermissionRoute::Native,
                             ))
                         })
                         .transpose()?;

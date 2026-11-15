@@ -4,6 +4,10 @@ use std::{
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
     time::Duration,
 };
 
@@ -14,7 +18,7 @@ use rmcp::{
     service::{RequestContext, RoleServer},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::json;
+use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use tempfile::TempDir;
 use tokio::{
@@ -26,14 +30,25 @@ use tokio::{
 use uuid::Uuid;
 use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 
-use crate::{protection, runs, store::Store};
+use crate::{
+    diagnostics,
+    dispatch::{Delivery, EventSource},
+    protection,
+    providers::{ApprovalDecision, ProviderEvent, ProviderEventData, ProviderLocation, RequestId},
+    runs,
+    store::Store,
+};
 
 pub const HELPER_FLAG: &str = "--mcp-bridge";
+pub(crate) const SERVER_NAME: &str = "omniagent_runtime";
 const PIPE_PREFIX: &str = r"\\.\pipe\omniagent-run-";
-const INSPECT_SCOPE: &str = "inspect_run_scope";
+pub(crate) const INSPECT_SCOPE: &str = "inspect_run_scope";
+pub(crate) const REQUEST_PERMISSION: &str = "request_permission";
+pub(crate) const PERMISSION_PREFIX: &str = "omniagent-permission:";
 const VERSION: u8 = 1;
 const MAX_FRAME_BYTES: usize = 16 * 1024;
 const DEADLINE: Duration = Duration::from_secs(3);
+const PERMISSION_DEADLINE: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,12 +67,24 @@ struct Ticket {
     version: u8,
     pipe: String,
     credential: Credential,
+    #[serde(default)]
+    permission_prompt: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PermissionPrompt {
+    tool_name: String,
+    input: serde_json::Map<String, Value>,
+    tool_use_id: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Operation {
+    ListTools,
     InspectScope,
+    RequestPermission(PermissionPrompt),
+    PollPermission { id: String },
 }
 
 #[derive(Deserialize, Serialize)]
@@ -69,9 +96,12 @@ struct Request {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(tag = "status", content = "scope", rename_all = "snake_case")]
+#[serde(tag = "status", content = "payload", rename_all = "snake_case")]
 enum Response {
     Scope(RunScope),
+    PermissionRequested(String),
+    PermissionPending,
+    PermissionDecided(ApprovalDecision),
     Unavailable,
 }
 
@@ -79,11 +109,44 @@ enum Response {
 pub struct RunBridge {
     task: JoinHandle<()>,
     ticket_path: PathBuf,
+    observed: Arc<AtomicU8>,
+    permission_prompt: bool,
     _directory: TempDir,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum Registration {
+    Configured,
+    ToolsListed,
+    ScopeVerified,
+    Unavailable { reason: String },
+}
+
+#[derive(Clone, Serialize)]
+pub struct BridgeLaunch {
+    pub command: String,
+    pub args: [String; 2],
+    #[serde(skip)]
+    pub(crate) permission_prompt: bool,
+}
+
+impl BridgeLaunch {
+    pub(crate) fn acp_servers(&self) -> Value {
+        json!([{"name": SERVER_NAME, "command": self.command, "args": self.args, "env": []}])
+    }
 }
 
 impl RunBridge {
     pub async fn start(store: &Store, run_id: String) -> Result<Self> {
+        Self::start_for_run(store, run_id, false).await
+    }
+
+    pub(crate) async fn start_for_run(
+        store: &Store,
+        run_id: String,
+        permission_prompt: bool,
+    ) -> Result<Self> {
         let scope = active_scope(store, run_id)
             .await?
             .context("cannot bind an MCP bridge to an inactive run")?;
@@ -91,6 +154,7 @@ impl RunBridge {
             version: VERSION,
             pipe: format!("{PIPE_PREFIX}{}", Uuid::new_v4()),
             credential: *Uuid::new_v4().as_bytes(),
+            permission_prompt,
         };
         let endpoint = security::current_user_pipe(&ticket.pipe)?;
         let directory = tempfile::Builder::new()
@@ -101,21 +165,59 @@ impl RunBridge {
             &ticket_path,
             protection::protect(&serde_json::to_vec(&ticket)?)?,
         )?;
+        let observed = Arc::new(AtomicU8::new(0));
         let task = tokio::spawn(serve_pipe(
             endpoint,
             store.clone(),
             scope,
-            ticket.credential,
+            ticket,
+            observed.clone(),
         ));
         Ok(Self {
             task,
             ticket_path,
+            observed,
+            permission_prompt,
             _directory: directory,
         })
     }
 
     pub fn ticket_path(&self) -> &Path {
         &self.ticket_path
+    }
+
+    pub(crate) fn launch(&self, executable: &Path) -> Result<BridgeLaunch> {
+        ensure!(
+            executable.is_absolute() && executable.is_file(),
+            "MCP helper executable is unavailable"
+        );
+        Ok(BridgeLaunch {
+            command: executable
+                .to_str()
+                .context("MCP helper path is not Unicode")?
+                .into(),
+            args: [
+                HELPER_FLAG.into(),
+                self.ticket_path
+                    .to_str()
+                    .context("MCP ticket path is not Unicode")?
+                    .into(),
+            ],
+            permission_prompt: self.permission_prompt,
+        })
+    }
+
+    pub(crate) fn registration(&self) -> Registration {
+        if self.task.is_finished() {
+            return Registration::Unavailable {
+                reason: "The local bridge stopped".into(),
+            };
+        }
+        match self.observed.load(Ordering::Acquire) {
+            0 => Registration::Configured,
+            1 => Registration::ToolsListed,
+            _ => Registration::ScopeVerified,
+        }
     }
 }
 
@@ -151,26 +253,57 @@ async fn serve_pipe(
     mut endpoint: NamedPipeServer,
     store: Store,
     scope: RunScope,
-    credential: Credential,
+    ticket: Ticket,
+    observed: Arc<AtomicU8>,
 ) {
     while endpoint.connect().await.is_ok() {
         let _ = timeout(DEADLINE, async {
             let request: Request = read_frame(&mut endpoint).await?;
-            let allowed =
-                request.version == VERSION && bool::from(request.credential.ct_eq(&credential));
-            let response = match request.operation {
-                Operation::InspectScope
-                    if allowed
-                        && active_scope(&store, scope.run_id.clone()).await?
-                            == Some(scope.clone()) =>
-                {
-                    Response::Scope(scope.clone())
+            let allowed = request.version == VERSION
+                && bool::from(request.credential.ct_eq(&ticket.credential));
+            let (response, decision) = if allowed
+                && active_scope(&store, scope.run_id.clone()).await? == Some(scope.clone())
+            {
+                match request.operation {
+                    Operation::ListTools => {
+                        observed.fetch_max(1, Ordering::Release);
+                        (Response::Scope(scope.clone()), None)
+                    }
+                    Operation::InspectScope => {
+                        observed.fetch_max(2, Ordering::Release);
+                        (Response::Scope(scope.clone()), None)
+                    }
+                    Operation::RequestPermission(prompt) if ticket.permission_prompt => {
+                        (record_permission(&store, &scope, prompt).await?, None)
+                    }
+                    Operation::PollPermission { id } if ticket.permission_prompt => match store
+                        .pending_claude_permission(
+                            scope.run_id.clone(),
+                            scope.turn_id.clone(),
+                            RequestId::Text(id),
+                        )
+                        .await?
+                    {
+                        Some((seq, Some(decision))) => {
+                            (Response::PermissionDecided(decision), Some(seq))
+                        }
+                        Some((_, None)) => (Response::PermissionPending, None),
+                        None => (Response::Unavailable, None),
+                    },
+                    _ => (Response::Unavailable, None),
                 }
-                Operation::InspectScope => Response::Unavailable,
+            } else {
+                (Response::Unavailable, None)
             };
             write_frame(&mut endpoint, &response).await?;
             // DisconnectNamedPipe discards unread bytes. Wait for the client to receive the reply.
-            endpoint.read_u8().await?;
+            if endpoint.read_u8().await? == 1
+                && let Some(seq) = decision
+            {
+                store
+                    .settle_permission_decision(seq, Delivery::Submitted)
+                    .await?;
+            }
             Ok::<_, anyhow::Error>(())
         })
         .await;
@@ -180,7 +313,45 @@ async fn serve_pipe(
     }
 }
 
-async fn inspect(ticket: &Ticket) -> Result<RunScope> {
+async fn record_permission(
+    store: &Store,
+    scope: &RunScope,
+    prompt: PermissionPrompt,
+) -> Result<Response> {
+    ensure!(
+        !prompt.tool_name.trim().is_empty() && prompt.tool_name.len() <= 256,
+        "invalid permission tool name"
+    );
+    let id = format!("{PERMISSION_PREFIX}{}", Uuid::new_v4());
+    store
+        .record_agent_observation(
+            scope.run_id.clone(),
+            EventSource::Provider,
+            ProviderEvent {
+                location: ProviderLocation {
+                    item_id: prompt.tool_use_id.clone(),
+                    ..Default::default()
+                },
+                data: ProviderEventData::Approval {
+                    request_id: RequestId::Text(id.clone()),
+                    operation: diagnostics::preview(&prompt.tool_name),
+                    description: None,
+                    prompt: Some(prompt),
+                },
+            },
+        )
+        .await?;
+    Ok(Response::PermissionRequested(id))
+}
+
+async fn read_scope(ticket: &Ticket, operation: Operation) -> Result<RunScope> {
+    match exchange(ticket, operation).await? {
+        Response::Scope(scope) => Ok(scope),
+        _ => anyhow::bail!("MCP bridge scope unavailable"),
+    }
+}
+
+async fn exchange(ticket: &Ticket, operation: Operation) -> Result<Response> {
     timeout(DEADLINE, async {
         let mut pipe = loop {
             match ClientOptions::new().open(&ticket.pipe) {
@@ -196,16 +367,13 @@ async fn inspect(ticket: &Ticket) -> Result<RunScope> {
             &Request {
                 version: ticket.version,
                 credential: ticket.credential,
-                operation: Operation::InspectScope,
+                operation,
             },
         )
         .await?;
         let response: Response = read_frame(&mut pipe).await?;
         pipe.write_u8(1).await?;
-        match response {
-            Response::Scope(scope) => Ok(scope),
-            Response::Unavailable => anyhow::bail!("MCP bridge scope unavailable"),
-        }
+        Ok(response)
     })
     .await?
 }
@@ -258,6 +426,27 @@ fn read_ticket(path: &Path) -> Result<Ticket> {
     Ok(ticket)
 }
 
+async fn permission_decision(
+    ticket: &Ticket,
+    prompt: PermissionPrompt,
+) -> Result<ApprovalDecision> {
+    let Response::PermissionRequested(id) =
+        exchange(ticket, Operation::RequestPermission(prompt)).await?
+    else {
+        anyhow::bail!("MCP bridge rejected permission request");
+    };
+    timeout(PERMISSION_DEADLINE, async {
+        loop {
+            match exchange(ticket, Operation::PollPermission { id: id.clone() }).await? {
+                Response::PermissionDecided(decision) => return Ok(decision),
+                Response::PermissionPending => sleep(Duration::from_millis(150)).await,
+                _ => anyhow::bail!("MCP permission request is no longer active"),
+            }
+        }
+    })
+    .await?
+}
+
 struct StdioBridge(Ticket);
 
 impl ServerHandler for StdioBridge {
@@ -271,14 +460,36 @@ impl ServerHandler for StdioBridge {
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult::with_all_items(vec![Tool::new(
-            INSPECT_SCOPE,
-            "Returns the project, checkout, run, and turn bound to this OmniAgent connection.",
-            json!({"type":"object", "additionalProperties":false})
-                .as_object()
-                .unwrap()
-                .clone(),
-        )]))
+        read_scope(&self.0, Operation::ListTools)
+            .await
+            .map_err(|_| bridge_unavailable())?;
+        let mut tools = vec![
+            Tool::new(
+                INSPECT_SCOPE,
+                "Returns the project, checkout, run, and turn bound to this OmniAgent connection.",
+                json!({"type":"object", "properties":{}, "additionalProperties":false})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .with_annotations(
+                ToolAnnotations::new()
+                    .read_only(true)
+                    .destructive(false)
+                    .idempotent(true)
+                    .open_world(false),
+            ),
+        ];
+        if self.0.permission_prompt {
+            tools.push(Tool::new(
+                REQUEST_PERMISSION,
+                "Asks OmniAgent's user to decide whether to permit a Claude Code tool call.",
+                json!({"type":"object", "properties": {
+                    "tool_name": {"type":"string"}, "input": {"type":"object"}, "tool_use_id": {"type":"string"},
+                }, "required": ["tool_name", "input"]}).as_object().unwrap().clone(),
+            ));
+        }
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
@@ -286,6 +497,28 @@ impl ServerHandler for StdioBridge {
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if request.name == REQUEST_PERMISSION && self.0.permission_prompt {
+            let prompt =
+                serde_json::from_value(Value::Object(request.arguments.unwrap_or_default()))
+                    .map_err(|_| {
+                        ErrorData::invalid_params("Invalid Claude permission request", None)
+                    })?;
+            let response = match permission_decision(&self.0, prompt).await {
+                Ok(ApprovalDecision::AllowOnce) => json!({"behavior":"allow"}),
+                Ok(ApprovalDecision::Deny) => {
+                    json!({"behavior":"deny", "message":"The user declined this permission."})
+                }
+                Ok(ApprovalDecision::Cancel) => {
+                    json!({"behavior":"deny", "message":"The user cancelled this permission.", "interrupt": true})
+                }
+                Err(_) => {
+                    json!({"behavior":"deny", "message":"The OmniAgent permission request is unavailable."})
+                }
+            };
+            return Ok(
+                CallToolResult::success(vec![ContentBlock::text(response.to_string())]).into(),
+            );
+        }
         if request.name != INSPECT_SCOPE
             || request
                 .arguments
@@ -296,11 +529,15 @@ impl ServerHandler for StdioBridge {
                 None,
             ));
         }
-        let scope = inspect(&self.0)
+        let scope = read_scope(&self.0, Operation::InspectScope)
             .await
-            .map_err(|_| ErrorData::internal_error("Run bridge is unavailable", None))?;
+            .map_err(|_| bridge_unavailable())?;
         Ok(CallToolResult::structured(json!(scope)).into())
     }
+}
+
+fn bridge_unavailable() -> ErrorData {
+    ErrorData::internal_error("Run bridge is unavailable", None)
 }
 
 pub fn run_from_args() -> Option<i32> {

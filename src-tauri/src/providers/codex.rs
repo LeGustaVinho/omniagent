@@ -714,6 +714,7 @@ impl CodexSession {
             request_id: id.clone(),
             operation: method.to_owned(),
             description: string(params, "reason").map(|value| diagnostics::preview(&value)),
+            prompt: None,
         });
         event.location.item_id = string(params, "itemId");
         self.approvals.insert(id, approval);

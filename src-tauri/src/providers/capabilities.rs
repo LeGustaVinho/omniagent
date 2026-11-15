@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{conversations::SessionScope, protection, runner::ExecutionPlatform, store::Store};
+use crate::{
+    conversations::SessionScope, mcp_bridge::Registration, protection, runner::ExecutionPlatform,
+    store::Store,
+};
 
 use super::{Capability, Provider, ProviderEventData, SessionMode, Transport};
 
@@ -290,11 +293,17 @@ pub(crate) struct ReportedCapabilities {
     pub configuration_reported: bool,
     pub configuration_revision: Option<String>,
     pub codex_instruction_settings: Option<super::configuration::CodexInstructionSettings>,
+    pub bridge_registration: Option<Registration>,
 }
 
 impl ReportedCapabilities {
     pub(crate) fn observe(&mut self, data: &ProviderEventData) -> bool {
         match data {
+            ProviderEventData::BridgeRegistration { registration } => {
+                let changed = self.bridge_registration.as_ref() != Some(registration);
+                self.bridge_registration = Some(registration.clone());
+                return changed;
+            }
             ProviderEventData::Handshake { capabilities, .. } => {
                 self.available.extend(capabilities)
             }
@@ -355,6 +364,24 @@ impl ReportedCapabilities {
         Capability::ALL
             .into_iter()
             .map(|capability| {
+                if capability == Capability::RunScopedMcp {
+                    let availability = match self.bridge_registration {
+                        Some(Registration::ToolsListed | Registration::ScopeVerified) => {
+                            Availability::Available
+                        }
+                        Some(Registration::Unavailable { .. }) => Availability::Unavailable,
+                        _ => Availability::Unknown,
+                    };
+                    return CapabilityDescriptor {
+                        subject: CapabilitySubject::Protocol { capability },
+                        source: DeclaredSource::Adapter,
+                        availability,
+                        observed: (availability == Availability::Available)
+                            .then_some(ObservedResult::Succeeded),
+                        blocker: None,
+                        boundary: EvidenceBoundary::ExactCheckout,
+                    };
+                }
                 let observed = self.observed.contains(&capability);
                 let announced = self.available.contains(&capability);
                 let blocked = capability == Capability::WorkspaceWrite

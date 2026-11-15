@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     customizations::{CustomizationKind, LaunchReview, ReviewState},
+    mcp_bridge::{BridgeLaunch, INSPECT_SCOPE, REQUEST_PERMISSION, SERVER_NAME},
     repository::CheckoutLayout,
 };
 
@@ -51,6 +52,7 @@ impl ScopedLaunch {
         layout: &CheckoutLayout,
         review: &LaunchReview,
         arguments: Vec<OsString>,
+        bridge: Option<&BridgeLaunch>,
     ) -> Result<Self> {
         let mut launch = Self {
             arguments,
@@ -80,9 +82,17 @@ impl ScopedLaunch {
                 .insert(entry.id.clone(), reason.into());
         }
         match provider {
-            Provider::Claude => launch.claude(version, layout, review)?,
-            Provider::Codex => launch.codex(layout, review)?,
-            Provider::Antigravity => launch.antigravity(review)?,
+            Provider::Claude => launch.claude(version, layout, review, bridge)?,
+            Provider::Codex => launch.codex(layout, review, bridge)?,
+            Provider::Antigravity => {
+                launch.antigravity(review)?;
+                if let Some(bridge) = bridge {
+                    launch.evidence.inputs.push(LaunchInput {
+                        name: "mcpServers".into(),
+                        contents: bridge.acp_servers().to_string(),
+                    });
+                }
+            }
         }
         Ok(launch)
     }
@@ -92,6 +102,7 @@ impl ScopedLaunch {
         version: &str,
         layout: &CheckoutLayout,
         review: &LaunchReview,
+        bridge: Option<&BridgeLaunch>,
     ) -> Result<()> {
         ensure!(
             at_least(version, (2, 1, 257)),
@@ -100,6 +111,19 @@ impl ScopedLaunch {
         self.evidence.strategy = "claude_restricted".into();
         let mut hooks: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
         let mut mcp = Map::new();
+        if let Some(bridge) = bridge {
+            mcp.insert(SERVER_NAME.into(), serde_json::to_value(bridge)?);
+            self.record_argument(
+                "--allowedTools",
+                format!("mcp__{SERVER_NAME}__{INSPECT_SCOPE}"),
+            );
+            if bridge.permission_prompt {
+                self.record_argument(
+                    "--permission-prompt-tool",
+                    format!("mcp__{SERVER_NAME}__{REQUEST_PERMISSION}"),
+                );
+            }
+        }
         for (entry, declaration) in &review.approved {
             match entry.kind {
                 CustomizationKind::Hook => {
@@ -112,6 +136,13 @@ impl ScopedLaunch {
                     }));
                 }
                 CustomizationKind::McpServer => {
+                    if bridge.is_some() && declaration.name == SERVER_NAME {
+                        self.evidence.excluded.insert(
+                            entry.id.clone(),
+                            "This MCP name is reserved for the OmniAgent run bridge".into(),
+                        );
+                        continue;
+                    }
                     ensure!(
                         mcp.insert(declaration.name.clone(), declaration.body.clone())
                             .is_none(),
@@ -171,7 +202,20 @@ impl ScopedLaunch {
         Ok(())
     }
 
-    fn codex(&mut self, layout: &CheckoutLayout, review: &LaunchReview) -> Result<()> {
+    fn record_argument(&mut self, name: &str, contents: String) {
+        self.arguments.extend([name.into(), (&contents).into()]);
+        self.evidence.inputs.push(LaunchInput {
+            name: name.into(),
+            contents,
+        });
+    }
+
+    fn codex(
+        &mut self,
+        layout: &CheckoutLayout,
+        review: &LaunchReview,
+        bridge: Option<&BridgeLaunch>,
+    ) -> Result<()> {
         self.evidence.strategy = "codex_untrusted_project".into();
         let mut projects = toml::Table::new();
         for directory in layout
@@ -192,8 +236,25 @@ impl ScopedLaunch {
             );
         }
         let mut servers = toml::Table::new();
+        if let Some(bridge) = bridge {
+            servers.insert(
+                SERVER_NAME.into(),
+                toml::Value::try_from(json!({
+                    "command": bridge.command,
+                    "args": bridge.args,
+                    "tools": { INSPECT_SCOPE: {"approval_mode": "approve"} },
+                }))?,
+            );
+        }
         for (entry, declaration) in &review.approved {
             if entry.kind == CustomizationKind::McpServer {
+                if bridge.is_some() && declaration.name == SERVER_NAME {
+                    self.evidence.excluded.insert(
+                        entry.id.clone(),
+                        "This MCP name is reserved for the OmniAgent run bridge".into(),
+                    );
+                    continue;
+                }
                 let mut server = toml::Value::try_from(&declaration.body)
                     .context("could not encode the approved MCP server")?;
                 if declaration.body["command"].is_string() {

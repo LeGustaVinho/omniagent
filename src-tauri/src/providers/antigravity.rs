@@ -66,6 +66,7 @@ impl CliAdapter for AntigravityAdapter {
             turn: None,
             permissions: HashMap::new(),
             available_commands: None,
+            bridge: None,
         }))
     }
 }
@@ -232,6 +233,7 @@ struct AcpSession {
     turn: Option<Turn>,
     permissions: HashMap<RequestId, Vec<PermissionOption>>,
     available_commands: Option<(String, Vec<String>)>,
+    bridge: Option<crate::mcp_bridge::BridgeLaunch>,
 }
 
 struct PermissionOption {
@@ -276,6 +278,9 @@ impl AcpSession {
             .is_some_and(Value::is_object);
         let can_load = agent["loadSession"] == true;
         let mut params = json!({ "cwd": self.request.checkout, "mcpServers": [] });
+        if let Some(bridge) = &self.bridge {
+            params["mcpServers"] = bridge.acp_servers();
+        }
         let method = match &self.request.intent {
             SessionIntent::Start => "session/new",
             SessionIntent::Resume {
@@ -719,6 +724,7 @@ impl AcpSession {
             request_id: id.clone(),
             operation,
             description,
+            prompt: None,
         });
         event.location.item_id = string(tool, "toolCallId");
         self.permissions.insert(id, options);
@@ -729,6 +735,10 @@ impl AcpSession {
 impl CliSession for AcpSession {
     fn arguments(&self) -> Vec<OsString> {
         arguments()
+    }
+
+    fn configure_mcp_bridge(&mut self, launch: crate::mcp_bridge::BridgeLaunch) {
+        self.bridge = Some(launch);
     }
 
     fn start(&mut self) -> Result<AdapterUpdate> {

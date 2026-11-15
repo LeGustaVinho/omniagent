@@ -89,6 +89,20 @@ pub struct AttemptPlan {
     pub input: Vec<MessageRevision>,
 }
 
+pub(crate) enum PermissionRoute {
+    Native,
+    ClaudePrompt,
+}
+
+impl PermissionRoute {
+    fn as_sql(&self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::ClaudePrompt => "claude_prompt",
+        }
+    }
+}
+
 impl Store {
     pub async fn conversation(&self, id: String) -> Result<Conversation> {
         self.execute(move |db| load_conversation(db, &id)).await
@@ -340,10 +354,18 @@ impl Store {
                 _ => {}
             }
             tx.execute("INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)", params![run_id, source.as_sql(), payload])?;
-            if source == EventSource::Provider && let ProviderEventData::Approval { request_id, .. } = &event.data {
-                tx.execute("INSERT INTO agent_permissions(request_event_seq, run_id, turn_id, request_key, delivery)
-                    VALUES (?1, ?2, ?3, ?4, 'pending')",
-                    params![tx.last_insert_rowid(), run_id, active.turn_id, permission_key(request_id)?])?;
+            if source == EventSource::Provider && let ProviderEventData::Approval { request_id, prompt, .. } = &event.data {
+                let route = if prompt.is_some() { PermissionRoute::ClaudePrompt } else { PermissionRoute::Native };
+                if prompt.is_some() {
+                    let pending: u32 = tx.query_row(
+                        "SELECT count(*) FROM agent_permissions WHERE run_id = ?1 AND route = 'claude_prompt' AND delivery IN ('pending', 'prepared')",
+                        [&run_id], |row| row.get(0),
+                    )?;
+                    ensure!(pending < 16, "too many active Claude permission prompts");
+                }
+                tx.execute("INSERT INTO agent_permissions(request_event_seq, run_id, turn_id, request_key, delivery, route)
+                    VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
+                    params![tx.last_insert_rowid(), run_id, active.turn_id, permission_key(request_id)?, route.as_sql()])?;
             }
             tx.commit()?;
             Ok(())
@@ -356,6 +378,7 @@ impl Store {
         turn_id: String,
         request_id: RequestId,
         decision: ApprovalDecision,
+        route: PermissionRoute,
     ) -> Result<i64> {
         let key = permission_key(&request_id)?;
         let decision = match decision {
@@ -366,10 +389,10 @@ impl Store {
         self.execute(move |db| {
             db.query_row(
                 "UPDATE agent_permissions SET delivery = 'prepared', decision = ?1
-                 WHERE run_id = ?2 AND turn_id = ?3 AND request_key = ?4 AND delivery = 'pending'
+                 WHERE run_id = ?2 AND turn_id = ?3 AND request_key = ?4 AND delivery = 'pending' AND route = ?5
                    AND EXISTS (SELECT 1 FROM active_agent_attempts WHERE run_id = ?2)
                  RETURNING request_event_seq",
-                params![decision, run_id, turn_id, key],
+                params![decision, run_id, turn_id, key, route.as_sql()],
                 |row| row.get(0),
             )
             .context("permission request is absent or stale for this turn")
@@ -393,6 +416,27 @@ impl Store {
             )?;
             ensure!(updated == 1, "permission decision is no longer prepared");
             Ok(())
+        }).await
+    }
+
+    pub(crate) async fn pending_claude_permission(
+        &self,
+        run_id: String,
+        turn_id: String,
+        id: RequestId,
+    ) -> Result<Option<(i64, Option<ApprovalDecision>)>> {
+        let key = permission_key(&id)?;
+        self.execute(move |db| {
+            let row = db.query_row(
+                "SELECT request_event_seq, decision FROM agent_permissions WHERE run_id = ?1 AND turn_id = ?2
+                    AND request_key = ?3 AND route = 'claude_prompt' AND delivery IN ('pending', 'prepared')",
+                params![run_id, turn_id, key],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            ).optional()?;
+            row.map(|(seq, decision)| {
+                let decision = decision.map(|value| serde_json::from_value(serde_json::Value::String(value))).transpose()?;
+                Ok((seq, decision))
+            }).transpose()
         }).await
     }
 
@@ -741,6 +785,7 @@ mod tests {
                             request_id: request.clone(),
                             operation: "shell".into(),
                             description: None,
+                            prompt: None,
                         },
                     },
                 )
@@ -752,7 +797,8 @@ mod tests {
                     first.id.clone(),
                     second.turn_id.clone(),
                     request.clone(),
-                    ApprovalDecision::AllowOnce
+                    ApprovalDecision::AllowOnce,
+                    PermissionRoute::Native,
                 )
                 .await
                 .is_err()
@@ -763,7 +809,8 @@ mod tests {
                     first.id.clone(),
                     first.turn_id.clone(),
                     RequestId::Text("3".into()),
-                    ApprovalDecision::AllowOnce
+                    ApprovalDecision::AllowOnce,
+                    PermissionRoute::Native,
                 )
                 .await
                 .is_err()
@@ -774,6 +821,7 @@ mod tests {
                 first.turn_id.clone(),
                 request.clone(),
                 ApprovalDecision::Deny,
+                PermissionRoute::Native,
             )
             .await?;
         store
@@ -785,7 +833,8 @@ mod tests {
                     first.id.clone(),
                     first.turn_id.clone(),
                     request.clone(),
-                    ApprovalDecision::AllowOnce
+                    ApprovalDecision::AllowOnce,
+                    PermissionRoute::Native,
                 )
                 .await
                 .is_err()
@@ -796,6 +845,7 @@ mod tests {
                 second.turn_id.clone(),
                 request.clone(),
                 ApprovalDecision::Cancel,
+                PermissionRoute::Native,
             )
             .await?;
         store.recover_agent_attempts_after_restart().await?;
@@ -805,7 +855,8 @@ mod tests {
                     second.id.clone(),
                     second.turn_id.clone(),
                     request,
-                    ApprovalDecision::AllowOnce
+                    ApprovalDecision::AllowOnce,
+                    PermissionRoute::Native,
                 )
                 .await
                 .is_err()
@@ -1215,7 +1266,7 @@ mod tests {
         let first = prepare(&store, &conversation.id, scope.clone(), first_prompt).await?;
         let first_session = first.agent_session_id.clone();
         let first_run = first.run.id.clone();
-        let running = start_managed_turn(store.clone(), runner.clone(), first);
+        let running = start_managed_turn(store.clone(), runner.clone(), first, None);
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), running.wait()).await??,
             RunStatus::Succeeded
@@ -1230,7 +1281,7 @@ mod tests {
         assert_eq!(resumed.input[0].text, "Second prompt");
         let resumed_run = resumed.run.id.clone();
         assert_eq!(
-            start_managed_turn(store.clone(), runner, resumed)
+            start_managed_turn(store.clone(), runner, resumed, None)
                 .wait()
                 .await?,
             RunStatus::Succeeded

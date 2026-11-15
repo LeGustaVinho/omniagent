@@ -11,8 +11,9 @@ use omniagent::{
     conversations::{Conversation, SessionScope},
     customizations::{CustomizationInventory, CustomizationKind},
     dispatch::NativeHistory,
+    mcp_bridge::Registration,
     providers::{
-        Provider, ProviderEventData, SessionMode,
+        ApprovalDecision, Provider, ProviderEventData, SessionMode,
         profiles::{ConfiguredExecutable, probe_cli},
         runtime::start_managed_turn,
     },
@@ -119,16 +120,204 @@ async fn turn(
     conversation: &Conversation,
     scope: SessionScope,
 ) -> Result<(String, RunStatus)> {
+    turn_with_prompt(store, conversation, scope,
+        "Instruction audit. Follow the repository instruction context. Do not read files or use tools.").await
+}
+
+async fn turn_with_prompt(
+    store: &Store,
+    conversation: &Conversation,
+    scope: SessionScope,
+    prompt: &str,
+) -> Result<(String, RunStatus)> {
+    turn_with_approval(store, conversation, scope, prompt, None).await
+}
+
+async fn turn_with_approval(
+    store: &Store,
+    conversation: &Conversation,
+    scope: SessionScope,
+    prompt: &str,
+    approval: Option<(&str, ApprovalDecision)>,
+) -> Result<(String, RunStatus)> {
     let current = store.conversation(conversation.id.clone()).await?;
-    let attempt = store.prepare_agent_attempt(current.id, current.context_id, scope,
-        "Instruction audit. Follow the repository instruction context. Do not read files or use tools.".into()).await?;
+    let attempt = store
+        .prepare_agent_attempt(current.id, current.context_id, scope, prompt.into())
+        .await?;
     let run = attempt.run.id.clone();
-    let status = tokio::time::timeout(
-        Duration::from_secs(55),
-        start_managed_turn(store.clone(), Arc::new(DirectWindowsRunner), attempt).wait(),
-    )
-    .await??;
+    let running = start_managed_turn(
+        store.clone(),
+        Arc::new(DirectWindowsRunner),
+        attempt,
+        Some(PathBuf::from(env!("CARGO_BIN_EXE_omniagent"))),
+    );
+    let outcome = tokio::time::timeout(Duration::from_secs(55), async {
+        if let Some((expected_tool, decision)) = approval {
+            let mut cursor = 0;
+            'active: loop {
+                for event in store
+                    .agent_observations(conversation.id.clone(), run.clone(), cursor)
+                    .await?
+                {
+                    cursor = event.seq;
+                    if matches!(
+                        event.event.data,
+                        ProviderEventData::TurnFinished { .. } | ProviderEventData::Error { .. }
+                    ) {
+                        break 'active;
+                    }
+                    if let ProviderEventData::Approval {
+                        request_id,
+                        operation,
+                        description,
+                        ..
+                    } = event.event.data
+                    {
+                        ensure!(
+                            operation == expected_tool
+                                || description
+                                    .as_ref()
+                                    .is_some_and(|value| value.contains(expected_tool)),
+                            "unexpected fixture request {operation:?} {description:?}"
+                        );
+                        running.approve(request_id, decision).await?;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(75)).await;
+            }
+        }
+        running.wait().await
+    })
+    .await;
+    let status = match outcome {
+        Ok(status) => status?,
+        Err(error) => {
+            let events = store
+                .agent_observations(conversation.id.clone(), run.clone(), 0)
+                .await?;
+            let relevant: Vec<_> = events
+                .iter()
+                .filter_map(|event| match &event.event.data {
+                    ProviderEventData::Approval { .. }
+                    | ProviderEventData::Error { .. }
+                    | ProviderEventData::BridgeRegistration { .. } => Some(&event.event.data),
+                    _ => None,
+                })
+                .collect();
+            return Err(anyhow::anyhow!("{error}: {relevant:?}"));
+        }
+    };
     Ok((run, status))
+}
+
+async fn verify_bridge(provider: Provider, model: &str) -> Result<()> {
+    let fixture = Fixture::new()?;
+    let (store, checkout) = fixture.register().await?;
+    let mut scope = scope(provider, model, &fixture.path)?;
+    let approval = if provider == Provider::Antigravity {
+        scope.mode = SessionMode::ApprovedWrite;
+        Some(("inspect_run_scope", ApprovalDecision::AllowOnce))
+    } else {
+        None
+    };
+    let conversation = store
+        .create_conversation(checkout.checkout_id, "MCP run binding".into())
+        .await?;
+    for resumed in [false, true] {
+        let (run, status) = turn_with_approval(&store, &conversation, scope.clone(),
+            "Use the inspect_run_scope tool from the omniagent_runtime MCP server (mcp__omniagent_runtime__inspect_run_scope) with no arguments. Return only the exact runId from the result. Call it afresh on this turn because the runId changes on resume.", approval).await?;
+        let events = store
+            .agent_observations(conversation.id.clone(), run.clone(), 0)
+            .await?;
+        let registrations = events
+            .iter()
+            .filter_map(|event| match &event.event.data {
+                ProviderEventData::BridgeRegistration { registration } => Some(registration),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if status != RunStatus::Succeeded || !registrations.contains(&&Registration::ScopeVerified)
+        {
+            let evidence = events
+                .iter()
+                .filter_map(|event| match &event.event.data {
+                    ProviderEventData::AssistantMessage { text }
+                    | ProviderEventData::Diagnostic { message: text }
+                    | ProviderEventData::Error { message: text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            anyhow::bail!(
+                "{provider:?} run {run} (resume={resumed}): {status:?}, {registrations:?}, {evidence:?}"
+            );
+        }
+        let messages = store.conversation_messages(conversation.id.clone()).await?;
+        let response = &messages.last().context("missing bridge response")?.text;
+        assert!(
+            response.contains(&run),
+            "provider returned {response:?} for {run}"
+        );
+        let dispatch = store
+            .agent_dispatch(conversation.id.clone(), run)
+            .await?
+            .context("missing dispatch")?;
+        assert_eq!(
+            matches!(
+                dispatch.snapshot.native_history,
+                NativeHistory::ProviderCursor { .. }
+            ),
+            resumed
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Codex App Server with gpt-6-luna"]
+async fn codex_calls_its_run_bridge_on_start_and_resume() -> Result<()> {
+    verify_bridge(Provider::Codex, "gpt-6-luna").await
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Claude Code with Haiku 5.5"]
+async fn claude_calls_its_run_bridge_on_start_and_resume() -> Result<()> {
+    verify_bridge(Provider::Claude, "claude-haiku-5-5").await
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Antigravity with Gemini 3.8 Flash"]
+async fn antigravity_calls_its_run_bridge_on_start_and_resume() -> Result<()> {
+    verify_bridge(Provider::Antigravity, "gemini-3.8-flash").await
+}
+
+#[tokio::test]
+#[ignore = "requires authenticated Claude Code with Haiku 5.5"]
+async fn claude_routes_write_permission_through_the_mcp_prompt_tool() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let (store, checkout) = fixture.register().await?;
+    let mut scope = scope(Provider::Claude, "claude-haiku-5-5", &fixture.path)?;
+    scope.mode = SessionMode::ApprovedWrite;
+    let conversation = store
+        .create_conversation(checkout.checkout_id, "Claude permission prompt".into())
+        .await?;
+    for (file, decision) in [
+        ("denied.txt", ApprovalDecision::Deny),
+        ("allowed.txt", ApprovalDecision::AllowOnce),
+    ] {
+        let (run, status) = turn_with_approval(&store, &conversation, scope.clone(),
+            &format!("Use only the Write tool exactly once to create {file} in the current directory with text permission-fixture. Stop if denied."),
+            Some(("Write", decision))).await?;
+        let events = store
+            .agent_observations(conversation.id.clone(), run, 0)
+            .await?;
+        assert!(events.iter().any(|event| matches!(&event.event.data, ProviderEventData::Approval { operation, prompt: Some(_), .. } if operation == "Write")), "Claude did not call the MCP permission prompt");
+        assert_eq!(status, RunStatus::Succeeded);
+        assert_eq!(
+            fixture.path.join(file).is_file(),
+            decision == ApprovalDecision::AllowOnce
+        );
+    }
+    Ok(())
 }
 
 async fn verify_answer(store: &Store, conversation: &Conversation, marker: &str) -> Result<()> {

@@ -90,10 +90,11 @@ pub enum Capability {
     NativeSuggestions,
     SideRequest,
     WorkspaceWrite,
+    RunScopedMcp,
 }
 
 impl Capability {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::ModelInventory,
         Self::Resume,
         Self::Reasoning,
@@ -105,6 +106,7 @@ impl Capability {
         Self::NativeSuggestions,
         Self::SideRequest,
         Self::WorkspaceWrite,
+        Self::RunScopedMcp,
     ];
 }
 
@@ -247,6 +249,9 @@ pub enum ProviderEventData {
     ScopedLaunchPrepared {
         evidence: Box<launch_scope::ScopedLaunchEvidence>,
     },
+    BridgeRegistration {
+        registration: crate::mcp_bridge::Registration,
+    },
     CapabilityAssessmentUpdated {
         assessment: Box<capabilities::CapabilityAssessment>,
     },
@@ -325,6 +330,8 @@ pub enum ProviderEventData {
         request_id: RequestId,
         operation: String,
         description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<crate::mcp_bridge::PermissionPrompt>,
     },
     Question {
         request_id: RequestId,
@@ -369,6 +376,7 @@ pub trait CliAdapter: Send + Sync {
 /// Methods advance one provider protocol per process. The runtime owns I/O and persistence.
 pub trait CliSession: Send {
     fn arguments(&self) -> Vec<OsString>;
+    fn configure_mcp_bridge(&mut self, _launch: crate::mcp_bridge::BridgeLaunch) {}
     fn set_workspace_instructions(&mut self, _instructions: String) -> anyhow::Result<()> {
         anyhow::bail!("this adapter does not accept protocol instruction projection")
     }
