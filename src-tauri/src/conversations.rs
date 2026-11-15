@@ -26,6 +26,15 @@ pub struct Conversation {
     pub context_id: String,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct ConversationSession {
+    pub id: String,
+    pub provider: Provider,
+    pub provider_session_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -112,6 +121,52 @@ impl Store {
             let conversation = load_conversation(db, &conversation_id)?;
             let entries = context_entries(db, &conversation.id, &conversation.context_id)?;
             load_messages(db, &conversation.id, &entries)
+        })
+        .await
+    }
+
+    pub async fn rename_conversation(&self, id: String, title: String) -> Result<Conversation> {
+        ensure!(!title.trim().is_empty(), "conversation title is empty");
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let updated = tx.execute(
+                "UPDATE conversations SET title = ?1 WHERE id = ?2",
+                params![title, id],
+            )?;
+            ensure!(updated == 1, "conversation does not exist");
+            let conversation = load_conversation(&tx, &id)?;
+            tx.commit()?;
+            Ok(conversation)
+        })
+        .await
+    }
+
+    pub async fn conversation_sessions(&self, id: String) -> Result<Vec<ConversationSession>> {
+        self.execute(move |db| {
+            load_conversation(db, &id)?;
+            let mut query = db.prepare(
+                "SELECT s.id, json_extract(s.scope, '$.provider'), s.provider_session_id
+                 FROM agent_sessions s JOIN agent_attempts a ON a.agent_session_id = s.id
+                 WHERE a.conversation_id = ?1 AND s.conversation_id = ?1
+                 GROUP BY s.id ORDER BY min(a.ordinal)",
+            )?;
+            let rows = query.query_map([id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?;
+            rows.map(|row| {
+                let (id, provider, provider_session_id) = row?;
+                let provider = serde_json::from_value(serde_json::Value::String(provider))?;
+                Ok(ConversationSession {
+                    id,
+                    provider,
+                    provider_session_id,
+                })
+            })
+            .collect()
         })
         .await
     }
@@ -660,6 +715,48 @@ mod tests {
                 vec![b"{\"fixture\":true}\n".to_vec()],
             )
             .await
+    }
+
+    #[tokio::test]
+    async fn renaming_keeps_the_saved_native_session_and_checkout_binding() -> Result<()> {
+        let (_dir, store, conversation, scope) = setup().await?;
+        let first = prepare(&store, &conversation.id, scope.clone(), "confirmed").await?;
+        confirm(&store, &first).await?;
+        let original = store.conversation(conversation.id.clone()).await?;
+        let unrelated = store
+            .create_conversation(original.checkout_id.clone(), original.title.clone())
+            .await?;
+        let links = store.conversation_sessions(original.id.clone()).await?;
+        assert_eq!(
+            links,
+            [ConversationSession {
+                id: first.agent_session_id.clone(),
+                provider: Provider::Codex,
+                provider_session_id: Some("native-thread".into()),
+            }]
+        );
+
+        let renamed = store
+            .rename_conversation(original.id.clone(), "Nova conversa".into())
+            .await?;
+        assert_eq!(renamed.id, original.id);
+        assert_eq!(renamed.checkout_id, original.checkout_id);
+        assert_eq!(renamed.context_id, original.context_id);
+        assert_eq!(renamed.title, "Nova conversa");
+        assert_eq!(
+            store.conversation(unrelated.id.clone()).await?.title,
+            original.title
+        );
+        assert!(store.conversation_sessions(unrelated.id).await?.is_empty());
+        assert_eq!(
+            store.conversation_sessions(original.id.clone()).await?,
+            links
+        );
+
+        let next = prepare(&store, &original.id, scope, "continue").await?;
+        assert_eq!(next.agent_session_id, first.agent_session_id);
+        assert!(matches!(next.intent, SessionIntent::Resume { .. }));
+        Ok(())
     }
 
     #[tokio::test]
