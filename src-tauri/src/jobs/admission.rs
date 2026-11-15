@@ -614,7 +614,7 @@ fn occupancy(db: &Connection) -> Result<u32> {
         "SELECT count(*) FROM (
             SELECT a.run_id FROM job_attempts a JOIN runs r ON r.id = a.run_id
             WHERE r.status IN ('starting', 'running', 'waiting_for_input')
-            UNION SELECT run_id FROM unconfirmed_question_stops
+            UNION SELECT run_id FROM unconfirmed_agent_stops
             UNION SELECT run_id FROM native_goal_executors WHERE NOT stop_confirmed
          )",
         [],
@@ -1350,7 +1350,7 @@ fn active_conversation_run(db: &Connection, conversation: &str) -> Result<Option
     Ok(db
         .query_row(
             "SELECT run_id FROM active_agent_attempts WHERE conversation_id = ?1
-             UNION ALL SELECT run_id FROM unconfirmed_question_stops WHERE conversation_id = ?1 LIMIT 1",
+             UNION ALL SELECT run_id FROM unconfirmed_agent_stops WHERE conversation_id = ?1 LIMIT 1",
             [conversation],
             |row| row.get(0),
         )

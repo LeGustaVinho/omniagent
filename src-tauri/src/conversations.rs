@@ -934,7 +934,10 @@ impl Store {
             let active = active_attempt(&tx, &run_id)?;
             let run = runs::load_run(&tx, &run_id)?;
             let incomplete = crate::jobs::settle_subagent_audit(&tx, &run_id, has_response)?;
-            let (outcome, failure) = if outcome == RunStatus::Succeeded && crate::jobs::pause_revoked_goal(&tx, &run_id)? {
+            let (outcome, failure) = if outcome == RunStatus::Succeeded
+                && (crate::jobs::pause_revoked_goal(&tx, &run_id)?
+                    || crate::jobs::delegated_goal_authority_revoked(&tx, &run_id)?)
+            {
                 (RunStatus::Interrupted, Some(crate::jobs::FailureObservation {
                     phase: crate::jobs::FailurePhase::Execution,
                     cause: Some(crate::jobs::FailureCause::GoalAuthorityRevoked),
@@ -1049,6 +1052,7 @@ impl Store {
             crate::jobs::recover_native_goal_executors(&tx)?;
             crate::jobs::recover_question_stop_reservations(&tx)?;
             crate::jobs::recover_native_subagents(&tx)?;
+            crate::jobs::recover_managed_goal_stops(&tx)?;
             crate::jobs::recover_commands(&tx)?;
             crate::jobs::settle_owned_goal_cancellations(&tx)?;
             tx.commit()?;
@@ -1867,7 +1871,7 @@ fn check_idle_base(db: &Connection, id: &str, requested: &str) -> Result<Convers
     );
     let active: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM active_agent_attempts WHERE conversation_id = ?1
-         UNION ALL SELECT 1 FROM unconfirmed_question_stops WHERE conversation_id = ?1)",
+         UNION ALL SELECT 1 FROM unconfirmed_agent_stops WHERE conversation_id = ?1)",
         [id],
         |row| row.get(0),
     )?;
@@ -3213,6 +3217,331 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_saved_goal_question_cannot_dispatch_past_the_turn_limit() -> Result<()> {
+        use crate::jobs::{
+            AdmissionBlocker, AdmissionEnvironment, GoalDefinition, JobContext, QuestionTimer,
+        };
+
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let database = scope.checkout.join("store.sqlite");
+        let environment = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: true,
+        };
+        let goal = store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: conversation.id.clone(),
+                    context_id: conversation.context_id,
+                },
+                scope,
+                None,
+                GoalDefinition {
+                    objective: "Request a decision in one turn".into(),
+                    criteria: vec![],
+                    max_turns: Some(1),
+                    max_seconds: None,
+                    token_budget: None,
+                },
+                None,
+            )
+            .await?;
+        let attempt = store.claim_next_job(environment.clone()).await?.unwrap();
+        store.mark_agent_running(attempt.run.id.clone()).await?;
+        let dispatch = prepare_fixture_dispatch(&store, &attempt).await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        let request_id = RequestId::Number(44);
+        let schema = json!({"type":"object","properties":{"continue":{"type":"boolean"}},"required":["continue"]});
+        store
+            .record_agent_observation(
+                attempt.run.id.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: Default::default(),
+                    data: ProviderEventData::Question {
+                        request_id: request_id.clone(),
+                        form: json!({"message":"Continue?","schema":schema}),
+                        normalized: Some(QuestionForm::schema("Continue?".into(), &schema)?),
+                        route: QuestionRoute::Native,
+                    },
+                },
+            )
+            .await?;
+        assert!(matches!(
+            store
+                .poll_question_timer(attempt.run.id.clone(), i64::MAX)
+                .await?,
+            QuestionTimer::Stop
+        ));
+        store
+            .finish_observed_agent_attempt(
+                attempt.run.id.clone(),
+                RunStatus::Interrupted,
+                None,
+                None,
+                true,
+            )
+            .await?;
+        drop(store);
+
+        let store = Store::open(database)?;
+        assert_eq!(
+            store
+                .saved_conversation_questions(conversation.id.clone(), attempt.run.id.clone())
+                .await?[0]
+                .reason,
+            "timeout"
+        );
+        store
+            .answer_saved_question(
+                conversation.id,
+                QuestionOrigin {
+                    run_id: attempt.run.id,
+                    request_id,
+                },
+                QuestionReply {
+                    action: QuestionAction::Accept,
+                    values: [("continue".into(), json!(true))].into_iter().collect(),
+                },
+            )
+            .await?;
+        let inspected = store
+            .inspect_job(goal.job.project_id, goal.job.id, environment.clone())
+            .await?
+            .unwrap();
+        assert_eq!(inspected.queued_question, Some(true));
+        assert_eq!(
+            inspected.blockers,
+            [AdmissionBlocker::Policy {
+                reason: "The goal reached its turn limit"
+            }]
+        );
+        assert!(store.claim_next_job(environment).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegated_goal_work_preserves_approval_and_dependency_waits_after_revocation()
+    -> Result<()> {
+        use crate::jobs::{
+            AdmissionBlocker, AdmissionEnvironment, DownstreamWaitState, GoalDefinition,
+            JobContext, JobPermission, JobRequest, JobRole, JobRule, JobWorkspace,
+        };
+
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        scope.runner = crate::runner::DirectWindowsRunner::IDENTITY.into();
+        let database = scope.checkout.join("store.sqlite");
+        let environment = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: true,
+        };
+        let goal = store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: conversation.id,
+                    context_id: conversation.context_id,
+                },
+                scope,
+                None,
+                GoalDefinition {
+                    objective: "Wait for delegated evidence".into(),
+                    criteria: vec![],
+                    max_turns: Some(3),
+                    max_seconds: Some(120),
+                    token_budget: None,
+                },
+                None,
+            )
+            .await?;
+        store.set_job_queue_capacity(1).await?;
+        let root = store.claim_next_job(environment.clone()).await?.unwrap();
+        store.mark_agent_running(root.run.id.clone()).await?;
+        let child = store
+            .submit_agent_job(
+                root.run.id.clone(),
+                "child".into(),
+                JobRequest {
+                    checkout_id: None,
+                    task_id: None,
+                    mode: SessionMode::ReadOnly,
+                    instructions: "Collect evidence".into(),
+                    dependencies: vec![],
+                    requires_bridge: false,
+                },
+            )
+            .await?;
+        store
+            .request_downstream_wait(root.run.id.clone(), "wait".into(), vec![child.id.clone()])
+            .await?;
+        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        store
+            .finish_observed_agent_attempt(
+                root.run.id.clone(),
+                RunStatus::Interrupted,
+                None,
+                None,
+                true,
+            )
+            .await?;
+        drop(store);
+
+        let store = Store::open(database)?;
+        let project = goal.job.project_id;
+        let revision = goal.id;
+        let wait = store
+            .downstream_wait(project.clone(), root.run.id.clone())
+            .await?
+            .unwrap();
+        assert_eq!(wait.state, DownstreamWaitState::Waiting);
+        assert!(wait.inputs[0].status.is_none());
+        let approval = store
+            .inspect_job(project.clone(), child.id.clone(), environment.clone())
+            .await?
+            .unwrap();
+        let [AdmissionBlocker::Approval { approval_id }] = approval.blockers.as_slice() else {
+            anyhow::bail!("Expected the child to wait for approval");
+        };
+        store
+            .decide_job_approval(project.clone(), approval_id.clone(), true)
+            .await?;
+        let running = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("the child never acquired released capacity")?;
+        store.mark_agent_running(running.run.id.clone()).await?;
+        let denied = vec![JobRule {
+            role: JobRole::Operator,
+            operation: SessionMode::ReadOnly,
+            workspace: JobWorkspace::Project,
+            permission: JobPermission::Deny,
+            requirements: Default::default(),
+        }];
+        store
+            .set_project_job_rules(project.clone(), vec![], denied.clone())
+            .await?;
+        assert!(
+            store
+                .goal_delegation_revoked(running.run.id.clone())
+                .await?
+        );
+        assert!(prepare_fixture_dispatch(&store, &running).await.is_err());
+        assert_eq!(
+            store
+                .finish_observed_agent_attempt(
+                    running.run.id.clone(),
+                    RunStatus::Succeeded,
+                    None,
+                    None,
+                    false
+                )
+                .await?,
+            RunStatus::Interrupted
+        );
+        assert_eq!(
+            store
+                .job_failure(project.clone(), running.run.id)
+                .await?
+                .unwrap()
+                .observation
+                .cause,
+            Some(crate::jobs::FailureCause::GoalAuthorityRevoked)
+        );
+        let waiting = store
+            .inspect_job(project.clone(), goal.job.id, environment.clone())
+            .await?
+            .unwrap();
+        assert!(waiting.blockers.contains(&AdmissionBlocker::Policy {
+            reason: "A project rule denies this role, operation, and workspace"
+        }));
+        assert!(
+            waiting
+                .blockers
+                .iter()
+                .any(|reason| matches!(reason, AdmissionBlocker::Downstream { pending: 1, .. }))
+        );
+        assert_eq!(
+            store
+                .inspect_project_queue(project.clone(), environment.clone())
+                .await?
+                .active,
+            1
+        );
+        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        store
+            .set_project_job_rules(project.clone(), denied, vec![])
+            .await?;
+        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        store.recover_agent_attempts_after_restart().await?;
+        assert_eq!(
+            store
+                .inspect_project_queue(project.clone(), environment.clone())
+                .await?
+                .active,
+            0
+        );
+        let resumed = store.claim_next_job(environment).await?.unwrap();
+        assert_eq!(
+            resumed.previous_run_id.as_deref(),
+            Some(root.run.id.as_str())
+        );
+        assert!(
+            resumed
+                .input
+                .iter()
+                .any(|message| message.text.contains(&child.id))
+        );
+        store.mark_agent_running(resumed.run.id.clone()).await?;
+        let pending = store
+            .submit_agent_job(
+                resumed.run.id.clone(),
+                "another-child".into(),
+                JobRequest {
+                    checkout_id: None,
+                    task_id: None,
+                    mode: SessionMode::ReadOnly,
+                    instructions: "Additional evidence".into(),
+                    dependencies: vec![],
+                    requires_bridge: false,
+                },
+            )
+            .await?;
+        store
+            .execute(move |db| {
+                db.execute(
+                    "UPDATE goal_revisions SET created_ms = 0, deadline_ms = 1 WHERE id = ?1",
+                    [revision],
+                )?;
+                Ok(())
+            })
+            .await?;
+        assert!(
+            store
+                .goal_execution_for_run(resumed.run.id.clone())
+                .await?
+                .unwrap()
+                .time_limit_reached()
+        );
+        assert!(prepare_fixture_dispatch(&store, &resumed).await.is_err());
+        let pending = store
+            .inspect_job(
+                project,
+                pending.id,
+                AdmissionEnvironment {
+                    runner: resumed.scope.runner.clone(),
+                    bridge_available: true,
+                },
+            )
+            .await?
+            .unwrap();
+        assert!(pending.blockers.contains(&AdmissionBlocker::Policy {
+            reason: "The goal reached its time limit"
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn managed_goal_pause_fences_the_current_run_and_resumes_its_checkpoint() -> Result<()> {
         exercise_goal_stop(GoalStopScenario::ConfirmedPause).await
     }
@@ -3256,6 +3585,7 @@ mod tests {
 
         let (_dir, store, conversation, mut scope) = setup().await?;
         scope.executable = std::env::current_exe()?;
+        scope.runner = crate::runner::DirectWindowsRunner::IDENTITY.into();
         let database = scope.checkout.join("store.sqlite");
         let env = AdmissionEnvironment {
             runner: scope.runner.clone(),

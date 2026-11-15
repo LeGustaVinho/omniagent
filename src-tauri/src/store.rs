@@ -59,6 +59,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/044-goal-stop-controls.sql"),
     include_str!("../migrations/045-native-goal-turns.sql"),
     include_str!("../migrations/046-native-goal-recovery.sql"),
+    include_str!("../migrations/047-goal-waits.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

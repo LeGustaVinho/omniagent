@@ -224,10 +224,12 @@ impl TurnExecution {
         &mut self,
         process: &mut CapturedProcess,
         session: &mut dyn CliSession,
+        for_wait: bool,
     ) -> Result<RunStatus> {
-        let mut action = self
-            .app
-            .block_on(self.store.native_goal_stop_action(self.plan.run.id.clone()))?;
+        let mut action = self.app.block_on(
+            self.store
+                .native_goal_stop_action(self.plan.run.id.clone(), for_wait),
+        )?;
         self.wait_native_control(process, session)?;
         for _ in 0..2 {
             if self
@@ -243,9 +245,10 @@ impl TurnExecution {
             };
             self.write_native_goal_control(process, session.control_native_goal(command)?)?;
             self.wait_native_control(process, session)?;
-            let latest = self
-                .app
-                .block_on(self.store.native_goal_stop_action(self.plan.run.id.clone()))?;
+            let latest = self.app.block_on(
+                self.store
+                    .native_goal_stop_action(self.plan.run.id.clone(), for_wait),
+            )?;
             if latest == action {
                 break;
             }

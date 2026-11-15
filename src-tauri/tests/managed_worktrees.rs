@@ -570,7 +570,20 @@ fn candidate_fixture_worker() -> Result<()> {
                         done("native-first")
                     )?;
                     fs::write(root.join("candidate.bin"), b"native second turn")?;
-                    if root.join("fixture-native-complete").is_file() {
+                    if root.join("fixture-native-question").is_file() {
+                        fs::write(
+                            root.join("candidate.bin"),
+                            b"native candidate awaiting input",
+                        )?;
+                        let question = json!({"id":72,"method":"item/tool/requestUserInput","params":{
+                            "threadId":thread,"turnId":"native-second","itemId":"question",
+                            "questions":[{"id":"target","question":"Where should I write?","options":[{"label":"This worktree"}]}]
+                        }});
+                        let expired = json!({"method":"serverRequest/resolved","params":{
+                            "threadId":thread,"requestId":72
+                        }});
+                        writeln!(output, "{question}\n{expired}")?;
+                    } else if root.join("fixture-native-complete").is_file() {
                         native_goal["status"] = json!("complete");
                         let observed = json!({"method":"thread/goal/updated","params":{
                             "threadId":thread,"turnId":"native-second","goal":native_goal
@@ -1876,7 +1889,7 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
     fs::create_dir_all(source.join(".git/info"))?;
     fs::write(
         source.join(".git/info/exclude"),
-        "ignored.txt\nfixture-native-goal\nfixture-native-complete\nfixture-native-profile-changed\nfixture-native-uncertain-stop\n",
+        "ignored.txt\nfixture-native-goal\nfixture-native-complete\nfixture-native-profile-changed\nfixture-native-uncertain-stop\nfixture-native-question\n",
     )?;
     fs::write(tree.root.join("fixture-native-goal"), [])?;
     let runner = Arc::new(NativeGoalFixture(AtomicBool::new(false)));
@@ -2047,6 +2060,25 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
     let (chat, goal) = queue("Run two native turns", None, Some(40_000)).await?;
     let (first_run, first_session) = native_turn(&store, &database, &chat, 1).await?;
     assert!(runner.0.load(Ordering::Acquire));
+    let rejected_delegation = store
+        .submit_agent_job(
+            first_run.clone(),
+            "outside-budget".into(),
+            JobRequest {
+                checkout_id: None,
+                task_id: None,
+                mode: SessionMode::ReadOnly,
+                instructions: "Consume a separate model session".into(),
+                dependencies: vec![],
+                requires_bridge: false,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        rejected_delegation.to_string(),
+        "Delegated work cannot enforce this goal's token budget"
+    );
     assert_eq!(
         store
             .inspect_project_queue(project.clone(), env.clone())
@@ -2240,6 +2272,86 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
             .active,
         0
     );
+
+    fs::write(tree.root.join("fixture-native-question"), [])?;
+    let (chat, _) = queue(
+        "Wait for input during a native writer goal",
+        None,
+        Some(40_000),
+    )
+    .await?;
+    let waiting = finished_goal(&store, &chat, 1)
+        .await
+        .context("native question wait")?;
+    assert_eq!(waiting.control_state, GoalControlState::Active);
+    let prior_session = waiting
+        .provider_session_id
+        .context("native wait lost its provider thread")?;
+    let prior_run = waiting
+        .job
+        .latest_attempt
+        .context("native wait lost its attempt")?
+        .run_id;
+    let saved = store
+        .saved_conversation_questions(chat.clone(), prior_run.clone())
+        .await?;
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].state, "saved");
+    assert_eq!(
+        store
+            .inspect_project_queue(project.clone(), env.clone())
+            .await?
+            .active,
+        0
+    );
+    fs::remove_file(tree.root.join("fixture-native-question"))?;
+    store
+        .answer_saved_question(
+            chat.clone(),
+            QuestionOrigin {
+                run_id: prior_run.clone(),
+                request_id: RequestId::Number(72),
+            },
+            QuestionReply {
+                action: QuestionAction::Accept,
+                values: [("target".into(), json!("This worktree"))]
+                    .into_iter()
+                    .collect(),
+            },
+        )
+        .await?;
+    let answered = finished_goal(&store, &chat, 2)
+        .await
+        .context("native question continuation")?;
+    assert_eq!(answered.continuation_owner, GoalContinuationOwner::Native);
+    assert_ne!(
+        answered.provider_session_id.as_deref(),
+        Some(prior_session.as_str())
+    );
+    let resumed = answered
+        .job
+        .latest_attempt
+        .context("missing resumed question attempt")?;
+    assert_eq!(resumed.previous_run_id.as_deref(), Some(prior_run.as_str()));
+    assert_eq!(resumed.status, RunStatus::Succeeded);
+    let seed = store
+        .agent_dispatch(chat, resumed.run_id.clone())
+        .await?
+        .context("missing native question dispatch")?;
+    let request: Value = serde_json::from_slice(&seed.frames[0])?;
+    assert_eq!(request["method"], "thread/inject_items");
+    assert!(
+        request
+            .pointer("/params/items/0/content/0/text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.contains("\"target\":\"This worktree\""))
+    );
+    let budget: i64 = rusqlite::Connection::open(&database)?.query_row(
+        "SELECT token_budget FROM native_goal_executors WHERE run_id = ?1",
+        [&resumed.run_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(budget, 40_000 - 137);
 
     fs::remove_file(tree.root.join("fixture-native-complete"))?;
     let (chat, native) = queue("Hand off a paused native goal", None, None).await?;

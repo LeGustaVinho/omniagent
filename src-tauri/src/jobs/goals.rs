@@ -446,29 +446,186 @@ pub(super) fn limit_blocker(
     job: &str,
     native_candidate: bool,
 ) -> Result<Option<&'static str>> {
-    let limits: Option<(Option<i64>, bool, String)> = db
-        .query_row(
-            "SELECT r.deadline_ms, r.continuation_owner = 'managed' AND r.token_budget_requested, controls.state
-         FROM goal_continuations c JOIN goal_revisions r ON r.id = c.revision_id
-         JOIN goal_revision_controls controls ON controls.revision_id = r.id
-         WHERE c.job_id = ?1",
-            [job],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-    let Some((deadline, unsupported_budget, state)) = limits else {
+    let Some(goal) = goal_membership(db, job)? else {
         return Ok(None);
     };
-    if let Some(reason) = GoalControlState::from_key(&state)?.blocker() {
+    if let Some(reason) = goal.control_blocker() {
         return Ok(Some(reason));
     }
-    Ok(match (deadline, unsupported_budget) {
-        (Some(deadline), _) if now_ms() >= deadline => Some("The goal reached its time limit"),
-        (_, true) if !native_candidate => {
-            Some("The managed goal route cannot enforce this token budget")
+    if goal.deadline.is_some_and(|deadline| now_ms() >= deadline) {
+        return Ok(Some("The goal reached its time limit"));
+    }
+    if goal.delegated {
+        return delegation_blocker(db, job, goal.token_budget);
+    }
+    if goal.token_budget && goal.managed && !native_candidate {
+        return Ok(Some(
+            "The managed goal route cannot enforce this token budget",
+        ));
+    }
+    if managed_turn_limit_reached(db, &goal.revision)? {
+        return Ok(Some("The goal reached its turn limit"));
+    }
+    Ok(None)
+}
+
+struct GoalMembership {
+    revision: String,
+    deadline: Option<i64>,
+    managed: bool,
+    token_budget: bool,
+    state: GoalControlState,
+    delegated: bool,
+    pausing_for_wait: bool,
+}
+
+impl GoalMembership {
+    fn control_blocker(&self) -> Option<&'static str> {
+        if self.delegated && self.pausing_for_wait && self.state == GoalControlState::Pausing {
+            return None;
         }
-        _ => None,
-    })
+        self.state.blocker()
+    }
+}
+
+const GOAL_LINEAGE: &str = "WITH RECURSIVE lineage(job_id, origin_run_id) AS (
+    SELECT id, origin_run_id FROM jobs WHERE id = ?1
+    UNION ALL
+    SELECT parent.id, parent.origin_run_id
+    FROM lineage child JOIN job_attempts origin ON origin.run_id = child.origin_run_id
+    JOIN jobs parent ON parent.id = origin.job_id
+    WHERE NOT EXISTS (SELECT 1 FROM goal_continuations c WHERE c.job_id = child.job_id)
+)";
+
+fn goal_membership(db: &Connection, job: &str) -> Result<Option<GoalMembership>> {
+    let row = db
+        .query_row(
+            &format!(
+                "{GOAL_LINEAGE}
+                SELECT r.id, r.deadline_ms, r.continuation_owner = 'managed',
+                       r.token_budget_requested, controls.state, c.job_id <> ?1,
+                       controls.resume_after_wait
+                FROM lineage JOIN goal_continuations c ON c.job_id = lineage.job_id
+                JOIN goal_revisions r ON r.id = c.revision_id
+                JOIN goal_revision_controls controls ON controls.revision_id = r.id"
+            ),
+            [job],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(
+        |(revision, deadline, managed, token_budget, state, delegated, pausing_for_wait)| {
+            Ok(GoalMembership {
+                revision,
+                deadline,
+                managed,
+                token_budget,
+                state: GoalControlState::from_key(&state)?,
+                delegated,
+                pausing_for_wait,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn delegation_blocker(
+    db: &Connection,
+    job: &str,
+    token_budget: bool,
+) -> Result<Option<&'static str>> {
+    if token_budget {
+        return Ok(Some(
+            "Delegated work cannot enforce this goal's token budget",
+        ));
+    }
+    let mut origins = db.prepare(&format!(
+        "{GOAL_LINEAGE} SELECT origin_run_id FROM lineage WHERE origin_run_id IS NOT NULL"
+    ))?;
+    for origin in origins.query_map([job], |row| row.get::<_, String>(0))? {
+        if super::policy::attempt_requirements(db, &origin?)?.is_err() {
+            return Ok(Some("The goal's delegation authorization changed"));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn new_delegation_blocker(db: &Connection, run: &str) -> Result<Option<&'static str>> {
+    let Some((job, goal)) = run_goal_membership(db, run)? else {
+        return Ok(None);
+    };
+    if let Some(reason) = goal.control_blocker() {
+        return Ok(Some(reason));
+    }
+    if goal.deadline.is_some_and(|deadline| now_ms() >= deadline) {
+        return Ok(Some("The goal reached its time limit"));
+    }
+    if super::policy::attempt_requirements(db, run)?.is_err() {
+        return Ok(Some("The goal's delegation authorization changed"));
+    }
+    delegation_blocker(db, &job, goal.token_budget)
+}
+
+fn managed_turn_limit_reached(db: &Connection, revision: &str) -> Result<bool> {
+    let definition: Vec<u8> = db.query_row(
+        "SELECT definition FROM goal_revisions WHERE id = ?1",
+        [revision],
+        |row| row.get(0),
+    )?;
+    let definition: GoalDefinition = serde_json::from_slice(&protection::unprotect(&definition)?)?;
+    let Some(max_turns) = definition.max_turns else {
+        return Ok(false);
+    };
+    // A prepared dispatch may have reached the CLI before a disconnect or restart.
+    Ok(db.query_row(
+        "SELECT count(*) >= ?2 FROM goal_continuations c JOIN job_attempts a ON a.job_id = c.job_id
+         WHERE c.revision_id = ?1 AND EXISTS (
+            SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
+            WHERE s.run_id = a.run_id AND d.ordinal = 1
+         )",
+        params![revision, max_turns],
+        |row| row.get(0),
+    )?)
+}
+
+pub(crate) fn goal_dispatch_blocker(db: &Connection, run: &str) -> Result<Option<&'static str>> {
+    let job = attempt_job_id(db, run)?;
+    let Some(job) = job else {
+        return Ok(None);
+    };
+    // A token budget was qualified at admission and is rechecked at native activation.
+    limit_blocker(db, &job, true)
+}
+
+fn attempt_job_id(db: &Connection, run: &str) -> Result<Option<String>> {
+    Ok(db
+        .query_row(
+            "SELECT job_id FROM job_attempts WHERE run_id = ?1",
+            [run],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?)
+}
+
+fn run_goal_membership(db: &Connection, run: &str) -> Result<Option<(String, GoalMembership)>> {
+    let Some(job) = attempt_job_id(db, run)? else {
+        return Ok(None);
+    };
+    Ok(goal_membership(db, &job)?.map(|goal| (job, goal)))
+}
+
+pub(super) fn goal_owns_run(db: &Connection, run: &str) -> Result<bool> {
+    Ok(run_goal_membership(db, run)?.is_some())
 }
 
 pub(super) fn deactivate_cancelled_job(db: &Connection, job: &str) -> Result<()> {
@@ -487,7 +644,7 @@ pub(super) fn deactivate_cancelled_job(db: &Connection, job: &str) -> Result<()>
                    WHERE member.revision_id = c.revision_id AND (
                        EXISTS (SELECT 1 FROM active_agent_attempts WHERE run_id = a.run_id)
                        OR EXISTS (SELECT 1 FROM job_writer_reservations WHERE run_id = a.run_id)
-                       OR EXISTS (SELECT 1 FROM unconfirmed_question_stops WHERE run_id = a.run_id)
+                       OR EXISTS (SELECT 1 FROM unconfirmed_agent_stops WHERE run_id = a.run_id)
                    )
                )
          )",
@@ -502,6 +659,7 @@ pub(super) fn deactivate_cancelled_job(db: &Connection, job: &str) -> Result<()>
 
 pub(crate) struct GoalExecution {
     deadline_ms: Option<i64>,
+    pub(crate) delegated: bool,
 }
 
 impl GoalExecution {
@@ -517,12 +675,19 @@ impl Store {
         run: String,
     ) -> Result<Option<GoalExecution>> {
         self.execute(move |db| {
-            Ok(db.query_row(
-                "SELECT r.deadline_ms FROM goal_continuations c JOIN goal_revisions r ON r.id = c.revision_id
-                 JOIN job_attempts a ON a.job_id = c.job_id WHERE a.run_id = ?1",
-                [&run], |row| Ok(GoalExecution { deadline_ms: row.get(0)? }),
-            ).optional()?)
-        }).await
+            Ok(
+                run_goal_membership(db, &run)?.map(|(_, goal)| GoalExecution {
+                    deadline_ms: goal.deadline,
+                    delegated: goal.delegated,
+                }),
+            )
+        })
+        .await
+    }
+
+    pub(crate) async fn goal_delegation_revoked(&self, run: String) -> Result<bool> {
+        self.execute(move |db| delegated_goal_authority_revoked(db, &run))
+            .await
     }
 
     pub(crate) async fn activate_native_goal_executor(
@@ -553,7 +718,7 @@ impl Store {
             let Some((revision, session)) = execution else {
                 return Ok(false);
             };
-            if !super::validate_attempt_policy(&tx, &run)? {
+            if !super::policy::validate_attempt_policy(&tx, &run)? {
                 tx.commit()?;
                 return Ok(false);
             }
@@ -586,6 +751,24 @@ impl Store {
             Ok(())
         }).await
     }
+}
+
+pub(crate) fn delegated_goal_authority_revoked(db: &Connection, run: &str) -> Result<bool> {
+    let Some((job, goal)) = run_goal_membership(db, run)? else {
+        return Ok(false);
+    };
+    // Cancellation follows the queue's explicit stop path.
+    if !goal.delegated
+        || matches!(
+            goal.state,
+            GoalControlState::Cancelling | GoalControlState::Cancelled
+        )
+    {
+        return Ok(false);
+    }
+    Ok(goal.control_blocker().is_some()
+        || delegation_blocker(db, &job, goal.token_budget)?.is_some()
+        || !super::policy::validate_attempt_policy(db, run)?)
 }
 
 pub(crate) fn settle_native_goal_executor(
@@ -770,7 +953,7 @@ pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) 
         match report.as_ref().map(|report| report.action) {
             Some(GoalTurnAction::Blocked) => "blocked",
             Some(GoalTurnAction::Continue) if owner == "managed" => {
-                if definition.max_turns.is_some_and(|max| ordinal >= max)
+                if managed_turn_limit_reached(db, &revision)?
                     || deadline.is_some_and(|deadline| now_ms() >= deadline)
                     || definition.token_budget.is_some()
                 {

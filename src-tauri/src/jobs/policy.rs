@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     providers::{Capability, SessionMode},
+    repository::writers::writer_owner,
     store::Store,
 };
 
@@ -90,6 +91,9 @@ pub enum RequiredCustomization {
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum DispatchRejection {
     PolicyChanged,
+    Goal {
+        reason: String,
+    },
     PipelineRelease {
         reason: ReleaseBlocker,
     },
@@ -194,6 +198,16 @@ pub(super) fn attempt_requirements(
     if accepted != policy.key || job.queue_state == QueueState::Cancelled {
         return Ok(Err(DispatchRejection::PolicyChanged));
     }
+    if job.mode == SessionMode::ApprovedWrite {
+        let task = job
+            .task_id
+            .as_deref()
+            .context("The writer has no task scope")?;
+        let owner = writer_owner(db, &job.project_id, task, &job.checkout_id)?;
+        if owner.is_none() || owner != job.worktree_owner_task_id {
+            return Ok(Err(DispatchRejection::WorktreeUnavailable));
+        }
+    }
     super::instruction_delivery::supplement_requirements(db, run, policy.requirements)
 }
 
@@ -203,6 +217,20 @@ pub(crate) fn validate_attempt_policy(db: &Connection, run: &str) -> Result<bool
         return Ok(false);
     }
     Ok(true)
+}
+
+pub(crate) fn validate_attempt_dispatch(db: &Connection, run: &str) -> Result<bool> {
+    if let Some(reason) = super::goals::goal_dispatch_blocker(db, run)? {
+        save_rejection(
+            db,
+            run,
+            &DispatchRejection::Goal {
+                reason: reason.into(),
+            },
+        )?;
+        return Ok(false);
+    }
+    validate_attempt_policy(db, run)
 }
 
 pub(super) fn dispatch_rejection(db: &Connection, run: &str) -> Result<Option<DispatchRejection>> {

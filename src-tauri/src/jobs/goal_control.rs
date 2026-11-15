@@ -120,6 +120,11 @@ impl Store {
             ).optional()?.context("The goal revision is no longer active in this project")?;
             let current = GoalControlState::from_key(&current)?;
             if current == action.requested() || current == action.settled() {
+                tx.execute(
+                    "UPDATE goal_revision_controls SET resume_after_wait = 0 WHERE revision_id = ?1",
+                    [&revision],
+                )?;
+                tx.commit()?;
                 return Ok(current);
             }
             ensure!(
@@ -162,7 +167,7 @@ impl Store {
                             (SELECT a.run_id FROM goal_continuations c JOIN job_attempts a ON a.job_id = c.job_id
                              WHERE c.revision_id = ?1 ORDER BY c.checkpoint_ordinal DESC, a.ordinal DESC LIMIT 1))
                             WHEN ?2 = 'needs_review' THEN coalesce(?4, stop_run_id) ELSE ?4 END,
-                        requested_ms = ?5, settled_ms = ?6,
+                        requested_ms = ?5, settled_ms = ?6, resume_after_wait = 0,
                         stop_event_floor = coalesce((SELECT max(seq) FROM agent_events WHERE run_id = ?4), 0),
                         confirmed_by = CASE WHEN ?6 IS NOT NULL THEN 'recorded_idle' END WHERE revision_id = ?1",
                 params![revision, state.key(), action.key(), run, now,
@@ -297,32 +302,37 @@ impl Store {
         }).await
     }
 
-    pub(crate) async fn native_goal_stop_action(&self, run: String) -> Result<GoalStopAction> {
-        let (project, revision, action): (String, String, Option<String>) = self.execute({
-            let run = run.clone();
-            move |db| {
-                Ok(db.query_row(
-                    "SELECT goal.project_id, g.revision_id,
+    pub(crate) async fn native_goal_stop_action(
+        &self,
+        run: String,
+        for_wait: bool,
+    ) -> Result<GoalStopAction> {
+        let action = self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let (revision, state, action): (String, String, Option<String>) = tx.query_row(
+                    "SELECT g.revision_id, controls.state,
                         CASE WHEN controls.stop_run_id = ?1 AND controls.state IN ('pausing', 'cancelling')
                              THEN controls.stop_action END
                      FROM native_goal_executors x
                      JOIN active_goals g ON g.revision_id = x.revision_id
-                     JOIN goals goal ON goal.id = g.goal_id
                      JOIN goal_revision_controls controls ON controls.revision_id = x.revision_id
                      WHERE x.run_id = ?1 AND NOT x.stop_confirmed",
                     [&run], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )?)
-            }
+                )?;
+            let action = match action.as_deref() {
+                Some("cancel") => GoalStopAction::Cancel,
+                Some("pause") => GoalStopAction::Pause,
+                _ => {
+                    ensure!(state == "active", "The native goal already has a stop boundary");
+                    stage_runtime_goal_pause(&tx, &revision, &run, for_wait)?;
+                    GoalStopAction::Pause
+                }
+            };
+            tx.commit()?;
+            Ok(action)
         }).await?;
-        match action.as_deref() {
-            Some("cancel") => Ok(GoalStopAction::Cancel),
-            Some("pause") => Ok(GoalStopAction::Pause),
-            _ => {
-                self.request_goal_stop(project, revision, GoalStopAction::Pause)
-                    .await?;
-                Ok(GoalStopAction::Pause)
-            }
-        }
+        self.job_signal.send_replace(());
+        Ok(action)
     }
 }
 
@@ -363,21 +373,32 @@ pub(crate) fn pause_revoked_goal(db: &Connection, run: &str) -> Result<bool> {
     let Some(revision) = revision else {
         return Ok(false);
     };
-    if super::validate_attempt_policy(db, run)? {
+    if super::policy::validate_attempt_policy(db, run)? {
         return Ok(false);
     }
+    stage_runtime_goal_pause(db, &revision, run, false)?;
+    Ok(true)
+}
+
+fn stage_runtime_goal_pause(
+    db: &Connection,
+    revision: &str,
+    run: &str,
+    for_wait: bool,
+) -> Result<()> {
     db.execute(
         "UPDATE goal_revision_controls SET state = 'pausing', stop_action = 'pause',
             stop_run_id = ?2, requested_ms = ?3, settled_ms = NULL, confirmed_by = NULL,
+            resume_after_wait = ?4,
             stop_event_floor = coalesce((SELECT max(seq) FROM agent_events WHERE run_id = ?2), 0)
          WHERE revision_id = ?1",
-        params![revision, run, now_ms()],
+        params![revision, run, now_ms(), for_wait],
     )?;
     db.execute(
         "UPDATE job_attempts SET cancel_requested = 1 WHERE run_id = ?1",
         [run],
     )?;
-    Ok(true)
+    Ok(())
 }
 
 pub(super) fn confirmed_goal_pause(
@@ -445,6 +466,10 @@ fn paused_job(db: &Connection, project: &str, revision: &str) -> Result<(Job, Op
         !has_unsettled_reservation(db, revision)?,
         "The previous executor still holds a reservation"
     );
+    ensure!(
+        !owned_children_unsettled(db, revision)?,
+        "Delegated work is still stopping"
+    );
     let job = load_job(db, project, &id)?.context("The paused goal lost its latest job")?;
     Ok((job, stopped))
 }
@@ -478,26 +503,78 @@ pub(super) fn activate_paused_goal(
             let remaining = super::native_goal_evidence::paused_native_budget(db, &run, budget)?
                 .context("The previous native goal's token usage could not be verified")?;
             ensure!(remaining > 0, "The goal reached its token budget");
-            Some(i64::try_from(remaining)?)
+            Some(remaining)
         } else {
             None
         };
-        db.execute(
-            "INSERT INTO native_goal_resume_checkpoints VALUES (?1, ?2, ?3)
-             ON CONFLICT(job_id) DO UPDATE SET source_run_id = excluded.source_run_id, remaining_tokens = excluded.remaining_tokens",
-             params![job, run, remaining],
-        )?;
-        db.execute(
-            "UPDATE goal_revisions SET continuation_owner = 'managed' WHERE id = ?1",
-            [revision],
-        )?;
+        pin_native_resume(db, revision, job, &run, remaining)?;
     }
+    activate_goal(db, revision)
+}
+
+fn pin_native_resume(
+    db: &Connection,
+    revision: &str,
+    job: &str,
+    run: &str,
+    budget: Option<u64>,
+) -> Result<()> {
+    db.execute(
+        "INSERT INTO native_goal_resume_checkpoints VALUES (?1, ?2, ?3)
+         ON CONFLICT(job_id) DO UPDATE SET source_run_id = excluded.source_run_id, remaining_tokens = excluded.remaining_tokens",
+        params![job, run, budget.map(i64::try_from).transpose()?],
+    )?;
+    db.execute(
+        "UPDATE goal_revisions SET continuation_owner = 'managed' WHERE id = ?1",
+        [revision],
+    )?;
+    Ok(())
+}
+
+fn activate_goal(db: &Connection, revision: &str) -> Result<()> {
     let changed = db.execute(
-        "UPDATE goal_revision_controls SET state = 'active' WHERE revision_id = ?1 AND state = 'paused'",
+        "UPDATE goal_revision_controls SET state = 'active', resume_after_wait = 0
+         WHERE revision_id = ?1 AND state = 'paused'",
         [revision],
     )?;
     ensure!(changed == 1, "The goal was already resumed or cancelled");
     Ok(())
+}
+
+fn resume_after_confirmed_wait(db: &Connection, revision: &str, run: &str) -> Result<()> {
+    let boundary: Option<(String, Vec<u8>)> = db.query_row(
+        "SELECT a.job_id, r.definition FROM job_attempts a
+         JOIN goal_revisions r ON r.initial_job_id = a.job_id
+         JOIN goal_revision_controls c ON c.revision_id = r.id
+         WHERE a.run_id = ?1 AND r.id = ?2 AND r.continuation_owner = 'native'
+           AND c.state = 'paused' AND c.resume_after_wait AND c.confirmed_by = 'worker'
+           AND (r.deadline_ms IS NULL OR r.deadline_ms > ?3)
+           AND (EXISTS (SELECT 1 FROM job_downstream_waits w WHERE w.parent_run_id = a.run_id AND w.state = 'waiting')
+              OR EXISTS (SELECT 1 FROM open_agent_questions q WHERE q.run_id = a.run_id AND q.state = 'saved'))
+           AND (NOT EXISTS (SELECT 1 FROM job_worktree_starts w WHERE w.run_id = a.run_id)
+              OR EXISTS (SELECT 1 FROM job_worktree_candidates w WHERE w.run_id = a.run_id AND w.capture_confirmed))",
+        params![run, revision, now_ms()], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let Some((job, definition)) = boundary else {
+        return Ok(());
+    };
+    if super::policy::attempt_requirements(db, run)?.is_err() {
+        return Ok(());
+    }
+    let definition: super::GoalDefinition =
+        serde_json::from_slice(&crate::protection::unprotect(&definition)?)?;
+    let remaining = if let Some(budget) = definition.token_budget {
+        let Some(remaining) = super::native_goal_evidence::paused_native_budget(db, run, budget)?
+            .filter(|remaining| *remaining > 0)
+        else {
+            return Ok(());
+        };
+        Some(remaining)
+    } else {
+        None
+    };
+    pin_native_resume(db, revision, &job, run, remaining)?;
+    activate_goal(db, revision)
 }
 
 pub(crate) fn settle_goal_stop(
@@ -505,6 +582,15 @@ pub(crate) fn settle_goal_stop(
     run: &str,
     quiescence_confirmed: bool,
 ) -> Result<()> {
+    if !quiescence_confirmed && super::goals::goal_owns_run(db, run)? {
+        db.execute(
+            "INSERT INTO unconfirmed_managed_goal_stops SELECT a.run_id FROM job_attempts a
+             WHERE a.run_id = ?1 AND a.process_launch_requested
+               AND NOT EXISTS (SELECT 1 FROM native_goal_executors x WHERE x.run_id = a.run_id)
+             ON CONFLICT(run_id) DO NOTHING",
+            [run],
+        )?;
+    }
     let pending: Option<(String, String, String, bool)> = db.query_row(
         "SELECT controls.revision_id, controls.stop_action, r.continuation_owner, a.process_launch_requested
          FROM goal_revision_controls controls JOIN goal_revisions r ON r.id = controls.revision_id
@@ -538,6 +624,9 @@ pub(crate) fn settle_goal_stop(
             &action,
             if launched { "worker" } else { "unlaunched" },
         )?;
+        if owner == "native" && action == "pause" {
+            resume_after_confirmed_wait(db, &revision, run)?;
+        }
     } else {
         db_set_stop_outcome(db, &revision, GoalControlState::NeedsReview, None)?;
     }
@@ -612,7 +701,7 @@ fn has_unsettled_reservation(db: &Connection, revision: &str) -> Result<bool> {
             SELECT 1 FROM goal_continuations c JOIN job_attempts a ON a.job_id = c.job_id
             WHERE c.revision_id = ?1 AND (
                 EXISTS (SELECT 1 FROM job_writer_reservations WHERE run_id = a.run_id)
-                OR EXISTS (SELECT 1 FROM unconfirmed_question_stops WHERE run_id = a.run_id)
+                OR EXISTS (SELECT 1 FROM unconfirmed_agent_stops WHERE run_id = a.run_id)
                 OR EXISTS (SELECT 1 FROM native_subagent_reservations WHERE run_id = a.run_id AND state <> 'released')
                 OR EXISTS (SELECT 1 FROM native_goal_executors WHERE run_id = a.run_id AND NOT stop_confirmed)
             )
@@ -719,7 +808,7 @@ fn owned_children_unsettled(db: &Connection, revision: &str) -> Result<bool> {
             JOIN runs r ON r.id = a.run_id
             WHERE r.status IN ('starting','running','waiting_for_input')
               OR EXISTS (SELECT 1 FROM job_writer_reservations w WHERE w.run_id = a.run_id)
-              OR EXISTS (SELECT 1 FROM unconfirmed_question_stops w WHERE w.run_id = a.run_id)
+              OR EXISTS (SELECT 1 FROM unconfirmed_agent_stops w WHERE w.run_id = a.run_id)
               OR EXISTS (SELECT 1 FROM native_subagent_reservations w WHERE w.run_id = a.run_id AND w.state <> 'released')
         )"),
         [revision], |row| row.get(0),
@@ -742,6 +831,28 @@ pub(crate) fn settle_owned_goal_cancellations(db: &Connection) -> Result<()> {
         if !owned_children_unsettled(db, &revision)? {
             settle_confirmed_goal_stop(db, &revision, "cancel", &proof)?;
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn recover_managed_goal_stops(db: &Connection) -> Result<()> {
+    // A previous desktop process owned the non-inheritable Windows Job Object.
+    // Guest attempts still need confirmation from their runner.
+    let stopped = {
+        let mut statement = db.prepare(
+            "DELETE FROM unconfirmed_managed_goal_stops WHERE run_id IN (
+                 SELECT a.run_id FROM agent_attempts a JOIN agent_sessions s ON s.id = a.agent_session_id
+                 WHERE json_extract(s.scope, '$.runner') = ?1
+             ) RETURNING run_id",
+        )?;
+        statement
+            .query_map([crate::runner::DirectWindowsRunner::IDENTITY], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for run in stopped {
+        super::observe_child_run(db, &run)?;
     }
     Ok(())
 }

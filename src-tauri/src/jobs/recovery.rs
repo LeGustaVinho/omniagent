@@ -155,6 +155,14 @@ fn load_recovery_source(
     let Some(attempt) = job.latest_attempt.as_ref() else {
         return Ok(None);
     };
+    let unsettled: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM unconfirmed_managed_goal_stops WHERE run_id = ?1)",
+        [&attempt.run_id],
+        |row| row.get(0),
+    )?;
+    if unsettled {
+        return Ok(None);
+    }
     let native_executor: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM native_goal_executors WHERE run_id = ?1)",
         [&attempt.run_id],
@@ -442,7 +450,11 @@ fn unchanged_native_preflight(db: &Connection, run: &str) -> Result<bool> {
 pub(super) fn pending_writer_checkpoint(db: &Connection, job: &Job) -> Result<Option<String>> {
     Ok(db
         .query_row(
-            "SELECT checkpoint_run_id FROM goal_writer_recoveries WHERE job_id = ?1",
+            "SELECT checkpoint_run_id FROM goal_writer_recoveries WHERE job_id = ?1
+             UNION ALL
+             SELECT p.source_run_id FROM native_goal_resume_checkpoints p
+             JOIN job_worktree_candidates w ON w.run_id = p.source_run_id AND w.capture_confirmed
+             WHERE p.job_id = ?1 LIMIT 1",
             [&job.id],
             |row| row.get(0),
         )

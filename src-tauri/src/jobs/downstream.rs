@@ -151,6 +151,16 @@ fn would_cycle(db: &Connection, parent: &Job, child: &str) -> Result<bool> {
 }
 
 fn observe_child(db: &Connection, child: &Job) -> Result<()> {
+    if let Some(attempt) = &child.latest_attempt {
+        let unsettled: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM unconfirmed_agent_stops WHERE run_id = ?1)",
+            [&attempt.run_id],
+            |row| row.get(0),
+        )?;
+        if unsettled {
+            return Ok(());
+        }
+    }
     let (run, status) = if child.queue_state == QueueState::Cancelled {
         (None, RunStatus::Cancelled)
     } else if let Some(attempt) = child.latest_attempt.as_ref().filter(|attempt| {

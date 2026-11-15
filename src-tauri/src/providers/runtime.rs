@@ -756,9 +756,10 @@ impl TurnExecution {
                 )
             });
         if self.native_goal.is_some() && !matches!(run, Ok(RunStatus::Succeeded)) {
-            let _ = self
-                .app
-                .block_on(self.store.native_goal_stop_action(self.plan.run.id.clone()));
+            let _ = self.app.block_on(
+                self.store
+                    .native_goal_stop_action(self.plan.run.id.clone(), false),
+            );
         }
         let prior_failure = self.failure;
         let awaiting_question = self.app.block_on(
@@ -874,7 +875,7 @@ impl TurnExecution {
                 {
                     self.failure.cause = Some(FailureCause::GoalAuthorityRevoked);
                 }
-                return self.stop_native_goal(process, session);
+                return self.stop_native_goal(process, session, false);
             }
             if self
                 .goal
@@ -883,7 +884,7 @@ impl TurnExecution {
             {
                 self.failure.cause = Some(FailureCause::GoalTimeLimit);
                 if self.native_goal.is_some() {
-                    return self.stop_native_goal(process, session);
+                    return self.stop_native_goal(process, session, false);
                 }
                 if model_started {
                     self.app.block_on(
@@ -896,19 +897,26 @@ impl TurnExecution {
                 }
                 return Ok(RunStatus::Interrupted);
             }
-            if sent && self.goal.is_some() && Instant::now() >= next_goal_authority_check {
+            if sent
+                && let Some(goal) = &self.goal
+                && Instant::now() >= next_goal_authority_check
+            {
                 next_goal_authority_check = Instant::now() + Duration::from_secs(1);
-                if self.app.block_on(
-                    self.store
-                        .pause_goal_if_policy_changed(self.plan.run.id.clone()),
-                )? {
+                let run = self.plan.run.id.clone();
+                let revoked = if goal.delegated {
+                    self.app.block_on(self.store.goal_delegation_revoked(run))?
+                } else {
+                    self.app
+                        .block_on(self.store.pause_goal_if_policy_changed(run))?
+                };
+                if revoked {
                     self.failure.cause = Some(FailureCause::GoalAuthorityRevoked);
                     self.app.block_on(
                         self.store
                             .preserve_questions_after_turn(self.plan.run.id.clone(), false),
                     )?;
                     if self.native_goal.is_some() {
-                        return self.stop_native_goal(process, session);
+                        return self.stop_native_goal(process, session, false);
                     }
                     if model_started {
                         interrupt_to_completion(process, session, |event, source| {
@@ -947,7 +955,7 @@ impl TurnExecution {
                         QuestionTimer::WakeAt(deadline) => Some(deadline),
                         QuestionTimer::Stop => {
                             if self.native_goal.is_some() {
-                                return self.stop_native_goal(process, session);
+                                return self.stop_native_goal(process, session, true);
                             }
                             interrupt_to_completion(process, session, |event, source| {
                                 self.record(event, source)
@@ -983,7 +991,7 @@ impl TurnExecution {
                         }
                     }
                     if self.native_goal.is_some() {
-                        return self.stop_native_goal(process, session);
+                        return self.stop_native_goal(process, session, yielding && !exiting);
                     }
                     let outcome = if model_started {
                         match interrupt_to_completion(process, session, |event, source| {
@@ -1169,7 +1177,7 @@ impl TurnExecution {
             if let Some(native) = &self.native_goal {
                 if native.result().is_some() {
                     if !self.confirm_native_terminal(process, session)? {
-                        return self.stop_native_goal(process, session);
+                        return self.stop_native_goal(process, session, false);
                     }
                     let Some(result) = self
                         .native_goal
@@ -1179,7 +1187,7 @@ impl TurnExecution {
                         continue;
                     };
                     let Some(result) = result else {
-                        return self.stop_native_goal(process, session);
+                        return self.stop_native_goal(process, session, false);
                     };
                     if !self.app.block_on(
                         self.store
@@ -1191,7 +1199,7 @@ impl TurnExecution {
                         )?;
                         return Ok(RunStatus::Succeeded);
                     }
-                    return self.stop_native_goal(process, session);
+                    return self.stop_native_goal(process, session, true);
                 }
                 continue;
             }

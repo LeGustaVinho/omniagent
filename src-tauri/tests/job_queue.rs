@@ -1187,6 +1187,8 @@ async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -
     db.execute_batch(
         "DROP TABLE attempt_subagent_audit;
          DROP TABLE native_subagent_audit_candidates;
+         DROP VIEW unconfirmed_agent_stops;
+         DROP TABLE unconfirmed_managed_goal_stops;
          DROP TABLE goal_writer_attempts;
          DROP TABLE goal_writer_recoveries;
          DROP TABLE goal_revision_controls;
@@ -1808,7 +1810,9 @@ async fn queued_conversation_draft_and_snapshot_survive_reopen_without_creating_
     drop(store);
     // A pending conversation job from the previous schema already owns its prompt and scope.
     rusqlite::Connection::open(&database)?.execute_batch(
-        "DROP TABLE goal_writer_attempts;
+        "DROP VIEW unconfirmed_agent_stops;
+         DROP TABLE unconfirmed_managed_goal_stops;
+         DROP TABLE goal_writer_attempts;
          DROP TABLE goal_writer_recoveries;
          DROP TABLE goal_revision_controls;
          DROP TABLE late_goal_turn_reports;

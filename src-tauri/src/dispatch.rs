@@ -137,7 +137,7 @@ impl Store {
         let frame_cipher = protection::protect(&serde_json::to_vec(&frames)?)?;
         let dispatched = self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            if !crate::jobs::validate_attempt_policy(&tx, &run_id)? {
+            if !crate::jobs::validate_attempt_dispatch(&tx, &run_id)? {
                 tx.commit()?;
                 return Ok(None);
             }

@@ -44,15 +44,17 @@ pub use failures::{
 };
 pub use goal_control::{GoalControlState, GoalStopAction};
 pub(crate) use goal_control::{
-    pause_revoked_goal, settle_goal_stop, settle_owned_goal_cancellations,
+    pause_revoked_goal, recover_managed_goal_stops, settle_goal_stop,
+    settle_owned_goal_cancellations,
 };
 pub use goals::{
     GoalCheckpoint, GoalContinuationOwner, GoalDefinition, GoalRevision, GoalTurnAction,
     GoalTurnReport,
 };
 pub(crate) use goals::{
-    GoalExecution, accept_goal_checkpoint, is_native_goal_run, record_native_goal,
-    record_native_goal_turn, recover_native_goal_executors, settle_native_goal_executor,
+    GoalExecution, accept_goal_checkpoint, delegated_goal_authority_revoked, is_native_goal_run,
+    record_native_goal, record_native_goal_turn, recover_native_goal_executors,
+    settle_native_goal_executor,
 };
 pub use history::{QueueHistoryPolicy, QueueHistorySettings};
 pub(crate) use history::{apply_queue_history_policy, detached_question_context};
@@ -68,7 +70,7 @@ pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use pipeline::{
     PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease, ReleaseBlocker,
 };
-pub(crate) use policy::validate_attempt_policy;
+pub(crate) use policy::validate_attempt_dispatch;
 pub use policy::{
     DispatchRejection, JobPermission, JobRequirements, JobRole, JobRule, JobWorkspace,
     RequiredCustomization,
@@ -292,6 +294,9 @@ impl Store {
                         .context("job request points to a missing job");
                 }
                 ensure!(active, "job origin run is no longer active");
+                if let Some(reason) = goals::new_delegation_blocker(&tx, &run_id)? {
+                    anyhow::bail!(reason);
+                }
                 let pipeline = pipeline::load_attempt_job(&tx, &run_id)?
                     .and_then(|parent| parent.pipeline)
                     .map(|origin| origin.binding());
@@ -607,7 +612,7 @@ pub(crate) fn record_launch_intent(db: &Connection, run_id: &str) -> Result<Opti
     if cancelled {
         return Ok(Some(false));
     }
-    if !validate_attempt_policy(db, run_id)? {
+    if !validate_attempt_dispatch(db, run_id)? {
         return Ok(None);
     }
     record_process_launch(db, run_id)?;

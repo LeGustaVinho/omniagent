@@ -79,6 +79,7 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
       const rejection = blocker.rejection;
       switch (rejection.type) {
         case "policy_changed": return "The project rule changed before dispatch. Review the current rule before retrying.";
+        case "goal": return rejection.reason;
         case "pipeline_release": return releaseReasons[rejection.reason];
         case "profile_unavailable": return "The selected CLI profile changed or could not be verified.";
         case "worktree_unavailable": return "The worktree identity could not be verified.";
