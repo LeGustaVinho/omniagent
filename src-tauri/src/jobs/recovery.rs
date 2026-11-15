@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -17,7 +19,12 @@ use crate::{
 };
 
 use super::{
-    Job, JobOrigin, QueueState, admission::recovery_scope, load_job, policy::reconcile_approval,
+    Job, JobKind, JobOrigin, QueueState,
+    admission::recovery_scope,
+    command::CommandInvocation,
+    load_job,
+    pipeline::{load_attempt_job, release_blocker},
+    policy::reconcile_approval,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
@@ -66,7 +73,67 @@ pub(super) struct RecoverySource {
     launch_requested: bool,
 }
 
-pub(super) fn recovery_source(db: &Connection, job: &Job) -> Result<Option<RecoverySource>> {
+#[derive(PartialEq, Eq)]
+pub(super) enum RecoveryProfile {
+    Agent(SessionScope),
+    Command(CommandInvocation),
+}
+
+impl RecoveryProfile {
+    fn checkout(&self) -> &Path {
+        match self {
+            Self::Agent(scope) => &scope.checkout,
+            Self::Command(invocation) => &invocation.checkout,
+        }
+    }
+
+    fn executable(&self) -> &Path {
+        match self {
+            Self::Agent(scope) => &scope.executable,
+            Self::Command(invocation) => &invocation.executable,
+        }
+    }
+}
+
+pub(super) enum RecoveryCheckpoint {
+    Agent(Box<RecoverySource>),
+    Command {
+        run_id: String,
+        launch_requested: bool,
+    },
+}
+
+impl RecoveryCheckpoint {
+    pub(super) fn run_id(&self) -> &str {
+        match self {
+            Self::Agent(source) => &source.source_run_id,
+            Self::Command { run_id, .. } => run_id,
+        }
+    }
+
+    pub(super) fn context_id(&self) -> Option<&str> {
+        match self {
+            Self::Agent(source) => Some(&source.result_context_id),
+            Self::Command { .. } => None,
+        }
+    }
+
+    pub(super) fn actions(&self, mode: SessionMode) -> Vec<RecoveryAction> {
+        match self {
+            Self::Agent(source) => source.actions(mode),
+            Self::Command {
+                launch_requested: false,
+                ..
+            } => vec![RecoveryAction::Retry],
+            Self::Command {
+                launch_requested: true,
+                ..
+            } => Vec::new(),
+        }
+    }
+}
+
+pub(super) fn recovery_source(db: &Connection, job: &Job) -> Result<Option<RecoveryCheckpoint>> {
     let Some(attempt) = job.latest_attempt.as_ref().filter(|attempt| {
         matches!(
             attempt.status,
@@ -75,6 +142,17 @@ pub(super) fn recovery_source(db: &Connection, job: &Job) -> Result<Option<Recov
     }) else {
         return Ok(None);
     };
+    if job.kind == JobKind::Command {
+        let launch_requested = db.query_row(
+            "SELECT process_launch_requested FROM job_attempts WHERE run_id = ?1",
+            [&attempt.run_id],
+            |row| row.get(0),
+        )?;
+        return Ok(Some(RecoveryCheckpoint::Command {
+            run_id: attempt.run_id.clone(),
+            launch_requested,
+        }));
+    }
     let (conversation_id, input_context_id, sealed, provider_terminal, session, provider_turn_id, dispatched, launch_requested):
         (String, String, Option<String>, Option<String>, Option<String>, Option<String>, bool, bool) = db.query_row(
         "SELECT a.conversation_id, a.context_id, a.result_context_id, a.provider_terminal,
@@ -95,7 +173,7 @@ pub(super) fn recovery_source(db: &Connection, job: &Job) -> Result<Option<Recov
     else {
         return Ok(None);
     };
-    Ok(Some(RecoverySource {
+    Ok(Some(RecoveryCheckpoint::Agent(Box::new(RecoverySource {
         source_run_id: attempt.run_id.clone(),
         conversation_id,
         input_context_id,
@@ -106,7 +184,7 @@ pub(super) fn recovery_source(db: &Connection, job: &Job) -> Result<Option<Recov
         provider_turn_id,
         dispatched,
         launch_requested,
-    }))
+    }))))
 }
 
 impl RecoverySource {
@@ -191,29 +269,29 @@ impl RecoverySource {
 pub(crate) fn requeue_unlaunched_job(db: &Connection, run_id: &str) -> Result<()> {
     let queued = db.execute(
         "INSERT INTO job_recoveries (job_id, source_run_id, action, context_id)
-         SELECT j.id, a.run_id, 'retry', run.result_context_id
+         SELECT j.id, a.run_id, 'retry', attempt.result_context_id
          FROM job_attempts a JOIN jobs j ON j.id = a.job_id
-         JOIN agent_attempts run ON run.run_id = a.run_id
+         JOIN runs r ON r.id = a.run_id
+         LEFT JOIN agent_attempts attempt ON attempt.run_id = a.run_id
          WHERE a.run_id = ?1 AND a.process_launch_requested = 0 AND a.cancel_requested = 0
-           AND j.queue_state IN ('queued', 'paused') AND run.result_context_id = run.context_id
+           AND j.queue_state IN ('queued', 'paused')
+           AND (r.kind = 'command' OR attempt.result_context_id = attempt.context_id)
            AND NOT EXISTS (SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
                            WHERE s.run_id = a.run_id)
          ON CONFLICT(job_id) DO NOTHING",
         [run_id],
     )?;
     if queued != 0 {
-        let (project, id): (String, String) = db.query_row(
-            "SELECT j.project_id, j.id FROM jobs j JOIN job_attempts a ON a.job_id = j.id WHERE a.run_id = ?1",
-            [run_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let job = load_job(db, &project, &id)?.context("Recovery job disappeared")?;
+        let job = load_attempt_job(db, run_id)?.context("Recovery job disappeared")?;
         reconcile_approval(db, &job)?;
     }
     Ok(())
 }
 
-pub(super) fn pending_recovery(db: &Connection, job: &Job) -> Result<Option<(String, String)>> {
+pub(super) fn pending_recovery(
+    db: &Connection,
+    job: &Job,
+) -> Result<Option<(String, Option<String>)>> {
     Ok(db
         .query_row(
             "SELECT source_run_id, context_id FROM job_recoveries WHERE job_id = ?1",
@@ -237,10 +315,12 @@ impl Store {
                 move |db| {
                     let job = load_job(db, &project, &id)?
                         .context("Job is unavailable in this project")?;
+                    ensure!(release_blocker(db, &job)?.is_none(),
+                        "The pipeline job needs an accepted release for the current plan and worktree");
                     let scope = recovery_scope(db, &job)?;
                     let refresh = job.origin == JobOrigin::Operator
-                        && scope.permission_revision == DESKTOP_PERMISSION_REVISION
-                        && scope.account_binding.is_none();
+                        && matches!(&scope, RecoveryProfile::Agent(profile)
+                            if profile.permission_revision == DESKTOP_PERMISSION_REVISION && profile.account_binding.is_none());
                     Ok((job.checkout_id, job.worktree_owner_task_id, scope, refresh))
                 }
             })
@@ -254,9 +334,12 @@ impl Store {
             )
             .await?;
         } else {
-            repository::verify_checkout(self, checkout_id, scope.checkout.clone()).await?;
+            repository::verify_checkout(self, checkout_id, scope.checkout().to_owned()).await?;
         }
         let refreshed = if refresh_desktop {
+            let RecoveryProfile::Agent(scope) = &scope else {
+                anyhow::bail!("The recovery has no desktop CLI profile");
+            };
             let configured = self.configured_executable(scope.provider).await?;
             let configured_path = configured.executable.clone();
             let model = scope
@@ -284,7 +367,7 @@ impl Store {
             Some((configured_path, current))
         } else {
             ensure!(
-                scope.executable.is_file(),
+                scope.executable().is_file(),
                 "The job's CLI executable is unavailable"
             );
             None
@@ -294,10 +377,14 @@ impl Store {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let job = load_job(&tx, &project_id, &job_id)?
                     .context("Job is unavailable in this project")?;
+                ensure!(
+                    release_blocker(&tx, &job)?.is_none(),
+                    "The pipeline job needs an accepted release for the current plan and worktree"
+                );
                 let checkpoint = recovery_source(&tx, &job)?
                     .context("The job no longer has a recoverable checkpoint")?;
                 ensure!(
-                    checkpoint.source_run_id == expected_run,
+                    checkpoint.run_id() == expected_run,
                     "The job has a newer attempt"
                 );
                 ensure!(
@@ -336,9 +423,9 @@ impl Store {
                     "INSERT INTO job_recoveries VALUES (?1, ?2, ?3, ?4)",
                     params![
                         job.id,
-                        checkpoint.source_run_id,
+                        checkpoint.run_id(),
                         action.key(),
-                        checkpoint.result_context_id
+                        checkpoint.context_id()
                     ],
                 )?;
                 if job.queue_state != QueueState::Paused {

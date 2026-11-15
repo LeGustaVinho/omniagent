@@ -10,7 +10,7 @@ use crate::{
     store::Store,
 };
 
-use super::{Job, JobOrigin, load_job};
+use super::{Job, JobOrigin, ReleaseBlocker, load_job, pipeline::release_blocker};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -18,6 +18,7 @@ use super::{Job, JobOrigin, load_job};
 pub enum JobRole {
     Operator,
     Agent,
+    Pipeline,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
@@ -85,6 +86,9 @@ pub enum RequiredCustomization {
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum DispatchRejection {
     PolicyChanged,
+    PipelineRelease {
+        reason: ReleaseBlocker,
+    },
     ProfileUnavailable,
     WorktreeUnavailable,
     Requirements {
@@ -116,6 +120,7 @@ pub(super) fn effective_policy(db: &Connection, job: &Job) -> Result<EffectivePo
     let role = match job.origin {
         JobOrigin::Operator => JobRole::Operator,
         JobOrigin::Agent { .. } => JobRole::Agent,
+        JobOrigin::Pipeline => JobRole::Pipeline,
     };
     let matched = rules(db, &job.project_id)?.into_iter().find(|rule| {
         rule.role == role
@@ -152,7 +157,10 @@ pub(super) fn bind_attempt_policy(db: &Connection, job: &Job, run: &str) -> Resu
     Ok(())
 }
 
-fn attempt_policy(db: &Connection, run: &str) -> Result<Option<(String, EffectivePolicy)>> {
+fn attempt_requirements(
+    db: &Connection,
+    run: &str,
+) -> Result<std::result::Result<JobRequirements, DispatchRejection>> {
     let row: Option<(String, String, String)> = db
         .query_row(
             "SELECT p.policy_key, j.project_id, j.id FROM job_attempt_policies p
@@ -162,16 +170,23 @@ fn attempt_policy(db: &Connection, run: &str) -> Result<Option<(String, Effectiv
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    row.map(|(accepted, project, id)| {
-        let job = load_job(db, &project, &id)?.context("Job is unavailable")?;
-        Ok((accepted, effective_policy(db, &job)?))
-    })
-    .transpose()
+    let Some((accepted, project, id)) = row else {
+        return Ok(Ok(JobRequirements::default()));
+    };
+    let job = load_job(db, &project, &id)?.context("Job is unavailable")?;
+    if let Some(reason) = release_blocker(db, &job)? {
+        return Ok(Err(DispatchRejection::PipelineRelease { reason }));
+    }
+    let policy = effective_policy(db, &job)?;
+    if accepted != policy.key {
+        return Ok(Err(DispatchRejection::PolicyChanged));
+    }
+    Ok(Ok(policy.requirements))
 }
 
 pub(crate) fn validate_attempt_policy(db: &Connection, run: &str) -> Result<bool> {
-    if attempt_policy(db, run)?.is_some_and(|(accepted, policy)| accepted != policy.key) {
-        save_rejection(db, run, &DispatchRejection::PolicyChanged)?;
+    if let Err(rejection) = attempt_requirements(db, run)? {
+        save_rejection(db, run, &rejection)?;
         return Ok(false);
     }
     Ok(true)
@@ -240,16 +255,15 @@ fn check_project(db: &Connection, project: &str) -> Result<()> {
 impl Store {
     pub(crate) async fn job_dispatch_requirements(&self, run: String) -> Result<JobRequirements> {
         let requirements = self
-            .execute(move |db| match attempt_policy(db, &run)? {
-                Some((accepted, policy)) if accepted == policy.key => Ok(Some(policy.requirements)),
-                Some(_) => {
-                    save_rejection(db, &run, &DispatchRejection::PolicyChanged)?;
+            .execute(move |db| match attempt_requirements(db, &run)? {
+                Ok(requirements) => Ok(Some(requirements)),
+                Err(rejection) => {
+                    save_rejection(db, &run, &rejection)?;
                     Ok(None)
                 }
-                None => Ok(Some(JobRequirements::default())),
             })
             .await?;
-        requirements.context("The project rule changed before dispatch")
+        requirements.context("Job authorization changed before dispatch")
     }
 
     pub(crate) async fn record_dispatch_rejection(

@@ -1,12 +1,40 @@
 use omniagent::{
     diagnostics,
-    jobs::{Job, JobFailure, JobRequest, JobRule, QueueSettings, QueueState, RecoveryAction},
+    jobs::{
+        CommandJobOutput, Job, JobFailure, JobRequest, JobRule, QueueSettings, QueueState,
+        RecoveryAction,
+    },
+    runs::RunRecord,
     store::Store,
 };
 use tauri::State;
 
 fn ui_error(error: anyhow::Error) -> String {
     diagnostics::preview(&error.to_string())
+}
+
+#[tauri::command]
+pub async fn command_job_run(
+    store: State<'_, Store>,
+    project_id: String,
+    run_id: String,
+) -> Result<Option<RunRecord>, String> {
+    store
+        .command_job_run(project_id, run_id)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn command_job_output(
+    store: State<'_, Store>,
+    project_id: String,
+    run_id: String,
+) -> Result<Option<CommandJobOutput>, String> {
+    store
+        .command_job_output(project_id, run_id)
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]

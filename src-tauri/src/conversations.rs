@@ -789,26 +789,16 @@ impl Store {
     }
 
     pub(crate) async fn record_agent_launch_intent(&self, run_id: String) -> Result<bool> {
-        let accepted = self.execute(move |db| {
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            active_attempt(&tx, &run_id)?;
-            let cancel_requested: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM job_attempts WHERE run_id = ?1 AND cancel_requested = 1)",
-                [&run_id], |row| row.get(0),
-            )?;
-            if cancel_requested {
-                return Ok(Some(false));
-            }
-            if !crate::jobs::validate_attempt_policy(&tx, &run_id)? {
+        let accepted = self
+            .execute(move |db| {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                active_attempt(&tx, &run_id)?;
+                let allowed = crate::jobs::record_launch_intent(&tx, &run_id)?;
                 tx.commit()?;
-                return Ok(None);
-            }
-            crate::jobs::record_process_launch(&tx, &run_id)?;
-            tx.commit()?;
-            Ok(Some(true))
-        })
-        .await?;
-        accepted.context("The project rule changed before process launch")
+                Ok(allowed)
+            })
+            .await?;
+        accepted.context("Job authorization changed before process launch")
     }
 
     pub async fn finish_agent_attempt(
@@ -914,6 +904,7 @@ impl Store {
                 [],
             )?;
             tx.execute("DELETE FROM active_agent_attempts", [])?;
+            crate::jobs::recover_commands(&tx)?;
             tx.commit()?;
             Ok(())
         })

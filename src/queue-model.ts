@@ -1,5 +1,6 @@
 import type { AdmissionBlocker } from "@/bindings/AdmissionBlocker";
 import type { JobInspection } from "@/bindings/JobInspection";
+import type { ReleaseBlocker } from "@/bindings/ReleaseBlocker";
 import type { RunStatus } from "@/bindings/RunStatus";
 import type { RequiredCustomization } from "@/bindings/RequiredCustomization";
 
@@ -40,6 +41,13 @@ export function customizationLabel(requirement: RequiredCustomization) {
   return requirement.type === "instruction" ? requirement.path : `${requirement.type.replaceAll("_", " ")} ${requirement.id}`;
 }
 
+const releaseReasons: Record<ReleaseBlocker, string> = {
+  missing: "This pipeline write needs an implementation release.",
+  stale_plan: "The implementation release does not cover the current plan revision.",
+  wrong_scope: "The implementation release does not cover this task and worktree.",
+  revoked: "The implementation release was revoked.",
+};
+
 export function queueBlockerReason(blocker: AdmissionBlocker): string {
   switch (blocker.type) {
     case "queue_paused": return "The job queue is paused.";
@@ -54,10 +62,12 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
     case "context_changed": return `The conversation changed since context ${blocker.contextId} was queued.`;
     case "conversation_busy": return "Waiting for the active conversation run.";
     case "missing_capability": return `Required capability unavailable: ${blocker.capability.replaceAll("_", " ")}.`;
+    case "pipeline_release": return releaseReasons[blocker.reason];
     case "dispatch_rejected": {
       const rejection = blocker.rejection;
       switch (rejection.type) {
         case "policy_changed": return "The project rule changed before dispatch. Review the current rule before retrying.";
+        case "pipeline_release": return releaseReasons[rejection.reason];
         case "profile_unavailable": return "The selected CLI profile changed or could not be verified.";
         case "worktree_unavailable": return "The worktree identity could not be verified.";
         case "requirements": {

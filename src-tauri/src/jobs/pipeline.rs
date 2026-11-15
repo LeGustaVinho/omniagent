@@ -1,0 +1,370 @@
+use anyhow::{Context, Result, ensure};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+use uuid::Uuid;
+
+use crate::{
+    conversations::SessionScope, protection, providers::SessionMode,
+    repository::writers::writer_owner, store::Store,
+};
+
+use super::{Job, JobOrigin, JobRequest, insert_job, load_job};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineNodeKind {
+    Execution,
+    ImplementationApproval,
+}
+
+/// A scheduler submission from a trusted workflow executor. The run-bound MCP tools
+/// inherit this association from the parent and never accept it as user input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineDispatch {
+    pub pipeline_run_id: String,
+    pub node_instance_id: String,
+    pub plan_revision: Option<String>,
+    pub release_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct PipelineRelease {
+    pub id: String,
+    pub approval_node_id: String,
+    pub plan_revision: String,
+    pub checkout_id: String,
+    pub task_id: String,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct PipelineJobOrigin {
+    pub pipeline_run_id: String,
+    pub node_instance_id: String,
+    pub plan_revision: Option<String>,
+    pub release: Option<PipelineRelease>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum ReleaseBlocker {
+    Missing,
+    StalePlan,
+    WrongScope,
+    Revoked,
+}
+
+impl PipelineJobOrigin {
+    pub(super) fn binding(&self) -> PipelineDispatch {
+        PipelineDispatch {
+            pipeline_run_id: self.pipeline_run_id.clone(),
+            node_instance_id: self.node_instance_id.clone(),
+            plan_revision: self.plan_revision.clone(),
+            release_id: self.release.as_ref().map(|release| release.id.clone()),
+        }
+    }
+}
+
+pub(super) fn bind_job(
+    db: &Connection,
+    project: &str,
+    job: &str,
+    binding: &PipelineDispatch,
+) -> Result<()> {
+    db.execute(
+        "INSERT INTO job_pipeline_origins
+         (job_id, project_id, pipeline_run_id, node_instance_id, plan_revision, release_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            job,
+            project,
+            binding.pipeline_run_id,
+            binding.node_instance_id,
+            binding.plan_revision,
+            binding.release_id
+        ],
+    )?;
+    Ok(())
+}
+
+pub(super) fn load_origin(
+    db: &Connection,
+    project: &str,
+    job: &str,
+) -> Result<Option<PipelineJobOrigin>> {
+    Ok(db.query_row(
+        "SELECT o.pipeline_run_id, o.node_instance_id, o.plan_revision,
+                r.id, r.approval_node_id, r.plan_revision, r.checkout_id, r.task_id, r.revoked
+         FROM job_pipeline_origins o
+         LEFT JOIN job_pipeline_releases r ON r.pipeline_run_id = o.pipeline_run_id AND r.id = o.release_id
+         WHERE o.project_id = ?1 AND o.job_id = ?2",
+        params![project, job],
+        |row| {
+            let release = match row.get::<_, Option<String>>(3)? {
+                Some(id) => Some(PipelineRelease {
+                    id, approval_node_id: row.get(4)?, plan_revision: row.get(5)?,
+                    checkout_id: row.get(6)?, task_id: row.get(7)?, revoked: row.get(8)?,
+                }),
+                None => None,
+            };
+            Ok(PipelineJobOrigin {
+                pipeline_run_id: row.get(0)?, node_instance_id: row.get(1)?,
+                plan_revision: row.get(2)?, release,
+            })
+        },
+    ).optional()?)
+}
+
+pub(super) fn release_blocker(db: &Connection, job: &Job) -> Result<Option<ReleaseBlocker>> {
+    let Some(origin) = job
+        .pipeline
+        .as_ref()
+        .filter(|_| job.mode == SessionMode::ApprovedWrite)
+    else {
+        return Ok(None);
+    };
+    let Some(release) = origin.release.as_ref() else {
+        return Ok(Some(ReleaseBlocker::Missing));
+    };
+    let current: Option<String> = db.query_row(
+        "SELECT plan_revision FROM job_pipeline_runs WHERE id = ?1 AND project_id = ?2",
+        params![origin.pipeline_run_id, job.project_id],
+        |row| row.get(0),
+    )?;
+    if current.as_ref() != Some(&release.plan_revision)
+        || origin.plan_revision.as_ref() != Some(&release.plan_revision)
+    {
+        return Ok(Some(ReleaseBlocker::StalePlan));
+    }
+    if release.checkout_id != job.checkout_id || Some(&release.task_id) != job.task_id.as_ref() {
+        return Ok(Some(ReleaseBlocker::WrongScope));
+    }
+    Ok(release.revoked.then_some(ReleaseBlocker::Revoked))
+}
+
+pub(super) fn load_attempt_job(db: &Connection, run: &str) -> Result<Option<Job>> {
+    let identity: Option<(String, String)> = db.query_row(
+        "SELECT j.project_id, j.id FROM jobs j JOIN job_attempts a ON a.job_id = j.id WHERE a.run_id = ?1",
+        [run],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    match identity {
+        Some((project, job)) => load_job(db, &project, &job),
+        None => Ok(None),
+    }
+}
+
+pub(super) fn resolve_node_checkout(
+    db: &Connection,
+    binding: &PipelineDispatch,
+    checkout: &str,
+) -> Result<(String, String)> {
+    db.query_row(
+        "SELECT p.project_id, c.root FROM job_pipeline_runs p
+         JOIN job_pipeline_nodes n ON n.pipeline_run_id = p.id
+         JOIN checkouts c ON c.project_id = p.project_id AND c.id = ?3
+         WHERE p.id = ?1 AND n.instance_id = ?2 AND n.kind = 'execution'",
+        params![binding.pipeline_run_id, binding.node_instance_id, checkout],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()?
+    .context("The node or checkout is unavailable in the pipeline")
+}
+
+impl Store {
+    pub async fn register_job_pipeline(&self, project: String, pipeline_run: String) -> Result<()> {
+        ensure!(
+            !pipeline_run.trim().is_empty(),
+            "A pipeline run needs an identifier"
+        );
+        self.execute(move |db| {
+            db.execute(
+                "INSERT INTO job_pipeline_runs (id, project_id) VALUES (?1, ?2)",
+                params![pipeline_run, project],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn register_job_pipeline_node(
+        &self,
+        project: String,
+        pipeline_run: String,
+        instance: String,
+        kind: PipelineNodeKind,
+    ) -> Result<()> {
+        ensure!(
+            !instance.trim().is_empty(),
+            "A pipeline node needs an instance identifier"
+        );
+        self.execute(move |db| {
+            let changed = db.execute(
+                "INSERT INTO job_pipeline_nodes (pipeline_run_id, instance_id, kind)
+                 SELECT id, ?3, ?4 FROM job_pipeline_runs WHERE id = ?1 AND project_id = ?2",
+                params![
+                    pipeline_run,
+                    project,
+                    instance,
+                    match kind {
+                        PipelineNodeKind::Execution => "execution",
+                        PipelineNodeKind::ImplementationApproval => "implementation_approval",
+                    }
+                ],
+            )?;
+            ensure!(changed == 1, "The pipeline run is outside this project");
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn set_job_pipeline_plan(
+        &self,
+        project: String,
+        pipeline_run: String,
+        expected: Option<String>,
+        revision: String,
+    ) -> Result<()> {
+        ensure!(
+            !revision.trim().is_empty(),
+            "A pipeline plan needs a revision"
+        );
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let changed = tx.execute(
+                "UPDATE job_pipeline_runs SET plan_revision = ?4
+                 WHERE id = ?1 AND project_id = ?2 AND plan_revision IS ?3",
+                params![pipeline_run, project, expected, revision],
+            )?;
+            ensure!(changed == 1, "The pipeline's plan revision changed");
+            if expected.as_ref() != Some(&revision) {
+                tx.execute(
+                    "UPDATE job_pipeline_releases SET revoked = 1 WHERE pipeline_run_id = ?1",
+                    [&pipeline_run],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await?;
+        self.job_signal.send_replace(());
+        Ok(())
+    }
+
+    /// Records the accepted decision from the pipeline's implementation approval node.
+    pub async fn record_job_pipeline_release(
+        &self,
+        project: String,
+        pipeline_run: String,
+        approval_node: String,
+        plan_revision: String,
+        checkout: String,
+        task: String,
+    ) -> Result<PipelineRelease> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            ensure!(
+                writer_owner(&tx, &project, &task, &checkout)?.is_some(),
+                "The release needs an assigned task worktree in this project"
+            );
+            let id = Uuid::new_v4().to_string();
+            let changed = tx.execute(
+                "INSERT INTO job_pipeline_releases
+                 (id, pipeline_run_id, approval_node_id, project_id, checkout_id, task_id, plan_revision)
+                 SELECT ?1, p.id, n.instance_id, p.project_id, ?5, ?6, p.plan_revision
+                 FROM job_pipeline_runs p JOIN job_pipeline_nodes n ON n.pipeline_run_id = p.id
+                 WHERE p.id = ?2 AND p.project_id = ?7 AND n.instance_id = ?3
+                   AND n.kind = 'implementation_approval' AND p.plan_revision = ?4",
+                params![id, pipeline_run, approval_node, plan_revision, checkout, task, project],
+            )?;
+            ensure!(changed == 1, "The decision does not approve the pipeline's current plan");
+            tx.commit()?;
+            Ok(PipelineRelease { id, approval_node_id: approval_node, plan_revision,
+                checkout_id: checkout, task_id: task, revoked: false })
+        }).await
+    }
+
+    pub async fn revoke_job_pipeline_release(
+        &self,
+        project: String,
+        release: String,
+    ) -> Result<()> {
+        self.execute(move |db| {
+            let changed = db.execute(
+                "UPDATE job_pipeline_releases SET revoked = 1 WHERE project_id = ?1 AND id = ?2",
+                params![project, release],
+            )?;
+            ensure!(changed == 1, "The release is unavailable in this project");
+            Ok(())
+        })
+        .await?;
+        self.job_signal.send_replace(());
+        Ok(())
+    }
+
+    pub async fn submit_pipeline_agent_job(
+        &self,
+        binding: PipelineDispatch,
+        scope: SessionScope,
+        mut request: JobRequest,
+    ) -> Result<Job> {
+        ensure!(
+            scope.mode == request.mode
+                && scope.checkout.is_absolute()
+                && scope.executable.is_absolute()
+                && !scope.runner.is_empty(),
+            "Invalid pipeline CLI profile"
+        );
+        let checkout = request
+            .checkout_id
+            .clone()
+            .context("A pipeline job needs an explicit checkout")?;
+        request.normalize(&checkout)?;
+        let saved_scope = protection::protect(&serde_json::to_vec(&scope)?)?;
+        let job = self
+            .execute(move |db| {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let (project, root) = resolve_node_checkout(&tx, &binding, &checkout)?;
+                ensure!(
+                    scope.checkout.starts_with(root),
+                    "The CLI directory is outside the pipeline checkout"
+                );
+                let job = insert_job(
+                    &tx,
+                    project,
+                    None,
+                    JobOrigin::Pipeline,
+                    request,
+                    0,
+                    Some(&binding),
+                )?;
+                tx.execute(
+                    "UPDATE jobs SET operator_scope = ?1 WHERE id = ?2",
+                    params![saved_scope, job.id],
+                )?;
+                tx.commit()?;
+                Ok(job)
+            })
+            .await?;
+        self.job_signal.send_replace(());
+        Ok(job)
+    }
+
+    pub async fn attempt_pipeline_origin(
+        &self,
+        project: String,
+        run: String,
+    ) -> Result<Option<PipelineJobOrigin>> {
+        self.execute(move |db| {
+            Ok(load_attempt_job(db, &run)?
+                .filter(|job| job.project_id == project)
+                .and_then(|job| job.pipeline))
+        })
+        .await
+    }
+}

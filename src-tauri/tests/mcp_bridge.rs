@@ -9,6 +9,10 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::{AttemptPlan, SessionScope},
+    jobs::{
+        AdmissionBlocker, AdmissionEnvironment, JobPermission, JobRequest, JobRole, JobRule,
+        JobWorkspace, PipelineDispatch, PipelineNodeKind, RecoveryAction, ReleaseBlocker,
+    },
     mcp_bridge::{HELPER_FLAG, RunBridge},
     process_io::{CapturedProcess, Stream},
     providers::{Provider, SessionMode, WireMessage},
@@ -260,5 +264,299 @@ async fn run_bound_mcp_submits_jobs_idempotently_and_only_discloses_its_own_chil
         .await?;
     let (_helper, expired) = invoke_tool(helper, "get_job_status", json!({"jobId":id})).await?;
     assert!(expired["error"].is_object());
+    Ok(())
+}
+
+#[tokio::test]
+async fn pipeline_release_scope_is_inherited_by_mcp_descendants_and_rechecked_on_retry()
+-> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let db = directory.path().join("bridge.sqlite");
+    let store = Store::open(db.clone())?;
+    let fixture = attempt(&store, directory.path().join("source")).await?;
+    ensure!(
+        Command::new("git.exe")
+            .current_dir(&fixture.scope.checkout)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=NUL",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Base"
+            ])
+            .status()?
+            .success()
+    );
+    let project = fixture.run.project_id.clone();
+    let task = store
+        .create_project_task(project.clone(), "Approved task".into())
+        .await?;
+    let worktree = repository::provision_task_worktree(
+        &store,
+        directory.path().join("worktrees"),
+        project.clone(),
+        task.id.clone(),
+        fixture.run.checkout_id,
+    )
+    .await?;
+    let allow = [JobRole::Pipeline, JobRole::Agent]
+        .into_iter()
+        .flat_map(|role| {
+            [SessionMode::ReadOnly, SessionMode::ApprovedWrite]
+                .into_iter()
+                .map(move |operation| JobRule {
+                    role,
+                    operation,
+                    workspace: JobWorkspace::Project,
+                    permission: JobPermission::Allow,
+                    requirements: Default::default(),
+                })
+        })
+        .collect();
+    store
+        .set_project_job_rules(project.clone(), vec![], allow)
+        .await?;
+    let env = AdmissionEnvironment {
+        runner: DirectWindowsRunner.identity().into(),
+        bridge_available: true,
+    };
+    let pipeline = "pipeline-run".to_owned();
+    store
+        .register_job_pipeline(project.clone(), pipeline.clone())
+        .await?;
+    store
+        .register_job_pipeline_node(
+            project.clone(),
+            pipeline.clone(),
+            "implement".into(),
+            PipelineNodeKind::Execution,
+        )
+        .await?;
+    store
+        .register_job_pipeline_node(
+            project.clone(),
+            pipeline.clone(),
+            "approve".into(),
+            PipelineNodeKind::ImplementationApproval,
+        )
+        .await?;
+    let submit = |plan: &str, release_id: Option<String>, mode| {
+        store.submit_pipeline_agent_job(
+            PipelineDispatch {
+                pipeline_run_id: pipeline.clone(),
+                node_instance_id: "implement".into(),
+                plan_revision: Some(plan.into()),
+                release_id,
+            },
+            SessionScope {
+                mode,
+                checkout: worktree.root.clone(),
+                ..fixture.scope.clone()
+            },
+            JobRequest {
+                checkout_id: Some(worktree.checkout_id.clone()),
+                task_id: Some(task.id.clone()),
+                mode,
+                instructions: "Use the approved plan".into(),
+                dependencies: vec![],
+                requires_bridge: false,
+            },
+        )
+    };
+    store
+        .set_job_pipeline_plan(project.clone(), pipeline.clone(), None, "plan-1".into())
+        .await?;
+    assert!(
+        store
+            .record_job_pipeline_release(
+                project.clone(),
+                pipeline.clone(),
+                "implement".into(),
+                "plan-1".into(),
+                worktree.checkout_id.clone(),
+                task.id.clone()
+            )
+            .await
+            .is_err()
+    );
+    let stale = store
+        .record_job_pipeline_release(
+            project.clone(),
+            pipeline.clone(),
+            "approve".into(),
+            "plan-1".into(),
+            worktree.checkout_id.clone(),
+            task.id.clone(),
+        )
+        .await?;
+    let missing = submit("plan-1", None, SessionMode::ApprovedWrite).await?;
+    let old = submit("plan-1", Some(stale.id), SessionMode::ApprovedWrite).await?;
+    store
+        .set_job_pipeline_plan(
+            project.clone(),
+            pipeline.clone(),
+            Some("plan-1".into()),
+            "plan-2".into(),
+        )
+        .await?;
+    for (job_id, expected) in [
+        (missing.id, ReleaseBlocker::Missing),
+        (old.id, ReleaseBlocker::StalePlan),
+    ] {
+        assert_eq!(
+            store
+                .inspect_job(project.clone(), job_id, env.clone())
+                .await?
+                .unwrap()
+                .blockers,
+            [AdmissionBlocker::PipelineRelease { reason: expected }]
+        );
+    }
+    assert!(store.claim_next_job(env.clone()).await?.is_none());
+    let release = store
+        .record_job_pipeline_release(
+            project.clone(),
+            pipeline.clone(),
+            "approve".into(),
+            "plan-2".into(),
+            worktree.checkout_id.clone(),
+            task.id.clone(),
+        )
+        .await?;
+    let parent = submit(
+        "plan-2",
+        Some(release.id.clone()),
+        SessionMode::ApprovedWrite,
+    )
+    .await?;
+    let attempt = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("The released writer was not admitted")?;
+    assert_eq!(
+        store
+            .job(project.clone(), parent.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap()
+            .run_id,
+        attempt.run.id
+    );
+    let bridge = RunBridge::start(&store, attempt.run.id.clone()).await?;
+    let helper = start_helper(bridge.ticket_path().into(), worktree.root.clone()).await?;
+    let (helper, spoofed) = invoke_tool(helper, "submit_job", json!({"requestId":"spoof", "request":{
+        "mode":"approved_write", "instructions":"Try to forge release identity", "releaseId":"untrusted"
+    }})).await?;
+    assert!(spoofed["error"].is_object());
+    let (helper, submitted) = invoke_tool(
+        helper,
+        "submit_job",
+        json!({"requestId":"child", "request":{
+            "mode":"approved_write", "instructions":"Implement the delegated scope"
+        }}),
+    )
+    .await?;
+    let child = submitted["result"]["structuredContent"]["jobId"]
+        .as_str()
+        .context("Child response omitted the job ID")?;
+    let (_helper, status) = invoke_tool(helper, "get_job_status", json!({"jobId":child})).await?;
+    assert_eq!(
+        status["result"]["structuredContent"]["pipeline"],
+        json!({
+            "pipelineRunId": pipeline, "nodeInstanceId": "implement", "planRevision": "plan-2", "release": release,
+        })
+    );
+    assert!(
+        store.claim_next_job(env.clone()).await?.is_none(),
+        "The parent still owns the writer"
+    );
+    store
+        .finish_agent_attempt(attempt.run.id, RunStatus::Failed, None)
+        .await?;
+    let first_child = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("Released child did not run")?;
+    let lineage = store
+        .attempt_pipeline_origin(project.clone(), first_child.run.id.clone())
+        .await?
+        .unwrap();
+    assert_eq!(lineage.release.as_ref(), Some(&release));
+    let grandchild = store
+        .submit_agent_job(
+            first_child.run.id.clone(),
+            "nested".into(),
+            JobRequest {
+                checkout_id: None,
+                task_id: None,
+                mode: SessionMode::ApprovedWrite,
+                instructions: "Nested writer".into(),
+                dependencies: vec![child.into()],
+                requires_bridge: false,
+            },
+        )
+        .await?;
+    assert_eq!(grandchild.pipeline.as_ref(), Some(&lineage));
+    store
+        .finish_agent_attempt(first_child.run.id.clone(), RunStatus::Failed, None)
+        .await?;
+    store
+        .queue_job_recovery(
+            project.clone(),
+            child.into(),
+            first_child.run.id.clone(),
+            RecoveryAction::Retry,
+        )
+        .await?;
+    let retry = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("Eligible child retry did not run")?;
+    assert_eq!(retry.previous_run_id.as_ref(), Some(&first_child.run.id));
+    assert_eq!(
+        Store::open(db)?
+            .attempt_pipeline_origin(project.clone(), retry.run.id.clone())
+            .await?,
+        Some(lineage)
+    );
+    store
+        .finish_agent_attempt(retry.run.id.clone(), RunStatus::Failed, None)
+        .await?;
+    store
+        .queue_job_recovery(
+            project.clone(),
+            child.into(),
+            retry.run.id.clone(),
+            RecoveryAction::Retry,
+        )
+        .await?;
+    store
+        .revoke_job_pipeline_release(project.clone(), release.id)
+        .await?;
+    let recheck = store
+        .inspect_job(project.clone(), child.into(), env.clone())
+        .await?
+        .unwrap();
+    assert_eq!(
+        recheck.blockers,
+        [AdmissionBlocker::PipelineRelease {
+            reason: ReleaseBlocker::Revoked
+        }]
+    );
+    assert!(store.claim_next_job(env).await?.is_none());
+    assert!(
+        store
+            .queue_job_recovery(project, child.into(), retry.run.id, RecoveryAction::Retry)
+            .await
+            .is_err()
+    );
     Ok(())
 }

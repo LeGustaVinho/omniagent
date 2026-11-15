@@ -15,8 +15,9 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     conversations::SessionScope,
     jobs::{
-        AdmissionBlocker, AdmissionEnvironment, FailureCause, FailurePhase, Job, JobRequest,
-        JobScheduler,
+        AdmissionBlocker, AdmissionEnvironment, FailureCause, FailurePhase, Job, JobKind,
+        JobPermission, JobRequest, JobRole, JobRule, JobScheduler, JobWorkspace, PipelineCommand,
+        PipelineDispatch, PipelineNodeKind, RecoveryAction, ReleaseBlocker,
     },
     process_io::CapturedProcess,
     providers::{Provider, SessionMode, runtime::start_managed_turn},
@@ -604,6 +605,259 @@ async fn queue_approved_writer(
         .decide_job_approval(job.project_id.clone(), approval.clone(), true)
         .await?;
     Ok(job)
+}
+
+struct VerifyCommandOnRetry(AtomicBool);
+
+impl Runner for VerifyCommandOnRetry {
+    fn identity(&self) -> &str {
+        DirectWindowsRunner.identity()
+    }
+
+    fn executable_revision(&self, path: &Path) -> Option<String> {
+        if self.0.swap(false, Ordering::SeqCst) {
+            return None;
+        }
+        DirectWindowsRunner.executable_revision(path)
+    }
+
+    fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
+        DirectWindowsRunner.launch(request)
+    }
+}
+
+#[tokio::test]
+async fn pipeline_commands_need_the_exact_release_and_share_supervision_and_linked_recovery()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("command.sqlite");
+    let store = Store::open(database.clone())?;
+    let source = repository(&store, &temp.path().join("source")).await?;
+    let project = source.project_id;
+    let task = store
+        .create_project_task(project.clone(), "Command scope".into())
+        .await?;
+    let other = store
+        .create_project_task(project.clone(), "Different scope".into())
+        .await?;
+    let tree = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project.clone(),
+        task.id.clone(),
+        source.checkout_id.clone(),
+    )
+    .await?;
+    let other_tree = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project.clone(),
+        other.id.clone(),
+        source.checkout_id,
+    )
+    .await?;
+    let pipeline = "command-pipeline".to_owned();
+    store
+        .register_job_pipeline(project.clone(), pipeline.clone())
+        .await?;
+    store
+        .register_job_pipeline_node(
+            project.clone(),
+            pipeline.clone(),
+            "command".into(),
+            PipelineNodeKind::Execution,
+        )
+        .await?;
+    store
+        .register_job_pipeline_node(
+            project.clone(),
+            pipeline.clone(),
+            "approval".into(),
+            PipelineNodeKind::ImplementationApproval,
+        )
+        .await?;
+    store
+        .set_job_pipeline_plan(project.clone(), pipeline.clone(), None, "plan-a".into())
+        .await?;
+    let release = store
+        .record_job_pipeline_release(
+            project.clone(),
+            pipeline.clone(),
+            "approval".into(),
+            "plan-a".into(),
+            tree.checkout_id.clone(),
+            task.id.clone(),
+        )
+        .await?;
+    store
+        .set_project_job_rules(
+            project.clone(),
+            vec![],
+            vec![JobRule {
+                role: JobRole::Pipeline,
+                operation: SessionMode::ApprovedWrite,
+                workspace: JobWorkspace::Project,
+                permission: JobPermission::Allow,
+                requirements: Default::default(),
+            }],
+        )
+        .await?;
+    let executable = std::path::PathBuf::from(
+        std::env::var_os("SystemRoot").context("Windows root is unavailable")?,
+    )
+    .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let enqueue =
+        |tree: &ManagedWorktree, task_id: &str, release_id: Option<String>, script: &str| {
+            store.submit_pipeline_command_job(
+                PipelineDispatch {
+                    pipeline_run_id: pipeline.clone(),
+                    node_instance_id: "command".into(),
+                    plan_revision: Some("plan-a".into()),
+                    release_id,
+                },
+                tree.checkout_id.clone(),
+                task_id.into(),
+                vec![],
+                PipelineCommand {
+                    executable: executable.clone(),
+                    arguments: vec![
+                        "-NoProfile".into(),
+                        "-NonInteractive".into(),
+                        "-Command".into(),
+                        script.into(),
+                    ],
+                },
+            )
+        };
+    let missing = enqueue(&tree, &task.id, None, "throw 'unreleased command'").await?;
+    let wrong = enqueue(
+        &other_tree,
+        &other.id,
+        Some(release.id.clone()),
+        "throw 'wrong scope'",
+    )
+    .await?;
+    let command = enqueue(
+        &tree,
+        &task.id,
+        Some(release.id.clone()),
+        "Set-Content -LiteralPath './command.txt' -Value 'approved'; Write-Output 'command-output'",
+    )
+    .await?;
+    assert_eq!(command.kind, JobKind::Command);
+    let scheduler = JobScheduler::start(
+        store.clone(),
+        Arc::new(VerifyCommandOnRetry(AtomicBool::new(true))),
+        None,
+    );
+    let env = scheduler.environment();
+    let inspect = |job: &Job| store.inspect_job(project.clone(), job.id.clone(), env.clone());
+    for (blocked, reason) in [
+        (&missing, ReleaseBlocker::Missing),
+        (&wrong, ReleaseBlocker::WrongScope),
+    ] {
+        let job = inspect(blocked).await?.unwrap();
+        assert!(job.job.latest_attempt.is_none());
+        assert_eq!(job.blockers, [AdmissionBlocker::PipelineRelease { reason }]);
+    }
+    let terminal = |job: Job, store: Store| async move {
+        tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            loop {
+                if let Some(attempt) = store
+                    .job(job.project_id.clone(), job.id.clone())
+                    .await?
+                    .unwrap()
+                    .latest_attempt
+                    .filter(|attempt| attempt.status.is_terminal())
+                {
+                    return Ok::<_, anyhow::Error>(attempt);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await?
+    };
+    let failed = terminal(command.clone(), store.clone()).await?;
+    assert_eq!(failed.status, RunStatus::Failed);
+    assert!(!tree.root.join("command.txt").exists());
+    store
+        .queue_job_recovery(
+            project.clone(),
+            command.id.clone(),
+            failed.run_id.clone(),
+            RecoveryAction::Retry,
+        )
+        .await?;
+    let retry = tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        loop {
+            let done = terminal(command.clone(), store.clone()).await?;
+            if done.ordinal > failed.ordinal {
+                return Ok::<_, anyhow::Error>(done);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await??;
+    assert_eq!(retry.status, RunStatus::Succeeded);
+    assert_eq!(retry.previous_run_id.as_ref(), Some(&failed.run_id));
+    assert!(retry.conversation_id.is_none());
+    assert_eq!(
+        store
+            .attempt_pipeline_origin(project.clone(), retry.run_id.clone())
+            .await?
+            .unwrap()
+            .release
+            .as_ref(),
+        Some(&release)
+    );
+    assert!(matches!(
+        store
+            .attempt_worktree_evidence(project.clone(), retry.run_id.clone())
+            .await?,
+        Some(AttemptWorktreeEvidence::Saved { .. })
+    ));
+
+    let held = enqueue(
+        &tree,
+        &task.id,
+        Some(release.id),
+        "Set-Content -LiteralPath './command-ready.txt' -Value 'partial'; Start-Sleep -Seconds 90",
+    )
+    .await?;
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        while !tree.root.join("command-ready.txt").is_file() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await?;
+    let active = inspect(&held).await?.unwrap().job.latest_attempt.unwrap();
+    store
+        .request_project_job_interrupt(project.clone(), held.id.clone(), active.run_id)
+        .await?;
+    let cancelled = terminal(held, store.clone()).await?;
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
+    assert!(matches!(
+        store
+            .attempt_worktree_evidence(project.clone(), cancelled.run_id)
+            .await?,
+        Some(AttemptWorktreeEvidence::Saved { .. })
+    ));
+    scheduler.shutdown().await?;
+
+    let reopened = Store::open(database)?;
+    let logs = reopened
+        .command_job_output(project, retry.run_id.clone())
+        .await?
+        .unwrap();
+    assert!(logs.stdout.contains("command-output"));
+    assert_eq!(logs.process.unwrap().code, 0);
+    assert!(
+        reopened
+            .command_job_output("another-project".into(), retry.run_id)
+            .await?
+            .is_none()
+    );
+    Ok(())
 }
 
 #[tokio::test]

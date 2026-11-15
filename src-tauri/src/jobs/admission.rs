@@ -13,15 +13,18 @@ use crate::{
     protection,
     providers::{Capability, SessionMode},
     repository::writers::{WriterConflict, writer_conflict, writer_owner},
-    runs::RunStatus,
+    runs::{self, RunRecord, RunStatus},
     store::Store,
 };
 
 use super::{
-    DispatchRejection, Job, JobContext, JobOrigin, JobPermission, JobRequest, QueueState,
-    RecoveryAction, insert_job, load_job,
+    DispatchRejection, Job, JobContext, JobKind, JobOrigin, JobPermission, JobRequest, QueueState,
+    RecoveryAction, ReleaseBlocker,
+    command::{CommandAttempt, CommandInvocation, load_command},
+    insert_job, load_job,
+    pipeline::release_blocker,
     policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
-    recovery::{pending_recovery, recovery_source},
+    recovery::{RecoveryCheckpoint, pending_recovery, recovery_source},
 };
 
 #[derive(Debug, Clone)]
@@ -71,6 +74,9 @@ pub enum AdmissionBlocker {
     DispatchRejected {
         rejection: DispatchRejection,
     },
+    PipelineRelease {
+        reason: ReleaseBlocker,
+    },
     Writer {
         checkout_id: String,
         run_id: String,
@@ -106,6 +112,20 @@ pub struct ProjectQueue {
     pub settings: QueueSettings,
     pub active: u32,
     pub jobs: Vec<JobInspection>,
+}
+
+pub(super) enum ScheduledAttempt {
+    Agent(Box<AttemptPlan>),
+    Command(CommandAttempt),
+}
+
+impl ScheduledAttempt {
+    fn run(&self) -> &RunRecord {
+        match self {
+            Self::Agent(plan) => &plan.run,
+            Self::Command(attempt) => &attempt.run,
+        }
+    }
 }
 
 impl Store {
@@ -163,7 +183,15 @@ impl Store {
                     requires_bridge: false,
                 };
                 request.normalize(&conversation.checkout_id)?;
-                let job = insert_job(&tx, project, Some(context), JobOrigin::Operator, request, 0)?;
+                let job = insert_job(
+                    &tx,
+                    project,
+                    Some(context),
+                    JobOrigin::Operator,
+                    request,
+                    0,
+                    None,
+                )?;
                 tx.execute(
                     "UPDATE jobs SET operator_scope = ?1 WHERE id = ?2",
                     params![operator_scope, job.id],
@@ -336,6 +364,17 @@ impl Store {
     }
 
     pub async fn claim_next_job(&self, env: AdmissionEnvironment) -> Result<Option<AttemptPlan>> {
+        Ok(match self.claim_scheduled_attempt(env, false).await? {
+            Some(ScheduledAttempt::Agent(plan)) => Some(*plan),
+            _ => None,
+        })
+    }
+
+    pub(super) async fn claim_scheduled_attempt(
+        &self,
+        env: AdmissionEnvironment,
+        include_commands: bool,
+    ) -> Result<Option<ScheduledAttempt>> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let settings = queue_settings(&tx)?;
@@ -357,70 +396,40 @@ impl Store {
             };
             for (project, id) in candidates {
                 let job = load_job(&tx, &project, &id)?.context("pending job disappeared")?;
+                if !include_commands && job.kind == JobKind::Command {
+                    continue;
+                }
                 let inputs = load_inputs(&tx, &job)?;
                 if !evaluate(&tx, &job, &inputs, &env)?.is_empty() {
                     continue;
                 }
-                let scope = inputs
-                    .scope
-                    .context("admitted job has no effective CLI profile")?;
-                let (mut plan, previous_run, ordinal, kind) = if let Some(action) =
-                    job.queued_recovery
-                {
-                    let checkpoint = recovery_source(&tx, &job)?
-                        .context("The recovery checkpoint is no longer current")?;
-                    let conversation = load_conversation(&tx, &checkpoint.conversation_id)?;
-                    let history = match action {
-                        RecoveryAction::Retry => AttemptHistory::Retry {
-                            input_context_id: checkpoint.input_context_id.clone(),
-                        },
-                        RecoveryAction::Resume => AttemptHistory::Resume {
-                            native: checkpoint.native_resume(&tx, &scope)?,
-                        },
-                    };
-                    let plan = insert_job_recovery_attempt(&tx, conversation, scope, history)?;
-                    ensure!(
-                        plan.previous_run_id.as_ref() == Some(&checkpoint.source_run_id),
-                        "The recovered attempt lost its lineage"
-                    );
-                    let ordinal = job
-                        .latest_attempt
-                        .as_ref()
-                        .context("missing previous job attempt")?
-                        .ordinal
-                        + 1;
+                let checkpoint = job
+                    .queued_recovery
+                    .map(|_| {
+                        recovery_source(&tx, &job)?
+                            .context("The recovery checkpoint is no longer current")
+                    })
+                    .transpose()?;
+                let plan = build_attempt(&tx, &job, inputs, checkpoint.as_ref())?;
+                let previous_run = checkpoint.as_ref().map(RecoveryCheckpoint::run_id);
+                let ordinal = job
+                    .latest_attempt
+                    .as_ref()
+                    .map_or(1, |previous| previous.ordinal + 1);
+                let kind = job.queued_recovery.map_or("initial", RecoveryAction::key);
+                if checkpoint.is_some() {
                     tx.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [&job.id])?;
-                    (plan, Some(checkpoint.source_run_id), ordinal, action.key())
-                } else {
-                    let conversation = match (&job.origin, job.context.as_ref()) {
-                        (JobOrigin::Operator, Some(context)) => {
-                            load_conversation(&tx, &context.conversation_id)?
-                        }
-                        _ => insert_conversation(
-                            &tx,
-                            job.checkout_id.clone(),
-                            "Background job".into(),
-                            true,
-                        )?,
-                    };
-                    (
-                        insert_job_attempt(&tx, conversation, scope, &inputs.request.instructions)?,
-                        None,
-                        1,
-                        "initial",
-                    )
-                };
-                plan.requires_bridge = inputs.request.requires_bridge;
+                }
                 tx.execute(
                     "INSERT INTO job_attempts(job_id, ordinal, run_id, previous_run_id, kind)
                      VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![job.id, ordinal, plan.run.id, previous_run, kind],
+                    params![job.id, ordinal, plan.run().id, previous_run, kind],
                 )?;
-                bind_attempt_policy(&tx, &job, &plan.run.id)?;
+                bind_attempt_policy(&tx, &job, &plan.run().id)?;
                 if job.mode == SessionMode::ApprovedWrite {
                     tx.execute(
                         "INSERT INTO job_writer_reservations VALUES (?1, ?2)",
-                        params![job.checkout_id, plan.run.id],
+                        params![job.checkout_id, plan.run().id],
                     )?;
                 }
                 tx.commit()?;
@@ -459,7 +468,7 @@ impl Store {
             let changed = db.execute(
                 "UPDATE job_attempts SET cancel_requested = 1 WHERE run_id = ?1 AND job_id = ?2
                  AND EXISTS (SELECT 1 FROM jobs WHERE id = ?2 AND project_id = ?3)
-                 AND EXISTS (SELECT 1 FROM active_agent_attempts WHERE run_id = ?1)",
+                 AND EXISTS (SELECT 1 FROM runs WHERE id = ?1 AND status IN ('starting', 'running', 'waiting_for_input'))",
                 params![run_id, job_id, project_id],
             )?;
             ensure!(
@@ -489,7 +498,8 @@ fn queue_settings(db: &Connection) -> Result<QueueSettings> {
 
 fn occupancy(db: &Connection) -> Result<u32> {
     Ok(db.query_row(
-        "SELECT count(*) FROM job_attempts j JOIN active_agent_attempts a ON a.run_id = j.run_id",
+        "SELECT count(*) FROM job_attempts a JOIN runs r ON r.id = a.run_id
+         WHERE r.status IN ('starting', 'running', 'waiting_for_input')",
         [],
         |row| row.get(0),
     )?)
@@ -498,12 +508,71 @@ fn occupancy(db: &Connection) -> Result<u32> {
 struct Inputs {
     request: JobRequest,
     scope: Option<SessionScope>,
+    command: Option<CommandInvocation>,
 }
 
-pub(super) fn recovery_scope(db: &Connection, job: &Job) -> Result<SessionScope> {
-    let scope = load_inputs(db, job)?
+fn build_attempt(
+    db: &Connection,
+    job: &Job,
+    inputs: Inputs,
+    checkpoint: Option<&RecoveryCheckpoint>,
+) -> Result<ScheduledAttempt> {
+    if let Some(invocation) = inputs.command {
+        let (run, _) = runs::insert_run(db, job.checkout_id.clone(), "command")?;
+        return Ok(ScheduledAttempt::Command(CommandAttempt {
+            run,
+            invocation,
+        }));
+    }
+    let scope = inputs
         .scope
-        .context("The job needs an eligible CLI profile")?;
+        .context("Admitted job has no effective CLI profile")?;
+    let mut plan = match checkpoint {
+        Some(RecoveryCheckpoint::Agent(checkpoint)) => {
+            let conversation = load_conversation(db, &checkpoint.conversation_id)?;
+            let history = match job
+                .queued_recovery
+                .context("The recovery action is missing")?
+            {
+                RecoveryAction::Retry => AttemptHistory::Retry {
+                    input_context_id: checkpoint.input_context_id.clone(),
+                },
+                RecoveryAction::Resume => AttemptHistory::Resume {
+                    native: checkpoint.native_resume(db, &scope)?,
+                },
+            };
+            let plan = insert_job_recovery_attempt(db, conversation, scope, history)?;
+            ensure!(
+                plan.previous_run_id.as_ref() == Some(&checkpoint.source_run_id),
+                "The recovered attempt lost its lineage"
+            );
+            plan
+        }
+        Some(RecoveryCheckpoint::Command { .. }) => {
+            anyhow::bail!("The job has a command checkpoint")
+        }
+        None => {
+            let conversation = match (&job.origin, job.context.as_ref()) {
+                (JobOrigin::Operator, Some(context)) => {
+                    load_conversation(db, &context.conversation_id)?
+                }
+                _ => {
+                    insert_conversation(db, job.checkout_id.clone(), "Background job".into(), true)?
+                }
+            };
+            insert_job_attempt(db, conversation, scope, &inputs.request.instructions)?
+        }
+    };
+    plan.requires_bridge = inputs.request.requires_bridge;
+    Ok(ScheduledAttempt::Agent(Box::new(plan)))
+}
+
+pub(super) fn recovery_scope(
+    db: &Connection,
+    job: &Job,
+) -> Result<super::recovery::RecoveryProfile> {
+    use super::recovery::RecoveryProfile;
+    let inputs = load_inputs(db, job)?;
     if job.mode == SessionMode::ApprovedWrite {
         let task = job
             .task_id
@@ -516,7 +585,14 @@ pub(super) fn recovery_scope(db: &Connection, job: &Job) -> Result<SessionScope>
             "The task no longer owns this worktree"
         );
     }
-    Ok(scope)
+    match inputs.command {
+        Some(invocation) => Ok(RecoveryProfile::Command(invocation)),
+        None => Ok(RecoveryProfile::Agent(
+            inputs
+                .scope
+                .context("The job needs an eligible CLI profile")?,
+        )),
+    }
 }
 
 fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
@@ -527,7 +603,7 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
     )?;
     let request: JobRequest = serde_json::from_slice(&protection::unprotect(&request)?)?;
     let scope: Option<SessionScope> = match &job.origin {
-        JobOrigin::Operator => operator_scope
+        JobOrigin::Operator | JobOrigin::Pipeline => operator_scope
             .map(|bytes| {
                 Ok::<_, anyhow::Error>(serde_json::from_slice(&protection::unprotect(&bytes)?)?)
             })
@@ -557,7 +633,16 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
             }
         }
     };
-    Ok(Inputs { request, scope })
+    let command = if job.kind == JobKind::Command {
+        Some(load_command(db, &job.id)?.context("The command invocation is missing")?)
+    } else {
+        None
+    };
+    Ok(Inputs {
+        request,
+        scope,
+        command,
+    })
 }
 
 fn inspect(db: &Connection, job: Job, env: &AdmissionEnvironment) -> Result<JobInspection> {
@@ -641,14 +726,18 @@ fn evaluate(
         }),
         _ => {}
     }
-    match &inputs.scope {
-        None => blockers.push(Policy {
+    match (&inputs.scope, &inputs.command) {
+        (None, None) => blockers.push(Policy {
             reason: "The job needs an eligible CLI permission profile",
         }),
-        Some(scope) if scope.runner != env.runner || !scope.executable.is_file() => {
-            blockers.push(Policy {
+        (Some(scope), _) if scope.runner != env.runner || !scope.executable.is_file() => blockers
+            .push(Policy {
                 reason: "The job's selected CLI or runner is unavailable",
-            })
+            }),
+        (_, Some(command)) if command.runner != env.runner || !command.executable.is_file() => {
+            blockers.push(Policy {
+                reason: "The registered command or runner is unavailable",
+            });
         }
         _ => {}
     }
@@ -656,12 +745,17 @@ fn evaluate(
         let (source_run, context_id) =
             pending_recovery(db, job)?.context("Missing queued recovery")?;
         let matching = recovery_source(db, job)?.is_some_and(|source| {
-            source.source_run_id == source_run
-                && source.result_context_id == context_id
+            source.run_id() == source_run
+                && source.context_id() == context_id.as_deref()
                 && source.actions(job.mode).contains(&action)
         });
         if !matching {
-            blockers.push(ContextChanged { context_id });
+            blockers.push(match context_id {
+                Some(context_id) => ContextChanged { context_id },
+                None => Policy {
+                    reason: "The command recovery checkpoint changed",
+                },
+            });
         }
     } else if let (JobOrigin::Operator, Some(context)) = (&job.origin, &job.context) {
         let conversation = load_conversation(db, &context.conversation_id)?;
@@ -687,6 +781,9 @@ fn evaluate(
         });
     }
     if job.mode == SessionMode::ApprovedWrite {
+        if let Some(reason) = release_blocker(db, job)? {
+            blockers.push(PipelineRelease { reason });
+        }
         let scope = job
             .task_id
             .as_deref()

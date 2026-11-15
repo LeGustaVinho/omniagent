@@ -13,12 +13,12 @@ use tokio::{
 
 use crate::{
     diagnostics,
-    providers::runtime::{ManagedTurnControl, start_scheduled_turn},
+    providers::runtime::{ManagedTurn, ManagedTurnControl, start_scheduled_turn},
     runner::Runner,
     store::Store,
 };
 
-use super::AdmissionEnvironment;
+use super::{AdmissionEnvironment, admission::ScheduledAttempt, command::start_command};
 
 #[derive(Clone)]
 pub struct JobScheduler {
@@ -50,9 +50,39 @@ impl LaunchGate {
 type ActiveTurns = Arc<Mutex<HashMap<String, LiveTurn>>>;
 
 struct LiveTurn {
-    conversation: String,
-    control: ManagedTurnControl,
+    control: ActiveControl,
     interrupt_sent: bool,
+}
+
+enum ActiveControl {
+    Agent {
+        conversation: String,
+        control: ManagedTurnControl,
+    },
+    Command(watch::Sender<bool>),
+}
+
+impl ActiveControl {
+    fn interrupt(&self) -> bool {
+        match self {
+            Self::Agent { control, .. } => control.interrupt().is_ok(),
+            Self::Command(signal) => signal.send(true).is_ok(),
+        }
+    }
+}
+
+enum Worker {
+    Agent(ManagedTurn),
+    Command(JoinHandle<Result<()>>),
+}
+
+impl Worker {
+    async fn wait(self) -> Result<()> {
+        match self {
+            Self::Agent(worker) => worker.wait().await.map(|_| ()),
+            Self::Command(worker) => worker.await.context("Command job worker failed")?,
+        }
+    }
 }
 
 impl JobScheduler {
@@ -89,8 +119,13 @@ impl JobScheduler {
             .lock()
             .expect("job scheduler lock")
             .get(run)
-            .filter(|turn| turn.conversation == conversation)
-            .map(|turn| turn.control.clone())
+            .and_then(|turn| match &turn.control {
+                ActiveControl::Agent {
+                    conversation: owner,
+                    control,
+                } if owner == conversation => Some(control.clone()),
+                _ => None,
+            })
             .context("This conversation run is no longer active")
     }
 
@@ -148,7 +183,7 @@ async fn drive(
                         if let Some(turn) = live.get_mut(&id)
                             && !turn.interrupt_sent
                         {
-                            turn.interrupt_sent = turn.control.interrupt().is_ok();
+                            turn.interrupt_sent = turn.control.interrupt();
                         }
                     }
                 }
@@ -156,24 +191,49 @@ async fn drive(
             }
             if let Some(_boundary) = admission.enter().await {
                 match store
-                    .claim_next_job(environment(runner.as_ref(), bridge.as_ref()))
+                    .claim_scheduled_attempt(environment(runner.as_ref(), bridge.as_ref()), true)
                     .await
                 {
                     Ok(Some(plan)) => {
-                        let run_id = plan.run.id.clone();
-                        let conversation = plan.conversation_id.clone();
-                        let worker = start_scheduled_turn(
-                            store.clone(),
-                            runner.clone(),
-                            plan,
-                            bridge.clone(),
-                            admission.clone(),
-                        );
+                        let (run_id, control, worker) = match plan {
+                            ScheduledAttempt::Agent(plan) => {
+                                let run_id = plan.run.id.clone();
+                                let conversation = plan.conversation_id.clone();
+                                let worker = start_scheduled_turn(
+                                    store.clone(),
+                                    runner.clone(),
+                                    *plan,
+                                    bridge.clone(),
+                                    admission.clone(),
+                                );
+                                (
+                                    run_id,
+                                    ActiveControl::Agent {
+                                        conversation,
+                                        control: worker.control(),
+                                    },
+                                    Worker::Agent(worker),
+                                )
+                            }
+                            ScheduledAttempt::Command(attempt) => {
+                                let run_id = attempt.run.id.clone();
+                                let (control, worker) = start_command(
+                                    store.clone(),
+                                    runner.clone(),
+                                    attempt,
+                                    admission.clone(),
+                                );
+                                (
+                                    run_id,
+                                    ActiveControl::Command(control),
+                                    Worker::Command(worker),
+                                )
+                            }
+                        };
                         active.lock().expect("job scheduler lock").insert(
                             run_id.clone(),
                             LiveTurn {
-                                conversation,
-                                control: worker.control(),
+                                control,
                                 interrupt_sent: false,
                             },
                         );
@@ -204,7 +264,10 @@ async fn drive(
 
 async fn pending_interrupts(store: &Store) -> Result<Vec<String>> {
     store.execute(|db| {
-        let mut query = db.prepare("SELECT j.run_id FROM job_attempts j JOIN active_agent_attempts a ON a.run_id = j.run_id WHERE j.cancel_requested = 1")?;
+        let mut query = db.prepare(
+            "SELECT a.run_id FROM job_attempts a JOIN runs r ON r.id = a.run_id
+             WHERE a.cancel_requested = 1 AND r.status IN ('starting', 'running', 'waiting_for_input')",
+        )?;
         Ok(query.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
     }).await
 }

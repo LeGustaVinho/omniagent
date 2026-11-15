@@ -4,10 +4,12 @@ import { useQuery } from "@tanstack/react-query";
 import { CircleDot, FlaskConical, LibraryBig } from "lucide-react";
 import { useState } from "react";
 import type { RunRecord } from "@/bindings/RunRecord";
+import type { CommandJobOutput } from "@/bindings/CommandJobOutput";
 import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
 import { deliveryBase, deliveryBranch, deliveryNotePath, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
 import type { DeliveryStep, WorkspaceProps } from "@/workbench-contract";
+import { WorktreeEvidence } from "@/worktree-evidence";
 
 const steps: Record<DeliveryStep, string> = {
   note: "Ready to plan", question: "Waiting for input", plan: "Awaiting implementation approval",
@@ -22,7 +24,7 @@ type InspectorProps = WorkspaceProps & { runId: string; conversationId?: string;
 
 export function RunInspector({ runId, conversationId, onClose, checkout, simulation, openWorkspace, openChanges }: InspectorProps) {
   const [page, setPage] = useState<InspectorPage>("Overview");
-  if (!simulation) return <RecordedConversationRun projectId={checkout.projectId} runId={runId}
+  if (!simulation) return <RecordedExecutionRun projectId={checkout.projectId} runId={runId}
     conversationId={conversationId} onClose={onClose} />;
 
   const step = simulation.delivery;
@@ -64,12 +66,61 @@ export function RunInspector({ runId, conversationId, onClose, checkout, simulat
   );
 }
 
-function RecordedConversationRun({ conversationId, projectId, runId, onClose }: {
-  conversationId?: string;
-  projectId: string;
-  runId: string;
-  onClose: () => void;
-}) {
+type RecordedRunProps = Pick<InspectorProps, "conversationId" | "runId" | "onClose"> & { projectId: string };
+
+function RecordedExecutionRun(props: RecordedRunProps) {
+  const { projectId, conversationId, runId } = props;
+  const command = useQuery({
+    queryKey: ["command-job-run", projectId, runId],
+    queryFn: () => invoke<RunRecord | null>("command_job_run", { projectId, runId }),
+    enabled: conversationId === undefined,
+    refetchInterval: (query) => query.state.data && isLiveRun(query.state.data) ? 400 : false,
+  });
+  if (conversationId) return <RecordedConversationRun {...props} />;
+  if (command.isError) return <p className="work-progress" role="alert">{String(command.error)}</p>;
+  if (command.isPending) return <p className="work-progress" role="status">Loading execution…</p>;
+  return command.data ? <RecordedCommandRun run={command.data} onClose={props.onClose} />
+    : <RecordedConversationRun {...props} />;
+}
+
+function RecordedCommandRun({ run, onClose }: { run: RunRecord; onClose: () => void }) {
+  const { id: runId, projectId, status } = run;
+  const [open, setOpen] = useState(false);
+  const live = isLiveRun(run);
+  const outputs = useQuery({
+    queryKey: ["command-job-output", projectId, runId],
+    queryFn: () => invoke<CommandJobOutput | null>("command_job_output", { projectId, runId }),
+    enabled: open && !live,
+    staleTime: Infinity,
+  });
+  const failure = status === "failed" || status === "interrupted";
+  return <section className="work-inspection" aria-label="Command activity">
+    <div className="work-inspection-title"><span>Command attempt</span><code>{runId}</code>
+      <Button variant="outline" onClick={onClose}>Close</Button>
+    </div>
+    <p className="work-tag capitalize" role="status">{status.replaceAll("_", " ")}</p>
+    <div className="work-inspection-body">
+      {failure && <JobFailurePanel projectId={projectId} runId={runId} />}
+      {!live && !failure && <WorktreeEvidence projectId={projectId} runId={runId} ownerTaskId={null} />}
+      {!live && <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+        <summary>Command output</summary>
+        {open && <>
+          {outputs.isPending && <p role="status">Loading command output…</p>}
+          {outputs.isError && <p role="alert">{String(outputs.error)}</p>}
+          {outputs.data === null && <p>Command output is unavailable.</p>}
+          {outputs.data && <>
+            {outputs.data.process && <p>Exit code {outputs.data.process.code}</p>}
+            {outputs.data.truncated && <p>Output capture is incomplete.</p>}
+            {outputs.data.stdout && <><h3>Standard output</h3><pre>{outputs.data.stdout}</pre></>}
+            {outputs.data.stderr && <><h3>Standard error</h3><pre>{outputs.data.stderr}</pre></>}
+          </>}
+        </>}
+      </details>}
+    </div>
+  </section>;
+}
+
+function RecordedConversationRun({ conversationId, projectId, runId, onClose }: RecordedRunProps) {
   const current = useQuery({
     queryKey: ["inspect-conversation-run", projectId, conversationId, runId],
     queryFn: () => invoke<[RunRecord, string]>("inspect_conversation_run", { projectId, conversationId, runId }),

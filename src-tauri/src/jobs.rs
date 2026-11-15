@@ -10,19 +10,26 @@ use crate::{
 };
 
 mod admission;
+mod command;
 mod failures;
 mod notices;
+mod pipeline;
 mod policy;
 mod recovery;
 mod scheduler;
 pub use admission::{
     AdmissionBlocker, AdmissionEnvironment, JobInspection, ProjectQueue, QueueSettings,
 };
+pub(crate) use command::recover_commands;
+pub use command::{CommandJobOutput, PipelineCommand};
 pub(crate) use failures::record_job_failure;
 pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
+pub use pipeline::{
+    PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease, ReleaseBlocker,
+};
 pub(crate) use policy::validate_attempt_policy;
 pub use policy::{
     DispatchRejection, JobPermission, JobRequirements, JobRole, JobRule, JobWorkspace,
@@ -78,6 +85,15 @@ pub struct JobContext {
 pub enum JobOrigin {
     Operator,
     Agent { run_id: String, request_id: String },
+    Pipeline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum JobKind {
+    Agent,
+    Command,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -118,6 +134,8 @@ pub struct Job {
     pub task_id: Option<String>,
     pub worktree_owner_task_id: Option<String>,
     pub origin: JobOrigin,
+    pub kind: JobKind,
+    pub pipeline: Option<PipelineJobOrigin>,
     pub context: Option<JobContext>,
     pub mode: SessionMode,
     pub priority: i32,
@@ -132,7 +150,7 @@ pub struct Job {
 pub struct JobAttempt {
     pub ordinal: u32,
     pub run_id: String,
-    pub conversation_id: String,
+    pub conversation_id: Option<String>,
     pub status: RunStatus,
     pub cancel_requested: bool,
     pub previous_run_id: Option<String>,
@@ -208,6 +226,9 @@ impl Store {
                         .context("job request points to a missing job");
                 }
                 ensure!(active, "job origin run is no longer active");
+                let pipeline = pipeline::load_attempt_job(&tx, &run_id)?
+                    .and_then(|parent| parent.pipeline)
+                    .map(|origin| origin.binding());
                 let job = insert_job(
                     &tx,
                     project,
@@ -215,6 +236,7 @@ impl Store {
                     JobOrigin::Agent { run_id, request_id },
                     request,
                     0,
+                    pipeline.as_ref(),
                 )?;
                 tx.commit()?;
                 Ok(job)
@@ -302,6 +324,7 @@ fn insert_job(
     origin: JobOrigin,
     request: JobRequest,
     priority: i32,
+    pipeline_binding: Option<&PipelineDispatch>,
 ) -> Result<Job> {
     let encrypted = protection::protect(&serde_json::to_vec(&request)?)?;
     let checkout_id = request
@@ -336,7 +359,7 @@ fn insert_job(
     let writer_checkout = writer_owner.as_ref().map(|_| &checkout_id);
     let stored_task = writer_owner.as_ref().or(request.task_id.as_ref());
     let (run_id, request_id) = match &origin {
-        JobOrigin::Operator => (None, None),
+        JobOrigin::Operator | JobOrigin::Pipeline => (None, None),
         JobOrigin::Agent { run_id, request_id } => (Some(run_id), Some(request_id)),
     };
     let id = Uuid::new_v4().to_string();
@@ -348,6 +371,9 @@ fn insert_job(
             context.as_ref().map(|context| &context.conversation_id), context.as_ref().map(|context| &context.context_id),
             run_id, request_id, mode_key(request.mode), encrypted, priority],
     )?;
+    if let Some(binding) = pipeline_binding {
+        pipeline::bind_job(db, &project_id, &id, binding)?;
+    }
     if let (Some(owner), Some(scope)) = (&writer_owner, &request.task_id)
         && owner != scope
     {
@@ -375,7 +401,8 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
                 j.conversation_id, j.context_id, j.origin_run_id, j.request_id,
                 j.mode, j.priority, j.queue_state, a.ordinal, a.run_id, r.status, a.cancel_requested,
                 a.previous_run_id, a.kind, recovery.action,
-                CASE WHEN j.writer_checkout_id IS NOT NULL THEN j.task_id END, attempt.conversation_id
+                CASE WHEN j.writer_checkout_id IS NOT NULL THEN j.task_id END, attempt.conversation_id,
+                EXISTS(SELECT 1 FROM job_commands command WHERE command.job_id = j.id)
          FROM jobs j
          LEFT JOIN job_worktree_scopes scope ON scope.job_id = j.id
          LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (
@@ -390,11 +417,13 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
+    let pipeline = pipeline::load_origin(db, project_id, id)?;
     let origin = match row.get::<_, Option<String>>(4)? {
         Some(run_id) => JobOrigin::Agent {
             run_id,
             request_id: row.get(5)?,
         },
+        None if pipeline.is_some() => JobOrigin::Pipeline,
         None => JobOrigin::Operator,
     };
     let context = match row.get::<_, Option<String>>(2)? {
@@ -426,6 +455,12 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
         task_id: row.get(1)?,
         worktree_owner_task_id: row.get(16)?,
         origin,
+        kind: if row.get(18)? {
+            JobKind::Command
+        } else {
+            JobKind::Agent
+        },
+        pipeline,
         context,
         mode: read_mode(row.get_ref(6)?.as_str()?)?,
         priority: row.get(7)?,
@@ -447,6 +482,22 @@ pub(crate) fn release_settled_writer(db: &Connection, run_id: &str) -> Result<()
         [run_id],
     )?;
     Ok(())
+}
+
+pub(crate) fn record_launch_intent(db: &Connection, run_id: &str) -> Result<Option<bool>> {
+    let cancelled: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM job_attempts WHERE run_id = ?1 AND cancel_requested = 1)",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    if cancelled {
+        return Ok(Some(false));
+    }
+    if !validate_attempt_policy(db, run_id)? {
+        return Ok(None);
+    }
+    record_process_launch(db, run_id)?;
+    Ok(Some(true))
 }
 
 pub(crate) fn record_process_launch(db: &Connection, run_id: &str) -> Result<()> {

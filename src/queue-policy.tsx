@@ -135,7 +135,7 @@ function RuleEditor({ projectId, checkoutId, rules }: { projectId: string; check
       </ol>}
       <form className="flex flex-wrap items-end gap-2" onSubmit={addRule}>
         <label className="grid gap-1">Role
-          <select name="role" className={field}><option value="agent">Agent</option><option value="operator">Operator</option></select>
+          <select name="role" className={field}><option value="agent">Agent</option><option value="operator">Operator</option><option value="pipeline">Pipeline</option></select>
         </label>
         <label className="grid gap-1">Operation
           <select name="operation" className={field}><option value="read_only">Read only</option><option value="plan">Plan</option><option value="approved_write">Repository write</option></select>

@@ -301,7 +301,10 @@ async fn queue_controls_review_and_interrupt_only_the_selected_project_attempt()
         .job
         .latest_attempt
         .context("attempt missing")?;
-    assert_eq!(current.conversation_id, plan.conversation_id);
+    assert_eq!(
+        current.conversation_id.as_ref(),
+        Some(&plan.conversation_id)
+    );
     assert_eq!(current.run_id, run);
     assert!(current.cancel_requested);
     store

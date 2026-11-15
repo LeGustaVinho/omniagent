@@ -157,7 +157,7 @@ impl Store {
             tx.commit()?;
             Ok(Some(dispatch_id))
         }).await?;
-        dispatched.context("The project rule changed before prompt dispatch")
+        dispatched.context("Job authorization changed before prompt dispatch")
     }
 
     pub(crate) async fn settle_dispatch(

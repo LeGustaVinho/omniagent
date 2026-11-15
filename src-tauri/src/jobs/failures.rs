@@ -109,10 +109,11 @@ impl Store {
         self.execute(move |db| {
             let row = db.query_row(
                 "SELECT r.status, r.checkout_id, f.checkout_root, f.report, a.provider_terminal,
-                    EXISTS(SELECT 1 FROM agent_events e WHERE e.run_id = r.id),
+                    (EXISTS(SELECT 1 FROM agent_events e WHERE e.run_id = r.id)
+                        OR EXISTS(SELECT 1 FROM job_command_outputs o WHERE o.run_id = r.id)),
                     EXISTS(SELECT 1 FROM job_worktree_candidates d WHERE d.run_id = r.id AND d.capture_confirmed = 1)
                  FROM job_failures f JOIN runs r ON r.id = f.run_id
-                 JOIN agent_attempts a ON a.run_id = f.run_id JOIN job_attempts ja ON ja.run_id = f.run_id
+                 LEFT JOIN agent_attempts a ON a.run_id = f.run_id JOIN job_attempts ja ON ja.run_id = f.run_id
                  JOIN jobs j ON j.id = ja.job_id WHERE j.project_id = ?1 AND f.run_id = ?2",
                 params![project, run],
                 |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get::<_, Option<String>>(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),

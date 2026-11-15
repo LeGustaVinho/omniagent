@@ -41,12 +41,18 @@ function applyQueueAction(projectId: string, action: QueueAction) {
 }
 
 function jobTitle({ job }: JobInspection) {
+  if (job.kind === "command") return "Command job";
   if (job.context && job.origin.type === "operator") return "Conversation turn";
-  return job.origin.type === "agent" ? "Agent job" : "Operator job";
+  if (job.origin.type === "agent") return "Agent job";
+  return job.origin.type === "pipeline" ? "Pipeline job" : "Operator job";
 }
 
 function jobRequester({ job }: JobInspection) {
-  return job.origin.type === "operator" ? "Operator" : `Agent · ${job.origin.runId}`;
+  switch (job.origin.type) {
+    case "operator": return "Operator";
+    case "agent": return `Agent · ${job.origin.runId}`;
+    case "pipeline": return "Pipeline";
+  }
 }
 
 function firstWaitReason(inspection: JobInspection) {
@@ -115,13 +121,22 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
           <dt className="text-muted-foreground">Worktree</dt><dd className="break-all font-mono text-xs">{ownCheckout ? checkout.checkoutRoot : job.checkoutId}</dd>
           <dt className="text-muted-foreground">Profile mode</dt><dd>{job.mode.replaceAll("_", " ")}</dd>
           <dt className="text-muted-foreground">Priority</dt><dd>{job.priority}</dd>
+          {job.pipeline && <>
+            <dt className="text-muted-foreground">Pipeline run</dt><dd className="break-all">{job.pipeline.pipelineRunId}</dd>
+            <dt className="text-muted-foreground">Node instance</dt><dd className="break-all">{job.pipeline.nodeInstanceId}</dd>
+            {job.pipeline.planRevision && <><dt className="text-muted-foreground">Plan revision</dt><dd className="break-all">{job.pipeline.planRevision}</dd></>}
+            {job.pipeline.release && <>
+              <dt className="text-muted-foreground">Implementation release</dt><dd className="break-all">{job.pipeline.release.id}</dd>
+              <dt className="text-muted-foreground">Released scope</dt><dd className="break-all">{job.pipeline.release.taskId} · {job.pipeline.release.checkoutId}</dd>
+            </>}
+          </>}
           <dt className="text-muted-foreground">Attempt</dt><dd>{attempt ? `#${attempt.ordinal}` : "Awaiting dispatch"}</dd>
           {attempt && <><dt className="text-muted-foreground">Run ID</dt><dd className="break-all font-mono text-xs">{attempt.runId}</dd></>}
           {attempt?.recovery && <><dt className="text-muted-foreground">Recovery</dt><dd>{attempt.recovery === "resume" ? "Resumed from checkpoint" : "Retried saved input"}</dd></>}
         </dl>
         {attempt && (attempt.status === "failed" || attempt.status === "interrupted") &&
           <JobFailurePanel projectId={job.projectId} runId={attempt.runId}
-            openLogs={() => openActivity(attempt.runId, attempt.conversationId)} />}
+            openLogs={() => openActivity(attempt.runId, attempt.conversationId ?? undefined)} />}
         {blockers.length > 0 && <section className="grid gap-1.5" aria-label="Admission blockers">
           <h4 className="text-xs font-semibold">Admission blockers</h4>
           <ul className="divide-y divide-border rounded border border-border">

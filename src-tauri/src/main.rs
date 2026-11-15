@@ -188,6 +188,8 @@ fn main() {
             queue_runtime::project_job_rules,
             queue_runtime::set_project_job_rules,
             queue_runtime::job_failure,
+            queue_runtime::command_job_run,
+            queue_runtime::command_job_output,
             queue_runtime::set_pending_job_state,
             queue_runtime::pending_job_approval_request,
             queue_runtime::decide_job_approval,
