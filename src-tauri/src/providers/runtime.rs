@@ -313,6 +313,7 @@ fn start_turn(
                 phase: FailurePhase::Preparation,
                 ..Default::default()
             },
+            process_launched: false,
             quiescence_confirmed: false,
             downstream_requested: false,
             question_changed: false,
@@ -371,6 +372,14 @@ fn start_turn(
                 Some(execution.failure),
                 execution.quiescence_confirmed,
             ))?;
+        if (!execution.process_launched || execution.quiescence_confirmed)
+            && let Err(error) = execution.staged_attachments.retire()
+        {
+            eprintln!(
+                "Could not retire attachments: {}",
+                diagnostics::preview(&error.to_string())
+            );
+        }
         Ok(status)
     });
     ManagedTurn {
@@ -385,6 +394,7 @@ struct TurnExecution {
     goal: Option<GoalExecution>,
     native_goal: Option<native_goals::NativeGoalLoop>,
     failure: FailureObservation,
+    process_launched: bool,
     quiescence_confirmed: bool,
     downstream_requested: bool,
     admission: Option<LaunchGate>,
@@ -751,6 +761,7 @@ impl TurnExecution {
                 )
                 .inspect_err(|_| self.failure.cause = Some(FailureCause::LaunchRejected))?
         };
+        self.process_launched = true;
         let control = process.control.clone();
         let endpoint = bridge.as_ref().map(|(endpoint, _)| endpoint);
         self.failure.phase = FailurePhase::Startup;
@@ -804,6 +815,7 @@ impl TurnExecution {
             || self.downstream_requested
             || awaiting_question
             || self.plan.native_subagent_limit.is_some()
+            || self.staged_attachments.active()
         {
             control
                 .confirm_quiescence()

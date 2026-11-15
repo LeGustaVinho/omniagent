@@ -288,6 +288,18 @@ impl RecoverySource {
         if goal_executor {
             return Ok(None);
         }
+        // Replay attachments from their stored message revisions. The old
+        // provider session may hold paths belonging to a retired attempt.
+        let checkpoint_has_attachments: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversation_contexts ctx, json_each(ctx.entries) entry
+             JOIN message_attachments a ON a.message_revision_id = entry.value
+             WHERE ctx.id = ?1 AND ctx.conversation_id = ?2)",
+            params![self.input_context_id, self.conversation_id],
+            |row| row.get(0),
+        )?;
+        if checkpoint_has_attachments {
+            return Ok(None);
+        }
         let encrypted: Option<Vec<u8>> = db.query_row(
             "SELECT x.payload FROM context_snapshots x JOIN dispatches d ON d.snapshot_id = x.id
              WHERE x.run_id = ?1 AND d.ordinal = 1 AND d.delivery = 'submitted'",

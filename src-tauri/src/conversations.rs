@@ -6727,6 +6727,171 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovered_jobs_replay_frozen_attachments_and_recheck_references() -> Result<()> {
+        use crate::{
+            attachments::{
+                AttachmentDelivery, AttachmentPreview, AttachmentSource, CapturedPayload,
+            },
+            jobs::{AdmissionEnvironment, JobContext, RecoveryAction},
+            runner::{AttachmentRunScope, StagedAttachmentFile},
+        };
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use sha2::{Digest, Sha256};
+
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aJ9sAAAAASUVORK5CYII=";
+        for action in [RecoveryAction::Retry, RecoveryAction::Resume] {
+            let (_dir, store, chat, mut scope) = setup().await?;
+            scope.executable = std::env::current_exe()?;
+            let env = AdmissionEnvironment {
+                runner: scope.runner.clone(),
+                bridge_available: false,
+            };
+            let preview = |name: &str, bytes: &[u8], delivery| {
+                std::fs::write(scope.checkout.join(name), bytes)?;
+                AttachmentPreview::read_with_delivery(
+                    &scope.checkout,
+                    AttachmentSource::Checkout {
+                        relative_path: name.into(),
+                    },
+                    delivery,
+                )
+            };
+            let prompt = "Inspect these saved inputs";
+            store
+                .save_conversation_draft(chat.id.clone(), prompt.into())
+                .await?;
+            let job = store
+                .enqueue_conversation_turn_with_attachments(
+                    JobContext {
+                        conversation_id: chat.id.clone(),
+                        context_id: chat.context_id,
+                    },
+                    scope.clone(),
+                    prompt.into(),
+                    vec![
+                        preview(
+                            "image.png",
+                            &STANDARD.decode(PNG)?,
+                            AttachmentDelivery::Native,
+                        )?,
+                        preview(
+                            "excerpt.txt",
+                            b"original excerpt",
+                            AttachmentDelivery::Excerpt { start: 0, end: 8 },
+                        )?,
+                        preview(
+                            "reference.txt",
+                            b"original reference",
+                            AttachmentDelivery::Reference,
+                        )?,
+                    ],
+                )
+                .await?;
+            let first = store
+                .claim_next_job(env.clone())
+                .await?
+                .context("missing first attempt")?;
+            let run = first.run.id.clone();
+            store.mark_agent_running(run.clone()).await?;
+            let dispatch = prepare_fixture_dispatch(&store, &first).await?;
+            store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+            for data in [
+                ProviderEventData::SessionReady {
+                    model: None,
+                    effort: None,
+                },
+                ProviderEventData::TurnFinished {
+                    outcome: TurnOutcome::Interrupted,
+                },
+            ] {
+                store
+                    .record_agent_observation(
+                        run.clone(),
+                        EventSource::Provider,
+                        ProviderEvent {
+                            location: ProviderLocation {
+                                session_id: Some("prior-provider-session".into()),
+                                ..Default::default()
+                            },
+                            data,
+                        },
+                    )
+                    .await?;
+            }
+            let mut abandoned = DirectWindowsRunner.attachment_staging(
+                &AttachmentRunScope::for_attempt(&first.run, &scope.checkout),
+            )?;
+            let bytes = b"private attempt copy";
+            abandoned.stage_read_only(
+                StagedAttachmentFile {
+                    name: "attachment.txt",
+                    size: bytes.len() as u64,
+                    sha256: &format!("{:x}", Sha256::digest(bytes)),
+                },
+                &mut bytes.as_slice(),
+            )?;
+            let path = abandoned.directory().join("attachment.txt");
+            drop(abandoned);
+            assert!(path.exists());
+            store
+                .finish_agent_attempt(run.clone(), RunStatus::Cancelled, None)
+                .await?;
+            store.retire_local_attachments_after_restart().await?;
+            assert!(!path.exists());
+            assert!(
+                store
+                    .agent_dispatch(chat.id.clone(), run.clone())
+                    .await?
+                    .is_some()
+            );
+
+            for name in ["image.png", "excerpt.txt", "reference.txt"] {
+                std::fs::write(scope.checkout.join(name), b"replacement content")?;
+            }
+            store
+                .queue_job_recovery(job.project_id, job.id, run, action)
+                .await?;
+            let replay = store
+                .claim_next_job(env)
+                .await?
+                .context("missing recovery attempt")?;
+            assert!(matches!(replay.intent, SessionIntent::Start));
+            assert!(
+                matches!(&replay.attachments[0].1.payload, CapturedPayload::Native { content } if content == PNG)
+            );
+            assert!(
+                matches!(&replay.attachments[1].1.payload, CapturedPayload::Excerpt { excerpt } if excerpt.text == "original")
+            );
+            let replay_run = replay.run.id.clone();
+            let runner = Arc::new(FixtureRunner(WireLog {
+                store: store.clone(),
+                runtime: tokio::runtime::Handle::current(),
+                conversation: chat.id.clone(),
+                frames: Arc::default(),
+            }));
+            assert_eq!(
+                start_managed_turn(store.clone(), runner, replay, None)
+                    .wait()
+                    .await?,
+                RunStatus::Failed
+            );
+            assert!(
+                store
+                    .agent_dispatch(chat.id.clone(), replay_run.clone())
+                    .await?
+                    .is_none()
+            );
+            let observations = store.agent_observations(chat.id, replay_run, 0).await?;
+            assert!(observations.iter().any(|entry| matches!(
+                &entry.event.data,
+                ProviderEventData::AttachmentBlocked { blockers } if blockers.iter().any(|item|
+                    item.source.file_name() == Some("reference.txt") && item.reason.contains("preview it again"))
+            )));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stale_references_and_unsupported_native_formats_report_each_file_before_dispatch()
     -> Result<()> {
         use crate::attachments::{AttachmentDelivery, AttachmentPreview, AttachmentSource};

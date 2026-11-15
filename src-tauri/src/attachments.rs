@@ -21,6 +21,7 @@ use crate::{
     runner::{
         AttachmentRunScope, AttachmentStaging, CheckoutAttachment, Runner, StagedAttachmentFile,
     },
+    store::Store,
 };
 
 mod limits;
@@ -676,6 +677,18 @@ pub(crate) struct StagedAttachments {
 }
 
 impl StagedAttachments {
+    pub(crate) fn active(&self) -> bool {
+        self.directory.is_some() || !self.locks.is_empty()
+    }
+
+    pub(crate) fn retire(self) -> io::Result<()> {
+        let Self {
+            directory, locks, ..
+        } = self;
+        drop(locks);
+        directory.map_or(Ok(()), |directory| directory.retire())
+    }
+
     pub(crate) fn configure_claude_read_directory(
         &mut self,
         runner: &dyn Runner,
@@ -830,23 +843,100 @@ impl StagedAttachments {
 
 struct LocalAttachmentStaging {
     locks: Vec<File>,
-    _directory: tempfile::TempDir,
     canonical: PathBuf,
 }
+
+const LOCAL_STAGING_PREFIX: &str = "omniagent-attachments-";
+const LOCAL_STAGING_SUFFIX_LEN: usize = 12;
 
 pub(crate) fn local_attachment_staging(
     scope: &AttachmentRunScope<'_>,
 ) -> io::Result<Box<dyn AttachmentStaging>> {
     let run = uuid::Uuid::parse_str(scope.run_id).map_err(io::Error::other)?;
+    let project = uuid::Uuid::parse_str(scope.project_id).map_err(io::Error::other)?;
     let directory = tempfile::Builder::new()
-        .prefix(&format!("omniagent-attachments-{run}-"))
+        .prefix(&format!(
+            "{LOCAL_STAGING_PREFIX}{}-{}-",
+            project.simple(),
+            run.simple()
+        ))
+        .rand_bytes(LOCAL_STAGING_SUFFIX_LEN)
         .tempdir()?;
-    let canonical = dunce::canonicalize(directory.path())?;
-    Ok(Box::new(LocalAttachmentStaging {
-        locks: vec![],
-        _directory: directory,
-        canonical,
-    }))
+    LocalAttachmentStaging::keep(directory)
+}
+
+impl LocalAttachmentStaging {
+    fn keep(directory: tempfile::TempDir) -> io::Result<Box<dyn AttachmentStaging>> {
+        let canonical = dunce::canonicalize(directory.path())?;
+        let _ = directory.keep();
+        Ok(Box::new(LocalAttachmentStaging {
+            locks: vec![],
+            canonical,
+        }))
+    }
+}
+
+fn remove_local_staging(path: &Path) -> io::Result<()> {
+    if plain_metadata(path)?.is_some_and(|metadata| metadata.is_dir()) {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+impl Store {
+    /// Called after restart recovery by the single-instance desktop. The local
+    /// runner's Windows job handles terminate their processes when the app exits.
+    pub async fn retire_local_attachments_after_restart(&self) -> Result<()> {
+        self.execute(|db| {
+            let root = dunce::canonicalize(std::env::temp_dir())?;
+            let mut terminal = db.prepare(
+                "SELECT EXISTS(SELECT 1 FROM runs r
+                 JOIN checkouts c ON c.id = r.checkout_id
+                 JOIN agent_attempts a ON a.run_id = r.id
+                 WHERE r.id = ?1 AND c.project_id = ?2
+                 AND r.status IN ('succeeded', 'failed', 'cancelled', 'interrupted'))",
+            )?;
+            for entry in std::fs::read_dir(root)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(name) = name
+                    .to_str()
+                    .and_then(|name| name.strip_prefix(LOCAL_STAGING_PREFIX))
+                else {
+                    continue;
+                };
+                let Some((project, rest)) = name.split_once('-') else {
+                    continue;
+                };
+                let Some((run, suffix)) = rest.split_once('-') else {
+                    continue;
+                };
+                if project.len() != 32
+                    || run.len() != 32
+                    || suffix.len() != LOCAL_STAGING_SUFFIX_LEN
+                    || !suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                {
+                    continue;
+                }
+                let (Ok(project), Ok(run)) =
+                    (uuid::Uuid::try_parse(project), uuid::Uuid::try_parse(run))
+                else {
+                    continue;
+                };
+                if terminal.query_row([run.to_string(), project.to_string()], |row| {
+                    row.get::<_, bool>(0)
+                })? && let Err(error) = remove_local_staging(&entry.path())
+                {
+                    eprintln!(
+                        "Could not retire local attachments for run {run}: {}",
+                        crate::diagnostics::preview(&error.to_string())
+                    );
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
 }
 
 impl AttachmentStaging for LocalAttachmentStaging {
@@ -888,6 +978,12 @@ impl AttachmentStaging for LocalAttachmentStaging {
         self.locks.push(lock);
         Ok(())
     }
+
+    fn retire(self: Box<Self>) -> io::Result<()> {
+        let Self { locks, canonical } = *self;
+        drop(locks);
+        remove_local_staging(&canonical)
+    }
 }
 
 #[cfg(test)]
@@ -925,11 +1021,7 @@ mod tests {
             let staging = tempfile::Builder::new()
                 .prefix(&format!("{}-", scope.run_id))
                 .tempdir_in(&self.staging_root)?;
-            Ok(Box::new(LocalAttachmentStaging {
-                locks: vec![],
-                canonical: dunce::canonicalize(staging.path())?,
-                _directory: staging,
-            }))
+            LocalAttachmentStaging::keep(staging)
         }
 
         fn attachment_reference(
@@ -1057,6 +1149,8 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read_dir(directory)?.count(), 1);
+        staging.retire()?;
+        assert!(!directory.exists());
         Ok(())
     }
 }

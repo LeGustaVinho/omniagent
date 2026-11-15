@@ -57,6 +57,7 @@ pub struct StagedAttachmentFile<'a> {
 
 /// A private directory for one attempt. A runner must verify the size and digest
 /// before making the file readable, and keep it read-only for the lease's lifetime.
+/// Dropping a lease without retirement leaves cleanup to the runner's recovery path.
 pub trait AttachmentStaging: Send {
     fn directory(&self) -> &Path;
     fn stage_read_only(
@@ -64,6 +65,7 @@ pub trait AttachmentStaging: Send {
         file: StagedAttachmentFile<'_>,
         bytes: &mut dyn io::Read,
     ) -> io::Result<()>;
+    fn retire(self: Box<Self>) -> io::Result<()>;
 }
 
 pub trait RunControl: Send + Sync {

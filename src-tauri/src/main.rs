@@ -129,6 +129,14 @@ fn main() {
             let path = app.path().app_local_data_dir()?.join("omniagent.sqlite3");
             let store = Store::open(path)?;
             tauri::async_runtime::block_on(store.recover_agent_attempts_after_restart())?;
+            if let Err(error) =
+                tauri::async_runtime::block_on(store.retire_local_attachments_after_restart())
+            {
+                eprintln!(
+                    "Could not recover local attachment staging: {}",
+                    omniagent::diagnostics::preview(&error.to_string())
+                );
+            }
             let notices = store.job_notices();
             let scheduler = tauri::async_runtime::block_on(async {
                 JobScheduler::start(
