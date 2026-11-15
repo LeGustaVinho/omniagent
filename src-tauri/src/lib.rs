@@ -1,5 +1,6 @@
 mod diagnostics;
 pub mod evidence;
+pub mod model_catalog;
 pub mod process;
 pub mod process_io;
 mod protection;
