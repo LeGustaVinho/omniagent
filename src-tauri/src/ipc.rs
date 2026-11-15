@@ -5,6 +5,7 @@ use std::{
 };
 
 use omniagent::{
+    customizations::CustomizationInventory,
     evidence::FixtureInputEvidence,
     providers::{
         Provider,
@@ -94,6 +95,30 @@ pub async fn cli_plugin_inventory(
 pub async fn active_checkout(store: State<'_, Store>) -> Result<Option<ProjectCheckout>, String> {
     store
         .active_checkout()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn review_checkout_customizations(
+    store: State<'_, Store>,
+    checkout_id: String,
+) -> Result<CustomizationInventory, String> {
+    store
+        .refresh_checkout_customizations(checkout_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn approve_checkout_customization(
+    store: State<'_, Store>,
+    checkout_id: String,
+    entry_id: String,
+    fingerprint: String,
+) -> Result<CustomizationInventory, String> {
+    store
+        .approve_checkout_customization(checkout_id, entry_id, fingerprint)
         .await
         .map_err(|error| error.to_string())
 }

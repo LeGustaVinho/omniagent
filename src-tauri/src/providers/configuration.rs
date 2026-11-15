@@ -24,6 +24,7 @@ use super::{
 use crate::{conversations::SessionScope, repository::CheckoutLayout};
 
 mod instructions;
+pub(crate) use instructions::normalize_path;
 pub use instructions::{
     CodexInstructionSettings, InstructionInventory, InstructionScope, InstructionSelection,
     InstructionSource,
@@ -279,7 +280,7 @@ impl Discovery {
     }
 }
 
-fn read_local_file(path: &Path) -> io::Result<Vec<u8>> {
+pub(crate) fn read_local_file(path: &Path) -> io::Result<Vec<u8>> {
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
@@ -362,7 +363,7 @@ mod tests {
     }
 }
 
-fn plain_metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {
+pub(crate) fn plain_metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {
     // Do not follow a checkout junction into user files or a network share.
     use std::path::{Component, Prefix};
     if !path.is_absolute()

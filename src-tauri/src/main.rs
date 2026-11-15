@@ -59,6 +59,8 @@ fn main() {
             ipc::set_cli_executable,
             ipc::probe_cli_executable,
             ipc::cli_plugin_inventory,
+            ipc::review_checkout_customizations,
+            ipc::approve_checkout_customization,
             ipc::select_active_checkout,
             ipc::workbench_layout,
             ipc::save_workbench_layout,

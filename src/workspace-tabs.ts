@@ -52,6 +52,12 @@ export function openProviderSettings(api: DockviewApi) {
   api.addPanel({ id: "provider-settings", title: "Provider settings", component: "providerSettings" });
 }
 
+export function openCustomizations(api: DockviewApi) {
+  const panel = api.getPanel("customizations");
+  if (panel) return panel.api.setActive();
+  api.addPanel({ id: "customizations", title: "Customizations", component: "customizations" });
+}
+
 export function openFixtureRun(api: DockviewApi, runId: string) {
   const id = `fixture:${runId}`;
   const panel = api.getPanel(id);

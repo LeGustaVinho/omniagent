@@ -509,7 +509,7 @@ fn is_normal_component(name: &str) -> bool {
         && parts.next().is_none()
 }
 
-fn normalize_path(path: &Path) -> Option<PathBuf> {
+pub(crate) fn normalize_path(path: &Path) -> Option<PathBuf> {
     let mut result = PathBuf::new();
     for part in path.components() {
         match part {

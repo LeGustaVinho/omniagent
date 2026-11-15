@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::store::Store;
+use crate::{customizations, store::Store};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -83,7 +83,13 @@ pub async fn verify_checkout(
 }
 
 pub async fn register(store: &Store, directory: PathBuf) -> Result<ProjectCheckout> {
-    let repository = tokio::task::spawn_blocking(move || inspect(&directory)).await??;
+    let (repository, inventory) = tokio::task::spawn_blocking(move || {
+        let cwd = dunce::canonicalize(&directory)?;
+        let repository = inspect(&cwd)?;
+        let inventory = customizations::inspect(Path::new(&repository.checkout_root), &cwd)?;
+        Ok::<_, anyhow::Error>((repository, inventory))
+    })
+    .await??;
     store
         .execute(move |db| {
             let transaction = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -97,7 +103,7 @@ pub async fn register(store: &Store, directory: PathBuf) -> Result<ProjectChecko
                 ],
                 |row| row.get(0),
             )?;
-            let checkout_id = transaction.query_row(
+            let checkout_id: String = transaction.query_row(
                 "INSERT INTO checkouts(id, project_id, git_dir, root) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(project_id, git_dir) DO UPDATE SET root = excluded.root RETURNING id",
                 params![
@@ -108,6 +114,7 @@ pub async fn register(store: &Store, directory: PathBuf) -> Result<ProjectChecko
                 ],
                 |row| row.get(0),
             )?;
+            customizations::save(&transaction, &checkout_id, &inventory)?;
             transaction.commit()?;
             Ok(ProjectCheckout {
                 project_id,

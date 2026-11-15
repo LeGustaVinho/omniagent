@@ -8,13 +8,14 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
+import { CustomizationsPanel, useCustomizationInventory } from "@/customizations-panel";
 import { FixtureListPanel, FixtureRunPanel } from "@/fixture-panels";
 import { ProviderSettingsPanel } from "@/provider-settings";
 import { useRunSubscription } from "@/run-projection";
-import { openFixtureList, openProviderSettings, persistFixtureLayout, restoreFixtureLayout } from "@/workspace-tabs";
+import { openCustomizations, openFixtureList, openProviderSettings, persistFixtureLayout, restoreFixtureLayout } from "@/workspace-tabs";
 import "dockview/dist/styles/dockview.css";
 
-const panels = { fixtures: FixtureListPanel, run: FixtureRunPanel, providerSettings: ProviderSettingsPanel };
+const panels = { fixtures: FixtureListPanel, run: FixtureRunPanel, providerSettings: ProviderSettingsPanel, customizations: CustomizationsPanel };
 
 function TabActions({ activePanel, panels, group }: IDockviewHeaderActionsProps) {
   if (!activePanel || panels.length < 2) return null;
@@ -37,6 +38,9 @@ export default function Workbench({ checkout }: { checkout: ProjectCheckout }) {
   const [layoutReady, setLayoutReady] = useState(false);
   const [layoutError, setLayoutError] = useState("");
   const { error, reconnect } = useRunSubscription(checkout);
+  const customizations = useCustomizationInventory(checkout.checkoutId);
+  const reviewCount = customizations.data?.entries.filter(({ review }) =>
+    review === "pending" || review === "changed" || review === "unresolved").length ?? 0;
   const onReady = useCallback(({ api }: DockviewReadyEvent) => {
     setView(api);
   }, []);
@@ -94,6 +98,11 @@ export default function Workbench({ checkout }: { checkout: ProjectCheckout }) {
           onClick={() => { if (view) openProviderSettings(view); }}>
           Provider settings
         </Button>
+        <Button className="mt-2 w-full justify-start px-2" variant="outline" disabled={!layoutReady}
+          onClick={() => { if (view) openCustomizations(view); }}>
+          Customizations
+        </Button>
+        {reviewCount > 0 && <p className="px-2 pt-1 text-xs text-muted-foreground">{reviewCount} to review</p>}
       </aside>
       <section aria-label="Workspace tabs" className="flex min-w-0 flex-1 flex-col">
         {layoutError && <p role="status" className="px-4 py-2 text-sm text-muted-foreground">Layout storage: {layoutError}</p>}
