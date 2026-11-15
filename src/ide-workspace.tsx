@@ -18,6 +18,7 @@ interface Buffer {
   body: string;
   saved: string;
   revision: number;
+  external?: string;
 }
 
 type IdeDialog =
@@ -57,7 +58,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const buffer = active ? files[active] : undefined;
   const dirty = (path: string) => {
     const entry = files[path];
-    return Boolean(entry && entry.body !== entry.saved);
+    return Boolean(entry && (entry.external !== undefined || entry.body !== entry.saved));
   };
   const filesForSearch = [
     ...Object.entries(files).map(([path, value]) => ({ path, content: value.body })),
@@ -101,16 +102,31 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const report = useCallback((path: string, issues: CodeProblem[]) => setMarkers((before) => ({ ...before, [path]: issues })), []);
 
   const save = (path: string) => {
+    const external = files[path]?.external;
+    if (external !== undefined) {
+      setDialog({ kind: "conflict", path, incoming: external });
+      return false;
+    }
     setFiles((before) => {
       const current = before[path];
       if (!current) return before;
       return { ...before, [path]: { body: current.body, saved: current.body, revision: current.revision + 1 } };
     });
     setStatus(`Saved ${path}`);
+    return true;
+  };
+  const replaceModelBuffer = (path: string, content: string) => {
+    const record = models.get(path);
+    if (!record || record.model.getValue() === content) return;
+    record.synchronizing = true;
+    try { record.model.setValue(content); } finally { record.synchronizing = false; }
   };
   const discard = (path: string) => {
     const entry = files[path];
-    if (entry) update(path, entry.saved);
+    if (!entry) return;
+    const body = entry.external ?? entry.saved;
+    replaceModelBuffer(path, body);
+    setFiles((before) => ({ ...before, [path]: { body, saved: body, revision: entry.revision + Number(entry.external !== undefined) } }));
   };
   const requestClose = (path: string, api: FilePanelApi) => {
     if (!dirty(path) || !dock.api || keepOnlyCleanClose(dock.api, path, api)) api.close();
@@ -118,7 +134,9 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   };
   const simulateConflict = () => {
     if (!active || !buffer) return;
-    const incoming = `// Revision ${buffer.revision + 1} from an external editor\n${buffer.saved}`;
+    const incoming = buffer.external ?? `// Revision ${buffer.revision + 1} from an external editor\n${buffer.saved}`;
+    setFiles((before) => ({ ...before, [active]: { ...buffer, external: incoming } }));
+    setStatus(`External changes need review in ${active}`);
     setDialog({ kind: "conflict", path: active, incoming });
   };
 
@@ -208,7 +226,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
         </div>}
         {simulated && active && buffer && <footer className="ide-statusbar">
           <span>{buffer.body === buffer.saved ? "Saved" : "Unsaved changes"} · UTF-8</span>
-          <button type="button" className="fw-btn" onClick={simulateConflict}>Simulate external change</button>
+          <button type="button" className="fw-btn" onClick={simulateConflict}>{buffer.external === undefined ? "Simulate external change" : "Review external change"}</button>
         </footer>}
       </div>
 
@@ -216,7 +234,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
         <div className="file-dialog-footer">
           <button type="button" className="fw-btn" onClick={() => setDialog(undefined)}>Cancel</button>
           <button type="button" className="fw-btn fw-destructive" onClick={() => { discard(dialog.path); dialog.api.close(); setDialog(undefined); }}>Discard changes</button>
-          <button type="button" className="fw-btn fw-primary" onClick={() => { save(dialog.path); dialog.api.close(); setDialog(undefined); }}>Save and close</button>
+          <button type="button" className="fw-btn fw-primary" onClick={() => { if (save(dialog.path)) { dialog.api.close(); setDialog(undefined); } }}>Save and close</button>
         </div>
       </FileDialog>}
       {dialog?.kind === "conflict" && <FileDialog title="File changed externally" description={`Review both versions of ${dialog.path} before continuing.`} onClose={() => setDialog(undefined)}>
@@ -228,6 +246,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
           <button type="button" className="fw-btn" onClick={() => setDialog(undefined)}>Review later</button>
           <button type="button" className="fw-btn fw-outlined" onClick={() => {
             const { path, incoming } = dialog;
+            replaceModelBuffer(path, incoming);
             setFiles((before) => ({ ...before, [path]: { body: incoming, saved: incoming, revision: (before[path]?.revision ?? 0) + 1 } }));
             setStatus(`Loaded external revision of ${path}`);
             setDialog(undefined);
@@ -236,7 +255,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
             const { path, incoming } = dialog;
             setFiles((before) => {
               const current = before[path];
-              return current ? { ...before, [path]: { ...current, saved: incoming, revision: current.revision + 1 } } : before;
+              return current ? { ...before, [path]: { ...current, external: undefined, saved: incoming, revision: current.revision + 1 } } : before;
             });
             setStatus(`Local edits retained against the external revision of ${path}`);
             setDialog(undefined);

@@ -18,7 +18,7 @@ export interface WorkspaceProps {
   simulation: SimulationSession | null;
   startSimulation: (scenario?: ScenarioId) => void;
   openWorkspace: (workspace: WorkspaceId, target?: string) => void;
-  openActivity: (runId: string) => void;
+  openActivity: (runId: string, conversationId?: string) => void;
   openChanges: (target: "saved" | "working") => void;
 }
 

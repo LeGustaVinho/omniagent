@@ -1,9 +1,17 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{protection, providers::SessionMode, runs::RunStatus, store::Store};
+
+mod admission;
+mod scheduler;
+pub use admission::{
+    AdmissionBlocker, AdmissionEnvironment, JobInspection, ProjectQueue, QueueSettings,
+};
+pub use scheduler::JobScheduler;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -32,26 +40,29 @@ impl JobRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct JobContext {
     pub conversation_id: String,
     pub context_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum JobOrigin {
     Operator,
     Agent { run_id: String, request_id: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum QueueState {
     Queued,
     Paused,
@@ -77,8 +88,9 @@ impl QueueState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct Job {
     pub id: String,
     pub project_id: String,
@@ -92,12 +104,14 @@ pub struct Job {
     pub latest_attempt: Option<JobAttempt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub struct JobAttempt {
     pub ordinal: u32,
     pub run_id: String,
     pub status: RunStatus,
+    pub cancel_requested: bool,
 }
 
 #[derive(Debug)]
@@ -122,9 +136,10 @@ impl Store {
             !request_id.trim().is_empty() && request_id.len() <= 256,
             "job request ID must contain between 1 and 256 bytes"
         );
-        self.execute(move |db| {
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let (project, checkout, context, inherited_task, active) = tx
+        let job = self
+            .execute(move |db| {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let (project, checkout, context, inherited_task, active) = tx
                 .query_row(
                     "SELECT c.project_id, c.id, a.conversation_id, a.context_id, parent.task_id,
                         EXISTS(SELECT 1 FROM active_agent_attempts WHERE run_id = a.run_id)
@@ -149,38 +164,37 @@ impl Store {
                 )
                 .optional()?
                 .context("job origin run is unknown")?;
-            request.normalize(&checkout)?;
-            request.task_id = request.task_id.or(inherited_task);
-            let canonical = serde_json::to_vec(&request)?;
-            let prior: Option<(String, Vec<u8>)> = tx
-                .query_row(
-                    "SELECT id, request FROM jobs WHERE origin_run_id = ?1 AND request_id = ?2",
-                    params![run_id, request_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            if let Some((id, encrypted)) = prior {
-                ensure!(
-                    protection::unprotect(&encrypted)? == canonical,
-                    JobRequestConflict
-                );
-                return load_job(&tx, &project, &id)?
-                    .context("job request points to a missing job");
-            }
-            ensure!(active, "job origin run is no longer active");
-            let job = insert_job(
-                &tx,
-                project,
-                Some(context),
-                JobOrigin::Agent { run_id, request_id },
-                request,
-                &canonical,
-                0,
-            )?;
-            tx.commit()?;
-            Ok(job)
-        })
-        .await
+                request.normalize(&checkout)?;
+                request.task_id = request.task_id.or(inherited_task);
+                let prior: Option<(String, Vec<u8>)> = tx
+                    .query_row(
+                        "SELECT id, request FROM jobs WHERE origin_run_id = ?1 AND request_id = ?2",
+                        params![run_id, request_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((id, encrypted)) = prior {
+                    let previous: JobRequest =
+                        serde_json::from_slice(&protection::unprotect(&encrypted)?)?;
+                    ensure!(previous == request, JobRequestConflict);
+                    return load_job(&tx, &project, &id)?
+                        .context("job request points to a missing job");
+                }
+                ensure!(active, "job origin run is no longer active");
+                let job = insert_job(
+                    &tx,
+                    project,
+                    Some(context),
+                    JobOrigin::Agent { run_id, request_id },
+                    request,
+                    0,
+                )?;
+                tx.commit()?;
+                Ok(job)
+            })
+            .await?;
+        self.job_signal.send_replace(());
+        Ok(job)
     }
 
     pub async fn job(&self, project_id: String, id: String) -> Result<Option<Job>> {
@@ -213,20 +227,23 @@ impl Store {
         id: String,
         state: QueueState,
     ) -> Result<Job> {
-        self.execute(move |db| {
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let changed = tx.execute(
-                "UPDATE jobs SET queue_state = ?3 WHERE project_id = ?1 AND id = ?2
+        let job = self
+            .execute(move |db| {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let changed = tx.execute(
+                    "UPDATE jobs SET queue_state = ?3 WHERE project_id = ?1 AND id = ?2
                  AND queue_state IN ('queued', 'paused')
                  AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = ?2)",
-                params![project_id, id, state.as_sql()],
-            )?;
-            ensure!(changed == 1, "job is not pending in this project");
-            let job = load_job(&tx, &project_id, &id)?.context("job no longer exists")?;
-            tx.commit()?;
-            Ok(job)
-        })
-        .await
+                    params![project_id, id, state.as_sql()],
+                )?;
+                ensure!(changed == 1, "job is not pending in this project");
+                let job = load_job(&tx, &project_id, &id)?.context("job no longer exists")?;
+                tx.commit()?;
+                Ok(job)
+            })
+            .await?;
+        self.job_signal.send_replace(());
+        Ok(job)
     }
 }
 
@@ -253,9 +270,9 @@ fn insert_job(
     context: Option<JobContext>,
     origin: JobOrigin,
     request: JobRequest,
-    canonical: &[u8],
     priority: i32,
 ) -> Result<Job> {
+    let encrypted = protection::protect(&serde_json::to_vec(&request)?)?;
     let checkout_id = request
         .checkout_id
         .context("job checkout was not resolved")?;
@@ -299,8 +316,14 @@ fn insert_job(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![id, project_id, checkout_id, request.task_id, writer,
             context.as_ref().map(|context| &context.conversation_id), context.as_ref().map(|context| &context.context_id),
-            run_id, request_id, mode_key(request.mode), protection::protect(canonical)?, priority],
+            run_id, request_id, mode_key(request.mode), encrypted, priority],
     )?;
+    if matches!(origin, JobOrigin::Agent { .. }) || request.mode == SessionMode::ApprovedWrite {
+        db.execute(
+            "INSERT INTO job_approvals VALUES (?1, ?2, 'pending')",
+            params![Uuid::new_v4().to_string(), id],
+        )?;
+    }
     for dependency in request.dependencies {
         let exists = load_job(db, &project_id, &dependency)?.is_some();
         ensure!(exists, "job dependency is outside the project");
@@ -315,7 +338,7 @@ fn insert_job(
 fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> {
     let mut query = db.prepare(
         "SELECT j.checkout_id, j.task_id, j.conversation_id, j.context_id, j.origin_run_id, j.request_id,
-                j.mode, j.priority, j.queue_state, a.ordinal, a.run_id, r.status
+                j.mode, j.priority, j.queue_state, a.ordinal, a.run_id, r.status, a.cancel_requested
          FROM jobs j
          LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (
              SELECT max(ordinal) FROM job_attempts WHERE job_id = j.id
@@ -342,11 +365,15 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
         None => None,
     };
     let latest_attempt = match row.get::<_, Option<u32>>(9)? {
-        Some(ordinal) => Some(JobAttempt {
-            ordinal,
-            run_id: row.get(10)?,
-            status: RunStatus::from_sql(row.get_ref(11)?.as_str()?)?,
-        }),
+        Some(ordinal) => {
+            let status = RunStatus::from_sql(row.get_ref(11)?.as_str()?)?;
+            Some(JobAttempt {
+                ordinal,
+                run_id: row.get(10)?,
+                status,
+                cancel_requested: row.get::<_, bool>(12)? && !status.is_terminal(),
+            })
+        }
         None => None,
     };
     Ok(Some(Job {
@@ -361,4 +388,12 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
         queue_state: QueueState::from_sql(row.get_ref(8)?.as_str()?)?,
         latest_attempt,
     }))
+}
+
+pub(crate) fn release_writer(db: &Connection, run_id: &str) -> Result<()> {
+    db.execute(
+        "DELETE FROM job_writer_reservations WHERE run_id = ?1",
+        [run_id],
+    )?;
+    Ok(())
 }

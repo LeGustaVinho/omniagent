@@ -92,6 +92,7 @@ pub struct AttemptPlan {
     pub(crate) attachments: Vec<(String, CapturedAttachment)>,
     pub(crate) question_route: QuestionRoute,
     pub(crate) answered_question: Option<QuestionOrigin>,
+    pub(crate) requires_bridge: bool,
 }
 
 enum AttemptInput {
@@ -129,7 +130,7 @@ impl Store {
         self.execute(move |db| {
             let mut statement = db.prepare(
                 "SELECT id, checkout_id, title, active_context_id FROM conversations
-                 WHERE checkout_id = ?1 ORDER BY title COLLATE NOCASE, id",
+                 WHERE checkout_id = ?1 AND background = 0 ORDER BY title COLLATE NOCASE, id",
             )?;
             let rows = statement.query_map([checkout_id], |row| {
                 Ok(Conversation {
@@ -207,19 +208,9 @@ impl Store {
         ensure!(!title.trim().is_empty(), "conversation title is empty");
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let id = new_id();
-            tx.execute(
-                "INSERT INTO conversations(id, checkout_id, title) VALUES (?1, ?2, ?3)",
-                params![id, checkout_id, title],
-            )?;
-            let context_id = activate_context(&tx, &id, &[])?;
+            let conversation = insert_conversation(&tx, checkout_id, title, false)?;
             tx.commit()?;
-            Ok(Conversation {
-                id,
-                checkout_id,
-                title,
-                context_id,
-            })
+            Ok(conversation)
         })
         .await
     }
@@ -451,7 +442,6 @@ impl Store {
                 && !scope.profile_id.is_empty(),
             "incomplete session scope"
         );
-        let serialized = serde_json::to_string(&scope)?;
         let encrypted = answer
             .is_none()
             .then(|| protection::protect(text.as_bytes()))
@@ -481,114 +471,25 @@ impl Store {
         };
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let conversation = check_idle_base(&tx, &conversation_id, &base_context_id)?;
             if consume_draft {
-                let draft: Vec<u8> = tx.query_row(
-                    "SELECT payload FROM drafts WHERE kind = 'conversation' AND owner_id = ?1 AND document = ''",
-                    [&conversation_id], |row| row.get(0),
-                ).optional()?.context("The conversation draft no longer exists")?;
-                ensure!(protection::unprotect(&draft)? == text.as_bytes(), "The conversation draft changed before sending");
-                tx.execute("DELETE FROM drafts WHERE kind = 'conversation' AND owner_id = ?1 AND document = ''",
-                    [&conversation_id])?;
+                consume_matching_draft(&tx, &conversation_id, &text)?;
             }
-            let answered_request = answer.as_ref().map(|(origin, reply)| {
-                validate_structured_reply(&tx, &conversation, &serialized, origin, reply)
-            }).transpose()?;
-            let registered: String = tx.query_row(
-                "SELECT root FROM checkouts WHERE id = ?1", [&conversation.checkout_id], |row| row.get(0),
+            let plan = insert_attempt(
+                &tx,
+                PreparedAttempt {
+                    conversation_id,
+                    base_context_id,
+                    scope,
+                    encrypted,
+                    frozen,
+                    question_route,
+                    answer,
+                },
             )?;
-            ensure!(checkout.starts_with(Path::new(&registered)), "working directory is outside the conversation checkout");
-            if let Some((root, _)) = &frozen {
-                ensure!(root == Path::new(&registered), "attachment checkout changed after admission");
-            }
-            let mut entries = context_entries(&tx, &conversation_id, &base_context_id)?;
-            let previous = previous_attempt(&tx, &conversation_id)?;
-            let continuity = match &previous {
-                Some(prior) if prior.scope == serialized && scope.account_binding.as_ref().is_some_and(|id| !id.is_empty()) =>
-                    append_only_cursor(&tx, &conversation_id, &entries, prior)?,
-                _ => None,
-            };
-
-            let (agent_session_id, resume_cursor_id, intent, consumed) = if let Some((prior, cursor, consumed)) = continuity {
-                let provider_session_id = prior.provider_session_id.clone().expect("checked native ID");
-                (prior.session_id.clone(), Some(cursor), SessionIntent::Resume { provider_session_id }, consumed)
-            } else {
-                let id = new_id();
-                tx.execute("INSERT INTO agent_sessions(id, conversation_id, scope) VALUES (?1, ?2, ?3)",
-                    params![id, conversation_id, serialized])?;
-                (id, None, SessionIntent::Start, 0)
-            };
-
-            let encrypted = if let (Some((_, reply)), Some((_, form))) = (&answer, &answered_request) {
-                let values = serde_json::json!({"question": form, "answer": reply.values});
-                let text = format!(
-                    "The user answered this saved planning question. Continue the original planning task with the supplied values.\n{}",
-                    serde_json::to_string(&values)?
-                );
-                protection::protect(text.as_bytes())?
-            } else {
-                encrypted.context("missing admitted message content")?
-            };
-            let revision = insert_message(&tx, &conversation_id, MessageRole::User, encrypted)?;
-            if let Some((_, payload)) = frozen {
-                tx.execute("INSERT INTO message_attachments(message_revision_id, payload) VALUES (?1, ?2)", params![revision, payload])?;
-            }
-            entries.push(revision);
-            let context_id = activate_context(&tx, &conversation_id, &entries)?;
-            let input = load_messages(&tx, &conversation_id, &entries[consumed..])?;
-            let mut attachments = Vec::new();
-            for message in &input {
-                let payload = tx.query_row("SELECT payload FROM message_attachments WHERE message_revision_id = ?1",
-                    [&message.revision_id], |row| row.get::<_, Vec<u8>>(0)).optional()?;
-                if let Some(payload) = payload {
-                    let items: Vec<CapturedAttachment> = serde_json::from_slice(&protection::unprotect(&payload)?)?;
-                    attachments.extend(items.into_iter().map(|item| (message.revision_id.clone(), item)));
-                }
-            }
-            if !attachments.is_empty() {
-                let limits = attachments::limits_for_checkout(&tx, &conversation.checkout_id)?;
-                attachments::check_limits(limits, attachments.iter().map(|(_, item)| (&item.metadata, item.delivery())))?;
-            }
-            let (run, _) = runs::insert_run(&tx, conversation.checkout_id, "agent")?;
-            let ordinal = previous.as_ref().map_or(1, |prior| prior.ordinal + 1);
-            let previous_run_id = previous.map(|prior| prior.run_id);
-            tx.execute(
-                "INSERT INTO agent_attempts(run_id, turn_id, conversation_id, ordinal, agent_session_id,
-                 previous_run_id, context_id, resume_cursor_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![run.id, run.turn_id, conversation_id, ordinal, agent_session_id,
-                    previous_run_id, context_id, resume_cursor_id],
-            )?;
-            tx.execute("INSERT INTO active_agent_attempts VALUES (?1, ?2)", params![conversation_id, run.id])?;
-            let mut answered_question = None;
-            if let (Some((origin, reply)), Some((request_event_seq, _))) = (answer, answered_request) {
-                let event = ProviderEvent {
-                    location: Default::default(),
-                    data: ProviderEventData::StructuredQuestionReplyLinked {
-                        origin: origin.clone(), reply, continuation_run_id: run.id.clone(),
-                    },
-                };
-                let payload = protection::protect(&serde_json::to_vec(&event)?)?;
-                tx.execute("INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)",
-                    params![origin.run_id, EventSource::Application.as_sql(), payload])?;
-                let reply_event_seq = tx.last_insert_rowid();
-                let changed = tx.execute(
-                    "UPDATE structured_question_continuations SET continuation_run_id = ?1, reply_event_seq = ?2
-                     WHERE request_event_seq = ?3 AND continuation_run_id IS NULL",
-                    params![run.id, reply_event_seq, request_event_seq],
-                )?;
-                ensure!(changed == 1, "structured planning question has already been answered");
-                let changed = tx.execute(
-                    "UPDATE agent_questions SET delivery = 'closed'
-                     WHERE request_event_seq = ?1 AND delivery = 'pending'",
-                    [request_event_seq],
-                )?;
-                ensure!(changed == 1, "structured planning question is no longer pending");
-                answered_question = Some(origin);
-            }
             tx.commit()?;
-            Ok(AttemptPlan { run, conversation_id, agent_session_id, previous_run_id, context_id,
-                resume_cursor_id, intent, scope, input, attachments, question_route, answered_question })
-        }).await
+            Ok(plan)
+        })
+        .await
     }
 
     pub async fn prepare_structured_planning_attempt(
@@ -908,10 +809,13 @@ impl Store {
             }
             close_permissions(&tx, &run_id)?;
             close_native_questions(&tx, &run_id)?;
+            crate::jobs::release_writer(&tx, &run_id)?;
             tx.execute("DELETE FROM active_agent_attempts WHERE run_id = ?1", [&run_id])?;
             tx.commit()?;
             Ok(())
-        }).await
+        }).await?;
+        self.job_signal.send_replace(());
+        Ok(())
     }
 
     pub async fn recover_agent_attempts_after_restart(&self) -> Result<()> {
@@ -929,6 +833,7 @@ impl Store {
                 close_permissions(&tx, &id)?;
                 close_native_questions(&tx, &id)?;
                 close_unfinished_structured_questions(&tx, &id)?;
+                crate::jobs::release_writer(&tx, &id)?;
             }
             tx.execute(
                 "UPDATE dispatches SET delivery = 'unconfirmed' WHERE delivery = 'prepared'",
@@ -942,8 +847,272 @@ impl Store {
     }
 }
 
+struct PreparedAttempt {
+    conversation_id: String,
+    base_context_id: String,
+    scope: SessionScope,
+    encrypted: Option<Vec<u8>>,
+    frozen: Option<(PathBuf, Vec<u8>)>,
+    question_route: QuestionRoute,
+    answer: Option<(QuestionOrigin, QuestionReply)>,
+}
+
+pub(crate) fn consume_matching_draft(
+    db: &Connection,
+    conversation_id: &str,
+    text: &str,
+) -> Result<()> {
+    let draft: Vec<u8> = db.query_row(
+        "SELECT payload FROM drafts WHERE kind = 'conversation' AND owner_id = ?1 AND document = ''",
+        [conversation_id], |row| row.get(0),
+    ).optional()?.context("The conversation draft no longer exists")?;
+    ensure!(
+        protection::unprotect(&draft)? == text.as_bytes(),
+        "The conversation draft changed before sending"
+    );
+    db.execute(
+        "DELETE FROM drafts WHERE kind = 'conversation' AND owner_id = ?1 AND document = ''",
+        [conversation_id],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn insert_job_attempt(
+    db: &Connection,
+    conversation: Conversation,
+    scope: SessionScope,
+    text: &str,
+) -> Result<AttemptPlan> {
+    insert_attempt(
+        db,
+        PreparedAttempt {
+            conversation_id: conversation.id,
+            base_context_id: conversation.context_id,
+            scope,
+            encrypted: Some(protection::protect(text.as_bytes())?),
+            frozen: None,
+            question_route: QuestionRoute::Native,
+            answer: None,
+        },
+    )
+}
+
+fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptPlan> {
+    let PreparedAttempt {
+        conversation_id,
+        base_context_id,
+        scope,
+        encrypted,
+        frozen,
+        question_route,
+        answer,
+    } = prepared;
+    let serialized = serde_json::to_string(&scope)?;
+    let checkout = &scope.checkout;
+    let conversation = check_idle_base(db, &conversation_id, &base_context_id)?;
+    let answered_request = answer
+        .as_ref()
+        .map(|(origin, reply)| {
+            validate_structured_reply(db, &conversation, &serialized, origin, reply)
+        })
+        .transpose()?;
+    let registered: String = db.query_row(
+        "SELECT root FROM checkouts WHERE id = ?1",
+        [&conversation.checkout_id],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        checkout.starts_with(Path::new(&registered)),
+        "working directory is outside the conversation checkout"
+    );
+    if let Some((root, _)) = &frozen {
+        ensure!(
+            root == Path::new(&registered),
+            "attachment checkout changed after admission"
+        );
+    }
+    let mut entries = context_entries(db, &conversation_id, &base_context_id)?;
+    let previous = previous_attempt(db, &conversation_id)?;
+    let continuity = match &previous {
+        Some(prior)
+            if prior.scope == serialized
+                && scope
+                    .account_binding
+                    .as_ref()
+                    .is_some_and(|id| !id.is_empty()) =>
+        {
+            append_only_cursor(db, &conversation_id, &entries, prior)?
+        }
+        _ => None,
+    };
+
+    let (agent_session_id, resume_cursor_id, intent, consumed) =
+        if let Some((prior, cursor, consumed)) = continuity {
+            let provider_session_id = prior
+                .provider_session_id
+                .clone()
+                .expect("checked native ID");
+            (
+                prior.session_id.clone(),
+                Some(cursor),
+                SessionIntent::Resume {
+                    provider_session_id,
+                },
+                consumed,
+            )
+        } else {
+            let id = new_id();
+            db.execute(
+                "INSERT INTO agent_sessions(id, conversation_id, scope) VALUES (?1, ?2, ?3)",
+                params![id, conversation_id, serialized],
+            )?;
+            (id, None, SessionIntent::Start, 0)
+        };
+
+    let encrypted = if let (Some((_, reply)), Some((_, form))) = (&answer, &answered_request) {
+        let values = serde_json::json!({"question": form, "answer": reply.values});
+        let text = format!(
+            "The user answered this saved planning question. Continue the original planning task with the supplied values.\n{}",
+            serde_json::to_string(&values)?
+        );
+        protection::protect(text.as_bytes())?
+    } else {
+        encrypted.context("missing admitted message content")?
+    };
+    let revision = insert_message(db, &conversation_id, MessageRole::User, encrypted)?;
+    if let Some((_, payload)) = frozen {
+        db.execute(
+            "INSERT INTO message_attachments(message_revision_id, payload) VALUES (?1, ?2)",
+            params![revision, payload],
+        )?;
+    }
+    entries.push(revision);
+    let context_id = activate_context(db, &conversation_id, &entries)?;
+    let input = load_messages(db, &conversation_id, &entries[consumed..])?;
+    let mut attachments = Vec::new();
+    for message in &input {
+        let payload = db
+            .query_row(
+                "SELECT payload FROM message_attachments WHERE message_revision_id = ?1",
+                [&message.revision_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        if let Some(payload) = payload {
+            let items: Vec<CapturedAttachment> =
+                serde_json::from_slice(&protection::unprotect(&payload)?)?;
+            attachments.extend(
+                items
+                    .into_iter()
+                    .map(|item| (message.revision_id.clone(), item)),
+            );
+        }
+    }
+    if !attachments.is_empty() {
+        let limits = attachments::limits_for_checkout(db, &conversation.checkout_id)?;
+        attachments::check_limits(
+            limits,
+            attachments
+                .iter()
+                .map(|(_, item)| (&item.metadata, item.delivery())),
+        )?;
+    }
+    let (run, _) = runs::insert_run(db, conversation.checkout_id, "agent")?;
+    let ordinal = previous.as_ref().map_or(1, |prior| prior.ordinal + 1);
+    let previous_run_id = previous.map(|prior| prior.run_id);
+    db.execute(
+        "INSERT INTO agent_attempts(run_id, turn_id, conversation_id, ordinal, agent_session_id,
+         previous_run_id, context_id, resume_cursor_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            run.id,
+            run.turn_id,
+            conversation_id,
+            ordinal,
+            agent_session_id,
+            previous_run_id,
+            context_id,
+            resume_cursor_id
+        ],
+    )?;
+    db.execute(
+        "INSERT INTO active_agent_attempts VALUES (?1, ?2)",
+        params![conversation_id, run.id],
+    )?;
+    let mut answered_question = None;
+    if let (Some((origin, reply)), Some((request_event_seq, _))) = (answer, answered_request) {
+        let event = ProviderEvent {
+            location: Default::default(),
+            data: ProviderEventData::StructuredQuestionReplyLinked {
+                origin: origin.clone(),
+                reply,
+                continuation_run_id: run.id.clone(),
+            },
+        };
+        let payload = protection::protect(&serde_json::to_vec(&event)?)?;
+        db.execute(
+            "INSERT INTO agent_events(run_id, source, payload) VALUES (?1, ?2, ?3)",
+            params![origin.run_id, EventSource::Application.as_sql(), payload],
+        )?;
+        let reply_event_seq = db.last_insert_rowid();
+        let changed = db.execute(
+            "UPDATE structured_question_continuations SET continuation_run_id = ?1, reply_event_seq = ?2
+             WHERE request_event_seq = ?3 AND continuation_run_id IS NULL",
+            params![run.id, reply_event_seq, request_event_seq],
+        )?;
+        ensure!(
+            changed == 1,
+            "structured planning question has already been answered"
+        );
+        let changed = db.execute(
+            "UPDATE agent_questions SET delivery = 'closed'
+             WHERE request_event_seq = ?1 AND delivery = 'pending'",
+            [request_event_seq],
+        )?;
+        ensure!(
+            changed == 1,
+            "structured planning question is no longer pending"
+        );
+        answered_question = Some(origin);
+    }
+    Ok(AttemptPlan {
+        run,
+        conversation_id,
+        agent_session_id,
+        previous_run_id,
+        context_id,
+        resume_cursor_id,
+        intent,
+        scope,
+        input,
+        attachments,
+        question_route,
+        answered_question,
+        requires_bridge: false,
+    })
+}
+
 fn new_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+pub(crate) fn insert_conversation(
+    db: &Connection,
+    checkout_id: String,
+    title: String,
+    background: bool,
+) -> Result<Conversation> {
+    let id = new_id();
+    db.execute(
+        "INSERT INTO conversations(id, checkout_id, title, background) VALUES (?1, ?2, ?3, ?4)",
+        params![id, checkout_id, title, background],
+    )?;
+    let context_id = activate_context(db, &id, &[])?;
+    Ok(Conversation {
+        id,
+        checkout_id,
+        title,
+        context_id,
+    })
 }
 
 fn validate_structured_reply(
@@ -996,7 +1165,7 @@ fn validate_structured_reply(
     Ok((seq, form))
 }
 
-fn load_conversation(db: &Connection, id: &str) -> Result<Conversation> {
+pub(crate) fn load_conversation(db: &Connection, id: &str) -> Result<Conversation> {
     Ok(db.query_row(
         "SELECT id, checkout_id, title, active_context_id FROM conversations WHERE id = ?1",
         [id],

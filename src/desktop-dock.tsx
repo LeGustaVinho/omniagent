@@ -154,10 +154,17 @@ export function RealConversations({
 }) {
   const dock = useDesktopDock(checkout, "conversations");
   useEffect(() => {
-    if (dock.ready && dock.api && target) {
-      dock.api.getPanel("conversation:" + target)?.api.setActive();
-    }
-  }, [dock.api, dock.ready, target]);
+    if (!dock.ready || !dock.api || !target) return;
+    const api = dock.api;
+    const existing = api.getPanel("conversation:" + target);
+    if (existing) return existing.api.setActive();
+    let cancelled = false;
+    void invoke<Conversation[]>("list_conversations", { checkoutId: checkout.checkoutId }).then((conversations) => {
+      const match = conversations.find((conversation) => conversation.id === target);
+      if (!cancelled && match) openConversation(api, match);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [checkout.checkoutId, dock.api, dock.ready, target]);
 
   function open(conversation: Conversation) {
     if (!dock.api) return;

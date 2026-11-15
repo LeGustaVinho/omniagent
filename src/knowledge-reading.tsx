@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { isValidElement, useEffect, useRef, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -15,6 +15,7 @@ const readingPlugins = [rehypeKatex];
 function textContent(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
   if (Array.isArray(node)) return node.map(textContent).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) return textContent(node.props.children);
   return "";
 }
 
@@ -58,7 +59,12 @@ export function NoteReading({ path, content, files, jump, onLink, onAttachment }
     a: ({ href, children }) => {
       if (href?.startsWith("omni-mark:")) return <mark>{children}</mark>;
       if (href?.startsWith("omni-wiki:")) {
-        const value = decodeURIComponent(href.slice("omni-wiki:".length));
+        let value: string;
+        try {
+          value = decodeURIComponent(href.slice("omni-wiki:".length));
+        } catch {
+          return <span>{children}</span>;
+        }
         const link = parseWiki(value.replace(/^!/, ""), value.startsWith("!"));
         const attachment = noteAttachments.find(({ name }) => link.target.split("/").at(-1)?.toLowerCase() === name);
         if (attachment) return <button type="button" className="note-inline-link" onClick={() => onAttachment(attachment)}><FileText size={13} />{children}</button>;

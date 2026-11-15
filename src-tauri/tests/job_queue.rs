@@ -1,10 +1,13 @@
 use std::{fs, path::Path, process::Command};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::{AttemptPlan, SessionScope},
-    jobs::{JobOrigin, JobRequest, JobRequestConflict, QueueState},
-    providers::{Provider, SessionMode},
+    jobs::{
+        AdmissionBlocker, AdmissionEnvironment, Job, JobContext, JobOrigin, JobRequest,
+        JobRequestConflict, QueueSettings, QueueState,
+    },
+    providers::{Capability, Provider, SessionMode},
     repository,
     runner::{DirectWindowsRunner, Runner},
     runs::RunStatus,
@@ -12,6 +15,10 @@ use omniagent::{
 };
 
 async fn origin(store: &Store, path: &Path) -> Result<AttemptPlan> {
+    origin_with_mode(store, path, SessionMode::ReadOnly).await
+}
+
+async fn origin_with_mode(store: &Store, path: &Path, mode: SessionMode) -> Result<AttemptPlan> {
     fs::create_dir(path)?;
     ensure!(
         Command::new("git.exe")
@@ -37,7 +44,7 @@ async fn origin(store: &Store, path: &Path) -> Result<AttemptPlan> {
                 cli_version: "fixture".into(),
                 runner: DirectWindowsRunner.identity().into(),
                 permission_revision: "read-only".into(),
-                mode: SessionMode::ReadOnly,
+                mode,
                 model: None,
                 effort: None,
             },
@@ -232,5 +239,469 @@ async fn job_trust_is_scoped_to_the_origin_project_and_writes_need_a_managed_wor
         .await?;
     assert_eq!(dependent.id, normalized_replay.id);
     assert_eq!(dependent.queue_state, QueueState::Queued);
+    Ok(())
+}
+
+fn environment(bridge_available: bool) -> AdmissionEnvironment {
+    AdmissionEnvironment {
+        runner: DirectWindowsRunner.identity().into(),
+        bridge_available,
+    }
+}
+
+async fn approve(store: &Store, job: &Job) -> Result<()> {
+    let pending = store
+        .inspect_job(job.project_id.clone(), job.id.clone(), environment(false))
+        .await?
+        .context("missing job")?;
+    let approval = pending
+        .blockers
+        .into_iter()
+        .find_map(|blocker| match blocker {
+            AdmissionBlocker::Approval { approval_id } => Some(approval_id),
+            _ => None,
+        })
+        .context("missing linked approval")?;
+    store
+        .decide_job_approval(job.project_id.clone(), approval, true)
+        .await
+}
+
+#[tokio::test]
+async fn queued_conversation_draft_and_snapshot_survive_reopen_without_creating_a_run() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("queue.sqlite3");
+    let store = Store::open(database.clone())?;
+    let parent = origin(&store, &temp.path().join("project")).await?;
+    store
+        .finish_agent_attempt(parent.run.id, RunStatus::Cancelled, None)
+        .await?;
+    let chat = store
+        .create_conversation(parent.run.checkout_id, "Durable queue".into())
+        .await?;
+    let job_context = JobContext {
+        conversation_id: chat.id.clone(),
+        context_id: chat.context_id.clone(),
+    };
+    store
+        .save_conversation_draft(chat.id.clone(), "Saved exact prompt ☕".into())
+        .await?;
+    assert!(
+        store
+            .enqueue_conversation_turn(
+                job_context.clone(),
+                parent.scope.clone(),
+                "Raced draft".into()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.conversation_draft(chat.id.clone()).await?,
+        "Saved exact prompt ☕"
+    );
+    let settings = QueueSettings {
+        paused: true,
+        capacity: 2,
+    };
+    store.set_job_queue_settings(settings).await?;
+    let queued = store
+        .enqueue_conversation_turn(job_context, parent.scope, "Saved exact prompt ☕".into())
+        .await?;
+    assert!(store.conversation_draft(chat.id.clone()).await?.is_empty());
+    assert!(
+        store
+            .latest_conversation_run(chat.id.clone())
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        store.conversation(chat.id.clone()).await?.context_id,
+        chat.context_id
+    );
+    drop(store);
+    let store = Store::open(database)?;
+    assert_eq!(store.job_queue_settings().await?, settings);
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    let current = store
+        .latest_conversation_job(chat.id.clone(), environment(false))
+        .await?
+        .context("pending job missing")?;
+    assert_eq!(current.job, queued);
+    assert_eq!(current.blockers, [AdmissionBlocker::QueuePaused]);
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: false,
+            ..settings
+        })
+        .await?;
+    let plan = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("did not claim saved job")?;
+    assert_eq!(plan.conversation_id, chat.id);
+    assert_eq!(
+        plan.input.last().context("missing prompt")?.text,
+        "Saved exact prompt ☕"
+    );
+    assert_eq!(
+        store
+            .latest_conversation_run(chat.id.clone())
+            .await?
+            .context("missing run")?,
+        plan.run
+    );
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    store
+        .finish_agent_attempt(plan.run.id.clone(), RunStatus::Cancelled, None)
+        .await?;
+    assert_eq!(
+        store
+            .job(queued.project_id, queued.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap()
+            .status,
+        RunStatus::Cancelled
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn inspector_and_claim_agree_on_approval_dependencies_bridge_and_capacity() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("queue.sqlite3");
+    let store = Store::open(database.clone())?;
+    let parallel = Store::open(database)?;
+    let parent = origin(&store, &temp.path().join("project")).await?;
+    let task = store
+        .create_project_task(parent.run.project_id.clone(), "Queue task".into())
+        .await?;
+    let bridge_job = store
+        .submit_agent_job(
+            parent.run.id.clone(),
+            "needs-bridge".into(),
+            JobRequest {
+                requires_bridge: true,
+                ..request()
+            },
+        )
+        .await?;
+    let portable = store
+        .submit_agent_job(
+            parent.run.id.clone(),
+            "portable".into(),
+            JobRequest {
+                task_id: Some(task.id.clone()),
+                ..request()
+            },
+        )
+        .await?;
+    let dependent = store
+        .submit_agent_job(
+            parent.run.id,
+            "depends-on-portable".into(),
+            JobRequest {
+                dependencies: vec![portable.id.clone()],
+                ..request()
+            },
+        )
+        .await?;
+    let read =
+        |job: &Job| store.inspect_job(job.project_id.clone(), job.id.clone(), environment(false));
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    for job in [&bridge_job, &portable, &dependent] {
+        approve(&store, job).await?;
+    }
+    assert_eq!(
+        read(&bridge_job).await?.unwrap().blockers,
+        [AdmissionBlocker::MissingCapability {
+            capability: Capability::RunScopedMcp
+        }]
+    );
+    assert!(read(&portable).await?.unwrap().blockers.is_empty());
+    assert_eq!(
+        read(&dependent).await?.unwrap().blockers,
+        [AdmissionBlocker::Dependency {
+            job_id: portable.id.clone(),
+            status: None,
+            queue_state: QueueState::Queued
+        }]
+    );
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: false,
+            capacity: 1,
+        })
+        .await?;
+    let (first, second) = tokio::join!(
+        store.claim_next_job(environment(false)),
+        parallel.claim_next_job(environment(false))
+    );
+    let claimed = [first?, second?].into_iter().flatten().collect::<Vec<_>>();
+    assert_eq!(claimed.len(), 1);
+    let plan = &claimed[0];
+    assert_ne!(plan.conversation_id, parent.conversation_id);
+    assert_eq!(
+        read(&portable)
+            .await?
+            .unwrap()
+            .job
+            .latest_attempt
+            .unwrap()
+            .run_id,
+        plan.run.id
+    );
+    assert!(
+        read(&dependent)
+            .await?
+            .unwrap()
+            .blockers
+            .contains(&AdmissionBlocker::Capacity {
+                active: 1,
+                limit: 1
+            })
+    );
+    store.mark_agent_running(plan.run.id.clone()).await?;
+    let grandchild = store
+        .submit_agent_job(plan.run.id.clone(), "nested".into(), request())
+        .await?;
+    assert_eq!(grandchild.task_id, Some(task.id));
+    assert_eq!(
+        grandchild.origin,
+        JobOrigin::Agent {
+            run_id: plan.run.id.clone(),
+            request_id: "nested".into()
+        }
+    );
+    assert!(
+        store
+            .request_job_interrupt(parent.conversation_id, plan.run.id.clone())
+            .await
+            .is_err()
+    );
+    store
+        .request_job_interrupt(plan.conversation_id.clone(), plan.run.id.clone())
+        .await?;
+    let stopping = read(&portable).await?.unwrap().job.latest_attempt.unwrap();
+    assert!(stopping.cancel_requested);
+    assert_eq!(stopping.status, RunStatus::Running);
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    // The provider can complete successfully before the cancellation takes effect.
+    store
+        .finish_agent_attempt(plan.run.id.clone(), RunStatus::Succeeded, None)
+        .await?;
+    assert!(
+        store
+            .finish_agent_attempt(plan.run.id.clone(), RunStatus::Cancelled, None)
+            .await
+            .is_err()
+    );
+    let complete = read(&portable).await?.unwrap().job.latest_attempt.unwrap();
+    assert!(!complete.cancel_requested);
+    assert_eq!(complete.status, RunStatus::Succeeded);
+    assert!(read(&dependent).await?.unwrap().blockers.is_empty());
+    let dependency_plan = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("dependent became eligible")?;
+    assert_eq!(
+        read(&dependent)
+            .await?
+            .unwrap()
+            .job
+            .latest_attempt
+            .unwrap()
+            .run_id,
+        dependency_plan.run.id
+    );
+    store
+        .finish_agent_attempt(dependency_plan.run.id, RunStatus::Cancelled, None)
+        .await?;
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    let bridge_plan = store
+        .claim_next_job(environment(true))
+        .await?
+        .context("bridge job remained blocked")?;
+    assert_eq!(
+        read(&bridge_job)
+            .await?
+            .unwrap()
+            .job
+            .latest_attempt
+            .unwrap()
+            .run_id,
+        bridge_plan.run.id
+    );
+    store
+        .finish_agent_attempt(bridge_plan.run.id, RunStatus::Cancelled, None)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_occupied_managed_worktree_and_a_declined_approval_block_the_same_jobs_in_both_paths()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("queue.sqlite3");
+    let store = Store::open(database.clone())?;
+    let root = temp.path().join("project");
+    let parent = origin_with_mode(&store, &root, SessionMode::ApprovedWrite).await?;
+    let git = |args: &[&str]| -> Result<String> {
+        let output = Command::new("git.exe")
+            .args(args)
+            .current_dir(&root)
+            .output()?;
+        ensure!(
+            output.status.success(),
+            "fixture Git operation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().into())
+    };
+    git(&[
+        "-c",
+        "user.name=OmniAgent Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=.git/no-fixture-hooks",
+        "commit",
+        "--allow-empty",
+        "--quiet",
+        "-m",
+        "Base",
+    ])?;
+    let worktree = temp.path().join("managed");
+    let branch = "codex/queue-writer-fixture";
+    git(&[
+        "-c",
+        "core.hooksPath=.git/no-fixture-hooks",
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        branch,
+        worktree.to_str().unwrap(),
+    ])?;
+    let worktree = repository::register(&store, worktree).await?;
+    let task = store
+        .create_project_task(worktree.project_id.clone(), "Fixture writer".into())
+        .await?;
+    // Register the real linked checkout as managed for this admission fixture.
+    rusqlite::Connection::open(&database)?.execute(
+        "INSERT INTO managed_task_worktrees VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            worktree.project_id,
+            task.id,
+            worktree.checkout_id,
+            branch,
+            git(&["rev-parse", "HEAD"])?
+        ],
+    )?;
+    let writer = || JobRequest {
+        checkout_id: Some(worktree.checkout_id.clone()),
+        task_id: Some(task.id.clone()),
+        mode: SessionMode::ApprovedWrite,
+        ..request()
+    };
+    let first = store
+        .submit_agent_job(parent.run.id.clone(), "first-writer".into(), writer())
+        .await?;
+    let second = store
+        .submit_agent_job(parent.run.id.clone(), "second-writer".into(), writer())
+        .await?;
+    let declined = store
+        .submit_agent_job(parent.run.id, "declined-writer".into(), writer())
+        .await?;
+    let inspect =
+        |job: &Job| store.inspect_job(job.project_id.clone(), job.id.clone(), environment(false));
+    let approval = inspect(&declined)
+        .await?
+        .unwrap()
+        .blockers
+        .into_iter()
+        .find_map(|blocker| match blocker {
+            AdmissionBlocker::Approval { approval_id } => Some(approval_id),
+            _ => None,
+        })
+        .context("missing writer approval")?;
+    store
+        .decide_job_approval(declined.project_id.clone(), approval, false)
+        .await?;
+    for job in [&first, &second] {
+        approve(&store, job).await?;
+    }
+    let claimed = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("first writer did not claim")?;
+    let snapshot = store
+        .inspect_project_queue(worktree.project_id.clone(), environment(false))
+        .await?;
+    assert_eq!(snapshot.active, 1);
+    assert_eq!(snapshot.settings.capacity, 3);
+    assert_eq!(snapshot.jobs.len(), 3);
+    for (entry, job) in snapshot.jobs.iter().zip([&first, &second, &declined]) {
+        assert_eq!(entry, &inspect(job).await?.unwrap());
+    }
+    assert_eq!(
+        inspect(&first)
+            .await?
+            .unwrap()
+            .job
+            .latest_attempt
+            .unwrap()
+            .run_id,
+        claimed.run.id
+    );
+    assert_eq!(
+        inspect(&second).await?.unwrap().blockers,
+        [AdmissionBlocker::Writer {
+            checkout_id: worktree.checkout_id.clone(),
+            run_id: claimed.run.id.clone(),
+        }]
+    );
+    assert!(
+        inspect(&declined)
+            .await?
+            .unwrap()
+            .blockers
+            .iter()
+            .any(|blocker| matches!(blocker, AdmissionBlocker::Policy { .. }))
+    );
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    store
+        .finish_agent_attempt(claimed.run.id, RunStatus::Cancelled, None)
+        .await?;
+    assert!(inspect(&second).await?.unwrap().blockers.is_empty());
+    let next = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("writer did not yield slot")?;
+    assert_eq!(
+        inspect(&second)
+            .await?
+            .unwrap()
+            .job
+            .latest_attempt
+            .unwrap()
+            .run_id,
+        next.run.id
+    );
+    store
+        .finish_agent_attempt(next.run.id, RunStatus::Cancelled, None)
+        .await?;
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    assert_eq!(
+        inspect(&declined).await?.unwrap().blockers,
+        [AdmissionBlocker::Policy {
+            reason: "An operator declined this job"
+        }]
+    );
     Ok(())
 }

@@ -7,6 +7,8 @@ import { lazy, Suspense, useEffect, useState, type ComponentType, type ReactNode
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { CheckoutSelector } from "@/checkout-selector";
 import { Button } from "@/components/ui/button";
+import { ConversationMarkdown } from "@/conversation-markdown";
+import { previewPlan } from "@/conversation-preview-data";
 import { RealConversations, RealDiagnostics } from "@/desktop-dock";
 import { GitSimulationProvider } from "@/git-simulation";
 import { RunInspector, SimulationDiagnostics } from "@/inspection-panel";
@@ -39,7 +41,7 @@ const areas = [
 
 type Navigation = { active: WorkspaceId; visited: Partial<Record<WorkspaceId, { target?: string }>> };
 type SimulationState = { scenario: ScenarioId; epoch: number; delivery: DeliveryStep; navigation: Navigation };
-type SidePane = { type: "activity"; runId: string } | { type: "changes"; target: "saved" | "working" };
+type SidePane = { type: "activity"; runId: string; conversationId?: string } | { type: "changes"; target: "saved" | "working" };
 
 function show(workspace: WorkspaceId, target?: string, prior?: Navigation): Navigation {
   return { active: workspace, visited: { ...prior?.visited, [workspace]: target === undefined ? prior?.visited[workspace] ?? {} : { target } } };
@@ -143,7 +145,7 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
           setRealNavigation((current) => show(workspace, target, current));
         }
       },
-      openActivity: (runId) => setSide({ type: "activity", runId }),
+      openActivity: (runId, conversationId) => setSide({ type: "activity", runId, conversationId }),
       openChanges: (target) => setSide({ type: "changes", target }),
     };
   }
@@ -211,7 +213,7 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
               compact={compact} openSystem={() => showSettings("system")} />
           </div>}
           {realQueue && <div className="work-queue-panel" hidden={Boolean(preview) || realQueue !== "open"}>
-            <Suspense fallback={loading}><QueuePanel {...real} onClose={() => setRealQueue("closed")} /></Suspense>
+            <Suspense fallback={loading}><QueuePanel {...real} active={!preview && realQueue === "open"} onClose={() => setRealQueue("closed")} /></Suspense>
           </div>}
           {previewQueue && simulated && <div className="work-queue-panel" key={preview?.epoch} hidden={previewQueue !== "open"}>
             <Suspense fallback={loading}><QueuePanel {...simulated} onClose={() => setPreviewQueue("closed")} /></Suspense>
@@ -220,7 +222,7 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
         {side && <SideInspector key={side.type === "activity" ? side.runId : side.target} side={side} compact={compact} close={closeSide}
           plan={simulated && side.type === "changes" && side.target === "saved" && <SavedPlan />}>
           <Suspense fallback={loading}>
-            {side.type === "activity" ? <RunInspector {...current} runId={side.runId} /> : <ChangesPanel {...current} target={side.target} />}
+            {side.type === "activity" ? <RunInspector {...current} runId={side.runId} conversationId={side.conversationId} onClose={closeSide} /> : <ChangesPanel {...current} target={side.target} />}
           </Suspense>
         </SideInspector>}
       </div>
@@ -261,13 +263,8 @@ function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, openS
 
 function SavedPlan() {
   return <article className="work-inspection-body max-h-full overflow-auto">
-    <p className="font-mono text-xs">Plan revision 2 · docs/release.md</p>
-    <h3>Update the release checklist</h3>
-    <ol className="list-decimal space-y-2 pl-5">
-      <li>Add a Recovery section with a rollback checkpoint.</li>
-      <li>Verify links and Markdown rendering.</li>
-      <li>Review the saved patch before accepting the change.</li>
-    </ol>
+    <p className="font-mono text-xs">Plan revision 1 · docs/release.md</p>
+    <ConversationMarkdown>{previewPlan}</ConversationMarkdown>
   </article>;
 }
 

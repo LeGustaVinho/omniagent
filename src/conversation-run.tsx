@@ -40,11 +40,11 @@ const labels = {
 };
 const liveStatuses = new Set(["starting", "running", "waiting_for_input"]);
 
-export function isLiveRun(run: RunRecord | null | undefined) {
+export function isLiveRun(run: Pick<RunRecord, "status"> | null | undefined) {
   return Boolean(run && liveStatuses.has(run.status));
 }
 
-export function useConversationRun(conversationId: string, run: RunRecord | null | undefined) {
+export function useConversationRun(conversationId: string, run: RunRecord | null | undefined, cancelRequested: boolean) {
   const queryClient = useQueryClient();
   const runId = run?.id;
   const target = { conversationId, runId };
@@ -92,8 +92,10 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
     refetchInterval: live ? 200 : false,
     queryFn: () => invoke<ConversationPendingInput[]>("pending_conversation_inputs", target),
   });
+  const currentStop = stopState?.runId === runId ? stopState : undefined;
+  const stopping = cancelRequested || Boolean(currentStop && !currentStop.error);
   async function stop() {
-    if (!runId) return;
+    if (!runId || stopping) return;
     setStopState({ runId });
     try {
       await invoke("stop_conversation_turn", target);
@@ -102,7 +104,6 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
     }
   }
 
-  const currentStop = stopState?.runId === runId ? stopState : undefined;
   return {
     projection: result.data,
     output: result.data?.plan || result.data?.final || result.data?.streamed,
@@ -111,7 +112,7 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
     refreshInputs: () => void inputs.refetch(),
     live,
     stop,
-    stopping: Boolean(currentStop && !currentStop.error),
+    stopping,
   };
 }
 
@@ -136,11 +137,12 @@ export function ConversationRequests({ activity, conversationId, runId }: {
   );
 }
 
-export function ConversationActivity({ conversationId, run, projection, onClose }: {
+export function ConversationActivity({ conversationId, run, projection, onClose, embedded }: {
   conversationId: string;
   run: RunRecord;
   projection?: Projection;
   onClose: () => void;
+  embedded?: boolean;
 }) {
   const [showInput, setShowInput] = useState(false);
   const heading = useRef<HTMLButtonElement>(null);
@@ -154,17 +156,17 @@ export function ConversationActivity({ conversationId, run, projection, onClose 
   });
   const usage = projection?.usage;
   return (
-    <aside className="conv-activity" aria-label="Conversation activity" onKeyDown={(event) => {
+    <aside className={embedded ? "conv-activity conv-activity-embedded" : "conv-activity"} aria-label="Conversation activity" onKeyDown={(event) => {
       if (event.key !== "Escape") return;
       event.stopPropagation();
       onClose();
     }}>
-      <header className="conv-activity-heading">
+      {!embedded && <header className="conv-activity-heading">
         <Activity className="size-4" aria-hidden /><h2>Activity</h2>
         <button ref={heading} type="button" className="conv-icon-button ml-auto" aria-label="Close activity" onClick={onClose}>
           <X aria-hidden />
         </button>
-      </header>
+      </header>}
       <div className="conv-activity-content">
       <dl>
         <dt>Execution</dt><dd role="status">{labels[run.status]}</dd>

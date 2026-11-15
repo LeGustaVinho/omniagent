@@ -1,6 +1,11 @@
+import { invoke } from "@tauri-apps/api/core";
+import { useQuery } from "@tanstack/react-query";
 import { Activity, CircleDot, FlaskConical, LibraryBig } from "lucide-react";
 import { useState } from "react";
+import type { RunRecord } from "@/bindings/RunRecord";
 import { Button } from "@/components/ui/button";
+import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
+import { deliveryBase, deliveryBranch, deliveryNotePath, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
 import type { DeliveryStep, WorkspaceProps } from "@/workbench-contract";
 
 const steps: Record<DeliveryStep, string> = {
@@ -12,8 +17,12 @@ const steps: Record<DeliveryStep, string> = {
 const inspectorPages = ["Overview", "Timeline", "Agents", "Context", "Exact input", "Approvals", "Artifacts"] as const;
 type InspectorPage = (typeof inspectorPages)[number];
 
-export function RunInspector({ runId, simulation, startSimulation, openWorkspace, openChanges }: WorkspaceProps & { runId: string }) {
+type InspectorProps = WorkspaceProps & { runId: string; conversationId?: string; onClose: () => void };
+
+export function RunInspector({ runId, conversationId, onClose, checkout, simulation, startSimulation, openWorkspace, openChanges }: InspectorProps) {
   const [page, setPage] = useState<InspectorPage>("Overview");
+  if (!simulation && conversationId) return <RecordedConversationRun projectId={checkout.projectId} runId={runId}
+    conversationId={conversationId} onClose={onClose} />;
   if (!simulation) return <div className="work-empty">
     <Activity size={22} /><h2>Run inspector</h2><p>Integration pending for this run.</p>
     <Button variant="outline" onClick={() => startSimulation()}>Simulate</Button>
@@ -32,11 +41,11 @@ export function RunInspector({ runId, simulation, startSimulation, openWorkspace
       </div>
       <div className="work-inspection-body">
         {page === "Overview" && <><h3>Execution</h3><dl>
-          <dt>Provider</dt><dd>Codex</dd><dt>Role</dt><dd>Implementation</dd><dt>Worktree</dt><dd><code>example/release-checklist</code></dd>
+          <dt>Provider</dt><dd>Codex</dd><dt>Role</dt><dd>Implementation</dd><dt>Worktree</dt><dd><code>{deliveryBranch}</code></dd>
           <dt>Result</dt><dd>{hasResult ? "Candidate saved" : status}</dd>
-        </dl><Button variant="outline" onClick={() => openWorkspace("tasks", "release")}>Open task</Button></>}
+        </dl><Button variant="outline" onClick={() => openWorkspace("tasks", deliveryTaskId)}>Open task</Button></>}
         {page === "Timeline" && <><h3>Events</h3><ol className="work-timeline">
-          <li><span>Source selected</span><small>docs/release.md · revision 3</small></li>
+          <li><span>Source selected</span><small>{deliveryNotePath} · {deliveryBase}</small></li>
           {step !== "note" && <li><span>Planning requested</span><small>Read-only profile · Codex</small></li>}
           <li><span>{status}</span><small>Latest state</small></li>
         </ol></>}
@@ -44,11 +53,11 @@ export function RunInspector({ runId, simulation, startSimulation, openWorkspace
           <li><span>Planning · Codex</span><small>Read-only workspace</small></li>
           {hasResult && <li className="ml-4"><span>Review · Claude Code</span><small>Independent verification</small></li>}
         </ul></>}
-        {page === "Context" && <><h3>Context snapshot</h3><p>Revision 3 · 2,410 input tokens estimated</p>
-          <button className="work-text-action" onClick={() => openWorkspace("knowledge", "docs/release.md")}>docs/release.md</button>
-          <p>Base commit <code>59a9f0c</code> · checkout instructions included</p></>}
-        {page === "Exact input" && <><h3>Exact provider input</h3><pre>Use the repository release checklist revision 3. Keep the task scope limited to the approved changes and capture a diff for review.</pre></>}
-        {page === "Approvals" && <><h3>Implementation release</h3><p>{["note", "question", "plan"].includes(step) ? "A decision is required for the selected plan." : "Plan revision 2 · approved example scope"}</p>
+        {page === "Context" && <><h3>Context snapshot</h3><p>2,410 input tokens estimated</p>
+          <button className="work-text-action" onClick={() => openWorkspace("knowledge", deliveryNotePath)}>{deliveryNotePath}</button>
+          <p>Base commit <code>{deliveryBase}</code> · checkout instructions included</p></>}
+        {page === "Exact input" && <><h3>Exact provider input</h3><pre>Use {deliveryNotePath} at {deliveryBase}. Keep the task scope limited to the approved changes and capture a diff for review.</pre></>}
+        {page === "Approvals" && <><h3>Implementation release</h3><p>{["note", "question", "plan"].includes(step) ? "A decision is required for the selected plan." : "Plan revision 1 · approved example scope"}</p>
           <Button variant="outline" onClick={() => openWorkspace("conversations", "plan")}>Open conversation</Button></>}
         {page === "Artifacts" && <><h3>Artifacts</h3>{hasResult
           ? <Button variant="outline" onClick={() => openChanges("saved")}>Open saved diff</Button>
@@ -56,6 +65,30 @@ export function RunInspector({ runId, simulation, startSimulation, openWorkspace
       </div>
     </section>
   );
+}
+
+function RecordedConversationRun({ conversationId, projectId, runId, onClose }: {
+  conversationId: string;
+  projectId: string;
+  runId: string;
+  onClose: () => void;
+}) {
+  const current = useQuery({
+    queryKey: ["inspect-conversation-run", projectId, conversationId, runId],
+    queryFn: () => invoke<RunRecord>("inspect_conversation_run", { projectId, conversationId, runId }),
+    refetchInterval: (query) => isLiveRun(query.state.data) ? 400 : false,
+  });
+  const activity = useConversationRun(conversationId, current.data, false);
+  if (current.error) return <p className="work-progress" role="alert">{String(current.error)}</p>;
+  if (!current.data) return <p className="work-progress" role="status">Loading execution…</p>;
+  return <div className="h-full overflow-auto">
+    <ConversationActivity embedded conversationId={conversationId} run={current.data} projection={activity.projection} onClose={onClose} />
+    <div className="work-inspection-body">
+      <ConversationRequests conversationId={conversationId} runId={runId} activity={activity} />
+      {activity.live && <StopConversation {...activity} />}
+      {activity.error && <p role="alert">{String(activity.error)}</p>}
+    </div>
+  </div>;
 }
 
 export function SimulationDiagnostics({ openSystem, openActivity, simulation }: WorkspaceProps & { openSystem?: () => void }) {
@@ -73,7 +106,7 @@ export function SimulationDiagnostics({ openSystem, openActivity, simulation }: 
       <section className="work-stat"><FlaskConical size={20} /><h2>Windows qualification</h2><p>Review provider, WebView2 and installer status for this scenario.</p>
         <Button variant="outline" onClick={openSystem}>System settings</Button></section>
       <section className="work-stat"><LibraryBig size={20} /><h2>Recorded attempt</h2><p>{simulation && steps[simulation.delivery]}</p>
-        <Button variant="outline" onClick={() => openActivity("release")}>Open run inspector</Button></section>
+        <Button variant="outline" onClick={() => openActivity(deliveryRunId)}>Open run inspector</Button></section>
     </div> : <section className="work-stat">
       <h2>Process fixture</h2><p role="status">{fixtureStatus}</p>
       <div className="flex flex-wrap items-center gap-2">

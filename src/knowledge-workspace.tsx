@@ -27,6 +27,7 @@ interface Note {
   content: string;
   saved: string;
   revision: number;
+  external?: string;
 }
 
 interface RewrittenNote {
@@ -52,7 +53,7 @@ function initialNotes(simulated: boolean, recovery: boolean): Record<string, Not
 }
 
 function isDirty(note?: Note) {
-  return Boolean(note && note.content !== note.saved);
+  return Boolean(note && (note.external !== undefined || note.content !== note.saved));
 }
 
 export default function KnowledgeWorkspace(props: WorkspaceProps) {
@@ -76,6 +77,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const [status, setStatus] = useState(simulation?.scenario === "recovery" ? "Recovered an unsaved Markdown buffer." : "");
   const [problem, setProblem] = useState("");
   const [selection, setSelection] = useState("");
+  const [selectedAnchor, setSelectedAnchor] = useState("");
   const lastTarget = useRef(initialPath);
   const active = dock.path;
   const note = active ? notes[active] : undefined;
@@ -115,12 +117,24 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     });
   };
   const save = (path: string) => {
+    const external = notes[path]?.external;
+    if (external !== undefined) {
+      setDialog({ kind: "conflict", path, external });
+      return false;
+    }
     setNotes((before) => {
       const current = before[path];
       if (!current || !isDirty(current)) return before;
       return { ...before, [path]: { ...current, saved: current.content, revision: current.revision + 1 } };
     });
     setStatus(`Saved ${path}`);
+    return true;
+  };
+  const discard = (path: string) => {
+    const entry = notes[path];
+    if (!entry) return;
+    const content = entry.external ?? entry.saved;
+    setNotes((before) => ({ ...before, [path]: { content, saved: content, revision: entry.revision + Number(entry.external !== undefined) } }));
   };
   const close = (path: string, api: FilePanelApi) => {
     if (!isDirty(notes[path]) || !dock.api || keepOnlyCleanClose(dock.api, path, api)) api.close();
@@ -141,7 +155,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       navigateLocation(only);
       return;
     }
-    setSelection(targets[0]?.path ?? "");
+    setSelection(only?.path ?? "");
+    setSelectedAnchor(only && link.anchor && anchorLine(notes[only.path]?.content ?? "", link.anchor) ? link.anchor : "");
     setDialog({ kind: "link", from, link, matches: targets });
   };
 
@@ -163,10 +178,10 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     const skipped: string[] = [];
     for (const edit of proposal.edits) {
       const current = changed[edit.path];
-      if (!current || current.content !== edit.before) { skipped.push(edit.path); continue; }
+      if (!current || current.external !== undefined || current.content !== edit.before) { skipped.push(edit.path); continue; }
       changed[edit.path] = { content: edit.after, saved: edit.after, revision: current.revision + 1 };
     }
-    if (skipped.includes(proposal.path)) {
+    if (moved.external !== undefined || skipped.includes(proposal.path)) {
       setProblem("The source note changed. Close and review a fresh rename preview.");
       return;
     }
@@ -310,9 +325,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         </div>
 
         {simulated && active && note && !graph && <footer className="ide-statusbar note-statusbar">
-          <button type="button" className="fw-btn" onClick={() => setDialog({
-            kind: "conflict", path: active, external: note.saved + "\n\n> External review added a new readiness note.\n",
-          })}>Simulate external change</button>
+          <button type="button" className="fw-btn" onClick={() => {
+            const external = note.external ?? note.saved + "\n\n> External review added a new readiness note.\n";
+            setNotes((before) => ({ ...before, [active]: { ...note, external } }));
+            setStatus(`External changes need review in ${active}`);
+            setDialog({ kind: "conflict", path: active, external });
+          }}>{note.external === undefined ? "Simulate external change" : "Review external change"}</button>
           {active === deliveryNote && simulation?.delivery === "note" && <button type="button" className="fw-btn fw-primary" disabled={isDirty(note)}
             title={isDirty(note) ? "Save this note before planning from its revision" : "Start Plan Mode from the saved note"}
             onClick={() => { simulation.advanceDelivery("start"); openWorkspace("conversations", "plan"); }}><Wand2 size={14} />Plan from note</button>}
@@ -323,8 +341,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       {dialog?.kind === "close" && <FileDialog title="Save note before closing?" description={`${dialog.path} has unsaved changes.`} onClose={closeDialog}>
         <div className="file-dialog-footer">
           <button type="button" className="fw-btn" onClick={closeDialog}>Cancel</button>
-          <button type="button" className="fw-btn fw-destructive" onClick={() => { update(dialog.path, notes[dialog.path]?.saved ?? ""); dialog.api.close(); closeDialog(); }}>Discard changes</button>
-          <button type="button" className="fw-btn fw-primary" onClick={() => { save(dialog.path); dialog.api.close(); closeDialog(); }}>Save and close</button>
+          <button type="button" className="fw-btn fw-destructive" onClick={() => { discard(dialog.path); dialog.api.close(); closeDialog(); }}>Discard changes</button>
+          <button type="button" className="fw-btn fw-primary" onClick={() => { if (save(dialog.path)) { dialog.api.close(); closeDialog(); } }}>Save and close</button>
         </div>
       </FileDialog>}
       {dialog?.kind === "conflict" && <FileDialog title="Note revision conflict" description={`Review the local and external versions of ${dialog.path}.`} onClose={closeDialog}>
@@ -344,7 +362,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
             const { path, external } = dialog;
             setNotes((before) => {
               const current = before[path];
-              return current ? { ...before, [path]: { ...current, saved: external, revision: current.revision + 1 } } : before;
+              return current ? { ...before, [path]: { ...current, external: undefined, saved: external, revision: current.revision + 1 } } : before;
             });
             setStatus(`Kept local edits for reconciliation with ${path}`);
             closeDialog();
@@ -372,15 +390,24 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       </FileDialog>}
       {dialog?.kind === "link" && <FileDialog title={dialog.matches.length > 1 ? "Choose a note" : "Repair note link"}
         description={`Resolve [[${dialog.link.raw}]] from ${dialog.from}.`} onClose={closeDialog}>
-        <label>Target note<select value={selection} onChange={(event) => setSelection(event.target.value)}>
+        <label>Target note<select value={selection} onChange={(event) => {
+          const path = event.target.value;
+          const originalAnchor = dialog.link.anchor;
+          setSelection(path);
+          setSelectedAnchor(originalAnchor && anchorLine(notes[path]?.content ?? "", originalAnchor) ? originalAnchor : "");
+        }}>
           <option value="">Select a note</option>
           {(dialog.matches.length > 1 ? dialog.matches : catalog).map(({ path }) => <option key={path} value={path}>{path}</option>)}
         </select></label>
+        {selection && <label>Heading or block<input value={selectedAnchor} placeholder="Open note without a specific location"
+          onChange={(event) => setSelectedAnchor(event.target.value)} /></label>}
+        {selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()) && <p role="alert">The heading or block is unavailable in this note.</p>}
         <div className="file-dialog-footer">
-          <button type="button" className="fw-btn fw-outlined" disabled={!selection} onClick={() => { navigateLocation({ path: selection, anchor: dialog.link.anchor }); closeDialog(); }}>Open note</button>
-          <button type="button" className="fw-btn fw-primary" disabled={!selection} onClick={() => {
+          <button type="button" className="fw-btn fw-outlined" disabled={!selection || Boolean(selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()))}
+            onClick={() => { navigateLocation({ path: selection, anchor: selectedAnchor.trim() || undefined }); closeDialog(); }}>Open note</button>
+          <button type="button" className="fw-btn fw-primary" disabled={!selection || Boolean(selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()))} onClick={() => {
             const current = notes[dialog.from];
-            if (current) update(dialog.from, repairWikiAddress(current.content, dialog.link.raw, selection));
+            if (current) update(dialog.from, repairWikiAddress(current.content, dialog.link.raw, selection, selectedAnchor.trim() || undefined));
             setStatus(`Updated reference in ${dialog.from}`);
             closeDialog();
           }}>Update link</button>

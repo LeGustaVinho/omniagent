@@ -11,8 +11,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use omniagent::{
-    conversations::SessionScope,
+    conversations::{Conversation, SessionScope},
     dispatch::{Delivery, EventSource},
+    jobs::{AdmissionBlocker, JobContext, JobScheduler, QueueSettings},
     process::TerminalOutcome,
     process_io::{CapturedProcess, OutputFrame, ProcessInput, Stream},
     providers::{
@@ -105,7 +106,26 @@ fn protocol_fixture_worker() -> Result<()> {
         if line.contains(APPROVAL) {
             bytes.clear();
             assert!(stdin.read_until(b'\n', &mut bytes)? > 0);
-            verify_denial(provider, &serde_json::from_slice(&bytes)?);
+            let reply: Value = serde_json::from_slice(&bytes)?;
+            if provider == Provider::Codex && reply["method"] == "turn/interrupt" {
+                assert_eq!(reply["params"]["turnId"], "wire-turn");
+                fs::write(checkout.join("received-interrupt.ndjson"), &bytes)?;
+                let deadline = std::time::Instant::now() + Duration::from_secs(4);
+                while !checkout.join("settle-interrupt").exists() {
+                    anyhow::ensure!(
+                        std::time::Instant::now() < deadline,
+                        "timed out waiting to settle interrupt"
+                    );
+                    thread::sleep(Duration::from_millis(25));
+                }
+                let terminal = json!({"method":"turn/completed", "params":{
+                    "threadId":SESSION,"turn":{"id":"wire-turn","status":"interrupted"}
+                }});
+                writeln!(stdout, "{terminal}")?;
+                stdout.flush()?;
+                break;
+            }
+            verify_denial(provider, &reply);
             fs::write(checkout.join("received-decision.ndjson"), &bytes)?;
         }
     }
@@ -174,9 +194,11 @@ impl Runner for FixtureRunner {
     }
 }
 
-async fn verify_managed_wire(provider: Provider) -> Result<()> {
-    let sandbox = tempfile::tempdir()?;
-    let checkout = dunce::canonicalize(sandbox.path())?;
+async fn open_wire_fixture(
+    provider: Provider,
+    sandbox: &Path,
+) -> Result<(Store, Conversation, Arc<FixtureRunner>, SessionScope)> {
+    let checkout = dunce::canonicalize(sandbox)?;
     assert!(
         Command::new("git.exe")
             .args(["init", "--quiet"])
@@ -185,8 +207,7 @@ async fn verify_managed_wire(provider: Provider) -> Result<()> {
             .success()
     );
     fs::write(checkout.join(WORKER_MARKER), serde_json::to_vec(&provider)?)?;
-    let database = checkout.join("fixture.sqlite");
-    let store = Store::open(database.clone())?;
+    let store = Store::open(checkout.join("fixture.sqlite"))?;
     let project = repository::register(&store, checkout.clone()).await?;
     let chat = store
         .create_conversation(project.checkout_id, "Protected wire fixture".into())
@@ -210,6 +231,14 @@ async fn verify_managed_wire(provider: Provider) -> Result<()> {
         model: None,
         effort: None,
     };
+    Ok((store, chat, runner, scope))
+}
+
+async fn verify_managed_wire(provider: Provider) -> Result<()> {
+    let sandbox = tempfile::tempdir()?;
+    let (store, chat, runner, scope) = open_wire_fixture(provider, sandbox.path()).await?;
+    let checkout = scope.checkout.clone();
+    let database = checkout.join("fixture.sqlite");
     let attempt = store
         .prepare_agent_attempt(chat.id.clone(), chat.context_id, scope, PROMPT.into())
         .await?;
@@ -299,6 +328,140 @@ async fn all_managed_adapters_deliver_protected_dispatch_over_native_pipes() -> 
             .await
             .with_context(|| format!("{provider:?} managed wire fixture"))?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confirms_stop()
+-> Result<()> {
+    let sandbox = tempfile::tempdir()?;
+    let (store, chat, runner, scope) = open_wire_fixture(Provider::Codex, sandbox.path()).await?;
+    let checkout = scope.checkout.clone();
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: true,
+            capacity: 1,
+        })
+        .await?;
+    store
+        .save_conversation_draft(chat.id.clone(), PROMPT.into())
+        .await?;
+    let job = store
+        .enqueue_conversation_turn(
+            JobContext {
+                conversation_id: chat.id.clone(),
+                context_id: chat.context_id,
+            },
+            scope,
+            PROMPT.into(),
+        )
+        .await?;
+    let scheduler = JobScheduler::start(store.clone(), runner, None);
+    let inspector = store
+        .inspect_job(
+            job.project_id.clone(),
+            job.id.clone(),
+            scheduler.environment(),
+        )
+        .await?
+        .context("queued job missing")?;
+    assert_eq!(inspector.blockers, [AdmissionBlocker::QueuePaused]);
+    assert!(inspector.job.latest_attempt.is_none());
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: false,
+            capacity: 1,
+        })
+        .await?;
+
+    let run = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(run) = store.latest_conversation_run(chat.id.clone()).await?
+                && !store
+                    .pending_conversation_inputs(chat.id.clone(), run.id.clone())
+                    .await?
+                    .is_empty()
+            {
+                return Ok::<_, anyhow::Error>(run);
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .context("detached scheduler did not reach the provider approval")??;
+    assert_eq!(run.status, RunStatus::Running);
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let quiet = store
+        .job(job.project_id.clone(), job.id.clone())
+        .await?
+        .unwrap()
+        .latest_attempt
+        .unwrap();
+    assert_eq!(quiet.status, RunStatus::Running);
+    assert!(!quiet.cancel_requested);
+    assert!(
+        !store
+            .pending_conversation_inputs(chat.id.clone(), run.id.clone())
+            .await?
+            .is_empty()
+    );
+
+    store
+        .request_job_interrupt(chat.id.clone(), run.id.clone())
+        .await?;
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while !checkout.join("received-interrupt.ndjson").is_file() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("provider did not receive the interrupt")?;
+    let stopping = store
+        .job(job.project_id.clone(), job.id.clone())
+        .await?
+        .unwrap()
+        .latest_attempt
+        .unwrap();
+    assert_eq!(stopping.status, RunStatus::Running);
+    assert!(stopping.cancel_requested);
+    fs::write(checkout.join("settle-interrupt"), b"")?;
+
+    let terminal = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let result = store
+                .latest_conversation_run(chat.id.clone())
+                .await?
+                .context("attempt disappeared")?;
+            if result.status.is_terminal() {
+                return Ok::<_, anyhow::Error>(result);
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .context("provider did not settle the interrupted attempt")??;
+    assert_eq!(terminal.id, run.id);
+    assert_eq!(terminal.status, RunStatus::Cancelled);
+    assert!(
+        store
+            .pending_conversation_inputs(chat.id.clone(), run.id.clone())
+            .await?
+            .is_empty()
+    );
+    assert!(
+        store
+            .request_job_interrupt(chat.id.clone(), run.id.clone())
+            .await
+            .is_err()
+    );
+    let connection = rusqlite::Connection::open(checkout.join("fixture.sqlite"))?;
+    let delivery: String = connection.query_row(
+        "SELECT delivery FROM agent_permissions WHERE run_id = ?1",
+        [&run.id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(delivery, "closed");
+    scheduler.shutdown().await?;
     Ok(())
 }
 

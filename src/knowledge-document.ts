@@ -73,6 +73,7 @@ export function withoutProperties(content: string) {
 function byMarkdownLine(content: string, map: (line: string) => string) {
   let fence: string | undefined;
   return content.split(/(\r?\n)/).map((line) => {
+    if (line === "\n" || line === "\r\n") return line;
     const boundary = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
     if (boundary && (!fence || fence[0] === boundary[0] && boundary.length >= fence.length)) {
       fence = fence ? undefined : boundary;
@@ -82,12 +83,25 @@ function byMarkdownLine(content: string, map: (line: string) => string) {
   }).join("");
 }
 
-function byText(content: string, map: (text: string) => string) {
+function byText(content: string, map: (text: string) => string, stripComments = false) {
   let commenting = false;
-  return byMarkdownLine(content, (line) => line.split(/(%%|`+[^\r\n]*?`+)/g).map((part) => {
-    if (part === "%%") { commenting = !commenting; return part; }
-    return commenting || part.startsWith("`") ? part : map(part);
-  }).join(""));
+  return byMarkdownLine(content, (line) => {
+    let cursor = 0;
+    let output = "";
+    const fragment = (text: string) => commenting ? (stripComments ? "" : text) : map(text);
+    for (const token of line.matchAll(/%%|(`+)(?!`)(.*?)\1(?!`)/g)) {
+      const offset = token.index;
+      output += fragment(line.slice(cursor, offset));
+      if (token[0] === "%%") {
+        commenting = !commenting;
+        if (!stripComments) output += token[0];
+      } else if (!commenting || !stripComments) {
+        output += token[0];
+      }
+      cursor = offset + token[0].length;
+    }
+    return output + fragment(line.slice(cursor));
+  });
 }
 
 export function parseWiki(raw: string, embed = false): NoteTarget {
@@ -98,7 +112,7 @@ export function parseWiki(raw: string, embed = false): NoteTarget {
 
 export function wikiLinks(source: string): NoteTarget[] {
   const outgoing: NoteTarget[] = [];
-  byText(source, (line) => {
+  byText(withoutProperties(source), (line) => {
     for (const match of line.matchAll(wikiPattern)) {
       if (match[2]) outgoing.push(parseWiki(match[2], match[1] === "!"));
     }
@@ -140,7 +154,9 @@ export function resolveWiki(link: NoteTarget, from: string, files: readonly Exam
 }
 
 export function headings(content: string): NoteHeading[] {
-  const lines = content.split(/\r?\n/);
+  const body = withoutProperties(content);
+  const skippedLines = content.slice(0, content.length - body.length).split(/\r?\n/).length - 1;
+  const lines = byText(body, (line) => line, true).split(/\r?\n/);
   const result: NoteHeading[] = [];
   let fence: string | undefined;
   for (const [index, line] of lines.entries()) {
@@ -151,13 +167,13 @@ export function headings(content: string): NoteHeading[] {
     }
     if (fence) continue;
     const heading = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
-    if (heading?.[1] && heading[2]) result.push({ label: heading[2], anchor: heading[2], line: index + 1, level: heading[1].length });
+    if (heading?.[1] && heading[2]) result.push({ label: heading[2], anchor: heading[2], line: skippedLines + index + 1, level: heading[1].length });
   }
   return result;
 }
 
 export function anchorKey(label: string) {
-  return label.normalize("NFKC").toLowerCase().trim().replace(/[\s-]+/g, "-");
+  return label.normalize("NFKC").toLowerCase().trim().replace(/[*`~]/g, "").replace(/[\s-]+/g, "-");
 }
 
 export function anchorLine(source: string, target: string): number | undefined {
@@ -181,15 +197,23 @@ function excerpt(source: string, target?: string) {
 }
 
 function replaceWikiAddress(content: string, replace: (link: NoteTarget) => string | undefined) {
-  return byText(content, (line) => line.replace(wikiPattern, (original: string, embed: string, raw: string) => {
+  const text = withoutProperties(content);
+  const rewritten = byText(text, (line) => line.replace(wikiPattern, (original: string, embed: string, raw: string) => {
     const link = parseWiki(raw, embed === "!");
     const address = replace(link);
     return address ? `${embed}[[${address}${link.anchor ? "#" + link.anchor : ""}${link.alias ? "|" + link.alias : ""}]]` : original;
   }));
+  return content.slice(0, content.length - text.length) + rewritten;
 }
 
-export function repairWikiAddress(content: string, raw: string, to: string) {
-  return replaceWikiAddress(content, (link) => link.raw === raw ? to : undefined);
+export function repairWikiAddress(content: string, raw: string, to: string, anchor?: string) {
+  const text = withoutProperties(content);
+  const updated = byText(text, (line) => line.replace(wikiPattern, (original: string, embed: string, entry: string) => {
+    if (entry !== raw) return original;
+    const { alias } = parseWiki(entry);
+    return `${embed}[[${to}${anchor ? "#" + anchor : ""}${alias ? "|" + alias : ""}]]`;
+  }));
+  return content.slice(0, content.length - text.length) + updated;
 }
 
 export function rewriteNoteReferences(content: string, originalPath: string, path: string, renamedPath: string, files: readonly ExampleFile[]) {
@@ -226,6 +250,5 @@ export function prepareReading(source: string, path: string, files: readonly Exa
     const label = alias ?? (target || anchor || raw);
     return `[${escapedLabel(label)}](omni-wiki:${encodeURIComponent(embed + raw)})`;
   }).replace(/==([^=]+)==/g, (_match, value: string) => `[${escapedLabel(value)}](omni-mark:${encodeURIComponent(value)})`)
-    .replace(/^> \[!([A-Za-z]+)\]\s*(.*)$/, (_match, kind: string, label: string) => `> **${kind}${label ? " · " + label : ""}**`))
-    .replace(/%%[\s\S]*?%%/g, "");
+    .replace(/^> \[!([A-Za-z]+)\]\s*(.*)$/, (_match, kind: string, label: string) => `> **${kind}${label ? " · " + label : ""}**`), true);
 }

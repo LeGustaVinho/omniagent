@@ -494,6 +494,10 @@ impl TurnExecution {
             }
         };
         let registration = bridge.as_ref().map(|(_, registration)| registration);
+        ensure!(
+            registration.is_some() || !self.plan.requires_bridge,
+            "This job requires the OmniAgent MCP bridge"
+        );
         if let Some(registration) = registration {
             session.configure_mcp_bridge(registration.clone());
         }
@@ -570,7 +574,9 @@ impl TurnExecution {
         ended?;
         if let Some(endpoint) = endpoint {
             let registration = match endpoint.registration() {
-                Registration::Configured if matches!(run, Ok(RunStatus::Succeeded)) => {
+                Registration::Configured
+                    if self.plan.requires_bridge || matches!(run, Ok(RunStatus::Succeeded)) =>
+                {
                     Registration::Unavailable {
                         reason: "The CLI did not list the scoped tools during this attempt".into(),
                     }
@@ -599,8 +605,9 @@ impl TurnExecution {
         let mut wait_for_configuration = false;
         let mut wait_for_skills = false;
         loop {
-            if let Some(bridge) = bridge {
-                self.record_bridge_registration(bridge.registration())?;
+            let registration = bridge.map(RunBridge::registration);
+            if let Some(registration) = &registration {
+                self.record_bridge_registration(registration.clone())?;
             }
             let command = commands.try_recv();
             match command {
@@ -663,8 +670,25 @@ impl TurnExecution {
             let inventory_complete = (!wait_for_configuration
                 || self.reported.configuration_reported)
                 && (!wait_for_skills || self.reported_skills.is_some());
+            let bridge_ready = !self.plan.requires_bridge
+                || matches!(
+                    registration,
+                    Some(Registration::ToolsListed | Registration::ScopeVerified)
+                );
+            if !sent
+                && !bridge_ready
+                && (Instant::now() >= startup_deadline
+                    || matches!(registration, Some(Registration::Unavailable { .. })))
+            {
+                self.record_bridge_registration(Registration::Unavailable {
+                    reason: "The CLI did not list required OmniAgent MCP tools before dispatch"
+                        .into(),
+                })?;
+                anyhow::bail!("The CLI did not list required OmniAgent MCP tools before dispatch");
+            }
             if ready
                 && !sent
+                && bridge_ready
                 && (inventory_complete
                     || inventory_deadline.is_some_and(|deadline| Instant::now() >= deadline))
             {

@@ -15,7 +15,7 @@ use omniagent::{
         profiles::{CliProbe, ConfiguredExecutable, probe_cli},
     },
     repository::ProjectCheckout,
-    runs::{RunSnapshot, SubscriptionUpdate},
+    runs::{RunRecord, RunSnapshot, SubscriptionUpdate},
     store::Store,
 };
 use tauri::{State, ipc::Channel};
@@ -190,6 +190,19 @@ pub async fn cli_plugin_inventory(
         .save_plugin_inventory(report)
         .await
         .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn inspect_conversation_run(
+    store: State<'_, Store>,
+    project_id: String,
+    conversation_id: String,
+    run_id: String,
+) -> Result<RunRecord, String> {
+    store
+        .inspect_conversation_run(project_id, conversation_id, run_id)
+        .await
         .map_err(|error| error.to_string())
 }
 

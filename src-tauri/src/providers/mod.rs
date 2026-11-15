@@ -76,8 +76,9 @@ pub enum Authentication {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum Capability {
     ModelInventory,
     FreshSession,
@@ -177,8 +178,9 @@ pub enum DelegationControls {
     },
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum SessionMode {
     ReadOnly,
     Plan,

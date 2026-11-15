@@ -5,6 +5,9 @@ import { Activity, ArrowDown, ArrowUp, MessageSquare, Plus, Search } from "lucid
 import { Dialog } from "radix-ui";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import type { Conversation } from "@/bindings/Conversation";
+import type { AdmissionBlocker } from "@/bindings/AdmissionBlocker";
+import type { Job } from "@/bindings/Job";
+import type { JobInspection } from "@/bindings/JobInspection";
 import type { MessageRevision } from "@/bindings/MessageRevision";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
@@ -21,6 +24,27 @@ import "./conversation.css";
 
 const draftWrites = new Map<string, Promise<void>>();
 const historyOffsets = new Map<string, number>();
+
+function pendingJob(inspection: JobInspection | null | undefined) {
+  return Boolean(inspection && !inspection.job.latestAttempt && inspection.job.queueState !== "cancelled");
+}
+
+function waitReason(blocker: AdmissionBlocker | undefined): string {
+  switch (blocker?.type) {
+    case "queue_paused": return "The job queue is paused.";
+    case "job_paused": return "This job is paused.";
+    case "context_changed": return "The conversation changed since this message was queued.";
+    case "conversation_busy": return "Waiting for the active conversation run.";
+    case "capacity": return `Waiting for an execution slot (${blocker.active} of ${blocker.limit} in use).`;
+    case "policy": return blocker.reason;
+    case "dependency": return "Waiting for a required job to complete.";
+    case "approval": return "Waiting for approval.";
+    case "writer": return "Waiting for the worktree writer.";
+    case "missing_capability": return "The selected runner is missing a required capability.";
+    case "job_cancelled": return "Job cancelled.";
+    default: return "Waiting to start.";
+  }
+}
 
 function saveDraft(conversationId: string, text: string) {
   const pending = draftWrites.get(conversationId);
@@ -224,6 +248,15 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
   });
   const selected = models.data?.find(({ option }) => option.selection.modelId === selection?.modelId
     && option.selection.provider === selection?.provider && option.selection.profileId === selection?.profileId);
+  const jobKey = ["conversation", conversationId, "latest-job"];
+  const latestJob = useQuery({
+    queryKey: jobKey,
+    queryFn: () => invoke<JobInspection | null>("latest_conversation_job", { conversationId }),
+    refetchInterval: (query) => pendingJob(query.state.data) || isLiveRun(query.state.data?.job.latestAttempt) ? 250 : false,
+  });
+  const job = latestJob.data;
+  const queued = pendingJob(job);
+  const attempt = job?.job.latestAttempt;
   const runKey = ["conversation", conversationId, "latest-run"];
   const latest = useQuery({
     queryKey: runKey,
@@ -231,8 +264,10 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     refetchInterval: (query) => isLiveRun(query.state.data) ? 250 : false,
   });
   const run = latest.data;
-  const activity = useConversationRun(conversationId, run);
+  const cancelRequested = attempt?.runId === run?.id && Boolean(attempt?.cancelRequested);
+  const activity = useConversationRun(conversationId, run, cancelRequested);
   const { live } = activity;
+  const busy = queued || live || isLiveRun(attempt);
   const [inspectedRun, setInspectedRun] = useState<string>();
   const activityButton = useRef<HTMLButtonElement>(null);
   const showingActivity = visible && run && inspectedRun === run.id;
@@ -244,24 +279,31 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     activityButton.current?.focus();
   }
   useEffect(() => {
+    if (attempt?.runId) void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-run"] });
+  }, [attempt?.runId, conversationId, queryClient]);
+  useEffect(() => {
     if (run?.status) void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "messages"] });
   }, [run?.id, run?.status, conversationId, queryClient]);
   const send = useMutation({
     mutationFn: async (submitted: string) => {
       if (!selection) throw new Error("Choose a model");
       await saveDraft(conversationId, submitted);
-      return invoke<RunRecord>("start_conversation_turn", {
+      return invoke<Job>("start_conversation_turn", {
         conversationId, selection, effort: effort || null, mode, text: submitted,
       });
     },
-    onSuccess: (run, submitted) => {
+    onSuccess: (queuedJob, submitted) => {
       activeEdit.current++;
       queryClient.setQueryData<string>(draftKey, (current) => current === submitted ? "" : current);
       setDraftStatus("");
       setDraftError("");
-      queryClient.setQueryData(runKey, run);
-      void queryClient.invalidateQueries({ queryKey: historyKey });
+      queryClient.setQueryData<JobInspection>(jobKey, { job: queuedJob, blockers: [] });
+      void queryClient.invalidateQueries({ queryKey: jobKey });
     },
+  });
+  const cancelQueued = useMutation({
+    mutationFn: (jobId: string) => invoke("cancel_conversation_job", { conversationId, jobId }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: jobKey }),
   });
 
   function editDraft(text: string) {
@@ -279,7 +321,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     });
   }
 
-  const canSend = Boolean(text.trim() && !live && !latest.isPending && selected?.option.selectable && !send.isPending);
+  const canSend = Boolean(text.trim() && !busy && !latest.isPending && !latestJob.isPending && selected?.option.selectable && !send.isPending);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -313,7 +355,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
         <div ref={historyContents} className="conv-reading">
         {history.isPending && <p role="status" className="text-sm text-muted-foreground">Loading messages…</p>}
         {history.error && <p role="alert" className="text-sm text-red-300">{String(history.error)}</p>}
-        {history.data?.length === 0 && !run && <div className="conv-empty">
+        {history.data?.length === 0 && !run && !queued && <div className="conv-empty">
           <MessageSquare aria-hidden />
           <h2>Start a conversation</h2>
           <p>Choose a model and ask about this repository.</p>
@@ -326,6 +368,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
             </li>
           ))}
         </ol>
+        {(latestJob.error || cancelQueued.error) && <p role="alert" className="text-sm text-red-300">{String(latestJob.error || cancelQueued.error)}</p>}
         {latest.error && <p role="alert" className="text-sm text-red-300">{String(latest.error)}</p>}
         {activity.error && <p role="alert" className="text-sm text-red-300">{String(activity.error)}</p>}
         {live && activity.output && <div className="conv-stream" aria-label="Streaming response">
@@ -345,6 +388,16 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           request?.scrollIntoView({ block: "nearest" });
           request?.querySelector<HTMLElement>("button, input, select")?.focus({ preventScroll: true });
         }}>Waiting for input <ArrowUp aria-hidden /></button>}
+        {queued && job && <div className="conv-queued">
+          <strong>Queued message</strong>
+          <div>
+            <p role="status" className="text-muted-foreground">{waitReason(job.blockers[0])}</p>
+            <button type="button" className="conv-quiet-button" disabled={cancelQueued.isPending}
+              onClick={() => cancelQueued.mutate(job.job.id)}>
+              {cancelQueued.isPending ? "Cancelling…" : "Cancel queued message"}
+            </button>
+          </div>
+        </div>}
       <form onSubmit={submit} className="conv-composer">
           <label htmlFor={`draft-${conversationId}`} className="sr-only">Message draft</label>
           <textarea id={`draft-${conversationId}`} placeholder="Ask about this repository…"

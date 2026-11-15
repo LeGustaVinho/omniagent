@@ -2,12 +2,37 @@ use anyhow::{Result, ensure};
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
-use crate::{repository::ProjectCheckout, store::Store};
+use crate::{
+    repository::ProjectCheckout,
+    runs::{RunRecord, load_run},
+    store::Store,
+};
 
 const ACTIVE_CHECKOUT: &str = "active_checkout";
 const MAX_LAYOUT_BYTES: usize = 512 * 1024;
 
 impl Store {
+    pub async fn inspect_conversation_run(
+        &self,
+        project_id: String,
+        conversation_id: String,
+        run_id: String,
+    ) -> Result<RunRecord> {
+        self.execute(move |db| {
+            let belongs: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1
+                 FROM agent_attempts a JOIN conversations c ON c.id = a.conversation_id
+                 JOIN checkouts w ON w.id = c.checkout_id
+                 WHERE a.run_id = ?1 AND c.id = ?2 AND w.project_id = ?3)",
+                params![run_id, conversation_id, project_id],
+                |row| row.get(0),
+            )?;
+            ensure!(belongs, "Run does not belong to this conversation and project");
+            load_run(db, &run_id)
+        })
+        .await
+    }
+
     pub async fn registered_checkouts(&self) -> Result<Vec<ProjectCheckout>> {
         self.execute(|db| {
             let mut statement = db.prepare(

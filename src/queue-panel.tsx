@@ -5,10 +5,11 @@ import { deliveryConversation } from "@/conversation-preview-data";
 import { ModelPicker } from "@/components/model-picker";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { deliveryBranch, deliveryModels, deliveryRunId, deliveryTaskId, modelName } from "@/tasks-demo-data";
-import { DeliveryStatus, InlineIssue, IntegrationNotice } from "@/tasks-git-ui";
+import LiveQueue from "@/queue-live";
+import { matchesQueueView, queueViews, type JobState, type QueueView } from "@/queue-model";
+import { DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
 import type { DeliveryAction, DeliveryStep, WorkspaceProps } from "@/workbench-contract";
 
-type JobState = "Queued" | "Running" | "Waiting for input" | "Paused" | "Interrupted" | "Completed" | "Failed" | "Cancelled";
 interface Job {
   id: string;
   title: string;
@@ -47,19 +48,6 @@ const actions: Partial<Record<DeliveryStep, { action: DeliveryAction; title: str
   failed: { action: "retry", title: "Retry as linked attempt" },
 };
 
-const queueViews = ["All", "Waiting", "Active", "Needs input", "History"] as const;
-type QueueView = typeof queueViews[number];
-
-function matchesView(job: Job, view: QueueView) {
-  switch (view) {
-    case "All": return true;
-    case "Waiting": return job.state === "Queued" || job.state === "Paused";
-    case "Active": return job.state === "Running";
-    case "Needs input": return job.state === "Waiting for input";
-    case "History": return ["Completed", "Failed", "Interrupted", "Cancelled"].includes(job.state);
-  }
-}
-
 function QueueJobForm({ onAdd, onCancel }: { onAdd: (title: string, assignment: ModelSelection) => void; onCancel: () => void }) {
   const [title, setTitle] = useState("");
   const [assignment, setAssignment] = useState<ModelSelection | null>(null);
@@ -81,7 +69,11 @@ function QueueJobForm({ onAdd, onCancel }: { onAdd: (title: string, assignment: 
   );
 }
 
-export default function QueuePanel({ simulation, startSimulation, openWorkspace, openActivity, onClose }: WorkspaceProps & { onClose?: () => void }) {
+export default function QueuePanel(props: WorkspaceProps & { onClose?: () => void; active?: boolean }) {
+  return props.simulation ? <SimulatedQueue {...props} /> : <LiveQueue {...props} />;
+}
+
+function SimulatedQueue({ simulation, openWorkspace, openActivity, onClose }: WorkspaceProps & { onClose?: () => void }) {
   const [paused, setPaused] = useState(false);
   const [view, setView] = useState<QueueView>("All");
   const [jobs, setJobs] = useState(auxiliaryJobs);
@@ -91,7 +83,7 @@ export default function QueuePanel({ simulation, startSimulation, openWorkspace,
   const delivery = simulation?.delivery;
   const mainJob: Job | undefined = delivery ? { id: deliveryTaskId, title: "Implement release checklist", requester: "Delivery workflow", priority: "High", attempt, branch: deliveryBranch, assignment: deliveryModels[0]?.selection, ...releaseQueue[delivery] } : undefined;
   const allJobs = mainJob ? [mainJob, ...jobs] : [];
-  const visibleJobs = allJobs.filter((job) => matchesView(job, view));
+  const visibleJobs = allJobs.filter((job) => matchesQueueView(job.state, view));
   const selectedJob = allJobs.find((job) => job.id === selected);
   const isPrimary = selectedJob?.id === deliveryTaskId;
   const active = allJobs.filter((job) => job.state === "Running").length;
@@ -134,7 +126,6 @@ export default function QueuePanel({ simulation, startSimulation, openWorkspace,
       {simulation && adding && <QueueJobForm onAdd={addJob} onCancel={() => setAdding(false)} />}
       <div className="delivery-body">
           <div className="delivery-main">
-            {!simulation && <IntegrationNotice title="Queue integration pending" onSimulate={startSimulation}>This panel shows attempts, capacity and wait reasons when the scheduler is connected.</IntegrationNotice>}
             <table className="delivery-table"><thead><tr><th>Job</th><th>Status</th><th>Priority</th><th>Attempt</th><th>Wait reason</th></tr></thead>
               <tbody>{visibleJobs.map((job) => (
                 <tr key={job.id}>

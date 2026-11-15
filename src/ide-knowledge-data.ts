@@ -42,6 +42,8 @@ export const exampleNotes: ExampleFile[] = [
     "",
     "Coverage can be tracked as $c = p / n$. ==Sign off after both checks==. #release",
     "",
+    "Open the [[release-evidence.pdf|evidence PDF]] or [[rollout-tone.wav|release cue]].",
+    "",
     "%% Keep a note on tool availability for later review. %%",
     "",
     "```mermaid",

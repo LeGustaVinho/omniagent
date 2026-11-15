@@ -113,18 +113,6 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
   }, [models, path, scope]);
 
   useEffect(() => {
-    const record = models.get(path);
-    if (record && record.model.getValue() !== content) {
-      record.synchronizing = true;
-      try {
-        record.model.setValue(content);
-      } finally {
-        record.synchronizing = false;
-      }
-    }
-  }, [content, models, path]);
-
-  useEffect(() => {
     const codeEditor = instance.current;
     if (jump && codeEditor) {
       codeEditor.setPosition({ lineNumber: jump.line, column: 1 });

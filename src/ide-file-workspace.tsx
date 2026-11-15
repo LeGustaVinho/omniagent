@@ -117,22 +117,30 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     if (!api) return;
     let active = true;
     let timer: number | undefined;
+    let pending: string | undefined;
+    let loaded = false;
     let writes = Promise.resolve();
     const scope = { workspace, checkoutId };
     const serialize = () => JSON.stringify(api.toJSON());
+    const flush = () => {
+      const layout = pending;
+      pending = undefined;
+      if (layout === undefined) return;
+      writes = writes.catch(() => undefined).then(() =>
+        invoke<void>("save_workbench_layout", { ...scope, layout }),
+      );
+      void writes.catch((failure: unknown) => { if (active) setError(String(failure)); });
+    };
     const save = () => {
-      if (simulated) return;
+      if (simulated || !loaded) return;
       window.clearTimeout(timer);
-      const layout = serialize();
-      timer = window.setTimeout(() => {
-        writes = writes.catch(() => undefined).then(() =>
-          invoke<void>("save_workbench_layout", { ...scope, layout }),
-        );
-        void writes.catch((failure: unknown) => { if (active) setError(String(failure)); });
-      }, 80);
+      pending = serialize();
+      timer = window.setTimeout(flush, 80);
     };
     const updatePath = () => setPath((api.activePanel?.params as FilePanelParams | undefined)?.path);
-    const activeChange = api.onDidActivePanelChange(updatePath);
+    const activeChange = api.onDidActivePanelChange(() => { updatePath(); save(); });
+    const layoutChange = api.onDidLayoutChange(save);
+    window.addEventListener("pagehide", flush);
 
     const restore = async () => {
       try {
@@ -143,20 +151,20 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
         if (active) setError(String(failure));
       } finally {
         if (active) {
+          loaded = true;
           if (initialPathRef.current) focusFile(api, initialPathRef.current);
           updatePath();
           setReady(true);
         }
       }
     };
-    let layoutChange: ReturnType<DockviewApi["onDidLayoutChange"]> | undefined;
-    void restore().then(() => {
-      if (active) layoutChange = api.onDidLayoutChange(save);
-    });
+    void restore();
     return () => {
       active = false;
       window.clearTimeout(timer);
-      layoutChange?.dispose();
+      window.removeEventListener("pagehide", flush);
+      flush();
+      layoutChange.dispose();
       activeChange.dispose();
     };
   }, [api, checkoutId, simulated, workspace]);
@@ -269,11 +277,18 @@ export function FileDialog({ title, description, onClose, children }: {
   onClose: () => void;
   children: ReactNode;
 }) {
+  const activator = useRef(document.activeElement);
   return (
     <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="file-dialog-overlay" />
-        <Dialog.Content className="file-dialog">
+        <Dialog.Content className="file-dialog" onCloseAutoFocus={(event) => {
+          const element = activator.current;
+          if (element instanceof HTMLElement && element.isConnected) {
+            event.preventDefault();
+            element.focus();
+          }
+        }}>
           <header>
             <Dialog.Title>{title}</Dialog.Title>
             <Dialog.Close asChild><button type="button" className="fw-icon" aria-label="Close dialog"><X size={17} /></button></Dialog.Close>

@@ -117,7 +117,7 @@ async function checkSimulation(browser, checkout) {
   await simulation.waitForDisplayed();
 
   await click(browser, "button=Plan from note");
-  await browser.$("legend=Who should the recovery instructions address?").waitForExist();
+  await browser.$("strong=Who should the recovery instructions address?").waitForDisplayed();
   await capture(browser, "01-conversations");
   await click(browser, "button=Reply");
   await click(browser, "button=Approve implementation");
@@ -261,7 +261,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     assert.notEqual(firstHeading, secondHeading);
     await browser.$("button=Cancel run").click();
     await browser.waitUntil(async () => (await events().getText()).includes("Cancelled"));
-    await browser.$("button=Split right").click();
+    await browser.$('button[aria-label="Split right"]').click();
     const expectedTabs = { groups: [[firstHeading, "Fixture runs"], [secondHeading]], active: secondHeading };
     await browser.waitUntil(async () => (await readTabs(browser)).groups.length === 2);
     assert.deepEqual(await readTabs(browser), expectedTabs);
@@ -478,6 +478,11 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       await panel.$("button=Send").click();
       await panel.$('div[aria-label="Streaming response"]').waitForDisplayed({ timeout: 45_000 });
       const { id: activeRun } = await invoke(browser, "latest_conversation_run", { conversationId: conversation.id });
+      const conversationJob = await invoke(browser, "latest_conversation_job", { conversationId: conversation.id });
+      assert.equal(conversationJob.job.latestAttempt.runId, activeRun);
+      const queue = await invoke(browser, "project_job_queue", { projectId: checkout.projectId });
+      assert.ok(queue.active >= 1);
+      assert.equal(queue.jobs.find(({ job }) => job.id === conversationJob.job.id).job.latestAttempt.runId, activeRun);
       const historySelector = `${selector} [aria-label="Conversation history"]`;
       await browser.waitUntil(() => browser.execute((historySelector) => {
         const history = document.querySelector(historySelector);
@@ -518,6 +523,13 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       }, { timeout: 15_000 });
     }
     await checkSimulation(browser, main);
+  } catch (error) {
+    if (browser && process.env.OMNIAGENT_UI_CAPTURE_DIR) {
+      await capture(browser, "failure").catch(() => undefined);
+      const screen = await browser.execute(() => document.body.innerText.slice(0, 1300)).catch(() => "");
+      if (screen) console.error(screen);
+    }
+    throw error;
   } finally {
     try {
       await browser?.deleteSession();

@@ -22,8 +22,8 @@
 .file-workspace-sidebar {
   display: flex;
   flex-direction: column;
-  width: 240px;
-  flex: 0 0 240px;
+  width: 248px;
+  flex: 0 0 248px;
   min-height: 0;
   border-right: 1px solid var(--border);
   background: var(--card);
@@ -189,13 +189,7 @@
 .file-dialog-comparison h3 { margin: 0 0 6px; font-size: 12px; }
 .file-dialog-comparison pre { height: 180px; margin: 0; padding: 9px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; font-size: 11px; background: var(--background); }
 
-@container (width < 900px) {
-  .file-workspace-sidebar {
-    width: min(248px, 58%);
-    flex-basis: min(248px, 58%);
-  }
-}
-@container (width < 660px) {
+@container (width < 912px) {
   .file-workspace-sidebar {
     position: absolute;
     z-index: 10;
