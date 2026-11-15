@@ -756,6 +756,43 @@ async fn conversation_job(
 }
 
 #[tokio::test]
+async fn crash_after_claim_requeues_unlaunched_jobs_but_honors_a_pending_cancel() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("queue.sqlite3");
+    let store = Store::open(database.clone())?;
+    let (chat, job, untouched) = conversation_job(&store, &temp.path().join("ready")).await?;
+    let (other, cancelled_job, cancelled) =
+        conversation_job(&store, &temp.path().join("cancelled")).await?;
+    store
+        .request_job_interrupt(other.id, cancelled.run.id.clone())
+        .await?;
+    let reopened = Store::open(database)?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    let no_retry = reopened
+        .job(cancelled_job.project_id, cancelled_job.id)
+        .await?
+        .unwrap();
+    assert!(no_retry.queued_recovery.is_none());
+    let queued = reopened.job(job.project_id, job.id).await?.unwrap();
+    assert_eq!(queued.queued_recovery, Some(RecoveryAction::Retry));
+    assert_eq!(
+        queued.latest_attempt.unwrap().status,
+        RunStatus::Interrupted
+    );
+    let next = reopened
+        .claim_next_job(environment(false))
+        .await?
+        .context("never-launched work was lost")?;
+    assert_eq!(next.conversation_id, chat.id);
+    assert_eq!(next.previous_run_id, Some(untouched.run.id));
+    assert_eq!(next.context_id, untouched.context_id);
+    assert_eq!(next.input, untouched.input);
+    assert!(reopened.claim_next_job(environment(false)).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn restart_keeps_inflight_and_queued_recovery_distinct_then_links_only_one_retry()
 -> Result<()> {
     let temp = tempfile::tempdir()?;

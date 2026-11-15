@@ -842,6 +842,9 @@ impl Store {
             close_native_questions(&tx, &run_id)?;
             crate::jobs::release_settled_writer(&tx, &run_id)?;
             tx.execute("DELETE FROM active_agent_attempts WHERE run_id = ?1", [&run_id])?;
+            if outcome == RunStatus::Interrupted {
+                crate::jobs::requeue_unlaunched_job(&tx, &run_id)?;
+            }
             tx.commit()?;
             Ok(())
         }).await?;
@@ -869,6 +872,7 @@ impl Store {
                     [&id],
                 )?;
                 crate::jobs::release_settled_writer(&tx, &id)?;
+                crate::jobs::requeue_unlaunched_job(&tx, &id)?;
             }
             tx.execute(
                 "UPDATE dispatches SET delivery = 'unconfirmed' WHERE delivery = 'prepared'",
@@ -878,7 +882,9 @@ impl Store {
             tx.commit()?;
             Ok(())
         })
-        .await
+        .await?;
+        self.job_signal.send_replace(());
+        Ok(())
     }
 }
 

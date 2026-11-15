@@ -16,7 +16,9 @@ pub use admission::{
     AdmissionBlocker, AdmissionEnvironment, JobInspection, ProjectQueue, QueueSettings,
 };
 pub use recovery::RecoveryAction;
+pub(crate) use recovery::requeue_unlaunched_job;
 pub use scheduler::JobScheduler;
+pub(crate) use scheduler::LaunchGate;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

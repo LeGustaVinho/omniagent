@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     conversations::SessionScope,
-    jobs::{AdmissionBlocker, AdmissionEnvironment, Job, JobRequest},
+    jobs::{AdmissionBlocker, AdmissionEnvironment, Job, JobRequest, JobScheduler},
     process_io::CapturedProcess,
     providers::{Provider, SessionMode, runtime::start_managed_turn},
     repository::{
@@ -343,9 +343,23 @@ fn candidate_fixture_worker() -> Result<()> {
                     "threadId":"fixture", "turn":{"id":"turn","status":"completed"}
                 }});
                 let accepted = json!({"id":frame["id"],"result":{"turn":{"id":"turn"}}});
-                writeln!(output, "{accepted}\n{terminal}")?;
+                writeln!(output, "{accepted}")?;
+                if root.join("fixture-hold-open").exists() {
+                    fs::write(root.join("fixture-ready"), [])?;
+                } else {
+                    writeln!(output, "{terminal}")?;
+                }
                 output.flush()?;
                 // Keep the native process alive until the runtime stops its job object.
+                continue;
+            }
+            Some("turn/interrupt") => {
+                let reply = json!({"id":frame["id"],"result":{}});
+                let terminal = json!({"method":"turn/completed", "params":{
+                    "threadId":"fixture", "turn":{"id":"turn","status":"interrupted"}
+                }});
+                writeln!(output, "{reply}\n{terminal}")?;
+                output.flush()?;
                 continue;
             }
             other => anyhow::bail!("unexpected fixture request {other:?}"),
@@ -568,6 +582,87 @@ async fn queue_approved_writer(
         .decide_job_approval(job.project_id.clone(), approval.clone(), true)
         .await?;
     Ok(job)
+}
+
+#[tokio::test]
+async fn exit_saves_partial_writer_evidence_and_keeps_it_on_restart() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("store.sqlite");
+    let store = Store::open(database.clone())?;
+    let source = temp.path().join("source");
+    let project = repository(&store, &source).await?;
+    let task = store
+        .create_project_task(project.project_id.clone(), "Partial edits".into())
+        .await?;
+    let tree = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project.project_id.clone(),
+        task.id.clone(),
+        project.checkout_id.clone(),
+    )
+    .await?;
+    let info = source.join(".git/info");
+    fs::create_dir_all(&info)?;
+    fs::write(
+        info.join("exclude"),
+        "ignored.txt\nfixture-hold-open\nfixture-ready\n",
+    )?;
+    fs::write(tree.root.join("fixture-hold-open"), [])?;
+    let runner = Arc::new(CandidateWriter);
+    let parent = candidate_parent(&store, &project, &runner).await?;
+    let env = AdmissionEnvironment {
+        runner: runner.identity().into(),
+        bridge_available: false,
+    };
+    let job = queue_approved_writer(&store, &env, &tree, &parent, &task.id, "exit-writer").await?;
+    let scheduler = JobScheduler::start(store.clone(), runner, None);
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while !tree.root.join("fixture-ready").is_file() {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("writer did not produce partial edits")?;
+    scheduler.shutdown().await?;
+    let interrupted = store
+        .job(project.project_id.clone(), job.id.clone())
+        .await?
+        .unwrap();
+    assert!(interrupted.queued_recovery.is_none());
+    let attempt = interrupted.latest_attempt.unwrap();
+    assert_eq!(attempt.status, RunStatus::Interrupted);
+    let saved = store
+        .attempt_worktree_evidence(project.project_id.clone(), attempt.run_id.clone())
+        .await?
+        .context("interrupted writer evidence missing")?;
+    let AttemptWorktreeEvidence::Saved { artifact } = &saved else {
+        anyhow::bail!("partial candidate was not captured during exit");
+    };
+    let files = &artifact
+        .candidate
+        .changes
+        .as_ref()
+        .context("missing captured changes")?
+        .untracked;
+    assert!(
+        files
+            .iter()
+            .any(|file| file.path == "candidate.bin" && file.content_base64.is_some())
+    );
+    fs::write(tree.root.join("candidate.bin"), b"new live content")?;
+    let reopened = Store::open(database)?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    assert_eq!(
+        reopened
+            .attempt_worktree_evidence(project.project_id.clone(), attempt.run_id.clone())
+            .await?,
+        Some(saved)
+    );
+    let recovered = reopened.job(project.project_id, job.id).await?.unwrap();
+    assert_eq!(recovered.latest_attempt.unwrap(), attempt);
+    assert!(recovered.queued_recovery.is_none());
+    Ok(())
 }
 
 #[tokio::test]

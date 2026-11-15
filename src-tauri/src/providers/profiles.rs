@@ -1,5 +1,6 @@
 use std::{
     ffi::OsString,
+    io,
     path::{Path, PathBuf},
     sync::{LazyLock, mpsc},
     thread,
@@ -112,7 +113,7 @@ pub fn desktop_profile(configured: ConfiguredExecutable) -> Result<DesktopProfil
         effort: None,
     })?;
     let models = run_probe(
-        &DirectWindowsRunner,
+        |request| DirectWindowsRunner.launch(request),
         &executable,
         &cwd,
         &session.arguments(),
@@ -341,7 +342,7 @@ pub(super) fn command_probe(
     args: Vec<OsString>,
 ) -> Result<CommandOutput> {
     command_probe_with_limits(
-        &DirectWindowsRunner,
+        |request| DirectWindowsRunner.launch(request),
         executable,
         cwd,
         args,
@@ -351,7 +352,7 @@ pub(super) fn command_probe(
 }
 
 pub(super) fn command_probe_with_limits(
-    runner: &dyn Runner,
+    launch: impl FnOnce(LaunchRequest<'_>) -> io::Result<CapturedProcess>,
     executable: &Path,
     cwd: &Path,
     args: Vec<OsString>,
@@ -359,7 +360,7 @@ pub(super) fn command_probe_with_limits(
     output_limit: usize,
 ) -> Result<CommandOutput> {
     run_probe(
-        runner,
+        launch,
         executable,
         cwd,
         &args,
@@ -413,7 +414,7 @@ fn handshake_probe(
         effort: None,
     })?;
     run_probe(
-        &DirectWindowsRunner,
+        |request| DirectWindowsRunner.launch(request),
         executable,
         cwd,
         &session.arguments(),
@@ -451,7 +452,7 @@ fn handshake_probe(
 }
 
 fn run_probe<T>(
-    runner: &dyn Runner,
+    launch: impl FnOnce(LaunchRequest<'_>) -> io::Result<CapturedProcess>,
     executable: &Path,
     cwd: &Path,
     args: &[OsString],
@@ -462,7 +463,7 @@ fn run_probe<T>(
         .iter()
         .map(|value| value.as_os_str())
         .collect::<Vec<_>>();
-    let process = runner.launch(LaunchRequest {
+    let process = launch(LaunchRequest {
         version: CONTRACT_VERSION,
         executable,
         checkout: cwd,

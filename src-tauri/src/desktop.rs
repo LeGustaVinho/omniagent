@@ -29,11 +29,15 @@ pub fn create_tray(app: &App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show(app),
             "exit" => {
-                app.state::<FixtureRuns>().stop_all();
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = app.state::<JobScheduler>().shutdown().await;
-                    app.exit(0);
+                    let scheduler = app.state::<JobScheduler>();
+                    if scheduler.stop_admission().await {
+                        let fixtures = app.state::<FixtureRuns>();
+                        let (fixtures, jobs) =
+                            tokio::join!(fixtures.shutdown(), scheduler.shutdown());
+                        app.exit(i32::from(fixtures.is_err() || jobs.is_err()));
+                    }
                 });
             }
             _ => {}
