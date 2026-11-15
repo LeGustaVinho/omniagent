@@ -22,7 +22,7 @@ use crate::{
 
 use super::{
     Authentication, CliAdapter, ProbeKind, Provider, ProviderEventData, ReportedModel,
-    SessionIntent, SessionMode, SessionRequest,
+    SessionIntent, SessionMode, SessionOption, SessionRequest,
 };
 
 const PROBE_TIME: Duration = Duration::from_secs(10);
@@ -72,6 +72,7 @@ pub struct CliProbe {
 pub struct DesktopModel {
     pub option: ModelOption,
     pub efforts: Vec<String>,
+    pub default_effort: Option<String>,
 }
 
 pub struct DesktopProfile {
@@ -81,7 +82,10 @@ pub struct DesktopProfile {
 }
 
 /// Query the CLI in a neutral directory with no prompt or project customizations.
-pub fn desktop_profile(configured: ConfiguredExecutable) -> Result<DesktopProfile> {
+pub fn desktop_profile(
+    configured: ConfiguredExecutable,
+    model_id: Option<String>,
+) -> Result<DesktopProfile> {
     let provider = configured.provider;
     let check = probe_cli(configured)?;
     let executable = PathBuf::from(
@@ -108,7 +112,7 @@ pub fn desktop_profile(configured: ConfiguredExecutable) -> Result<DesktopProfil
         checkout: cwd.clone(),
         intent: SessionIntent::Start,
         mode: SessionMode::ReadOnly,
-        model: None,
+        model: model_id,
         effort: None,
     })?;
     let models = run_probe(
@@ -122,6 +126,8 @@ pub fn desktop_profile(configured: ConfiguredExecutable) -> Result<DesktopProfil
                 process.input.send(frame.as_bytes())?;
             }
             let mut models: Option<Vec<ReportedModel>> = None;
+            let mut session_model = None;
+            let mut session_effort = None;
             loop {
                 let frame = process
                     .output
@@ -130,7 +136,6 @@ pub fn desktop_profile(configured: ConfiguredExecutable) -> Result<DesktopProfil
                 for frame in update.outbound {
                     process.input.send(frame.as_bytes())?;
                 }
-                let mut session_efforts = None;
                 for event in update.events {
                     match event.data {
                         ProviderEventData::Error { .. } => bail!("The CLI could not list models"),
@@ -138,20 +143,12 @@ pub fn desktop_profile(configured: ConfiguredExecutable) -> Result<DesktopProfil
                             models = Some(inventory)
                         }
                         ProviderEventData::SessionOptions { options } => {
-                            session_efforts = options
-                                .into_iter()
-                                .find(|option| {
-                                    option.category.as_deref() == Some("thought_level")
-                                        || option.id == "thought_level"
-                                })
-                                .map(|option| {
-                                    option
-                                        .choices
-                                        .into_iter()
-                                        .map(|choice| choice.value)
-                                        .collect::<Vec<_>>()
-                                });
+                            session_effort = options.into_iter().find(|option| {
+                                option.category.as_deref() == Some("thought_level")
+                                    || option.id == "thought_level"
+                            });
                         }
+                        ProviderEventData::SessionReady { model, .. } => session_model = model,
                         _ => {}
                     }
                 }
@@ -175,12 +172,17 @@ pub fn desktop_profile(configured: ConfiguredExecutable) -> Result<DesktopProfil
                     return Ok(options
                         .into_iter()
                         .zip(models)
-                        .map(|(option, reported)| DesktopModel {
-                            option,
-                            efforts: reported
-                                .effort_levels
-                                .or_else(|| session_efforts.clone())
-                                .unwrap_or_default(),
+                        .map(|(option, reported)| {
+                            let (efforts, default_effort) = model_effort_levels(
+                                reported,
+                                session_model.as_deref(),
+                                session_effort.as_ref(),
+                            );
+                            DesktopModel {
+                                option,
+                                efforts,
+                                default_effort,
+                            }
                         })
                         .collect());
                 }
@@ -192,6 +194,29 @@ pub fn desktop_profile(configured: ConfiguredExecutable) -> Result<DesktopProfil
         version,
         models,
     })
+}
+
+fn model_effort_levels(
+    reported: ReportedModel,
+    session_model: Option<&str>,
+    session_effort: Option<&SessionOption>,
+) -> (Vec<String>, Option<String>) {
+    if let Some(efforts) = reported.effort_levels {
+        return (efforts, reported.default_effort);
+    }
+    if session_model == Some(reported.id.as_str())
+        && let Some(effort) = session_effort
+    {
+        return (
+            effort
+                .choices
+                .iter()
+                .map(|choice| choice.value.clone())
+                .collect(),
+            effort.current.clone(),
+        );
+    }
+    (Vec::new(), None)
 }
 
 impl Store {
@@ -494,6 +519,33 @@ fn run_probe<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effort_options_are_scoped_to_the_reported_model() -> Result<()> {
+        let advertised: ReportedModel = serde_json::from_value(serde_json::json!({
+            "id": "advertised", "name": "Advertised",
+            "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            "defaultEffort": "low"
+        }))?;
+        let discovered: ReportedModel =
+            serde_json::from_value(serde_json::json!({ "id": "selected", "name": "Selected" }))?;
+        let session = serde_json::from_value(serde_json::json!({
+            "id": "thought_level", "name": "Thinking level", "current": "medium",
+            "choices": [{"name": "Medium", "value": "medium"}, {"name": "Extra high", "value": "xhigh"}]
+        }))?;
+        let (levels, default) = model_effort_levels(advertised, Some("selected"), Some(&session));
+        assert_eq!(levels, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+        assert_eq!(default.as_deref(), Some("low"));
+        let (levels, default) =
+            model_effort_levels(discovered.clone(), Some("selected"), Some(&session));
+        assert_eq!(levels, ["medium", "xhigh"]);
+        assert_eq!(default.as_deref(), Some("medium"));
+        assert_eq!(
+            model_effort_levels(discovered, Some("different-model"), Some(&session)),
+            (Vec::new(), None)
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn overrides_are_scoped_and_survive_reopening_the_store() -> Result<()> {

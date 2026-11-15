@@ -15,6 +15,7 @@ import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import type { RunRecord } from "@/bindings/RunRecord";
 import { ComposerModelPicker } from "@/components/model-picker";
+import { EffortSelect, type EffortSet } from "@/components/effort-select";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
@@ -198,7 +199,7 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
 }
 
 type PanelParams = { conversationId: string; title: string };
-type DesktopModel = { option: ModelOption; efforts: string[] };
+type DesktopModel = EffortSet & { option: ModelOption };
 const selectorClass = "conv-select";
 
 export function ConversationPanel({ params, api }: IDockviewPanelProps<PanelParams>) {
@@ -264,6 +265,16 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
   });
   const selected = models.data?.find(({ option }) => option.selection.modelId === selection?.modelId
     && option.selection.provider === selection?.provider && option.selection.profileId === selection?.profileId);
+  const antigravityModel = provider === "antigravity" ? selected?.option.selection.modelId : undefined;
+  const modelEfforts = useQuery({
+    queryKey: ["conversation-models", provider, antigravityModel],
+    queryFn: () => invoke<DesktopModel[]>("conversation_models", { provider, modelId: antigravityModel }),
+    enabled: Boolean(antigravityModel),
+    staleTime: 60_000,
+  });
+  const efforts = antigravityModel
+    ? modelEfforts.data?.find(({ option }) => option.selection.modelId === antigravityModel)
+    : selected;
   const jobKey = ["conversation", conversationId, "latest-job"];
   const latestJob = useQuery({
     queryKey: jobKey,
@@ -306,7 +317,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
       if (mode === "goal" || goalCommand(submitted) !== undefined) throw new Error("Goal Mode is available in simulation.");
       await saveDraft(conversationId, submitted);
       return invoke<Job>("start_conversation_turn", {
-        conversationId, selection, effort: effort || null, mode, text: submitted,
+        conversationId, selection, effort: efforts?.efforts.includes(effort) ? effort : null, mode, text: submitted,
       });
     },
     onSuccess: (queuedJob, submitted) => {
@@ -463,10 +474,8 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
               <ComposerModelPicker options={models.data?.map(({ option }) => option) ?? []} selected={selection} loading={models.isPending}
                 onChange={(selection) => { setSelection(selection); setEffort(""); }} />
               <ConversationModeSelect mode={mode} onChange={setMode} />
-              <select aria-label="Thinking level" className={selectorClass} value={effort} onChange={(event) => setEffort(event.target.value)}>
-                <option value="">Default effort</option>
-                {selected?.efforts.map((level) => <option key={level} value={level}>{level}</option>)}
-              </select>
+              <EffortSelect capabilities={efforts} loading={Boolean(antigravityModel && modelEfforts.isPending)}
+                className={selectorClass} value={effort} onChange={setEffort} />
               {live ? <StopConversation {...activity} /> :
                 <Button type="submit" className="conv-send" disabled={!canSend}>
                   {send.isPending ? "Starting…" : goalUnavailable ? "Start goal" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
@@ -478,6 +487,10 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           {models.error && <div className="flex flex-wrap items-center gap-2">
             <p role="alert" className="conv-alert">{String(models.error)}</p>
             <Button type="button" variant="outline" onClick={() => void models.refetch()}>Refresh models</Button>
+          </div>}
+          {antigravityModel && modelEfforts.error && <div className="flex flex-wrap items-center gap-2">
+            <p role="alert" className="conv-alert">Could not load effort levels for this model.</p>
+            <Button type="button" variant="outline" onClick={() => void modelEfforts.refetch()}>Retry effort lookup</Button>
           </div>}
           {draftStatus && <p role="status" className="text-xs text-muted-foreground">{draftStatus}</p>}
           {(draftError || draft.error) && <p role="alert" className="conv-alert">{draftError || String(draft.error)}</p>}

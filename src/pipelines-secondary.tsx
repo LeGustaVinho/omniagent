@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { ArrowRight, Check, CircleAlert, Clock3, Columns2, FileCode2, GitBranch, ListChecks, Plus, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { EffortSelect } from "@/components/effort-select";
 import { ModelPicker, ModelRatingMeters } from "@/components/model-picker";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { exampleModelEfforts } from "@/model-effort-examples";
 import { getSampleModel, sampleModels } from "./pipelines-model";
 import type { Role, WorkflowRevision } from "./pipelines-model";
 
@@ -31,7 +33,7 @@ export function RoleEditor({ roles, onChange }: { roles: Role[]; onChange: (role
     const title = newRoleName.trim();
     if (!title || roles.some((item) => item.title.toLowerCase() === title.toLowerCase())) return;
     const id = crypto.randomUUID();
-    onChange([...roles, { id, title, model: null, effort: "medium", instructions: "", tools: "Repository read", completion: "", review: "Independent", requirements: [] }]);
+    onChange([...roles, { id, title, model: null, effort: "", instructions: "", tools: "Repository read", completion: "", review: "Independent", requirements: [] }]);
     setNewRoleName("");
     setSelected(id);
   }
@@ -53,8 +55,11 @@ export function RoleEditor({ roles, onChange }: { roles: Role[]; onChange: (role
         <section className="pipeline-box pipeline-stack pipeline-form">
           <h3>{role.title || "Untitled role"}</h3>
           <label>Name<input value={role.title} onChange={(event) => update({ title: event.currentTarget.value })} /></label>
-          <ModelPicker label="Default model" options={sampleModels} selection={{ mode: "single", selected: role.model, onChange: (model) => update({ model }) }} />
-          <label>Effort<select value={role.effort} onChange={(event) => update({ effort: event.currentTarget.value })}><option>low</option><option>medium</option><option>high</option></select></label>
+          <ModelPicker label="Default model" options={sampleModels} selection={{ mode: "single", selected: role.model, onChange: (model) => {
+            const effort = exampleModelEfforts(model)?.efforts.includes(role.effort) ? role.effort : "";
+            update({ model, effort });
+          } }} />
+          <label>Effort<EffortSelect capabilities={exampleModelEfforts(role.model)} value={role.effort} onChange={(effort) => update({ effort })} /></label>
           <label>Instructions<textarea rows={3} value={role.instructions} onChange={(event) => update({ instructions: event.currentTarget.value })} /></label>
           <label>Tool scope<select value={role.tools} onChange={(event) => update({ tools: event.currentTarget.value })}><option>Repository read</option><option>Approved worktree write</option><option>No tools</option></select></label>
           <label>Completion contract<textarea rows={2} value={role.completion} onChange={(event) => update({ completion: event.currentTarget.value })} /></label>

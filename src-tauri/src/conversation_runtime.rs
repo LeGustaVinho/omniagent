@@ -19,9 +19,17 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
 
-async fn profile(store: &Store, provider: Provider) -> Result<DesktopProfile> {
+async fn profile(
+    store: &Store,
+    provider: Provider,
+    model_id: Option<String>,
+) -> Result<DesktopProfile> {
     let configured = store.configured_executable(provider).await?;
-    Ok(tauri::async_runtime::spawn_blocking(move || desktop_profile(configured)).await??)
+    let model_id = model_id.filter(|_| provider == Provider::Antigravity);
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || desktop_profile(configured, model_id))
+            .await??,
+    )
 }
 
 fn ui_error(error: anyhow::Error) -> String {
@@ -32,8 +40,9 @@ fn ui_error(error: anyhow::Error) -> String {
 pub async fn conversation_models(
     store: State<'_, Store>,
     provider: Provider,
+    model_id: Option<String>,
 ) -> Result<Vec<DesktopModel>, String> {
-    profile(&store, provider)
+    profile(&store, provider, model_id)
         .await
         .map(|profile| profile.models)
         .map_err(ui_error)
@@ -57,7 +66,7 @@ pub async fn start_conversation_turn(
             executable,
             version,
             models,
-        } = profile(&store, selection.provider).await?;
+        } = profile(&store, selection.provider, Some(selection.model_id.clone())).await?;
         let selected = models
             .into_iter()
             .find(|model| model.option.selection == selection && model.option.selectable)

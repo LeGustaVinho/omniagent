@@ -172,7 +172,24 @@ async function checkSimulation(browser, checkout) {
   await modelMenu.waitForDisplayed();
   assert.equal(await composerHeight(), heightBefore);
   await capture(browser, "01-composer-model-picker");
-  await browser.keys("Escape");
+  await click(browser, '.conv-model-menu [role="menuitemradio"][aria-label="GPT‑6.1 Sol"]');
+  const effortValues = () => browser.execute(() => {
+    const composer = document.querySelector(".work-deck:not([hidden]) .work-view:not([hidden]) .conv-composer");
+    return Array.from(composer.querySelector('select[aria-label="Effort"]').options, (option) => option.value);
+  });
+  assert.deepEqual(await effortValues(), ["", "low", "medium", "high", "xhigh", "max", "ultra"]);
+  const effort = conversation.$('select[aria-label="Effort"]');
+  await effort.selectByAttribute("value", "ultra");
+  await click(conversation, ".conv-model-trigger");
+  await click(browser, '.conv-model-menu [role="menuitemradio"][aria-label="GPT‑6 Luna"]');
+  assert.deepEqual(await effortValues(), ["", "low", "medium", "high", "xhigh", "max"]);
+  assert.equal(await effort.getValue(), "");
+  await conversation.$('select[aria-label="Provider"]').selectByAttribute("value", "antigravity");
+  assert.deepEqual(await effortValues(), ["", "low", "medium", "high"]);
+  await click(conversation, ".conv-model-trigger");
+  await click(browser, '.conv-model-menu [role="menuitemradio"][aria-label="Gemini 4 Hydrogen"]');
+  assert.deepEqual(await effortValues(), ["", "low", "medium", "high", "xhigh"]);
+  await conversation.$('select[aria-label="Provider"]').selectByAttribute("value", "codex");
   await conversation.$('select[aria-label="Conversation mode"]').selectByAttribute("value", "goal");
   const draft = conversation.$('textarea[aria-label="Message draft"]');
   await draft.setValue("Verify recovery instructions against the release checklist.");
@@ -566,6 +583,16 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     await browser.keys(["Control", "Enter"]);
     assert.equal(await invoke(browser, "latest_conversation_job", { conversationId: conversation.id }), null);
     await mode.selectByAttribute("value", "read_only");
+    if (process.env.OMNIAGENT_LIVE_EFFORTS === "1") {
+      const argon = "gemini-4-argon";
+      const hydrogen = "gemini-4-hydrogen";
+      const find = (models, id) => models.find(({ option }) => option.selection.modelId === id);
+      const argonProfile = await invoke(browser, "conversation_models", { provider: "antigravity", modelId: argon });
+      const hydrogenProfile = await invoke(browser, "conversation_models", { provider: "antigravity", modelId: hydrogen });
+      assert.deepEqual(find(argonProfile, argon)?.efforts, ["low", "medium", "high"]);
+      assert.deepEqual(find(hydrogenProfile, hydrogen)?.efforts, ["low", "medium", "high", "xhigh"]);
+      assert.deepEqual(find(argonProfile, hydrogen)?.efforts, []);
+    }
 
     if (process.env.OMNIAGENT_LIVE_CONVERSATION === "1") {
       const selector = `section[aria-label="${conversation.title}"]`;

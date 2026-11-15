@@ -7,7 +7,9 @@ import { useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import { ComposerModelPicker } from "@/components/model-picker";
+import { EffortSelect } from "@/components/effort-select";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
+import { exampleModelEfforts } from "@/model-effort-examples";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import {
   deliveryConversation, demoModels, fileSamples, previewPlan, providers,
@@ -129,7 +131,7 @@ export function PreviewConversationPanel(props: PanelProps) {
   const [mode, setMode] = useState<ConversationMode>("plan");
   const [provider, setProvider] = useState<Provider>("codex");
   const [selection, setSelection] = useState<ModelSelection | null>(demoModels.find(({ selection }) => selection.provider === "codex")?.selection ?? null);
-  const [effort, setEffort] = useState("Standard");
+  const [effort, setEffort] = useState("");
   const [deliveryRoute, setDeliveryRoute] = useState("live");
   const [dialog, setDialog] = useState<PanelDialog>();
   const [attachment, setAttachment] = useState<PreviewAttachment>({ path: "docs/release.md", route: "Reference" });
@@ -180,6 +182,7 @@ export function PreviewConversationPanel(props: PanelProps) {
   function updateProfile(next: Provider) {
     setProvider(next);
     setSelection(demoModels.find(({ selection }) => selection.provider === next)?.selection ?? null);
+    setEffort("");
     setDeliveryRoute(next === "codex" ? "live" : "queued");
   }
 
@@ -414,11 +417,9 @@ export function PreviewConversationPanel(props: PanelProps) {
                 <select aria-label="Provider" className="conv-select" value={provider} onChange={(event) => updateProfile(event.currentTarget.value as Provider)}>
                   {Object.entries(providers).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
                 </select>
-                <ComposerModelPicker options={modelOptions} selected={selection} onChange={setSelection} />
+                <ComposerModelPicker options={modelOptions} selected={selection} onChange={(model) => { setSelection(model); setEffort(""); }} />
                 <ConversationModeSelect mode={mode} onChange={setMode} />
-                <select aria-label="Thinking level" className="conv-select" value={effort} onChange={(event) => setEffort(event.currentTarget.value)}>
-                  <option>Standard</option><option>High</option><option>Low</option>
-                </select>
+                <EffortSelect capabilities={exampleModelEfforts(selection)} className="conv-select" value={effort} onChange={setEffort} />
                 {activeRun && !composingGoal && <select aria-label="Delivery" className="conv-select" value={deliveryRoute} onChange={(event) => setDeliveryRoute(event.currentTarget.value)}>
                   <option value="live" disabled={provider !== "codex"}>Send to active turn</option>
                   <option value="queued">Queue for next turn</option>
