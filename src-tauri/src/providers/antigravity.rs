@@ -73,6 +73,7 @@ impl CliAdapter for AntigravityAdapter {
             question_route: Default::default(),
             available_commands: None,
             plan_command_available: false,
+            goal_command: None,
             bridge: None,
             prompt_capabilities: Value::Null,
         }))
@@ -245,6 +246,7 @@ struct AcpSession {
     question_route: super::questions::QuestionRoute,
     available_commands: Option<(String, Vec<String>)>,
     plan_command_available: bool,
+    goal_command: Option<bool>,
     bridge: Option<crate::mcp_bridge::BridgeLaunch>,
     prompt_capabilities: Value,
 }
@@ -255,6 +257,16 @@ struct PermissionOption {
 }
 
 impl AcpSession {
+    fn command_observations(&mut self, names: Vec<String>) -> [ProviderEvent; 2] {
+        self.plan_command_available = names.iter().any(|name| name == "plan");
+        let available = names.iter().any(|name| name == "goal");
+        self.goal_command = Some(available);
+        [
+            self.event(ProviderEventData::AvailableCommands { names }),
+            self.event(ProviderEventData::NativeGoalCommandReported { available }),
+        ]
+    }
+
     fn event(&self, data: ProviderEventData) -> ProviderEvent {
         ProviderEvent {
             location: ProviderLocation {
@@ -451,8 +463,7 @@ impl AcpSession {
         if let Some((session, names)) = self.available_commands.take()
             && session == id
         {
-            self.plan_command_available = names.iter().any(|name| name == "plan");
-            announced.push(self.event(ProviderEventData::AvailableCommands { names }));
+            announced.extend(self.command_observations(names));
         }
         if self.request.mode == SessionMode::Plan
             && self.configuration.current(Setting::Mode) == Some("plan")
@@ -596,18 +607,21 @@ impl AcpSession {
             })]));
         }
         if update["sessionUpdate"] == "available_commands_update" {
-            let names: Vec<_> = choices(&update["availableCommands"])
-                .filter_map(|command| string(command, "name"))
-                .collect();
+            let names = update["availableCommands"].as_array().and_then(|commands| {
+                commands
+                    .iter()
+                    .map(|command| string(command, "name"))
+                    .collect::<Option<Vec<_>>>()
+            });
+            let Some(names) = names else {
+                return Ok(self.update_diagnostic(update, "Malformed ACP available commands list"));
+            };
             if !self.ready {
                 self.available_commands = Some((session_id.to_owned(), names));
                 return Ok(AdapterUpdate::default());
             }
             if self.session_id.as_deref() == Some(session_id) {
-                self.plan_command_available = names.iter().any(|name| name == "plan");
-                return Ok(events([
-                    self.event(ProviderEventData::AvailableCommands { names })
-                ]));
+                return Ok(events(self.command_observations(names)));
             }
         }
         if !self.ready || self.session_id.as_deref() != Some(session_id) {
@@ -832,6 +846,10 @@ impl AcpSession {
 }
 
 impl CliSession for AcpSession {
+    fn native_goal_support(&self) -> super::goal::NativeGoalSupport {
+        super::goal::NativeGoalSupport::from_advertisement(self.goal_command)
+    }
+
     fn set_question_route(&mut self, route: super::questions::QuestionRoute) {
         self.question_route = route;
     }

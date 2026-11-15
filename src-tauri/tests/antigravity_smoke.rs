@@ -2,6 +2,7 @@ use std::{
     ffi::OsStr,
     path::Path,
     process::Command,
+    sync::mpsc::RecvTimeoutError,
     time::{Duration, Instant},
 };
 
@@ -13,6 +14,7 @@ use omniagent::{
         AdapterUpdate, ApprovalDecision, CliAdapter, CliSession, ProviderEventData, SessionIntent,
         SessionMode, SessionRequest, TurnInput, TurnOutcome,
         antigravity::AntigravityAdapter,
+        goal::{ManagedGoalReason, NativeGoalCommand, NativeGoalSupport},
         runtime::{Interruption, interrupt_to_completion},
     },
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
@@ -159,12 +161,27 @@ fn antigravity_confirms_cancellation_on_the_outstanding_prompt() -> Result<()> {
     let executable = AntigravityAdapter.discover(None)?;
     let (mut session, mut process, _) =
         launch_ready(&executable, checkout.path(), SessionIntent::Start)?;
-    send(
+    cancel_streaming_prompt(
+        &mut *session,
         &mut process,
+        "Write the numbers from 1 to 2000, one per line. Do not use tools.",
+    )?;
+    process.control.cancel()?;
+    process.control.wait()?;
+    Ok(())
+}
+
+fn cancel_streaming_prompt(
+    session: &mut dyn CliSession,
+    process: &mut CapturedProcess,
+    text: &str,
+) -> Result<()> {
+    send(
+        process,
         &session.send(TurnInput {
             attachments: Vec::new(),
             message_id: "cancel-smoke".into(),
-            text: "Write the numbers from 1 to 2000, one per line. Do not use tools.".into(),
+            text: text.into(),
         })?,
     )?;
     // Cancel after the provider has begun the prompt. A notification delivered
@@ -176,7 +193,7 @@ fn antigravity_confirms_cancellation_on_the_outstanding_prompt() -> Result<()> {
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .context("ACP did not start streaming before cancellation")??;
         let update = session.receive(frame)?;
-        send(&mut process, &update)?;
+        send(process, &update)?;
         if update
             .events
             .iter()
@@ -192,13 +209,82 @@ fn antigravity_confirms_cancellation_on_the_outstanding_prompt() -> Result<()> {
             bail!("ACP completed without streaming the cancellation fixture");
         }
     }
-    let outcome = interrupt_to_completion(&mut process, &mut *session, |_, _| Ok(()))?;
+    let outcome = interrupt_to_completion(process, session, |_, _| Ok(()))?;
     assert_eq!(
         outcome,
         Interruption::PromptReturned(TurnOutcome::Interrupted)
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires an authenticated Antigravity CLI with Gemini 3.8 Flash"]
+fn antigravity_goal_advertisement_and_prompt_cancel_leave_lifecycle_unqualified() -> Result<()> {
+    let checkout = tempfile::tempdir()?;
+    ensure!(
+        Command::new("git.exe")
+            .args(["init", "--quiet"])
+            .current_dir(checkout.path())
+            .status()?
+            .success()
+    );
+    let executable = AntigravityAdapter.discover(None)?;
+    let (mut session, mut process, id) =
+        launch_ready(&executable, checkout.path(), SessionIntent::Start)?;
+    let expected = NativeGoalSupport::Managed {
+        reason: ManagedGoalReason::IncompleteLifecycle,
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while session.native_goal_support() != expected {
+        let frame = process
+            .output
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .context("ACP did not advertise /goal")??;
+        send(&mut process, &session.receive(frame)?)?;
+    }
+    assert!(
+        session
+            .control_native_goal(NativeGoalCommand::Status)
+            .is_err()
+    );
+    cancel_streaming_prompt(
+        &mut *session,
+        &mut process,
+        "/goal Read-only fixture. Write numbers from one to one thousand in full words and finish with END_FIXTURE. Do not use tools or modify files.",
+    )?;
     process.control.cancel()?;
     process.control.wait()?;
+
+    let (mut resumed, mut child, restored) = launch_ready(
+        &executable,
+        checkout.path(),
+        SessionIntent::Resume {
+            provider_session_id: id.clone(),
+        },
+    )?;
+    assert_eq!(restored, id);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        let frame = match child.output.recv_timeout(remaining) {
+            Ok(frame) => frame?,
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(error) => return Err(error.into()),
+        };
+        let update = resumed.receive(frame)?;
+        assert!(update.events.iter().all(|event| !matches!(
+            event.data,
+            ProviderEventData::TurnStarted | ProviderEventData::AssistantDelta { .. }
+        )));
+        send(&mut child, &update)?;
+    }
+    assert_eq!(resumed.native_goal_support(), expected);
+    assert!(
+        resumed
+            .control_native_goal(NativeGoalCommand::Resume)
+            .is_err()
+    );
+    child.control.cancel()?;
+    child.control.wait()?;
     Ok(())
 }
 
