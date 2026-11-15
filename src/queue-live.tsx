@@ -160,7 +160,7 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
               {blocker.type === "approval" && <ApprovalReview projectId={job.projectId} approvalId={blocker.approvalId} busy={busy} onAction={onAction} />}
               {blocker.type === "dependency" && <button type="button" className="justify-self-start text-primary hover:underline" onClick={() => onDependency(blocker.jobId)}>Inspect dependency</button>}
               {blocker.type === "instruction_order" && <button type="button" className="justify-self-start text-primary hover:underline" onClick={() => onDependency(blocker.jobId)}>Inspect earlier instruction</button>}
-              {(blocker.type === "conversation_busy" || blocker.type === "writer") && <button type="button" className="justify-self-start text-primary hover:underline" onClick={() => openActivity(blocker.runId, blocker.type === "conversation_busy" ? conversationId : undefined)}>Inspect blocking run</button>}
+              {(blocker.type === "conversation_busy" || blocker.type === "continuation_owner" || blocker.type === "instruction_delivery_uncertain" || blocker.type === "writer") && <button type="button" className="justify-self-start text-primary hover:underline" onClick={() => openActivity(blocker.runId, blocker.type === "writer" ? undefined : conversationId)}>Inspect blocking run</button>}
             </li>)}
           </ul>
         </section>}

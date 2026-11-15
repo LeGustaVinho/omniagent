@@ -13,8 +13,10 @@ mod admission;
 mod command;
 mod downstream;
 mod failures;
+mod goals;
 mod history;
 mod inspection;
+mod instruction_delivery;
 mod instructions;
 mod notices;
 mod pipeline;
@@ -36,9 +38,15 @@ pub(crate) use failures::record_job_failure;
 pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
+pub use goals::{
+    GoalCheckpoint, GoalContinuationOwner, GoalDefinition, GoalRevision, GoalTurnAction,
+    GoalTurnReport,
+};
+pub(crate) use goals::{GoalExecution, accept_goal_checkpoint, record_native_goal};
 pub use history::{QueueHistoryPolicy, QueueHistorySettings};
 pub(crate) use history::{apply_queue_history_policy, detached_question_context};
 pub(crate) use inspection::{InspectionPolicy, InspectionQueue, load_inspection_queue};
+pub(crate) use instruction_delivery::validate_revisions as validate_instruction_revisions;
 pub(crate) use instructions::migrate_pending_instructions;
 pub use instructions::{InstructionDelivery, PendingInstruction};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
@@ -336,6 +344,8 @@ fn change_pending_job_state(
     let changed = db.execute(
         "UPDATE jobs SET queue_state = ?3 WHERE project_id = ?1 AND id = ?2
          AND queue_state IN ('queued', 'paused')
+         AND NOT EXISTS (SELECT 1 FROM instruction_delivery_attempts
+             WHERE job_id = ?2 AND route = 'continuation' AND superseded = 0)
          AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = ?2)
               OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = ?2)
               OR EXISTS (SELECT 1 FROM open_agent_questions q JOIN job_attempts a ON a.run_id = q.run_id
@@ -357,6 +367,7 @@ fn change_pending_job_state(
     }
     let job = load_job(db, project, job_id)?.context("job no longer exists")?;
     if state == QueueState::Cancelled {
+        goals::deactivate_cancelled_job(db, job_id)?;
         downstream::observe_cancelled_job(db, &job)?;
     }
     Ok(job)
@@ -464,17 +475,22 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
     let mut query = db.prepare(
         "SELECT j.checkout_id, coalesce(scope.scope_task_id, j.task_id),
                 j.conversation_id, j.context_id, j.origin_run_id, j.request_id,
-                j.mode, j.priority, j.queue_state, a.ordinal, a.run_id, r.status, a.cancel_requested,
-                a.previous_run_id, a.kind, recovery.action,
+                j.mode, j.priority, j.queue_state,
+                coalesce(a.ordinal, CASE WHEN instruction.run_id IS NOT NULL THEN 1 END),
+                coalesce(a.run_id, instruction.run_id), r.status, coalesce(a.cancel_requested, 0),
+                a.previous_run_id, coalesce(a.kind, 'initial'), recovery.action,
                 CASE WHEN j.writer_checkout_id IS NOT NULL THEN j.task_id END, attempt.conversation_id,
-                EXISTS(SELECT 1 FROM job_commands command WHERE command.job_id = j.id)
+                EXISTS(SELECT 1 FROM job_commands command WHERE command.job_id = j.id),
+                instruction.run_id IS NOT NULL
          FROM jobs j
          LEFT JOIN job_worktree_scopes scope ON scope.job_id = j.id
          LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (
              SELECT max(ordinal) FROM job_attempts WHERE job_id = j.id
          )
-         LEFT JOIN runs r ON r.id = a.run_id
-         LEFT JOIN agent_attempts attempt ON attempt.run_id = a.run_id
+         LEFT JOIN instruction_delivery_attempts instruction ON instruction.job_id = j.id
+             AND instruction.route = 'continuation' AND instruction.superseded = 0
+         LEFT JOIN runs r ON r.id = coalesce(a.run_id, instruction.run_id)
+         LEFT JOIN agent_attempts attempt ON attempt.run_id = r.id
          LEFT JOIN job_recoveries recovery ON recovery.job_id = j.id
          WHERE j.project_id = ?1 AND j.id = ?2",
     )?;
@@ -513,8 +529,9 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
         }
         None => None,
     };
+    let absorbed = row.get::<_, bool>(19)?;
     let downstream_wait = match latest_attempt.as_ref() {
-        Some(attempt) => downstream::load_wait(db, &attempt.run_id)?.filter(|wait| {
+        Some(attempt) if !absorbed => downstream::load_wait(db, &attempt.run_id)?.filter(|wait| {
             matches!(
                 wait.state,
                 DownstreamWaitState::Yielding
@@ -522,7 +539,7 @@ fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> 
                     | DownstreamWaitState::NeedsReview
             )
         }),
-        None => None,
+        _ => None,
     };
     Ok(Some(Job {
         id: id.into(),

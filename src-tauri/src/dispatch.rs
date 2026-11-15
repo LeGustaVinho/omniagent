@@ -141,12 +141,16 @@ impl Store {
                 tx.commit()?;
                 return Ok(None);
             }
-            let (context, turn, session): (String, String, String) = tx.query_row(
-                "SELECT a.context_id, a.turn_id, a.agent_session_id
-                 FROM agent_attempts a JOIN active_agent_attempts l ON l.run_id = a.run_id WHERE a.run_id = ?1",
-                [&run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            let (context, turn, session, scope): (String, String, String, String) = tx.query_row(
+                "SELECT a.context_id, a.turn_id, a.agent_session_id, s.scope
+                 FROM agent_attempts a JOIN active_agent_attempts l ON l.run_id = a.run_id
+                 JOIN agent_sessions s ON s.id = a.agent_session_id WHERE a.run_id = ?1",
+                [&run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             ).context("dispatch requires an active attempt")?;
             ensure!(context == snapshot.context_id, "snapshot does not cover the admitted context");
+            ensure!(serde_json::from_str::<SessionScope>(&scope)? == snapshot.scope,
+                "snapshot does not use the admitted session scope");
+            crate::jobs::validate_instruction_revisions(&tx, &run_id, &snapshot.submitted_messages)?;
             let snapshot_id = Uuid::new_v4().to_string();
             let dispatch_id = Uuid::new_v4().to_string();
             tx.execute("INSERT INTO context_snapshots(id, run_id, context_id, payload) VALUES (?1, ?2, ?3, ?4)",

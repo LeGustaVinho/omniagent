@@ -79,7 +79,9 @@ impl From<AdmissionBlocker> for QueueBlockerKind {
             AdmissionBlocker::ContextChanged { .. }
             | AdmissionBlocker::ConversationBusy { .. }
             | AdmissionBlocker::InstructionOrder { .. }
+            | AdmissionBlocker::ContinuationOwner { .. }
             | AdmissionBlocker::Downstream { .. } => Self::Context,
+            AdmissionBlocker::InstructionDeliveryUncertain { .. } => Self::Dispatch,
             AdmissionBlocker::MissingCapability { .. } => Self::Capability,
             AdmissionBlocker::SubagentAudit { .. } => Self::Capability,
             AdmissionBlocker::DispatchRejected { .. } => Self::Dispatch,

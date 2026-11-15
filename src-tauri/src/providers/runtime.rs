@@ -20,8 +20,8 @@ use crate::{
     diagnostics,
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
     jobs::{
-        DispatchRejection, FailureCause, FailureObservation, FailurePhase, LaunchGate,
-        QuestionTimer, SubagentAuditRoute, now_ms,
+        DispatchRejection, FailureCause, FailureObservation, FailurePhase, GoalExecution,
+        LaunchGate, QuestionTimer, SubagentAuditRoute, now_ms,
     },
     mcp_bridge::{PERMISSION_PREFIX, Registration, RunBridge},
     process::TerminalOutcome,
@@ -315,6 +315,7 @@ fn start_turn(
             quiescence_confirmed: false,
             downstream_requested: false,
             question_changed: false,
+            goal: None,
         };
         let outcome = execution
             .run(runner.as_ref(), &receiver, bridge_executable)
@@ -379,6 +380,7 @@ fn start_turn(
 
 struct TurnExecution {
     question_changed: bool,
+    goal: Option<GoalExecution>,
     failure: FailureObservation,
     quiescence_confirmed: bool,
     downstream_requested: bool,
@@ -513,6 +515,17 @@ impl TurnExecution {
         bridge_executable: Option<PathBuf>,
     ) -> Result<RunStatus> {
         if self.exiting() {
+            return Ok(RunStatus::Interrupted);
+        }
+        self.goal = self
+            .app
+            .block_on(self.store.goal_execution_for_run(self.plan.run.id.clone()))?;
+        if self
+            .goal
+            .as_ref()
+            .is_some_and(GoalExecution::time_limit_reached)
+        {
+            self.failure.cause = Some(FailureCause::GoalTimeLimit);
             return Ok(RunStatus::Interrupted);
         }
         self.app.block_on(
@@ -737,6 +750,7 @@ impl TurnExecution {
             .app
             .block_on(self.store.has_yielding_wait(self.plan.run.id.clone()))?;
         if managed_writer
+            || self.goal.is_some()
             || self.exiting()
             || self.downstream_requested
             || awaiting_question
@@ -804,6 +818,23 @@ impl TurnExecution {
         let mut wait_for_skills = false;
         let mut question_deadline = None;
         loop {
+            if self
+                .goal
+                .as_ref()
+                .is_some_and(GoalExecution::time_limit_reached)
+            {
+                self.failure.cause = Some(FailureCause::GoalTimeLimit);
+                if sent {
+                    self.app.block_on(
+                        self.store
+                            .preserve_questions_after_turn(self.plan.run.id.clone(), false),
+                    )?;
+                    interrupt_to_completion(process, session, |event, source| {
+                        self.record(event, source)
+                    })?;
+                }
+                return Ok(RunStatus::Interrupted);
+            }
             let registration = bridge.map(RunBridge::registration);
             if let Some(registration) = &registration {
                 self.record_bridge_registration(registration.clone())?;

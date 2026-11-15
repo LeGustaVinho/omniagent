@@ -58,12 +58,14 @@ pub async fn start_conversation_turn(
     effort: Option<String>,
     mode: SessionMode,
     text: String,
+    expected_context_id: Option<String>,
 ) -> Result<Job, String> {
     async {
         ensure!(
             matches!(mode, SessionMode::ReadOnly | SessionMode::Plan),
             "Direct conversation turns require a read-only or planning profile"
         );
+        let conversation = store.conversation(conversation_id.clone()).await?;
         let DesktopProfile {
             executable,
             version,
@@ -79,7 +81,6 @@ pub async fn start_conversation_turn(
                 .is_none_or(|value| selected.efforts.contains(value)),
             "The selected thinking level is no longer available"
         );
-        let conversation = store.conversation(conversation_id.clone()).await?;
         let checkout = repository::checkout_root(&store, conversation.checkout_id).await?;
         let scope = SessionScope {
             provider: selection.provider,
@@ -98,7 +99,7 @@ pub async fn start_conversation_turn(
             .enqueue_conversation_turn(
                 JobContext {
                     conversation_id,
-                    context_id: conversation.context_id,
+                    context_id: expected_context_id.unwrap_or(conversation.context_id),
                 },
                 scope,
                 text,

@@ -45,6 +45,8 @@ function waitReason(blocker: AdmissionBlocker | undefined): string {
     case "context_changed": return "The conversation changed since this message was queued.";
     case "conversation_busy": return "Waiting for the active conversation run.";
     case "instruction_order": return "Waiting for an earlier instruction.";
+    case "continuation_owner": return "Waiting for the owning run to continue.";
+    case "instruction_delivery_uncertain": return "An instruction in this context needs delivery review.";
     case "capacity": return `Waiting for an execution slot (${blocker.active} of ${blocker.limit} in use).`;
     case "policy": return blocker.reason;
     case "dependency": return "Waiting for a required job to complete.";
@@ -328,6 +330,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
       await saveDraft(conversationId, submitted);
       return invoke<Job>("start_conversation_turn", {
         conversationId, selection, effort: efforts?.efforts.includes(effort) ? effort : null, mode, text: submitted,
+        expectedContextId: history.data?.contextId,
       });
     },
     onSuccess: (_, submitted) => {

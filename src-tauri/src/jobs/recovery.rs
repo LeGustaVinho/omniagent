@@ -144,7 +144,10 @@ pub(super) fn recovery_source(db: &Connection, job: &Job) -> Result<Option<Recov
     }) else {
         return Ok(None);
     };
-    if super::question_waits::has_open_questions(db, &attempt.run_id)? {
+    if super::instruction_delivery::adopted_run(db, &job.id)?.is_some()
+        || super::instruction_delivery::unconfirmed_adoption(db, &attempt.run_id)?
+        || super::question_waits::has_open_questions(db, &attempt.run_id)?
+    {
         return Ok(None);
     }
     if job.kind == JobKind::Command {

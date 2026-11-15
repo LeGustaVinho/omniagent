@@ -34,7 +34,7 @@ use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 use crate::{
     diagnostics,
     dispatch::{Delivery, EventSource},
-    jobs::{DownstreamWaitState, JobRequest, JobRequestConflict},
+    jobs::{DownstreamWaitState, GoalTurnReport, JobRequest, JobRequestConflict},
     protection,
     providers::{ApprovalDecision, ProviderEvent, ProviderEventData, ProviderLocation, RequestId},
     runs,
@@ -50,6 +50,7 @@ pub(crate) const INSPECT_OMNIAGENT: &str = "inspect_omniagent";
 pub(crate) const SUBMIT_JOB: &str = "submit_job";
 pub(crate) const GET_JOB_STATUS: &str = "get_job_status";
 pub(crate) const WAIT_FOR_JOBS: &str = "wait_for_jobs";
+const REPORT_GOAL_PROGRESS: &str = "report_goal_progress";
 pub(crate) const REQUEST_PERMISSION: &str = "request_permission";
 pub(crate) const PERMISSION_PREFIX: &str = "omniagent-permission:";
 pub(crate) const VERSION: u8 = 1;
@@ -114,6 +115,7 @@ enum Operation {
     SubmitJob(SubmitJob),
     GetJobStatus(JobStatusRequest),
     WaitForJobs(WaitForJobsRequest),
+    ReportGoalProgress(GoalTurnReport),
     RequestPermission(PermissionPrompt),
     PollPermission { id: String },
 }
@@ -141,6 +143,8 @@ enum Response {
     },
     JobRejected,
     JobRequestConflict,
+    GoalProgressRecorded,
+    GoalProgressRejected,
     PermissionRequested(String),
     PermissionPending,
     PermissionDecided(ApprovalDecision),
@@ -369,6 +373,13 @@ async fn serve_pipe(
                         ).await {
                             Ok(wait) => Response::JobWaiting { wait_id: wait.id, state: wait.state },
                             Err(_) => Response::JobRejected,
+                        };
+                        (response, None)
+                    }
+                    Operation::ReportGoalProgress(report) => {
+                        let response = match store.record_goal_turn_report(scope.run_id.clone(), report).await {
+                            Ok(()) => Response::GoalProgressRecorded,
+                            Err(_) => Response::GoalProgressRejected,
                         };
                         (response, None)
                     }
@@ -613,6 +624,15 @@ impl ServerHandler for StdioBridge {
                         "childJobIds":{"type":"array","minItems":1,"items":{"type":"string"}}}})
                     .as_object().unwrap().clone(),
             ).with_annotations(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
+            Tool::new(
+                REPORT_GOAL_PROGRESS,
+                "Records the current managed goal turn's evidence and proposed next action. Send the same report if retrying the request. The scheduler considers the action after the turn finishes.",
+                json!({"type":"object", "required":["evidence","action"], "additionalProperties":false,
+                    "properties":{
+                        "evidence":{"type":"string","minLength":1,"maxLength":8192},
+                        "action":{"enum":["continue","review","blocked"]}
+                    }}).as_object().unwrap().clone(),
+            ).with_annotations(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
         ];
         if self.0.permission_prompt {
             tools.push(Tool::new(
@@ -631,6 +651,24 @@ impl ServerHandler for StdioBridge {
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if request.name == REPORT_GOAL_PROGRESS {
+            let report =
+                serde_json::from_value(Value::Object(request.arguments.unwrap_or_default()))
+                    .map_err(|_| ErrorData::invalid_params("Invalid goal progress report", None))?;
+            return match exchange(&self.0, Operation::ReportGoalProgress(report))
+                .await
+                .map_err(|_| bridge_unavailable())?
+            {
+                Response::GoalProgressRecorded => {
+                    Ok(CallToolResult::structured(json!({"recorded": true})).into())
+                }
+                Response::GoalProgressRejected => Err(ErrorData::invalid_params(
+                    "This run cannot record that goal progress report",
+                    None,
+                )),
+                _ => Err(bridge_unavailable()),
+            };
+        }
         if matches!(
             request.name.as_ref(),
             SUBMIT_JOB | GET_JOB_STATUS | WAIT_FOR_JOBS

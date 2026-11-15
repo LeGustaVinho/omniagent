@@ -71,15 +71,11 @@ pub(super) fn load_revision(db: &Connection, job: &str) -> Result<Option<QueuedR
 
 pub(super) fn record_instruction(
     db: &Connection,
-    job: &Job,
+    job_id: &str,
+    conversation: &str,
     text: &str,
     attachments: Option<&FrozenAttachments>,
 ) -> Result<()> {
-    let conversation = &job
-        .context
-        .as_ref()
-        .context("Instruction has no destination")?
-        .conversation_id;
     let revision = insert_message(
         db,
         conversation,
@@ -89,7 +85,7 @@ pub(super) fn record_instruction(
     db.execute(
         "INSERT INTO queued_conversation_instructions(job_id, message_id, revision_id, attachment_labels)
          SELECT ?1, message_id, id, ?3 FROM message_revisions WHERE id = ?2",
-        params![job.id, revision, attachments.map(|files| &files.labels)],
+        params![job_id, revision, attachments.map(|files| &files.labels)],
     )?;
     save_attachments(db, &revision, attachments)
 }
@@ -145,6 +141,8 @@ pub(super) fn predecessor(db: &Connection, job: &Job) -> Result<Option<String>> 
            ON j.conversation_id = current.conversation_id AND j.sequence < current.sequence
          JOIN queued_conversation_instructions earlier ON earlier.job_id = j.id
          WHERE current.id = ?1 AND j.queue_state <> 'cancelled'
+           AND NOT EXISTS (SELECT 1 FROM instruction_delivery_attempts
+               WHERE job_id = j.id AND route = 'continuation' AND superseded = 0)
            AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
                 OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id))
            AND (EXISTS (SELECT 1 FROM job_history_bindings WHERE job_id = j.id)) =
@@ -165,9 +163,86 @@ pub(super) fn preserves_destination(
     if anchor == active {
         return Ok(true);
     }
+    let same_history: bool = db.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM conversation_contexts original JOIN conversation_contexts selected
+               ON selected.conversation_id = original.conversation_id
+                 AND selected.history_generation = original.history_generation
+             WHERE original.conversation_id = ?1 AND original.id = ?2 AND selected.id = ?3
+         )",
+        params![conversation, anchor, active],
+        |row| row.get(0),
+    )?;
+    if !same_history {
+        return Ok(false);
+    }
     let original = context_entries(db, conversation, anchor)?;
     let current = context_entries(db, conversation, active)?;
     Ok(current.starts_with(&original))
+}
+
+pub(super) fn parked_owner(
+    db: &Connection,
+    conversation: &str,
+    context: &str,
+) -> Result<Option<String>> {
+    Ok(db.query_row(
+        "SELECT a.run_id
+         FROM job_attempts j
+         JOIN agent_attempts a ON a.run_id = j.run_id
+         JOIN jobs job ON job.id = j.job_id
+         LEFT JOIN job_pipeline_origins origin ON origin.job_id = j.job_id
+         LEFT JOIN job_pipeline_runs pipeline ON pipeline.id = origin.pipeline_run_id AND pipeline.project_id = job.project_id
+         LEFT JOIN job_history_bindings binding ON binding.job_id = job.id
+         WHERE a.conversation_id = ?1 AND job.queue_state <> 'cancelled'
+           AND (
+               (pipeline.id IS NOT NULL AND origin.plan_revision IS pipeline.plan_revision)
+               OR EXISTS (SELECT 1 FROM goal_continuations c JOIN active_goals g ON g.revision_id = c.revision_id
+                          WHERE c.job_id = job.id)
+           )
+           AND j.ordinal = (SELECT max(ordinal) FROM job_attempts WHERE job_id = job.id)
+           AND (a.result_context_id = ?2 OR binding.context_id = ?2)
+           AND (
+               EXISTS (SELECT 1 FROM job_downstream_waits WHERE parent_run_id = a.run_id
+                   AND state IN ('yielding', 'waiting', 'needs_review'))
+               OR EXISTS (SELECT 1 FROM open_agent_questions WHERE run_id = a.run_id)
+           )
+         ORDER BY job.sequence LIMIT 1",
+        params![conversation, context],
+        |row| row.get(0),
+    ).optional()?)
+}
+
+pub(super) fn fits_continuation(
+    db: &Connection,
+    instruction: &Job,
+    conversation: &str,
+    boundary: &str,
+    revision: &str,
+) -> Result<bool> {
+    let anchor = instruction
+        .context
+        .as_ref()
+        .context("Instruction has no destination")?;
+    let candidate_history = context_entries(db, conversation, &anchor.context_id)?;
+    let receiving_history = context_entries(db, conversation, boundary)?;
+    if !receiving_history.starts_with(&candidate_history)
+        || receiving_history.iter().any(|id| id == revision)
+    {
+        return Ok(false);
+    }
+    let mut files = attachments::captured_for_revision(db, revision)?;
+    if files.is_empty() {
+        return Ok(true);
+    }
+    for prior in receiving_history {
+        files.extend(attachments::captured_for_revision(db, &prior)?);
+    }
+    Ok(attachments::check_limits(
+        attachments::limits_for_checkout(db, &instruction.checkout_id)?,
+        files.iter().map(|item| (&item.metadata, item.delivery())),
+    )
+    .is_ok())
 }
 
 struct EditableInstruction {
@@ -185,6 +260,7 @@ fn editable(
         "SELECT j.project_id, i.message_id FROM queued_conversation_instructions i JOIN jobs j ON j.id = i.job_id
          WHERE j.conversation_id = ?1 AND i.job_id = ?2 AND i.revision_id = ?3
            AND j.queue_state IN ('queued', 'paused')
+           AND NOT EXISTS (SELECT 1 FROM instruction_delivery_attempts WHERE job_id = j.id AND superseded = 0)
            AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)",
         params![conversation, id, expected],
         |row| Ok(EditableInstruction { project: row.get(0)?, message: row.get(1)? }),
@@ -273,9 +349,10 @@ impl Store {
             let tx = db.transaction()?;
             let mut statement = tx.prepare(
                 "SELECT j.project_id, j.id, i.revision_id, coalesce(h.context_id, j.context_id), h.job_id IS NOT NULL,
-                        j.checkout_id, j.operator_scope, m.content, i.attachment_labels, a.run_id,
-                        CASE WHEN a.run_id IS NULL THEN j.queue_state
-                             WHEN EXISTS (SELECT 1 FROM active_agent_attempts WHERE run_id = a.run_id) THEN 'delivering'
+                        j.checkout_id, j.operator_scope, m.content, i.attachment_labels, coalesce(a.run_id, delivery.run_id),
+                        CASE WHEN a.run_id IS NULL AND delivery.run_id IS NULL THEN j.queue_state
+                             WHEN EXISTS (SELECT 1 FROM active_agent_attempts WHERE run_id = coalesce(a.run_id, delivery.run_id)) THEN 'delivering'
+                             WHEN delivery.run_id IS NOT NULL THEN 'needs_review'
                              WHEN EXISTS (SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
                                           WHERE s.run_id = a.run_id AND d.delivery <> 'submitted') THEN 'needs_review'
                              WHEN EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id) THEN 'delivering'
@@ -284,10 +361,14 @@ impl Store {
                  JOIN message_revisions m ON m.id = i.revision_id
                  LEFT JOIN job_history_bindings h ON h.job_id = j.id
                  LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (SELECT max(ordinal) FROM job_attempts WHERE job_id = j.id)
+                 LEFT JOIN instruction_delivery_attempts delivery ON delivery.job_id = j.id
+                     AND delivery.route = 'continuation' AND delivery.superseded = 0
                  WHERE j.conversation_id = ?1 AND j.queue_state <> 'cancelled'
                    AND NOT EXISTS (SELECT 1 FROM job_attempts prior
                                    JOIN context_snapshots s ON s.run_id = prior.run_id JOIN dispatches d ON d.snapshot_id = s.id
                                    WHERE prior.job_id = j.id AND d.ordinal = 1 AND d.delivery = 'submitted')
+                   AND NOT EXISTS (SELECT 1 FROM context_snapshots x JOIN dispatches d ON d.snapshot_id = x.id
+                                   WHERE x.run_id = delivery.run_id AND d.ordinal = 1 AND d.delivery = 'submitted')
                  ORDER BY j.sequence",
             )?;
             let mut rows = statement.query([&conversation])?;
@@ -340,7 +421,7 @@ pub(super) fn current_request(db: &Connection, job: &Job, encrypted: &[u8]) -> R
 
 pub(crate) fn migrate_pending_instructions(db: &Connection) -> Result<()> {
     let mut statement = db.prepare(
-        "SELECT j.project_id, j.id, j.request FROM jobs j
+        "SELECT j.conversation_id, j.id, j.request FROM jobs j
          WHERE j.conversation_id IS NOT NULL AND j.origin_run_id IS NULL AND j.operator_scope IS NOT NULL
            AND j.task_id IS NULL AND j.queue_state <> 'cancelled'
            AND NOT EXISTS (SELECT 1 FROM job_pipeline_origins WHERE job_id = j.id)
@@ -357,10 +438,9 @@ pub(crate) fn migrate_pending_instructions(db: &Connection) -> Result<()> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (project, id, payload) in rows {
-        let job = load_job(db, &project, &id)?.context("Instruction lost its legacy job")?;
+    for (conversation, id, payload) in rows {
         let request: JobRequest = serde_json::from_slice(&protection::unprotect(&payload)?)?;
-        record_instruction(db, &job, &request.instructions, None)?;
+        record_instruction(db, &id, &conversation, &request.instructions, None)?;
     }
     Ok(())
 }

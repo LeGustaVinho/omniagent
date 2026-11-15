@@ -25,8 +25,10 @@ use super::{
     JobPermission, JobRequest, QueueState, RecoveryAction, ReleaseBlocker,
     command::{CommandAttempt, CommandInvocation, load_command},
     downstream::{continuation_prompt, record_continuation},
+    goals::{self, GoalBoundary},
     history::{effective_release_blocker, load_binding, uses_recorded_checkpoint},
     insert_job,
+    instruction_delivery::{self, InstructionClaim},
     instructions::{self, QueuedRevision},
     load_job,
     policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
@@ -59,6 +61,12 @@ pub struct QueueSettings {
 pub enum AdmissionBlocker {
     InstructionOrder {
         job_id: String,
+    },
+    ContinuationOwner {
+        run_id: String,
+    },
+    InstructionDeliveryUncertain {
+        run_id: String,
     },
     QueuePaused,
     JobPaused,
@@ -202,7 +210,12 @@ impl Store {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let conversation = load_conversation(&tx, &context.conversation_id)?;
                 ensure!(
-                    conversation.context_id == context.context_id,
+                    instructions::preserves_destination(
+                        &tx,
+                        &conversation.id,
+                        &context.context_id,
+                        &conversation.context_id
+                    )?,
                     "conversation context changed"
                 );
                 let (project, root): (String, PathBuf) = tx.query_row(
@@ -237,7 +250,13 @@ impl Store {
                     "UPDATE jobs SET operator_scope = ?1 WHERE id = ?2",
                     params![operator_scope, job.id],
                 )?;
-                instructions::record_instruction(&tx, &job, &text, attachments.as_ref())?;
+                instructions::record_instruction(
+                    &tx,
+                    &job.id,
+                    &conversation.id,
+                    &text,
+                    attachments.as_ref(),
+                )?;
                 tx.commit()?;
                 Ok(job)
             })
@@ -431,6 +450,8 @@ impl Store {
             let candidates = {
                 let mut query = tx.prepare(
                     "SELECT project_id, id FROM jobs j WHERE queue_state = 'queued'
+                    AND NOT EXISTS (SELECT 1 FROM instruction_delivery_attempts
+                        WHERE job_id = j.id AND route = 'continuation' AND superseded = 0)
                     AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
                          OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id)
                          OR EXISTS (SELECT 1 FROM ready_question_continuations WHERE job_id = j.id)
@@ -463,10 +484,28 @@ impl Store {
                     .transpose()?;
                 let wait = job.downstream_wait.as_ref();
                 let question_run = inputs.question.as_ref().map(|question| question.run.clone());
-                let plan = build_attempt(&tx, &job, inputs, checkpoint.as_ref(), allocation)?;
+                let goal_run = inputs.goal.as_ref().map(|boundary| boundary.run.clone());
+                let adopted = continuation_instruction(&tx, &job, &inputs, &env)?;
+                let standalone = if job.latest_attempt.is_none() {
+                    inputs.instruction.as_ref().map(|instruction| -> Result<_> {
+                        Ok(InstructionClaim {
+                            job_id: job.id.clone(),
+                            revision_id: instruction.revision_id.clone(),
+                            policy_key: effective_policy(&tx, &job)?.key,
+                            route: "standalone",
+                        })
+                    }).transpose()?
+                } else {
+                    None
+                };
+                let plan = build_attempt(
+                    &tx, &job, inputs, checkpoint.as_ref(), allocation,
+                    adopted.as_ref().map(|claim| claim.revision_id.clone()),
+                )?;
                 let previous_run = question_run.as_deref()
                     .or_else(|| wait.map(|wait| wait.parent_run_id.as_str()))
-                    .or_else(|| checkpoint.as_ref().map(RecoveryCheckpoint::run_id));
+                    .or_else(|| checkpoint.as_ref().map(RecoveryCheckpoint::run_id))
+                    .or(goal_run.as_deref());
                 let ordinal = job
                     .latest_attempt
                     .as_ref()
@@ -481,6 +520,13 @@ impl Store {
                     params![job.id, ordinal, plan.run().id, previous_run, kind],
                 )?;
                 bind_attempt_policy(&tx, &job, &plan.run().id)?;
+                if let ScheduledAttempt::Agent(plan) = &plan {
+                    if let Some(claim) = adopted.or(standalone) {
+                        claim.record(&tx, plan)?;
+                    } else if let Some(checkpoint) = &checkpoint {
+                        instruction_delivery::carry_unsent_instruction(&tx, checkpoint.run_id(), plan)?;
+                    }
+                }
                 if let Some(wait) = wait {
                     record_continuation(&tx, wait, &plan.run().id)?;
                 }
@@ -572,6 +618,7 @@ struct Inputs {
     command: Option<CommandInvocation>,
     question: Option<QuestionContinuation>,
     instruction: Option<QueuedRevision>,
+    goal: Option<GoalBoundary>,
 }
 
 fn build_attempt(
@@ -580,6 +627,7 @@ fn build_attempt(
     inputs: Inputs,
     checkpoint: Option<&RecoveryCheckpoint>,
     allocation: SubagentAllocation,
+    instruction_revision: Option<String>,
 ) -> Result<ScheduledAttempt> {
     if let Some(invocation) = inputs.command {
         let (run, _) = runs::insert_run(db, job.checkout_id.clone(), "command")?;
@@ -597,19 +645,51 @@ fn build_attempt(
             .as_ref()
             .map(|wait| continuation_prompt(db, wait))
             .transpose()?;
-        question_answers::insert_attempt(db, question, scope, downstream, allocation)?
+        question_answers::insert_attempt(
+            db,
+            question,
+            scope,
+            downstream,
+            instruction_revision,
+            allocation,
+        )?
     } else if let Some(wait) = &job.downstream_wait {
         let (conversation, recorded) = downstream_conversation(db, job, wait)?
             .context("The downstream wait context changed")?;
         let text = continuation_prompt(db, wait)?;
-        let plan = if let Some(recorded) = recorded {
-            insert_recorded_job_attempt(db, conversation, scope, recorded, &text, allocation)?
-        } else {
-            insert_downstream_attempt(db, conversation, scope, &text, allocation)?
-        };
+        let plan = insert_downstream_attempt(
+            db,
+            conversation,
+            scope,
+            recorded,
+            &text,
+            instruction_revision,
+            allocation,
+        )?;
         ensure!(
             plan.previous_run_id.as_ref() == Some(&wait.parent_run_id),
             "The continuation lost its waiting attempt"
+        );
+        plan
+    } else if let Some(boundary) = inputs.goal {
+        let conversation = load_conversation(db, &boundary.conversation)?;
+        let recorded = load_binding(db, &job.id)?.map(|binding| RecordedAttempt {
+            context_id: boundary.context,
+            previous_run_id: Some(boundary.run.clone()),
+            question_route: binding.question_route,
+        });
+        let plan = insert_downstream_attempt(
+            db,
+            conversation,
+            scope,
+            recorded,
+            &inputs.request.instructions,
+            instruction_revision,
+            allocation,
+        )?;
+        ensure!(
+            plan.previous_run_id.as_deref() == Some(&boundary.run),
+            "The goal checkpoint is no longer current"
         );
         plan
     } else {
@@ -857,7 +937,94 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
         command,
         question: load_continuation(db, job)?,
         instruction: instructions::load_revision(db, &job.id)?,
+        goal: goals::managed_boundary(db, &job.id)?,
     })
+}
+
+fn continuation_instruction(
+    db: &Connection,
+    owner: &Job,
+    owner_inputs: &Inputs,
+    env: &AdmissionEnvironment,
+) -> Result<Option<InstructionClaim>> {
+    let owner_run = owner_inputs
+        .question
+        .as_ref()
+        .map(|question| question.run.as_str())
+        .or_else(|| {
+            owner
+                .downstream_wait
+                .as_ref()
+                .map(|wait| wait.parent_run_id.as_str())
+        });
+    let boundary = if let Some(boundary) = &owner_inputs.goal {
+        (
+            boundary.run.clone(),
+            boundary.conversation.clone(),
+            boundary.context.clone(),
+        )
+    } else if let Some(run) = owner_run {
+        let (conversation, context) = db.query_row(
+            "SELECT conversation_id, result_context_id FROM agent_attempts WHERE run_id = ?1",
+            [run],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        (run.to_owned(), conversation, context)
+    } else {
+        return Ok(None);
+    };
+    let (run, conversation, boundary) = boundary;
+    let active = load_conversation(db, &conversation)?;
+    let mut candidates = db.prepare(
+        "SELECT j.id FROM jobs j JOIN queued_conversation_instructions i ON i.job_id = j.id
+         WHERE j.project_id = ?1 AND j.conversation_id = ?2 AND j.queue_state <> 'cancelled'
+           AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
+           AND NOT EXISTS (SELECT 1 FROM instruction_delivery_attempts WHERE job_id = j.id AND superseded = 0)
+         ORDER BY j.sequence",
+    )?;
+    for id in candidates.query_map(params![owner.project_id, conversation], |row| {
+        row.get::<_, String>(0)
+    })? {
+        let candidate =
+            load_job(db, &owner.project_id, &id?)?.context("Queued instruction disappeared")?;
+        let binding = load_binding(db, &candidate.id)?;
+        let destination = binding
+            .as_ref()
+            .map_or(&active.context_id, |binding| &binding.context.context_id);
+        if instruction_owner(db, &conversation, destination)?.as_deref() != Some(run.as_str()) {
+            continue;
+        }
+        let inputs = load_inputs(db, &candidate)?;
+        if inputs.scope != owner_inputs.scope || candidate.checkout_id != owner.checkout_id {
+            return Ok(None);
+        }
+        let (blockers, _) = evaluate(db, &candidate, &inputs, env)?;
+        if !matches!(blockers.as_slice(), [AdmissionBlocker::ContinuationOwner { run_id }] if *run_id == run)
+        {
+            return Ok(None);
+        }
+        let revision = inputs
+            .instruction
+            .context("Instruction revision disappeared")?
+            .revision_id;
+        if !instructions::fits_continuation(db, &candidate, &conversation, &boundary, &revision)? {
+            return Ok(None);
+        }
+        return Ok(Some(InstructionClaim {
+            policy_key: effective_policy(db, &candidate)?.key,
+            job_id: candidate.id,
+            revision_id: revision,
+            route: "continuation",
+        }));
+    }
+    Ok(None)
+}
+
+fn instruction_owner(db: &Connection, conversation: &str, context: &str) -> Result<Option<String>> {
+    if let Some(run) = goals::queued_boundary_owner(db, conversation, context)? {
+        return Ok(Some(run));
+    }
+    instructions::parked_owner(db, conversation, context)
 }
 
 pub(super) fn inspect(
@@ -868,9 +1035,11 @@ pub(super) fn inspect(
     let queued_question = load_continuation(db, &job)?.is_some();
     let awaiting_recovery =
         job.queued_recovery.is_some() || job.downstream_wait.is_some() || queued_question;
+    let adopted = instruction_delivery::adopted_run(db, &job.id)?.is_some();
     let question_wait = job
         .latest_attempt
         .as_ref()
+        .filter(|_| !adopted)
         .map(|attempt| question_wait_summary(db, &attempt.run_id))
         .transpose()?
         .flatten();
@@ -915,6 +1084,9 @@ fn evaluate(
         QueueState::Queued => {}
         QueueState::Paused => blockers.push(JobPaused),
         QueueState::Cancelled => return Ok((vec![JobCancelled], SubagentAllocation::default())),
+    }
+    if let Some(reason) = goals::limit_blocker(db, &job.id)? {
+        blockers.push(Policy { reason });
     }
     for id in &inputs.request.dependencies {
         let dependency =
@@ -984,6 +1156,12 @@ fn evaluate(
         }
         if let Some(run_id) = active_conversation_run(db, &question.conversation)? {
             blockers.push(ConversationBusy { run_id });
+        } else if let Some(run_id) = instruction_delivery::unconfirmed_in_context(
+            db,
+            &question.conversation,
+            &question.context,
+        )? {
+            blockers.push(InstructionDeliveryUncertain { run_id });
         }
     }
     if let Some(wait) = &job.downstream_wait {
@@ -1001,7 +1179,15 @@ fn evaluate(
             blockers.push(ConversationBusy {
                 run_id: wait.parent_run_id.clone(),
             });
-        } else if downstream_conversation(db, job, wait)?.is_none() {
+        } else if let Some((conversation, _)) = downstream_conversation(db, job, wait)? {
+            if inputs.question.is_none()
+                && let Some(context) = &wait.context_id
+                && let Some(run_id) =
+                    instruction_delivery::unconfirmed_in_context(db, &conversation.id, context)?
+            {
+                blockers.push(InstructionDeliveryUncertain { run_id });
+            }
+        } else {
             blockers.push(ContextChanged {
                 context_id: wait
                     .context_id
@@ -1055,17 +1241,23 @@ fn evaluate(
                 context_id: context.context_id.clone(),
             });
         }
+        let destination = binding
+            .as_ref()
+            .map_or(&conversation.context_id, |binding| {
+                &binding.context.context_id
+            });
         if let Some(run_id) = active_conversation_run(db, &context.conversation_id)? {
             blockers.push(ConversationBusy { run_id });
-        } else if let Some(run_id) = saved_question_run(
-            db,
-            &context.conversation_id,
-            binding
-                .as_ref()
-                .map_or(&conversation.context_id, |binding| {
-                    &binding.context.context_id
-                }),
-        )? {
+        } else if let Some(run_id) =
+            instruction_delivery::unconfirmed_in_context(db, &context.conversation_id, destination)?
+        {
+            blockers.push(InstructionDeliveryUncertain { run_id });
+        } else if inputs.instruction.is_some()
+            && let Some(run_id) = instruction_owner(db, &context.conversation_id, destination)?
+        {
+            blockers.push(ContinuationOwner { run_id });
+        } else if let Some(run_id) = saved_question_run(db, &context.conversation_id, destination)?
+        {
             blockers.push(ConversationBusy { run_id });
         }
     }

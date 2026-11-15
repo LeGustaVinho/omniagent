@@ -50,7 +50,21 @@ async function startSession(application) {
     capabilities: { browserName: "webview2", "tauri:options": { application } },
   });
   await browser.setTimeout({ script: 8_000 });
-  await waitForRuntime(browser);
+  try {
+    await waitForRuntime(browser);
+  } catch (error) {
+    const state = await browser.execute(async () => {
+      let runtime;
+      try {
+        runtime = await window.__TAURI_INTERNALS__?.invoke?.("runtime_status");
+      } catch (error) {
+        runtime = String(error);
+      }
+      return { origin: location.origin, readyState: document.readyState, runtime };
+    }).catch(() => undefined);
+    await browser.deleteSession().catch(() => {});
+    throw new Error(`Desktop runtime did not become ready (${JSON.stringify(state)})`, { cause: error });
+  }
   return browser;
 }
 
@@ -625,6 +639,23 @@ async function verifyPendingInstructions(browser, application, scratch) {
     const messages = await invoke(browser, "conversation_messages", scope);
     assert.deepEqual(messages.filter(({ role }) => role === "user").map(({ text }) => text), [text, edited]);
     assert.equal(messages.find(({ text }) => text === edited).revisionId, updated.revisionId);
+
+    await browser.waitUntil(async () => (await invoke(browser, "latest_conversation_run", scope))?.status === "succeeded",
+      { timeout: 30_000 });
+    const current = await invoke(browser, "conversation_history", scope);
+    const oldEmptyContext = await invoke(browser, "rewind_conversation_history", {
+      ...scope, baseId: current.contextId, throughRevision: null,
+    });
+    await invoke(browser, "rewind_conversation_history", {
+      ...scope, baseId: oldEmptyContext, throughRevision: null,
+    });
+    const stale = "Keep the draft from the earlier empty history";
+    await invoke(browser, "save_conversation_draft", { ...scope, text: stale });
+    await assert.rejects(invoke(browser, "start_conversation_turn", {
+      ...scope, selection: fixture.option.selection, mode: "read_only", text: stale, expectedContextId: oldEmptyContext,
+    }), /conversation context changed/i);
+    assert.equal(await invoke(browser, "conversation_draft", scope), stale);
+    assert.deepEqual(await pending(), []);
   } finally {
     await writeFile(release, "");
     await invoke(browser, "set_cli_executable", { provider: "codex", executable: profile.executable });

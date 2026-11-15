@@ -1187,6 +1187,16 @@ async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -
     db.execute_batch(
         "DROP TABLE attempt_subagent_audit;
          DROP TABLE native_subagent_audit_candidates;
+         DROP TABLE native_goal_observations;
+         DROP TABLE goal_turn_reports;
+         DROP TABLE goal_checkpoints;
+         DROP TABLE goal_continuations;
+         DROP TABLE active_goals;
+         DROP TABLE goal_revisions;
+         DROP TABLE goals;
+         DROP TABLE instruction_delivery_attempts;
+         ALTER TABLE conversations DROP COLUMN history_generation;
+         ALTER TABLE conversation_contexts DROP COLUMN history_generation;
          DROP INDEX jobs_by_conversation_sequence;
          DROP TABLE queued_conversation_instructions;
          DROP VIEW deliverable_job_notices;
@@ -1787,7 +1797,17 @@ async fn queued_conversation_draft_and_snapshot_survive_reopen_without_creating_
     drop(store);
     // A pending conversation job from the previous schema already owns its prompt and scope.
     rusqlite::Connection::open(&database)?.execute_batch(
-        "DROP TABLE queued_conversation_instructions;
+        "DROP TABLE native_goal_observations;
+         DROP TABLE goal_turn_reports;
+         DROP TABLE goal_checkpoints;
+         DROP TABLE goal_continuations;
+         DROP TABLE active_goals;
+         DROP TABLE goal_revisions;
+         DROP TABLE goals;
+         DROP TABLE instruction_delivery_attempts;
+         ALTER TABLE conversations DROP COLUMN history_generation;
+         ALTER TABLE conversation_contexts DROP COLUMN history_generation;
+         DROP TABLE queued_conversation_instructions;
          DROP INDEX jobs_by_conversation_sequence;
          PRAGMA user_version = 38;",
     )?;
@@ -1835,6 +1855,71 @@ async fn queued_conversation_draft_and_snapshot_survive_reopen_without_creating_
             .unwrap()
             .status,
         RunStatus::Cancelled
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_instruction_accepts_an_appended_reply_but_preserves_explicit_history_boundaries()
+-> Result<()> {
+    let root = tempfile::tempdir()?;
+    let store = Store::open(root.path().join("queue.sqlite"))?;
+    let running = origin(&store, &root.path().join("repository")).await?;
+    let conversation = store.conversation(running.conversation_id.clone()).await?;
+    let context_before_reply = JobContext {
+        conversation_id: conversation.id.clone(),
+        context_id: conversation.context_id,
+    };
+    store
+        .finish_agent_attempt(
+            running.run.id,
+            RunStatus::Succeeded,
+            Some("Background reply".into()),
+        )
+        .await?;
+    store
+        .save_conversation_draft(conversation.id.clone(), "Still in the same history".into())
+        .await?;
+    let queued = store
+        .enqueue_conversation_turn(
+            context_before_reply.clone(),
+            running.scope.clone(),
+            "Still in the same history".into(),
+        )
+        .await?;
+    assert_eq!(queued.context, Some(context_before_reply));
+    store
+        .set_pending_job_state(queued.project_id, queued.id, QueueState::Cancelled)
+        .await?;
+
+    let current = store.conversation(conversation.id.clone()).await?;
+    let initial_empty = store
+        .rewind_conversation_history(conversation.id.clone(), current.context_id, None)
+        .await?;
+    let cleared = store
+        .rewind_conversation_history(conversation.id.clone(), initial_empty.clone(), None)
+        .await?;
+    assert_ne!(initial_empty, cleared);
+    store
+        .save_conversation_draft(
+            conversation.id.clone(),
+            "Draft from the earlier empty context".into(),
+        )
+        .await?;
+    let stale = store
+        .enqueue_conversation_turn(
+            JobContext {
+                conversation_id: conversation.id.clone(),
+                context_id: initial_empty,
+            },
+            running.scope,
+            "Draft from the earlier empty context".into(),
+        )
+        .await;
+    assert!(stale.is_err());
+    assert_eq!(
+        store.conversation_draft(conversation.id).await?,
+        "Draft from the earlier empty context"
     );
     Ok(())
 }

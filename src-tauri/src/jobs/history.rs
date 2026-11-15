@@ -237,6 +237,8 @@ pub(crate) fn apply_queue_history_policy(db: &Connection, conversation: &str) ->
              LEFT JOIN conversation_contexts wait_context ON wait_context.id = w.context_id
              LEFT JOIN ready_question_continuations question ON question.job_id = j.id
              WHERE j.project_id = ?1 AND j.queue_state IN ('queued', 'paused')
+               AND NOT EXISTS (SELECT 1 FROM instruction_delivery_attempts
+                   WHERE job_id = j.id AND route = 'continuation' AND superseded = 0)
                AND (j.conversation_id = ?2 OR retry_context.conversation_id = ?2 OR wait_context.conversation_id = ?2
                     OR question.conversation_id = ?2)
                AND (latest.run_id IS NULL OR recovery.job_id IS NOT NULL OR w.id IS NOT NULL OR question.job_id IS NOT NULL)

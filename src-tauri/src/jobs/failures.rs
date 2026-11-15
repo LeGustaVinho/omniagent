@@ -29,6 +29,7 @@ pub enum FailureCause {
     WorktreeUnavailable,
     LaunchRejected,
     StartupTimeout,
+    GoalTimeLimit,
     ProviderError,
     TransportClosed,
     ProcessExit,

@@ -952,6 +952,54 @@ async fn waiting_writer_yields_its_only_slot_and_resumes_once_with_frozen_child_
     })
     .await??;
     assert_eq!(parked.state, DownstreamWaitState::Waiting);
+    let text = "Wait for the owning pipeline before opening a separate turn";
+    store
+        .save_conversation_draft(conversation.id.clone(), text.into())
+        .await?;
+    let queued_instruction = store
+        .enqueue_conversation_turn(
+            JobContext {
+                conversation_id: conversation.id.clone(),
+                context_id: conversation.context_id.clone(),
+            },
+            SessionScope {
+                provider: Provider::Codex,
+                profile_id: "read-only operator".into(),
+                account_binding: None,
+                checkout: managed.root.clone(),
+                executable: std::env::current_exe()?,
+                cli_version: "0.169.0-alpha.11.1".into(),
+                runner: runtime.identity().into(),
+                permission_revision: "read-only".into(),
+                mode: SessionMode::ReadOnly,
+                model: None,
+                effort: None,
+            },
+            text.into(),
+        )
+        .await?;
+    let pending = store
+        .inspect_job(
+            queued_instruction.project_id.clone(),
+            queued_instruction.id.clone(),
+            env.clone(),
+        )
+        .await?
+        .context("The instruction did not stay visible while waiting for the pipeline")?;
+    assert!(
+        pending
+            .blockers
+            .contains(&AdmissionBlocker::ContinuationOwner {
+                run_id: current.run_id.clone()
+            })
+    );
+    store
+        .set_pending_job_state(
+            queued_instruction.project_id,
+            queued_instruction.id,
+            omniagent::jobs::QueueState::Cancelled,
+        )
+        .await?;
     let parent_conversation = current
         .conversation_id
         .as_ref()

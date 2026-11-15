@@ -182,11 +182,20 @@ fn observe_child(db: &Connection, child: &Job) -> Result<()> {
 }
 
 pub(crate) fn observe_child_run(db: &Connection, run: &str) -> Result<()> {
-    let observed: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM job_attempts a JOIN job_downstream_inputs i ON i.child_job_id = a.job_id
-         WHERE a.run_id = ?1 AND i.status IS NULL)", [run], |row| row.get(0),
+    let mut tracked = db.prepare(
+        "SELECT j.project_id, j.id FROM jobs j
+         WHERE (EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id AND run_id = ?1)
+             OR EXISTS (SELECT 1 FROM instruction_delivery_attempts delivery
+                        WHERE delivery.job_id = j.id AND delivery.run_id = ?1
+                          AND delivery.superseded = 0 AND delivery.route = 'continuation'
+                          AND NOT EXISTS (SELECT 1 FROM job_recoveries WHERE source_run_id = ?1)))
+           AND EXISTS (SELECT 1 FROM job_downstream_inputs WHERE child_job_id = j.id AND status IS NULL)",
     )?;
-    if observed && let Some(child) = load_attempt_job(db, run)? {
+    for identity in tracked.query_map([run], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })? {
+        let (project, id) = identity?;
+        let child = load_job(db, &project, &id)?.context("A tracked downstream job disappeared")?;
         observe_child(db, &child)?;
     }
     Ok(())

@@ -73,6 +73,7 @@ pub(super) fn insert_attempt(
     continuation: &QuestionContinuation,
     scope: SessionScope,
     downstream: Option<String>,
+    instruction_revision: Option<String>,
     allocation: SubagentAllocation,
 ) -> Result<AttemptPlan> {
     let mut statement = db.prepare(
@@ -117,6 +118,7 @@ pub(super) fn insert_attempt(
         answers,
         earlier_replies: earlier_replies(db, &continuation.run)?,
         downstream,
+        instruction_revision,
     };
     insert_linked_question_job_attempt(db, conversation, scope, input, allocation)
 }

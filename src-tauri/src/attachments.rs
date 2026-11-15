@@ -6,11 +6,13 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    protection,
     providers::{
         Provider,
         configuration::{open_locked_local_file, plain_metadata},
@@ -428,6 +430,23 @@ pub(crate) fn capture(
             with_file_reason(preview.capture(checkout, limits), &label)
         })
         .collect()
+}
+
+pub(crate) fn captured_for_revision(
+    db: &Connection,
+    revision: &str,
+) -> Result<Vec<CapturedAttachment>> {
+    let payload: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT payload FROM message_attachments WHERE message_revision_id = ?1",
+            [revision],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match payload {
+        Some(payload) => Ok(serde_json::from_slice(&protection::unprotect(&payload)?)?),
+        None => Ok(Vec::new()),
+    }
 }
 
 fn with_file_reason<T>(result: Result<T>, label: &str) -> Result<T> {

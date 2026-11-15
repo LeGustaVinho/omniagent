@@ -324,7 +324,11 @@ impl Store {
             for message in identities {
                 let queued_only: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM queued_conversation_instructions i WHERE i.message_id = ?1
-                        AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = i.job_id))",
+                        AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = i.job_id)
+                        AND NOT EXISTS (
+                            SELECT 1 FROM instruction_delivery_attempts
+                            WHERE job_id = i.job_id AND route = 'continuation' AND superseded = 0
+                        ))",
                     [message], |row| row.get(0),
                 )?;
                 ensure!(!queued_only, "An unclaimed instruction is outside conversation history");
@@ -559,6 +563,7 @@ impl Store {
                     answer,
                     history: AttemptHistory::Automatic,
                     recorded: None,
+                    instruction_revision: None,
                     allocation,
                 },
             )?;
@@ -697,6 +702,9 @@ impl Store {
                 params![run_id, source.as_sql(), payload, diagnostic])?;
             if source == EventSource::Provider {
                 crate::jobs::record_native_subagent(&tx, &run_id, tx.last_insert_rowid(), &event.data)?;
+            }
+            if primary && let ProviderEventData::GoalObserved { observation } = &event.data {
+                crate::jobs::record_native_goal(&tx, &run_id, tx.last_insert_rowid(), observation)?;
             }
             if source == EventSource::Application && let ProviderEventData::CapabilityAssessmentUpdated { assessment } = &event.data {
                 crate::runtime_inspection::save_capability_summary(&tx, &run_id, assessment)?;
@@ -930,6 +938,9 @@ impl Store {
                 &tx, &run_id, &context_id, outcome, quiescence_confirmed,
             )?;
             if outcome == RunStatus::Succeeded && !suspended && !saved_input {
+                if quiescence_confirmed {
+                    crate::jobs::accept_goal_checkpoint(&tx, &run_id, &context_id)?;
+                }
                 tx.execute("UPDATE agent_sessions SET cursor_context_id = ?1 WHERE id = ?2 AND provider_session_id IS NOT NULL
                     AND EXISTS(SELECT 1 FROM agent_attempts a
                         JOIN context_snapshots s ON s.run_id = a.run_id
@@ -1028,6 +1039,7 @@ struct PreparedAttempt {
     answer: Option<(QuestionOrigin, QuestionReply)>,
     history: AttemptHistory,
     recorded: Option<RecordedAttempt>,
+    instruction_revision: Option<String>,
     allocation: SubagentAllocation,
 }
 
@@ -1085,6 +1097,7 @@ pub(crate) fn insert_job_attempt(
             answer: None,
             history: AttemptHistory::Automatic,
             recorded: None,
+            instruction_revision: None,
             allocation,
         },
     )
@@ -1110,6 +1123,7 @@ pub(crate) fn insert_instruction_attempt(
             answer: None,
             history: AttemptHistory::QueuedInstruction { revision_id },
             recorded,
+            instruction_revision: None,
             allocation,
         },
     )
@@ -1143,6 +1157,7 @@ pub(crate) fn insert_job_recovery_attempt(
             answer: None,
             history,
             recorded,
+            instruction_revision: None,
             allocation,
         },
     )
@@ -1152,7 +1167,9 @@ pub(crate) fn insert_downstream_attempt(
     db: &Connection,
     conversation: Conversation,
     scope: SessionScope,
+    recorded: Option<RecordedAttempt>,
     input: &str,
+    instruction_revision: Option<String>,
     allocation: SubagentAllocation,
 ) -> Result<AttemptPlan> {
     insert_attempt(
@@ -1163,10 +1180,13 @@ pub(crate) fn insert_downstream_attempt(
             scope,
             encrypted: Some(protection::protect(input.as_bytes())?),
             frozen: None,
-            question_route: QuestionRoute::Native,
+            question_route: recorded
+                .as_ref()
+                .map_or(QuestionRoute::Native, |recorded| recorded.question_route),
             answer: None,
             history: AttemptHistory::Downstream,
-            recorded: None,
+            recorded,
+            instruction_revision,
             allocation,
         },
     )
@@ -1192,6 +1212,7 @@ pub(crate) fn insert_recorded_job_attempt(
             answer: None,
             history: AttemptHistory::Downstream,
             recorded: Some(recorded),
+            instruction_revision: None,
             allocation,
         },
     )
@@ -1212,6 +1233,7 @@ pub(crate) struct LinkedQuestionInput {
     pub answers: Vec<(i64, RecordedQuestionAnswer)>,
     pub earlier_replies: Vec<RecordedQuestionAnswer>,
     pub downstream: Option<String>,
+    pub instruction_revision: Option<String>,
 }
 
 pub(crate) fn insert_linked_question_job_attempt(
@@ -1227,6 +1249,7 @@ pub(crate) fn insert_linked_question_job_attempt(
         answers,
         earlier_replies,
         downstream,
+        instruction_revision,
     } = input;
     let (_, first) = answers.first().context("Missing recorded answers")?;
     let origin = first.origin.clone();
@@ -1262,6 +1285,7 @@ pub(crate) fn insert_linked_question_job_attempt(
                 origin_run_id: origin.run_id.clone(),
             },
             recorded,
+            instruction_revision,
             allocation,
         },
     )?;
@@ -1308,6 +1332,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         answer,
         history,
         mut recorded,
+        instruction_revision,
         allocation,
     } = prepared;
     let serialized = serde_json::to_string(&scope)?;
@@ -1449,27 +1474,23 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             )?;
         }
         entries.push(revision);
+        if let Some(instruction) = instruction_revision {
+            ensure!(
+                !entries.contains(&instruction),
+                "The claimed instruction is already in the continuation context"
+            );
+            entries.push(instruction);
+        }
         write_context(db, &conversation_id, &entries, recorded.is_none())?
     };
     let input = load_messages(db, &conversation_id, &entries[consumed..])?;
     let mut attachments = Vec::new();
     for message in &input {
-        let payload = db
-            .query_row(
-                "SELECT payload FROM message_attachments WHERE message_revision_id = ?1",
-                [&message.revision_id],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()?;
-        if let Some(payload) = payload {
-            let items: Vec<CapturedAttachment> =
-                serde_json::from_slice(&protection::unprotect(&payload)?)?;
-            attachments.extend(
-                items
-                    .into_iter()
-                    .map(|item| (message.revision_id.clone(), item)),
-            );
-        }
+        attachments.extend(
+            attachments::captured_for_revision(db, &message.revision_id)?
+                .into_iter()
+                .map(|item| (message.revision_id.clone(), item)),
+        );
     }
     if !attachments.is_empty() {
         let limits = attachments::limits_for_checkout(db, &conversation.checkout_id)?;
@@ -1794,6 +1815,10 @@ fn activate_context(db: &Connection, conversation_id: &str, entries: &[String]) 
 fn switch_history(db: &Connection, conversation_id: &str, entries: &[String]) -> Result<String> {
     crate::jobs::apply_queue_history_policy(db, conversation_id)?;
     db.execute(
+        "UPDATE conversations SET history_generation = history_generation + 1 WHERE id = ?1",
+        [conversation_id],
+    )?;
+    db.execute(
         "UPDATE agent_sessions SET cursor_context_id = NULL WHERE conversation_id = ?1",
         [conversation_id],
     )?;
@@ -1808,7 +1833,8 @@ fn write_context(
 ) -> Result<String> {
     let id = new_id();
     db.execute(
-        "INSERT INTO conversation_contexts(id, conversation_id, entries) VALUES (?1, ?2, ?3)",
+        "INSERT INTO conversation_contexts(id, conversation_id, entries, history_generation)
+         SELECT ?1, id, ?3, history_generation FROM conversations WHERE id = ?2",
         params![id, conversation_id, serde_json::to_string(entries)?],
     )?;
     if activate {
@@ -2528,6 +2554,775 @@ mod tests {
                 vec![b"{\"fixture\":true}\n".to_vec()],
             )
             .await
+    }
+
+    #[tokio::test]
+    async fn goal_revision_keeps_its_selected_scope_and_checkpoint_after_restart() -> Result<()> {
+        use crate::jobs::{
+            AdmissionBlocker, AdmissionEnvironment, GoalContinuationOwner, GoalDefinition,
+            GoalTurnAction, GoalTurnReport, JobContext,
+        };
+
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let database = scope.checkout.join("store.sqlite");
+        let context = JobContext {
+            conversation_id: conversation.id.clone(),
+            context_id: conversation.context_id,
+        };
+        let definition = GoalDefinition {
+            objective: "Inspect the migration plan".into(),
+            criteria: vec!["Identify the last compatible schema".into()],
+            max_turns: 2,
+            max_seconds: Some(90),
+            token_budget: None,
+        };
+        let goal = store
+            .start_conversation_goal(
+                context.clone(),
+                scope.clone(),
+                None,
+                definition.clone(),
+                None,
+            )
+            .await?;
+        assert!(
+            store
+                .start_conversation_goal(
+                    context.clone(),
+                    scope.clone(),
+                    None,
+                    definition.clone(),
+                    None,
+                )
+                .await
+                .is_err()
+        );
+        drop(store);
+        let store = Store::open(database.clone())?;
+        let persisted = store
+            .active_conversation_goal(conversation.id.clone())
+            .await?
+            .context("The active goal was lost")?;
+        assert_eq!(persisted, goal);
+        assert_eq!(persisted.continuation_owner, GoalContinuationOwner::Managed);
+        let environment = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: true,
+        };
+        let plan = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("The goal was not scheduled")?;
+        assert!(plan.scope == scope);
+        assert_eq!(plan.conversation_id, conversation.id);
+        assert!(
+            plan.input
+                .last()
+                .unwrap()
+                .text
+                .contains(&definition.criteria[0])
+        );
+        store.mark_agent_running(plan.run.id.clone()).await?;
+        let dispatch = prepare_fixture_dispatch(&store, &plan).await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        let report = GoalTurnReport {
+            evidence: "Found the last compatible schema. Verify the upgrade path.".into(),
+            action: GoalTurnAction::Continue,
+        };
+        store
+            .record_goal_turn_report(plan.run.id.clone(), report.clone())
+            .await?;
+        store
+            .record_goal_turn_report(plan.run.id.clone(), report.clone())
+            .await?;
+        assert!(
+            store
+                .record_goal_turn_report(
+                    plan.run.id.clone(),
+                    GoalTurnReport {
+                        action: GoalTurnAction::Review,
+                        ..report.clone()
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let captured = store.conversation(conversation.id.clone()).await?;
+        store
+            .save_conversation_draft(conversation.id.clone(), "Check both migrations".into())
+            .await?;
+        let instruction = store
+            .enqueue_conversation_turn(
+                JobContext {
+                    conversation_id: conversation.id.clone(),
+                    context_id: captured.context_id,
+                },
+                scope.clone(),
+                "Check both migrations".into(),
+            )
+            .await?;
+        store
+            .record_agent_observation(
+                plan.run.id.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: ProviderLocation {
+                        session_id: Some("goal-session".into()),
+                        ..Default::default()
+                    },
+                    data: ProviderEventData::TurnFinished {
+                        outcome: TurnOutcome::Completed,
+                    },
+                },
+            )
+            .await?;
+        store
+            .finish_observed_agent_attempt(
+                plan.run.id.clone(),
+                RunStatus::Succeeded,
+                Some("Schema 38".into()),
+                None,
+                true,
+            )
+            .await?;
+        drop(store);
+        let store = Store::open(database)?;
+        let persisted = store
+            .active_conversation_goal(conversation.id.clone())
+            .await?
+            .context("The goal revision was lost")?;
+        let checkpoint = persisted
+            .checkpoint
+            .context("The goal checkpoint was lost")?;
+        assert_eq!(checkpoint.ordinal, 1);
+        assert_eq!(checkpoint.run_id, plan.run.id);
+        assert_eq!(checkpoint.report, Some(report.clone()));
+        assert_eq!(checkpoint.next_action, "continue");
+        assert_eq!(
+            checkpoint.context_id,
+            store
+                .conversation(conversation.id.clone())
+                .await?
+                .context_id
+        );
+        assert_eq!(
+            persisted.provider_session_id.as_deref(),
+            Some("goal-session")
+        );
+        let waiting = store
+            .inspect_job(instruction.project_id, instruction.id, environment.clone())
+            .await?
+            .context("The pending instruction was lost")?;
+        assert_eq!(
+            waiting.blockers,
+            vec![AdmissionBlocker::ContinuationOwner {
+                run_id: plan.run.id.clone()
+            }]
+        );
+        let next = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("Missing the goal continuation")?;
+        assert_eq!(next.previous_run_id.as_deref(), Some(plan.run.id.as_str()));
+        assert_eq!(next.input.last().unwrap().text, "Check both migrations");
+        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        store.mark_agent_running(next.run.id.clone()).await?;
+        let dispatch = prepare_fixture_dispatch(&store, &next).await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        store
+            .record_goal_turn_report(next.run.id.clone(), report)
+            .await?;
+        store
+            .record_agent_observation(
+                next.run.id.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: ProviderLocation::default(),
+                    data: ProviderEventData::TurnFinished {
+                        outcome: TurnOutcome::Completed,
+                    },
+                },
+            )
+            .await?;
+        store
+            .finish_observed_agent_attempt(
+                next.run.id.clone(),
+                RunStatus::Succeeded,
+                Some("Verified".into()),
+                None,
+                true,
+            )
+            .await?;
+        let finished = store
+            .active_conversation_goal(conversation.id)
+            .await?
+            .unwrap()
+            .checkpoint
+            .unwrap();
+        assert_eq!(finished.ordinal, 2);
+        assert_eq!(finished.next_action, "limit_reached");
+        assert!(store.claim_next_job(environment).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stage_goal_keeps_its_task_and_matches_native_evidence_to_its_session() -> Result<()> {
+        use crate::{
+            jobs::{
+                AdmissionEnvironment, GoalContinuationOwner, GoalDefinition, JobContext,
+                PipelineDispatch, PipelineNodeKind,
+            },
+            providers::goal::{NativeGoalObservation, NativeGoalState},
+        };
+
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let database = scope.checkout.join("store.sqlite");
+        let project = store
+            .execute({
+                let checkout = conversation.checkout_id.clone();
+                move |db| {
+                    Ok(db.query_row(
+                        "SELECT project_id FROM checkouts WHERE id = ?1",
+                        [checkout],
+                        |row| row.get::<_, String>(0),
+                    )?)
+                }
+            })
+            .await?;
+        let task = store
+            .create_project_task(project.clone(), "Goal fixture task".into())
+            .await?;
+        let stage = PipelineDispatch {
+            pipeline_run_id: "goal-pipeline".into(),
+            node_instance_id: "verification".into(),
+            plan_revision: Some("accepted".into()),
+            release_id: None,
+        };
+        store
+            .register_job_pipeline(project.clone(), stage.pipeline_run_id.clone())
+            .await?;
+        store
+            .register_job_pipeline_node(
+                project.clone(),
+                stage.pipeline_run_id.clone(),
+                stage.node_instance_id.clone(),
+                PipelineNodeKind::Execution,
+            )
+            .await?;
+        store
+            .set_job_pipeline_plan(
+                project.clone(),
+                stage.pipeline_run_id.clone(),
+                None,
+                "accepted".into(),
+            )
+            .await?;
+        let goal = store
+            .start_pipeline_goal(
+                stage.clone(),
+                JobContext {
+                    conversation_id: conversation.id.clone(),
+                    context_id: conversation.context_id,
+                },
+                scope.clone(),
+                Some(task.id.clone()),
+                GoalDefinition {
+                    objective: "Verify the accepted plan".into(),
+                    criteria: vec!["Collect fixture evidence".into()],
+                    max_turns: 1,
+                    max_seconds: None,
+                    token_budget: None,
+                },
+            )
+            .await?;
+        assert!(
+            store
+                .active_conversation_goal(conversation.id)
+                .await?
+                .is_none()
+        );
+        assert!(
+            store
+                .active_pipeline_goal(
+                    "foreign".into(),
+                    stage.pipeline_run_id.clone(),
+                    stage.node_instance_id.clone()
+                )
+                .await?
+                .is_none()
+        );
+        let run = store
+            .claim_next_job(AdmissionEnvironment {
+                runner: scope.runner.clone(),
+                bridge_available: true,
+            })
+            .await?
+            .context("Stage goal did not use the scheduler")?;
+        assert!(run.scope == scope);
+        // Simulate an admitted native owner while testing evidence storage independently of the provider.
+        store
+            .execute({
+                let revision = goal.id.clone();
+                move |db| {
+                    db.execute(
+                        "UPDATE goal_revisions SET continuation_owner = 'native' WHERE id = ?1",
+                        [revision],
+                    )?;
+                    Ok(())
+                }
+            })
+            .await?;
+        let observed = |reported_thread: &str| ProviderEvent {
+            location: ProviderLocation {
+                session_id: Some("native-session".into()),
+                ..Default::default()
+            },
+            data: ProviderEventData::GoalObserved {
+                observation: NativeGoalObservation {
+                    provider_session_id: reported_thread.into(),
+                    provider_goal_id: Some("provider-goal".into()),
+                    provider_turn_id: None,
+                    state: NativeGoalState::Active,
+                    reported_state: Some("active".into()),
+                    tokens_used: None,
+                    token_budget: None,
+                    elapsed_seconds: None,
+                    evaluation: None,
+                },
+            },
+        };
+        store
+            .record_agent_observation(
+                run.run.id.clone(),
+                EventSource::Provider,
+                observed("foreign"),
+            )
+            .await?;
+        assert!(
+            store
+                .active_pipeline_goal(
+                    project.clone(),
+                    stage.pipeline_run_id.clone(),
+                    stage.node_instance_id.clone()
+                )
+                .await?
+                .unwrap()
+                .provider_goal_id
+                .is_none()
+        );
+        store
+            .record_agent_observation(
+                run.run.id.clone(),
+                EventSource::Provider,
+                observed("native-session"),
+            )
+            .await?;
+        drop(store);
+        let store = Store::open(database)?;
+        let revision = store
+            .active_pipeline_goal(project, stage.pipeline_run_id, stage.node_instance_id)
+            .await?
+            .context("Stage goal revision was lost")?;
+        assert_eq!(revision.id, goal.id);
+        assert_eq!(revision.job.task_id.as_deref(), Some(task.id.as_str()));
+        assert_eq!(revision.job.checkout_id, conversation.checkout_id);
+        assert_eq!(revision.continuation_owner, GoalContinuationOwner::Native);
+        assert_eq!(
+            revision.provider_session_id.as_deref(),
+            Some("native-session")
+        );
+        assert_eq!(revision.provider_goal_id.as_deref(), Some("provider-goal"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_queued_goal_via_history_releases_its_owner() -> Result<()> {
+        use crate::jobs::{
+            AdmissionBlocker, AdmissionEnvironment, GoalDefinition, JobContext, QueueHistoryPolicy,
+        };
+
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let context = JobContext {
+            conversation_id: conversation.id.clone(),
+            context_id: conversation.context_id,
+        };
+        let definition = GoalDefinition {
+            objective: "Inspect the fixture".into(),
+            criteria: Vec::new(),
+            max_turns: 1,
+            max_seconds: None,
+            token_budget: Some(100),
+        };
+        store
+            .set_conversation_queue_history_policy(
+                conversation.id.clone(),
+                Some(QueueHistoryPolicy::Cancel),
+            )
+            .await?;
+        let goal = store
+            .start_conversation_goal(
+                context.clone(),
+                scope.clone(),
+                None,
+                definition.clone(),
+                None,
+            )
+            .await?;
+        let environment = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: true,
+        };
+        let inspection = store
+            .inspect_job(goal.job.project_id, goal.job.id, environment.clone())
+            .await?
+            .unwrap();
+        assert!(inspection.blockers.contains(&AdmissionBlocker::Policy {
+            reason: "The managed goal route cannot enforce this token budget",
+        }));
+        assert!(store.claim_next_job(environment).await?.is_none());
+        let next_context = store
+            .rewind_conversation_history(conversation.id.clone(), context.context_id, None)
+            .await?;
+        assert!(
+            store
+                .active_conversation_goal(conversation.id.clone())
+                .await?
+                .is_none()
+        );
+        let replacement = store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: conversation.id,
+                    context_id: next_context,
+                },
+                scope,
+                None,
+                GoalDefinition {
+                    token_budget: None,
+                    ..definition
+                },
+                None,
+            )
+            .await?;
+        assert_eq!(goal.goal_id, replacement.goal_id);
+        assert_ne!(goal.id, replacement.id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn instruction_dispatch_requires_the_claimed_revision_and_scope() -> Result<()> {
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let environment = crate::jobs::AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: false,
+        };
+        let text = "Only send the admitted revision";
+        store
+            .save_conversation_draft(conversation.id.clone(), text.into())
+            .await?;
+        store
+            .enqueue_conversation_turn(
+                crate::jobs::JobContext {
+                    conversation_id: conversation.id,
+                    context_id: conversation.context_id,
+                },
+                scope.clone(),
+                text.into(),
+            )
+            .await?;
+        let mut attempt = store
+            .claim_next_job(environment)
+            .await?
+            .context("The instruction was not claimed")?;
+        let correct = attempt
+            .input
+            .last()
+            .context("The claim has no message")?
+            .revision_id
+            .clone();
+        attempt.input.last_mut().unwrap().revision_id = "other-revision".into();
+        assert!(prepare_fixture_dispatch(&store, &attempt).await.is_err());
+        attempt.input.last_mut().unwrap().revision_id = correct;
+        attempt.scope.model = Some("other-model".into());
+        assert!(prepare_fixture_dispatch(&store, &attempt).await.is_err());
+        attempt.scope = scope;
+        prepare_fixture_dispatch(&store, &attempt).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pipeline_receives_only_the_first_compatible_instruction_after_restart() -> Result<()> {
+        exercise_pipeline_instruction_delivery(true).await
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_owner_delivery_holds_later_turns_on_its_context() -> Result<()> {
+        exercise_pipeline_instruction_delivery(false).await
+    }
+
+    async fn exercise_pipeline_instruction_delivery(confirmed: bool) -> Result<()> {
+        use crate::jobs::{
+            AdmissionBlocker, AdmissionEnvironment, InstructionDelivery, JobContext, JobRequest,
+            PipelineDispatch, PipelineNodeKind, QueueState,
+        };
+
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let database = scope.checkout.join("store.sqlite");
+        let project = store
+            .execute({
+                let checkout = conversation.checkout_id.clone();
+                move |db| {
+                    Ok(db.query_row(
+                        "SELECT project_id FROM checkouts WHERE id = ?1",
+                        [checkout],
+                        |row| row.get::<_, String>(0),
+                    )?)
+                }
+            })
+            .await?;
+        let environment = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: false,
+        };
+        store.set_job_queue_capacity(1).await?;
+        store
+            .register_job_pipeline(project.clone(), "pipeline".into())
+            .await?;
+        store
+            .set_job_pipeline_plan(project.clone(), "pipeline".into(), None, "v1".into())
+            .await?;
+        store
+            .register_job_pipeline_node(
+                project.clone(),
+                "pipeline".into(),
+                "owner".into(),
+                PipelineNodeKind::Execution,
+            )
+            .await?;
+        let request = |instructions: &str| JobRequest {
+            checkout_id: Some(conversation.checkout_id.clone()),
+            task_id: None,
+            mode: SessionMode::ReadOnly,
+            instructions: instructions.into(),
+            dependencies: Vec::new(),
+            requires_bridge: false,
+        };
+        let context = JobContext {
+            conversation_id: conversation.id.clone(),
+            context_id: conversation.context_id.clone(),
+        };
+        let binding = PipelineDispatch {
+            pipeline_run_id: "pipeline".into(),
+            node_instance_id: "owner".into(),
+            plan_revision: Some("v1".into()),
+            release_id: None,
+        };
+        let pipeline = if confirmed {
+            store
+                .submit_pinned_pipeline_agent_job(
+                    binding,
+                    scope.clone(),
+                    request("Pipeline prompt"),
+                    context.clone(),
+                    QuestionRoute::Native,
+                )
+                .await?
+        } else {
+            store
+                .submit_pipeline_agent_job(binding, scope.clone(), request("Pipeline prompt"))
+                .await?
+        };
+        let first = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("Missing pipeline run")?;
+        let conversation = store.conversation(first.conversation_id.clone()).await?;
+        let context = JobContext {
+            conversation_id: conversation.id.clone(),
+            context_id: conversation.context_id.clone(),
+        };
+        store.mark_agent_running(first.run.id.clone()).await?;
+        let child = store
+            .submit_agent_job(
+                first.run.id.clone(),
+                "child".into(),
+                request("Child prompt"),
+            )
+            .await?;
+        store
+            .request_pipeline_downstream_wait(
+                first.run.id.clone(),
+                "wait".into(),
+                vec![child.id.clone()],
+            )
+            .await?;
+        let enqueue = |text: &'static str| {
+            let store = &store;
+            let scope = scope.clone();
+            let context = context.clone();
+            async move {
+                store
+                    .save_conversation_draft(context.conversation_id.clone(), text.into())
+                    .await?;
+                store
+                    .enqueue_conversation_turn(context, scope, text.into())
+                    .await
+            }
+        };
+        let first_instruction = enqueue("Queued first").await?;
+        let second_instruction = enqueue("Queued second").await?;
+        let queue = store
+            .pending_conversation_instructions(conversation.id.clone(), environment.clone())
+            .await?;
+        store
+            .revise_pending_instruction(
+                conversation.id.clone(),
+                first_instruction.id.clone(),
+                queue[0].revision_id.clone(),
+                "Revised first".into(),
+                None,
+            )
+            .await?;
+        store
+            .finish_observed_agent_attempt(
+                first.run.id.clone(),
+                RunStatus::Interrupted,
+                Some("Yielded".into()),
+                None,
+                true,
+            )
+            .await?;
+        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        store
+            .set_pending_job_state(project.clone(), child.id, QueueState::Cancelled)
+            .await?;
+        let continuation = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("Missing owner continuation")?;
+        assert_eq!(continuation.previous_run_id.as_ref(), Some(&first.run.id));
+        let instruction = continuation.input.last().context("Missing queued input")?;
+        assert_eq!(instruction.text, "Revised first");
+        assert!(
+            continuation
+                .input
+                .iter()
+                .all(|message| message.text != "Queued second")
+        );
+        let claimed_revision = instruction.revision_id.clone();
+        let pending = store
+            .pending_conversation_instructions(conversation.id.clone(), environment.clone())
+            .await?;
+        assert_eq!(pending[0].delivery, InstructionDelivery::Delivering);
+        assert_eq!(pending[0].run_id.as_ref(), Some(&continuation.run.id));
+        assert!(!pending[0].editable);
+        assert!(
+            store
+                .set_pending_job_state(
+                    project.clone(),
+                    first_instruction.id.clone(),
+                    QueueState::Cancelled
+                )
+                .await
+                .is_err()
+        );
+        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+
+        drop(store);
+        let store = Store::open(database.clone())?;
+        store.recover_agent_attempts_after_restart().await?;
+        let resumed = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("Missing safe owner retry")?;
+        assert_eq!(resumed.previous_run_id.as_ref(), Some(&continuation.run.id));
+        assert_eq!(resumed.input.last().unwrap().revision_id, claimed_revision);
+        assert_eq!(
+            resumed
+                .input
+                .iter()
+                .filter(|message| message.revision_id == claimed_revision)
+                .count(),
+            1
+        );
+        let (attempts, active_claims) = store.execute({
+            let instruction = first_instruction.id.clone();
+            move |db| Ok(db.query_row(
+                "SELECT count(*), sum(superseded = 0) FROM instruction_delivery_attempts WHERE job_id = ?1",
+                [instruction], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )?)
+        }).await?;
+        assert_eq!((attempts, active_claims), (2, 1));
+        store.mark_agent_running(resumed.run.id.clone()).await?;
+        let dispatch = prepare_fixture_dispatch(&store, &resumed).await?;
+        if !confirmed {
+            drop(store);
+            let store = Store::open(database)?;
+            store.recover_agent_attempts_after_restart().await?;
+            let pending = store
+                .pending_conversation_instructions(conversation.id.clone(), environment.clone())
+                .await?;
+            assert_eq!(pending[0].id, first_instruction.id);
+            assert_eq!(pending[0].delivery, InstructionDelivery::NeedsReview);
+            assert_eq!(pending[0].run_id.as_ref(), Some(&resumed.run.id));
+            let later = store
+                .inspect_job(project.clone(), second_instruction.id, environment.clone())
+                .await?
+                .context("Missing later queued instruction")?;
+            assert!(
+                later
+                    .blockers
+                    .contains(&AdmissionBlocker::InstructionDeliveryUncertain {
+                        run_id: resumed.run.id.clone(),
+                    })
+            );
+            let owner = store
+                .inspect_job(project, pipeline.id, environment.clone())
+                .await?
+                .context("Missing owning job")?;
+            assert!(owner.recovery_actions.is_empty());
+            assert!(store.claim_next_job(environment).await?.is_none());
+            return Ok(());
+        }
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        store
+            .finish_agent_attempt(resumed.run.id.clone(), RunStatus::Succeeded, None)
+            .await?;
+        let delivered = store
+            .job(project.clone(), first_instruction.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap();
+        assert_eq!(delivered.run_id, resumed.run.id);
+        let owner = store
+            .job(project, pipeline.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap();
+        assert_eq!(owner.run_id, delivered.run_id);
+        let pending = store
+            .pending_conversation_instructions(conversation.id, environment.clone())
+            .await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, second_instruction.id);
+        let next = store
+            .claim_next_job(environment)
+            .await?
+            .context("Missing remaining instruction")?;
+        assert_eq!(next.input.last().unwrap().text, "Queued second");
+        assert!(
+            next.input
+                .iter()
+                .all(|message| message.revision_id != claimed_revision)
+        );
+        Ok(())
     }
 
     #[tokio::test]

@@ -193,7 +193,7 @@ pub(super) fn attempt_requirements(
     if accepted != policy.key || job.queue_state == QueueState::Cancelled {
         return Ok(Err(DispatchRejection::PolicyChanged));
     }
-    Ok(Ok(policy.requirements))
+    super::instruction_delivery::supplement_requirements(db, run, policy.requirements)
 }
 
 pub(crate) fn validate_attempt_policy(db: &Connection, run: &str) -> Result<bool> {
