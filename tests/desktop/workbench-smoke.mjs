@@ -310,33 +310,77 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     assert.deepEqual(await invoke(browser, "conversation_messages", { conversationId: conversation.id }), []);
 
     if (process.env.OMNIAGENT_LIVE_CONVERSATION === "1") {
+      const selector = `section[aria-label="${conversation.title}"]`;
+      const panel = browser.$(selector);
       const models = await invoke(browser, "conversation_models", { provider: "codex" });
       const model = models.find(({ option }) => option.selection.modelId === "gpt-6-luna" && option.selectable);
       assert.ok(model, "the installed profile does not offer the qualified fixture model");
-      const summary = browser.$("summary*=Choose a model");
-      await summary.click();
-      const modelRadio = browser.$(`input[aria-label="${model.option.name}"]`);
-      await modelRadio.click();
-      await browser.$('summary span[aria-label="Selected models"]').click();
+      const summary = `${selector} form details summary`;
+      await browser.$(summary).waitForDisplayed();
+      await browser.execute((summary) => document.querySelector(summary).focus(), summary);
+      await browser.keys("Enter");
+      const radioSelector = `${selector} input[aria-label="${model.option.name}"]`;
+      const modelRadio = browser.$(radioSelector);
+      await modelRadio.waitForDisplayed();
+      await browser.execute((radio) => document.querySelector(radio).focus(), radioSelector);
+      await browser.keys(" ");
+      await browser.waitUntil(() => modelRadio.isSelected());
+      const rating = model.option.rating;
+      assert.ok(rating);
+      const originalRating = await browser.execute((radio) => {
+        const option = document.querySelector(radio).closest("label");
+        return {
+          meters: [...option.querySelectorAll("meter")].map((meter) => [meter.getAttribute("aria-label"), meter.value]),
+          price: [...option.querySelectorAll("span")].find((span) => span.childElementCount === 0
+            && span.textContent.startsWith("API reference "))?.textContent,
+        };
+      }, radioSelector);
+      assert.deepEqual(originalRating.meters, [
+        ["Intelligence", rating.intelligenceTenths / 10],
+        ["Price score", rating.priceScore],
+      ]);
+      const rate = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(rating.apiReferenceCents / 100);
+      assert.equal(originalRating.price, `API reference ${rate} / 1M tokens`);
+      const compact = await browser.execute((radio) => {
+        const picker = document.querySelector(radio).closest("details");
+        const selected = picker.querySelector("summary [aria-label='Selected models']");
+        picker.style.maxWidth = "315px";
+        try {
+          return {
+            width: picker.clientWidth,
+            scrollWidth: picker.scrollWidth,
+            meters: [...selected.querySelectorAll("meter")].map((meter) => [meter.getAttribute("aria-label"), meter.value]),
+            price: [...selected.querySelectorAll("span")].find((span) => span.childElementCount === 0
+              && span.textContent.startsWith("API reference "))?.textContent,
+          };
+        } finally {
+          picker.style.removeProperty("max-width");
+        }
+      }, radioSelector);
+      assert.ok(compact.width > 0 && compact.width <= 315);
+      assert.equal(compact.scrollWidth, compact.width);
+      assert.deepEqual(compact.meters, originalRating.meters);
+      assert.equal(compact.price, originalRating.price);
+      await panel.$('summary span[aria-label="Selected models"]').click();
       const prompt = "Reply exactly OMNIAGENT_DESKTOP_REPLY without tools.";
       await recoveredDraft.setValue(prompt);
-      await browser.$("button=Send").click();
-      await browser.$("p=OMNIAGENT_DESKTOP_REPLY").waitForDisplayed({ timeout: 45_000 });
+      await panel.$("button=Send").click();
+      await panel.$("p=OMNIAGENT_DESKTOP_REPLY").waitForDisplayed({ timeout: 45_000 });
       await browser.waitUntil(async () => (await invoke(browser, "latest_conversation_run", {
         conversationId: conversation.id,
       }))?.status === "succeeded");
       assert.equal(await invoke(browser, "conversation_draft", { conversationId: conversation.id }), "");
       const messages = await invoke(browser, "conversation_messages", { conversationId: conversation.id });
       assert.deepEqual(messages.map(({ text }) => text), [prompt, "OMNIAGENT_DESKTOP_REPLY"]);
-      await browser.$("button=Exact input").click();
-      await browser.$('section[aria-label="Exact provider input"] pre').waitForDisplayed();
-      const wire = JSON.parse(await browser.$('section[aria-label="Exact provider input"] pre').getText());
+      await panel.$("button=Exact input").click();
+      await panel.$('section[aria-label="Exact provider input"] pre').waitForDisplayed();
+      const wire = JSON.parse(await panel.$('section[aria-label="Exact provider input"] pre').getText());
       assert.equal(wire.params.input[0].text, prompt);
 
       await recoveredDraft.setValue("Write every number from one to two thousand in words on separate lines. Do not use tools.");
-      await browser.$("button=Send").click();
-      await browser.$('div[aria-label="Streaming response"]').waitForDisplayed({ timeout: 45_000 });
-      await browser.$("button=Stop").click();
+      await panel.$("button=Send").click();
+      await panel.$('div[aria-label="Streaming response"]').waitForDisplayed({ timeout: 45_000 });
+      await panel.$("button=Stop").click();
       await browser.waitUntil(async () => {
         const run = await invoke(browser, "latest_conversation_run", { conversationId: conversation.id });
         return ["cancelled", "interrupted"].includes(run?.status);
