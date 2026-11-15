@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     conversations::{MessageRevision, SessionScope},
     protection,
-    providers::ProviderEvent,
+    providers::{ProviderEvent, capabilities::CapabilityAssessment},
     store::Store,
 };
 
@@ -19,6 +19,8 @@ pub struct ContextSnapshot {
     pub base_commit: Option<String>,
     pub submitted_messages: Vec<MessageRevision>,
     pub native_history: NativeHistory,
+    #[serde(default)]
+    pub capabilities: Option<CapabilityAssessment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

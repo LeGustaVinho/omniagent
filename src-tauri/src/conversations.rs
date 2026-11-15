@@ -711,6 +711,7 @@ mod tests {
                     base_commit: None,
                     submitted_messages: attempt.input.clone(),
                     native_history,
+                    capabilities: None,
                 },
                 vec![b"{\"fixture\":true}\n".to_vec()],
             )
@@ -959,7 +960,8 @@ mod tests {
                 json!({"id":2,"result":{"thread":{"id":"native-session","turns":[{"id":"history"}]},"model":"observed","cwd":request.checkout,
                     "sandbox":{"type":"readOnly"}}}),
                 json!({"id":3,"result":{"data":[]}}),
-                json!({"id":4,"result":{"turn":{"id":"native-turn"}}}),
+                json!({"id":4,"result":{"config":{"approval_policy":"never","sandbox_mode":"read-only"}}}),
+                json!({"id":5,"result":{"turn":{"id":"native-turn"}}}),
                 json!({"method":"thread/settings/updated","params":{"threadId":"native-session",
                     "threadSettings":{"model":"observed-later","effort":"high"}}}),
                 json!({"method":"item/completed","params":{"threadId":"native-session","turnId":"native-turn",
@@ -1034,6 +1036,10 @@ mod tests {
             first_dispatch.snapshot.submitted_messages[0].text,
             first_prompt
         );
+        let assessment = first_dispatch.snapshot.capabilities.as_ref().unwrap();
+        assert_eq!(assessment.scope.checkout.id, conversation.checkout_id);
+        assert_eq!(assessment.scope.reported_model.as_deref(), Some("observed"));
+        assert!(assessment.scope.configuration.provider_revision.is_some());
         let second_dispatch = store
             .agent_dispatch(conversation.id.clone(), resumed_run.clone())
             .await?
@@ -1050,6 +1056,11 @@ mod tests {
         let observations = store
             .agent_observations(conversation.id.clone(), resumed_run, 0)
             .await?;
+        assert!(observations.iter().any(|observation| {
+            observation.source == EventSource::Application
+                && matches!(&observation.event.data, ProviderEventData::CapabilityAssessmentUpdated { assessment }
+                    if assessment.scope.reported_model.as_deref() == Some("observed-later"))
+        }));
         for expected in [
             ProviderEventData::HistoryReported {
                 turns: Some(1),
@@ -1096,6 +1107,10 @@ mod tests {
             .unwrap();
         assert_eq!(original.snapshot.submitted_messages[0].text, first_prompt);
         assert_eq!(original.frames, first_dispatch.frames);
+        assert_eq!(
+            original.snapshot.capabilities,
+            first_dispatch.snapshot.capabilities
+        );
         let state = store.execute(move |db| {
             let (snapshot, frames): (Vec<u8>, Vec<u8>) = db.query_row(
                 "SELECT s.payload, d.frames FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id WHERE s.run_id = ?1",

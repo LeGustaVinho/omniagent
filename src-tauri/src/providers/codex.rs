@@ -12,6 +12,7 @@ use super::{
     AdapterUpdate, ApprovalDecision, AuthProbe, Authentication, CliAdapter, CliSession, Interrupt,
     ProbeKind, Provider, ProviderEvent, ProviderEventData, ProviderLocation, ReportedModel,
     RequestId, SessionIntent, SessionMode, SessionRequest, Transport, TurnInput, TurnOutcome,
+    WireMessage, capabilities,
     rpc::{self, Rpc},
 };
 use crate::{
@@ -71,6 +72,7 @@ impl CliAdapter for CodexAdapter {
 enum Request {
     Initialize,
     OpenSession,
+    ReadConfiguration,
     ModelPage,
     StartTurn,
     Interrupt,
@@ -175,6 +177,11 @@ impl CodexSession {
             return Ok(self.diagnostic("Codex sent a response for an unknown request"));
         };
         if let Some(error) = response.get("error") {
+            if request == Request::ReadConfiguration {
+                return Ok(self.events(vec![
+                    self.event(ProviderEventData::ConfigurationReported { revision: None }),
+                ]));
+            }
             let message =
                 diagnostics::preview(error["message"].as_str().unwrap_or("Codex request failed"));
             if request == Request::ModelPage {
@@ -249,6 +256,21 @@ impl CodexSession {
                     )?],
                     events,
                 })
+            }
+            Request::ReadConfiguration => {
+                let revision = if let Some(mut config) = result
+                    .get("config")
+                    .filter(|value| value.is_object())
+                    .cloned()
+                {
+                    config.sort_all_objects();
+                    Some(capabilities::revision(&config)?)
+                } else {
+                    None
+                };
+                Ok(self.events(vec![
+                    self.event(ProviderEventData::ConfigurationReported { revision }),
+                ]))
             }
             Request::ModelPage => self.model_page(result),
             Request::StartTurn => {
@@ -588,6 +610,14 @@ impl CliSession for CodexSession {
             }), Request::Initialize)?],
             events: vec![],
         })
+    }
+
+    fn query_effective_configuration(&mut self) -> Result<Option<WireMessage>> {
+        Ok(Some(self.rpc.request(
+            "config/read",
+            json!({"cwd": self.request.checkout, "includeLayers": false}),
+            Request::ReadConfiguration,
+        )?))
     }
 
     fn send(&mut self, input: TurnInput) -> Result<AdapterUpdate> {

@@ -15,7 +15,7 @@ use crate::{
     process::TerminalOutcome,
     process_io::CapturedProcess,
     repository,
-    runner::{CONTRACT_VERSION, LaunchRequest, Runner},
+    runner::{CONTRACT_VERSION, ExecutionPlatform, LaunchRequest, Runner},
     runs::RunStatus,
     store::Store,
 };
@@ -24,6 +24,8 @@ use super::{
     AdapterUpdate, ApprovalDecision, CliSession, Provider, ProviderEvent, ProviderEventData,
     ProviderLocation, RequestId, SessionIntent, SessionRequest, TurnInput, TurnOutcome,
     WireMessage,
+    capabilities::{CapabilityScope, ReportedCapabilities},
+    configuration,
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -185,6 +187,10 @@ pub fn start_managed_turn(store: Store, runner: Arc<dyn Runner>, plan: AttemptPl
             plan,
             final_answer: String::new(),
             streamed_answer: String::new(),
+            reported: ReportedCapabilities::default(),
+            capability_scope: None,
+            executable_revision: None,
+            platform: None,
         };
         let outcome = execution.run(runner.as_ref(), &receiver);
         let status = match outcome {
@@ -228,12 +234,20 @@ struct TurnExecution {
     plan: AttemptPlan,
     final_answer: String,
     streamed_answer: String,
+    reported: ReportedCapabilities,
+    capability_scope: Option<CapabilityScope>,
+    executable_revision: Option<String>,
+    platform: Option<ExecutionPlatform>,
 }
 
 impl TurnExecution {
     fn record(&mut self, event: ProviderEvent, source: EventSource) -> Result<()> {
+        let mut scope_changed = false;
         // Child traffic belongs to the run timeline, not the parent transcript.
         if event.location.parent_item_id.is_none() {
+            if source == EventSource::Provider {
+                scope_changed = self.reported.observe(&event.data);
+            }
             match &event.data {
                 ProviderEventData::AssistantDelta { text } => self.streamed_answer.push_str(text),
                 ProviderEventData::AssistantMessage { text } => self.final_answer.push_str(text),
@@ -244,7 +258,27 @@ impl TurnExecution {
             self.plan.run.id.clone(),
             source,
             event,
-        ))
+        ))?;
+        if scope_changed && let Some(scope) = &mut self.capability_scope {
+            scope.reported_model = self.reported.model.clone();
+            scope.reported_effort = self.reported.effort.clone();
+            let descriptors = self.reported.descriptors(scope);
+            let assessment = self.app.block_on(
+                self.store
+                    .resolve_capability_assessment(scope.clone(), descriptors),
+            )?;
+            self.app.block_on(self.store.record_agent_observation(
+                self.plan.run.id.clone(),
+                EventSource::Application,
+                ProviderEvent {
+                    location: ProviderLocation::default(),
+                    data: ProviderEventData::CapabilityAssessmentUpdated {
+                        assessment: Box::new(assessment),
+                    },
+                },
+            ))?;
+        }
+        Ok(())
     }
 
     fn run(
@@ -278,6 +312,8 @@ impl TurnExecution {
             .iter()
             .map(|argument| argument.as_os_str())
             .collect::<Vec<_>>();
+        self.executable_revision = runner.executable_revision(&scope.executable);
+        self.platform = runner.execution_platform();
         let mut process = runner.launch(LaunchRequest {
             version: CONTRACT_VERSION,
             executable: &scope.executable,
@@ -304,6 +340,8 @@ impl TurnExecution {
         bounded_write(process, session.start()?.outbound)?;
         let startup_deadline = Instant::now() + Duration::from_secs(20);
         let mut sent = false;
+        let mut ready = false;
+        let mut configuration_deadline = None;
         loop {
             let command = commands.try_recv();
             match command {
@@ -327,7 +365,15 @@ impl TurnExecution {
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
-            if !sent {
+            if ready
+                && !sent
+                && (self.reported.configuration_reported
+                    || configuration_deadline.is_none_or(|deadline| Instant::now() >= deadline))
+            {
+                self.dispatch(process, session)?;
+                sent = true;
+            }
+            if !ready {
                 ensure!(
                     Instant::now() < startup_deadline,
                     "CLI session startup timed out"
@@ -348,7 +394,7 @@ impl TurnExecution {
                 }
             };
             let update = session.receive(frame)?;
-            let should_send = !sent
+            let session_ready = !ready
                 && update.events.iter().any(|event| {
                     matches!(event.data, ProviderEventData::SessionReady { .. })
                         || (self.plan.scope.provider == Provider::Claude
@@ -366,9 +412,12 @@ impl TurnExecution {
             if failed_start {
                 return Ok(RunStatus::Failed);
             }
-            if should_send {
-                self.dispatch(process, session)?;
-                sent = true;
+            if session_ready {
+                ready = true;
+                if let Some(probe) = session.query_effective_configuration()? {
+                    bounded_write(process, vec![probe])?;
+                    configuration_deadline = Some(Instant::now() + Duration::from_secs(2));
+                }
             }
         }
     }
@@ -392,13 +441,34 @@ impl TurnExecution {
             },
             _ => anyhow::bail!("inconsistent resume cursor"),
         };
+        let configuration = configuration::inspect(
+            self.plan.scope.provider,
+            &self.plan.scope.checkout,
+            self.reported.configuration_revision.as_deref(),
+        )?;
+        let scope = CapabilityScope::from_dispatch(
+            &self.plan.scope,
+            self.plan.run.checkout_id.clone(),
+            self.executable_revision.clone(),
+            self.platform.clone(),
+            configuration,
+            self.reported.model.clone(),
+            self.reported.effort.clone(),
+        );
+        let descriptors = self.reported.descriptors(&scope);
+        let capabilities = self.app.block_on(
+            self.store
+                .resolve_capability_assessment(scope.clone(), descriptors),
+        )?;
+        self.capability_scope = Some(scope);
         let snapshot = ContextSnapshot {
-            version: 1,
+            version: 2,
             context_id: self.plan.context_id.clone(),
             scope: self.plan.scope.clone(),
             base_commit: repository::base_commit(&self.plan.scope.checkout)?,
             submitted_messages: self.plan.input.clone(),
             native_history,
+            capabilities: Some(capabilities),
         };
         let frames = update
             .outbound

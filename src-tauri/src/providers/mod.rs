@@ -76,7 +76,7 @@ pub enum Authentication {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     ModelInventory,
@@ -89,6 +89,23 @@ pub enum Capability {
     NativeCompaction,
     NativeSuggestions,
     SideRequest,
+    WorkspaceWrite,
+}
+
+impl Capability {
+    pub const ALL: [Self; 11] = [
+        Self::ModelInventory,
+        Self::Resume,
+        Self::Reasoning,
+        Self::ToolApprovals,
+        Self::PlanningQuestions,
+        Self::CancelTurn,
+        Self::SubagentEvents,
+        Self::NativeCompaction,
+        Self::NativeSuggestions,
+        Self::SideRequest,
+        Self::WorkspaceWrite,
+    ];
 }
 
 #[derive(Clone)]
@@ -219,6 +236,12 @@ pub enum ProviderEventData {
     DispatchSubmitted {
         dispatch_id: String,
     },
+    ConfigurationReported {
+        revision: Option<String>,
+    },
+    CapabilityAssessmentUpdated {
+        assessment: Box<capabilities::CapabilityAssessment>,
+    },
     Handshake {
         protocol: String,
         capabilities: Vec<Capability>,
@@ -339,6 +362,9 @@ pub trait CliAdapter: Send + Sync {
 pub trait CliSession: Send {
     fn arguments(&self) -> Vec<OsString>;
     fn start(&mut self) -> anyhow::Result<AdapterUpdate>;
+    fn query_effective_configuration(&mut self) -> anyhow::Result<Option<WireMessage>> {
+        Ok(None)
+    }
     fn send(&mut self, input: TurnInput) -> anyhow::Result<AdapterUpdate>;
     fn receive(&mut self, frame: OutputFrame) -> anyhow::Result<AdapterUpdate>;
     fn respond_approval(
@@ -451,8 +477,10 @@ mod tests {
     }
 }
 pub mod antigravity;
+pub mod capabilities;
 pub mod claude;
 pub mod codex;
+mod configuration;
 pub mod goal;
 pub mod profiles;
 mod rpc;
