@@ -1,6 +1,7 @@
 import type { AdmissionBlocker } from "@/bindings/AdmissionBlocker";
 import type { JobInspection } from "@/bindings/JobInspection";
 import type { RunStatus } from "@/bindings/RunStatus";
+import type { RequiredCustomization } from "@/bindings/RequiredCustomization";
 
 export type JobState = "Queued" | "Starting" | "Running" | "Waiting for input" | "Waiting for approval" | "Paused" | "Interrupted" | "Completed" | "Failed" | "Cancelled";
 
@@ -35,6 +36,10 @@ export function queueJobState({ job, blockers }: JobInspection): JobState {
   return "Queued";
 }
 
+export function customizationLabel(requirement: RequiredCustomization) {
+  return requirement.type === "instruction" ? requirement.path : `${requirement.type.replaceAll("_", " ")} ${requirement.id}`;
+}
+
 export function queueBlockerReason(blocker: AdmissionBlocker): string {
   switch (blocker.type) {
     case "queue_paused": return "The job queue is paused.";
@@ -49,6 +54,21 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
     case "context_changed": return `The conversation changed since context ${blocker.contextId} was queued.`;
     case "conversation_busy": return "Waiting for the active conversation run.";
     case "missing_capability": return `Required capability unavailable: ${blocker.capability.replaceAll("_", " ")}.`;
+    case "dispatch_rejected": {
+      const rejection = blocker.rejection;
+      switch (rejection.type) {
+        case "policy_changed": return "The project rule changed before dispatch. Review the current rule before retrying.";
+        case "profile_unavailable": return "The selected CLI profile changed or could not be verified.";
+        case "worktree_unavailable": return "The worktree identity could not be verified.";
+        case "requirements": {
+          const missing = [
+            ...rejection.capabilities.map((capability) => capability.replaceAll("_", " ")),
+            ...rejection.customizations.map(customizationLabel),
+          ];
+          return `Could not verify required dispatch evidence: ${missing.join(", ")}.`;
+        }
+      }
+    }
     case "writer": return blocker.needsReview ? "The previous worktree writer needs review." : "Waiting for the worktree writer.";
     case "app_writer": return "Waiting for an app write to finish.";
     case "pending_worktree_changes": return `The worktree has pending changes for task scope ${blocker.scopeTaskId}.`;

@@ -553,6 +553,87 @@ async function verifyDetachedJob(browser, application, scratch) {
   }
 }
 
+async function verifyJobPolicy(browser, application, scratch) {
+  const repo = join(scratch, "Policy checkout");
+  git(scratch, "init", "-q", repo);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Fixture");
+  const checkout = await invoke(browser, "register_project", { directory: repo });
+  await selectCheckout(browser, checkout);
+  await writeFile(join(repo, "release-desktop-jobs"), "");
+  const projectId = checkout.projectId;
+  const queue = () => invoke(browser, "project_job_queue", { projectId });
+  const configured = (await invoke(browser, "cli_executables")).find(({ provider }) => provider === "codex");
+  const initial = (await queue()).settings;
+  const originalRules = await invoke(browser, "project_job_rules", { projectId });
+  await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
+  let rules = originalRules;
+  async function setRules(next) {
+    rules = await invoke(browser, "set_project_job_rules", { projectId, expected: rules, rules: next });
+  }
+
+  try {
+    assert.equal(initial.capacity, 3);
+    await browser.$('button[aria-label="Queue"]').click();
+    const queuePanel = browser.$('section[aria-label="Execution queue"]');
+    await queuePanel.$("summary=Queue settings").click();
+    await queuePanel.$('input[type="number"]').setValue(2);
+    await queuePanel.$("button=Save capacity").click();
+    await browser.waitUntil(async () => (await queue()).settings.capacity === 2);
+
+    const allowed = {
+      role: "operator",
+      operation: "read_only",
+      workspace: { type: "checkout", checkoutId: checkout.checkoutId },
+      permission: "allow",
+      requirements: {
+        capabilities: ["native_goal_command"],
+        customizations: [{ type: "instruction", path: "AGENTS.md" }],
+      },
+    };
+    await setRules([allowed]);
+    const models = await invoke(browser, "conversation_models", { provider: "codex" });
+    const model = models.find(({ option }) => option.selection.modelId === "desktop-fixture" && option.selectable);
+    assert.ok(model);
+    const chat = await invoke(browser, "create_conversation", { checkoutId: checkout.checkoutId, title: "Policy check" });
+    const text = "Run the queued job while detached";
+    await invoke(browser, "save_conversation_draft", { conversationId: chat.id, text });
+    const job = await invoke(browser, "start_conversation_turn", {
+      conversationId: chat.id, selection: model.option.selection, mode: "read_only", text,
+    });
+    const inspect = async () => (await queue()).jobs.find((entry) => entry.job.id === job.id);
+    await browser.waitUntil(async () => (await inspect()).job.latestAttempt?.status === "failed", { timeout: 20_000 });
+    const failed = await inspect();
+    const runId = failed.job.latestAttempt.runId;
+    assert.deepEqual(failed.blockers, [{ type: "dispatch_rejected", rejection: {
+      type: "requirements", ...allowed.requirements,
+    } }]);
+    assert.equal(await invoke(browser, "conversation_input", { conversationId: chat.id, runId }), null);
+    await assert.rejects(access(join(repo, "detached-job-dispatched")), { code: "ENOENT" });
+
+    await writeFile(join(repo, "AGENTS.md"), "# Fixture\n\nUse the selected worktree.\n");
+    await setRules([{ ...allowed, requirements: { ...allowed.requirements, capabilities: [] } }]);
+    const alternate = join(scratch, "refreshed-cli");
+    await mkdir(alternate);
+    const executable = join(alternate, "omniagent.exe");
+    await copyFile(application, executable);
+    await invoke(browser, "set_cli_executable", { provider: "codex", executable });
+    await invoke(browser, "queue_job_recovery", { projectId, jobId: job.id, runId, action: "retry" });
+    await browser.waitUntil(async () => {
+      const attempt = (await inspect()).job.latestAttempt;
+      return attempt?.previousRunId === runId && ["succeeded", "failed", "cancelled", "interrupted"].includes(attempt.status);
+    }, { timeout: 20_000 });
+    const retried = await inspect();
+    assert.deepEqual(retried.blockers, []);
+    assert.equal(retried.job.latestAttempt.status, "succeeded");
+    await access(join(repo, "detached-job-dispatched"));
+  } finally {
+    await setRules(originalRules);
+    await invoke(browser, "set_job_queue_capacity", { capacity: initial.capacity });
+    await invoke(browser, "set_cli_executable", { provider: "codex", executable: configured.executable });
+  }
+}
+
 test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => {
   assert.equal(process.platform, "win32");
   const root = await realpath(tmpdir());
@@ -899,6 +980,9 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
       }, { timeout: 15_000 });
     }
     await checkSimulation(browser, main);
+    await t.test("checks the current worktree and required evidence on a linked retry", async () => {
+      await verifyJobPolicy(browser, application, scratch);
+    });
     await t.test("dispatches queued work while the WebView is detached and restores the same attempt", async () => {
       await verifyDetachedJob(browser, application, scratch);
     });

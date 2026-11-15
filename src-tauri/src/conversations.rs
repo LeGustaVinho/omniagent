@@ -789,7 +789,7 @@ impl Store {
     }
 
     pub(crate) async fn record_agent_launch_intent(&self, run_id: String) -> Result<bool> {
-        self.execute(move |db| {
+        let accepted = self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             active_attempt(&tx, &run_id)?;
             let cancel_requested: bool = tx.query_row(
@@ -797,13 +797,18 @@ impl Store {
                 [&run_id], |row| row.get(0),
             )?;
             if cancel_requested {
-                return Ok(false);
+                return Ok(Some(false));
+            }
+            if !crate::jobs::validate_attempt_policy(&tx, &run_id)? {
+                tx.commit()?;
+                return Ok(None);
             }
             crate::jobs::record_process_launch(&tx, &run_id)?;
             tx.commit()?;
-            Ok(true)
+            Ok(Some(true))
         })
-        .await
+        .await?;
+        accepted.context("The project rule changed before process launch")
     }
 
     pub async fn finish_agent_attempt(

@@ -7,13 +7,18 @@ use crate::{
     conversations::{self, NativeJobRecovery, SessionScope},
     dispatch::ContextSnapshot,
     protection,
-    providers::{Provider, SessionMode},
+    providers::{
+        Provider, SessionMode,
+        profiles::{DESKTOP_PERMISSION_REVISION, desktop_profile},
+    },
     repository,
     runs::RunStatus,
     store::Store,
 };
 
-use super::{Job, QueueState, admission::recovery_scope, load_job};
+use super::{
+    Job, JobOrigin, QueueState, admission::recovery_scope, load_job, policy::reconcile_approval,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -184,7 +189,7 @@ impl RecoverySource {
 // Only work proven never launched can be retried automatically. Keep the
 // previous attempt and its frozen context for the scheduler's normal checks.
 pub(crate) fn requeue_unlaunched_job(db: &Connection, run_id: &str) -> Result<()> {
-    db.execute(
+    let queued = db.execute(
         "INSERT INTO job_recoveries (job_id, source_run_id, action, context_id)
          SELECT j.id, a.run_id, 'retry', run.result_context_id
          FROM job_attempts a JOIN jobs j ON j.id = a.job_id
@@ -196,6 +201,15 @@ pub(crate) fn requeue_unlaunched_job(db: &Connection, run_id: &str) -> Result<()
          ON CONFLICT(job_id) DO NOTHING",
         [run_id],
     )?;
+    if queued != 0 {
+        let (project, id): (String, String) = db.query_row(
+            "SELECT j.project_id, j.id FROM jobs j JOIN job_attempts a ON a.job_id = j.id WHERE a.run_id = ?1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let job = load_job(db, &project, &id)?.context("Recovery job disappeared")?;
+        reconcile_approval(db, &job)?;
+    }
     Ok(())
 }
 
@@ -217,14 +231,17 @@ impl Store {
         expected_run: String,
         action: RecoveryAction,
     ) -> Result<Job> {
-        let (checkout_id, owner, scope) = self
+        let (checkout_id, owner, scope, refresh_desktop) = self
             .execute({
                 let (project, id) = (project_id.clone(), job_id.clone());
                 move |db| {
                     let job = load_job(db, &project, &id)?
                         .context("Job is unavailable in this project")?;
                     let scope = recovery_scope(db, &job)?;
-                    Ok((job.checkout_id, job.worktree_owner_task_id, scope))
+                    let refresh = job.origin == JobOrigin::Operator
+                        && scope.permission_revision == DESKTOP_PERMISSION_REVISION
+                        && scope.account_binding.is_none();
+                    Ok((job.checkout_id, job.worktree_owner_task_id, scope, refresh))
                 }
             })
             .await?;
@@ -239,6 +256,39 @@ impl Store {
         } else {
             repository::verify_checkout(self, checkout_id, scope.checkout.clone()).await?;
         }
+        let refreshed = if refresh_desktop {
+            let configured = self.configured_executable(scope.provider).await?;
+            let configured_path = configured.executable.clone();
+            let model = scope
+                .model
+                .clone()
+                .context("The desktop job has no selected model")?;
+            let antigravity_model =
+                (scope.provider == Provider::Antigravity).then(|| model.clone());
+            let profile =
+                tokio::task::spawn_blocking(move || desktop_profile(configured, antigravity_model))
+                    .await??;
+            ensure!(
+                profile.models.iter().any(|item| item.option.selectable
+                    && item.option.selection.profile_id == scope.profile_id
+                    && item.option.selection.model_id == model
+                    && scope
+                        .effort
+                        .as_ref()
+                        .is_none_or(|effort| item.efforts.contains(effort))),
+                "The original job model or thinking level is unavailable"
+            );
+            let mut current = scope.clone();
+            current.executable = profile.executable;
+            current.cli_version = profile.version;
+            Some((configured_path, current))
+        } else {
+            ensure!(
+                scope.executable.is_file(),
+                "The job's CLI executable is unavailable"
+            );
+            None
+        };
         let job = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -265,6 +315,23 @@ impl Store {
                     );
                     return Ok(job);
                 }
+                if let Some((configured, current)) = refreshed {
+                    let actual: Option<String> = tx
+                        .query_row(
+                            "SELECT executable FROM cli_executables WHERE provider = ?1",
+                            [current.provider.as_str()],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    ensure!(
+                        actual == configured,
+                        "The configured CLI changed during recovery"
+                    );
+                    tx.execute(
+                        "UPDATE jobs SET operator_scope = ?1 WHERE id = ?2",
+                        params![protection::protect(&serde_json::to_vec(&current)?)?, job.id],
+                    )?;
+                }
                 tx.execute(
                     "INSERT INTO job_recoveries VALUES (?1, ?2, ?3, ?4)",
                     params![
@@ -282,6 +349,7 @@ impl Store {
                 }
                 let job =
                     load_job(&tx, &project_id, &job_id)?.context("Recovery job disappeared")?;
+                reconcile_approval(&tx, &job)?;
                 tx.commit()?;
                 Ok(job)
             })

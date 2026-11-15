@@ -135,8 +135,12 @@ impl Store {
         );
         let snapshot_cipher = protection::protect(&serde_json::to_vec(&snapshot)?)?;
         let frame_cipher = protection::protect(&serde_json::to_vec(&frames)?)?;
-        self.execute(move |db| {
+        let dispatched = self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if !crate::jobs::validate_attempt_policy(&tx, &run_id)? {
+                tx.commit()?;
+                return Ok(None);
+            }
             let (context, turn, session): (String, String, String) = tx.query_row(
                 "SELECT a.context_id, a.turn_id, a.agent_session_id
                  FROM agent_attempts a JOIN active_agent_attempts l ON l.run_id = a.run_id WHERE a.run_id = ?1",
@@ -151,8 +155,9 @@ impl Store {
                         VALUES (?1, ?2, ?3, 1, ?4, 'prepared')", params![dispatch_id, turn, snapshot_id, frame_cipher])?;
             tx.execute("UPDATE agent_sessions SET cursor_context_id = NULL WHERE id = ?1", [&session])?;
             tx.commit()?;
-            Ok(dispatch_id)
-        }).await
+            Ok(Some(dispatch_id))
+        }).await?;
+        dispatched.context("The project rule changed before prompt dispatch")
     }
 
     pub(crate) async fn settle_dispatch(

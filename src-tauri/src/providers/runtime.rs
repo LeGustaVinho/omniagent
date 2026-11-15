@@ -19,7 +19,7 @@ use crate::{
     conversations::{AttemptPlan, MessageRevision, MessageRole, PermissionRoute},
     diagnostics,
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
-    jobs::{FailureCause, FailureObservation, FailurePhase, LaunchGate},
+    jobs::{DispatchRejection, FailureCause, FailureObservation, FailurePhase, LaunchGate},
     mcp_bridge::{PERMISSION_PREFIX, Registration, RunBridge},
     process::TerminalOutcome,
     process_io::CapturedProcess,
@@ -45,6 +45,8 @@ use super::{
     steering::{SteerOutcome, SteerTarget},
     suggestions::SuggestionOutcome,
 };
+
+mod requirements;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Interruption {
@@ -478,19 +480,30 @@ impl TurnExecution {
         if self.exiting() {
             return Ok(RunStatus::Interrupted);
         }
+        self.app.block_on(
+            self.store
+                .job_dispatch_requirements(self.plan.run.id.clone()),
+        )?;
         let scope = self.plan.scope.clone();
-        ensure!(
-            scope.runner == runner.identity(),
-            "selected runner differs from admission"
-        );
-        let checkout = self
-            .app
-            .block_on(repository::verify_checkout(
-                &self.store,
-                self.plan.run.checkout_id.clone(),
-                scope.checkout.clone(),
-            ))
-            .inspect_err(|_| self.failure.cause = Some(FailureCause::WorktreeUnavailable))?;
+        if let Err(error) = self.verify_effective_profile(runner) {
+            if self.exiting() {
+                return Ok(RunStatus::Interrupted);
+            }
+            self.reject_dispatch(DispatchRejection::ProfileUnavailable)?;
+            return Err(error);
+        }
+        let checkout = match self.app.block_on(repository::verify_checkout(
+            &self.store,
+            self.plan.run.checkout_id.clone(),
+            scope.checkout.clone(),
+        )) {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                self.reject_dispatch(DispatchRejection::WorktreeUnavailable)?;
+                self.failure.cause = Some(FailureCause::WorktreeUnavailable);
+                return Err(error);
+            }
+        };
         let adapter = scope.provider.adapter();
         let mut session = adapter.create_session(SessionRequest {
             checkout: scope.checkout.clone(),
@@ -973,6 +986,7 @@ impl TurnExecution {
             self.store
                 .resolve_capability_assessment(scope.clone(), descriptors),
         )?;
+        self.check_dispatch_requirements(&capabilities, &instructions, checkout)?;
         let mut input = format_input(&self.plan.input)?;
         if !self.plan.question_route.is_native() {
             input.text.push_str("\n\n");

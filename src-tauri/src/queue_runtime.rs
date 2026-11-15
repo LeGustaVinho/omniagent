@@ -1,6 +1,6 @@
 use omniagent::{
     diagnostics,
-    jobs::{Job, JobFailure, JobRequest, QueueSettings, QueueState, RecoveryAction},
+    jobs::{Job, JobFailure, JobRequest, JobRule, QueueSettings, QueueState, RecoveryAction},
     store::Store,
 };
 use tauri::State;
@@ -27,6 +27,38 @@ pub async fn set_job_queue_paused(
     paused: bool,
 ) -> Result<QueueSettings, String> {
     store.set_job_queue_paused(paused).await.map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn set_job_queue_capacity(
+    store: State<'_, Store>,
+    capacity: u32,
+) -> Result<QueueSettings, String> {
+    store
+        .set_job_queue_capacity(capacity)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn project_job_rules(
+    store: State<'_, Store>,
+    project_id: String,
+) -> Result<Vec<JobRule>, String> {
+    store.project_job_rules(project_id).await.map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn set_project_job_rules(
+    store: State<'_, Store>,
+    project_id: String,
+    expected: Vec<JobRule>,
+    rules: Vec<JobRule>,
+) -> Result<Vec<JobRule>, String> {
+    store
+        .set_project_job_rules(project_id, expected, rules)
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]

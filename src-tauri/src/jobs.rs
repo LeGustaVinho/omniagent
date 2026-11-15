@@ -12,6 +12,7 @@ use crate::{
 mod admission;
 mod failures;
 mod notices;
+mod policy;
 mod recovery;
 mod scheduler;
 pub use admission::{
@@ -22,6 +23,11 @@ pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
+pub(crate) use policy::validate_attempt_policy;
+pub use policy::{
+    DispatchRejection, JobPermission, JobRequirements, JobRole, JobRule, JobWorkspace,
+    RequiredCustomization,
+};
 pub use recovery::RecoveryAction;
 pub(crate) use recovery::requeue_unlaunched_job;
 pub use scheduler::JobScheduler;
@@ -350,12 +356,6 @@ fn insert_job(
             params![id, project_id, scope],
         )?;
     }
-    if matches!(origin, JobOrigin::Agent { .. }) || request.mode == SessionMode::ApprovedWrite {
-        db.execute(
-            "INSERT INTO job_approvals VALUES (?1, ?2, 'pending')",
-            params![Uuid::new_v4().to_string(), id],
-        )?;
-    }
     for dependency in request.dependencies {
         let exists = load_job(db, &project_id, &dependency)?.is_some();
         ensure!(exists, "job dependency is outside the project");
@@ -364,7 +364,9 @@ fn insert_job(
             params![project_id, id, dependency],
         )?;
     }
-    load_job(db, &project_id, &id)?.context("inserted job could not be loaded")
+    let job = load_job(db, &project_id, &id)?.context("inserted job could not be loaded")?;
+    policy::reconcile_approval(db, &job)?;
+    Ok(job)
 }
 
 fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> {

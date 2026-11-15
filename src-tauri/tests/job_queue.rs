@@ -5,7 +5,8 @@ use omniagent::{
     conversations::{AttemptPlan, Conversation, SessionScope},
     jobs::{
         AdmissionBlocker, AdmissionEnvironment, Job, JobContext, JobNoticeKind, JobOrigin,
-        JobRequest, JobRequestConflict, QueueSettings, QueueState, RecoveryAction,
+        JobPermission, JobRequest, JobRequestConflict, JobRole, JobRule, JobWorkspace,
+        QueueSettings, QueueState, RecoveryAction,
     },
     providers::{Capability, Provider, SessionIntent, SessionMode},
     repository,
@@ -64,6 +65,136 @@ fn request() -> JobRequest {
         dependencies: Vec::new(),
         requires_bridge: false,
     }
+}
+
+#[tokio::test]
+async fn project_job_rules_match_the_role_operation_and_workspace() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("queue.sqlite"))?;
+    let parent = origin(&store, &temp.path().join("project")).await?;
+    let other = origin(&store, &temp.path().join("other")).await?;
+    let project = parent.run.project_id.clone();
+    let tagged = store
+        .create_project_task(project.clone(), "Rule scope".into())
+        .await?;
+    let task_allow = JobRule {
+        role: JobRole::Agent,
+        operation: SessionMode::Plan,
+        workspace: JobWorkspace::Task {
+            task_id: tagged.id.clone(),
+        },
+        permission: JobPermission::Allow,
+        requirements: Default::default(),
+    };
+    let checkout_review = JobRule {
+        role: JobRole::Agent,
+        operation: SessionMode::Plan,
+        workspace: JobWorkspace::Checkout {
+            checkout_id: parent.run.checkout_id.clone(),
+        },
+        permission: JobPermission::Review,
+        requirements: Default::default(),
+    };
+    let deny = JobRule {
+        role: JobRole::Agent,
+        operation: SessionMode::ReadOnly,
+        workspace: JobWorkspace::Project,
+        permission: JobPermission::Deny,
+        requirements: Default::default(),
+    };
+    let rules = vec![task_allow.clone(), deny.clone()];
+    assert!(
+        store
+            .set_project_job_rules(
+                project.clone(),
+                vec![],
+                vec![JobRule {
+                    workspace: JobWorkspace::Checkout {
+                        checkout_id: other.run.checkout_id
+                    },
+                    ..deny.clone()
+                }]
+            )
+            .await
+            .is_err()
+    );
+    store
+        .set_project_job_rules(project.clone(), vec![], rules.clone())
+        .await?;
+    let allowed = store
+        .submit_agent_job(
+            parent.run.id.clone(),
+            "allowed".into(),
+            JobRequest {
+                task_id: Some(tagged.id.clone()),
+                ..request()
+            },
+        )
+        .await?;
+    let review = store
+        .submit_agent_job(parent.run.id.clone(), "review".into(), request())
+        .await?;
+    let denied = store
+        .submit_agent_job(
+            parent.run.id,
+            "denied".into(),
+            JobRequest {
+                mode: SessionMode::ReadOnly,
+                task_id: Some(tagged.id),
+                ..request()
+            },
+        )
+        .await?;
+    let inspect =
+        |job: &Job| store.inspect_job(project.clone(), job.id.clone(), environment(false));
+    assert!(inspect(&allowed).await?.unwrap().blockers.is_empty());
+    let approval_id = match &inspect(&review).await?.unwrap().blockers[..] {
+        [AdmissionBlocker::Approval { approval_id }] => approval_id.clone(),
+        blockers => anyhow::bail!("Unexpected review blockers {blockers:?}"),
+    };
+    assert!(matches!(
+        &inspect(&denied).await?.unwrap().blockers[..],
+        [AdmissionBlocker::Policy { .. }]
+    ));
+    assert!(
+        store
+            .project_job_rules(other.run.project_id)
+            .await?
+            .is_empty()
+    );
+    store
+        .decide_job_approval(project.clone(), approval_id.clone(), true)
+        .await?;
+    let changed = vec![task_allow, checkout_review, deny];
+    store
+        .set_project_job_rules(project.clone(), rules, changed)
+        .await?;
+    let pending = inspect(&review).await?.unwrap().blockers;
+    assert!(
+        matches!(&pending[..], [AdmissionBlocker::Approval { approval_id: new }] if new != &approval_id)
+    );
+    assert!(
+        store
+            .decide_job_approval(project, approval_id, true)
+            .await
+            .is_err()
+    );
+    let plan = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("Allowed job should start automatically")?;
+    assert_eq!(
+        store
+            .job(allowed.project_id, allowed.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap()
+            .run_id,
+        plan.run.id
+    );
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    Ok(())
 }
 
 #[tokio::test]

@@ -18,7 +18,9 @@ use crate::{
 };
 
 use super::{
-    Job, JobContext, JobOrigin, JobRequest, QueueState, RecoveryAction, insert_job, load_job,
+    DispatchRejection, Job, JobContext, JobOrigin, JobPermission, JobRequest, QueueState,
+    RecoveryAction, insert_job, load_job,
+    policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
     recovery::{pending_recovery, recovery_source},
 };
 
@@ -65,6 +67,9 @@ pub enum AdmissionBlocker {
     },
     MissingCapability {
         capability: Capability,
+    },
+    DispatchRejected {
+        rejection: DispatchRejection,
     },
     Writer {
         checkout_id: String,
@@ -199,6 +204,26 @@ impl Store {
                         Ok(QueueSettings {
                             paused,
                             capacity: row.get(0)?,
+                        })
+                    },
+                )?)
+            })
+            .await?;
+        self.job_signal.send_replace(());
+        Ok(settings)
+    }
+
+    pub async fn set_job_queue_capacity(&self, capacity: u32) -> Result<QueueSettings> {
+        ensure!(capacity > 0, "queue capacity must be positive");
+        let settings = self
+            .execute(move |db| {
+                Ok(db.query_row(
+                    "UPDATE job_queue_settings SET capacity = ?1 WHERE id = 1 RETURNING paused",
+                    [capacity],
+                    |row| {
+                        Ok(QueueSettings {
+                            paused: row.get(0)?,
+                            capacity,
                         })
                     },
                 )?)
@@ -367,7 +392,7 @@ impl Store {
                     tx.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [&job.id])?;
                     (plan, Some(checkpoint.source_run_id), ordinal, action.key())
                 } else {
-                    let conversation = match (&job.origin, job.context) {
+                    let conversation = match (&job.origin, job.context.as_ref()) {
                         (JobOrigin::Operator, Some(context)) => {
                             load_conversation(&tx, &context.conversation_id)?
                         }
@@ -391,6 +416,7 @@ impl Store {
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![job.id, ordinal, plan.run.id, previous_run, kind],
                 )?;
+                bind_attempt_policy(&tx, &job, &plan.run.id)?;
                 if job.mode == SessionMode::ApprovedWrite {
                     tx.execute(
                         "INSERT INTO job_writer_reservations VALUES (?1, ?2)",
@@ -478,10 +504,6 @@ pub(super) fn recovery_scope(db: &Connection, job: &Job) -> Result<SessionScope>
     let scope = load_inputs(db, job)?
         .scope
         .context("The job needs an eligible CLI profile")?;
-    ensure!(
-        scope.executable.is_file(),
-        "The job's CLI executable is unavailable"
-    );
     if job.mode == SessionMode::ApprovedWrite {
         let task = job
             .task_id
@@ -540,8 +562,12 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
 
 fn inspect(db: &Connection, job: Job, env: &AdmissionEnvironment) -> Result<JobInspection> {
     let awaiting_recovery = job.queued_recovery.is_some();
-    let blockers = if job.latest_attempt.is_some() && !awaiting_recovery {
-        Vec::new()
+    let blockers = if let Some(attempt) = job.latest_attempt.as_ref().filter(|_| !awaiting_recovery)
+    {
+        dispatch_rejection(db, &attempt.run_id)?
+            .map(|rejection| AdmissionBlocker::DispatchRejected { rejection })
+            .into_iter()
+            .collect()
     } else {
         evaluate(db, &job, &load_inputs(db, &job)?, env)?
     };
@@ -588,21 +614,32 @@ fn evaluate(
             });
         }
     }
-    let approval: Option<(String, String)> = db
+    let rule = effective_policy(db, job)?;
+    let approval: Option<(String, String, String)> = db
         .query_row(
-            "SELECT id, decision FROM job_approvals WHERE job_id = ?1",
+            "SELECT id, decision, policy_key FROM job_approvals WHERE job_id = ?1",
             [&job.id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    if let Some((approval_id, decision)) = approval {
-        match decision.as_str() {
-            "pending" => blockers.push(Approval { approval_id }),
-            "denied" => blockers.push(Policy {
-                reason: "An operator declined this job",
-            }),
-            _ => {}
+    match approval {
+        Some((_, decision, _)) if decision == "denied" => blockers.push(Policy {
+            reason: "An operator declined this job",
+        }),
+        _ if rule.permission == JobPermission::Deny => blockers.push(Policy {
+            reason: "A project rule denies this role, operation, and workspace",
+        }),
+        Some((approval_id, decision, key))
+            if rule.permission == JobPermission::Review && key == rule.key =>
+        {
+            if decision == "pending" {
+                blockers.push(Approval { approval_id });
+            }
         }
+        _ if rule.permission == JobPermission::Review => blockers.push(Policy {
+            reason: "The current project rule requires review",
+        }),
+        _ => {}
     }
     match &inputs.scope {
         None => blockers.push(Policy {

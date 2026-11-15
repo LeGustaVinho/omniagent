@@ -8,7 +8,7 @@ use omniagent::{
     model_catalog::ModelSelection,
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionMode,
-        profiles::{DesktopModel, DesktopProfile, desktop_profile},
+        profiles::{DESKTOP_PERMISSION_REVISION, DesktopModel, DesktopProfile, desktop_profile},
     },
     repository,
     runner::{DirectWindowsRunner, Runner},
@@ -87,7 +87,7 @@ pub async fn start_conversation_turn(
             executable,
             cli_version: version,
             runner: DirectWindowsRunner.identity().into(),
-            permission_revision: "desktop-direct-v1".into(),
+            permission_revision: DESKTOP_PERMISSION_REVISION.into(),
             mode,
             model: Some(selection.model_id),
             effort,

@@ -8,6 +8,7 @@ import type { RecoveryAction } from "@/bindings/RecoveryAction";
 import { JobFailurePanel } from "@/job-failure";
 import { Button } from "@/components/ui/button";
 import { matchesQueueView, queueBlockerReason, queueJobState, queueViews, type QueueView } from "@/queue-model";
+import { QueuePolicy } from "@/queue-policy";
 import { DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -196,6 +197,7 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
         </div>
       </header>
       {control.isError && <div className="px-3 py-2"><InlineIssue>{String(control.error)}</InlineIssue></div>}
+      {settings && <QueuePolicy key={checkout.projectId} projectId={checkout.projectId} checkoutId={checkout.checkoutId} capacity={settings.capacity} />}
       <nav className="flex gap-0.5 overflow-x-auto border-b border-border px-3 py-1" aria-label="Queue states">
         {queueViews.map((entry) => <button type="button" key={entry} className="delivery-tab" aria-pressed={view === entry} onClick={() => setView(entry)}>{entry}</button>)}
       </nav>

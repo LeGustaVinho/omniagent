@@ -76,6 +76,8 @@ pub struct DesktopModel {
     pub default_effort: Option<String>,
 }
 
+pub const DESKTOP_PERMISSION_REVISION: &str = "desktop-direct-v1";
+
 pub struct DesktopProfile {
     pub executable: PathBuf,
     pub version: String,
