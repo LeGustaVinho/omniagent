@@ -78,6 +78,7 @@ impl From<AdmissionBlocker> for QueueBlockerKind {
             AdmissionBlocker::Policy { .. } => Self::Policy,
             AdmissionBlocker::ContextChanged { .. }
             | AdmissionBlocker::ConversationBusy { .. }
+            | AdmissionBlocker::InstructionOrder { .. }
             | AdmissionBlocker::Downstream { .. } => Self::Context,
             AdmissionBlocker::MissingCapability { .. } => Self::Capability,
             AdmissionBlocker::SubagentAudit { .. } => Self::Capability,

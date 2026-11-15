@@ -197,6 +197,18 @@ fn wait_for_file(path: &Path) -> Result<()> {
 }
 
 fn complete(root: &Path, prompt: &str) -> Result<&'static str> {
+    if prompt.contains("Run the revised queued instruction") {
+        ensure!(
+            !prompt.contains("Replace this queued instruction")
+                && !prompt.contains("Remove this queued instruction"),
+            "obsolete instructions reached the provider"
+        );
+        fs::write(
+            root.join("queued-instruction-dispatched"),
+            "Run the revised queued instruction",
+        )?;
+        return Ok("The revised instruction ran.");
+    }
     if prompt == "Complete desktop slot probe" {
         return Ok("The freed slot ran the probe.");
     }

@@ -19,6 +19,7 @@ import { EffortSelect, type EffortSet } from "@/components/effort-select";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
+import { ConversationInstructions, useConversationInstructions } from "@/conversation-instructions";
 import { ConversationHistoryControls } from "@/conversation-history-controls";
 import { ConversationSubagentControls } from "@/subagent-quota";
 import { ConversationMarkdown } from "@/conversation-markdown";
@@ -43,6 +44,7 @@ function waitReason(blocker: AdmissionBlocker | undefined): string {
     case "job_paused": return "This job is paused.";
     case "context_changed": return "The conversation changed since this message was queued.";
     case "conversation_busy": return "Waiting for the active conversation run.";
+    case "instruction_order": return "Waiting for an earlier instruction.";
     case "capacity": return `Waiting for an execution slot (${blocker.active} of ${blocker.limit} in use).`;
     case "policy": return blocker.reason;
     case "dependency": return "Waiting for a required job to complete.";
@@ -298,6 +300,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     refetchInterval: (query) => isLiveRun(query.state.data) ? 250 : false,
   });
   const run = latest.data;
+  const instructions = useConversationInstructions(conversationId, visible);
   const cancelRequested = attempt?.runId === run?.id && Boolean(attempt?.cancelRequested);
   const activity = useConversationRun(conversationId, run, cancelRequested);
   const { live } = activity;
@@ -327,13 +330,12 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
         conversationId, selection, effort: efforts?.efforts.includes(effort) ? effort : null, mode, text: submitted,
       });
     },
-    onSuccess: (queuedJob, submitted) => {
+    onSuccess: (_, submitted) => {
       activeEdit.current++;
       queryClient.setQueryData<string>(draftKey, (current) => current === submitted ? "" : current);
       setDraftStatus("");
       setDraftError("");
-      queryClient.setQueryData<JobInspection>(jobKey, { job: queuedJob, blockers: [], recoveryActions: [] });
-      void queryClient.invalidateQueries({ queryKey: jobKey });
+      void instructions.refresh();
     },
   });
   const cancelQueued = useMutation({
@@ -364,7 +366,8 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     });
   }
 
-  const canSend = Boolean(text.trim() && !goalUnavailable && !busy && !latest.isPending && !latestJob.isPending && selected?.option.selectable && !send.isPending && !recover.isPending);
+  const canSend = Boolean(text.trim() && !goalUnavailable && !latest.isPending && !latestJob.isPending && selected?.option.selectable && !send.isPending && !recover.isPending);
+  const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -453,7 +456,8 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           request?.scrollIntoView({ block: "nearest" });
           (request?.querySelector<HTMLElement>("button, input, select") ?? request)?.focus({ preventScroll: true });
         }}>{job?.queuedQuestion ? "View answer" : "Waiting for input"} <ArrowUp aria-hidden /></button>}
-        {queued && job && <div className="conv-queued">
+        <ConversationInstructions conversationId={conversationId} instructions={instructions} />
+        {queued && job && (job.job.downstreamWait || job.queuedQuestion || (job.job.queuedRecovery && !instructions.data.some(({ id }) => id === job.job.id))) && <div className="conv-queued">
           <strong>{job.job.downstreamWait ? "Waiting for downstream jobs" : job.queuedQuestion ? "Queued answer" : "Queued message"}</strong>
           <div>
             <p role="status" className="text-muted-foreground">{waitReason(job.blockers[0])}</p>
@@ -488,10 +492,10 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
               <ConversationModeSelect mode={mode} onChange={setMode} />
               <EffortSelect capabilities={efforts} loading={Boolean(antigravityModel && modelEfforts.isPending)}
                 className={selectorClass} value={effort} onChange={setEffort} />
-              {live ? <StopConversation {...activity} /> :
+              {live && <StopConversation {...activity} />}
                 <Button type="submit" className="conv-send" disabled={!canSend}>
-                  {send.isPending ? "Starting…" : goalUnavailable ? "Start goal" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
-                </Button>}
+                  {send.isPending ? "Queueing…" : goalUnavailable ? "Start goal" : queueNext ? "Queue for next turn" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
+                </Button>
           </div>
           {goalUnavailable && <p className="conv-goal-note" role="status"><Target size={14} aria-hidden />
             Goal Mode is available in Simulation while runtime integration is pending.

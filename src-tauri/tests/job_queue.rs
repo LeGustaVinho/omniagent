@@ -2,13 +2,14 @@ use std::{fs, path::Path, process::Command, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use omniagent::{
+    attachments::{AttachmentDelivery, AttachmentSource},
     conversations::{AttemptPlan, Conversation, SessionScope},
     jobs::{
-        AdmissionBlocker, AdmissionEnvironment, Job, JobContext, JobNoticeKind, JobOrigin,
-        JobPermission, JobRequest, JobRequestConflict, JobRole, JobRule, JobWorkspace,
-        PipelineDispatch, PipelineNodeKind, ProjectSubagentPolicy, QueueHistoryPolicy,
-        QueueSettings, QueueState, RecoveryAction, SubagentAuditField, SubagentAuditPolicy,
-        SubagentAuditSource, SubagentCounts, SubagentLimitMode,
+        AdmissionBlocker, AdmissionEnvironment, InstructionDelivery, Job, JobContext,
+        JobNoticeKind, JobOrigin, JobPermission, JobRequest, JobRequestConflict, JobRole, JobRule,
+        JobWorkspace, PipelineDispatch, PipelineNodeKind, ProjectSubagentPolicy,
+        QueueHistoryPolicy, QueueSettings, QueueState, RecoveryAction, SubagentAuditField,
+        SubagentAuditPolicy, SubagentAuditSource, SubagentCounts, SubagentLimitMode,
     },
     providers::{Capability, Provider, SessionIntent, SessionMode},
     repository,
@@ -1186,6 +1187,8 @@ async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -
     db.execute_batch(
         "DROP TABLE attempt_subagent_audit;
          DROP TABLE native_subagent_audit_candidates;
+         DROP INDEX jobs_by_conversation_sequence;
+         DROP TABLE queued_conversation_instructions;
          DROP VIEW deliverable_job_notices;
          DROP VIEW ready_question_continuations;
          DROP VIEW open_agent_questions;
@@ -1782,6 +1785,12 @@ async fn queued_conversation_draft_and_snapshot_survive_reopen_without_creating_
         chat.context_id
     );
     drop(store);
+    // A pending conversation job from the previous schema already owns its prompt and scope.
+    rusqlite::Connection::open(&database)?.execute_batch(
+        "DROP TABLE queued_conversation_instructions;
+         DROP INDEX jobs_by_conversation_sequence;
+         PRAGMA user_version = 38;",
+    )?;
     let store = Store::open(database)?;
     assert_eq!(store.job_queue_settings().await?, settings);
     assert!(store.claim_next_job(environment(false)).await?.is_none());
@@ -1827,6 +1836,221 @@ async fn queued_conversation_draft_and_snapshot_survive_reopen_without_creating_
             .status,
         RunStatus::Cancelled
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_instructions_keep_order_and_claim_one_revision_after_restart() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("queue.sqlite3");
+    let store = Store::open(database.clone())?;
+    store.set_job_queue_capacity(1).await?;
+    let active = origin(&store, &temp.path().join("project")).await?;
+    let conversation = store.conversation(active.conversation_id.clone()).await?;
+    let context = JobContext {
+        conversation_id: conversation.id.clone(),
+        context_id: conversation.context_id.clone(),
+    };
+    let attachment = "queue-reference.md";
+    fs::write(
+        active.scope.checkout.join(attachment),
+        "Keep this reference with the instruction",
+    )?;
+    let preview = store
+        .preview_attachment(
+            conversation.checkout_id.clone(),
+            AttachmentSource::Checkout {
+                relative_path: attachment.into(),
+            },
+            AttachmentDelivery::Reference,
+        )
+        .await?;
+    store
+        .save_conversation_draft(conversation.id.clone(), "Original instruction".into())
+        .await?;
+    let first = store
+        .enqueue_conversation_turn_with_attachments(
+            context.clone(),
+            active.scope.clone(),
+            "Original instruction".into(),
+            vec![preview],
+        )
+        .await?;
+    let enqueue = |text: &'static str| {
+        let store = &store;
+        let context = context.clone();
+        let scope = active.scope.clone();
+        async move {
+            store
+                .save_conversation_draft(context.conversation_id.clone(), text.into())
+                .await?;
+            store
+                .enqueue_conversation_turn(context, scope, text.into())
+                .await
+        }
+    };
+    let removed = enqueue("Remove me").await?;
+    let last = enqueue("Last in order").await?;
+    let pending =
+        || store.pending_conversation_instructions(conversation.id.clone(), environment(false));
+    let pending = pending().await?;
+    assert_eq!(
+        pending.iter().map(|entry| &entry.id).collect::<Vec<_>>(),
+        [&first.id, &removed.id, &last.id]
+    );
+    assert_eq!(pending[0].attachments, [attachment]);
+    assert_eq!(pending[0].context_id, context.context_id);
+    assert_eq!(pending[0].provider, active.scope.provider);
+    assert_eq!(pending[0].checkout_id, active.run.checkout_id);
+    assert!(
+        pending
+            .iter()
+            .all(|entry| entry.delivery == InstructionDelivery::Queued && entry.editable)
+    );
+    store
+        .revise_pending_instruction(
+            conversation.id.clone(),
+            first.id.clone(),
+            pending[0].revision_id.clone(),
+            "Revised while the turn runs".into(),
+            None,
+        )
+        .await?;
+    assert!(
+        store
+            .revise_pending_instruction(
+                conversation.id.clone(),
+                first.id.clone(),
+                pending[0].revision_id.clone(),
+                "Stale edit".into(),
+                None
+            )
+            .await
+            .is_err()
+    );
+    store
+        .remove_pending_instruction(
+            conversation.id.clone(),
+            removed.id.clone(),
+            pending[1].revision_id.clone(),
+        )
+        .await?;
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    store
+        .finish_agent_attempt(
+            active.run.id,
+            RunStatus::Succeeded,
+            Some("Result of the active turn".into()),
+        )
+        .await?;
+    store
+        .set_pending_job_state(
+            first.project_id.clone(),
+            first.id.clone(),
+            QueueState::Paused,
+        )
+        .await?;
+    drop(store);
+
+    let store = Store::open(database.clone())?;
+    store.recover_agent_attempts_after_restart().await?;
+    let pending = store
+        .pending_conversation_instructions(conversation.id.clone(), environment(false))
+        .await?;
+    assert_eq!(pending[0].delivery, InstructionDelivery::Paused);
+    assert_eq!(pending[0].id, first.id);
+    assert_eq!(pending[0].text, "Revised while the turn runs");
+    assert_eq!(pending[0].attachments, [attachment]);
+    assert_eq!(pending[0].context_id, context.context_id);
+    assert_eq!(pending[1].id, last.id);
+    assert!(
+        pending[1]
+            .blockers
+            .contains(&AdmissionBlocker::InstructionOrder {
+                job_id: first.id.clone()
+            })
+    );
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    store
+        .set_pending_job_state(first.project_id, first.id.clone(), QueueState::Queued)
+        .await?;
+    let other = Store::open(database.clone())?;
+    let (claim, edit) = tokio::join!(
+        store.claim_next_job(environment(false)),
+        other.revise_pending_instruction(
+            conversation.id.clone(),
+            first.id.clone(),
+            pending[0].revision_id.clone(),
+            "Revision at the claim boundary".into(),
+            None
+        ),
+    );
+    let claim = claim?.context("The first instruction was not claimed")?;
+    let accepted = claim.input.last().context("No accepted instruction")?;
+    assert_eq!(
+        accepted.text,
+        if edit.is_ok() {
+            "Revision at the claim boundary"
+        } else {
+            "Revised while the turn runs"
+        }
+    );
+    if edit.is_err() {
+        assert_eq!(accepted.revision_id, pending[0].revision_id);
+    }
+    assert_eq!(
+        claim
+            .input
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "Plan the fixture",
+            "Result of the active turn",
+            accepted.text.as_str()
+        ]
+    );
+    let list = store
+        .pending_conversation_instructions(conversation.id.clone(), environment(false))
+        .await?;
+    assert_eq!(list[0].delivery, InstructionDelivery::Delivering);
+    assert_eq!(list[0].run_id.as_ref(), Some(&claim.run.id));
+    assert_eq!(list[0].revision_id, accepted.revision_id);
+    assert_eq!(list[0].attachments, [attachment]);
+    assert!(
+        store
+            .remove_pending_instruction(
+                conversation.id.clone(),
+                first.id,
+                accepted.revision_id.clone()
+            )
+            .await
+            .is_err()
+    );
+    assert!(other.claim_next_job(environment(false)).await?.is_none());
+    store.mark_agent_running(claim.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(
+            claim.run.id,
+            RunStatus::Succeeded,
+            Some("First instruction finished".into()),
+        )
+        .await?;
+    let next = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("The next instruction didn't follow")?;
+    assert_eq!(next.input.last().unwrap().text, "Last in order");
+    assert!(
+        next.input
+            .iter()
+            .any(|message| message.text == "First instruction finished")
+    );
+    assert!(next.input.iter().all(|message| message.text != "Remove me"));
+    store.mark_agent_running(next.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(next.run.id, RunStatus::Succeeded, None)
+        .await?;
     Ok(())
 }
 

@@ -15,6 +15,7 @@ mod downstream;
 mod failures;
 mod history;
 mod inspection;
+mod instructions;
 mod notices;
 mod pipeline;
 mod policy;
@@ -38,6 +39,8 @@ pub use failures::{
 pub use history::{QueueHistoryPolicy, QueueHistorySettings};
 pub(crate) use history::{apply_queue_history_policy, detached_question_context};
 pub(crate) use inspection::{InspectionPolicy, InspectionQueue, load_inspection_queue};
+pub(crate) use instructions::migrate_pending_instructions;
+pub use instructions::{InstructionDelivery, PendingInstruction};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use pipeline::{
     PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease, ReleaseBlocker,

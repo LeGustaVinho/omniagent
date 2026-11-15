@@ -553,6 +553,84 @@ async function verifyDetachedJob(browser, application, scratch) {
   }
 }
 
+async function verifyPendingInstructions(browser, application, scratch) {
+  const repo = join(scratch, "Pending instruction checkout");
+  git(scratch, "init", "-q", repo);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Fixture");
+  const checkout = await invoke(browser, "register_project", { directory: repo });
+  await selectCheckout(browser, checkout);
+  const profile = (await invoke(browser, "cli_executables")).find(({ provider }) => provider === "codex");
+  assert.ok(profile);
+  await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
+  const release = join(repo, "release-desktop-jobs");
+  try {
+    const models = await invoke(browser, "conversation_models", { provider: "codex" });
+    const fixture = models.find(({ option }) => option.selection.modelId === "desktop-fixture" && option.selectable);
+    assert.ok(fixture);
+    const title = "Edit pending instructions";
+    const chat = await invoke(browser, "create_conversation", { checkoutId: checkout.checkoutId, title });
+    const scope = { conversationId: chat.id };
+    const text = "Hold desktop slot 1";
+    await invoke(browser, "save_conversation_draft", { ...scope, text });
+    await invoke(browser, "start_conversation_turn", { ...scope, selection: fixture.option.selection, mode: "read_only", text });
+    const open = async () => {
+      await chooseConversations(browser);
+      await click(browser, `button=${title}`);
+      return browser.$(`section[aria-label="${title}"]`);
+    };
+    const panel = await open();
+    await panel.$("button=Stop").waitForDisplayed();
+    await browser.waitUntil(() => access(join(repo, "desktop-slot-1")).then(() => true, () => false),
+      { timeout: 30_000, timeoutMsg: "The active turn did not reach the CLI" });
+    await panel.$(".model-picker-trigger").click();
+    await click(browser, `.model-picker-menu [role="menuitemradio"][aria-label="${fixture.option.name}"]`);
+    const pending = () => invoke(browser, "pending_conversation_instructions", scope);
+    const instruction = (text) => panel.$(`.//li[p[text()="${text}"]]`);
+    const draft = panel.$("textarea[id^=draft-]");
+    const obsolete = "Replace this queued instruction";
+    const removed = "Remove this queued instruction";
+    for (const text of [obsolete, removed]) {
+      await draft.setValue(text);
+      const queue = panel.$("button=Queue for next turn");
+      await queue.waitForEnabled();
+      await queue.click();
+      await instruction(text).waitForDisplayed();
+      await draft.waitForEnabled();
+    }
+    const original = await pending();
+    assert.deepEqual(original.map(({ text }) => text), [obsolete, removed]);
+    assert.ok(original.every(({ checkoutId, provider, model }) =>
+      checkoutId === checkout.checkoutId && provider === "codex" && model === "desktop-fixture"));
+
+    await browser.refresh();
+    await waitForRuntime(browser);
+    await open();
+    assert.deepEqual((await pending()).map(({ id, contextId }) => [id, contextId]),
+      original.map(({ id, contextId }) => [id, contextId]));
+    await instruction(obsolete).$("button=Edit instruction").click();
+    const edited = "Run the revised queued instruction";
+    await panel.$('textarea[aria-label="Pending instruction text"]').setValue(edited);
+    await panel.$("button=Save instruction").click();
+    await instruction(edited).waitForDisplayed();
+    await instruction(removed).$("button=Remove instruction").click();
+    await instruction(removed).waitForExist({ reverse: true });
+    const [updated] = await pending();
+    assert.equal(updated.id, original[0].id);
+    assert.notEqual(updated.revisionId, original[0].revisionId);
+    assert.equal(updated.contextId, original[0].contextId);
+    await writeFile(release, "");
+    await panel.$("p=The revised instruction ran.").waitForDisplayed({ timeout: 30_000 });
+    assert.equal(await readFile(join(repo, "queued-instruction-dispatched"), "utf8"), edited);
+    const messages = await invoke(browser, "conversation_messages", scope);
+    assert.deepEqual(messages.filter(({ role }) => role === "user").map(({ text }) => text), [text, edited]);
+    assert.equal(messages.find(({ text }) => text === edited).revisionId, updated.revisionId);
+  } finally {
+    await writeFile(release, "");
+    await invoke(browser, "set_cli_executable", { provider: "codex", executable: profile.executable });
+  }
+}
+
 async function verifyQuestionContinuation(browser, application, scratch) {
   const repo = join(scratch, "Question continuation checkout");
   git(scratch, "init", "-q", repo);
@@ -1208,6 +1286,9 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     });
     await t.test("answers live and expired questions after reopening the desktop", async () => {
       await verifyQuestionContinuation(browser, application, scratch);
+    });
+    await t.test("edits and removes queued instructions before the active turn ends", async () => {
+      await verifyPendingInstructions(browser, application, scratch);
     });
   } catch (error) {
     if (browser && process.env.OMNIAGENT_UI_CAPTURE_DIR) {

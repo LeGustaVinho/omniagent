@@ -159,6 +159,7 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
               <p className="break-words">{queueBlockerReason(blocker)}</p>
               {blocker.type === "approval" && <ApprovalReview projectId={job.projectId} approvalId={blocker.approvalId} busy={busy} onAction={onAction} />}
               {blocker.type === "dependency" && <button type="button" className="justify-self-start text-primary hover:underline" onClick={() => onDependency(blocker.jobId)}>Inspect dependency</button>}
+              {blocker.type === "instruction_order" && <button type="button" className="justify-self-start text-primary hover:underline" onClick={() => onDependency(blocker.jobId)}>Inspect earlier instruction</button>}
               {(blocker.type === "conversation_busy" || blocker.type === "writer") && <button type="button" className="justify-self-start text-primary hover:underline" onClick={() => openActivity(blocker.runId, blocker.type === "conversation_busy" ? conversationId : undefined)}>Inspect blocking run</button>}
             </li>)}
           </ul>

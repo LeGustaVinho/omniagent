@@ -321,6 +321,14 @@ impl Store {
                 identities.len() == revisions.len(),
                 "context contains repeated messages"
             );
+            for message in identities {
+                let queued_only: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM queued_conversation_instructions i WHERE i.message_id = ?1
+                        AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = i.job_id))",
+                    [message], |row| row.get(0),
+                )?;
+                ensure!(!queued_only, "An unclaimed instruction is outside conversation history");
+            }
             let context = switch_history(&tx, &conversation_id, &revisions)?;
             tx.commit()?;
             Ok(context)
@@ -1031,6 +1039,7 @@ pub(crate) struct RecordedAttempt {
 
 pub(crate) enum AttemptHistory {
     Automatic,
+    QueuedInstruction { revision_id: String },
     Retry { input_context_id: String },
     Resume { native: Option<NativeJobRecovery> },
     Question { origin_run_id: String },
@@ -1076,6 +1085,31 @@ pub(crate) fn insert_job_attempt(
             answer: None,
             history: AttemptHistory::Automatic,
             recorded: None,
+            allocation,
+        },
+    )
+}
+
+pub(crate) fn insert_instruction_attempt(
+    db: &Connection,
+    conversation: Conversation,
+    scope: SessionScope,
+    revision_id: String,
+    recorded: Option<RecordedAttempt>,
+    allocation: SubagentAllocation,
+) -> Result<AttemptPlan> {
+    insert_attempt(
+        db,
+        PreparedAttempt {
+            conversation_id: conversation.id,
+            base_context_id: conversation.context_id,
+            scope,
+            encrypted: None,
+            frozen: None,
+            question_route: QuestionRoute::Native,
+            answer: None,
+            history: AttemptHistory::QueuedInstruction { revision_id },
+            recorded,
             allocation,
         },
     )
@@ -1324,12 +1358,15 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
     });
     let eligible = eligible.filter(|prior| allocation.audit == prior.audit);
     let continuity = match (&history, eligible, &recorded) {
-        (AttemptHistory::Automatic, Some(prior), None)
-            if prior.scope == serialized
-                && scope
-                    .account_binding
-                    .as_ref()
-                    .is_some_and(|id| !id.is_empty()) =>
+        (
+            AttemptHistory::Automatic | AttemptHistory::QueuedInstruction { .. },
+            Some(prior),
+            None,
+        ) if prior.scope == serialized
+            && scope
+                .account_binding
+                .as_ref()
+                .is_some_and(|id| !id.is_empty()) =>
         {
             append_only_cursor(db, &conversation_id, &entries, prior)?
         }
@@ -1390,6 +1427,9 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             )?;
         }
         input_context_id.clone()
+    } else if let AttemptHistory::QueuedInstruction { revision_id } = &history {
+        entries.push(revision_id.clone());
+        write_context(db, &conversation_id, &entries, recorded.is_none())?
     } else {
         let encrypted = if let (Some((_, reply)), Some((_, form))) = (&answer, &answered_request) {
             let values = serde_json::json!({"question": form, "answer": reply.values});
@@ -1734,7 +1774,7 @@ fn check_idle_base(db: &Connection, id: &str, requested: &str) -> Result<Convers
     Ok(conversation)
 }
 
-fn context_entries(
+pub(crate) fn context_entries(
     db: &Connection,
     conversation_id: &str,
     context_id: &str,
@@ -1780,7 +1820,7 @@ fn write_context(
     Ok(id)
 }
 
-fn insert_message(
+pub(crate) fn insert_message(
     db: &Connection,
     conversation_id: &str,
     role: MessageRole,
@@ -1803,7 +1843,7 @@ fn insert_message(
     Ok(revision)
 }
 
-fn load_messages(
+pub(crate) fn load_messages(
     db: &Connection,
     conversation_id: &str,
     entries: &[String],

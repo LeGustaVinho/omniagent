@@ -301,6 +301,7 @@
 .conv-queued > div { display: flex; align-items: center; gap: .3rem; overflow-wrap: anywhere; }
 .conv-queued > div > p, .conv-queued > div > input { flex: 1; min-width: 0; }
 .conv-queued > button { justify-self: start; }
+.conv-queued.conv-pending-instruction { max-height: none; overflow: visible; margin-bottom: 0; }
 .conv-dialog-scrim { position: fixed; z-index: 340; inset: 0; background: #0008; }
 .conv-dialog { position: fixed; z-index: 341; width: min(31rem, calc(100vw - 1.5rem)); max-height: calc(100dvh - 1.5rem); overflow: auto; inset: 50% auto auto 50%; transform: translate(-50%, -50%); display: grid; gap: .6rem; padding: 1rem; background: var(--card); color: var(--foreground); border: 1px solid var(--border); border-radius: .7rem; box-shadow: 0 1.1rem 3rem #0005; font-size: .825rem; }
 .conv-dialog > h2 { font-size: 1rem; font-weight: 620; }

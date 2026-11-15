@@ -67,6 +67,7 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
     case "policy": return blocker.reason;
     case "context_changed": return `The conversation changed since context ${blocker.contextId} was queued.`;
     case "conversation_busy": return "Waiting for the active conversation run.";
+    case "instruction_order": return "Waiting for an earlier instruction.";
     case "downstream":
       if (blocker.needsReview) return "The parent attempt needs review before it can continue.";
       return blocker.pending > 0 ? `Waiting for ${blocker.pending} downstream job results.` : "Waiting for the parent attempt to settle.";

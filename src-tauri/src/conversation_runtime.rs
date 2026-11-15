@@ -3,7 +3,8 @@ use omniagent::{
     conversations::SessionScope,
     diagnostics,
     jobs::{
-        Job, JobContext, JobInspection, JobScheduler, ProjectQueue, QueueState, RecoveryAction,
+        Job, JobContext, JobInspection, JobScheduler, PendingInstruction, ProjectQueue, QueueState,
+        RecoveryAction,
     },
     model_catalog::ModelSelection,
     providers::{
@@ -116,6 +117,45 @@ pub async fn latest_conversation_job(
 ) -> Result<Option<JobInspection>, String> {
     store
         .latest_conversation_job(conversation_id, scheduler.environment())
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn pending_conversation_instructions(
+    store: State<'_, Store>,
+    scheduler: State<'_, JobScheduler>,
+    conversation_id: String,
+) -> Result<Vec<PendingInstruction>, String> {
+    store
+        .pending_conversation_instructions(conversation_id, scheduler.environment())
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn revise_pending_instruction(
+    store: State<'_, Store>,
+    conversation_id: String,
+    instruction_id: String,
+    revision_id: String,
+    text: String,
+) -> Result<(), String> {
+    store
+        .revise_pending_instruction(conversation_id, instruction_id, revision_id, text, None)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn remove_pending_instruction(
+    store: State<'_, Store>,
+    conversation_id: String,
+    instruction_id: String,
+    revision_id: String,
+) -> Result<(), String> {
+    store
+        .remove_pending_instruction(conversation_id, instruction_id, revision_id)
         .await
         .map_err(ui_error)
 }

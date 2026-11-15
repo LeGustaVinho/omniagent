@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::{
+    attachments::AttachmentPreview,
     conversations::{
         AttemptHistory, AttemptPlan, RecordedAttempt, SessionScope, consume_matching_draft,
-        insert_conversation, insert_downstream_attempt, insert_job_attempt,
-        insert_job_recovery_attempt, insert_recorded_job_attempt, load_conversation,
-        recovery_checkpoint,
+        insert_conversation, insert_downstream_attempt, insert_instruction_attempt,
+        insert_job_attempt, insert_job_recovery_attempt, insert_recorded_job_attempt,
+        load_conversation, recovery_checkpoint,
     },
     protection,
     providers::{Capability, SessionMode, questions::QuestionRoute},
@@ -25,7 +26,9 @@ use super::{
     command::{CommandAttempt, CommandInvocation, load_command},
     downstream::{continuation_prompt, record_continuation},
     history::{effective_release_blocker, load_binding, uses_recorded_checkpoint},
-    insert_job, load_job,
+    insert_job,
+    instructions::{self, QueuedRevision},
+    load_job,
     policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
     question_answers::{self, QuestionContinuation, load_continuation},
     question_waits::{QuestionWaitSummary, has_open_questions, question_wait_summary},
@@ -54,6 +57,9 @@ pub struct QueueSettings {
 )]
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum AdmissionBlocker {
+    InstructionOrder {
+        job_id: String,
+    },
     QueuePaused,
     JobPaused,
     JobCancelled,
@@ -160,6 +166,17 @@ impl Store {
         scope: SessionScope,
         text: String,
     ) -> Result<Job> {
+        self.enqueue_conversation_turn_with_attachments(context, scope, text, Vec::new())
+            .await
+    }
+
+    pub async fn enqueue_conversation_turn_with_attachments(
+        &self,
+        context: JobContext,
+        scope: SessionScope,
+        text: String,
+        previews: Vec<AttachmentPreview>,
+    ) -> Result<Job> {
         ensure!(
             matches!(scope.mode, SessionMode::ReadOnly | SessionMode::Plan),
             "conversation turns require a read-only or planning profile"
@@ -168,6 +185,17 @@ impl Store {
             scope.executable.is_absolute() && !scope.runner.is_empty(),
             "invalid CLI profile"
         );
+        let attachment_checkout = self
+            .conversation(context.conversation_id.clone())
+            .await?
+            .checkout_id;
+        let attachments = instructions::freeze_attachments(
+            self,
+            attachment_checkout.clone(),
+            &scope.checkout,
+            previews,
+        )
+        .await?;
         let operator_scope = protection::protect(&serde_json::to_vec(&scope)?)?;
         let job = self
             .execute(move |db| {
@@ -183,35 +211,15 @@ impl Store {
                     |row| Ok((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?))),
                 )?;
                 ensure!(
-                    root == scope.checkout,
+                    conversation.checkout_id == attachment_checkout && root == scope.checkout,
                     "job checkout differs from the conversation checkout"
-                );
-                let already_pending: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM jobs j WHERE j.conversation_id = ?1
-                 AND j.origin_run_id IS NULL AND j.queue_state IN ('queued', 'paused')
-                 AND NOT EXISTS (SELECT 1 FROM job_history_bindings WHERE job_id = j.id)
-                 AND (NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = j.id)
-                      OR EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = j.id)
-                      OR EXISTS (SELECT 1 FROM ready_question_continuations WHERE job_id = j.id)
-                      OR EXISTS (SELECT 1 FROM job_downstream_waits w JOIN job_attempts a ON a.run_id = w.parent_run_id
-                          WHERE a.job_id = j.id AND w.state IN ('waiting', 'needs_review'))))",
-                    [&context.conversation_id],
-                    |row| row.get(0),
-                )?;
-                ensure!(
-                    !already_pending,
-                    "this conversation already has a pending job"
-                );
-                ensure!(
-                    saved_question_run(&tx, &context.conversation_id, &context.context_id)?.is_none(),
-                    "This conversation still has a saved question"
                 );
                 consume_matching_draft(&tx, &context.conversation_id, &text)?;
                 let mut request = JobRequest {
                     checkout_id: Some(conversation.checkout_id.clone()),
                     task_id: None,
                     mode: scope.mode,
-                    instructions: text,
+                    instructions: text.clone(),
                     dependencies: Vec::new(),
                     requires_bridge: false,
                 };
@@ -229,6 +237,7 @@ impl Store {
                     "UPDATE jobs SET operator_scope = ?1 WHERE id = ?2",
                     params![operator_scope, job.id],
                 )?;
+                instructions::record_instruction(&tx, &job, &text, attachments.as_ref())?;
                 tx.commit()?;
                 Ok(job)
             })
@@ -300,17 +309,18 @@ impl Store {
         approval_id: String,
     ) -> Result<JobRequest> {
         self.execute(move |db| {
-            let request: Vec<u8> = db
+            let (job_id, request): (String, Vec<u8>) = db
                 .query_row(
-                    "SELECT j.request FROM job_approvals p JOIN jobs j ON j.id = p.job_id
+                    "SELECT j.id, j.request FROM job_approvals p JOIN jobs j ON j.id = p.job_id
                  WHERE j.project_id = ?1 AND p.id = ?2 AND p.decision = 'pending'
                    AND j.queue_state IN ('queued', 'paused')",
                     params![project_id, approval_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?
                 .context("job approval is no longer pending in this project")?;
-            Ok(serde_json::from_slice(&protection::unprotect(&request)?)?)
+            let job = load_job(db, &project_id, &job_id)?.context("Job approval lost its job")?;
+            instructions::current_request(db, &job, &request)
         })
         .await
     }
@@ -389,7 +399,10 @@ impl Store {
             let identity: Option<(String, String)> = tx.query_row(
                 "SELECT project_id, id FROM jobs j WHERE conversation_id = ?1 AND origin_run_id IS NULL
                  AND NOT EXISTS (SELECT 1 FROM job_history_bindings WHERE job_id = j.id)
-                 ORDER BY sequence DESC LIMIT 1",
+                 ORDER BY EXISTS (
+                    SELECT 1 FROM job_attempts a JOIN active_agent_attempts active ON active.run_id = a.run_id
+                    WHERE a.job_id = j.id
+                 ) DESC, sequence DESC LIMIT 1",
                 [conversation], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional()?;
             let Some((project, id)) = identity else { return Ok(None) };
@@ -558,6 +571,7 @@ struct Inputs {
     scope: Option<SessionScope>,
     command: Option<CommandInvocation>,
     question: Option<QuestionContinuation>,
+    instruction: Option<QueuedRevision>,
 }
 
 fn build_attempt(
@@ -642,50 +656,72 @@ fn build_attempt(
                 anyhow::bail!("The job has a command checkpoint")
             }
             None => {
-                match (
-                    &job.origin,
-                    job.context.as_ref(),
-                    load_binding(db, &job.id)?,
-                ) {
-                    (JobOrigin::Operator | JobOrigin::Pipeline, _, Some(binding)) => {
-                        let conversation = load_conversation(db, &binding.context.conversation_id)?;
-                        insert_recorded_job_attempt(
-                            db,
-                            conversation,
-                            scope,
-                            RecordedAttempt {
-                                context_id: binding.context.context_id,
-                                previous_run_id: None,
-                                question_route: binding.question_route,
-                            },
-                            &inputs.request.instructions,
-                            allocation,
-                        )?
-                    }
-                    (JobOrigin::Operator, Some(context), None) => {
-                        let conversation = load_conversation(db, &context.conversation_id)?;
-                        insert_job_attempt(
-                            db,
-                            conversation,
-                            scope,
-                            &inputs.request.instructions,
-                            allocation,
-                        )?
-                    }
-                    _ => {
-                        let conversation = insert_conversation(
-                            db,
-                            job.checkout_id.clone(),
-                            "Background job".into(),
-                            true,
-                        )?;
-                        insert_job_attempt(
-                            db,
-                            conversation,
-                            scope,
-                            &inputs.request.instructions,
-                            allocation,
-                        )?
+                if let Some(instruction) = inputs.instruction {
+                    let context = job
+                        .context
+                        .as_ref()
+                        .context("Instruction has no conversation destination")?;
+                    let conversation = load_conversation(db, &context.conversation_id)?;
+                    let recorded = load_binding(db, &job.id)?.map(|binding| RecordedAttempt {
+                        context_id: binding.context.context_id,
+                        previous_run_id: None,
+                        question_route: binding.question_route,
+                    });
+                    insert_instruction_attempt(
+                        db,
+                        conversation,
+                        scope,
+                        instruction.revision_id,
+                        recorded,
+                        allocation,
+                    )?
+                } else {
+                    match (
+                        &job.origin,
+                        job.context.as_ref(),
+                        load_binding(db, &job.id)?,
+                    ) {
+                        (JobOrigin::Operator | JobOrigin::Pipeline, _, Some(binding)) => {
+                            let conversation =
+                                load_conversation(db, &binding.context.conversation_id)?;
+                            insert_recorded_job_attempt(
+                                db,
+                                conversation,
+                                scope,
+                                RecordedAttempt {
+                                    context_id: binding.context.context_id,
+                                    previous_run_id: None,
+                                    question_route: binding.question_route,
+                                },
+                                &inputs.request.instructions,
+                                allocation,
+                            )?
+                        }
+                        (JobOrigin::Operator, Some(context), None) => {
+                            let conversation = load_conversation(db, &context.conversation_id)?;
+                            insert_job_attempt(
+                                db,
+                                conversation,
+                                scope,
+                                &inputs.request.instructions,
+                                allocation,
+                            )?
+                        }
+                        _ => {
+                            let conversation = insert_conversation(
+                                db,
+                                job.checkout_id.clone(),
+                                "Background job".into(),
+                                true,
+                            )?;
+                            insert_job_attempt(
+                                db,
+                                conversation,
+                                scope,
+                                &inputs.request.instructions,
+                                allocation,
+                            )?
+                        }
                     }
                 }
             }
@@ -820,6 +856,7 @@ fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
         scope,
         command,
         question: load_continuation(db, job)?,
+        instruction: instructions::load_revision(db, &job.id)?,
     })
 }
 
@@ -1000,16 +1037,35 @@ fn evaluate(
     {
         let binding = load_binding(db, &job.id)?;
         let conversation = load_conversation(db, &context.conversation_id)?;
-        if binding.is_none() && conversation.context_id != context.context_id {
+        let destination_current = if inputs.instruction.is_some() {
+            if let Some(job_id) = instructions::predecessor(db, job)? {
+                blockers.push(InstructionOrder { job_id });
+            }
+            instructions::preserves_destination(
+                db,
+                &conversation.id,
+                &context.context_id,
+                &conversation.context_id,
+            )?
+        } else {
+            conversation.context_id == context.context_id
+        };
+        if binding.is_none() && !destination_current {
             blockers.push(ContextChanged {
                 context_id: context.context_id.clone(),
             });
         }
         if let Some(run_id) = active_conversation_run(db, &context.conversation_id)? {
             blockers.push(ConversationBusy { run_id });
-        } else if let Some(run_id) =
-            saved_question_run(db, &context.conversation_id, &context.context_id)?
-        {
+        } else if let Some(run_id) = saved_question_run(
+            db,
+            &context.conversation_id,
+            binding
+                .as_ref()
+                .map_or(&conversation.context_id, |binding| {
+                    &binding.context.context_id
+                }),
+        )? {
             blockers.push(ConversationBusy { run_id });
         }
     }

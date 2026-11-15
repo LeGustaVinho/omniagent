@@ -51,6 +51,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/036-subagent-audit.sql"),
     include_str!("../migrations/037-question-waits.sql"),
     include_str!("../migrations/038-question-answers.sql"),
+    include_str!("../migrations/039-pending-instructions.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -234,6 +235,9 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
         }
         if index + 1 == 34 {
             crate::jobs::migrate_subagent_observations(&tx)?;
+        }
+        if index + 1 == 39 {
+            crate::jobs::migrate_pending_instructions(&tx)?;
         }
         tx.pragma_update(None, "user_version", (index + 1) as u32)?;
     }
