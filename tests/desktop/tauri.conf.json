@@ -1,3 +1,12 @@
 {
-  "identifier": "io.github.legustavinho.omniagent.desktop-tests"
+  "identifier": "io.github.legustavinho.omniagent.desktop-tests",
+  "app": {
+    "security": {
+      "capabilities": [{
+        "identifier": "desktop-tests",
+        "windows": ["main"],
+        "permissions": ["core:default", "core:window:allow-close", "core:window:allow-is-visible"]
+      }]
+    }
+  }
 }

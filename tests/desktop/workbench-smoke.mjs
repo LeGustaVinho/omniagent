@@ -68,6 +68,15 @@ function readTabs(browser) {
   }));
 }
 
+function runRows(browser, runId) {
+  return browser.execute((prefix) => {
+    const timeline = Array.from(document.querySelectorAll('ol[aria-label="Run events"]')).find(
+      (list) => list.closest("section")?.querySelector("h1")?.textContent === "Run " + prefix,
+    );
+    return timeline ? Array.from(timeline.children, (row) => row.lastElementChild.textContent) : [];
+  }, runId.slice(0, 8));
+}
+
 test("registers a Git checkout and runs a fixture in the Windows desktop", { timeout: 90_000 }, async (t) => {
   assert.equal(process.platform, "win32");
   const root = await realpath(tmpdir());
@@ -144,6 +153,41 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     await browser.waitUntil(async () => (await readTabs(browser)).groups.length === 2);
     assert.deepEqual(await readTabs(browser), expectedTabs);
     assert.equal(await browser.$("header span[title]").getAttribute("title"), checkout.checkoutRoot);
+
+    await browser.$('aside[aria-label="Workspace"] button').click();
+    await browser.$("button=Start fixture").click();
+    await browser.$("form input").waitForDisplayed();
+    const scope = { checkoutId: checkout.checkoutId };
+    const waiting = await invoke(browser, "run_snapshot", scope);
+    const runId = waiting.runs.find((run) => run.status === "waiting_for_input").id;
+    const visible = () => invoke(browser, "plugin:window|is_visible", { label: "main" });
+    assert.equal(await visible(), true);
+    await invoke(browser, "plugin:window|close", { label: "main" });
+    await browser.waitUntil(async () => !(await visible()));
+
+    await invoke(browser, "send_fixture_input", { ...scope, runId, input: "Sent while hidden" });
+    await browser.waitUntil(async () => {
+      const snapshot = await invoke(browser, "run_snapshot", scope);
+      return snapshot.runs.find((run) => run.id === runId).status === "succeeded";
+    });
+    // Starting the same executable forwards to the visible window in the
+    // existing single instance. The attached WebDriver session keeps its page.
+    const reopen = spawn(application, [], { stdio: "ignore", windowsHide: true });
+    const stopped = new Promise((resolve, reject) => {
+      reopen.once("error", reject);
+      reopen.once("exit", resolve);
+    });
+    try {
+      await browser.waitUntil(visible);
+      assert.equal(await stopped, 0);
+    } finally {
+      if (reopen.exitCode === null) reopen.kill();
+    }
+    await browser.waitUntil(async () => (await runRows(browser, runId)).includes("Succeeded"));
+    const history = (await invoke(browser, "run_snapshot", scope)).recentEvents.filter((event) => event.runId === runId);
+    assert.equal(new Set(history.map((event) => event.seq)).size, history.length);
+    assert.ok(history.every((event, index) => index === 0 || BigInt(history[index - 1].seq) < BigInt(event.seq)));
+    assert.equal((await runRows(browser, runId)).length, history.length);
   } finally {
     try {
       await browser?.deleteSession();
