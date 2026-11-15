@@ -184,6 +184,7 @@ impl Configuration {
 
 struct Turn {
     text: String,
+    cancel_requested: bool,
 }
 
 struct AcpSession {
@@ -520,7 +521,9 @@ impl AcpSession {
     }
 
     fn permission(&mut self, id: RequestId, params: &Value) -> Result<AdapterUpdate> {
-        if self.turn.is_none() || self.session_id.as_deref() != params["sessionId"].as_str() {
+        if self.turn.as_ref().is_none_or(|turn| turn.cancel_requested)
+            || self.session_id.as_deref() != params["sessionId"].as_str()
+        {
             return outbound(self.rpc.result(&id, cancelled_permission())?);
         }
         ensure!(
@@ -584,6 +587,7 @@ impl CliSession for AcpSession {
         )?;
         self.turn = Some(Turn {
             text: String::new(),
+            cancel_requested: false,
         });
         Ok(AdapterUpdate {
             outbound: vec![frame],
@@ -656,10 +660,24 @@ impl CliSession for AcpSession {
     }
 
     fn interrupt(&mut self) -> Result<Interrupt> {
-        ensure!(self.turn.is_some(), "ACP has no active prompt");
+        let turn = self.turn.as_mut().context("ACP has no active prompt")?;
+        ensure!(!turn.cancel_requested, "ACP cancellation already requested");
+        let id = self
+            .session_id
+            .as_deref()
+            .context("missing ACP session ID")?;
+        let mut outbound = vec![
+            self.rpc
+                .notify("session/cancel", Some(json!({"sessionId":id})))?,
+        ];
+        for id in self.permissions.keys() {
+            outbound.push(self.rpc.result(id, cancelled_permission())?);
+        }
+        self.permissions.clear();
+        turn.cancel_requested = true;
         Ok(Interrupt {
-            outbound: Vec::new(),
-            grace: Duration::ZERO,
+            outbound,
+            grace: Duration::from_secs(5),
         })
     }
 
@@ -903,6 +921,84 @@ mod tests {
                     text: "blocked".into()
                 })
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_unblocks_permissions_and_waits_for_the_prompt_response() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = AntigravityAdapter.create_session(SessionRequest {
+            checkout: checkout.path().into(),
+            intent: SessionIntent::Start,
+            mode: SessionMode::ReadOnly,
+            model: None,
+            effort: None,
+        })?;
+        session.start()?;
+        receive(
+            &mut *session,
+            json!({"id":1,"result":{"protocolVersion":1}}),
+        )?;
+        receive(
+            &mut *session,
+            json!({"id":2,"result":results("argon","medium","plan")}),
+        )?;
+        session.send(TurnInput {
+            message_id: "turn".into(),
+            text: "Cancellation fixture".into(),
+        })?;
+        let permission = |id: usize| {
+            json!({
+                "id":id,"method":"session/request_permission","params":{
+                    "sessionId":"acp-session","toolCall":{"toolCallId":"edit","kind":"edit"},
+                    "options":[{"optionId":"allow","kind":"allow_once"}]
+                }
+            })
+        };
+        receive(&mut *session, permission(101))?;
+        let interrupt = session.interrupt()?;
+        assert_eq!(interrupt.outbound.len(), 2);
+        let notify: Value = serde_json::from_slice(interrupt.outbound[0].as_bytes())?;
+        assert_eq!(
+            notify,
+            json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"acp-session"}})
+        );
+        let reply: Value = serde_json::from_slice(interrupt.outbound[1].as_bytes())?;
+        assert_eq!(reply["id"], 101);
+        assert_eq!(reply["result"]["outcome"]["outcome"], "cancelled");
+        assert!(
+            session
+                .respond_approval(&RequestId::Number(101), ApprovalDecision::Deny)
+                .is_err()
+        );
+        assert!(session.interrupt().is_err());
+        let late = receive(&mut *session, permission(102))?;
+        assert_eq!(message(&late)?["result"]["outcome"]["outcome"], "cancelled");
+        assert!(
+            receive(
+                &mut *session,
+                json!({"id":800,"result":{"stopReason":"cancelled"}})
+            )?
+            .events
+            .iter()
+            .all(|event| !matches!(event.data, ProviderEventData::TurnFinished { .. }))
+        );
+        let terminal = receive(
+            &mut *session,
+            json!({"id":3,"result":{"stopReason":"cancelled"}}),
+        )?;
+        assert_eq!(
+            terminal.events[0].data,
+            ProviderEventData::TurnFinished {
+                outcome: TurnOutcome::Interrupted
+            }
+        );
+        assert!(
+            session
+                .process_finished(TerminalOutcome::Exited(0))
+                .events
+                .is_empty()
         );
         Ok(())
     }

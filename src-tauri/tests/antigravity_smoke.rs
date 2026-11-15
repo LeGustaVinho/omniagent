@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     path::Path,
     process::Command,
     time::{Duration, Instant},
@@ -6,10 +7,13 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use omniagent::{
-    process_io::CapturedProcess,
+    process::TerminalOutcome,
+    process_io::{CapturedProcess, OutputFrame, Stream},
     providers::{
-        AdapterUpdate, ApprovalDecision, CliAdapter, ProviderEventData, SessionIntent, SessionMode,
-        SessionRequest, TurnInput, TurnOutcome, antigravity::AntigravityAdapter,
+        AdapterUpdate, ApprovalDecision, CliAdapter, CliSession, ProviderEventData, SessionIntent,
+        SessionMode, SessionRequest, TurnInput, TurnOutcome,
+        antigravity::AntigravityAdapter,
+        runtime::{Interruption, interrupt_to_completion},
     },
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
 };
@@ -21,12 +25,11 @@ fn send(process: &mut CapturedProcess, update: &AdapterUpdate) -> Result<()> {
     Ok(())
 }
 
-fn run_turn(
+fn launch_ready(
     executable: &Path,
     checkout: &Path,
     intent: SessionIntent,
-    word: &str,
-) -> Result<String> {
+) -> Result<(Box<dyn CliSession>, CapturedProcess, String)> {
     let mut session = AntigravityAdapter.create_session(SessionRequest {
         checkout: checkout.into(),
         intent,
@@ -47,9 +50,6 @@ fn run_turn(
     })?;
     send(&mut process, &session.start()?)?;
     let deadline = Instant::now() + Duration::from_secs(60);
-    let mut native_id = None;
-    let mut answer = String::new();
-    let mut delta = String::new();
     loop {
         let frame = process
             .output
@@ -68,17 +68,45 @@ fn run_turn(
                         effort.as_deref() == Some("low"),
                         "ACP selected another thinking level"
                     );
-                    native_id = event.location.session_id;
-                    send(
-                        &mut process,
-                        &session.send(TurnInput {
-                            message_id: word.into(),
-                            text: format!(
-                                "Reply with exactly {word} and no punctuation. Do not use tools."
-                            ),
-                        })?,
-                    )?;
+                    let id = event
+                        .location
+                        .session_id
+                        .context("ACP did not send a session ID")?;
+                    return Ok((session, process, id));
                 }
+                ProviderEventData::Error { message } => bail!("ACP smoke failed: {message}"),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn run_turn(
+    executable: &Path,
+    checkout: &Path,
+    intent: SessionIntent,
+    word: &str,
+) -> Result<String> {
+    let (mut session, mut process, native_id) = launch_ready(executable, checkout, intent)?;
+    send(
+        &mut process,
+        &session.send(TurnInput {
+            message_id: word.into(),
+            text: format!("Reply with exactly {word} and no punctuation. Do not use tools."),
+        })?,
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut answer = String::new();
+    let mut delta = String::new();
+    loop {
+        let frame = process
+            .output
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .context("Antigravity smoke response timed out or stopped")??;
+        let update = session.receive(frame)?;
+        send(&mut process, &update)?;
+        for event in update.events {
+            match event.data {
                 ProviderEventData::AssistantDelta { text } => delta.push_str(&text),
                 ProviderEventData::AssistantMessage { text } => answer = text,
                 ProviderEventData::Approval { request_id, .. } => send(
@@ -98,12 +126,109 @@ fn run_turn(
                     ensure!(delta.contains(word), "ACP did not stream text");
                     process.control.cancel()?;
                     process.control.wait()?;
-                    return native_id.context("ACP did not send a session ID");
+                    return Ok(native_id);
                 }
                 _ => {}
             }
         }
     }
+}
+
+#[test]
+#[ignore = "requires an authenticated Antigravity CLI with Gemini 3.8 Flash"]
+fn antigravity_confirms_cancellation_on_the_outstanding_prompt() -> Result<()> {
+    let checkout = tempfile::tempdir()?;
+    let executable = AntigravityAdapter.discover(None)?;
+    let (mut session, mut process, _) =
+        launch_ready(&executable, checkout.path(), SessionIntent::Start)?;
+    send(
+        &mut process,
+        &session.send(TurnInput {
+            message_id: "cancel-smoke".into(),
+            text: "Write the numbers from 1 to 2000, one per line. Do not use tools.".into(),
+        })?,
+    )?;
+    // Cancel after the provider has begun the prompt. A notification delivered
+    // before the server starts processing session/prompt can race its setup.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let frame = process
+            .output
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .context("ACP did not start streaming before cancellation")??;
+        let update = session.receive(frame)?;
+        send(&mut process, &update)?;
+        if update
+            .events
+            .iter()
+            .any(|event| matches!(event.data, ProviderEventData::AssistantDelta { .. }))
+        {
+            break;
+        }
+        if update
+            .events
+            .iter()
+            .any(|event| matches!(event.data, ProviderEventData::TurnFinished { .. }))
+        {
+            bail!("ACP completed without streaming the cancellation fixture");
+        }
+    }
+    let outcome = interrupt_to_completion(&mut process, &mut *session, |_| Ok(()))?;
+    assert_eq!(
+        outcome,
+        Interruption::PromptReturned(TurnOutcome::Interrupted)
+    );
+    process.control.cancel()?;
+    process.control.wait()?;
+    Ok(())
+}
+
+#[test]
+fn unresponsive_acp_prompt_is_stopped_by_the_job_supervisor() -> Result<()> {
+    let checkout = tempfile::tempdir()?;
+    let mut session = AntigravityAdapter.create_session(SessionRequest {
+        checkout: checkout.path().into(),
+        intent: SessionIntent::Start,
+        mode: SessionMode::Plan,
+        model: None,
+        effort: None,
+    })?;
+    session.start()?;
+    for line in [
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"silent","modes":{"currentModeId":"plan"}}}"#,
+    ] {
+        session.receive(OutputFrame {
+            stream: Stream::Stdout,
+            data: line.into(),
+        })?;
+    }
+    session.send(TurnInput {
+        message_id: "cancel".into(),
+        text: "fixture".into(),
+    })?;
+    let mut quiet = DirectWindowsRunner.launch(LaunchRequest {
+        version: CONTRACT_VERSION,
+        executable: Path::new(env!("CARGO_BIN_EXE_omniagent")),
+        checkout: checkout.path(),
+        arguments: &[OsStr::new("--fixture-grandchild")],
+    })?;
+    let mut observed = Vec::new();
+    let outcome = interrupt_to_completion(&mut quiet, &mut *session, |event| {
+        observed.push(event.data);
+        Ok(())
+    })?;
+    assert!(matches!(
+        outcome,
+        Interruption::ProcessStopped(TerminalOutcome::Cancelled(_))
+    ));
+    assert_eq!(
+        observed,
+        vec![ProviderEventData::TurnFinished {
+            outcome: TurnOutcome::Interrupted
+        }]
+    );
+    Ok(())
 }
 
 #[test]
