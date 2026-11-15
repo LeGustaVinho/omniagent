@@ -410,6 +410,7 @@ pub struct CapabilityAssessment {
 pub(crate) struct ReportedCapabilities {
     available: BTreeSet<Capability>,
     observed: BTreeSet<Capability>,
+    goal_command: Option<bool>,
     pub model: Option<String>,
     models: Vec<super::ReportedModel>,
     pub effort: Option<String>,
@@ -501,6 +502,9 @@ impl ReportedCapabilities {
             ProviderEventData::PlanProposed { .. } => {
                 self.observed.insert(Capability::NativePlanOutput)
             }
+            ProviderEventData::NativeGoalCommandReported { available } => {
+                self.goal_command.replace(*available) != Some(*available)
+            }
             ProviderEventData::FreshSessionOpened => self.observed.insert(Capability::FreshSession),
             ProviderEventData::NativeForkVerified { .. } => {
                 self.observed.insert(Capability::NativeTurnFork)
@@ -553,6 +557,24 @@ impl ReportedCapabilities {
         let mut descriptors: Vec<_> = Capability::ALL
             .into_iter()
             .map(|capability| {
+                if capability == Capability::NativeGoalCommand {
+                    return CapabilityDescriptor {
+                        subject: CapabilitySubject::Protocol { capability },
+                        source: if self.goal_command.is_some() {
+                            DeclaredSource::Provider
+                        } else {
+                            DeclaredSource::Adapter
+                        },
+                        availability: match self.goal_command {
+                            Some(true) => Availability::Available,
+                            Some(false) => Availability::Unavailable,
+                            None => Availability::Unknown,
+                        },
+                        observed: None,
+                        blocker: None,
+                        boundary: EvidenceBoundary::ExactCheckout,
+                    };
+                }
                 if capability == Capability::RunScopedMcp {
                     return CapabilityDescriptor {
                         subject: CapabilitySubject::Protocol { capability },

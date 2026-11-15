@@ -73,6 +73,7 @@ impl CliAdapter for ClaudeAdapter {
             turn: None,
             pending: HashMap::new(),
             completed_turn: false,
+            goal_command: None,
             question_route: Default::default(),
         }))
     }
@@ -86,6 +87,7 @@ struct ClaudeSession {
     turn: Option<Turn>,
     pending: HashMap<RequestId, PendingInput>,
     completed_turn: bool,
+    goal_command: Option<bool>,
     question_route: super::questions::QuestionRoute,
 }
 
@@ -284,6 +286,18 @@ impl ClaudeSession {
         }
         if let Some(models) = models {
             announced.push(self.event(frame, ProviderEventData::ModelInventory { models }));
+        }
+        if let Some(commands) = status["commands"].as_array()
+            && commands.iter().all(|command| command["name"].is_string())
+        {
+            let available = commands
+                .iter()
+                .any(|command| command["name"] == "goal" && command["builtin"] == true);
+            self.goal_command = Some(available);
+            announced.push(self.event(
+                frame,
+                ProviderEventData::NativeGoalCommandReported { available },
+            ));
         }
         Ok(events(announced))
     }
@@ -576,6 +590,10 @@ impl ClaudeSession {
 }
 
 impl CliSession for ClaudeSession {
+    fn native_goal_support(&self) -> super::goal::NativeGoalSupport {
+        super::goal::NativeGoalSupport::from_advertisement(self.goal_command)
+    }
+
     fn set_question_route(&mut self, route: super::questions::QuestionRoute) {
         self.question_route = route;
     }

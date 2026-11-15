@@ -82,6 +82,18 @@ pub enum NativeGoalSupport {
     },
 }
 
+impl NativeGoalSupport {
+    pub(super) fn from_advertisement(advertised: Option<bool>) -> Self {
+        Self::Managed {
+            reason: match advertised {
+                Some(true) => ManagedGoalReason::IncompleteLifecycle,
+                Some(false) => ManagedGoalReason::Unavailable,
+                None => ManagedGoalReason::Unqualified,
+            },
+        }
+    }
+}
+
 pub struct NativeGoalEvidence {
     // A discovered command does not establish working lifecycle controls.
     pub scope_key: String,
