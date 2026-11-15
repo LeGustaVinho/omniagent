@@ -4,6 +4,7 @@ pub mod customizations;
 pub mod diagnostics;
 pub mod dispatch;
 pub mod evidence;
+pub mod jobs;
 pub mod mcp_bridge;
 pub mod model_catalog;
 pub mod process;

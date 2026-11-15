@@ -56,7 +56,7 @@ impl RunStatus {
         }
     }
 
-    fn from_sql(value: &str) -> Result<Self> {
+    pub(crate) fn from_sql(value: &str) -> Result<Self> {
         match value {
             "starting" => Ok(Self::Starting),
             "running" => Ok(Self::Running),
