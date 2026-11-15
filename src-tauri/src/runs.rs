@@ -370,7 +370,7 @@ mod tests {
         store
             .execute(|db| {
                 db.execute(
-                    "INSERT INTO projects VALUES ('project', 'common', 'root')",
+                    "INSERT INTO projects(id, git_common_dir, root) VALUES ('project', 'common', 'root')",
                     [],
                 )?;
                 db.execute(

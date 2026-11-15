@@ -248,6 +248,9 @@ pub enum ProviderEventData {
     AttachmentBlocked {
         blockers: Vec<crate::attachments::AttachmentBlocker>,
     },
+    AttachmentAssessed {
+        assessment: Box<crate::attachments::AttachmentAssessment>,
+    },
     ConfigurationReported {
         revision: Option<String>,
         #[serde(default)]

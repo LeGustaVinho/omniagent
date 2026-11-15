@@ -302,14 +302,17 @@ impl Store {
             let conversation = self.conversation(conversation_id.clone()).await?;
             let layout = crate::repository::verify_checkout(
                 self,
-                conversation.checkout_id,
+                conversation.checkout_id.clone(),
                 checkout.clone(),
             )
             .await?;
+            let limits = self
+                .checkout_attachment_limits(conversation.checkout_id)
+                .await?;
             let root = layout.root;
             Some(
                 tokio::task::spawn_blocking(move || -> Result<_> {
-                    let captured = attachments::capture(&root, previews)?;
+                    let captured = attachments::capture(&root, previews, limits)?;
                     let payload = protection::protect(&serde_json::to_vec(&captured)?)?;
                     Ok((root, payload))
                 })
@@ -360,7 +363,10 @@ impl Store {
                     attachments.extend(items.into_iter().map(|item| (message.revision_id.clone(), item)));
                 }
             }
-            attachments::check_limits(attachments.iter().map(|(_, item)| item.charged_size()))?;
+            if !attachments.is_empty() {
+                let limits = attachments::limits_for_checkout(&tx, &conversation.checkout_id)?;
+                attachments::check_limits(limits, attachments.iter().map(|(_, item)| (&item.metadata, item.delivery())))?;
+            }
             let (run, _) = runs::insert_run(&tx, conversation.checkout_id, "agent")?;
             let ordinal = previous.as_ref().map_or(1, |prior| prior.ordinal + 1);
             let previous_run_id = previous.map(|prior| prior.run_id);
@@ -1667,6 +1673,292 @@ mod tests {
         assert!(blockers[0].reason.contains("preview it again"));
         assert_eq!(blockers[1].source.file_name(), Some("unsupported.txt"));
         assert!(blockers[1].reason.contains("no native route"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attachment_limits_combine_current_project_settings_and_exact_profile_evidence()
+    -> Result<()> {
+        use crate::attachments::{
+            AttachmentDelivery, AttachmentFormat, AttachmentLimits, AttachmentPreview,
+            AttachmentSource, NativeAttachmentEncoding, QualifiedAttachmentContext,
+            QualifiedAttachmentFormat, QualifiedAttachmentLimits,
+        };
+
+        let (_dir, store, chat, scope) = setup().await?;
+        let project = crate::repository::register(&store, scope.checkout.clone()).await?;
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let make_runner = |conversation: &str| {
+            Arc::new(FixtureRunner(WireLog {
+                store: store.clone(),
+                runtime: tokio::runtime::Handle::current(),
+                conversation: conversation.into(),
+                frames: frames.clone(),
+            }))
+        };
+        let baseline =
+            prepare(&store, &chat.id, scope.clone(), "Establish fixture profile").await?;
+        let run = baseline.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), make_runner(&chat.id), baseline, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        let capability_scope = store
+            .agent_dispatch(chat.id.clone(), run)
+            .await?
+            .unwrap()
+            .snapshot
+            .capabilities
+            .unwrap()
+            .scope;
+        let qualified = QualifiedAttachmentLimits {
+            files_per_turn: Some(1),
+            encoded_request_bytes: Some(600),
+            formats: vec![QualifiedAttachmentFormat {
+                format: AttachmentFormat::Png,
+                encoding: NativeAttachmentEncoding::CodexLocalImage,
+                file_bytes: Some(1),
+                input_tokens: Some(12),
+            }],
+            context: Some(QualifiedAttachmentContext {
+                window_tokens: 2_000,
+                reserved_output_tokens: 1_000,
+                fixed_input_tokens: 30,
+            }),
+        };
+        let qualification = store
+            .record_attachment_limit_evidence(
+                capability_scope,
+                "simulated-qualified-limits".into(),
+                qualified.clone(),
+            )
+            .await?;
+        let project_limits = AttachmentLimits {
+            files_per_turn: 3,
+            bytes_per_file: 1024,
+            bytes_per_turn: 2048,
+            utf8_bytes_per_excerpt: 1400,
+        };
+        store
+            .set_project_attachment_limits(project.project_id.clone(), project_limits)
+            .await?;
+        assert_eq!(
+            store
+                .project_attachment_limits(project.project_id.clone())
+                .await?,
+            project_limits
+        );
+
+        let notes = AttachmentSource::Checkout {
+            relative_path: "source.txt".into(),
+        };
+        std::fs::write(scope.checkout.join("source.txt"), "a".repeat(1_500))?;
+        let app_error = store
+            .preview_attachment(
+                chat.checkout_id.clone(),
+                notes.clone(),
+                AttachmentDelivery::Native,
+            )
+            .await
+            .err()
+            .context("project preview accepted an oversized file")?
+            .to_string();
+        assert!(app_error.contains("source.txt") && app_error.contains("1024 bytes"));
+        let range = |count| AttachmentDelivery::Excerpt {
+            start: 0,
+            end: count,
+        };
+        let context_case =
+            AttachmentPreview::read_with_delivery(&scope.checkout, notes.clone(), range(1_100))?;
+        let count_case = [
+            AttachmentPreview::read_with_delivery(&scope.checkout, notes.clone(), range(3))?,
+            AttachmentPreview::read_with_delivery(&scope.checkout, notes, range(5))?,
+        ];
+        std::fs::write(scope.checkout.join("escape.txt"), "\u{1}".repeat(250))?;
+        let escaped = AttachmentSource::Checkout {
+            relative_path: "escape.txt".into(),
+        };
+        let encoded_case =
+            AttachmentPreview::read_with_delivery(&scope.checkout, escaped.clone(), range(250))?;
+        std::fs::write(
+            scope.checkout.join("picture.png"),
+            b"\x89PNG\r\n\x1a\nfixture",
+        )?;
+        let image = AttachmentPreview::read(
+            &scope.checkout,
+            AttachmentSource::Checkout {
+                relative_path: "picture.png".into(),
+            },
+        )?;
+        for (previews, expected) in [
+            (vec![image], "qualified image/png limit"),
+            (count_case.into(), "qualified limit of 1 attachments"),
+            (vec![context_case], "after reserving 1000 for output"),
+            (vec![encoded_case], "qualified limit is 600 bytes"),
+        ] {
+            let candidate = store
+                .create_conversation(chat.checkout_id.clone(), expected.into())
+                .await?;
+            let plan = store
+                .prepare_agent_attempt_with_attachments(
+                    candidate.id.clone(),
+                    candidate.context_id,
+                    scope.clone(),
+                    "Use my attachments".into(),
+                    previews,
+                )
+                .await?;
+            let run = plan.run.id.clone();
+            frames.lock().unwrap().clear();
+            assert_eq!(
+                start_managed_turn(store.clone(), make_runner(&candidate.id), plan, None)
+                    .wait()
+                    .await?,
+                RunStatus::Failed
+            );
+            assert!(
+                store
+                    .agent_dispatch(candidate.id.clone(), run.clone())
+                    .await?
+                    .is_none()
+            );
+            assert!(frames.lock().unwrap().iter().all(|frame| {
+                serde_json::from_slice::<Value>(frame).unwrap()["method"] != "turn/start"
+            }));
+            let assessment = store
+                .agent_observations(candidate.id, run, 0)
+                .await?
+                .into_iter()
+                .find_map(|entry| match entry.event.data {
+                    ProviderEventData::AttachmentAssessed { assessment } => Some(assessment),
+                    _ => None,
+                })
+                .context("missing pre-dispatch attachment decisions")?;
+            assert_eq!(assessment.qualified, Some(qualified.clone()));
+            assert_eq!(
+                assessment.qualification_id.as_deref(),
+                Some(qualification.as_str())
+            );
+            assert_eq!(assessment.project, project_limits);
+            assert!(
+                assessment
+                    .blockers
+                    .iter()
+                    .any(|entry| entry.reason.contains(expected)),
+                "{assessment:?}"
+            );
+            if expected.contains("600") {
+                assert!(assessment.encoded_request_bytes.unwrap() > 600);
+            }
+        }
+
+        let candidate = store
+            .create_conversation(chat.checkout_id.clone(), "Switched profile".into())
+            .await?;
+        let preview = store
+            .preview_attachment(chat.checkout_id.clone(), escaped.clone(), range(250))
+            .await?;
+        let mut switched_scope = scope;
+        switched_scope.profile_id = "another-profile".into();
+        let plan = store
+            .prepare_agent_attempt_with_attachments(
+                candidate.id.clone(),
+                candidate.context_id,
+                switched_scope.clone(),
+                "Use the excerpt".into(),
+                vec![preview],
+            )
+            .await?;
+        let run = plan.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), make_runner(&candidate.id), plan, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        let saved = store
+            .agent_dispatch(candidate.id.clone(), run.clone())
+            .await?
+            .unwrap();
+        let events = store.agent_observations(candidate.id, run, 0).await?;
+        let assessed = events
+            .iter()
+            .find(|entry| {
+                matches!(
+                    entry.event.data,
+                    ProviderEventData::AttachmentAssessed { .. }
+                )
+            })
+            .unwrap();
+        let submitted = events
+            .iter()
+            .find(|entry| {
+                matches!(
+                    entry.event.data,
+                    ProviderEventData::DispatchSubmitted { .. }
+                )
+            })
+            .unwrap();
+        assert!(assessed.seq < submitted.seq);
+        let ProviderEventData::AttachmentAssessed { assessment } = &assessed.event.data else {
+            unreachable!()
+        };
+        assert!(assessment.qualified.is_none());
+        assert_eq!(
+            assessment.encoded_request_bytes,
+            Some(saved.frames[0].len() as u64)
+        );
+
+        let candidate = store
+            .create_conversation(
+                chat.checkout_id.clone(),
+                "Limits updated after admission".into(),
+            )
+            .await?;
+        let preview = store
+            .preview_attachment(chat.checkout_id, escaped, range(3))
+            .await?;
+        let plan = store
+            .prepare_agent_attempt_with_attachments(
+                candidate.id.clone(),
+                candidate.context_id,
+                switched_scope,
+                "Use the excerpt".into(),
+                vec![preview],
+            )
+            .await?;
+        let run = plan.run.id.clone();
+        store
+            .set_project_attachment_limits(
+                project.project_id,
+                AttachmentLimits {
+                    files_per_turn: 0,
+                    ..project_limits
+                },
+            )
+            .await?;
+        assert_eq!(
+            start_managed_turn(store.clone(), make_runner(&candidate.id), plan, None)
+                .wait()
+                .await?,
+            RunStatus::Failed
+        );
+        let events = store.agent_observations(candidate.id, run, 0).await?;
+        let assessment = events
+            .into_iter()
+            .find_map(|entry| match entry.event.data {
+                ProviderEventData::AttachmentAssessed { assessment } => Some(assessment),
+                _ => None,
+            })
+            .context("updated project limit was not assessed")?;
+        assert_eq!(assessment.project.files_per_turn, 0);
+        assert!(
+            assessment.blockers[0]
+                .reason
+                .contains("project limit of 0 attachments")
+        );
         Ok(())
     }
 

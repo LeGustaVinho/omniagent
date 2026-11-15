@@ -13,7 +13,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     attachments::{
         AttachmentDelivery, AttachmentFormat, AttachmentInput, AttachmentPreview, AttachmentSource,
-        NativeAttachmentEncoding, TurnAttachment,
+        NativeAttachmentEncoding, QualifiedAttachmentLimits, TurnAttachment,
     },
     conversations::SessionScope,
     process_io::CapturedProcess,
@@ -734,7 +734,7 @@ async fn verify_fallback_routes(provider: Provider, model: &str) -> Result<()> {
         },
     )?;
     let plan = store.prepare_agent_attempt_with_attachments(
-        chat.id.clone(), chat.context_id, scope,
+        chat.id.clone(), chat.context_id, scope.clone(),
         "Reply with the two exact codes. Read the attached file reference with a file read tool if needed. The other code is in the attached excerpt.".into(),
         vec![excerpt, selected_reference],
     ).await?;
@@ -796,6 +796,86 @@ async fn verify_fallback_routes(provider: Provider, model: &str) -> Result<()> {
     ensure!(
         answer.contains(&excerpt_code) && answer.contains(&link_code),
         "{provider:?} did not consume both routes: {answer}"
+    );
+
+    let encoded_bytes = saved
+        .frames
+        .iter()
+        .map(|frame| frame.len() as u64)
+        .sum::<u64>();
+    let capability_scope = saved
+        .snapshot
+        .capabilities
+        .context("missing capability assessment")?
+        .scope;
+    // Qualify the envelope actually exercised by the authenticated fixture.
+    let evidence = store
+        .record_attachment_limit_evidence(
+            capability_scope,
+            saved.id,
+            QualifiedAttachmentLimits {
+                files_per_turn: Some(2),
+                encoded_request_bytes: Some(encoded_bytes),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let checked = store
+        .create_conversation(
+            chat.checkout_id.clone(),
+            "Attachment request limit fixture".into(),
+        )
+        .await?;
+    let preview = store
+        .preview_attachment(
+            chat.checkout_id,
+            AttachmentSource::Checkout {
+                relative_path: "excerpt.txt".into(),
+            },
+            AttachmentDelivery::Excerpt { start: 0, end: 1 },
+        )
+        .await?;
+    let blocked = store
+        .prepare_agent_attempt_with_attachments(
+            checked.id.clone(),
+            checked.context_id,
+            scope,
+            format!(
+                "Use the attached excerpt {}",
+                "x".repeat(encoded_bytes as usize)
+            ),
+            vec![preview],
+        )
+        .await?;
+    let blocked_run = blocked.run.id.clone();
+    assert_eq!(
+        start_managed_turn(store.clone(), Arc::new(DirectWindowsRunner), blocked, None)
+            .wait()
+            .await?,
+        RunStatus::Failed,
+        "{provider:?} did not apply the qualified request envelope"
+    );
+    assert!(
+        store
+            .agent_dispatch(checked.id.clone(), blocked_run.clone())
+            .await?
+            .is_none()
+    );
+    let report = store
+        .agent_observations(checked.id, blocked_run, 0)
+        .await?
+        .into_iter()
+        .find_map(|entry| match entry.event.data {
+            ProviderEventData::AttachmentAssessed { assessment } => Some(assessment),
+            _ => None,
+        })
+        .context("missing request limit decisions")?;
+    assert_eq!(report.qualification_id.as_deref(), Some(evidence.as_str()));
+    assert!(report.encoded_request_bytes.unwrap() > encoded_bytes);
+    assert!(
+        report.blockers[0]
+            .reason
+            .contains(&format!("qualified limit is {encoded_bytes} bytes"))
     );
     Ok(())
 }

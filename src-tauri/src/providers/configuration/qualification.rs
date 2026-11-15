@@ -117,7 +117,27 @@ pub(crate) fn resolve_effective_configuration(
 ) -> Result<()> {
     configuration.environment_revision = None;
     configuration.effective_revision = None;
+    configuration.attachment_revision = None;
     configuration.tool_revisions.clear();
+    if configuration.unresolved.is_empty() {
+        // A transport-specific attachment test can qualify the exact checkout even
+        // when its CLI cannot enumerate all environment capabilities.
+        let bridge_present = launch
+            .inputs
+            .iter()
+            .any(|input| input.contents.contains(SERVER_NAME));
+        configuration.attachment_revision = Some(revision(&(
+            &configuration.detected,
+            &configuration.provider_revision,
+            &launch.strategy,
+            &launch.approved,
+            &launch.mcp_sources,
+            &launch.instruction_sources,
+            bridge_present,
+            plugins.map(|inventory| &inventory.report),
+            skills,
+        ))?);
+    }
     let (Some(reported), Some(plugins), Some(skills)) = (reported, plugins, skills) else {
         return Ok(());
     };

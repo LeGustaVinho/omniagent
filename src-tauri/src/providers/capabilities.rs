@@ -10,7 +10,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    attachments::{AttachmentFormat, NativeAttachmentEncoding},
+    attachments::{
+        AttachmentContextUsage, AttachmentFormat, NativeAttachmentEncoding,
+        QualifiedAttachmentLimits,
+    },
     conversations::SessionScope,
     mcp_bridge::{INSPECT_SCOPE, Registration, SERVER_NAME, VERSION},
     protection,
@@ -43,6 +46,7 @@ pub enum CapabilitySubject {
         format: AttachmentFormat,
         encoding: NativeAttachmentEncoding,
     },
+    AttachmentLimits,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +100,17 @@ impl CapabilityDescriptor {
             boundary: EvidenceBoundary::ExactCheckout,
         }
     }
+
+    pub fn attachment_limits() -> Self {
+        Self {
+            subject: CapabilitySubject::AttachmentLimits,
+            source: DeclaredSource::Adapter,
+            availability: Availability::Unknown,
+            observed: None,
+            blocker: None,
+            boundary: EvidenceBoundary::ExactCheckout,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +144,8 @@ pub struct Verification {
     pub origin: EvidenceOrigin,
     pub result: ObservedResult,
     pub artifact_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_limits: Option<QualifiedAttachmentLimits>,
 }
 
 impl Verification {
@@ -191,6 +208,8 @@ pub struct ConfigurationEvidence {
     /// Provider configuration plus detected source revisions. An unknown
     /// provider configuration cannot qualify for evidence reuse.
     pub effective_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) attachment_revision: Option<String>,
     #[serde(default)]
     pub environment_revision: Option<String>,
     #[serde(default)]
@@ -265,6 +284,7 @@ impl CapabilityScope {
             descriptor.subject,
             CapabilitySubject::NativeAttachment { .. }
         );
+        let attachment_limits = descriptor.subject == CapabilitySubject::AttachmentLimits;
         if !native_attachment && !self.configuration.unresolved.is_empty() {
             return None;
         }
@@ -277,6 +297,12 @@ impl CapabilityScope {
                 ("native-attachment-v1", None)
             }
             CapabilitySubject::NativeAttachment { .. } => return None,
+            CapabilitySubject::AttachmentLimits
+                if descriptor.boundary == EvidenceBoundary::ExactCheckout =>
+            {
+                (self.configuration.attachment_revision.as_deref()?, None)
+            }
+            CapabilitySubject::AttachmentLimits => return None,
             CapabilitySubject::Tool { id, .. } => (
                 self.configuration.environment_revision.as_deref()?,
                 Some(self.configuration.tool_revisions.get(id)?.as_str()),
@@ -310,7 +336,7 @@ impl CapabilityScope {
             requested_model: self.requested_model.as_deref(),
             reported_model: self.reported_model.as_deref().or_else(|| {
                 // Claude establishes the selected model when the first input arrives.
-                if native_attachment && self.provider == Provider::Claude {
+                if (native_attachment || attachment_limits) && self.provider == Provider::Claude {
                     self.requested_model.as_deref()
                 } else {
                     None
@@ -376,6 +402,7 @@ pub(crate) struct ReportedCapabilities {
     pub codex_instruction_settings: Option<super::configuration::CodexInstructionSettings>,
     pub bridge_registration: Option<Registration>,
     pub native_attachments: Vec<(AttachmentFormat, NativeAttachmentEncoding)>,
+    pub context_usage: Option<AttachmentContextUsage>,
 }
 
 impl ReportedCapabilities {
@@ -421,6 +448,7 @@ impl ReportedCapabilities {
                 }
                 if changed {
                     self.observed.clear();
+                    self.context_usage = None;
                 }
                 changed
             }
@@ -441,6 +469,13 @@ impl ReportedCapabilities {
                 self.observed.insert(Capability::SubagentEvents)
             }
             ProviderEventData::Compacted => self.observed.insert(Capability::NativeCompaction),
+            ProviderEventData::ContextWindowUsage { used, size } => {
+                self.context_usage = Some(AttachmentContextUsage {
+                    used: *used,
+                    size: *size,
+                });
+                false
+            }
             ProviderEventData::Suggestion { .. } => {
                 self.observed.insert(Capability::NativeSuggestions)
             }
@@ -546,6 +581,7 @@ impl ReportedCapabilities {
             }
             descriptors.push(descriptor);
         }
+        descriptors.push(CapabilityDescriptor::attachment_limits());
         descriptors
     }
 }
@@ -562,6 +598,41 @@ impl Store {
         origin: EvidenceOrigin,
         result: ObservedResult,
         artifact_id: String,
+    ) -> Result<String> {
+        ensure!(
+            descriptor.subject != CapabilitySubject::AttachmentLimits,
+            "attachment limit evidence requires measured limits"
+        );
+        self.store_capability_evidence(scope, descriptor, origin, result, artifact_id, None)
+            .await
+    }
+
+    pub async fn record_attachment_limit_evidence(
+        &self,
+        scope: CapabilityScope,
+        artifact_id: String,
+        limits: QualifiedAttachmentLimits,
+    ) -> Result<String> {
+        limits.validate(scope.provider)?;
+        self.store_capability_evidence(
+            scope,
+            CapabilityDescriptor::attachment_limits(),
+            EvidenceOrigin::AuthenticatedFixture,
+            ObservedResult::Succeeded,
+            artifact_id,
+            Some(limits),
+        )
+        .await
+    }
+
+    async fn store_capability_evidence(
+        &self,
+        scope: CapabilityScope,
+        descriptor: CapabilityDescriptor,
+        origin: EvidenceOrigin,
+        result: ObservedResult,
+        artifact_id: String,
+        attachment_limits: Option<QualifiedAttachmentLimits>,
     ) -> Result<String> {
         ensure!(
             !artifact_id.trim().is_empty(),
@@ -591,7 +662,12 @@ impl Store {
             .key(&descriptor)
             .context("qualification scope is incomplete")?;
         let hash = revision(&key)?;
-        let evidence = protection::protect(&serde_json::to_vec(&(key, result, artifact_id))?)?;
+        let evidence = if let Some(limits) = attachment_limits {
+            serde_json::to_vec(&(key, result, artifact_id, limits))?
+        } else {
+            serde_json::to_vec(&(key, result, artifact_id))?
+        };
+        let evidence = protection::protect(&evidence)?;
         let id = Uuid::new_v4().to_string();
         self.execute(move |db| {
             db.execute(
@@ -661,14 +737,31 @@ fn latest_evidence(db: &Connection, hash: &str) -> Result<Option<Verification>> 
         )
         .optional()?;
     row.map(|(id, checked_at, origin, payload)| {
-        let (_, result, artifact_id): (serde_json::Value, ObservedResult, String) =
-            serde_json::from_slice(&protection::unprotect(&payload)?)?;
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Evidence {
+            AttachmentLimits(
+                serde::de::IgnoredAny,
+                ObservedResult,
+                String,
+                QualifiedAttachmentLimits,
+            ),
+            Capability(serde::de::IgnoredAny, ObservedResult, String),
+        }
+        let (result, artifact_id, attachment_limits) =
+            match serde_json::from_slice(&protection::unprotect(&payload)?)? {
+                Evidence::AttachmentLimits(_, result, artifact_id, limits) => {
+                    (result, artifact_id, Some(limits))
+                }
+                Evidence::Capability(_, result, artifact_id) => (result, artifact_id, None),
+            };
         Ok(Verification {
             id,
             checked_at,
             origin: serde_json::from_value(serde_json::Value::String(origin))?,
             result,
             artifact_id,
+            attachment_limits,
         })
     })
     .transpose()
@@ -714,6 +807,7 @@ mod tests {
                 unresolved: Vec::new(),
                 provider_revision: Some("provider-config".into()),
                 effective_revision: Some("config-1".into()),
+                attachment_revision: Some("attachment-config-1".into()),
                 environment_revision: Some("environment-1".into()),
                 tool_revisions: BTreeMap::from([(
                     "fixture/read_file".into(),

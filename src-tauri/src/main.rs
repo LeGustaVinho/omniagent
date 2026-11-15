@@ -60,6 +60,8 @@ fn main() {
             ipc::active_checkout,
             ipc::cli_executables,
             ipc::set_cli_executable,
+            ipc::project_attachment_limits,
+            ipc::set_project_attachment_limits,
             ipc::probe_cli_executable,
             ipc::cli_plugin_inventory,
             ipc::review_checkout_customizations,

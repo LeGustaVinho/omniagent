@@ -1,12 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
+import type { AttachmentLimits } from "@/bindings/AttachmentLimits";
 import type { CliProbe } from "@/bindings/CliProbe";
 import type { ConfiguredExecutable } from "@/bindings/ConfiguredExecutable";
 import type { PluginInventory } from "@/bindings/PluginInventory";
 import type { PluginInventoryStatus } from "@/bindings/PluginInventoryStatus";
 import type { Provider } from "@/bindings/Provider";
 import { Button } from "@/components/ui/button";
+import { useWorkspace } from "@/workspace-state";
 
 const PROVIDERS: Record<Provider, string> = {
   codex: "Codex",
@@ -36,6 +38,7 @@ const PLUGIN_STATUS: Record<PluginInventoryStatus, string> = {
 };
 
 export function ProviderSettingsPanel() {
+  const projectId = useWorkspace((state) => state.checkout?.projectId);
   const profiles = useQuery({
     queryKey: ["cli-executables"],
     queryFn: () => invoke<ConfiguredExecutable[]>("cli_executables"),
@@ -47,8 +50,63 @@ export function ProviderSettingsPanel() {
       {profiles.isPending && <p role="status" className="text-sm text-muted-foreground">Loading executable paths…</p>}
       {profiles.isError && <p role="alert" className="text-sm text-red-300">{String(profiles.error)}</p>}
       <div className="grid max-w-3xl gap-4">
+        {projectId && <ProjectAttachmentSettings key={projectId} projectId={projectId} />}
         {profiles.data?.map((profile) => <ExecutableSettings key={profile.provider} profile={profile} />)}
       </div>
+    </section>
+  );
+}
+
+const ATTACHMENT_FIELDS = {
+  filesPerTurn: "Files per turn",
+  bytesPerFile: "Bytes per native file or staged copy",
+  bytesPerTurn: "Combined native and staged bytes per turn",
+  utf8BytesPerExcerpt: "UTF-8 bytes per excerpt",
+} satisfies Record<keyof AttachmentLimits, string>;
+const ATTACHMENT_KEYS = Object.keys(ATTACHMENT_FIELDS) as (keyof AttachmentLimits)[];
+
+function ProjectAttachmentSettings({ projectId }: { projectId: string }) {
+  const queryClient = useQueryClient();
+  const queryKey = ["project-attachment-limits", projectId];
+  const settings = useQuery({
+    queryKey,
+    queryFn: () => invoke<AttachmentLimits>("project_attachment_limits", { projectId }),
+    staleTime: Infinity,
+  });
+  const save = useMutation({
+    mutationFn: (limits: AttachmentLimits) => invoke<void>("set_project_attachment_limits", { projectId, limits }),
+    onSuccess: (_, limits) => queryClient.setQueryData(queryKey, limits),
+  });
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    save.mutate(Object.fromEntries(ATTACHMENT_KEYS.map((key) => [key, Number(data.get(key))])) as AttachmentLimits);
+  }
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-4">
+      <h2 className="text-base font-semibold">Project attachment limits</h2>
+      {settings.isPending && <p role="status" className="mt-2 text-sm text-muted-foreground">Loading limits…</p>}
+      {settings.isError && <p role="alert" className="mt-2 text-sm text-red-300">{String(settings.error)}</p>}
+      {settings.data && (
+        <form onSubmit={submit} onChange={() => save.reset()} className="mt-3 grid gap-3 sm:grid-cols-2">
+          {ATTACHMENT_KEYS.map((key) => (
+            <label key={key} className="text-sm">
+              {ATTACHMENT_FIELDS[key]}
+              <input name={key} type="number" min={0}
+                max={key === "filesPerTurn" ? 4_294_967_295 : Number.MAX_SAFE_INTEGER}
+                step={1} required disabled={save.isPending} defaultValue={settings.data[key]}
+                className="mt-1 block w-full rounded-md border border-border bg-background p-2 font-mono text-xs" />
+            </label>
+          ))}
+          <div className="flex items-center gap-3 sm:col-span-2">
+            <Button type="submit" disabled={save.isPending}>{save.isPending ? "Saving…" : "Save limits"}</Button>
+            {save.isSuccess && <p role="status" className="text-sm text-muted-foreground">Limits saved</p>}
+            {save.isError && <p role="alert" className="text-sm text-red-300">{String(save.error)}</p>}
+          </div>
+        </form>
+      )}
     </section>
   );
 }

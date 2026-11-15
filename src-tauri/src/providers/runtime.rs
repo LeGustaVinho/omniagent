@@ -11,7 +11,8 @@ use tokio::{runtime::Handle, sync::oneshot, task::JoinHandle};
 
 use crate::{
     attachments::{
-        AttachmentBlocker, AttachmentDispatch, AttachmentFormat, AttachmentInput, AttachmentSource,
+        AttachmentAssessment, AttachmentBudget, AttachmentDecision, AttachmentDelivery,
+        AttachmentDispatch, AttachmentFormat, AttachmentInput, AttachmentSource,
         CapturedAttachment, CapturedPayload, StagedAttachments,
     },
     conversations::{AttemptPlan, MessageRevision, MessageRole, PermissionRoute},
@@ -666,55 +667,15 @@ impl TurnExecution {
                 .resolve_capability_assessment(scope.clone(), descriptors),
         )?;
         let mut input = format_input(&self.plan.input)?;
-        let mut attachments = Vec::new();
-        let mut blockers = Vec::new();
-        for (revision, attachment) in &self.plan.attachments {
-            match prepare_attachment(
-                &mut self.staged_attachments,
-                runner,
-                session,
-                checkout,
-                &capabilities,
-                attachment,
-            ) {
-                Ok((block, qualification_id)) => {
-                    input.attachments.push(block.clone());
-                    attachments.push(AttachmentDispatch {
-                        message_revision_id: revision.clone(),
-                        metadata: attachment.metadata.clone(),
-                        qualification_id,
-                        input: block,
-                    });
-                }
-                Err(error) => blockers.push(AttachmentBlocker {
-                    message_revision_id: revision.clone(),
-                    source: attachment.metadata.source.clone(),
-                    delivery: attachment.delivery(),
-                    reason: format!("{error:#}"),
-                }),
-            }
+        let (mut assessment, attachments) =
+            self.prepare_attachments(runner, session, checkout, &capabilities, &native_history)?;
+        if let Some(blocked) = assessment.take_if(|report| !report.blockers.is_empty()) {
+            return self.record_attachment_assessment(blocked);
         }
-        if !blockers.is_empty() {
-            let reasons = blockers
-                .iter()
-                .map(|item| {
-                    format!(
-                        "{}: {}",
-                        item.source.file_name().unwrap_or("attachment"),
-                        item.reason
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            self.record(
-                ProviderEvent {
-                    location: ProviderLocation::default(),
-                    data: ProviderEventData::AttachmentBlocked { blockers },
-                },
-                EventSource::Application,
-            )?;
-            anyhow::bail!("{reasons}");
-        }
+        input.attachments = attachments
+            .iter()
+            .map(|attachment| attachment.input.clone())
+            .collect();
         if attachments.iter().any(|attachment| {
             attachment.message_revision_id
                 != self
@@ -733,7 +694,23 @@ impl TurnExecution {
                 .push_str("\n\nAttachment order (message revision and file name):\n");
             input.text.push_str(&serde_json::to_string(&sources)?);
         }
+        if let Some(report) = &mut assessment {
+            report.check_context(scope.provider, &input.text, &attachments)?;
+        }
+        if let Some(blocked) = assessment.take_if(|report| !report.blockers.is_empty()) {
+            return self.record_attachment_assessment(blocked);
+        }
         let update = session.send(input)?;
+        if let Some(mut report) = assessment {
+            report.check_encoded_request(
+                update
+                    .outbound
+                    .iter()
+                    .map(|frame| frame.as_bytes().len() as u64)
+                    .sum(),
+            );
+            self.record_attachment_assessment(report)?;
+        }
         self.capability_scope = Some((scope, checkout.clone()));
         let reported_skills = self.reported_skills.clone().unwrap_or_else(|| {
             SkillCatalog::unavailable(match self.plan.scope.provider {
@@ -795,6 +772,124 @@ impl TurnExecution {
         )?;
         for event in update.events {
             self.record(event, EventSource::Application)?;
+        }
+        Ok(())
+    }
+
+    fn prepare_attachments(
+        &mut self,
+        runner: &dyn Runner,
+        session: &dyn CliSession,
+        checkout: &CheckoutLayout,
+        capabilities: &CapabilityAssessment,
+        history: &NativeHistory,
+    ) -> Result<(Option<AttachmentAssessment>, Vec<AttachmentDispatch>)> {
+        if self.plan.attachments.is_empty() {
+            return Ok((None, Vec::new()));
+        }
+        let project = self.app.block_on(
+            self.store
+                .checkout_attachment_limits(self.plan.run.checkout_id.clone()),
+        )?;
+        let evidence = capabilities
+            .entries
+            .iter()
+            .find(|entry| entry.descriptor.subject == CapabilitySubject::AttachmentLimits)
+            .and_then(|entry| entry.evidence.as_ref())
+            .filter(|evidence| evidence.verified());
+        let mut assessment = AttachmentAssessment {
+            project,
+            qualified: evidence.and_then(|evidence| evidence.attachment_limits.clone()),
+            qualification_id: evidence.map(|evidence| evidence.id.clone()),
+            files: Vec::new(),
+            blockers: Vec::new(),
+            encoded_request_bytes: None,
+            estimated_context_input_tokens: None,
+            provider_context: self.reported.context_usage,
+            provider_history_usage_unknown: matches!(history, NativeHistory::ProviderCursor { .. })
+                && self.reported.context_usage.is_none(),
+        };
+        let mut attachments = Vec::new();
+        let mut budget = AttachmentBudget::new(project);
+        for (index, (revision, attachment)) in self.plan.attachments.iter().enumerate() {
+            let delivery = attachment.delivery();
+            let metadata = &attachment.metadata;
+            let encoding = if delivery == AttachmentDelivery::Native {
+                session.attachment_encoding(metadata.format)
+            } else {
+                None
+            };
+            let mut decision = AttachmentDecision {
+                message_revision_id: revision.clone(),
+                metadata: metadata.clone(),
+                delivery,
+                encoding,
+                qualification_id: None,
+            };
+            let result = (|| {
+                budget.check(&metadata.source, delivery, metadata.size)?;
+                if let Some(limits) = &assessment.qualified {
+                    limits.check_file(index, metadata, encoding)?;
+                }
+                prepare_attachment(
+                    &mut self.staged_attachments,
+                    runner,
+                    session,
+                    checkout,
+                    capabilities,
+                    attachment,
+                )
+            })();
+            match result {
+                Ok((input, qualification_id)) => {
+                    decision.qualification_id = qualification_id.clone();
+                    attachments.push(AttachmentDispatch {
+                        message_revision_id: revision.clone(),
+                        metadata: metadata.clone(),
+                        qualification_id,
+                        input,
+                    });
+                }
+                Err(error) => assessment
+                    .blockers
+                    .push(decision.blocker(format!("{error:#}"))),
+            }
+            assessment.files.push(decision);
+        }
+        Ok((Some(assessment), attachments))
+    }
+
+    fn record_attachment_assessment(&mut self, assessment: AttachmentAssessment) -> Result<()> {
+        let blockers = assessment.blockers.clone();
+        self.record(
+            ProviderEvent {
+                location: ProviderLocation::default(),
+                data: ProviderEventData::AttachmentAssessed {
+                    assessment: Box::new(assessment),
+                },
+            },
+            EventSource::Application,
+        )?;
+        if !blockers.is_empty() {
+            let reasons = blockers
+                .iter()
+                .map(|item| {
+                    format!(
+                        "{}: {}",
+                        item.source.file_name().unwrap_or("attachment"),
+                        item.reason
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.record(
+                ProviderEvent {
+                    location: ProviderLocation::default(),
+                    data: ProviderEventData::AttachmentBlocked { blockers },
+                },
+                EventSource::Application,
+            )?;
+            anyhow::bail!("{reasons}");
         }
         Ok(())
     }

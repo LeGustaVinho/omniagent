@@ -18,10 +18,12 @@ use crate::{
     runner::Runner,
 };
 
-const FILE_LIMIT: u64 = 20 * 1024 * 1024;
-const TURN_LIMIT: u64 = 50 * 1024 * 1024;
-const COUNT_LIMIT: usize = 10;
-const EXCERPT_LIMIT: u64 = 64 * 1024;
+mod limits;
+pub use limits::{
+    AttachmentAssessment, AttachmentContextUsage, AttachmentDecision, AttachmentLimits,
+    QualifiedAttachmentContext, QualifiedAttachmentFormat, QualifiedAttachmentLimits,
+};
+pub(crate) use limits::{AttachmentBudget, limits_for_checkout};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -178,10 +180,20 @@ impl AttachmentPreview {
         source: AttachmentSource,
         delivery: AttachmentDelivery,
     ) -> Result<Self> {
+        Self::read_with_limits(checkout, source, delivery, AttachmentLimits::default())
+    }
+
+    fn read_with_limits(
+        checkout: &Path,
+        source: AttachmentSource,
+        delivery: AttachmentDelivery,
+        limits: AttachmentLimits,
+    ) -> Result<Self> {
         let result = (|| {
             let canonical = authorized_path(checkout, &source)?;
             let mut file = open_locked_local_file(&canonical)?;
-            let metadata = inspect(&mut file, &source, delivery)?;
+            AttachmentBudget::new(limits).check(&source, delivery, file.metadata()?.len())?;
+            let metadata = inspect(&mut file, &source)?;
             let excerpt = read_excerpt(&mut file, &metadata, delivery)?;
             Ok(Self {
                 metadata,
@@ -214,7 +226,7 @@ impl AttachmentPreview {
         })
     }
 
-    fn capture(self, checkout: &Path) -> Result<CapturedAttachment> {
+    fn capture(self, checkout: &Path, limits: AttachmentLimits) -> Result<CapturedAttachment> {
         ensure!(
             self.checkout == checkout,
             "attachment preview belongs to another checkout"
@@ -225,7 +237,8 @@ impl AttachmentPreview {
             "attachment path changed after preview"
         );
         let mut file = open_locked_local_file(&path)?;
-        let observed = inspect(&mut file, &self.metadata.source, self.delivery)?;
+        limits.check_file(&self.metadata.source, self.delivery, file.metadata()?.len())?;
+        let observed = inspect(&mut file, &self.metadata.source)?;
         ensure!(
             observed == self.metadata,
             "attachment changed after preview, preview it again"
@@ -289,28 +302,8 @@ fn authorized_path(checkout: &Path, source: &AttachmentSource) -> Result<PathBuf
     Ok(canonical)
 }
 
-fn inspect(
-    file: &mut File,
-    source: &AttachmentSource,
-    delivery: AttachmentDelivery,
-) -> Result<AttachmentMetadata> {
+fn inspect(file: &mut File, source: &AttachmentSource) -> Result<AttachmentMetadata> {
     let size = file.metadata()?.len();
-    if delivery.uses_file_budget(source) {
-        ensure!(
-            size <= FILE_LIMIT,
-            "attachment exceeds the 20 MiB file limit"
-        );
-    }
-    if let AttachmentDelivery::Excerpt { start, end } = delivery {
-        ensure!(
-            start < end && end <= size,
-            "excerpt range is outside the file"
-        );
-        ensure!(
-            end - start <= EXCERPT_LIMIT,
-            "excerpt exceeds the 64 KiB UTF-8 limit"
-        );
-    }
     let mut digest = Sha256::new();
     let mut buffer = [0; 8192];
     let mut carry = 0;
@@ -412,28 +405,16 @@ impl CapturedAttachment {
             CapturedPayload::Reference { .. } => AttachmentDelivery::Reference,
         }
     }
-
-    pub(crate) fn charged_size(&self) -> u64 {
-        charged_size(&self.metadata, self.delivery())
-    }
-}
-
-fn charged_size(metadata: &AttachmentMetadata, delivery: AttachmentDelivery) -> u64 {
-    if delivery.uses_file_budget(&metadata.source) {
-        metadata.size
-    } else {
-        0
-    }
 }
 
 pub(crate) fn capture(
     checkout: &Path,
     previews: Vec<AttachmentPreview>,
+    limits: AttachmentLimits,
 ) -> Result<Vec<CapturedAttachment>> {
     check_limits(
-        previews
-            .iter()
-            .map(|file| charged_size(&file.metadata, file.delivery)),
+        limits,
+        previews.iter().map(|file| (&file.metadata, file.delivery)),
     )?;
     previews
         .into_iter()
@@ -444,7 +425,7 @@ pub(crate) fn capture(
                 .file_name()
                 .unwrap_or("attachment")
                 .to_owned();
-            with_file_reason(preview.capture(checkout), &label)
+            with_file_reason(preview.capture(checkout, limits), &label)
         })
         .collect()
 }
@@ -453,19 +434,16 @@ fn with_file_reason<T>(result: Result<T>, label: &str) -> Result<T> {
     result.map_err(|error| anyhow::anyhow!("{label}: {error:#}"))
 }
 
-pub(crate) fn check_limits(sizes: impl IntoIterator<Item = u64>) -> Result<()> {
-    let mut total = 0;
-    for (index, size) in sizes.into_iter().enumerate() {
-        ensure!(index < COUNT_LIMIT, "turn exceeds the 10-attachment limit");
-        ensure!(
-            size <= FILE_LIMIT,
-            "attachment exceeds the 20 MiB file limit"
-        );
-        total += size;
-        ensure!(
-            total <= TURN_LIMIT,
-            "turn exceeds the 50 MiB attachment limit"
-        );
+pub(crate) fn check_limits<'a>(
+    limits: AttachmentLimits,
+    files: impl IntoIterator<Item = (&'a AttachmentMetadata, AttachmentDelivery)>,
+) -> Result<()> {
+    let mut budget = AttachmentBudget::new(limits);
+    for (metadata, delivery) in files {
+        with_file_reason(
+            budget.check(&metadata.source, delivery, metadata.size),
+            metadata.source.file_name().unwrap_or("attachment"),
+        )?;
     }
     Ok(())
 }
@@ -725,7 +703,8 @@ impl StagedAttachments {
         );
         let mut lock = open_locked_local_file(&path)?;
         ensure!(
-            inspect(&mut lock, &metadata.source, AttachmentDelivery::Reference)? == *metadata,
+            lock.metadata()?.len() == metadata.size
+                && inspect(&mut lock, &metadata.source)? == *metadata,
             "attachment reference changed, preview it again"
         );
         let path = match &metadata.source {

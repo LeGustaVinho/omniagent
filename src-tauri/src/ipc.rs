@@ -5,6 +5,7 @@ use std::{
 };
 
 use omniagent::{
+    attachments::AttachmentLimits,
     customizations::CustomizationInventory,
     evidence::FixtureInputEvidence,
     providers::{
@@ -45,6 +46,29 @@ pub async fn set_cli_executable(
 ) -> Result<ConfiguredExecutable, String> {
     store
         .set_cli_executable(provider, executable)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn project_attachment_limits(
+    store: State<'_, Store>,
+    project_id: String,
+) -> Result<AttachmentLimits, String> {
+    store
+        .project_attachment_limits(project_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_project_attachment_limits(
+    store: State<'_, Store>,
+    project_id: String,
+    limits: AttachmentLimits,
+) -> Result<(), String> {
+    store
+        .set_project_attachment_limits(project_id, limits)
         .await
         .map_err(|error| error.to_string())
 }
