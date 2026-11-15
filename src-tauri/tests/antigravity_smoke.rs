@@ -106,6 +106,7 @@ fn run_turn(
     send(
         &mut process,
         &session.send(TurnInput {
+            attachments: Vec::new(),
             message_id: word.into(),
             text: prompt.map(str::to_owned).unwrap_or_else(|| {
                 format!("Reply with exactly {word} and no punctuation. Do not use tools.")
@@ -161,6 +162,7 @@ fn antigravity_confirms_cancellation_on_the_outstanding_prompt() -> Result<()> {
     send(
         &mut process,
         &session.send(TurnInput {
+            attachments: Vec::new(),
             message_id: "cancel-smoke".into(),
             text: "Write the numbers from 1 to 2000, one per line. Do not use tools.".into(),
         })?,
@@ -221,6 +223,7 @@ fn unresponsive_acp_prompt_is_stopped_by_the_job_supervisor() -> Result<()> {
         })?;
     }
     session.send(TurnInput {
+        attachments: Vec::new(),
         message_id: "cancel".into(),
         text: "fixture".into(),
     })?;

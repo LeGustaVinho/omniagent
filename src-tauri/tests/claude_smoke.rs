@@ -38,7 +38,15 @@ fn run_turn(
         model: Some("claude-haiku-5-5".into()),
         effort: None,
     })?;
-    let arguments = session.arguments();
+    let mut arguments = session.arguments();
+    if !expected {
+        // Isolate slash-command loading from the model finding the fixture with a file tool.
+        let tools = arguments
+            .iter()
+            .position(|argument| argument == "--tools")
+            .context("missing Claude tools flag")?;
+        arguments[tools + 1] = "".into();
+    }
     let arguments = arguments
         .iter()
         .map(|value| value.as_os_str())
@@ -67,6 +75,7 @@ fn run_turn(
                 ProviderEventData::Handshake { .. } => send(
                     &mut process,
                     &session.send(TurnInput {
+                        attachments: Vec::new(),
                         message_id: word.into(),
                         text: prompt.map(str::to_owned).unwrap_or_else(|| {
                             format!(
@@ -166,7 +175,9 @@ fn claude_safe_mode_excludes_a_project_skill_from_stream_json_invocation() -> Re
         checkout.path(),
         SessionIntent::Start,
         &reply,
-        Some("/omniagent-skill-fixture"),
+        Some(
+            "/omniagent-skill-fixture\nIf that skill is unavailable, reply NONE. Do not use any tools.",
+        ),
         false,
     )?;
     Ok(())

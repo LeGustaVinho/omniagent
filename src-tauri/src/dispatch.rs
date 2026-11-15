@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    attachments::AttachmentDispatch,
     conversations::{MessageRevision, SessionScope},
     protection,
     providers::{
@@ -40,6 +41,8 @@ pub struct ContextSnapshot {
     pub requested_skill: Option<SkillRequest>,
     #[serde(default)]
     pub plugin_inventory: Option<PluginInventory>,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentDispatch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

@@ -454,6 +454,17 @@ impl ClaudeSession {
 }
 
 impl CliSession for ClaudeSession {
+    fn attachment_encoding(
+        &self,
+        format: crate::attachments::AttachmentFormat,
+    ) -> Option<crate::attachments::NativeAttachmentEncoding> {
+        use crate::attachments::{AttachmentFormat, NativeAttachmentEncoding};
+        if format.is_image() {
+            Some(NativeAttachmentEncoding::ClaudeImage)
+        } else {
+            (format == AttachmentFormat::Pdf).then_some(NativeAttachmentEncoding::ClaudeDocument)
+        }
+    }
     fn arguments(&self) -> Vec<OsString> {
         let tools = if self.request.mode == SessionMode::ApprovedWrite {
             "Read,Glob,Grep,Edit,Write"
@@ -509,8 +520,20 @@ impl CliSession for ClaudeSession {
     fn send(&mut self, input: TurnInput) -> Result<AdapterUpdate> {
         ensure!(self.ready, "Claude handshake has not completed");
         ensure!(self.turn.is_none(), "Claude already has a turn in progress");
+        let content = if input.attachments.is_empty() {
+            Value::String(input.text)
+        } else {
+            let mut blocks = Vec::new();
+            if !input.text.trim().is_empty() {
+                blocks.push(json!({"type":"text", "text": input.text}));
+            }
+            for attachment in &input.attachments {
+                blocks.push(attachment.block(Provider::Claude)?);
+            }
+            json!(blocks)
+        };
         let message = WireMessage::json(&json!({
-            "type": "user", "message": {"role": "user", "content": input.text}, "parent_tool_use_id": null
+            "type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": null
         }))?;
         self.completed_turn = false;
         self.turn = Some(Turn::default());
@@ -805,6 +828,7 @@ mod tests {
             }),
         )?;
         adapter.send(TurnInput {
+            attachments: Vec::new(),
             message_id: "turn".into(),
             text: "test".into(),
         })?;

@@ -11,6 +11,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{
+    attachments::{self, AttachmentPreview, CapturedAttachment},
     dispatch::{Delivery, EventSource},
     protection,
     providers::{
@@ -87,6 +88,7 @@ pub struct AttemptPlan {
     pub scope: SessionScope,
     /// Suffix after the provider cursor, or the full effective context for a fresh session.
     pub input: Vec<MessageRevision>,
+    pub(crate) attachments: Vec<(String, CapturedAttachment)>,
 }
 
 pub(crate) enum PermissionRoute {
@@ -237,6 +239,11 @@ impl Store {
                  SELECT ?1, ?2, max(revision) + 1, ?3 FROM message_revisions WHERE message_id = ?2",
                 params![revision, message_id, encrypted],
             )?;
+            tx.execute(
+                "INSERT INTO message_attachments(message_revision_id, payload)
+                SELECT ?1, payload FROM message_attachments WHERE message_revision_id = ?2",
+                params![revision, entries[index]],
+            )?;
             entries[index] = revision;
             let context = activate_context(&tx, &conversation_id, &entries)?;
             tx.commit()?;
@@ -252,7 +259,28 @@ impl Store {
         scope: SessionScope,
         text: String,
     ) -> Result<AttemptPlan> {
-        ensure!(!text.trim().is_empty(), "message is empty");
+        self.prepare_agent_attempt_with_attachments(
+            conversation_id,
+            base_context_id,
+            scope,
+            text,
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub async fn prepare_agent_attempt_with_attachments(
+        &self,
+        conversation_id: String,
+        base_context_id: String,
+        scope: SessionScope,
+        text: String,
+        previews: Vec<AttachmentPreview>,
+    ) -> Result<AttemptPlan> {
+        ensure!(
+            !text.trim().is_empty() || !previews.is_empty(),
+            "message is empty"
+        );
         let checkout = dunce::canonicalize(&scope.checkout)?;
         ensure!(
             checkout == scope.checkout,
@@ -268,6 +296,26 @@ impl Store {
         );
         let serialized = serde_json::to_string(&scope)?;
         let encrypted = protection::protect(text.as_bytes())?;
+        let frozen = if previews.is_empty() {
+            None
+        } else {
+            let conversation = self.conversation(conversation_id.clone()).await?;
+            let layout = crate::repository::verify_checkout(
+                self,
+                conversation.checkout_id,
+                checkout.clone(),
+            )
+            .await?;
+            let root = layout.root;
+            Some(
+                tokio::task::spawn_blocking(move || -> Result<_> {
+                    let captured = attachments::capture(&root, previews)?;
+                    let payload = protection::protect(&serde_json::to_vec(&captured)?)?;
+                    Ok((root, payload))
+                })
+                .await??,
+            )
+        };
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let conversation = check_idle_base(&tx, &conversation_id, &base_context_id)?;
@@ -275,6 +323,9 @@ impl Store {
                 "SELECT root FROM checkouts WHERE id = ?1", [&conversation.checkout_id], |row| row.get(0),
             )?;
             ensure!(checkout.starts_with(Path::new(&registered)), "working directory is outside the conversation checkout");
+            if let Some((root, _)) = &frozen {
+                ensure!(root == Path::new(&registered), "attachment checkout changed after admission");
+            }
             let mut entries = context_entries(&tx, &conversation_id, &base_context_id)?;
             let previous = previous_attempt(&tx, &conversation_id)?;
             let continuity = match &previous {
@@ -293,9 +344,23 @@ impl Store {
                 (id, None, SessionIntent::Start, 0)
             };
 
-            entries.push(insert_message(&tx, &conversation_id, MessageRole::User, encrypted)?);
+            let revision = insert_message(&tx, &conversation_id, MessageRole::User, encrypted)?;
+            if let Some((_, payload)) = frozen {
+                tx.execute("INSERT INTO message_attachments(message_revision_id, payload) VALUES (?1, ?2)", params![revision, payload])?;
+            }
+            entries.push(revision);
             let context_id = activate_context(&tx, &conversation_id, &entries)?;
             let input = load_messages(&tx, &conversation_id, &entries[consumed..])?;
+            let mut attachments = Vec::new();
+            for message in &input {
+                let payload = tx.query_row("SELECT payload FROM message_attachments WHERE message_revision_id = ?1",
+                    [&message.revision_id], |row| row.get::<_, Vec<u8>>(0)).optional()?;
+                if let Some(payload) = payload {
+                    let items: Vec<CapturedAttachment> = serde_json::from_slice(&protection::unprotect(&payload)?)?;
+                    attachments.extend(items.into_iter().map(|item| (message.revision_id.clone(), item)));
+                }
+            }
+            attachments::check_limits(attachments.iter().map(|(_, item)| item.metadata.size))?;
             let (run, _) = runs::insert_run(&tx, conversation.checkout_id, "agent")?;
             let ordinal = previous.as_ref().map_or(1, |prior| prior.ordinal + 1);
             let previous_run_id = previous.map(|prior| prior.run_id);
@@ -308,7 +373,7 @@ impl Store {
             tx.execute("INSERT INTO active_agent_attempts VALUES (?1, ?2)", params![conversation_id, run.id])?;
             tx.commit()?;
             Ok(AttemptPlan { run, conversation_id, agent_session_id, previous_run_id, context_id,
-                resume_cursor_id, intent, scope, input })
+                resume_cursor_id, intent, scope, input, attachments })
         }).await
     }
 
@@ -963,6 +1028,7 @@ mod tests {
                     scoped_launch: None,
                     requested_skill: None,
                     plugin_inventory: None,
+                    attachments: Vec::new(),
                 },
                 vec![b"{\"fixture\":true}\n".to_vec()],
             )
@@ -1189,6 +1255,12 @@ mod tests {
                 }).map_err(io::Error::other)?.ok_or_else(|| io::Error::other("turn wrote before dispatch evidence was committed"))?;
                 assert_eq!(evidence.delivery, Delivery::Prepared);
                 assert_eq!(evidence.frames, [bytes]);
+                for attachment in &evidence.snapshot.attachments {
+                    if let Some(path) = &attachment.input.path {
+                        assert!(std::fs::File::open(path).is_ok());
+                        assert!(std::fs::OpenOptions::new().write(true).open(path).is_err());
+                    }
+                }
             }
             self.frames.lock().unwrap().push(bytes.to_vec());
             Ok(bytes.len())
@@ -1209,6 +1281,9 @@ mod tests {
         }
         fn executable_revision(&self, _: &std::path::Path) -> Option<String> {
             Some("scripted-codex-build".into())
+        }
+        fn attachment_path(&self, path: &std::path::Path) -> Option<PathBuf> {
+            DirectWindowsRunner.attachment_path(path)
         }
         fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
             let (write, output) = mpsc::channel();
@@ -1265,6 +1340,139 @@ mod tests {
                 control: Arc::new(CompletedProcess),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn native_attachments_submit_qualified_frozen_bytes_and_a_read_only_path() -> Result<()> {
+        use crate::attachments::{
+            AttachmentFormat, AttachmentPreview, AttachmentSource, NativeAttachmentEncoding,
+        };
+        use crate::providers::capabilities::CapabilityStatus;
+        use base64::{Engine, engine::general_purpose::STANDARD};
+
+        let (_dir, store, chat, scope) = setup().await?;
+        let runner = Arc::new(FixtureRunner(WireLog {
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            conversation: chat.id.clone(),
+            frames: Arc::default(),
+        }));
+        let first = prepare(&store, &chat.id, scope.clone(), "Establish fixture profile").await?;
+        let first_run = first.run.id.clone();
+        assert_eq!(
+            start_managed_turn(store.clone(), runner.clone(), first, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        let profile = store
+            .agent_dispatch(chat.id.clone(), first_run)
+            .await?
+            .unwrap()
+            .snapshot
+            .capabilities
+            .unwrap();
+        let subject = CapabilitySubject::NativeAttachment {
+            format: AttachmentFormat::Png,
+            encoding: NativeAttachmentEncoding::CodexLocalImage,
+        };
+        let route = profile
+            .entries
+            .iter()
+            .find(|entry| entry.descriptor.subject == subject)
+            .unwrap();
+        assert_eq!(route.status(), CapabilityStatus::Unverified);
+        let qualification = store
+            .record_capability_evidence(
+                profile.scope.clone(),
+                route.descriptor.clone(),
+                EvidenceOrigin::AuthenticatedFixture,
+                ObservedResult::Succeeded,
+                "simulated-local-image-qualification".into(),
+            )
+            .await?;
+        let mut changed = profile.scope.clone();
+        changed.permission_revision = "other-permissions".into();
+        let resolved = store
+            .resolve_capability_assessment(changed, vec![route.descriptor.clone()])
+            .await?;
+        assert!(resolved.entries[0].evidence.is_none());
+
+        const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aJ9sAAAAASUVORK5CYII=";
+        let file = scope.checkout.join("picture.txt");
+        std::fs::write(&file, STANDARD.decode(PNG)?)?;
+        let request = AttachmentSource::Checkout {
+            relative_path: "picture.txt".into(),
+        };
+        let preview = AttachmentPreview::read(&scope.checkout, request.clone())?;
+        assert_eq!(preview.metadata().format, AttachmentFormat::Png);
+        let current = store.conversation(chat.id.clone()).await?;
+        std::fs::write(&file, b"saved after preview")?;
+        assert!(
+            store
+                .prepare_agent_attempt_with_attachments(
+                    chat.id.clone(),
+                    current.context_id.clone(),
+                    scope.clone(),
+                    "Inspect the picture".into(),
+                    vec![preview]
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.conversation(chat.id.clone()).await?.context_id,
+            current.context_id
+        );
+
+        std::fs::write(&file, STANDARD.decode(PNG)?)?;
+        let preview = AttachmentPreview::read(&scope.checkout, request)?;
+        let expected = preview.metadata().clone();
+        let admitted = store
+            .prepare_agent_attempt_with_attachments(
+                chat.id.clone(),
+                current.context_id,
+                scope.clone(),
+                "Inspect the picture".into(),
+                vec![preview],
+            )
+            .await?;
+        let run = admitted.run.id.clone();
+        std::fs::write(&file, b"saved after admission")?;
+        assert_eq!(
+            start_managed_turn(store.clone(), runner, admitted, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        let committed = store.agent_dispatch(chat.id.clone(), run).await?.unwrap();
+        let attachment = &committed.snapshot.attachments[0];
+        assert_eq!(attachment.metadata, expected);
+        assert_eq!(attachment.qualification_id, qualification);
+        assert_eq!(attachment.input.content, PNG);
+        assert_eq!(
+            attachment.message_revision_id,
+            committed.snapshot.submitted_messages[0].revision_id
+        );
+        let frame: Value = serde_json::from_slice(&committed.frames[0])?;
+        assert_eq!(
+            frame["params"]["input"][1],
+            json!({"type":"localImage","path":attachment.input.path})
+        );
+        assert!(!attachment.input.path.as_ref().unwrap().exists());
+
+        let next = prepare(&store, &chat.id, scope.clone(), "Continue").await?;
+        assert!(next.attachments.is_empty());
+        store
+            .finish_agent_attempt(next.run.id, RunStatus::Cancelled, None)
+            .await?;
+        let mut different = scope;
+        different.account_binding = Some("another-account".into());
+        let fresh = prepare(&store, &chat.id, different, "Read the retained input").await?;
+        assert!(matches!(fresh.intent, SessionIntent::Start));
+        assert_eq!(fresh.attachments.len(), 1);
+        assert_eq!(fresh.attachments[0].1.metadata, expected);
+        Ok(())
     }
 
     #[tokio::test]

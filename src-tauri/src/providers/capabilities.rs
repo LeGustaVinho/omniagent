@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    attachments::{AttachmentFormat, NativeAttachmentEncoding},
     conversations::SessionScope,
     mcp_bridge::{INSPECT_SCOPE, Registration, SERVER_NAME, VERSION},
     protection,
@@ -37,6 +38,10 @@ pub enum CapabilitySubject {
         id: String,
         version: String,
         operation: String,
+    },
+    NativeAttachment {
+        format: AttachmentFormat,
+        encoding: NativeAttachmentEncoding,
     },
 }
 
@@ -78,6 +83,19 @@ pub struct CapabilityDescriptor {
     pub observed: Option<ObservedResult>,
     pub blocker: Option<PolicyBlocker>,
     pub boundary: EvidenceBoundary,
+}
+
+impl CapabilityDescriptor {
+    pub fn native_attachment(format: AttachmentFormat, encoding: NativeAttachmentEncoding) -> Self {
+        Self {
+            subject: CapabilitySubject::NativeAttachment { format, encoding },
+            source: DeclaredSource::Adapter,
+            availability: Availability::Unknown,
+            observed: None,
+            blocker: None,
+            boundary: EvidenceBoundary::ExactCheckout,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,10 +261,22 @@ impl CapabilityScope {
     }
 
     fn key(&self, descriptor: &CapabilityDescriptor) -> Option<QualificationKey<'_>> {
-        if !self.configuration.unresolved.is_empty() {
+        let native_attachment = matches!(
+            descriptor.subject,
+            CapabilitySubject::NativeAttachment { .. }
+        );
+        if !native_attachment && !self.configuration.unresolved.is_empty() {
             return None;
         }
         let (configuration, tool_revision) = match &descriptor.subject {
+            CapabilitySubject::NativeAttachment { format, encoding }
+                if encoding.provider() == self.provider
+                    && encoding.supports(*format)
+                    && descriptor.boundary == EvidenceBoundary::ExactCheckout =>
+            {
+                ("native-attachment-v1", None)
+            }
+            CapabilitySubject::NativeAttachment { .. } => return None,
             CapabilitySubject::Tool { id, .. } => (
                 self.configuration.environment_revision.as_deref()?,
                 Some(self.configuration.tool_revisions.get(id)?.as_str()),
@@ -278,7 +308,14 @@ impl CapabilityScope {
             profile_id: &self.profile_id,
             account: self.account_binding.as_deref()?,
             requested_model: self.requested_model.as_deref(),
-            reported_model: self.reported_model.as_deref()?,
+            reported_model: self.reported_model.as_deref().or_else(|| {
+                // Claude establishes the selected model when the first input arrives.
+                if native_attachment && self.provider == Provider::Claude {
+                    self.requested_model.as_deref()
+                } else {
+                    None
+                }
+            })?,
             requested_effort: self.requested_effort.as_deref(),
             reported_effort: self.reported_effort.as_deref(),
             runner: &self.runner,
@@ -331,12 +368,14 @@ pub(crate) struct ReportedCapabilities {
     available: BTreeSet<Capability>,
     observed: BTreeSet<Capability>,
     pub model: Option<String>,
+    models: Vec<super::ReportedModel>,
     pub effort: Option<String>,
     pub configuration_reported: bool,
     pub configuration_revision: Option<String>,
     pub configuration_qualification: Option<super::configuration::ReportedConfiguration>,
     pub codex_instruction_settings: Option<super::configuration::CodexInstructionSettings>,
     pub bridge_registration: Option<Registration>,
+    pub native_attachments: Vec<(AttachmentFormat, NativeAttachmentEncoding)>,
 }
 
 impl ReportedCapabilities {
@@ -385,7 +424,12 @@ impl ReportedCapabilities {
                 }
                 changed
             }
-            ProviderEventData::ModelInventory { .. } | ProviderEventData::SessionOptions { .. } => {
+            ProviderEventData::ModelInventory { models } => {
+                let changed = self.models != *models;
+                self.models.clone_from(models);
+                self.observed.insert(Capability::ModelInventory) || changed
+            }
+            ProviderEventData::SessionOptions { .. } => {
                 self.observed.insert(Capability::ModelInventory)
             }
             ProviderEventData::Reasoning { .. } => self.observed.insert(Capability::Reasoning),
@@ -402,6 +446,17 @@ impl ReportedCapabilities {
             }
             _ => false,
         }
+    }
+
+    pub(crate) fn image_inputs_reported(&self, model: Option<&str>) -> Option<bool> {
+        let model = model?;
+        let row = self
+            .models
+            .iter()
+            .find(|row| row.id == model || row.canonical_id.as_deref() == Some(model))?;
+        row.input_modalities
+            .as_ref()
+            .map(|items| items.iter().any(|item| item.eq_ignore_ascii_case("image")))
     }
 
     pub(crate) fn descriptors(&self, scope: &CapabilityScope) -> Vec<CapabilityDescriptor> {
@@ -468,6 +523,28 @@ impl ReportedCapabilities {
                 blocker: None,
                 boundary: EvidenceBoundary::ExactCheckout,
             });
+        }
+        for &(format, encoding) in &self.native_attachments {
+            let mut descriptor = CapabilityDescriptor::native_attachment(format, encoding);
+            let advertised = match scope.provider {
+                Provider::Codex => self.image_inputs_reported(
+                    scope
+                        .reported_model
+                        .as_deref()
+                        .or(scope.requested_model.as_deref()),
+                ),
+                Provider::Antigravity => Some(true),
+                Provider::Claude => None,
+            };
+            if let Some(available) = advertised {
+                descriptor.source = DeclaredSource::Provider;
+                descriptor.availability = if available {
+                    Availability::Available
+                } else {
+                    Availability::Unavailable
+                };
+            }
+            descriptors.push(descriptor);
         }
         descriptors
     }

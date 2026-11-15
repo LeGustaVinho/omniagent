@@ -749,6 +749,14 @@ impl CodexSession {
 }
 
 impl CliSession for CodexSession {
+    fn attachment_encoding(
+        &self,
+        format: crate::attachments::AttachmentFormat,
+    ) -> Option<crate::attachments::NativeAttachmentEncoding> {
+        format
+            .is_image()
+            .then_some(crate::attachments::NativeAttachmentEncoding::CodexLocalImage)
+    }
     fn set_checkout_root(&mut self, root: &Path) {
         self.checkout_root = root.to_owned();
     }
@@ -808,8 +816,14 @@ impl CliSession for CodexSession {
             .session
             .as_ref()
             .context("Codex session has not started")?;
-        let mut params =
-            json!({ "threadId": session.id, "input": [{ "type": "text", "text": input.text }] });
+        let mut items = Vec::new();
+        if !input.text.is_empty() || input.attachments.is_empty() {
+            items.push(json!({"type": "text", "text": input.text}));
+        }
+        for attachment in &input.attachments {
+            items.push(attachment.block(Provider::Codex)?);
+        }
+        let mut params = json!({ "threadId": session.id, "input": items });
         if let Some(effort) = &self.request.effort {
             params["effort"] = json!(effort);
         }
@@ -1020,6 +1034,7 @@ mod tests {
         let checkout = tempfile::tempdir()?;
         let mut session = negotiate(SessionMode::ReadOnly, SessionIntent::Start, checkout.path())?;
         session.send(TurnInput {
+            attachments: Vec::new(),
             message_id: "message".into(),
             text: "fixture".into(),
         })?;
@@ -1098,6 +1113,7 @@ mod tests {
         )?;
         let text = "first line\nsecond line ☕";
         let request = session.send(TurnInput {
+            attachments: Vec::new(),
             message_id: "message".into(),
             text: text.into(),
         })?;
@@ -1109,6 +1125,7 @@ mod tests {
         assert!(
             session
                 .send(TurnInput {
+                    attachments: Vec::new(),
                     message_id: "another".into(),
                     text: "blocked".into()
                 })
@@ -1206,6 +1223,7 @@ mod tests {
             checkout.path(),
         )?;
         session.send(TurnInput {
+            attachments: Vec::new(),
             message_id: "message".into(),
             text: "run".into(),
         })?;

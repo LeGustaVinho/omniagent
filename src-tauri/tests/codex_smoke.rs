@@ -108,6 +108,7 @@ fn run_turn(
                         "Codex did not report the fixture skill"
                     );
                     let message = session.send(TurnInput {
+                        attachments: Vec::new(),
                         message_id: expected.to_owned(),
                         text: format!("Reply with exactly this word and no punctuation: {expected}. Do not use tools."),
                     })?;

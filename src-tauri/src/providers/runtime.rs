@@ -10,6 +10,7 @@ use serde_json::Value;
 use tokio::{runtime::Handle, sync::oneshot, task::JoinHandle};
 
 use crate::{
+    attachments::{AttachmentDispatch, AttachmentFormat, StagedAttachments},
     conversations::{AttemptPlan, MessageRevision, MessageRole, PermissionRoute},
     diagnostics,
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
@@ -26,7 +27,7 @@ use super::{
     AdapterUpdate, ApprovalDecision, CliSession, Provider, ProviderEvent, ProviderEventData,
     ProviderLocation, RequestId, SessionIntent, SessionMode, SessionRequest, TurnInput,
     TurnOutcome, WireMessage,
-    capabilities::{CapabilityScope, ReportedCapabilities},
+    capabilities::{CapabilityScope, CapabilitySubject, ReportedCapabilities, Verification},
     configuration,
     launch_scope::{ScopedLaunch, ScopedLaunchEvidence},
     plugins::{PluginInventory, probe_run_plugins},
@@ -204,6 +205,7 @@ pub fn start_managed_turn(
             capability_scope: None,
             executable_revision: None,
             platform: None,
+            staged_attachments: StagedAttachments::default(),
         };
         let outcome = execution.run(runner.as_ref(), &receiver, bridge_executable);
         let status = match outcome {
@@ -254,6 +256,7 @@ struct TurnExecution {
     capability_scope: Option<(CapabilityScope, CheckoutLayout)>,
     executable_revision: Option<String>,
     platform: Option<ExecutionPlatform>,
+    staged_attachments: StagedAttachments,
 }
 
 impl TurnExecution {
@@ -442,6 +445,7 @@ impl TurnExecution {
             commands,
             &checkout,
             endpoint,
+            runner,
         );
         let stopped = control.cancel();
         let ended = control.wait();
@@ -468,6 +472,7 @@ impl TurnExecution {
         commands: &mpsc::Receiver<Command>,
         checkout: &CheckoutLayout,
         bridge: Option<&RunBridge>,
+        runner: &dyn Runner,
     ) -> Result<RunStatus> {
         bounded_write(process, session.start()?.outbound)?;
         let startup_deadline = Instant::now() + Duration::from_secs(20);
@@ -531,7 +536,7 @@ impl TurnExecution {
                 && (inventory_complete
                     || inventory_deadline.is_some_and(|deadline| Instant::now() >= deadline))
             {
-                self.dispatch(process, session, checkout)?;
+                self.dispatch(process, session, checkout, runner)?;
                 sent = true;
             }
             if !ready {
@@ -590,8 +595,8 @@ impl TurnExecution {
         process: &mut CapturedProcess,
         session: &mut dyn CliSession,
         checkout: &CheckoutLayout,
+        runner: &dyn Runner,
     ) -> Result<()> {
-        let update = session.send(format_input(&self.plan.input)?)?;
         let native_history = match (&self.plan.intent, &self.plan.resume_cursor_id) {
             (SessionIntent::Start, None) => NativeHistory::Fresh,
             (
@@ -626,11 +631,65 @@ impl TurnExecution {
             self.reported.model.clone(),
             self.reported.effort.clone(),
         );
+        self.reported.native_attachments = AttachmentFormat::ALL
+            .into_iter()
+            .filter_map(|format| {
+                session
+                    .attachment_encoding(format)
+                    .map(|encoding| (format, encoding))
+            })
+            .collect();
         let descriptors = self.reported.descriptors(&scope);
         let capabilities = self.app.block_on(
             self.store
                 .resolve_capability_assessment(scope.clone(), descriptors),
         )?;
+        let mut input = format_input(&self.plan.input)?;
+        let mut attachments = Vec::new();
+        for (revision, attachment) in &self.plan.attachments {
+            let format = attachment.metadata.format;
+            let label = attachment
+                .metadata
+                .source
+                .file_name()
+                .unwrap_or("attachment");
+            let encoding = session.attachment_encoding(format).with_context(|| {
+                format!("{label} has no native attachment route for this session")
+            })?;
+            let qualification = capabilities.entries.iter().find(|entry| {
+                entry.descriptor.subject == CapabilitySubject::NativeAttachment { format, encoding }
+            }).and_then(|entry| entry.evidence.as_ref()).filter(|evidence| Verification::verified(evidence))
+                .with_context(|| format!("{label} has no native attachment qualification for this profile and checkout"))?;
+            let block = self
+                .staged_attachments
+                .materialize(runner, attachment, encoding)?;
+            input.attachments.push(block.clone());
+            attachments.push(AttachmentDispatch {
+                message_revision_id: revision.clone(),
+                metadata: attachment.metadata.clone(),
+                qualification_id: qualification.id.clone(),
+                input: block,
+            });
+        }
+        if attachments.iter().any(|attachment| {
+            attachment.message_revision_id
+                != self
+                    .plan
+                    .input
+                    .last()
+                    .expect("formatted user message")
+                    .revision_id
+        }) {
+            let sources: Vec<_> = attachments
+                .iter()
+                .map(|item| (&item.message_revision_id, item.metadata.source.file_name()))
+                .collect();
+            input
+                .text
+                .push_str("\n\nAttachment order (message revision and file name):\n");
+            input.text.push_str(&serde_json::to_string(&sources)?);
+        }
+        let update = session.send(input)?;
         self.capability_scope = Some((scope, checkout.clone()));
         let reported_skills = self.reported_skills.clone().unwrap_or_else(|| {
             SkillCatalog::unavailable(match self.plan.scope.provider {
@@ -649,7 +708,7 @@ impl TurnExecution {
             )
         });
         let snapshot = ContextSnapshot {
-            version: 7,
+            version: 8,
             context_id: self.plan.context_id.clone(),
             scope: self.plan.scope.clone(),
             base_commit: repository::base_commit(&self.plan.scope.checkout)?,
@@ -662,6 +721,7 @@ impl TurnExecution {
             scoped_launch: self.scoped_launch.clone(),
             requested_skill,
             plugin_inventory: self.plugin_inventory.clone(),
+            attachments,
         };
         let frames = update
             .outbound
@@ -788,6 +848,7 @@ fn format_input(input: &[MessageRevision]) -> Result<TurnInput> {
         )
     };
     Ok(TurnInput {
+        attachments: Vec::new(),
         message_id: last.message_id.clone(),
         text,
     })

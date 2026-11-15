@@ -1,4 +1,10 @@
-use std::{ffi::OsStr, fs::File, io, mem::MaybeUninit, path::Path};
+use std::{
+    ffi::OsStr,
+    fs::File,
+    io,
+    mem::MaybeUninit,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,6 +35,9 @@ pub trait Runner: Send + Sync {
         None
     }
     fn executable_revision(&self, _path: &Path) -> Option<String> {
+        None
+    }
+    fn attachment_path(&self, _staged: &Path) -> Option<PathBuf> {
         None
     }
     fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess>;
@@ -83,6 +92,10 @@ pub struct DirectWindowsRunner;
 impl Runner for DirectWindowsRunner {
     fn identity(&self) -> &str {
         "windows-direct"
+    }
+
+    fn attachment_path(&self, staged: &Path) -> Option<PathBuf> {
+        Some(staged.to_owned())
     }
 
     fn execution_platform(&self) -> Option<ExecutionPlatform> {

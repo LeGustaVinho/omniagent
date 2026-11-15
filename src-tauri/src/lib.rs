@@ -1,3 +1,4 @@
+pub mod attachments;
 pub mod conversations;
 pub mod customizations;
 mod diagnostics;

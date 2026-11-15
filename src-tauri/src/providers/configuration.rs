@@ -362,6 +362,18 @@ impl Discovery {
 }
 
 pub(crate) fn read_local_file(path: &Path) -> io::Result<Vec<u8>> {
+    let file = open_verified_local_file(path)?;
+    let mut bytes = Vec::new();
+    if file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)? as u64 > MAX_FILE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "configuration is too large",
+        ));
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn open_verified_local_file(path: &Path) -> io::Result<fs::File> {
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
@@ -386,24 +398,17 @@ pub(crate) fn read_local_file(path: &Path) -> io::Result<Vec<u8>> {
     if length == 0 || length >= final_name.len() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "could not confirm configuration path",
+            "could not confirm local file path",
         ));
     }
     let actual = PathBuf::from(OsString::from_wide(&final_name[..length]));
     if dunce::simplified(&actual) != dunce::simplified(path) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "configuration path changed",
+            "local file path changed",
         ));
     }
-    let mut bytes = Vec::new();
-    if file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)? as u64 > MAX_FILE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "configuration is too large",
-        ));
-    }
-    Ok(bytes)
+    Ok(file)
 }
 
 #[cfg(test)]

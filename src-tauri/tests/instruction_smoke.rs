@@ -283,6 +283,7 @@ fn invoke(
             if ready && !sent {
                 for frame in session
                     .send(TurnInput {
+                        attachments: Vec::new(),
                         message_id: "instructions".into(),
                         text: prompt.into(),
                     })?

@@ -67,6 +67,7 @@ impl CliAdapter for AntigravityAdapter {
             permissions: HashMap::new(),
             available_commands: None,
             bridge: None,
+            prompt_capabilities: Value::Null,
         }))
     }
 }
@@ -234,6 +235,7 @@ struct AcpSession {
     permissions: HashMap<RequestId, Vec<PermissionOption>>,
     available_commands: Option<(String, Vec<String>)>,
     bridge: Option<crate::mcp_bridge::BridgeLaunch>,
+    prompt_capabilities: Value,
 }
 
 struct PermissionOption {
@@ -310,6 +312,7 @@ impl AcpSession {
             .get("promptCapabilities")
             .filter(|data| data.is_object())
         {
+            self.prompt_capabilities = prompt.clone();
             observations.push(self.event(ProviderEventData::PromptCapabilities {
                 image: prompt["image"].as_bool(),
                 audio: prompt["audio"].as_bool(),
@@ -733,6 +736,23 @@ impl AcpSession {
 }
 
 impl CliSession for AcpSession {
+    fn attachment_encoding(
+        &self,
+        format: crate::attachments::AttachmentFormat,
+    ) -> Option<crate::attachments::NativeAttachmentEncoding> {
+        use crate::attachments::{AttachmentFormat, NativeAttachmentEncoding};
+        if format.is_image() && self.prompt_capabilities["image"] == true {
+            Some(NativeAttachmentEncoding::AcpImage)
+        } else if format.is_audio() && self.prompt_capabilities["audio"] == true {
+            Some(NativeAttachmentEncoding::AcpAudio)
+        } else if format == AttachmentFormat::Pdf
+            && self.prompt_capabilities["embeddedContext"] == true
+        {
+            Some(NativeAttachmentEncoding::AcpResource)
+        } else {
+            None
+        }
+    }
     fn arguments(&self) -> Vec<OsString> {
         arguments()
     }
@@ -761,10 +781,21 @@ impl CliSession for AcpSession {
             .session_id
             .as_deref()
             .context("missing ACP session ID")?;
+        let mut prompt = Vec::new();
+        if !input.text.is_empty() || input.attachments.is_empty() {
+            prompt.push(json!({"type":"text", "text": input.text}));
+        }
+        for attachment in &input.attachments {
+            ensure!(
+                self.attachment_encoding(attachment.format) == Some(attachment.encoding),
+                "ACP did not advertise this attachment format"
+            );
+            prompt.push(attachment.block(Provider::Antigravity)?);
+        }
         let frame = self.rpc.request(
             "session/prompt",
             json!({
-                "sessionId": id, "prompt": [{"type":"text", "text": input.text}],
+                "sessionId": id, "prompt": prompt,
             }),
             Request::Prompt,
         )?;
@@ -990,6 +1021,7 @@ mod tests {
         assert!(
             session
                 .send(TurnInput {
+                    attachments: Vec::new(),
                     message_id: "early".into(),
                     text: "blocked".into()
                 })
@@ -1005,6 +1037,7 @@ mod tests {
                 effort: Some("low".into())
             }));
         let request = session.send(TurnInput {
+            attachments: Vec::new(),
             message_id: "message".into(),
             text: "Olá ☕\nline".into(),
         })?;
@@ -1161,6 +1194,7 @@ mod tests {
         assert!(
             session
                 .send(TurnInput {
+                    attachments: Vec::new(),
                     message_id: "early".into(),
                     text: "blocked".into()
                 })
@@ -1189,6 +1223,7 @@ mod tests {
             json!({"id":2,"result":results("argon","medium","plan")}),
         )?;
         session.send(TurnInput {
+            attachments: Vec::new(),
             message_id: "turn".into(),
             text: "Cancellation fixture".into(),
         })?;

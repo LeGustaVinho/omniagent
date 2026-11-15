@@ -135,6 +135,7 @@ pub struct SessionRequest {
 pub struct TurnInput {
     pub message_id: String,
     pub text: String,
+    pub attachments: Vec<crate::attachments::TurnAttachment>,
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -397,6 +398,12 @@ pub trait CliAdapter: Send + Sync {
 /// Methods advance one provider protocol per process. The runtime owns I/O and persistence.
 pub trait CliSession: Send {
     fn arguments(&self) -> Vec<OsString>;
+    fn attachment_encoding(
+        &self,
+        _format: crate::attachments::AttachmentFormat,
+    ) -> Option<crate::attachments::NativeAttachmentEncoding> {
+        None
+    }
     fn set_checkout_root(&mut self, _root: &Path) {}
     fn configure_mcp_bridge(&mut self, _launch: crate::mcp_bridge::BridgeLaunch) {}
     fn set_workspace_instructions(&mut self, _instructions: String) -> anyhow::Result<()> {
