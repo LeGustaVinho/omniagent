@@ -377,9 +377,45 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       const wire = JSON.parse(await panel.$('section[aria-label="Exact provider input"] pre').getText());
       assert.equal(wire.params.input[0].text, prompt);
 
-      await recoveredDraft.setValue("Write every number from one to two thousand in words on separate lines. Do not use tools.");
+      await panel.$('select:has(option[value="plan"])').selectByAttribute("value", "plan");
+      const researchRows = Array.from({ length: 40 }, (_, index) => `Research row ${index + 1}`).join("\n");
+      await recoveredDraft.setValue(`In planning mode, first stream a short public progress message. Then use native request_user_input to ask which file format to use, offering Markdown or JSON. Wait for my answer. Do not edit any files. Here are the fixture rows:\n${researchRows}`);
       await panel.$("button=Send").click();
       await panel.$('div[aria-label="Streaming response"]').waitForDisplayed({ timeout: 45_000 });
+      const { id: activeRun } = await invoke(browser, "latest_conversation_run", { conversationId: conversation.id });
+      const historySelector = `${selector} [aria-label="Conversation history"]`;
+      await browser.waitUntil(() => browser.execute((historySelector) => {
+        const history = document.querySelector(historySelector);
+        return history.scrollHeight - history.clientHeight > 80;
+      }, historySelector));
+      await browser.execute((historySelector) => { document.querySelector(historySelector).scrollTop = 60; }, historySelector);
+
+      await browser.$("button=Conversations").click();
+      await browser.$("button=Other conversation").click();
+      const otherText = "Rascunho na segunda conversa";
+      await otherDraft.setValue(otherText);
+      await browser.$('section[aria-label="Other conversation"]').$("p=Draft saved").waitForDisplayed();
+      const whileSwitched = await invoke(browser, "latest_conversation_run", { conversationId: conversation.id });
+      assert.ok(["running", "waiting_for_input"].includes(whileSwitched.status));
+      assert.equal(await invoke(browser, "latest_conversation_run", { conversationId: otherConversation.id }), null);
+
+      await browser.$("button=Conversations").click();
+      await browser.$(`button=${conversation.title}`).click();
+      await panel.$('div[aria-label="Streaming response"]').waitForDisplayed();
+      await panel.$("button=Reply").waitForDisplayed({ timeout: 15_000 });
+      assert.equal((await readTabs(browser)).active, conversation.title);
+      assert.equal((await readTabs(browser)).groups.flat().filter((title) => title === conversation.title).length, 1);
+      assert.equal(await browser.execute((historySelector) => document.querySelector(historySelector).scrollTop, historySelector), 60);
+
+      await browser.$(".dv-active-group .dv-active-tab .dv-default-tab-action").click();
+      await panel.waitForExist({ reverse: true });
+      await browser.$("button=Conversations").click();
+      await browser.$(`button=${conversation.title}`).click();
+      await panel.$('div[aria-label="Streaming response"]').waitForDisplayed();
+      assert.equal((await invoke(browser, "latest_conversation_run", { conversationId: conversation.id })).id, activeRun);
+      assert.ok((await invoke(browser, "conversation_messages", { conversationId: conversation.id }))
+        .some(({ text }) => text === "OMNIAGENT_DESKTOP_REPLY"));
+      assert.equal(await invoke(browser, "conversation_draft", { conversationId: otherConversation.id }), otherText);
       await panel.$("button=Stop").click();
       await browser.waitUntil(async () => {
         const run = await invoke(browser, "latest_conversation_run", { conversationId: conversation.id });
