@@ -8,7 +8,7 @@ use std::{
     thread,
 };
 
-use crate::process::{WindowsProcess, WindowsProcessControl};
+use crate::{process::WindowsProcess, runner::RunControl};
 
 const FRAME_LIMIT: usize = 8 * 1024 * 1024;
 
@@ -25,14 +25,18 @@ pub struct OutputFrame {
 }
 
 pub struct CapturedProcess {
-    pub control: Arc<WindowsProcessControl>,
+    pub control: Arc<dyn RunControl>,
     pub input: ProcessInput,
     pub output: Receiver<io::Result<OutputFrame>>,
 }
 
-pub struct ProcessInput(File);
+pub struct ProcessInput(Box<dyn Write + Send>);
 
 impl ProcessInput {
+    pub fn new(writer: impl Write + Send + 'static) -> Self {
+        Self(Box::new(writer))
+    }
+
     pub fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.0.write_all(bytes)
     }
@@ -45,7 +49,7 @@ pub fn capture(process: WindowsProcess) -> io::Result<CapturedProcess> {
     start_reader(process.stderr, Stream::Stderr, sender)?;
     Ok(CapturedProcess {
         control: Arc::new(process.control),
-        input: ProcessInput(process.stdin),
+        input: ProcessInput::new(process.stdin),
         output,
     })
 }

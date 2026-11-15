@@ -7,9 +7,10 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use omniagent::{
-    process::{self, TerminalOutcome, WindowsProcessControl},
-    process_io::{ProcessInput, Stream, capture},
+    process::TerminalOutcome,
+    process_io::{ProcessInput, Stream},
     repository,
+    runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, RunControl, Runner},
     runs::{OutputStream, RunEventData, RunRecord, RunStatus},
     store::Store,
 };
@@ -23,7 +24,7 @@ pub struct FixtureRuns(Arc<Mutex<HashMap<String, ActiveRun>>>);
 #[derive(Clone)]
 struct ActiveRun {
     checkout_id: String,
-    control: Arc<WindowsProcessControl>,
+    control: Arc<dyn RunControl>,
     input: Arc<Mutex<Option<ProcessInput>>>,
 }
 
@@ -49,11 +50,12 @@ impl FixtureRuns {
         let executable = env::current_exe()?;
         let (mut run, _) = store.start_run(checkout_id.clone()).await?;
         let process = tokio::task::spawn_blocking(move || {
-            capture(process::launch(
-                &executable,
-                &cwd,
-                &[OsStr::new("--fixture")],
-            )?)
+            DirectWindowsRunner.launch(LaunchRequest {
+                version: CONTRACT_VERSION,
+                executable: &executable,
+                checkout: &cwd,
+                arguments: &[OsStr::new("--fixture")],
+            })
         })
         .await?;
         let process = match process {

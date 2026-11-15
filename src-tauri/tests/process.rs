@@ -8,6 +8,7 @@ use std::{
 
 use omniagent::process::{TerminalOutcome, launch};
 use omniagent::process_io::{Stream, capture};
+use omniagent::runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner};
 use windows_sys::Win32::{
     Foundation::WAIT_OBJECT_0,
     System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
@@ -56,6 +57,22 @@ fn the_supervisor_rejects_relative_executables() {
     .err()
     .unwrap();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn a_runner_rejects_an_unknown_contract_version_before_launch() {
+    let runner: &dyn Runner = &DirectWindowsRunner;
+    assert_eq!(runner.identity(), "windows-direct");
+    let failure = runner
+        .launch(LaunchRequest {
+            version: CONTRACT_VERSION + 1,
+            executable: Path::new(env!("CARGO_BIN_EXE_omniagent")),
+            checkout: &env::current_dir().unwrap(),
+            arguments: &[OsStr::new("--fixture")],
+        })
+        .err()
+        .unwrap();
+    assert_eq!(failure.kind(), std::io::ErrorKind::Unsupported);
 }
 
 #[test]
