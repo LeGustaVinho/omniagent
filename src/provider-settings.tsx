@@ -189,7 +189,10 @@ function ExecutableSettings({ profile }: { profile: ConfiguredExecutable }) {
           <dd>{probe.version ?? (probe.executable ? "Detected, version unverified" : "Executable not found")}</dd>
           <dt className="text-muted-foreground">Protocol</dt><dd>{PROTOCOL_LABELS[probe.protocol]}</dd>
           <dt className="text-muted-foreground">Authentication</dt><dd>{AUTH_LABELS[probe.authentication]}</dd>
-          <dt className="text-muted-foreground">Effective permissions</dt><dd>Unverified</dd>
+          <dt className="text-muted-foreground">Effective CLI permissions</dt>
+          <dd>{probe.effectivePermissions.status === "mode_reported" ? `${probe.effectivePermissions.mode} · reported for the probe session` : "Unverified"}</dd>
+          <dt className="text-muted-foreground">Windows command sandbox</dt>
+          <dd>{probe.osSandboxSupport === "unsupported" ? "Unsupported for this CLI on the Windows host" : probe.osSandboxSupport === "prerequisites_met" ? "Windows prerequisites met · activation unverified" : "Unverified on the Windows host"}</dd>
         </dl>
       )}
       {inventory.isError && <p role="alert" className="mt-3 text-sm text-red-300">{String(inventory.error)}</p>}

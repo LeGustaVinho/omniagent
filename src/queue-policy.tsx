@@ -15,7 +15,7 @@ const capabilityOptions: Capability[] = [
   "native_plan_mode", "planning_questions", "planning_answers", "native_plan_output", "native_goal_command",
   "native_goal_events", "cancel_turn", "live_steering", "subagent_events", "per_child_events", "native_subagent_audit",
   "native_delegation_controls", "native_compaction", "manual_native_compaction", "native_suggestions",
-  "side_request", "workspace_write", "run_scoped_mcp",
+  "side_request", "workspace_write", "os_command_sandbox", "run_scoped_mcp",
 ];
 const customizationFields = [
   ["instruction", "Required instruction paths"],
@@ -154,7 +154,7 @@ function RuleEditor({ projectId, checkoutId, rules }: { projectId: string; check
           <div className="grid gap-2 py-2 md:grid-cols-2">
             <label className="grid gap-1">Required verified capabilities
               <select className={field} multiple name="capability" size={5}>
-                {capabilityOptions.map((capability) => <option key={capability} value={capability}>{capability.replaceAll("_", " ")}</option>)}
+                {capabilityOptions.map((capability) => <option key={capability} value={capability}>{capability === "os_command_sandbox" ? "OS command sandbox" : capability.replaceAll("_", " ")}</option>)}
               </select>
             </label>
             {customizationFields.map(([name, label]) => <label className="grid gap-1" key={name}>{label}

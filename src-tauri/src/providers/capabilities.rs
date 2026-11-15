@@ -287,7 +287,9 @@ impl CapabilityScope {
         if matches!(
             descriptor.subject,
             CapabilitySubject::Protocol {
-                capability: Capability::NativeSubagentAudit | Capability::NativeGoalCommand,
+                capability: Capability::NativeSubagentAudit
+                    | Capability::NativeGoalCommand
+                    | Capability::OsCommandSandbox,
             }
         ) && descriptor.boundary != EvidenceBoundary::ExactCheckout
         {
@@ -339,6 +341,7 @@ impl CapabilityScope {
             CapabilitySubject::Protocol {
                 capability:
                     Capability::WorkspaceWrite
+                    | Capability::OsCommandSandbox
                     | Capability::ToolApprovals
                     | Capability::NativeSubagentAudit
                     | Capability::NativeGoalCommand,
@@ -598,6 +601,24 @@ impl ReportedCapabilities {
         let mut descriptors: Vec<_> = Capability::ALL
             .into_iter()
             .map(|capability| {
+                if capability == Capability::OsCommandSandbox {
+                    return CapabilityDescriptor {
+                        subject: CapabilitySubject::Protocol { capability },
+                        source: DeclaredSource::Adapter,
+                        availability: if super::sandbox::support(
+                            scope.provider,
+                            scope.platform.as_ref(),
+                        ) == super::sandbox::OsSandboxSupport::Unsupported
+                        {
+                            Availability::Unavailable
+                        } else {
+                            Availability::Unknown
+                        },
+                        observed: None,
+                        blocker: None,
+                        boundary: EvidenceBoundary::ExactCheckout,
+                    };
+                }
                 if capability == Capability::NativeGoalCommand {
                     return CapabilityDescriptor {
                         subject: CapabilitySubject::Protocol { capability },

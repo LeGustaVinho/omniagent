@@ -69,6 +69,7 @@ impl CliAdapter for ClaudeAdapter {
             request,
             initializing: false,
             ready: false,
+            permission_mode_reported: false,
             session_id: None,
             turn: None,
             pending: HashMap::new(),
@@ -85,6 +86,7 @@ struct ClaudeSession {
     request: SessionRequest,
     initializing: bool,
     ready: bool,
+    permission_mode_reported: bool,
     session_id: Option<String>,
     turn: Option<Turn>,
     pending: HashMap<RequestId, PendingInput>,
@@ -246,6 +248,7 @@ impl ClaudeSession {
                 mode == self.permission_mode(),
                 "Claude did not establish the requested permission mode"
             );
+            self.permission_mode_reported = true;
         }
         self.ready = true;
         let mut capabilities = Vec::new();
@@ -606,6 +609,11 @@ impl ClaudeSession {
 }
 
 impl CliSession for ClaudeSession {
+    fn reported_cli_permission(&self) -> Option<&'static str> {
+        self.permission_mode_reported
+            .then(|| self.permission_mode())
+    }
+
     fn enable_native_suggestions(&mut self) {
         self.suggestion_enabled = !self.initializing && self.permission_mode() != "plan";
     }

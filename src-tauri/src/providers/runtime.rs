@@ -555,11 +555,26 @@ impl TurnExecution {
             self.failure.cause = Some(FailureCause::GoalTimeLimit);
             return Ok(RunStatus::Interrupted);
         }
-        self.app.block_on(
+        let requirements = self.app.block_on(
             self.store
                 .job_dispatch_requirements(self.plan.run.id.clone()),
         )?;
         let scope = self.plan.scope.clone();
+        if requirements
+            .capabilities
+            .contains(&super::Capability::OsCommandSandbox)
+            && let Some(reason) = super::sandbox::admission_blocker(
+                &scope,
+                runner.execution_platform().as_ref(),
+                runner.identity() == crate::runner::DirectWindowsRunner::IDENTITY,
+            )
+        {
+            self.reject_dispatch(DispatchRejection::Requirements {
+                capabilities: vec![super::Capability::OsCommandSandbox],
+                customizations: Vec::new(),
+            })?;
+            anyhow::bail!("{reason}");
+        }
         if let Err(error) = self.verify_effective_profile(runner) {
             if self.exiting() {
                 return Ok(RunStatus::Interrupted);

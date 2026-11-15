@@ -6,8 +6,8 @@ use omniagent::{
     conversations::{AttemptPlan, Conversation, SessionScope},
     jobs::{
         AdmissionBlocker, AdmissionEnvironment, InstructionDelivery, Job, JobContext,
-        JobNoticeKind, JobOrigin, JobPermission, JobRequest, JobRequestConflict, JobRole, JobRule,
-        JobWorkspace, PipelineDispatch, PipelineNodeKind, ProjectSubagentPolicy,
+        JobNoticeKind, JobOrigin, JobPermission, JobRequest, JobRequestConflict, JobRequirements,
+        JobRole, JobRule, JobWorkspace, PipelineDispatch, PipelineNodeKind, ProjectSubagentPolicy,
         QueueHistoryPolicy, QueueSettings, QueueState, RecoveryAction, SubagentAuditField,
         SubagentAuditPolicy, SubagentAuditSource, SubagentCounts, SubagentLimitMode,
     },
@@ -68,6 +68,77 @@ fn request() -> JobRequest {
         dependencies: Vec::new(),
         requires_bridge: false,
     }
+}
+
+#[tokio::test]
+async fn queue_rejects_an_unsupported_os_sandbox_and_preserves_cli_only_work() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("queue.sqlite"))?;
+    let initial = origin(&store, &temp.path().join("project")).await?;
+    let chat = store.conversation(initial.conversation_id.clone()).await?;
+    store
+        .finish_agent_attempt(initial.run.id.clone(), RunStatus::Cancelled, None)
+        .await?;
+    store
+        .set_project_job_rules(
+            initial.run.project_id.clone(),
+            vec![],
+            vec![JobRule {
+                role: JobRole::Operator,
+                operation: SessionMode::ReadOnly,
+                workspace: JobWorkspace::Project,
+                permission: JobPermission::Allow,
+                requirements: JobRequirements {
+                    capabilities: vec![Capability::OsCommandSandbox],
+                    ..Default::default()
+                },
+            }],
+        )
+        .await?;
+    let queue = |chat: Conversation, mode: SessionMode| {
+        let (store, mut scope) = (store.clone(), initial.scope.clone());
+        scope.provider = Provider::Claude;
+        scope.mode = mode;
+        async move {
+            let prompt = "Test Windows profile admission";
+            store
+                .save_conversation_draft(chat.id.clone(), prompt.into())
+                .await?;
+            store
+                .enqueue_conversation_turn(
+                    JobContext {
+                        conversation_id: chat.id,
+                        context_id: chat.context_id,
+                    },
+                    scope,
+                    prompt.into(),
+                )
+                .await
+        }
+    };
+    let rejected = queue(chat, SessionMode::ReadOnly).await?;
+    let other_chat = store
+        .create_conversation(
+            initial.run.checkout_id,
+            "Planning with CLI permissions".into(),
+        )
+        .await?;
+    let admitted = queue(other_chat.clone(), SessionMode::Plan).await?;
+    let env = environment(false);
+    let inspection = store
+        .inspect_job(rejected.project_id, rejected.id, env.clone())
+        .await?
+        .context("Missing sandbox inspection")?;
+    assert!(inspection.blockers.iter().any(|blocker| matches!(blocker, AdmissionBlocker::Policy { reason } if reason.contains("OS command sandbox"))));
+    let plan = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("Missing supported job")?;
+    assert_eq!(plan.conversation_id, other_chat.id);
+    assert_eq!(plan.scope.mode, SessionMode::Plan);
+    assert_eq!(plan.run.project_id, admitted.project_id);
+    assert!(store.claim_next_job(env).await?.is_none());
+    Ok(())
 }
 
 #[tokio::test]

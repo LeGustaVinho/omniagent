@@ -846,6 +846,11 @@ impl AcpSession {
 }
 
 impl CliSession for AcpSession {
+    fn reported_cli_permission(&self) -> Option<&'static str> {
+        let mode = self.required_mode();
+        (self.ready && self.configuration.current(Setting::Mode) == Some(mode)).then_some(mode)
+    }
+
     fn native_goal_support(&self) -> super::goal::NativeGoalSupport {
         super::goal::NativeGoalSupport::from_advertisement(self.goal_command)
     }

@@ -21,8 +21,9 @@ use crate::{
     store::Store,
 };
 
+pub use super::sandbox::OsSandboxSupport;
 use super::{
-    Authentication, CliAdapter, ProbeKind, Provider, ProviderEventData, ReportedModel,
+    Authentication, CliAdapter, CliSession, ProbeKind, Provider, ProviderEventData, ReportedModel,
     SessionIntent, SessionMode, SessionOption, SessionRequest,
 };
 
@@ -50,10 +51,19 @@ pub enum ProtocolCheck {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, TS)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "status", rename_all = "snake_case")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub enum PermissionCheck {
     Unverified,
+    ModeReported { mode: &'static str },
+}
+
+impl PermissionCheck {
+    fn from_session(session: &dyn CliSession) -> Self {
+        session
+            .reported_cli_permission()
+            .map_or(Self::Unverified, |mode| Self::ModeReported { mode })
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]
@@ -66,6 +76,7 @@ pub struct CliProbe {
     pub protocol: ProtocolCheck,
     pub authentication: Authentication,
     pub effective_permissions: PermissionCheck,
+    pub os_sandbox_support: OsSandboxSupport,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,7 +101,7 @@ pub fn desktop_profile(
     model_id: Option<String>,
 ) -> Result<DesktopProfile> {
     let provider = configured.provider;
-    let check = probe_cli(configured)?;
+    let check = probe_cli_profile(configured, false)?;
     let executable = PathBuf::from(
         check
             .executable
@@ -286,6 +297,13 @@ impl Store {
 }
 
 pub fn probe_cli(configured: ConfiguredExecutable) -> Result<CliProbe> {
+    probe_cli_profile(configured, true)
+}
+
+fn probe_cli_profile(
+    configured: ConfiguredExecutable,
+    inspect_permission: bool,
+) -> Result<CliProbe> {
     let provider = configured.provider;
     let adapter = provider.adapter();
     let mut check = CliProbe {
@@ -295,6 +313,10 @@ pub fn probe_cli(configured: ConfiguredExecutable) -> Result<CliProbe> {
         protocol: ProtocolCheck::Unchecked,
         authentication: Authentication::Unknown,
         effective_permissions: PermissionCheck::Unverified,
+        os_sandbox_support: super::sandbox::support(
+            provider,
+            DirectWindowsRunner.execution_platform().as_ref(),
+        ),
     };
     let exe = match adapter.discover(configured.executable.as_deref().map(Path::new)) {
         Ok(path) => path,
@@ -334,9 +356,11 @@ pub fn probe_cli(configured: ConfiguredExecutable) -> Result<CliProbe> {
         &exe,
         cwd,
         matches!(authentication.kind, ProbeKind::SessionHandshake),
+        inspect_permission,
     ) {
-        Ok(auth) => {
+        Ok((auth, permission)) => {
             check.protocol = ProtocolCheck::Verified;
+            check.effective_permissions = permission;
             if auth != Authentication::Unknown {
                 check.authentication = auth;
             }
@@ -432,7 +456,8 @@ fn handshake_probe(
     executable: &Path,
     cwd: &Path,
     check_session_auth: bool,
-) -> Result<Authentication> {
+    inspect_permission: bool,
+) -> Result<(Authentication, PermissionCheck)> {
     let mut session = adapter.create_session(SessionRequest {
         checkout: cwd.into(),
         intent: SessionIntent::Start,
@@ -450,30 +475,53 @@ fn handshake_probe(
             for frame in session.start()?.outbound {
                 process.input.send(frame.as_bytes())?;
             }
-            loop {
-                let frame = process
-                    .output
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))??;
-                let response = session.receive(frame)?;
-                for event in response.events {
-                    match event.data {
-                        ProviderEventData::Handshake { .. } if !check_session_auth => {
-                            return Ok(Authentication::Unknown);
+            let mut negotiated = false;
+            let result = (|| {
+                loop {
+                    let frame = process
+                        .output
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))??;
+                    let response = session.receive(frame)?;
+                    for event in response.events {
+                        match event.data {
+                            ProviderEventData::Handshake { .. } => {
+                                negotiated = true;
+                                if !check_session_auth
+                                    && (!inspect_permission
+                                        || adapter.provider() == Provider::Claude)
+                                {
+                                    return Ok((
+                                        Authentication::Unknown,
+                                        PermissionCheck::from_session(session.as_ref()),
+                                    ));
+                                }
+                            }
+                            ProviderEventData::Authentication {
+                                authenticated: Some(false),
+                            } => {
+                                return Ok((Authentication::Required, PermissionCheck::Unverified));
+                            }
+                            ProviderEventData::SessionReady { .. } => {
+                                return Ok((
+                                    Authentication::Unknown,
+                                    PermissionCheck::from_session(session.as_ref()),
+                                ));
+                            }
+                            ProviderEventData::Error { .. } => {
+                                bail!("CLI protocol negotiation failed")
+                            }
+                            _ => {}
                         }
-                        ProviderEventData::Authentication {
-                            authenticated: Some(false),
-                        } => return Ok(Authentication::Required),
-                        ProviderEventData::SessionReady { .. } => {
-                            return Ok(Authentication::Unknown);
-                        }
-                        ProviderEventData::Error { .. } => bail!("CLI protocol negotiation failed"),
-                        _ => {}
+                    }
+                    for frame in response.outbound {
+                        process.input.send(frame.as_bytes())?;
                     }
                 }
-                for frame in response.outbound {
-                    process.input.send(frame.as_bytes())?;
-                }
+            })();
+            if negotiated && inspect_permission && !check_session_auth {
+                return result.or(Ok((Authentication::Unknown, PermissionCheck::Unverified)));
             }
+            result
         },
     )
 }
@@ -601,7 +649,12 @@ mod tests {
             })?;
             assert!(result.version.is_some(), "missing {provider:?} version");
             assert_eq!(result.protocol, ProtocolCheck::Verified, "{provider:?}");
-            assert_eq!(result.effective_permissions, PermissionCheck::Unverified);
+            if provider == Provider::Codex {
+                assert_eq!(
+                    result.effective_permissions,
+                    PermissionCheck::ModeReported { mode: "read-only" }
+                );
+            }
             if provider != Provider::Antigravity {
                 assert_eq!(
                     result.authentication,

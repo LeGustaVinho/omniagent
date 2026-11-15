@@ -103,11 +103,12 @@ pub enum Capability {
     NativeSuggestions,
     SideRequest,
     WorkspaceWrite,
+    OsCommandSandbox,
     RunScopedMcp,
 }
 
 impl Capability {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::ModelInventory,
         Self::FreshSession,
         Self::Resume,
@@ -131,6 +132,7 @@ impl Capability {
         Self::NativeSuggestions,
         Self::SideRequest,
         Self::WorkspaceWrite,
+        Self::OsCommandSandbox,
         Self::RunScopedMcp,
     ];
 
@@ -619,6 +621,9 @@ pub trait CliAdapter: Send + Sync {
 /// Methods advance one provider protocol per process. The runtime owns I/O and persistence.
 pub trait CliSession: Send {
     fn arguments(&self) -> Vec<OsString>;
+    fn reported_cli_permission(&self) -> Option<&'static str> {
+        None
+    }
     fn attachment_encoding(
         &self,
         _format: crate::attachments::AttachmentFormat,
@@ -797,6 +802,7 @@ pub mod profiles;
 pub mod questions;
 mod rpc;
 pub mod runtime;
+pub(crate) mod sandbox;
 pub mod side;
 pub mod skills;
 pub mod steering;

@@ -14,8 +14,9 @@ use crate::{
         load_conversation, recovery_checkpoint,
     },
     protection,
-    providers::{Capability, SessionMode, questions::QuestionRoute},
+    providers::{Capability, SessionMode, questions::QuestionRoute, sandbox},
     repository::writers::{WriterConflict, writer_conflict, writer_owner},
+    runner::{DirectWindowsRunner, Runner},
     runs::{self, RunRecord, RunStatus},
     store::Store,
 };
@@ -1173,6 +1174,26 @@ fn evaluate(
             });
         }
         _ => {}
+    }
+    if rule
+        .requirements
+        .capabilities
+        .contains(&Capability::OsCommandSandbox)
+    {
+        let direct = env.runner == DirectWindowsRunner::IDENTITY;
+        let platform = direct
+            .then(|| DirectWindowsRunner.execution_platform())
+            .flatten();
+        let reason = match inputs.scope.as_ref() {
+            Some(scope) => sandbox::admission_blocker(scope, platform.as_ref(), direct),
+            None if inputs.command.is_some() => {
+                Some("This command cannot satisfy the rule's CLI sandbox requirement")
+            }
+            None => None,
+        };
+        if let Some(reason) = reason {
+            blockers.push(Policy { reason });
+        }
     }
     if let Some(question) = &inputs.question {
         if !question_answers::current(db, question, inputs.scope.as_ref())? {

@@ -54,6 +54,25 @@ it("restores the last saved theme if the appearance write fails", async () => {
   expect(screen.getByRole("button", { name: "Dark" }).getAttribute("aria-pressed")).toBe("true");
 });
 
+it("shows reported CLI permissions independently of Windows sandbox support", async () => {
+  invoke.mockImplementation(async (command: string) => {
+    switch (command) {
+      case "appearance_settings": return defaultAppearance;
+      case "cli_executables": return [{ provider: "claude", executable: null }];
+      case "cli_plugin_inventory": return null;
+      case "probe_cli_executable": return {
+        provider: "claude", version: "2.1.296", protocol: "verified", authentication: "authenticated",
+        effectivePermissions: { status: "mode_reported", mode: "plan" }, osSandboxSupport: "unsupported",
+      };
+      default: throw new Error(`Unexpected command ${command}`);
+    }
+  });
+  openSettings({ initialPage: "providers", simulation: null });
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Check CLI" }));
+  expect((await screen.findByText("Effective CLI permissions")).nextElementSibling?.textContent).toContain("plan");
+  expect(screen.getByText("Windows command sandbox").nextElementSibling?.textContent).toBe("Unsupported for this CLI on the Windows host");
+});
+
 it("checks a backup profile and recovers a failed simulated update without desktop commands", async () => {
   const user = userEvent.setup();
   openSettings({

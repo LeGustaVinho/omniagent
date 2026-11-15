@@ -1466,6 +1466,10 @@ impl CodexSession {
 }
 
 impl CliSession for CodexSession {
+    fn reported_cli_permission(&self) -> Option<&'static str> {
+        self.session.as_ref().map(|_| self.sandbox().0)
+    }
+
     fn enable_native_suggestions(&mut self) {
         self.suggestion_enabled = !self.handshake_started && self.request.mode != SessionMode::Plan;
     }
