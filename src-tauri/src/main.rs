@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod conversation_runtime;
 mod desktop;
 mod fixture;
 mod fixture_runtime;
@@ -50,6 +51,7 @@ fn main() {
             app.manage(store);
             app.manage(ipc::EventSubscriptions::default());
             app.manage(fixture_runtime::FixtureRuns::default());
+            app.manage(conversation_runtime::ConversationRuns::default());
             desktop::create_tray(app)?;
             Ok(())
         })
@@ -75,6 +77,15 @@ fn main() {
             ipc::conversation_messages,
             ipc::conversation_draft,
             ipc::save_conversation_draft,
+            conversation_runtime::conversation_models,
+            conversation_runtime::start_conversation_turn,
+            conversation_runtime::latest_conversation_run,
+            conversation_runtime::stop_conversation_turn,
+            conversation_runtime::approve_conversation_input,
+            conversation_runtime::answer_conversation_question,
+            conversation_runtime::pending_conversation_inputs,
+            conversation_runtime::conversation_events,
+            conversation_runtime::conversation_input,
             ipc::fixture_input_evidence,
             ipc::subscribe_events,
             ipc::unsubscribe_events,

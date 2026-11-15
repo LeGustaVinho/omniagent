@@ -1,7 +1,7 @@
 pub mod attachments;
 pub mod conversations;
 pub mod customizations;
-mod diagnostics;
+pub mod diagnostics;
 pub mod dispatch;
 pub mod evidence;
 pub mod mcp_bridge;

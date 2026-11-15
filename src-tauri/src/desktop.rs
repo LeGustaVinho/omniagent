@@ -7,7 +7,7 @@ use tauri::{
 };
 use tauri_plugin_dialog::DialogExt;
 
-use crate::fixture_runtime::FixtureRuns;
+use crate::{conversation_runtime::ConversationRuns, fixture_runtime::FixtureRuns};
 
 pub fn show(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -29,6 +29,7 @@ pub fn create_tray(app: &App) -> tauri::Result<()> {
             "show" => show(app),
             "exit" => {
                 app.state::<FixtureRuns>().stop_all();
+                app.state::<ConversationRuns>().stop_all();
                 app.exit(0);
             }
             _ => {}

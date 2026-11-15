@@ -13,6 +13,7 @@ use serde::Serialize;
 use ts_rs::TS;
 
 use crate::{
+    model_catalog::{MODEL_CATALOG, ModelOption, ObservedModel},
     process::TerminalOutcome,
     process_io::{CapturedProcess, Stream},
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
@@ -20,8 +21,8 @@ use crate::{
 };
 
 use super::{
-    Authentication, CliAdapter, ProbeKind, Provider, ProviderEventData, SessionIntent, SessionMode,
-    SessionRequest,
+    Authentication, CliAdapter, ProbeKind, Provider, ProviderEventData, ReportedModel,
+    SessionIntent, SessionMode, SessionRequest,
 };
 
 const PROBE_TIME: Duration = Duration::from_secs(10);
@@ -64,6 +65,133 @@ pub struct CliProbe {
     pub protocol: ProtocolCheck,
     pub authentication: Authentication,
     pub effective_permissions: PermissionCheck,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopModel {
+    pub option: ModelOption,
+    pub efforts: Vec<String>,
+}
+
+pub struct DesktopProfile {
+    pub executable: PathBuf,
+    pub version: String,
+    pub models: Vec<DesktopModel>,
+}
+
+/// Query the CLI in a neutral directory with no prompt or project customizations.
+pub fn desktop_profile(configured: ConfiguredExecutable) -> Result<DesktopProfile> {
+    let provider = configured.provider;
+    let check = probe_cli(configured)?;
+    let executable = PathBuf::from(
+        check
+            .executable
+            .context("The CLI executable is unavailable")?,
+    );
+    let version = check
+        .version
+        .context("The CLI did not report its version")?;
+    ensure!(
+        check.protocol == ProtocolCheck::Verified,
+        "The CLI transport is unavailable"
+    );
+    ensure!(
+        check.authentication == Authentication::Authenticated
+            || provider == Provider::Antigravity
+                && check.authentication != Authentication::Required,
+        "Sign in to the configured CLI before opening a conversation"
+    );
+    let neutral = tempfile::tempdir()?;
+    let cwd = dunce::canonicalize(neutral.path())?;
+    let mut session = provider.adapter().create_session(SessionRequest {
+        checkout: cwd.clone(),
+        intent: SessionIntent::Start,
+        mode: SessionMode::ReadOnly,
+        model: None,
+        effort: None,
+    })?;
+    let models = run_probe(
+        &DirectWindowsRunner,
+        &executable,
+        &cwd,
+        &session.arguments(),
+        PROBE_TIME,
+        |mut process, deadline| {
+            for frame in session.start()?.outbound {
+                process.input.send(frame.as_bytes())?;
+            }
+            let mut models: Option<Vec<ReportedModel>> = None;
+            loop {
+                let frame = process
+                    .output
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))??;
+                let update = session.receive(frame)?;
+                for frame in update.outbound {
+                    process.input.send(frame.as_bytes())?;
+                }
+                let mut session_efforts = None;
+                for event in update.events {
+                    match event.data {
+                        ProviderEventData::Error { .. } => bail!("The CLI could not list models"),
+                        ProviderEventData::ModelInventory { models: inventory } => {
+                            models = Some(inventory)
+                        }
+                        ProviderEventData::SessionOptions { options } => {
+                            session_efforts = options
+                                .into_iter()
+                                .find(|option| {
+                                    option.category.as_deref() == Some("thought_level")
+                                        || option.id == "thought_level"
+                                })
+                                .map(|option| {
+                                    option
+                                        .choices
+                                        .into_iter()
+                                        .map(|choice| choice.value)
+                                        .collect::<Vec<_>>()
+                                });
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(models) = models.take() {
+                    let observed = models
+                        .iter()
+                        .map(|model| ObservedModel {
+                            id: model.id.clone(),
+                            canonical_id: model.canonical_id.clone(),
+                            name: model.name.clone(),
+                            selectable: model.selectable != Some(false),
+                            unavailable_reason: (model.selectable == Some(false))
+                                .then_some("Unavailable in this CLI session".into()),
+                        })
+                        .collect::<Vec<_>>();
+                    let options = MODEL_CATALOG.project_options(
+                        provider,
+                        &format!("desktop-direct:{}", provider.as_str()),
+                        &observed,
+                    );
+                    return Ok(options
+                        .into_iter()
+                        .zip(models)
+                        .map(|(option, reported)| DesktopModel {
+                            option,
+                            efforts: reported
+                                .effort_levels
+                                .or_else(|| session_efforts.clone())
+                                .unwrap_or_default(),
+                        })
+                        .collect());
+                }
+            }
+        },
+    )?;
+    Ok(DesktopProfile {
+        executable,
+        version,
+        models,
+    })
 }
 
 impl Store {

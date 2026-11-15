@@ -1,10 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { IDockviewPanelProps } from "dockview-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { MessageRevision } from "@/bindings/MessageRevision";
+import type { ModelOption } from "@/bindings/ModelOption";
+import type { ModelSelection } from "@/bindings/ModelSelection";
+import type { Provider } from "@/bindings/Provider";
+import type { RunRecord } from "@/bindings/RunRecord";
+import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
+import { ConversationRun, isLiveRun } from "@/conversation-run";
 import { openConversation } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
 
@@ -66,6 +72,9 @@ export function ConversationListPanel({ containerApi }: IDockviewPanelProps) {
 }
 
 type PanelParams = { conversationId: string; title: string };
+type DesktopModel = { option: ModelOption; efforts: string[] };
+type ProfileMode = "read_only" | "plan";
+const selectorClass = "rounded-md border border-input bg-background px-2 py-2 text-sm";
 
 export function ConversationPanel({ params }: IDockviewPanelProps<PanelParams>) {
   return <ConversationContent key={params.conversationId} {...params} />;
@@ -80,15 +89,55 @@ function ConversationContent({ conversationId, title }: PanelParams) {
       await draftWrites.get(conversationId);
       return invoke<string>("conversation_draft", { conversationId });
     },
+    staleTime: Infinity,
   });
+  const historyKey = ["conversation", conversationId, "messages"];
   const history = useQuery({
-    queryKey: ["conversation", conversationId, "messages"],
+    queryKey: historyKey,
     queryFn: () => invoke<MessageRevision[]>("conversation_messages", { conversationId }),
   });
   const activeEdit = useRef(0);
   const [draftError, setDraftError] = useState("");
   const [draftStatus, setDraftStatus] = useState("");
+  const [provider, setProvider] = useState<Provider>("codex");
+  const [selection, setSelection] = useState<ModelSelection | null>(null);
+  const [effort, setEffort] = useState("");
+  const [mode, setMode] = useState<ProfileMode>("read_only");
   const text = draft.data ?? "";
+  const models = useQuery({
+    queryKey: ["conversation-models", provider],
+    queryFn: () => invoke<DesktopModel[]>("conversation_models", { provider }),
+    staleTime: 60_000,
+  });
+  const selected = models.data?.find(({ option }) => option.selection.modelId === selection?.modelId && option.selection.provider === selection?.provider);
+  const runKey = ["conversation", conversationId, "latest-run"];
+  const latest = useQuery({
+    queryKey: runKey,
+    queryFn: () => invoke<RunRecord | null>("latest_conversation_run", { conversationId }),
+    refetchInterval: (query) => isLiveRun(query.state.data) ? 250 : false,
+  });
+  const run = latest.data;
+  const live = isLiveRun(run);
+  useEffect(() => {
+    if (run?.status) void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "messages"] });
+  }, [run?.id, run?.status, conversationId, queryClient]);
+  const send = useMutation({
+    mutationFn: async (submitted: string) => {
+      if (!selection) throw new Error("Choose a model");
+      await saveDraft(conversationId, submitted);
+      return invoke<RunRecord>("start_conversation_turn", {
+        conversationId, selection, effort: effort || null, mode, text: submitted,
+      });
+    },
+    onSuccess: (run, submitted) => {
+      activeEdit.current++;
+      queryClient.setQueryData<string>(draftKey, (current) => current === submitted ? "" : current);
+      setDraftStatus("");
+      setDraftError("");
+      queryClient.setQueryData(runKey, run);
+      void queryClient.invalidateQueries({ queryKey: historyKey });
+    },
+  });
 
   function editDraft(text: string) {
     const edit = ++activeEdit.current;
@@ -103,6 +152,11 @@ function ConversationContent({ conversationId, title }: PanelParams) {
         setDraftError(String(error));
       }
     });
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!live && text.trim() && selected?.option.selectable && !send.isPending) send.mutate(text);
   }
 
   return (
@@ -121,16 +175,56 @@ function ConversationContent({ conversationId, title }: PanelParams) {
             </li>
           ))}
         </ol>
+        {latest.error && <p role="alert" className="text-sm text-red-300">{String(latest.error)}</p>}
+        {run && <ConversationRun key={run.id} conversationId={conversationId} run={run} />}
       </div>
-      <div className="border-t border-border p-4">
+      <form onSubmit={submit} className="max-h-[55%] overflow-auto border-t border-border p-4">
         <div className="mx-auto grid max-w-3xl gap-2">
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="grid gap-1 text-xs">Provider
+              <select className={selectorClass} value={provider} onChange={(event) => {
+                setProvider(event.target.value as Provider);
+                setSelection(null);
+                setEffort("");
+              }}>
+                <option value="codex">Codex</option>
+                <option value="claude">Claude Code</option>
+                <option value="antigravity">Antigravity</option>
+              </select>
+            </label>
+            <label className="grid gap-1 text-xs">Thinking level
+              <select className={selectorClass} value={effort} onChange={(event) => setEffort(event.target.value)}>
+                <option value="">Default</option>
+                {selected?.efforts.map((level) => <option key={level} value={level}>{level}</option>)}
+              </select>
+            </label>
+            <label className="grid gap-1 text-xs">Profile
+              <select className={selectorClass} value={mode} onChange={(event) => setMode(event.target.value as ProfileMode)}>
+                <option value="read_only">Read-only</option>
+                <option value="plan">Planning</option>
+              </select>
+            </label>
+          </div>
+          <ModelPicker label="Model" options={models.data?.map(({ option }) => option) ?? []}
+            selection={{ mode: "single", selected: selection, onChange: (selection) => { setSelection(selection); setEffort(""); } }} />
+          {models.isPending && <p role="status" className="text-xs text-muted-foreground">Checking CLI models…</p>}
+          {models.error && <div className="flex flex-wrap items-center gap-2">
+            <p role="alert" className="text-xs text-red-300">{String(models.error)}</p>
+            <Button type="button" variant="outline" onClick={() => void models.refetch()}>Refresh models</Button>
+          </div>}
           <label htmlFor={`draft-${conversationId}`} className="text-sm font-medium">Message draft</label>
           <textarea id={`draft-${conversationId}`} className="min-h-24 rounded-md border border-input bg-background p-3 text-sm focus-visible:outline-ring"
-            value={text} onChange={(event) => editDraft(event.target.value)} disabled={draft.isPending || Boolean(draft.error)} />
-          {draftStatus && <p role="status" className="text-xs text-muted-foreground">{draftStatus}</p>}
+            value={text} onChange={(event) => editDraft(event.target.value)} disabled={draft.isPending || Boolean(draft.error) || send.isPending} />
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Button type="submit" disabled={!text.trim() || live || latest.isPending || !selected?.option.selectable || send.isPending}>
+              {send.isPending ? "Starting…" : "Send"}
+            </Button>
+            {draftStatus && <p role="status" className="text-xs text-muted-foreground">{draftStatus}</p>}
+          </div>
           {(draftError || draft.error) && <p role="alert" className="text-sm text-red-300">{draftError || String(draft.error)}</p>}
+          {send.error && <p role="alert" className="text-sm text-red-300">{String(send.error)}</p>}
         </div>
-      </div>
+      </form>
     </section>
   );
 }

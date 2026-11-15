@@ -49,7 +49,14 @@ async function startSession(application) {
     capabilities: { browserName: "webview2", "tauri:options": { application } },
   });
   await browser.setTimeout({ script: 8_000 });
-  await browser.waitUntil(() => browser.execute(() => typeof window.__TAURI_INTERNALS__?.invoke === "function"));
+  await browser.waitUntil(() => browser.execute(async () => {
+    if (location.origin === "null" || typeof window.__TAURI_INTERNALS__?.invoke !== "function") return false;
+    try {
+      return await window.__TAURI_INTERNALS__.invoke("runtime_status") === "Desktop runtime is ready.";
+    } catch {
+      return false;
+    }
+  }), { timeout: 15_000 });
   return browser;
 }
 
@@ -94,7 +101,7 @@ function runRows(browser, runId) {
   }, runId.slice(0, 8));
 }
 
-test("registers a Git checkout and runs a fixture in the Windows desktop", { timeout: 90_000 }, async (t) => {
+test("registers a Git checkout and runs a fixture in the Windows desktop", { timeout: 150_000 }, async (t) => {
   assert.equal(process.platform, "win32");
   const root = await realpath(tmpdir());
   const scratch = await mkdtemp(join(root, "omniagent-webdriver-"));
@@ -283,7 +290,13 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     killTestApplication(application);
     await browser.deleteSession().catch(() => undefined);
     browser = await startSession(application);
-    await browser.$("button=Conversations").waitForEnabled();
+    assert.equal((await invoke(browser, "active_checkout"))?.checkoutId, main.checkoutId);
+    try {
+      await browser.$("button=Conversations").waitForEnabled({ timeout: 15_000 });
+    } catch (error) {
+      const screen = await browser.execute(() => document.body.innerText.slice(0, 500));
+      throw new Error(`Workspace did not reopen: ${screen}`, { cause: error });
+    }
     await browser.$("button=Conversations").click();
     await browser.$("button=Other conversation").click();
     await browser.$('textarea[id^="draft-"]').waitForEnabled();
@@ -293,6 +306,40 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     await browser.$('textarea[id^="draft-"]').waitForEnabled();
     assert.equal(await browser.$('textarea[id^="draft-"]').getValue(), unsent);
     assert.deepEqual(await invoke(browser, "conversation_messages", { conversationId: conversation.id }), []);
+
+    if (process.env.OMNIAGENT_LIVE_CONVERSATION === "1") {
+      const models = await invoke(browser, "conversation_models", { provider: "codex" });
+      const model = models.find(({ option }) => option.selection.modelId === "gpt-6-luna" && option.selectable);
+      assert.ok(model, "the installed profile does not offer the qualified fixture model");
+      const summary = browser.$("summary*=Choose a model");
+      await summary.click();
+      const modelRadio = browser.$(`input[aria-label="${model.option.name}"]`);
+      await modelRadio.click();
+      await browser.$('summary span[aria-label="Selected models"]').click();
+      const prompt = "Reply exactly OMNIAGENT_DESKTOP_REPLY without tools.";
+      await browser.$('textarea[id^="draft-"]').setValue(prompt);
+      await browser.$("button=Send").click();
+      await browser.$("p=OMNIAGENT_DESKTOP_REPLY").waitForDisplayed({ timeout: 45_000 });
+      await browser.waitUntil(async () => (await invoke(browser, "latest_conversation_run", {
+        conversationId: conversation.id,
+      }))?.status === "succeeded");
+      assert.equal(await invoke(browser, "conversation_draft", { conversationId: conversation.id }), "");
+      const messages = await invoke(browser, "conversation_messages", { conversationId: conversation.id });
+      assert.deepEqual(messages.map(({ text }) => text), [prompt, "OMNIAGENT_DESKTOP_REPLY"]);
+      await browser.$("button=Exact input").click();
+      await browser.$('section[aria-label="Exact provider input"] pre').waitForDisplayed();
+      const wire = JSON.parse(await browser.$('section[aria-label="Exact provider input"] pre').getText());
+      assert.equal(wire.params.input[0].text, prompt);
+
+      await browser.$('textarea[id^="draft-"]').setValue("Write every number from one to two thousand in words on separate lines. Do not use tools.");
+      await browser.$("button=Send").click();
+      await browser.$('div[aria-label="Streaming response"]').waitForDisplayed({ timeout: 45_000 });
+      await browser.$("button=Stop").click();
+      await browser.waitUntil(async () => {
+        const run = await invoke(browser, "latest_conversation_run", { conversationId: conversation.id });
+        return ["cancelled", "interrupted"].includes(run?.status);
+      }, { timeout: 15_000 });
+    }
   } finally {
     try {
       await browser?.deleteSession();

@@ -155,11 +155,24 @@ enum Decision {
 
 pub struct ManagedTurn {
     pub run_id: String,
-    commands: mpsc::SyncSender<Command>,
+    control: ManagedTurnControl,
     worker: JoinHandle<Result<RunStatus>>,
 }
 
-impl ManagedTurn {
+#[derive(Clone)]
+pub struct ManagedTurnControl {
+    commands: mpsc::SyncSender<Command>,
+}
+
+impl std::ops::Deref for ManagedTurn {
+    type Target = ManagedTurnControl;
+
+    fn deref(&self) -> &Self::Target {
+        &self.control
+    }
+}
+
+impl ManagedTurnControl {
     pub fn interrupt(&self) -> Result<()> {
         self.commands
             .try_send(Command::Interrupt)
@@ -196,13 +209,19 @@ impl ManagedTurn {
             .await
             .context("attempt stopped before recording steering")?
     }
+}
+
+impl ManagedTurn {
+    pub fn control(&self) -> ManagedTurnControl {
+        self.control.clone()
+    }
 
     pub async fn wait(self) -> Result<RunStatus> {
         let Self {
-            commands, worker, ..
+            control, worker, ..
         } = self;
         let result = worker.await.context("managed turn worker failed")?;
-        drop(commands);
+        drop(control);
         result
     }
 }
@@ -297,7 +316,7 @@ fn start_turn(
     });
     ManagedTurn {
         run_id: id,
-        commands,
+        control: ManagedTurnControl { commands },
         worker,
     }
 }

@@ -99,6 +99,7 @@ enum AttemptInput {
         text: String,
         previews: Vec<AttachmentPreview>,
         question_route: QuestionRoute,
+        consume_draft: bool,
     },
     StructuredReply {
         origin: QuestionOrigin,
@@ -163,6 +164,39 @@ impl Store {
         } else {
             self.save_draft(key, text.into_bytes()).await
         }
+    }
+
+    pub async fn latest_conversation_run(
+        &self,
+        conversation_id: String,
+    ) -> Result<Option<RunRecord>> {
+        self.execute(move |db| {
+            let latest: Option<String> = db.query_row(
+                "SELECT run_id FROM agent_attempts WHERE conversation_id = ?1 ORDER BY ordinal DESC LIMIT 1",
+                [conversation_id],
+                |row| row.get(0),
+            ).optional()?;
+            latest.map(|id| runs::load_run(db, &id)).transpose()
+        }).await
+    }
+
+    pub async fn pending_conversation_inputs(
+        &self,
+        conversation_id: String,
+        run_id: String,
+    ) -> Result<Vec<ProviderEvent>> {
+        self.execute(move |db| {
+            let mut statement = db.prepare(
+                "SELECT e.payload FROM agent_events e
+                 JOIN active_agent_attempts active ON active.run_id = e.run_id
+                 WHERE active.conversation_id = ?1 AND e.run_id = ?2 AND (
+                    EXISTS (SELECT 1 FROM agent_permissions p WHERE p.request_event_seq = e.seq AND p.delivery = 'pending')
+                    OR EXISTS (SELECT 1 FROM agent_questions q WHERE q.request_event_seq = e.seq AND q.delivery = 'pending')
+                 ) ORDER BY e.seq",
+            )?;
+            let rows = statement.query_map(params![conversation_id, run_id], |row| row.get::<_, Vec<u8>>(0))?;
+            rows.map(|row| Ok(serde_json::from_slice(&protection::unprotect(&row?)?)?)).collect()
+        }).await
     }
 
     pub async fn create_conversation(
@@ -341,6 +375,28 @@ impl Store {
                 text,
                 previews,
                 question_route: QuestionRoute::Native,
+                consume_draft: false,
+            },
+        )
+        .await
+    }
+
+    pub async fn prepare_conversation_draft_attempt(
+        &self,
+        conversation_id: String,
+        base_context_id: String,
+        scope: SessionScope,
+        text: String,
+    ) -> Result<AttemptPlan> {
+        self.admit_agent_attempt(
+            conversation_id,
+            base_context_id,
+            scope,
+            AttemptInput::Message {
+                text,
+                previews: Vec::new(),
+                question_route: QuestionRoute::Native,
+                consume_draft: true,
             },
         )
         .await
@@ -353,12 +409,13 @@ impl Store {
         scope: SessionScope,
         input: AttemptInput,
     ) -> Result<AttemptPlan> {
-        let (text, previews, question_route, answer) = match input {
+        let (text, previews, question_route, answer, consume_draft) = match input {
             AttemptInput::Message {
                 text,
                 previews,
                 question_route,
-            } => (text, previews, question_route, None),
+                consume_draft,
+            } => (text, previews, question_route, None, consume_draft),
             AttemptInput::StructuredReply { origin, reply } => {
                 ensure!(
                     reply.action == QuestionAction::Accept,
@@ -369,6 +426,7 @@ impl Store {
                     Vec::new(),
                     QuestionRoute::StructuredTurn,
                     Some((origin, reply)),
+                    false,
                 )
             }
         };
@@ -424,6 +482,15 @@ impl Store {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let conversation = check_idle_base(&tx, &conversation_id, &base_context_id)?;
+            if consume_draft {
+                let draft: Vec<u8> = tx.query_row(
+                    "SELECT payload FROM drafts WHERE kind = 'conversation' AND owner_id = ?1 AND document = ''",
+                    [&conversation_id], |row| row.get(0),
+                ).optional()?.context("The conversation draft no longer exists")?;
+                ensure!(protection::unprotect(&draft)? == text.as_bytes(), "The conversation draft changed before sending");
+                tx.execute("DELETE FROM drafts WHERE kind = 'conversation' AND owner_id = ?1 AND document = ''",
+                    [&conversation_id])?;
+            }
             let answered_request = answer.as_ref().map(|(origin, reply)| {
                 validate_structured_reply(&tx, &conversation, &serialized, origin, reply)
             }).transpose()?;
@@ -540,6 +607,7 @@ impl Store {
                 text,
                 previews,
                 question_route: QuestionRoute::StructuredTurn,
+                consume_draft: false,
             },
         )
         .await
@@ -1889,6 +1957,64 @@ mod tests {
                 control: Arc::new(CompletedProcess),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn desktop_admission_consumes_only_the_exact_draft_atomically() -> Result<()> {
+        let (_directory, store, chat, scope) = setup().await?;
+        let id = chat.id.clone();
+        store
+            .save_conversation_draft(id.clone(), "newer revision".into())
+            .await?;
+        assert!(
+            store
+                .prepare_conversation_draft_attempt(
+                    id.clone(),
+                    chat.context_id.clone(),
+                    scope.clone(),
+                    "older revision".into(),
+                )
+                .await
+                .is_err()
+        );
+        assert!(store.latest_conversation_run(id.clone()).await?.is_none());
+        assert_eq!(
+            store.conversation_draft(id.clone()).await?,
+            "newer revision"
+        );
+        assert!(
+            store
+                .prepare_conversation_draft_attempt(
+                    id.clone(),
+                    "stale context".into(),
+                    scope.clone(),
+                    "newer revision".into(),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.conversation_draft(id.clone()).await?,
+            "newer revision"
+        );
+        let plan = store
+            .prepare_conversation_draft_attempt(
+                id.clone(),
+                chat.context_id,
+                scope,
+                "newer revision".into(),
+            )
+            .await?;
+        assert!(store.conversation_draft(id.clone()).await?.is_empty());
+        assert_eq!(
+            store.latest_conversation_run(id.clone()).await?.unwrap().id,
+            plan.run.id
+        );
+        assert_eq!(
+            store.conversation_messages(id).await?[0].text,
+            "newer revision"
+        );
+        Ok(())
     }
 
     #[tokio::test]
