@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { copyFile, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -94,6 +94,15 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
   git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
     "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Fixture");
   git(repo, "worktree", "add", "-q", "--detach", linked);
+  await writeFile(join(repo, "AGENTS.md"), "Desktop registration keeps Markdown available.");
+  await mkdir(join(repo, ".claude"));
+  await mkdir(join(repo, "scripts"));
+  await writeFile(join(repo, "scripts", "startup.ps1"), "Set-Content hook-marker started");
+  await writeFile(join(repo, "scripts", "mcp.js"), "require('node:fs').writeFileSync('mcp-marker', 'started');");
+  await writeFile(join(repo, ".claude", "settings.json"), JSON.stringify({
+    hooks: { SessionStart: [{ matcher: "startup", hooks: [{ type: "command", command: "powershell.exe -NoProfile -File ./scripts/startup.ps1" }] }] },
+  }));
+  await writeFile(join(repo, ".mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: "node", args: ["./scripts/mcp.js"] } } }));
 
   const args = ["--port", String(port), "--native-port", String(port + 1)];
   if (process.env.OMNIAGENT_EDGE_DRIVER) args.push("--native-driver", process.env.OMNIAGENT_EDGE_DRIVER);
@@ -189,6 +198,32 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     assert.equal(new Set(history.map((event) => event.seq)).size, history.length);
     assert.ok(history.every((event, index) => index === 0 || BigInt(history[index - 1].seq) < BigInt(event.seq)));
     assert.equal((await runRows(browser, runId)).length, history.length);
+
+    await selectCheckout(browser, main);
+    await browser.$("button=Customizations").click();
+    const reviewScope = { checkoutId: main.checkoutId };
+    const initial = await invoke(browser, "review_checkout_customizations", reviewScope);
+    const approvedHook = initial.entries.find(({ kind }) => kind === "hook");
+    assert.ok(approvedHook);
+    const hook = browser.$('//details[summary[contains(., "SessionStart")]]');
+    await hook.waitForDisplayed();
+    const hookSummary = hook.$("summary");
+    assert.match(await hookSummary.getText(), /Pending review/);
+    const markdown = browser.$("summary=AGENTS.md");
+    await markdown.click();
+    await browser.$("pre=Desktop registration keeps Markdown available.").waitForDisplayed();
+    await hookSummary.click();
+    await hook.$("button=Approve revision").click();
+    await browser.waitUntil(async () => (await hookSummary.getText()).includes("Revision approved"));
+    assert.match(await browser.$("summary*=fixture").getText(), /Pending review/);
+    await writeFile(join(repo, "scripts", "startup.ps1"), "Set-Content hook-marker changed");
+    await assert.rejects(invoke(browser, "approve_checkout_customization", {
+      ...reviewScope, entryId: approvedHook.id, fingerprint: approvedHook.fingerprint,
+    }), /Customization changed/);
+    await browser.$("button=Refresh").click();
+    await browser.waitUntil(async () => (await hookSummary.getText()).includes("Changed since approval"));
+    await assert.rejects(access(join(repo, "hook-marker")), { code: "ENOENT" });
+    await assert.rejects(access(join(repo, "mcp-marker")), { code: "ENOENT" });
 
     await browser.$("button=Provider settings").click();
     const executable = browser.$('input[name="codex"]');
