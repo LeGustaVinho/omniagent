@@ -1,11 +1,11 @@
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path, process::Command, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::{AttemptPlan, Conversation, SessionScope},
     jobs::{
-        AdmissionBlocker, AdmissionEnvironment, Job, JobContext, JobOrigin, JobRequest,
-        JobRequestConflict, QueueSettings, QueueState, RecoveryAction,
+        AdmissionBlocker, AdmissionEnvironment, Job, JobContext, JobNoticeKind, JobOrigin,
+        JobRequest, JobRequestConflict, QueueSettings, QueueState, RecoveryAction,
     },
     providers::{Capability, Provider, SessionIntent, SessionMode},
     repository,
@@ -64,6 +64,63 @@ fn request() -> JobRequest {
         dependencies: Vec::new(),
         requires_bridge: false,
     }
+}
+
+#[tokio::test]
+async fn native_job_notices_survive_reopen_and_skip_obsolete_approvals() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("queue.sqlite");
+    let store = Store::open(database.clone())?;
+    let parent = origin(&store, &temp.path().join("repo")).await?;
+    let mut notices = store.job_notices();
+    let job = store
+        .submit_agent_job(parent.run.id.clone(), "review".into(), request())
+        .await?;
+    assert_eq!(
+        store
+            .submit_agent_job(parent.run.id.clone(), "review".into(), request())
+            .await?,
+        job
+    );
+    let approval = tokio::time::timeout(Duration::from_secs(3), notices.next()).await??;
+    assert_eq!(approval.kind, JobNoticeKind::JobApproval);
+    assert_eq!(approval.project_id, job.project_id);
+    assert_eq!(approval.job_id, job.id);
+    assert!(approval.run_id.is_none());
+    drop(notices);
+    drop(store);
+
+    let reopened = Store::open(database)?;
+    let mut notices = reopened.job_notices();
+    let delivered = tokio::time::timeout(Duration::from_secs(3), notices.next()).await??;
+    assert_eq!(delivered, approval);
+    notices.acknowledge(&delivered).await?;
+    let obsolete = reopened
+        .submit_agent_job(parent.run.id, "obsolete".into(), request())
+        .await?;
+    reopened
+        .set_pending_job_state(obsolete.project_id, obsolete.id, QueueState::Cancelled)
+        .await?;
+    approve(&reopened, &job).await?;
+    let plan = reopened
+        .claim_next_job(environment(false))
+        .await?
+        .context("approved job was not admitted")?;
+    reopened.mark_agent_running(plan.run.id.clone()).await?;
+    reopened
+        .finish_agent_attempt(plan.run.id.clone(), RunStatus::Succeeded, None)
+        .await?;
+    let completed = tokio::time::timeout(Duration::from_secs(3), notices.next()).await??;
+    assert_eq!(completed.kind, JobNoticeKind::Succeeded);
+    assert_eq!(completed.job_id, job.id);
+    assert_eq!(completed.run_id, Some(plan.run.id));
+    notices.acknowledge(&completed).await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), notices.next())
+            .await
+            .is_err()
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -753,6 +810,43 @@ async fn conversation_job(
         .await?
         .context("missing first attempt")?;
     Ok((chat, job, plan))
+}
+
+#[tokio::test]
+async fn crash_after_claim_requeues_unlaunched_jobs_but_honors_a_pending_cancel() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("queue.sqlite3");
+    let store = Store::open(database.clone())?;
+    let (chat, job, untouched) = conversation_job(&store, &temp.path().join("ready")).await?;
+    let (other, cancelled_job, cancelled) =
+        conversation_job(&store, &temp.path().join("cancelled")).await?;
+    store
+        .request_job_interrupt(other.id, cancelled.run.id.clone())
+        .await?;
+    let reopened = Store::open(database)?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    let no_retry = reopened
+        .job(cancelled_job.project_id, cancelled_job.id)
+        .await?
+        .unwrap();
+    assert!(no_retry.queued_recovery.is_none());
+    let queued = reopened.job(job.project_id, job.id).await?.unwrap();
+    assert_eq!(queued.queued_recovery, Some(RecoveryAction::Retry));
+    assert_eq!(
+        queued.latest_attempt.unwrap().status,
+        RunStatus::Interrupted
+    );
+    let next = reopened
+        .claim_next_job(environment(false))
+        .await?
+        .context("never-launched work was lost")?;
+    assert_eq!(next.conversation_id, chat.id);
+    assert_eq!(next.previous_run_id, Some(untouched.run.id));
+    assert_eq!(next.context_id, untouched.context_id);
+    assert_eq!(next.input, untouched.input);
+    assert!(reopened.claim_next_job(environment(false)).await?.is_none());
+    Ok(())
 }
 
 #[tokio::test]

@@ -7,15 +7,14 @@ use std::{
 
 use anyhow::{Context, Result};
 use tokio::{
-    sync::watch,
+    sync::{Mutex as AsyncMutex, MutexGuard, watch},
     task::{JoinHandle, JoinSet},
 };
 
 use crate::{
     diagnostics,
-    providers::runtime::{ManagedTurnControl, start_managed_turn},
+    providers::runtime::{ManagedTurnControl, start_scheduled_turn},
     runner::Runner,
-    runs::RunStatus,
     store::Store,
 };
 
@@ -27,7 +26,25 @@ pub struct JobScheduler {
     bridge: Option<PathBuf>,
     active: ActiveTurns,
     stop: watch::Sender<bool>,
-    task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+    admission: LaunchGate,
+    task: Arc<AsyncMutex<Option<JoinHandle<()>>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct LaunchGate {
+    boundary: Arc<AsyncMutex<()>>,
+    stopping: watch::Receiver<bool>,
+}
+
+impl LaunchGate {
+    pub(crate) fn is_closed(&self) -> bool {
+        *self.stopping.borrow() || self.stopping.has_changed().is_err()
+    }
+
+    pub(crate) async fn enter(&self) -> Option<MutexGuard<'_, ()>> {
+        let guard = self.boundary.lock().await;
+        (!self.is_closed()).then_some(guard)
+    }
 }
 
 type ActiveTurns = Arc<Mutex<HashMap<String, LiveTurn>>>;
@@ -41,20 +58,25 @@ struct LiveTurn {
 impl JobScheduler {
     pub fn start(store: Store, runner: Arc<dyn Runner>, bridge: Option<PathBuf>) -> Self {
         let (stop, stopping) = watch::channel(false);
+        let admission = LaunchGate {
+            boundary: Arc::new(AsyncMutex::new(())),
+            stopping,
+        };
         let active = ActiveTurns::default();
         let task = tokio::spawn(drive(
             store,
             runner.clone(),
             bridge.clone(),
             active.clone(),
-            stopping,
+            admission.clone(),
         ));
         Self {
             runner,
             bridge,
             active,
             stop,
-            task: Arc::new(tokio::sync::Mutex::new(Some(task))),
+            admission,
+            task: Arc::new(AsyncMutex::new(Some(task))),
         }
     }
 
@@ -72,10 +94,21 @@ impl JobScheduler {
             .context("This conversation run is no longer active")
     }
 
-    pub async fn shutdown(&self) -> Result<()> {
+    pub async fn stop_admission(&self) -> bool {
+        let Some(_boundary) = self.admission.enter().await else {
+            return false;
+        };
         self.stop.send_replace(true);
-        if let Some(task) = self.task.lock().await.take() {
-            task.await.context("job scheduler task failed")?;
+        true
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        self.stop_admission().await;
+        let mut task = self.task.lock().await;
+        if let Some(worker) = task.as_mut() {
+            let result = worker.await;
+            task.take();
+            result.context("job scheduler task failed")?;
         }
         Ok(())
     }
@@ -93,19 +126,15 @@ async fn drive(
     runner: Arc<dyn Runner>,
     bridge: Option<PathBuf>,
     active: ActiveTurns,
-    mut stopping: watch::Receiver<bool>,
+    admission: LaunchGate,
 ) {
     let mut signal = store.job_signal.subscribe();
+    let mut stopping = admission.stopping.clone();
     let mut workers = JoinSet::new();
     loop {
-        let stop = *stopping.borrow_and_update();
+        stopping.borrow_and_update();
+        let stop = admission.is_closed();
         if stop {
-            let mut live = active.lock().expect("job scheduler lock");
-            for turn in live.values_mut() {
-                if !turn.interrupt_sent {
-                    turn.interrupt_sent = turn.control.interrupt().is_ok();
-                }
-            }
             if workers.is_empty() {
                 break;
             }
@@ -125,45 +154,37 @@ async fn drive(
                 }
                 Err(error) => report(&error),
             }
-            if !*stopping.borrow() {
+            if let Some(_boundary) = admission.enter().await {
                 match store
                     .claim_next_job(environment(runner.as_ref(), bridge.as_ref()))
                     .await
                 {
                     Ok(Some(plan)) => {
                         let run_id = plan.run.id.clone();
-                        if *stopping.borrow() {
-                            if let Err(error) = store
-                                .finish_agent_attempt(run_id, RunStatus::Cancelled, None)
-                                .await
-                            {
+                        let conversation = plan.conversation_id.clone();
+                        let worker = start_scheduled_turn(
+                            store.clone(),
+                            runner.clone(),
+                            plan,
+                            bridge.clone(),
+                            admission.clone(),
+                        );
+                        active.lock().expect("job scheduler lock").insert(
+                            run_id.clone(),
+                            LiveTurn {
+                                conversation,
+                                control: worker.control(),
+                                interrupt_sent: false,
+                            },
+                        );
+                        let active = active.clone();
+                        workers.spawn(async move {
+                            let result = worker.wait().await;
+                            active.lock().expect("job scheduler lock").remove(&run_id);
+                            if let Err(error) = result {
                                 report(&error);
                             }
-                        } else {
-                            let conversation = plan.conversation_id.clone();
-                            let worker = start_managed_turn(
-                                store.clone(),
-                                runner.clone(),
-                                plan,
-                                bridge.clone(),
-                            );
-                            active.lock().expect("job scheduler lock").insert(
-                                run_id.clone(),
-                                LiveTurn {
-                                    conversation,
-                                    control: worker.control(),
-                                    interrupt_sent: false,
-                                },
-                            );
-                            let active = active.clone();
-                            workers.spawn(async move {
-                                let result = worker.wait().await;
-                                active.lock().expect("job scheduler lock").remove(&run_id);
-                                if let Err(error) = result {
-                                    report(&error);
-                                }
-                            });
-                        }
+                        });
                         continue;
                     }
                     Ok(None) => {}
@@ -172,9 +193,7 @@ async fn drive(
             }
         }
         tokio::select! {
-            change = stopping.changed(), if !stop => {
-                if change.is_err() { stopping = watch::channel(true).1; }
-            }
+            _ = stopping.changed(), if !stop => {}
             _ = signal.changed(), if !stop => {},
             _ = workers.join_next(), if !workers.is_empty() => {},
             // Recheck local executable and runner readiness after external changes.

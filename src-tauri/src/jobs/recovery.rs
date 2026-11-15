@@ -107,9 +107,7 @@ impl RecoverySource {
     pub(super) fn actions(&self, mode: SessionMode) -> Vec<RecoveryAction> {
         // A write may already have affected the candidate even when delivery was uncertain.
         // Keep its recovery pending review until a reconciled worktree checkpoint is available.
-        if mode == SessionMode::ApprovedWrite
-            && (self.launch_requested || self.dispatched || self.status == RunStatus::Interrupted)
-        {
+        if mode == SessionMode::ApprovedWrite && (self.launch_requested || self.dispatched) {
             return Vec::new();
         }
         let mut actions = vec![RecoveryAction::Retry];
@@ -180,6 +178,24 @@ impl RecoverySource {
                 approved_customizations: scoped_launch.approved,
             }))
     }
+}
+
+// Only work proven never launched can be retried automatically. Keep the
+// previous attempt and its frozen context for the scheduler's normal checks.
+pub(crate) fn requeue_unlaunched_job(db: &Connection, run_id: &str) -> Result<()> {
+    db.execute(
+        "INSERT INTO job_recoveries (job_id, source_run_id, action, context_id)
+         SELECT j.id, a.run_id, 'retry', run.result_context_id
+         FROM job_attempts a JOIN jobs j ON j.id = a.job_id
+         JOIN agent_attempts run ON run.run_id = a.run_id
+         WHERE a.run_id = ?1 AND a.process_launch_requested = 0 AND a.cancel_requested = 0
+           AND j.queue_state IN ('queued', 'paused') AND run.result_context_id = run.context_id
+           AND NOT EXISTS (SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
+                           WHERE s.run_id = a.run_id)
+         ON CONFLICT(job_id) DO NOTHING",
+        [run_id],
+    )?;
+    Ok(())
 }
 
 pub(super) fn pending_recovery(db: &Connection, job: &Job) -> Result<Option<(String, String)>> {

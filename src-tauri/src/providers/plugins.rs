@@ -11,8 +11,9 @@ use crate::{
     conversations::SessionScope,
     diagnostics,
     process::TerminalOutcome,
+    process_io::CapturedProcess,
     protection,
-    runner::{DirectWindowsRunner, Runner},
+    runner::{DirectWindowsRunner, LaunchRequest, Runner},
     store::Store,
 };
 
@@ -107,7 +108,7 @@ pub fn probe_plugins(configured: ConfiguredExecutable) -> Result<PluginReport> {
     }
     read_inventory(
         &mut report,
-        &DirectWindowsRunner,
+        |request| DirectWindowsRunner.launch(request),
         &path,
         cwd,
         Duration::from_secs(25),
@@ -115,7 +116,10 @@ pub fn probe_plugins(configured: ConfiguredExecutable) -> Result<PluginReport> {
     Ok(report)
 }
 
-pub(crate) fn probe_run_plugins(scope: &SessionScope, runner: &dyn Runner) -> PluginReport {
+pub(crate) fn probe_run_plugins(
+    scope: &SessionScope,
+    launch: impl FnOnce(LaunchRequest<'_>) -> io::Result<CapturedProcess>,
+) -> PluginReport {
     let mut report = PluginReport {
         provider: scope.provider,
         executable: scope.executable.to_str().map(str::to_owned),
@@ -130,7 +134,7 @@ pub(crate) fn probe_run_plugins(scope: &SessionScope, runner: &dyn Runner) -> Pl
     {
         read_inventory(
             &mut report,
-            runner,
+            launch,
             &scope.executable,
             directory.path(),
             Duration::from_secs(5),
@@ -141,13 +145,13 @@ pub(crate) fn probe_run_plugins(scope: &SessionScope, runner: &dyn Runner) -> Pl
 
 fn read_inventory(
     report: &mut PluginReport,
-    runner: &dyn Runner,
+    launch: impl FnOnce(LaunchRequest<'_>) -> io::Result<CapturedProcess>,
     executable: &Path,
     cwd: &Path,
     timeout: Duration,
 ) {
     let args = ["plugin", "list", "--json"].map(Into::into).to_vec();
-    let output = command_probe_with_limits(runner, executable, cwd, args, timeout, 2 * 1024 * 1024);
+    let output = command_probe_with_limits(launch, executable, cwd, args, timeout, 2 * 1024 * 1024);
     match output {
         Ok(output) if output.status == TerminalOutcome::Exited(0) => {
             (report.status, report.plugins) = decode_plugins(report.provider, &output.stdout);

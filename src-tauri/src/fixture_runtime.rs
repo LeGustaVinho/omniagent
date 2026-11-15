@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use omniagent::{
     process::TerminalOutcome,
-    process_io::{ProcessInput, Stream},
+    process_io::{CapturedProcess, ProcessInput, Stream},
     repository,
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, RunControl, Runner},
     runs::{OutputStream, RunEventData, RunRecord, RunStatus},
@@ -19,7 +19,13 @@ use tauri::{AppHandle, State};
 use tauri_plugin_notification::NotificationExt;
 
 #[derive(Clone, Default)]
-pub struct FixtureRuns(Arc<Mutex<HashMap<String, ActiveRun>>>);
+pub struct FixtureRuns(Arc<Mutex<FixtureState>>);
+
+#[derive(Default)]
+struct FixtureState {
+    stopping: bool,
+    active: HashMap<String, ActiveRun>,
+}
 
 #[derive(Clone)]
 struct ActiveRun {
@@ -33,33 +39,73 @@ impl FixtureRuns {
         self.0
             .lock()
             .expect("active run lock")
+            .active
             .get(run_id)
             .filter(|run| run.checkout_id == checkout_id)
             .cloned()
             .context("fixture run is no longer active")
     }
 
-    pub fn stop_all(&self) {
-        for run in self.0.lock().expect("active run lock").values() {
-            let _ = run.control.cancel();
-        }
+    pub async fn shutdown(&self) -> Result<()> {
+        let controls = {
+            let mut state = self.0.lock().expect("active run lock");
+            state.stopping = true;
+            state
+                .active
+                .values()
+                .map(|run| run.control.clone())
+                .collect::<Vec<_>>()
+        };
+        tokio::task::spawn_blocking(move || {
+            for control in &controls {
+                let _ = control.cancel();
+            }
+            for control in controls {
+                control.confirm_quiescence()?;
+            }
+            Ok(())
+        })
+        .await?
     }
 
     async fn launch(&self, app: AppHandle, store: Store, checkout_id: String) -> Result<RunRecord> {
         let cwd = repository::checkout_root(&store, checkout_id.clone()).await?;
         let executable = env::current_exe()?;
         let (mut run, _) = store.start_run(checkout_id.clone()).await?;
+        let active = self.0.clone();
+        let run_id = run.id.clone();
         let process = tokio::task::spawn_blocking(move || {
-            DirectWindowsRunner.launch(LaunchRequest {
+            let mut state = active.lock().expect("active run lock");
+            if state.stopping {
+                return Ok(None);
+            }
+            let CapturedProcess {
+                control,
+                output,
+                input,
+            } = DirectWindowsRunner.launch(LaunchRequest {
                 version: CONTRACT_VERSION,
                 executable: &executable,
                 checkout: &cwd,
                 arguments: &[OsStr::new("--fixture")],
-            })
+            })?;
+            state.active.insert(
+                run_id,
+                ActiveRun {
+                    checkout_id,
+                    control: control.clone(),
+                    input: Arc::new(Mutex::new(Some(input))),
+                },
+            );
+            Ok::<_, std::io::Error>(Some((control, output)))
         })
         .await?;
-        let process = match process {
-            Ok(process) => process,
+        let (control, output) = match process {
+            Ok(Some(process)) => process,
+            Ok(None) => {
+                record_status(&store, &run.id, RunStatus::Cancelled).await?;
+                anyhow::bail!("the application is exiting");
+            }
             Err(error) => {
                 store
                     .record_run_event(
@@ -74,21 +120,21 @@ impl FixtureRuns {
                 return Err(error.into());
             }
         };
-        record_status(&store, &run.id, RunStatus::Running).await?;
+        if let Err(error) = record_status(&store, &run.id, RunStatus::Running).await {
+            self.0
+                .lock()
+                .expect("active run lock")
+                .active
+                .remove(&run.id);
+            let _ = control.cancel();
+            return Err(error);
+        }
         run.status = RunStatus::Running;
-        self.0.lock().expect("active run lock").insert(
-            run.id.clone(),
-            ActiveRun {
-                checkout_id,
-                control: process.control.clone(),
-                input: Arc::new(Mutex::new(Some(process.input))),
-            },
-        );
         let active = self.0.clone();
         let run_id = run.id.clone();
         tauri::async_runtime::spawn(async move {
             let wait = tokio::task::spawn_blocking({
-                let control = process.control.clone();
+                let control = control.clone();
                 move || control.wait()
             });
             let runtime = tokio::runtime::Handle::current();
@@ -96,7 +142,7 @@ impl FixtureRuns {
                 let store = store.clone();
                 let run_id = run_id.clone();
                 move || {
-                    for frame in process.output {
+                    for frame in output {
                         let frame = frame?;
                         runtime.block_on(record_output(
                             &store,
@@ -114,7 +160,7 @@ impl FixtureRuns {
                 .and_then(|result| result)
                 .err();
             if let Some(error) = &output_error {
-                let _ = process.control.cancel();
+                let _ = control.cancel();
                 let _ = store
                     .record_run_event(
                         run_id.clone(),
@@ -132,7 +178,11 @@ impl FixtureRuns {
                 Ok(Ok(TerminalOutcome::Cancelled(_))) => RunStatus::Cancelled,
                 _ => RunStatus::Failed,
             };
-            active.lock().expect("active run lock").remove(&run_id);
+            active
+                .lock()
+                .expect("active run lock")
+                .active
+                .remove(&run_id);
             if record_status(&store, &run_id, status).await.is_ok() {
                 let body = match status {
                     RunStatus::Succeeded => "The fixture run completed.",

@@ -1,4 +1,5 @@
 use std::{
+    io,
     path::PathBuf,
     sync::{Arc, mpsc},
     thread,
@@ -18,6 +19,7 @@ use crate::{
     conversations::{AttemptPlan, MessageRevision, MessageRole, PermissionRoute},
     diagnostics,
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
+    jobs::LaunchGate,
     mcp_bridge::{PERMISSION_PREFIX, Registration, RunBridge},
     process::TerminalOutcome,
     process_io::CapturedProcess,
@@ -234,7 +236,24 @@ pub fn start_managed_turn(
     plan: AttemptPlan,
     bridge_executable: Option<PathBuf>,
 ) -> ManagedTurn {
-    start_turn(store, runner, plan, bridge_executable, false)
+    start_turn(store, runner, plan, bridge_executable, false, None)
+}
+
+pub(crate) fn start_scheduled_turn(
+    store: Store,
+    runner: Arc<dyn Runner>,
+    plan: AttemptPlan,
+    bridge_executable: Option<PathBuf>,
+    admission: LaunchGate,
+) -> ManagedTurn {
+    start_turn(
+        store,
+        runner,
+        plan,
+        bridge_executable,
+        false,
+        Some(admission),
+    )
 }
 
 /// Start a supervised turn whose selected profile permits native prompt suggestions.
@@ -244,7 +263,7 @@ pub fn start_managed_turn_with_native_suggestions(
     plan: AttemptPlan,
     bridge_executable: Option<PathBuf>,
 ) -> ManagedTurn {
-    start_turn(store, runner, plan, bridge_executable, true)
+    start_turn(store, runner, plan, bridge_executable, true, None)
 }
 
 fn start_turn(
@@ -253,6 +272,7 @@ fn start_turn(
     plan: AttemptPlan,
     bridge_executable: Option<PathBuf>,
     native_suggestions: bool,
+    admission: Option<LaunchGate>,
 ) -> ManagedTurn {
     let id = plan.run.id.clone();
     let handle = Handle::current();
@@ -275,6 +295,7 @@ fn start_turn(
             platform: None,
             staged_attachments: StagedAttachments::default(),
             native_suggestions,
+            admission,
         };
         let outcome = execution
             .run(runner.as_ref(), &receiver, bridge_executable)
@@ -295,7 +316,11 @@ fn start_turn(
                     },
                     EventSource::Supervisor,
                 );
-                RunStatus::Failed
+                if execution.exiting() {
+                    RunStatus::Interrupted
+                } else {
+                    RunStatus::Failed
+                }
             }
         };
         let answer = execution.proposed_plan.unwrap_or_else(|| {
@@ -322,6 +347,7 @@ fn start_turn(
 }
 
 struct TurnExecution {
+    admission: Option<LaunchGate>,
     app: Handle,
     store: Store,
     plan: AttemptPlan,
@@ -436,6 +462,9 @@ impl TurnExecution {
         commands: &mpsc::Receiver<Command>,
         bridge_executable: Option<PathBuf>,
     ) -> Result<RunStatus> {
+        if self.exiting() {
+            return Ok(RunStatus::Interrupted);
+        }
         let scope = self.plan.scope.clone();
         ensure!(
             scope.runner == runner.identity(),
@@ -557,7 +586,19 @@ impl TurnExecution {
             );
         }
         self.platform = runner.execution_platform();
-        let plugins = probe_run_plugins(&scope, runner);
+        let admission = self.admission.clone();
+        let plugins = probe_run_plugins(&scope, |request| {
+            let _boundary = match &admission {
+                Some(gate) => Some(self.app.block_on(gate.enter()).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::Interrupted, "the scheduler is exiting")
+                })?),
+                None => None,
+            };
+            runner.launch(request)
+        });
+        if self.exiting() {
+            return Ok(RunStatus::Interrupted);
+        }
         self.plugin_inventory = Some(
             self.app
                 .block_on(self.store.save_plugin_inventory(plugins))?,
@@ -566,18 +607,27 @@ impl TurnExecution {
             &self.store,
             self.plan.run.id.clone(),
         ))?;
-        if !self.app.block_on(
-            self.store
-                .record_agent_launch_intent(self.plan.run.id.clone()),
-        )? {
-            return Ok(RunStatus::Cancelled);
-        }
-        let mut process = runner.launch(LaunchRequest {
-            version: CONTRACT_VERSION,
-            executable: &scope.executable,
-            checkout: &scope.checkout,
-            arguments: &args,
-        })?;
+        let mut process = {
+            let _boundary = match &admission {
+                Some(gate) => match self.app.block_on(gate.enter()) {
+                    Some(guard) => Some(guard),
+                    None => return Ok(RunStatus::Interrupted),
+                },
+                None => None,
+            };
+            if !self.app.block_on(
+                self.store
+                    .record_agent_launch_intent(self.plan.run.id.clone()),
+            )? {
+                return Ok(RunStatus::Cancelled);
+            }
+            runner.launch(LaunchRequest {
+                version: CONTRACT_VERSION,
+                executable: &scope.executable,
+                checkout: &scope.checkout,
+                arguments: &args,
+            })?
+        };
         let control = process.control.clone();
         let endpoint = bridge.as_ref().map(|(endpoint, _)| endpoint);
         let run = self
@@ -595,8 +645,10 @@ impl TurnExecution {
             });
         let stopped = control.cancel();
         let ended = control.wait();
-        if managed_writer {
+        if managed_writer || self.exiting() {
             control.confirm_quiescence()?;
+        }
+        if managed_writer {
             self.app.block_on(repository::save_worktree_candidate(
                 &self.store,
                 self.plan.run.id.clone(),
@@ -620,6 +672,10 @@ impl TurnExecution {
         run
     }
 
+    fn exiting(&self) -> bool {
+        self.admission.as_ref().is_some_and(LaunchGate::is_closed)
+    }
+
     fn drive(
         &mut self,
         process: &mut CapturedProcess,
@@ -629,6 +685,9 @@ impl TurnExecution {
         bridge: Option<&RunBridge>,
         runner: &dyn Runner,
     ) -> Result<RunStatus> {
+        if self.exiting() {
+            return Ok(RunStatus::Interrupted);
+        }
         bounded_write(process, session.start()?.outbound)?;
         let startup_deadline = Instant::now() + Duration::from_secs(20);
         let mut sent = false;
@@ -641,18 +700,28 @@ impl TurnExecution {
             if let Some(registration) = &registration {
                 self.record_bridge_registration(registration.clone())?;
             }
-            let command = commands.try_recv();
+            let exiting = self.exiting();
+            let command = if exiting {
+                Ok(Command::Interrupt)
+            } else {
+                commands.try_recv()
+            };
             match command {
                 Ok(Command::Interrupt) | Err(mpsc::TryRecvError::Disconnected) => {
-                    if !sent {
-                        return Ok(RunStatus::Cancelled);
-                    }
-                    let result = interrupt_to_completion(process, session, |event, source| {
-                        self.record(event, source)
-                    })?;
-                    return Ok(match result {
-                        Interruption::PromptReturned(outcome) => status(outcome),
-                        Interruption::ProcessStopped(_) => RunStatus::Cancelled,
+                    let outcome = if sent {
+                        match interrupt_to_completion(process, session, |event, source| {
+                            self.record(event, source)
+                        })? {
+                            Interruption::PromptReturned(outcome) => status(outcome),
+                            Interruption::ProcessStopped(_) => RunStatus::Cancelled,
+                        }
+                    } else {
+                        RunStatus::Cancelled
+                    };
+                    return Ok(if exiting && outcome == RunStatus::Cancelled {
+                        RunStatus::Interrupted
+                    } else {
+                        outcome
                     });
                 }
                 Ok(Command::Approval(id, answer, reply)) => {
@@ -724,7 +793,9 @@ impl TurnExecution {
                 && (inventory_complete
                     || inventory_deadline.is_some_and(|deadline| Instant::now() >= deadline))
             {
-                self.dispatch(process, session, checkout, runner)?;
+                if !self.dispatch(process, session, checkout, runner)? {
+                    return Ok(RunStatus::Interrupted);
+                }
                 sent = true;
             }
             if !ready {
@@ -787,7 +858,7 @@ impl TurnExecution {
         session: &mut dyn CliSession,
         checkout: &CheckoutLayout,
         runner: &dyn Runner,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let native_history = if let Some(recovery) = &self.plan.native_job_recovery {
             NativeHistory::ProviderRecovery {
                 session_id: recovery.provider_session_id.clone(),
@@ -852,7 +923,7 @@ impl TurnExecution {
         let (mut assessment, attachments) =
             self.prepare_attachments(runner, session, checkout, &capabilities, &native_history)?;
         if let Some(blocked) = assessment.take_if(|report| !report.blockers.is_empty()) {
-            return self.record_attachment_assessment(blocked);
+            return self.record_attachment_assessment(blocked).map(|()| true);
         }
         input.attachments = attachments
             .iter()
@@ -880,7 +951,7 @@ impl TurnExecution {
             report.check_context(scope.provider, &input.text, &attachments)?;
         }
         if let Some(blocked) = assessment.take_if(|report| !report.blockers.is_empty()) {
-            return self.record_attachment_assessment(blocked);
+            return self.record_attachment_assessment(blocked).map(|()| true);
         }
         let update = session.send(input)?;
         if let Some(mut report) = assessment {
@@ -933,20 +1004,30 @@ impl TurnExecution {
             .iter()
             .map(|frame| frame.as_bytes().to_vec())
             .collect();
-        let dispatch_id = self.app.block_on(self.store.prepare_dispatch(
-            self.plan.run.id.clone(),
-            snapshot,
-            frames,
-        ))?;
-        let result = bounded_write(process, update.outbound);
-        let delivery = if result.is_ok() {
-            Delivery::Submitted
-        } else {
-            Delivery::Unconfirmed
+        let dispatch_id = {
+            let _boundary = match &self.admission {
+                Some(gate) => match self.app.block_on(gate.enter()) {
+                    Some(guard) => Some(guard),
+                    None => return Ok(false),
+                },
+                None => None,
+            };
+            let dispatch_id = self.app.block_on(self.store.prepare_dispatch(
+                self.plan.run.id.clone(),
+                snapshot,
+                frames,
+            ))?;
+            let result = bounded_write(process, update.outbound);
+            let delivery = if result.is_ok() {
+                Delivery::Submitted
+            } else {
+                Delivery::Unconfirmed
+            };
+            self.app
+                .block_on(self.store.settle_dispatch(dispatch_id.clone(), delivery))?;
+            result?;
+            dispatch_id
         };
-        self.app
-            .block_on(self.store.settle_dispatch(dispatch_id.clone(), delivery))?;
-        result?;
         self.record(
             ProviderEvent {
                 location: ProviderLocation::default(),
@@ -957,7 +1038,7 @@ impl TurnExecution {
         for event in update.events {
             self.record(event, EventSource::Application)?;
         }
-        Ok(())
+        Ok(true)
     }
 
     fn complete_structured_planning(&mut self) -> Result<()> {

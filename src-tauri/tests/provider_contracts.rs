@@ -4,7 +4,7 @@ use std::{
     io::{self, BufRead, Write},
     path::Path,
     process::Command,
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::Duration,
 };
@@ -13,7 +13,9 @@ use anyhow::{Context, Result, bail};
 use omniagent::{
     conversations::{Conversation, SessionScope},
     dispatch::{Delivery, EventSource, NativeHistory},
-    jobs::{AdmissionBlocker, JobContext, JobScheduler, QueueSettings, RecoveryAction},
+    jobs::{
+        AdmissionBlocker, JobContext, JobNoticeKind, JobScheduler, QueueSettings, RecoveryAction,
+    },
     process::TerminalOutcome,
     process_io::{CapturedProcess, OutputFrame, ProcessInput, Stream},
     providers::{
@@ -385,6 +387,7 @@ async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confir
             PROMPT.into(),
         )
         .await?;
+    let mut notices = store.job_notices();
     let scheduler = JobScheduler::start(store.clone(), runner, None);
     let inspector = store
         .inspect_job(
@@ -403,7 +406,14 @@ async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confir
         })
         .await?;
 
+    let approval = tokio::time::timeout(Duration::from_secs(15), notices.next()).await??;
+    assert_eq!(approval.kind, JobNoticeKind::Permission);
+    assert_eq!(approval.project_id, job.project_id);
+    assert_eq!(approval.job_id, job.id);
+    assert!(approval.request_event_seq.is_some());
     let run = fixture_approval(&store, &chat.id).await?;
+    assert_eq!(approval.run_id.as_ref(), Some(&run.id));
+    notices.acknowledge(&approval).await?;
     assert_eq!(run.status, RunStatus::Running);
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let quiet = store
@@ -536,6 +546,11 @@ async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confir
     assert_eq!(complete.ordinal, 2);
     assert_eq!(complete.previous_run_id.as_deref(), Some(run.id.as_str()));
     assert_eq!(complete.recovery, Some(RecoveryAction::Resume));
+    let completed = tokio::time::timeout(Duration::from_secs(3), notices.next()).await??;
+    assert_eq!(completed.kind, JobNoticeKind::Succeeded);
+    assert_eq!(completed.job_id, job.id);
+    assert_eq!(completed.run_id.as_ref(), Some(&resumed.id));
+    notices.acknowledge(&completed).await?;
     let resume_wire: Value =
         serde_json::from_slice(&fs::read(checkout.join("received-resume.ndjson"))?)?;
     assert_eq!(resume_wire["params"]["threadId"], SESSION);
@@ -633,7 +648,7 @@ async fn shutdown_stops_admission_before_reaping_a_live_cli_and_keeps_unclaimed_
             .await?
             .unwrap()
             .status,
-        RunStatus::Cancelled
+        RunStatus::Interrupted
     );
     assert!(
         store
@@ -672,6 +687,16 @@ async fn shutdown_stops_admission_before_reaping_a_live_cli_and_keeps_unclaimed_
         .await?
         .context("original dispatch was lost during restart")?;
     assert_eq!(restored_dispatch.frames, old_dispatch.frames);
+    let interrupted = store
+        .latest_conversation_job(first.id.clone(), restored.environment())
+        .await?
+        .context("interrupted job missing")?;
+    assert!(interrupted.job.queued_recovery.is_none());
+    assert!(
+        interrupted
+            .recovery_actions
+            .contains(&RecoveryAction::Retry)
+    );
     store
         .set_job_queue_settings(QueueSettings {
             paused: false,
@@ -689,6 +714,135 @@ async fn shutdown_stops_admission_before_reaping_a_live_cli_and_keeps_unclaimed_
         store.latest_conversation_run(first.id).await?.unwrap().id,
         live.id
     );
+    restored.shutdown().await?;
+    Ok(())
+}
+
+struct HeldPreparation {
+    ready: tokio::sync::oneshot::Sender<()>,
+    proceed: mpsc::Receiver<()>,
+}
+
+struct PrelaunchFixture {
+    inner: Arc<FixtureRunner>,
+    hold: Mutex<Option<HeldPreparation>>,
+}
+
+impl Runner for PrelaunchFixture {
+    fn identity(&self) -> &str {
+        self.inner.identity()
+    }
+
+    fn executable_revision(&self, path: &Path) -> Option<String> {
+        let hold = self.hold.lock().unwrap().take();
+        if let Some(hold) = hold {
+            hold.ready.send(()).expect("test is awaiting the claim");
+            hold.proceed
+                .recv_timeout(Duration::from_secs(20))
+                .expect("test releases preparation");
+        }
+        self.inner.executable_revision(path)
+    }
+
+    fn launch(&self, _request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
+        panic!("Exit must prevent all further CLI launches after closing admission")
+    }
+}
+
+#[tokio::test]
+async fn exit_after_claim_before_launch_requeues_the_frozen_job_for_restart() -> Result<()> {
+    let sandbox = tempfile::tempdir()?;
+    let (store, chat, runner, scope) = open_wire_fixture(Provider::Codex, sandbox.path()).await?;
+    let checkout = scope.checkout.clone();
+    let db = checkout.join("fixture.sqlite");
+    store
+        .save_conversation_draft(chat.id.clone(), PROMPT.into())
+        .await?;
+    let job = store
+        .enqueue_conversation_turn(
+            JobContext {
+                conversation_id: chat.id.clone(),
+                context_id: chat.context_id,
+            },
+            scope,
+            PROMPT.into(),
+        )
+        .await?;
+    let (ready, claimed) = tokio::sync::oneshot::channel();
+    let (proceed, resume_preparation) = mpsc::channel();
+    let before_launch = Arc::new(PrelaunchFixture {
+        inner: runner.clone(),
+        hold: Mutex::new(Some(HeldPreparation {
+            ready,
+            proceed: resume_preparation,
+        })),
+    });
+    let scheduler = JobScheduler::start(store.clone(), before_launch, None);
+    tokio::time::timeout(Duration::from_secs(8), claimed).await??;
+    let original = store
+        .latest_conversation_run(chat.id.clone())
+        .await?
+        .context("claim missing")?;
+    assert_eq!(original.status, RunStatus::Starting);
+    assert!(scheduler.stop_admission().await);
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: true,
+            capacity: 1,
+        })
+        .await?;
+    proceed.send(())?;
+    scheduler.shutdown().await?;
+    assert_eq!(
+        store
+            .latest_conversation_run(chat.id.clone())
+            .await?
+            .unwrap()
+            .status,
+        RunStatus::Interrupted
+    );
+    assert!(
+        store
+            .agent_dispatch(chat.id.clone(), original.id.clone())
+            .await?
+            .is_none()
+    );
+
+    let reopened = Store::open(db)?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    let restored = JobScheduler::start(reopened.clone(), runner, None);
+    let pending = reopened
+        .latest_conversation_job(chat.id.clone(), restored.environment())
+        .await?
+        .context("queued job missing")?;
+    assert_eq!(pending.job.id, job.id);
+    assert_eq!(pending.job.queued_recovery, Some(RecoveryAction::Retry));
+    assert_eq!(pending.blockers, [AdmissionBlocker::QueuePaused]);
+    reopened
+        .set_job_queue_settings(QueueSettings {
+            paused: false,
+            capacity: 1,
+        })
+        .await?;
+    let resumed = fixture_approval(&reopened, &chat.id).await?;
+    let linked = reopened
+        .job(job.project_id, job.id)
+        .await?
+        .unwrap()
+        .latest_attempt
+        .unwrap();
+    assert_eq!(linked.run_id, resumed.id);
+    assert_eq!(linked.ordinal, 2);
+    assert_eq!(linked.previous_run_id, Some(original.id));
+    let dispatch = reopened
+        .agent_dispatch(chat.id, resumed.id)
+        .await?
+        .context("resumed dispatch missing")?;
+    assert_eq!(
+        dispatch.snapshot.submitted_messages.last().unwrap().text,
+        PROMPT
+    );
+    fs::write(checkout.join("settle-interrupt"), b"")?;
     restored.shutdown().await?;
     Ok(())
 }
