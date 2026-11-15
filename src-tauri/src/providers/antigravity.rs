@@ -527,6 +527,23 @@ impl AcpSession {
             );
             return Ok(AdapterUpdate::default());
         }
+        if update["sessionUpdate"] == "config_option_update" {
+            self.configuration.update(update);
+            ensure!(
+                self.configuration.current(Setting::Mode) == Some(self.required_mode()),
+                "ACP changed the workspace permission mode"
+            );
+            return Ok(events([self.event(ProviderEventData::ModelObserved {
+                model: self
+                    .configuration
+                    .current(Setting::Model)
+                    .map(str::to_owned),
+                effort: self
+                    .configuration
+                    .current(Setting::Effort)
+                    .map(str::to_owned),
+            })]));
+        }
         let Some(turn) = self.turn.as_mut() else {
             return Ok(AdapterUpdate::default());
         };

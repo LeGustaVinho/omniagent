@@ -42,7 +42,9 @@ fn main() {
         .on_window_event(desktop::hide_main_on_close)
         .setup(|app| {
             let path = app.path().app_local_data_dir()?.join("omniagent.sqlite3");
-            app.manage(Store::open(path)?);
+            let store = Store::open(path)?;
+            tauri::async_runtime::block_on(store.recover_agent_attempts_after_restart())?;
+            app.manage(store);
             app.manage(ipc::EventSubscriptions::default());
             app.manage(fixture_runtime::FixtureRuns::default());
             desktop::create_tray(app)?;

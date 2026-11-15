@@ -369,6 +369,13 @@ impl CodexSession {
         }
         let delta = || required_string(params, "delta").map(str::to_owned);
         let data = match method {
+            "thread/settings/updated" => {
+                let settings = &params["threadSettings"];
+                ProviderEventData::ModelObserved {
+                    model: string(settings, "model"),
+                    effort: string(settings, "effort"),
+                }
+            }
             "item/agentMessage/delta" => ProviderEventData::AssistantDelta { text: delta()? },
             "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
                 ProviderEventData::Reasoning {

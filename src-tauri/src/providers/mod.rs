@@ -91,12 +91,14 @@ pub enum Capability {
     SideRequest,
 }
 
+#[derive(Clone)]
 pub enum SessionIntent {
     Start,
     Resume { provider_session_id: String },
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionMode {
     ReadOnly,
     Plan,
@@ -222,6 +224,10 @@ pub enum ProviderEventData {
         authenticated: Option<bool>,
     },
     SessionReady {
+        model: Option<String>,
+        effort: Option<String>,
+    },
+    ModelObserved {
         model: Option<String>,
         effort: Option<String>,
     },

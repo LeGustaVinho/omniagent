@@ -267,6 +267,17 @@ impl ClaudeSession {
             turn.saw_final_message = true;
         }
         let mut result = Vec::new();
+        if parent.is_none()
+            && let Some(model) = string(&frame["message"], "model")
+        {
+            result.push(self.event(
+                frame,
+                ProviderEventData::ModelObserved {
+                    model: Some(model),
+                    effort: None,
+                },
+            ));
+        }
         if !text.is_empty() {
             result.push(self.event(frame, ProviderEventData::AssistantMessage { text }));
         }

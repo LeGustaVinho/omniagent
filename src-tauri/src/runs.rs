@@ -44,7 +44,7 @@ impl RunStatus {
         )
     }
 
-    fn as_sql(self) -> &'static str {
+    pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Starting => "starting",
             Self::Running => "running",
@@ -149,7 +149,7 @@ impl RunSubscription {
             let cursor = self.cursor;
             let events = self.store.execute(move |db| {
                 let query = format!(
-                    "{EVENT_QUERY} WHERE r.checkout_id = ?1 AND e.seq > ?2 ORDER BY e.seq LIMIT ?3"
+                    "{EVENT_QUERY} WHERE r.kind = 'fixture' AND r.checkout_id = ?1 AND e.seq > ?2 ORDER BY e.seq LIMIT ?3"
                 );
                 let mut statement = db.prepare(&query)?;
                 let events = statement.query_map(params![checkout_id, cursor, REPLAY_PAGE], read_event)?
@@ -170,29 +170,7 @@ impl Store {
         let wake = self.event_signal.clone();
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let project_id = tx
-                .query_row(
-                    "SELECT project_id FROM checkouts WHERE id = ?1",
-                    [&checkout_id],
-                    |row| row.get(0),
-                )
-                .context("execution requires a registered checkout")?;
-            let run = RunRecord {
-                id: Uuid::new_v4().to_string(),
-                project_id,
-                checkout_id,
-                turn_id: Uuid::new_v4().to_string(),
-                status: RunStatus::Starting,
-            };
-            tx.execute(
-                "INSERT INTO runs(id, checkout_id, status) VALUES (?1, ?2, ?3)",
-                params![run.id, run.checkout_id, run.status.as_sql()],
-            )?;
-            tx.execute(
-                "INSERT INTO turns(id, run_id, ordinal) VALUES (?1, ?2, 1)",
-                params![run.turn_id, run.id],
-            )?;
-            let event = append_event(&tx, &run, RunEventData::Status { status: run.status })?;
+            let (run, event) = insert_run(&tx, checkout_id, "fixture")?;
             tx.commit()?;
             wake.send_replace(());
             Ok((run, event))
@@ -213,20 +191,10 @@ impl Store {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let run = load_run(&tx, &run_id)?;
             ensure!(!run.status.is_terminal(), "run already ended");
-            if let RunEventData::Status { status } = data {
-                ensure!(run.status.can_advance(status), "invalid run transition");
-                tx.execute(
-                    "UPDATE runs SET status = ?1 WHERE id = ?2",
-                    params![status.as_sql(), run.id],
-                )?;
-                if status.is_terminal() {
-                    tx.execute(
-                        "UPDATE turns SET closed_at = unixepoch() WHERE id = ?1",
-                        [&run.turn_id],
-                    )?;
-                }
-            }
-            let event = append_event(&tx, &run, data)?;
+            let event = match data {
+                RunEventData::Status { status } => advance_run(&tx, &run, status)?,
+                data => append_event(&tx, &run, data)?,
+            };
             tx.commit()?;
             wake.send_replace(());
             Ok(event)
@@ -243,7 +211,7 @@ impl Store {
                 })?;
             let runs = {
                 let query = format!(
-                    "{RUN_RECORD_QUERY} WHERE r.checkout_id = ?1 ORDER BY r.created_at DESC, r.id"
+                    "{RUN_RECORD_QUERY} WHERE r.kind = 'fixture' AND r.checkout_id = ?1 ORDER BY r.created_at DESC, r.id"
                 );
                 let mut statement = tx.prepare(&query)?;
                 statement
@@ -252,7 +220,7 @@ impl Store {
             };
             let recent_events = {
                 let query =
-                    format!("{EVENT_QUERY} WHERE r.checkout_id = ?1 ORDER BY e.seq DESC LIMIT ?2");
+                    format!("{EVENT_QUERY} WHERE r.kind = 'fixture' AND r.checkout_id = ?1 ORDER BY e.seq DESC LIMIT ?2");
                 let mut statement = tx.prepare(&query)?;
                 let mut events = statement
                     .query_map(params![checkout_id, REPLAY_PAGE], read_event)?
@@ -296,7 +264,53 @@ const RUN_RECORD_QUERY: &str = "SELECT r.id, c.project_id, c.id, t.id, r.status
 const EVENT_QUERY: &str = "SELECT e.seq, r.id, t.id, e.payload
     FROM run_events e JOIN turns t ON t.id = e.turn_id JOIN runs r ON r.id = t.run_id";
 
-fn load_run(db: &Connection, id: &str) -> Result<RunRecord> {
+pub(crate) fn insert_run(
+    db: &Connection,
+    checkout_id: String,
+    kind: &str,
+) -> Result<(RunRecord, RunEvent)> {
+    let project_id = db
+        .query_row(
+            "SELECT project_id FROM checkouts WHERE id = ?1",
+            [&checkout_id],
+            |row| row.get(0),
+        )
+        .context("execution requires a registered checkout")?;
+    let run = RunRecord {
+        id: Uuid::new_v4().to_string(),
+        project_id,
+        checkout_id,
+        turn_id: Uuid::new_v4().to_string(),
+        status: RunStatus::Starting,
+    };
+    db.execute(
+        "INSERT INTO runs(id, checkout_id, status, kind) VALUES (?1, ?2, ?3, ?4)",
+        params![run.id, run.checkout_id, run.status.as_sql(), kind],
+    )?;
+    db.execute(
+        "INSERT INTO turns(id, run_id, ordinal) VALUES (?1, ?2, 1)",
+        params![run.turn_id, run.id],
+    )?;
+    let event = append_event(db, &run, RunEventData::Status { status: run.status })?;
+    Ok((run, event))
+}
+
+pub(crate) fn advance_run(db: &Connection, run: &RunRecord, status: RunStatus) -> Result<RunEvent> {
+    ensure!(run.status.can_advance(status), "invalid run transition");
+    db.execute(
+        "UPDATE runs SET status = ?1 WHERE id = ?2",
+        params![status.as_sql(), run.id],
+    )?;
+    if status.is_terminal() {
+        db.execute(
+            "UPDATE turns SET closed_at = unixepoch() WHERE id = ?1",
+            [&run.turn_id],
+        )?;
+    }
+    append_event(db, run, RunEventData::Status { status })
+}
+
+pub(crate) fn load_run(db: &Connection, id: &str) -> Result<RunRecord> {
     let query = format!("{RUN_RECORD_QUERY} WHERE r.id = ?1");
     Ok(db.query_row(&query, [id], read_run)?)
 }

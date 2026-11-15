@@ -40,6 +40,30 @@ pub async fn checkout_root(store: &Store, checkout_id: String) -> Result<PathBuf
         .await
 }
 
+pub async fn verify_checkout(store: &Store, checkout_id: String) -> Result<PathBuf> {
+    let (root, git_dir, common): (String, String, String) = store
+        .execute(move |db| {
+            Ok(db.query_row(
+                "SELECT c.root, c.git_dir, p.git_common_dir FROM checkouts c
+             JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
+                [checkout_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?)
+        })
+        .await?;
+    tokio::task::spawn_blocking(move || {
+        let observed = inspect(Path::new(&root))?;
+        if observed.checkout_root != root
+            || observed.git_dir != git_dir
+            || observed.git_common_dir != common
+        {
+            bail!("checkout identity changed after registration");
+        }
+        Ok(PathBuf::from(root))
+    })
+    .await?
+}
+
 pub async fn register(store: &Store, directory: PathBuf) -> Result<ProjectCheckout> {
     let repository = tokio::task::spawn_blocking(move || inspect(&directory)).await??;
     store

@@ -1,11 +1,27 @@
-use std::{sync::mpsc, thread, time::Instant};
+use std::{
+    sync::{Arc, mpsc},
+    thread,
+    time::{Duration, Instant},
+};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
+use serde_json::Value;
+use tokio::{runtime::Handle, sync::oneshot, task::JoinHandle};
 
-use crate::{process::TerminalOutcome, process_io::CapturedProcess};
+use crate::{
+    conversations::{AttemptPlan, MessageRevision, MessageRole},
+    diagnostics,
+    process::TerminalOutcome,
+    process_io::CapturedProcess,
+    repository,
+    runner::{CONTRACT_VERSION, LaunchRequest, Runner},
+    runs::RunStatus,
+    store::Store,
+};
 
 use super::{
-    AdapterUpdate, CliSession, ProviderEvent, ProviderEventData, TurnOutcome, WireMessage,
+    AdapterUpdate, ApprovalDecision, CliSession, Provider, ProviderEvent, ProviderEventData,
+    ProviderLocation, RequestId, SessionRequest, TurnInput, TurnOutcome, WireMessage,
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -95,4 +111,340 @@ fn write_frames(process: &mut CapturedProcess, frames: Vec<WireMessage>) -> Resu
         process.input.send(request.as_bytes())?;
     }
     Ok(())
+}
+
+enum Command {
+    Interrupt,
+    Approval(RequestId, ApprovalDecision, oneshot::Sender<Result<()>>),
+    Question(RequestId, Value, oneshot::Sender<Result<()>>),
+}
+
+pub struct ManagedTurn {
+    pub run_id: String,
+    commands: mpsc::SyncSender<Command>,
+    worker: JoinHandle<Result<RunStatus>>,
+}
+
+impl ManagedTurn {
+    pub fn interrupt(&self) -> Result<()> {
+        self.commands
+            .try_send(Command::Interrupt)
+            .map_err(|_| anyhow::anyhow!("attempt command queue is closed or busy"))
+    }
+
+    pub async fn approve(&self, id: RequestId, decision: ApprovalDecision) -> Result<()> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .try_send(Command::Approval(id, decision, reply))
+            .map_err(|_| anyhow::anyhow!("attempt command queue is closed or busy"))?;
+        result
+            .await
+            .context("attempt stopped before acknowledging approval")?
+    }
+
+    pub async fn answer(&self, id: RequestId, answer: Value) -> Result<()> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .try_send(Command::Question(id, answer, reply))
+            .map_err(|_| anyhow::anyhow!("attempt command queue is closed or busy"))?;
+        result
+            .await
+            .context("attempt stopped before acknowledging answer")?
+    }
+
+    pub async fn wait(self) -> Result<RunStatus> {
+        let Self {
+            commands, worker, ..
+        } = self;
+        let result = worker.await.context("managed turn worker failed")?;
+        drop(commands);
+        result
+    }
+}
+
+/// Launch one process for the admitted attempt. The caller retains the handle
+/// to submit decisions or cancel. Dropping it requests a stop.
+pub fn start_managed_turn(store: Store, runner: Arc<dyn Runner>, plan: AttemptPlan) -> ManagedTurn {
+    let id = plan.run.id.clone();
+    let handle = Handle::current();
+    let (commands, receiver) = mpsc::sync_channel(16);
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut execution = TurnExecution {
+            app: handle,
+            store,
+            plan,
+            final_answer: String::new(),
+            streamed_answer: String::new(),
+        };
+        let outcome = execution.run(runner.as_ref(), &receiver);
+        let status = match outcome {
+            Ok(status) => status,
+            Err(error) => {
+                let message = diagnostics::preview(&error.to_string());
+                let _ = execution.record(ProviderEvent {
+                    location: ProviderLocation::default(),
+                    data: ProviderEventData::Error { message },
+                });
+                RunStatus::Failed
+            }
+        };
+        let answer = if execution.final_answer.is_empty() {
+            execution.streamed_answer
+        } else {
+            execution.final_answer
+        };
+        execution
+            .app
+            .block_on(execution.store.finish_agent_attempt(
+                execution.plan.run.id,
+                status,
+                Some(answer),
+            ))?;
+        Ok(status)
+    });
+    ManagedTurn {
+        run_id: id,
+        commands,
+        worker,
+    }
+}
+
+struct TurnExecution {
+    app: Handle,
+    store: Store,
+    plan: AttemptPlan,
+    final_answer: String,
+    streamed_answer: String,
+}
+
+impl TurnExecution {
+    fn record(&mut self, event: ProviderEvent) -> Result<()> {
+        // Child traffic belongs to the run timeline, not the parent transcript.
+        if event.location.parent_item_id.is_none() {
+            match &event.data {
+                ProviderEventData::AssistantDelta { text } => self.streamed_answer.push_str(text),
+                ProviderEventData::AssistantMessage { text } => self.final_answer.push_str(text),
+                _ => {}
+            }
+        }
+        self.app.block_on(
+            self.store
+                .observe_agent_event(self.plan.run.id.clone(), event),
+        )
+    }
+
+    fn run(
+        &mut self,
+        runner: &dyn Runner,
+        commands: &mpsc::Receiver<Command>,
+    ) -> Result<RunStatus> {
+        let scope = &self.plan.scope;
+        ensure!(
+            scope.runner == runner.identity(),
+            "selected runner differs from admission"
+        );
+        let checkout = self.app.block_on(repository::verify_checkout(
+            &self.store,
+            self.plan.run.checkout_id.clone(),
+        ))?;
+        ensure!(
+            checkout == scope.checkout,
+            "checkout differs from admission"
+        );
+        let adapter = scope.provider.adapter();
+        let mut session = adapter.create_session(SessionRequest {
+            checkout: scope.checkout.clone(),
+            intent: self.plan.intent.clone(),
+            mode: scope.mode,
+            model: scope.model.clone(),
+            effort: scope.effort.clone(),
+        })?;
+        let args = session.arguments();
+        let args = args
+            .iter()
+            .map(|argument| argument.as_os_str())
+            .collect::<Vec<_>>();
+        let mut process = runner.launch(LaunchRequest {
+            version: CONTRACT_VERSION,
+            executable: &scope.executable,
+            checkout: &scope.checkout,
+            arguments: &args,
+        })?;
+        self.app
+            .block_on(self.store.mark_agent_running(self.plan.run.id.clone()))?;
+        let control = process.control.clone();
+        let run = self.drive(&mut process, session.as_mut(), commands);
+        let stopped = control.cancel();
+        let ended = control.wait();
+        stopped?;
+        ended?;
+        run
+    }
+
+    fn drive(
+        &mut self,
+        process: &mut CapturedProcess,
+        session: &mut dyn CliSession,
+        commands: &mpsc::Receiver<Command>,
+    ) -> Result<RunStatus> {
+        bounded_write(process, session.start()?.outbound)?;
+        let startup_deadline = Instant::now() + Duration::from_secs(20);
+        let mut sent = false;
+        loop {
+            let command = commands.try_recv();
+            match command {
+                Ok(Command::Interrupt) | Err(mpsc::TryRecvError::Disconnected) => {
+                    if !sent {
+                        return Ok(RunStatus::Cancelled);
+                    }
+                    let result =
+                        interrupt_to_completion(process, session, |event| self.record(event))?;
+                    return Ok(match result {
+                        Interruption::PromptReturned(outcome) => status(outcome),
+                        Interruption::ProcessStopped(_) => RunStatus::Cancelled,
+                    });
+                }
+                Ok(Command::Approval(id, answer, reply)) => {
+                    self.deliver_decision(process, session.respond_approval(&id, answer), reply)?;
+                }
+                Ok(Command::Question(id, answer, reply)) => {
+                    self.deliver_decision(process, session.respond_question(&id, answer), reply)?;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if !sent {
+                ensure!(
+                    Instant::now() < startup_deadline,
+                    "CLI session startup timed out"
+                );
+            }
+            let frame = match process.output.recv_timeout(Duration::from_millis(50)) {
+                Ok(frame) => frame?,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    process.control.cancel()?;
+                    let terminal = process.control.wait()?;
+                    let terminal =
+                        self.record_update(process, session.process_finished(terminal))?;
+                    return Ok(terminal.unwrap_or(RunStatus::Failed));
+                }
+            };
+            let update = session.receive(frame)?;
+            let should_send = !sent
+                && update.events.iter().any(|event| {
+                    matches!(event.data, ProviderEventData::SessionReady { .. })
+                        || (self.plan.scope.provider == Provider::Claude
+                            && matches!(event.data, ProviderEventData::Handshake { .. }))
+                });
+            let failed_start = !sent
+                && update
+                    .events
+                    .iter()
+                    .any(|event| matches!(event.data, ProviderEventData::Error { .. }));
+            if let Some(status) = self.record_update(process, update)? {
+                return Ok(status);
+            }
+            if failed_start {
+                return Ok(RunStatus::Failed);
+            }
+            if should_send {
+                let input = format_input(&self.plan.input)?;
+                self.app.block_on(
+                    self.store
+                        .mark_agent_input_started(self.plan.run.id.clone()),
+                )?;
+                self.record_update(process, session.send(input)?)?;
+                sent = true;
+            }
+        }
+    }
+
+    fn record_update(
+        &mut self,
+        process: &mut CapturedProcess,
+        update: AdapterUpdate,
+    ) -> Result<Option<RunStatus>> {
+        let mut finished = None;
+        for event in update.events {
+            if let ProviderEventData::TurnFinished { outcome } = event.data {
+                finished = Some(status(outcome));
+            }
+            self.record(event)?;
+        }
+        bounded_write(process, update.outbound)?;
+        Ok(finished)
+    }
+
+    fn deliver_decision(
+        &mut self,
+        process: &mut CapturedProcess,
+        update: Result<AdapterUpdate>,
+        reply: oneshot::Sender<Result<()>>,
+    ) -> Result<()> {
+        match update {
+            Ok(update) => {
+                let applied = self.record_update(process, update);
+                let _ = reply.send(
+                    applied
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|error| anyhow::anyhow!("{error}")),
+                );
+                applied?;
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn status(outcome: TurnOutcome) -> RunStatus {
+    match outcome {
+        TurnOutcome::Completed => RunStatus::Succeeded,
+        TurnOutcome::Failed => RunStatus::Failed,
+        TurnOutcome::Interrupted => RunStatus::Cancelled,
+    }
+}
+
+fn format_input(input: &[MessageRevision]) -> Result<TurnInput> {
+    let (last, history) = input.split_last().context("attempt has no input")?;
+    ensure!(
+        last.role == MessageRole::User,
+        "last input must be a user message"
+    );
+    let text = if history.is_empty() {
+        last.text.clone()
+    } else {
+        format!(
+            "Conversation context supplied by OmniAgent (JSON message history):\n{}\n\nCurrent user message:\n{}",
+            serde_json::to_string(history)?,
+            last.text,
+        )
+    };
+    Ok(TurnInput {
+        message_id: last.message_id.clone(),
+        text,
+    })
+}
+
+fn bounded_write(process: &mut CapturedProcess, frames: Vec<WireMessage>) -> Result<()> {
+    if frames.is_empty() {
+        return Ok(());
+    }
+    let control = process.control.clone();
+    let (finished, wait) = mpsc::channel();
+    thread::scope(|scope| {
+        let watchdog = scope.spawn(move || {
+            if wait.recv_timeout(Duration::from_secs(10)).is_err() {
+                control.cancel()?;
+            }
+            Ok::<_, std::io::Error>(())
+        });
+        let result = write_frames(process, frames);
+        let _ = finished.send(());
+        watchdog.join().expect("CLI write watchdog")?;
+        result
+    })
 }

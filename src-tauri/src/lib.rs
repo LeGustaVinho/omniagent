@@ -1,3 +1,4 @@
+pub mod conversations;
 mod diagnostics;
 pub mod evidence;
 pub mod model_catalog;
