@@ -204,6 +204,7 @@ fn main() {
             conversation_runtime::request_goal_stop,
             conversation_runtime::resume_goal,
             conversation_runtime::confirm_managed_goal_stop,
+            conversation_runtime::confirm_native_goal_stop,
             conversation_runtime::revise_pending_instruction,
             conversation_runtime::remove_pending_instruction,
             conversation_runtime::project_job_queue,

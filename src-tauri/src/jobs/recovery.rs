@@ -155,13 +155,24 @@ fn load_recovery_source(
     let Some(attempt) = job.latest_attempt.as_ref() else {
         return Ok(None);
     };
+    let native_executor: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_goal_executors WHERE run_id = ?1)",
+        [&attempt.run_id],
+        |row| row.get(0),
+    )?;
+    if native_executor
+        && goal_revision.is_none()
+        && !pending_recovery(db, job)?.is_some_and(|(run, _)| run == attempt.run_id)
+    {
+        return Ok(None);
+    }
     match attempt.status {
         RunStatus::Failed | RunStatus::Cancelled | RunStatus::Interrupted => {}
         RunStatus::Succeeded
             if pending_recovery(db, job)?.is_some_and(|(run, _)| run == attempt.run_id) => {}
         RunStatus::Succeeded
             if let Some(revision) = goal_revision
-                && super::goal_control::worker_confirmed_goal_pause(
+                && super::goal_control::confirmed_goal_pause(
                     db,
                     job,
                     revision,
@@ -364,7 +375,12 @@ pub(crate) fn requeue_rejected_native_goal(db: &Connection, run: &str) -> Result
          JOIN goal_revisions r ON r.initial_job_id = j.id
          JOIN active_goals g ON g.revision_id = r.id
          JOIN goal_revision_controls control ON control.revision_id = r.id
-         WHERE a.run_id = ?1 AND attempt.ordinal = 1 AND NOT attempt.cancel_requested
+         WHERE a.run_id = ?1 AND NOT attempt.cancel_requested
+           AND (attempt.ordinal = 1 OR EXISTS (
+                SELECT 1 FROM native_goal_resume_checkpoints resume
+                JOIN native_goal_executors previous ON previous.run_id = resume.source_run_id
+                WHERE resume.job_id = j.id AND previous.revision_id = r.id AND previous.stop_confirmed
+           ))
            AND r.continuation_owner = 'managed' AND control.state = 'active'
            AND j.queue_state IN ('queued', 'paused') AND a.result_context_id = a.context_id
            AND (NOT EXISTS (SELECT 1 FROM context_snapshots snap WHERE snap.run_id = a.run_id)

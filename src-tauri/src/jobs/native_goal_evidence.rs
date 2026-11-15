@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -6,7 +8,9 @@ use crate::{
     protection,
     providers::{
         ProviderEvent, ProviderEventData, RequestId,
-        goal::{NativeGoalAction, NativeGoalControlOutcome, NativeGoalState},
+        goal::{
+            NativeGoalAction, NativeGoalControlOutcome, NativeGoalObservation, NativeGoalState,
+        },
     },
 };
 
@@ -229,6 +233,70 @@ pub(crate) fn late_native_goal_evidence(
     }
 }
 
+pub(crate) fn recover_native_goal_output(db: &Connection, run: &str) -> Result<Option<Vec<u8>>> {
+    let session: Option<String> = db
+        .query_row(
+            "SELECT provider_session_id FROM native_goal_executors WHERE run_id = ?1",
+            [run],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let order = db.prepare(
+        "SELECT provider_turn_id FROM native_goal_turns WHERE run_id = ?1 ORDER BY started_event_seq",
+    )?.query_map([run], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut output: BTreeMap<_, _> = order
+        .iter()
+        .map(|id| (id.as_str(), (String::new(), String::new())))
+        .collect();
+    let mut events = db.prepare(
+        "SELECT payload FROM agent_events WHERE run_id = ?1 AND source = 'provider' ORDER BY seq",
+    )?;
+    let mut rows = events.query([run])?;
+    while let Some(row) = rows.next()? {
+        let encrypted: Vec<u8> = row.get(0)?;
+        let event: ProviderEvent = serde_json::from_slice(&protection::unprotect(&encrypted)?)?;
+        if event.location.parent_item_id.is_some()
+            || event.location.session_id.as_deref() != Some(&session)
+        {
+            continue;
+        }
+        let Some((deltas, messages)) = event
+            .location
+            .turn_id
+            .as_deref()
+            .and_then(|id| output.get_mut(id))
+        else {
+            continue;
+        };
+        match event.data {
+            ProviderEventData::AssistantDelta { text } => deltas.push_str(&text),
+            ProviderEventData::AssistantMessage { text } => messages.push_str(&text),
+            _ => {}
+        }
+    }
+    let text = order
+        .iter()
+        .filter_map(|id| {
+            let (deltas, messages) = output.get(id.as_str())?;
+            let text = if messages.is_empty() {
+                deltas
+            } else {
+                messages
+            };
+            (!text.is_empty()).then_some(text.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(protection::protect(text.as_bytes())?))
+    }
+}
+
 pub(super) fn confirmed_stop_control(
     db: &Connection,
     run: &str,
@@ -247,4 +315,80 @@ pub(super) fn confirmed_stop_control(
         )
         .optional()?
         .unwrap_or(false))
+}
+
+pub(super) fn paused_native_budget(
+    db: &Connection,
+    run: &str,
+    original_budget: u64,
+) -> Result<Option<u64>> {
+    let authorized_budget: Option<i64> = db.query_row(
+        "SELECT token_budget FROM native_goal_executors WHERE run_id = ?1 AND stop_confirmed",
+        [run],
+        |row| row.get(0),
+    )?;
+    let start = control_observation(db, run, "start", 0)?;
+    let Some(budget) = authorized_budget
+        .map(u64::try_from)
+        .transpose()?
+        .or(start.as_ref().and_then(|goal| goal.token_budget))
+        .filter(|budget| *budget <= original_budget)
+    else {
+        return Ok(None);
+    };
+    let lifecycle: (bool, i64) = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_goal_controls WHERE run_id = ?1 AND action = 'start'),
+            max(
+                coalesce((SELECT max(settled_event_seq) FROM native_goal_controls
+                          WHERE run_id = ?1 AND action <> 'status'), 0),
+                coalesce((SELECT max(finished_event_seq) FROM native_goal_turns WHERE run_id = ?1), 0)
+            )",
+        [run], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if !lifecycle.0 {
+        // The Start frame was never prepared, so the reserved budget was unused.
+        return Ok(Some(budget));
+    }
+    if start.as_ref().and_then(|goal| goal.token_budget) != Some(budget) {
+        return Ok(None);
+    }
+    let open: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_goal_turns WHERE run_id = ?1 AND outcome IS NULL)",
+        [run],
+        |row| row.get(0),
+    )?;
+    if open {
+        return Ok(None);
+    }
+    let observation = control_observation(db, run, "status", lifecycle.1)?;
+    Ok(observation
+        .filter(|goal| goal.state == NativeGoalState::Paused && goal.token_budget == Some(budget))
+        .and_then(|goal| goal.tokens_used)
+        .map(|spent| budget.saturating_sub(spent)))
+}
+
+fn control_observation(
+    db: &Connection,
+    run: &str,
+    action: &str,
+    after: i64,
+) -> Result<Option<NativeGoalObservation>> {
+    let payload: Option<Vec<u8>> = db.query_row(
+        "SELECT e.payload FROM native_goal_controls c JOIN agent_events e ON e.seq = c.settled_event_seq
+         JOIN native_goal_executors x ON x.run_id = c.run_id
+         WHERE c.run_id = ?1 AND c.action = ?2 AND c.prepared_event_seq > ?3 AND c.outcome = 'confirmed'
+         ORDER BY c.prepared_event_seq DESC LIMIT 1",
+        params![run, action, after], |row| row.get(0),
+    ).optional()?;
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let event: ProviderEvent = serde_json::from_slice(&protection::unprotect(&payload)?)?;
+    match event.data {
+        ProviderEventData::NativeGoalControlSettled {
+            result: NativeGoalControlOutcome::Confirmed { observation },
+            ..
+        } => Ok(Some(observation)),
+        _ => anyhow::bail!("The native goal control evidence does not contain its receipt"),
+    }
 }

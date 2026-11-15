@@ -144,6 +144,7 @@ enum Response {
     JobRejected,
     JobRequestConflict,
     GoalProgressRecorded,
+    GoalProgressArchived,
     GoalProgressRejected,
     PermissionRequested(String),
     PermissionPending,
@@ -310,6 +311,15 @@ async fn serve_pipe(
             let allowed = request.version == VERSION
                 && bool::from(request.credential.ct_eq(&ticket.credential));
             let (response, decision) = if allowed
+                && let Operation::ReportGoalProgress(report) = &request.operation
+            {
+                let response = match store.record_goal_turn_report(scope.run_id.clone(), report.clone()).await {
+                    Ok(true) => Response::GoalProgressRecorded,
+                    Ok(false) => Response::GoalProgressArchived,
+                    Err(_) => Response::GoalProgressRejected,
+                };
+                (response, None)
+            } else if allowed
                 && active_scope(&store, scope.run_id.clone()).await? == Some(scope.clone())
             {
                 match request.operation {
@@ -373,13 +383,6 @@ async fn serve_pipe(
                         ).await {
                             Ok(wait) => Response::JobWaiting { wait_id: wait.id, state: wait.state },
                             Err(_) => Response::JobRejected,
-                        };
-                        (response, None)
-                    }
-                    Operation::ReportGoalProgress(report) => {
-                        let response = match store.record_goal_turn_report(scope.run_id.clone(), report).await {
-                            Ok(()) => Response::GoalProgressRecorded,
-                            Err(_) => Response::GoalProgressRejected,
                         };
                         (response, None)
                     }
@@ -662,6 +665,10 @@ impl ServerHandler for StdioBridge {
                 Response::GoalProgressRecorded => {
                     Ok(CallToolResult::structured(json!({"recorded": true})).into())
                 }
+                Response::GoalProgressArchived => Ok(CallToolResult::structured(
+                    json!({"recorded": true, "archived": true}),
+                )
+                .into()),
                 Response::GoalProgressRejected => Err(ErrorData::invalid_params(
                     "This run cannot record that goal progress report",
                     None,

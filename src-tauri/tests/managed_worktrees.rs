@@ -352,6 +352,30 @@ impl Runner for CandidateWriter {
 
 struct NativeGoalFixture(AtomicBool);
 
+struct NativeGoalFixtureControl {
+    inner: Arc<dyn omniagent::runner::RunControl>,
+    uncertainty_marker: std::path::PathBuf,
+}
+
+impl omniagent::runner::RunControl for NativeGoalFixtureControl {
+    fn cancel(&self) -> io::Result<bool> {
+        self.inner.cancel()
+    }
+
+    fn wait(&self) -> io::Result<omniagent::process::TerminalOutcome> {
+        self.inner.wait()
+    }
+
+    fn confirm_quiescence(&self) -> io::Result<()> {
+        if self.uncertainty_marker.exists() {
+            return Err(io::Error::other(
+                "fixture dropped the worker's stop acknowledgment",
+            ));
+        }
+        self.inner.confirm_quiescence()
+    }
+}
+
 impl Runner for NativeGoalFixture {
     fn identity(&self) -> &str {
         DirectWindowsRunner.identity()
@@ -385,13 +409,21 @@ impl Runner for NativeGoalFixture {
                 ..request
             });
         }
-        if request
+        let native = request
             .arguments
-            .contains(&OsStr::new("features.goals=true"))
-        {
+            .contains(&OsStr::new("features.goals=true"));
+        if native {
             self.0.store(true, Ordering::Release);
         }
-        CandidateWriter.launch(request)
+        let marker = request.checkout.join("fixture-native-uncertain-stop");
+        let mut process = CandidateWriter.launch(request)?;
+        if native {
+            process.control = Arc::new(NativeGoalFixtureControl {
+                inner: process.control,
+                uncertainty_marker: marker,
+            });
+        }
+        Ok(process)
     }
 }
 
@@ -475,6 +507,11 @@ fn register_fixture_bridge(request: &LaunchRequest<'_>) -> Result<()> {
 fn candidate_fixture_worker() -> Result<()> {
     let root = std::env::current_dir()?;
     let native_fixture = root.join("fixture-native-goal").is_file();
+    let thread = if native_fixture {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        "fixture".into()
+    };
     let mut native_goal = Value::Null;
     let mut output = io::stdout().lock();
     for line in io::stdin().lock().lines() {
@@ -483,7 +520,7 @@ fn candidate_fixture_worker() -> Result<()> {
             Some("initialize") => json!({"userAgent":"fixture"}),
             Some("initialized") => continue,
             Some("thread/start") => json!({
-                "thread":{"id":"fixture"}, "cwd":root, "model":"fixture",
+                "thread":{"id":thread}, "cwd":root, "model":"fixture",
                 "sandbox":{"type":"workspaceWrite"}
             }),
             Some("config/read") if native_fixture => json!({"config":{
@@ -496,25 +533,34 @@ fn candidate_fixture_worker() -> Result<()> {
             Some("thread/goal/set") if native_fixture => {
                 let params = &frame["params"];
                 if params["objective"].is_null() {
+                    if root.join("fixture-native-uncertain-stop").exists()
+                        && params["status"] == "paused"
+                    {
+                        let rejected = json!({"id":frame["id"], "error":{"code":-32000,"message":"Stop receipt unavailable"}});
+                        writeln!(output, "{rejected}")?;
+                        output.flush()?;
+                        continue;
+                    }
                     native_goal["status"] = params["status"].clone();
                     json!({"goal":native_goal})
                 } else {
                     native_goal = json!({
-                        "threadId":"fixture", "status":"active", "objective":params["objective"],
+                        "threadId":thread, "status":"active", "objective":params["objective"],
                         "tokenBudget":params["tokenBudget"], "tokensUsed":0u64
                     });
                     let start = |turn| {
                         json!({"method":"turn/started","params":{
-                            "threadId":"fixture","turn":{"id":turn}
+                            "threadId":thread,"turn":{"id":turn}
                         }})
                     };
                     let done = |turn| {
                         json!({"method":"turn/completed","params":{
-                            "threadId":"fixture","turn":{"id":turn,"status":"completed"}
+                            "threadId":thread,"turn":{"id":turn,"status":"completed"}
                         }})
                     };
                     fs::write(root.join("candidate.bin"), b"native first turn")?;
                     let reply = json!({"id":frame["id"],"result":{"goal":native_goal}});
+                    native_goal["tokensUsed"] = json!(137);
                     writeln!(
                         output,
                         "{reply}\n{}\n{}\n{}\n{}",
@@ -527,7 +573,7 @@ fn candidate_fixture_worker() -> Result<()> {
                     if root.join("fixture-native-complete").is_file() {
                         native_goal["status"] = json!("complete");
                         let observed = json!({"method":"thread/goal/updated","params":{
-                            "threadId":"fixture","turnId":"native-second","goal":native_goal
+                            "threadId":thread,"turnId":"native-second","goal":native_goal
                         }});
                         writeln!(output, "{observed}\n{}", done("native-second"))?;
                     }
@@ -589,10 +635,10 @@ fn candidate_fixture_worker() -> Result<()> {
                 if let Some(report) = report {
                     let accepted = json!({"id":frame["id"], "result":{"turn":{"id":"turn"}}});
                     let message = json!({"method":"item/completed","params":{
-                        "threadId":"fixture", "turnId":"turn", "item":{"type":"agentMessage","id":"message","text":report}
+                        "threadId":thread, "turnId":"turn", "item":{"type":"agentMessage","id":"message","text":report}
                     }});
                     let terminal = json!({"method":"turn/completed","params":{
-                        "threadId":"fixture", "turn":{"id":"turn","status":"completed"}
+                        "threadId":thread, "turn":{"id":"turn","status":"completed"}
                     }});
                     writeln!(output, "{accepted}\n{message}\n{terminal}")?;
                     output.flush()?;
@@ -628,17 +674,17 @@ fn candidate_fixture_worker() -> Result<()> {
                 fs::write(root.join("staged.txt"), "Unstaged by the CLI\n")?;
                 fs::write(root.join("ignored.txt"), "Ignored fixture data\n")?;
                 let terminal = json!({"method":"turn/completed","params":{
-                    "threadId":"fixture", "turn":{"id":"turn","status":"completed"}
+                    "threadId":thread, "turn":{"id":"turn","status":"completed"}
                 }});
                 let accepted = json!({"id":frame["id"],"result":{"turn":{"id":"turn"}}});
                 writeln!(output, "{accepted}")?;
                 if root.join("fixture-expire-question").exists() {
                     let request = json!({"id":71,"method":"item/tool/requestUserInput","params":{
-                        "threadId":"fixture","turnId":"turn","itemId":"question",
+                        "threadId":thread,"turnId":"turn","itemId":"question",
                         "questions":[{"id":"target","question":"Where should I write?","options":[{"label":"This worktree"}]}]
                     }});
                     let expired = json!({"method":"serverRequest/resolved","params":{
-                        "threadId":"fixture","requestId":71
+                        "threadId":thread,"requestId":71
                     }});
                     writeln!(output, "{request}\n{expired}")?;
                 } else if root.join("fixture-hold-open").exists() {
@@ -661,7 +707,7 @@ fn candidate_fixture_worker() -> Result<()> {
                 };
                 let reply = json!({"id":frame["id"],"result":{}});
                 let terminal = json!({"method":"turn/completed", "params":{
-                    "threadId":"fixture", "turn":{"id":frame["params"]["turnId"],"status":status}
+                    "threadId":thread, "turn":{"id":frame["params"]["turnId"],"status":status}
                 }});
                 writeln!(output, "{reply}\n{terminal}")?;
                 output.flush()?;
@@ -1830,7 +1876,7 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
     fs::create_dir_all(source.join(".git/info"))?;
     fs::write(
         source.join(".git/info/exclude"),
-        "ignored.txt\nfixture-native-goal\nfixture-native-complete\nfixture-native-profile-changed\n",
+        "ignored.txt\nfixture-native-goal\nfixture-native-complete\nfixture-native-profile-changed\nfixture-native-uncertain-stop\n",
     )?;
     fs::write(tree.root.join("fixture-native-goal"), [])?;
     let runner = Arc::new(NativeGoalFixture(AtomicBool::new(false)));
@@ -1914,9 +1960,34 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
         .await
         .with_context(|| format!("goal {chat} did not settle attempt {ordinal}"))?
     }
+    async fn native_turn(
+        store: &Store,
+        database: &Path,
+        chat: &str,
+        ordinal: u32,
+    ) -> Result<(String, String)> {
+        tokio::time::timeout(Duration::from_secs(35), async {
+            loop {
+                let goal = store.active_conversation_goal(chat.into()).await?.context("missing writer goal")?;
+                if let Some(attempt) = goal.job.latest_attempt.as_ref().filter(|value| value.ordinal == ordinal) {
+                    ensure!(!attempt.status.is_terminal(), "native goal ended before its second turn: {goal:?}");
+                    let open: bool = rusqlite::Connection::open(database)?.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM native_goal_turns
+                         WHERE run_id = ?1 AND provider_turn_id = 'native-second' AND outcome IS NULL)",
+                        [&attempt.run_id], |row| row.get(0),
+                    )?;
+                    if open {
+                        let session = goal.provider_session_id.context("native attempt has no thread")?;
+                        return Ok::<_, anyhow::Error>((attempt.run_id.clone(), session));
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        }).await.context("native writer did not reach its second turn")?
+    }
     store.set_job_queue_capacity(1).await?;
     let bridge = std::path::PathBuf::from(env!("CARGO_BIN_EXE_omniagent"));
-    let scheduler = JobScheduler::start(store.clone(), runner.clone(), Some(bridge));
+    let scheduler = JobScheduler::start(store.clone(), runner.clone(), Some(bridge.clone()));
     let (calibration_chat, _) =
         queue("Record the fixture's effective profile", Some(1), None).await?;
     let calibration = finished_goal(&store, &calibration_chat, 1)
@@ -1974,31 +2045,7 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
         .await?;
 
     let (chat, goal) = queue("Run two native turns", None, Some(40_000)).await?;
-    tokio::time::timeout(Duration::from_secs(35), async {
-        loop {
-            let current = store
-                .active_conversation_goal(chat.clone())
-                .await?
-                .context("missing writer goal")?;
-            if current.continuation_owner == GoalContinuationOwner::Native
-                && fs::read(tree.root.join("candidate.bin")).ok().as_deref()
-                    == Some(b"native second turn")
-            {
-                return Ok::<_, anyhow::Error>(());
-            }
-            if current
-                .job
-                .latest_attempt
-                .as_ref()
-                .is_some_and(|a| a.status.is_terminal())
-            {
-                anyhow::bail!("native goal ended before its second turn: {current:?}");
-            }
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
-    })
-    .await
-    .context("native writer did not reach its second turn")??;
+    let (first_run, first_session) = native_turn(&store, &database, &chat, 1).await?;
     assert!(runner.0.load(Ordering::Acquire));
     assert_eq!(
         store
@@ -2020,6 +2067,76 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
     );
     assert_eq!(
         store
+            .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Pause)
+            .await?,
+        GoalControlState::Pausing
+    );
+    let paused = finished_goal(&store, &chat, 1).await?;
+    assert_eq!(paused.control_state, GoalControlState::Paused);
+    assert_eq!(
+        paused.job.latest_attempt.unwrap().status,
+        RunStatus::Interrupted
+    );
+    assert_eq!(
+        store
+            .inspect_project_queue(project.clone(), env.clone())
+            .await?
+            .active,
+        0
+    );
+    scheduler.shutdown().await?;
+    let reopened = Store::open(database.clone())?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    assert!(reopened.claim_next_job(env.clone()).await?.is_none());
+    assert!(
+        reopened
+            .queue_job_recovery(
+                project.clone(),
+                goal.job.id.clone(),
+                first_run.clone(),
+                RecoveryAction::Resume
+            )
+            .await
+            .is_err()
+    );
+    fs::write(tree.root.join("candidate.bin"), b"external drift")?;
+    assert!(
+        reopened
+            .resume_goal(project.clone(), goal.id.clone())
+            .await
+            .is_err()
+    );
+    fs::write(tree.root.join("candidate.bin"), b"native second turn")?;
+    reopened
+        .resume_goal(project.clone(), goal.id.clone())
+        .await?;
+    assert!(
+        reopened
+            .resume_goal(project.clone(), goal.id.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        reopened
+            .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Pause)
+            .await?,
+        GoalControlState::Paused
+    );
+    assert!(reopened.claim_next_job(env.clone()).await?.is_none());
+    reopened
+        .resume_goal(project.clone(), goal.id.clone())
+        .await?;
+    let scheduler = JobScheduler::start(store.clone(), runner.clone(), Some(bridge.clone()));
+    let (second_run, second_session) = native_turn(&store, &database, &chat, 2).await?;
+    assert_ne!(first_session, second_session);
+    let resumed_budget: i64 = rusqlite::Connection::open(&database)?.query_row(
+        "SELECT token_budget FROM native_goal_executors WHERE run_id = ?1",
+        [&second_run],
+        |row| row.get(0),
+    )?;
+    assert_eq!(resumed_budget, 40_000 - 137);
+    assert_eq!(
+        store
             .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Cancel)
             .await?,
         GoalControlState::Cancelling
@@ -2039,7 +2156,12 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
     .await
     .context("native writer did not settle cancellation")??;
     assert_eq!(cancelled.status, RunStatus::Cancelled);
-    assert_eq!(cancelled.ordinal, 1);
+    assert_eq!(cancelled.ordinal, 2);
+    assert_eq!(cancelled.run_id, second_run);
+    assert_eq!(
+        cancelled.previous_run_id.as_deref(),
+        Some(first_run.as_str())
+    );
     assert!(
         store
             .active_conversation_goal(chat.clone())
@@ -2119,14 +2241,87 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
         0
     );
 
+    fs::remove_file(tree.root.join("fixture-native-complete"))?;
+    let (chat, native) = queue("Hand off a paused native goal", None, None).await?;
+    let (native_run, native_session) = native_turn(&store, &database, &chat, 1).await?;
+    fs::write(tree.root.join("fixture-native-uncertain-stop"), [])?;
+    assert_eq!(
+        store
+            .request_goal_stop(project.clone(), native.id.clone(), GoalStopAction::Pause)
+            .await?,
+        GoalControlState::Pausing
+    );
+    let review = finished_goal(&store, &chat, 1).await?;
+    assert_eq!(review.control_state, GoalControlState::NeedsReview);
+    assert!(
+        store
+            .confirm_native_goal_stop(project.clone(), native.id.clone(), native_run.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        with_managed_worktree_writer(
+            &store,
+            project.clone(),
+            tree.checkout_id.clone(),
+            task.id.clone(),
+            |_| Ok(())
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        store
+            .resume_goal(project.clone(), native.id.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .confirm_native_goal_stop(project.clone(), native.id.clone(), first_run)
+            .await
+            .is_err()
+    );
+    let current_chat = store.conversation(chat.clone()).await?;
+    assert!(
+        store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: chat.clone(),
+                    context_id: current_chat.context_id,
+                },
+                scope.clone(),
+                Some(task.id.clone()),
+                native.definition.clone(),
+                None
+            )
+            .await
+            .is_err()
+    );
+    scheduler.shutdown().await?;
+
+    let reopened = Store::open(database.clone())?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    assert!(reopened.claim_next_job(env.clone()).await?.is_none());
+    assert_eq!(
+        reopened
+            .confirm_native_goal_stop(project.clone(), native.id.clone(), native_run.clone())
+            .await?,
+        GoalControlState::Paused
+    );
+    assert!(matches!(
+        store
+            .attempt_worktree_evidence(project.clone(), native_run.clone())
+            .await?,
+        Some(AttemptWorktreeEvidence::Saved { .. })
+    ));
     fs::write(tree.root.join("fixture-native-profile-changed"), [])?;
-    let (chat, _) = queue(
-        "Fall back after the verified configuration changes",
-        None,
-        None,
-    )
-    .await?;
-    let fallback = match finished_goal(&store, &chat, 2).await {
+    fs::remove_file(tree.root.join("fixture-native-uncertain-stop"))?;
+    reopened
+        .resume_goal(project.clone(), native.id.clone())
+        .await?;
+    let scheduler = JobScheduler::start(store.clone(), runner.clone(), Some(bridge));
+    let fallback = match finished_goal(&store, &chat, 3).await {
         Ok(goal) => goal,
         Err(error) => {
             let live = store.active_conversation_goal(chat.clone()).await?.unwrap();
@@ -2135,12 +2330,19 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
         }
     };
     assert_eq!(fallback.continuation_owner, GoalContinuationOwner::Managed);
+    assert_ne!(
+        fallback.provider_session_id.as_deref(),
+        Some(native_session.as_str())
+    );
     let attempt = fallback
         .job
         .latest_attempt
         .context("missing managed retry")?;
     assert_eq!(attempt.status, RunStatus::Succeeded);
-    assert!(attempt.previous_run_id.is_some());
+    assert_ne!(
+        attempt.previous_run_id.as_deref(),
+        Some(native_run.as_str())
+    );
     assert!(
         store
             .agent_dispatch(chat.clone(), attempt.previous_run_id.unwrap())

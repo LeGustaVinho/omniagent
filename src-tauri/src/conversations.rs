@@ -992,6 +992,7 @@ impl Store {
                 }
             }
             crate::jobs::observe_child_run(&tx, &run_id)?;
+            crate::jobs::settle_owned_goal_cancellations(&tx)?;
             tx.commit()?;
             Ok(outcome)
         }).await?;
@@ -1025,7 +1026,8 @@ impl Store {
                 close_permissions(&tx, &id)?;
                 close_unfinished_structured_questions(&tx, &id)?;
                 crate::jobs::settle_subagent_audit(&tx, &id, false)?;
-                let context = seal_attempt_context(&tx, &id, &attempt, None)?;
+                let output = crate::jobs::recover_native_goal_output(&tx, &id)?;
+                let context = seal_attempt_context(&tx, &id, &attempt, output)?;
                 tx.execute(
                     "UPDATE agent_attempts SET result_context_id = ?1 WHERE run_id = ?2",
                     params![context, id],
@@ -1044,9 +1046,11 @@ impl Store {
                 [],
             )?;
             tx.execute("DELETE FROM active_agent_attempts", [])?;
+            crate::jobs::recover_native_goal_executors(&tx)?;
             crate::jobs::recover_question_stop_reservations(&tx)?;
             crate::jobs::recover_native_subagents(&tx)?;
             crate::jobs::recover_commands(&tx)?;
+            crate::jobs::settle_owned_goal_cancellations(&tx)?;
             tx.commit()?;
             Ok(())
         })
@@ -2939,6 +2943,276 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restarting_a_native_goal_restores_its_output_before_explicit_recovery() -> Result<()> {
+        use crate::jobs::{AdmissionEnvironment, GoalControlState, GoalDefinition, JobContext};
+        let (_directory, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        scope.runner = crate::runner::DirectWindowsRunner::IDENTITY.into();
+        let database = scope.checkout.join("store.sqlite");
+        let environment = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: true,
+        };
+        let goal = store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: conversation.id.clone(),
+                    context_id: conversation.context_id,
+                },
+                scope,
+                None,
+                GoalDefinition {
+                    objective: "Restore the recorded provider work".into(),
+                    criteria: vec![],
+                    max_turns: None,
+                    max_seconds: None,
+                    token_budget: None,
+                },
+                None,
+            )
+            .await?;
+        let attempt = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("missing native fixture attempt")?;
+        let native_location = |turn: Option<&str>| ProviderLocation {
+            session_id: Some("retired-thread".into()),
+            turn_id: turn.map(str::to_owned),
+            ..Default::default()
+        };
+        store.mark_agent_running(attempt.run.id.clone()).await?;
+        store
+            .record_agent_observation(
+                attempt.run.id.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: native_location(None),
+                    data: ProviderEventData::SessionReady {
+                        model: Some("requested-model".into()),
+                        effort: None,
+                    },
+                },
+            )
+            .await?;
+        store.execute({
+            let revision = goal.id.clone();
+            let run = attempt.run.id.clone();
+            move |db| {
+                db.execute(
+                    "INSERT INTO capability_evidence(id, version, qualification_key, origin, payload)
+                     VALUES ('restart-fixture', 1, 'test', 'protocol_fixture', X'00')", [],
+                )?;
+                db.execute(
+                    "INSERT INTO native_goal_executors(run_id, revision_id, provider_session_id, evidence_id)
+                     VALUES (?1, ?2, 'retired-thread', 'restart-fixture')",
+                    params![run, revision],
+                )?;
+                db.execute("UPDATE goal_revisions SET continuation_owner = 'native' WHERE id = ?1", [revision])?;
+                Ok(())
+            }
+        }).await?;
+        for (id, data) in [
+            ("provider-turn-1", ProviderEventData::TurnStarted),
+            (
+                "provider-turn-1",
+                ProviderEventData::AssistantDelta {
+                    text: "Streaming duplicate".into(),
+                },
+            ),
+            (
+                "provider-turn-1",
+                ProviderEventData::AssistantMessage {
+                    text: "Saved result".into(),
+                },
+            ),
+            (
+                "provider-turn-1",
+                ProviderEventData::TurnFinished {
+                    outcome: TurnOutcome::Completed,
+                },
+            ),
+            ("provider-turn-2", ProviderEventData::TurnStarted),
+            (
+                "provider-turn-2",
+                ProviderEventData::AssistantDelta {
+                    text: "Partial next result".into(),
+                },
+            ),
+        ] {
+            store
+                .record_agent_observation(
+                    attempt.run.id.clone(),
+                    EventSource::Provider,
+                    ProviderEvent {
+                        location: native_location(Some(id)),
+                        data,
+                    },
+                )
+                .await?;
+        }
+        drop(store);
+        let store = Store::open(database)?;
+        store.recover_agent_attempts_after_restart().await?;
+        let project = goal.job.project_id;
+        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        assert!(
+            store
+                .resume_goal(project.clone(), goal.id.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .confirm_native_goal_stop(project.clone(), goal.id.clone(), attempt.run.id.clone())
+                .await?,
+            GoalControlState::Paused
+        );
+        store.resume_goal(project, goal.id).await?;
+        let recovery = store
+            .claim_next_job(environment)
+            .await?
+            .context("missing reconciled attempt")?;
+        assert!(matches!(recovery.intent, SessionIntent::Start));
+        assert_eq!(
+            recovery.previous_run_id.as_deref(),
+            Some(attempt.run.id.as_str())
+        );
+        assert!(
+            recovery
+                .input
+                .iter()
+                .any(|message| message.text == "Saved result\n\nPartial next result")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_goal_waits_for_owned_children_and_fences_new_delegation() -> Result<()> {
+        use crate::jobs::{
+            AdmissionBlocker, AdmissionEnvironment, GoalControlState, GoalDefinition,
+            GoalStopAction, JobContext, JobRequest, QueueState,
+        };
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let environment = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: true,
+        };
+        let goal = store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: conversation.id.clone(),
+                    context_id: conversation.context_id,
+                },
+                scope,
+                None,
+                GoalDefinition {
+                    objective: "Coordinate owned child work".into(),
+                    criteria: vec![],
+                    max_turns: Some(2),
+                    max_seconds: None,
+                    token_budget: None,
+                },
+                None,
+            )
+            .await?;
+        let project = goal.job.project_id.clone();
+        store.set_job_queue_capacity(2).await?;
+        let root = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("missing goal attempt")?;
+        store.mark_agent_running(root.run.id.clone()).await?;
+        let request = JobRequest {
+            checkout_id: None,
+            task_id: None,
+            mode: SessionMode::ReadOnly,
+            instructions: "Child evidence".into(),
+            dependencies: vec![],
+            requires_bridge: false,
+        };
+        let child = store
+            .submit_agent_job(root.run.id.clone(), "child".into(), request.clone())
+            .await?;
+        let inspection = store
+            .inspect_job(project.clone(), child.id.clone(), environment.clone())
+            .await?
+            .unwrap();
+        let [AdmissionBlocker::Approval { approval_id }] = inspection.blockers.as_slice() else {
+            anyhow::bail!("expected a review for the child");
+        };
+        store
+            .decide_job_approval(project.clone(), approval_id.clone(), true)
+            .await?;
+        let running = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("missing admitted child")?;
+        store.mark_agent_running(running.run.id.clone()).await?;
+        let pending = store
+            .submit_agent_job(running.run.id.clone(), "grandchild".into(), request.clone())
+            .await?;
+        assert_eq!(
+            store
+                .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Cancel)
+                .await?,
+            GoalControlState::Cancelling
+        );
+        assert!(
+            store
+                .submit_agent_job(running.run.id.clone(), "new".into(), request.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .submit_agent_job(root.run.id.clone(), "child".into(), request)
+                .await?
+                .id,
+            child.id
+        );
+        let cancelled_child = store.job(project.clone(), child.id).await?.unwrap();
+        assert_eq!(cancelled_child.queue_state, QueueState::Cancelled);
+        assert!(cancelled_child.latest_attempt.unwrap().cancel_requested);
+        assert_eq!(
+            store
+                .job(project.clone(), pending.id)
+                .await?
+                .unwrap()
+                .queue_state,
+            QueueState::Cancelled
+        );
+        store
+            .finish_observed_agent_attempt(root.run.id, RunStatus::Cancelled, None, None, true)
+            .await?;
+        assert_eq!(
+            store
+                .active_conversation_goal(conversation.id.clone())
+                .await?
+                .unwrap()
+                .control_state,
+            GoalControlState::Cancelling
+        );
+        assert!(store.claim_next_job(environment).await?.is_none());
+        store
+            .finish_observed_agent_attempt(running.run.id, RunStatus::Cancelled, None, None, true)
+            .await?;
+        assert!(
+            store
+                .active_conversation_goal(conversation.id)
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .request_goal_stop(project, goal.id, GoalStopAction::Cancel)
+                .await?,
+            GoalControlState::Cancelled
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn managed_goal_pause_fences_the_current_run_and_resumes_its_checkpoint() -> Result<()> {
         exercise_goal_stop(GoalStopScenario::ConfirmedPause).await
     }
@@ -3412,6 +3686,35 @@ mod tests {
         assert_eq!(next.previous_run_id.as_deref(), Some(plan.run.id.as_str()));
         assert_eq!(next.input.last().unwrap().text, "Check both migrations");
         assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        let late = GoalTurnReport {
+            evidence: "Late report for the first attempt".into(),
+            action: GoalTurnAction::Blocked,
+        };
+        for _ in 0..2 {
+            assert!(
+                !store
+                    .record_goal_turn_report(plan.run.id.clone(), late.clone())
+                    .await?
+            );
+        }
+        assert_eq!(
+            store
+                .archived_goal_reports(plan.run.project_id.clone(), plan.run.id.clone())
+                .await?,
+            [late]
+        );
+        assert!(
+            store
+                .archived_goal_reports("another-project".into(), plan.run.id.clone())
+                .await?
+                .is_empty()
+        );
+        let original = store
+            .active_conversation_goal(conversation.id.clone())
+            .await?
+            .and_then(|goal| goal.checkpoint)
+            .context("the late report replaced the accepted checkpoint")?;
+        assert_eq!(original.next_action, "continue");
         store.mark_agent_running(next.run.id.clone()).await?;
         let dispatch = prepare_fixture_dispatch(&store, &next).await?;
         store.settle_dispatch(dispatch, Delivery::Submitted).await?;

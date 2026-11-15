@@ -527,6 +527,9 @@ impl Store {
                 }
                 bind_attempt_policy(&tx, &job, &plan.run().id)?;
                 if let ScheduledAttempt::Agent(plan) = &plan {
+                    if plan.native_goal_seed.is_none() {
+                        tx.execute("DELETE FROM native_goal_resume_checkpoints WHERE job_id = ?1", [&job.id])?;
+                    }
                     if let Some(claim) = adopted.or(standalone) {
                         claim.record(&tx, plan)?;
                     } else if let Some(checkpoint) = &checkpoint {

@@ -178,6 +178,7 @@ impl TurnExecution {
         if !self.app.block_on(self.store.activate_native_goal_executor(
             self.plan.run.id.clone(),
             seed.proof.evidence_id.clone(),
+            seed.token_budget,
         ))? {
             return Ok(false);
         }
@@ -268,6 +269,19 @@ impl TurnExecution {
             self.failure.cause = Some(FailureCause::StopUnconfirmed);
         } else if has_turn {
             interrupt_to_completion(process, session, |event, source| self.record(event, source))?;
+        }
+        if confirmed
+            && action == GoalStopAction::Pause
+            && self
+                .native_goal
+                .as_ref()
+                .is_some_and(|goal| goal.turn.is_none())
+        {
+            self.write_native_goal_control(
+                process,
+                session.control_native_goal(NativeGoalCommand::Status)?,
+            )?;
+            self.wait_native_control(process, session)?;
         }
         Ok(if action == GoalStopAction::Cancel && confirmed {
             RunStatus::Cancelled

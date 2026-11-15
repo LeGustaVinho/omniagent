@@ -306,34 +306,79 @@ impl Store {
         &self,
         run: String,
         report: GoalTurnReport,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         ensure!(
             !report.evidence.trim().is_empty() && report.evidence.len() <= 8192,
             "Invalid goal evidence"
         );
         let payload = protection::protect(&serde_json::to_vec(&report)?)?;
+        let report_key = crate::providers::capabilities::revision(&report)?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let active: bool = tx.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM active_agent_attempts a JOIN job_attempts j ON j.run_id = a.run_id
-                    JOIN goal_continuations c ON c.job_id = j.job_id
-                    JOIN active_goals g ON g.revision_id = c.revision_id
-                    JOIN goal_revisions r ON r.id = g.revision_id
-                    WHERE a.run_id = ?1 AND r.continuation_owner = 'managed' AND j.cancel_requested = 0
-                )",
-                [&run], |row| row.get(0),
-            )?;
-            ensure!(active, "The run has no active managed goal");
-            let old = tx.query_row("SELECT payload FROM goal_turn_reports WHERE run_id = ?1", [&run], |row| row.get(0)).optional()?;
+            let active: Option<bool> = tx
+                .query_row(
+                    "SELECT r.continuation_owner = 'managed' AND g.revision_id IS NOT NULL
+                    AND controls.state = 'active' AND NOT j.cancel_requested
+                    AND EXISTS (SELECT 1 FROM active_agent_attempts a WHERE a.run_id = j.run_id)
+                    AND NOT EXISTS (SELECT 1 FROM native_goal_executors x WHERE x.run_id = j.run_id)
+                 FROM job_attempts j JOIN goal_continuations c ON c.job_id = j.job_id
+                 JOIN goal_revisions r ON r.id = c.revision_id
+                 JOIN goal_revision_controls controls ON controls.revision_id = r.id
+                 LEFT JOIN active_goals g ON g.revision_id = c.revision_id WHERE j.run_id = ?1",
+                    [&run],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let active = active.context("The attempt does not belong to a goal")?;
+            if !active {
+                tx.execute(
+                    "INSERT INTO late_goal_turn_reports VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+                    params![run, report_key, payload],
+                )?;
+                tx.commit()?;
+                return Ok(false);
+            }
+            let old = tx
+                .query_row(
+                    "SELECT payload FROM goal_turn_reports WHERE run_id = ?1",
+                    [&run],
+                    |row| row.get(0),
+                )
+                .optional()?;
             if let Some(old) = decode_report(old)? {
-                ensure!(old == report, "This turn already reported a different checkpoint");
+                ensure!(
+                    old == report,
+                    "This turn already reported a different checkpoint"
+                );
             } else {
-                tx.execute("INSERT INTO goal_turn_reports VALUES (?1, ?2)", params![run, payload])?;
+                tx.execute(
+                    "INSERT INTO goal_turn_reports VALUES (?1, ?2)",
+                    params![run, payload],
+                )?;
             }
             tx.commit()?;
-            Ok(())
-        }).await
+            Ok(true)
+        })
+        .await
+    }
+
+    pub async fn archived_goal_reports(
+        &self,
+        project: String,
+        run: String,
+    ) -> Result<Vec<GoalTurnReport>> {
+        self.execute(move |db| {
+            let mut query = db.prepare(
+                "SELECT report.payload FROM late_goal_turn_reports report
+                 JOIN job_attempts a ON a.run_id = report.run_id JOIN jobs j ON j.id = a.job_id
+                 WHERE report.run_id = ?1 AND j.project_id = ?2 ORDER BY report.report_key",
+            )?;
+            query
+                .query_map(params![run, project], |row| row.get::<_, Vec<u8>>(0))?
+                .map(|payload| Ok(serde_json::from_slice(&protection::unprotect(&payload?)?)?))
+                .collect()
+        })
+        .await
     }
 }
 
@@ -428,7 +473,7 @@ pub(super) fn limit_blocker(
 
 pub(super) fn deactivate_cancelled_job(db: &Connection, job: &str) -> Result<()> {
     let cancelled: Option<String> = db.query_row(
-        "DELETE FROM active_goals
+        "SELECT revision_id FROM active_goals
          WHERE revision_id IN (
              SELECT c.revision_id FROM goal_continuations c
              JOIN goal_revisions r ON r.id = c.revision_id
@@ -445,16 +490,12 @@ pub(super) fn deactivate_cancelled_job(db: &Connection, job: &str) -> Result<()>
                        OR EXISTS (SELECT 1 FROM unconfirmed_question_stops WHERE run_id = a.run_id)
                    )
                )
-         ) RETURNING revision_id",
+         )",
         [job],
         |row| row.get(0),
     ).optional()?;
     if let Some(revision) = cancelled {
-        db.execute(
-            "UPDATE goal_revision_controls SET state = 'cancelled', stop_action = 'cancel', confirmed_by = 'recorded_idle',
-                    requested_ms = ?2, settled_ms = ?2 WHERE revision_id = ?1",
-            params![revision, now_ms()],
-        )?;
+        super::goal_control::cancel_parked_goal_for_history(db, &revision, true, None)?;
     }
     Ok(())
 }
@@ -488,7 +529,9 @@ impl Store {
         &self,
         run: String,
         evidence: String,
+        token_budget: Option<u64>,
     ) -> Result<bool> {
+        let token_budget = token_budget.map(i64::try_from).transpose()?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let execution: Option<(String, String)> = tx.query_row(
@@ -515,11 +558,15 @@ impl Store {
                 return Ok(false);
             }
             tx.execute(
-                "INSERT INTO native_goal_executors(run_id, revision_id, provider_session_id, evidence_id)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![run, revision, session, evidence],
+                "INSERT INTO native_goal_executors(run_id, revision_id, provider_session_id, evidence_id, token_budget)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![run, revision, session, evidence, token_budget],
             )?;
             tx.execute("UPDATE goal_revisions SET continuation_owner = 'native' WHERE id = ?1", [&revision])?;
+            tx.execute(
+                "DELETE FROM native_goal_resume_checkpoints WHERE job_id = (SELECT job_id FROM job_attempts WHERE run_id = ?1)",
+                [&run],
+            )?;
             tx.commit()?;
             Ok(true)
         }).await
@@ -555,6 +602,20 @@ pub(crate) fn settle_native_goal_executor(
     Ok(())
 }
 
+pub(crate) fn recover_native_goal_executors(db: &Connection) -> Result<()> {
+    // The old single-instance desktop owned the non-inheritable Job Object.
+    // Its process tree stopped on exit. The provider goal still needs review.
+    db.execute(
+        "UPDATE native_goal_executors SET stop_confirmed = 1
+         WHERE NOT stop_confirmed AND run_id IN (
+           SELECT a.run_id FROM agent_attempts a JOIN agent_sessions s ON s.id = a.agent_session_id
+           WHERE json_extract(s.scope, '$.runner') = ?1
+         )",
+        [crate::runner::DirectWindowsRunner::IDENTITY],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn record_native_goal(
     db: &Connection,
     run: &str,
@@ -576,7 +637,8 @@ pub(crate) fn record_native_goal(
 
 pub(crate) fn is_native_goal_run(db: &Connection, run: &str) -> Result<bool> {
     Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM job_attempts j
+        "SELECT EXISTS(SELECT 1 FROM native_goal_executors WHERE run_id = ?1
+           UNION ALL SELECT 1 FROM job_attempts j
            JOIN goal_continuations c ON c.job_id = j.job_id
            JOIN goal_revisions r ON r.id = c.revision_id
            WHERE j.run_id = ?1 AND r.continuation_owner = 'native')",

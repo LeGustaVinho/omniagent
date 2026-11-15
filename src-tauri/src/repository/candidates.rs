@@ -115,6 +115,14 @@ impl Store {
 }
 
 pub(crate) async fn save_worktree_candidate(store: &Store, run_id: String) -> Result<()> {
+    capture_worktree_candidate(store, run_id, false).await
+}
+
+pub(crate) async fn save_reconciled_native_candidate(store: &Store, run_id: String) -> Result<()> {
+    capture_worktree_candidate(store, run_id, true).await
+}
+
+async fn capture_worktree_candidate(store: &Store, run_id: String, reconcile: bool) -> Result<()> {
     let identity = store
         .execute({
             let run = run_id.clone();
@@ -125,8 +133,11 @@ pub(crate) async fn save_worktree_candidate(store: &Store, run_id: String) -> Re
                      JOIN jobs j ON j.id = a.job_id JOIN checkouts c ON c.id = s.checkout_id
                      JOIN projects p ON p.id = j.project_id
                      JOIN job_writer_reservations w ON w.run_id = a.run_id AND w.checkout_id = c.id
-                     WHERE s.run_id = ?1 AND j.mode = 'approved_write' AND j.checkout_id = c.id",
-                    [&run],
+                     WHERE s.run_id = ?1 AND j.mode = 'approved_write' AND j.checkout_id = c.id
+                       AND (NOT ?2 OR EXISTS (
+                            SELECT 1 FROM native_goal_executors x WHERE x.run_id = s.run_id AND x.stop_confirmed
+                       ))",
+                    params![run, reconcile],
                     |row| {
                         Ok((
                             row.get::<_, Vec<u8>>(0)?,
@@ -187,8 +198,9 @@ pub(crate) async fn save_worktree_candidate(store: &Store, run_id: String) -> Re
             let recorded = tx.execute(
                 "INSERT INTO job_worktree_candidates (run_id, evidence, capture_confirmed)
                  SELECT ?1, ?2, ?3 FROM job_writer_reservations WHERE run_id = ?1
-                 ON CONFLICT(run_id) DO NOTHING",
-                params![run_id, payload, confirmed],
+                 ON CONFLICT(run_id) DO UPDATE SET evidence = excluded.evidence, capture_confirmed = 1
+                 WHERE ?4 AND excluded.capture_confirmed AND NOT job_worktree_candidates.capture_confirmed",
+                params![run_id, payload, confirmed, reconcile],
             )?;
             ensure!(
                 recorded == 1

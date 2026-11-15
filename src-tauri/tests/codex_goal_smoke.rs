@@ -363,10 +363,16 @@ fn codex_native_goal_budget_control_and_restore() -> Result<()> {
         frame["method"] == "turn/completed" && frame["params"]["turn"]["id"] == *turn
     })?;
     assert_eq!(completed["params"]["turn"]["status"], "interrupted");
-    assert_eq!(
-        native.request("thread/goal/get", json!({"threadId":thread}))?["goal"]["status"],
-        "paused"
-    );
+    let observed = native.request("thread/goal/get", json!({"threadId":thread}))?;
+    assert_eq!(observed["goal"]["status"], "paused");
+    assert_eq!(observed["goal"]["tokenBudget"], 40_000);
+    let paused_usage = paused["goal"]["tokensUsed"]
+        .as_u64()
+        .context("missing pause usage")?;
+    let stopped_usage = observed["goal"]["tokensUsed"]
+        .as_u64()
+        .context("missing settled usage")?;
+    assert!(stopped_usage >= paused_usage);
     assert_eq!(
         native.request(
             "thread/goal/clear",

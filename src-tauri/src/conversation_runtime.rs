@@ -209,6 +209,19 @@ pub async fn confirm_managed_goal_stop(
 }
 
 #[tauri::command]
+pub async fn confirm_native_goal_stop(
+    store: State<'_, Store>,
+    project_id: String,
+    revision_id: String,
+    run_id: String,
+) -> Result<GoalControlState, String> {
+    store
+        .confirm_native_goal_stop(project_id, revision_id, run_id)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
 pub async fn revise_pending_instruction(
     store: State<'_, Store>,
     conversation_id: String,

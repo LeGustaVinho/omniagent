@@ -435,6 +435,7 @@ fn settle_command(
         super::requeue_unlaunched_job(db, id)?;
     }
     super::observe_child_run(db, id)?;
+    super::settle_owned_goal_cancellations(db)?;
     Ok(())
 }
 

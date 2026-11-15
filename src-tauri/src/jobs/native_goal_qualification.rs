@@ -162,18 +162,29 @@ pub(super) fn native_goal_seed(
     job: &Job,
     scope: Option<&SessionScope>,
 ) -> Result<Option<NativeGoalSeed>> {
-    let Some(scope) = scope.filter(|_| job.latest_attempt.is_none()) else {
+    let Some(scope) = scope else {
         return Ok(None);
     };
-    let encoded: Option<Vec<u8>> = db.query_row(
-        "SELECT r.definition FROM goal_revisions r JOIN active_goals active ON active.revision_id = r.id
-         WHERE r.initial_job_id = ?1 AND r.continuation_owner = 'managed'",
-        [&job.id], |row| row.get(0),
+    let encoded: Option<(Vec<u8>, Option<String>, Option<i64>)> = db.query_row(
+        "SELECT r.definition, x.run_id, resume.remaining_tokens
+         FROM goal_revisions r JOIN active_goals active ON active.revision_id = r.id
+         LEFT JOIN native_goal_resume_checkpoints resume ON resume.job_id = r.initial_job_id
+         LEFT JOIN native_goal_executors x ON x.revision_id = r.id AND x.run_id = resume.source_run_id AND x.stop_confirmed
+         WHERE r.initial_job_id = ?1 AND r.continuation_owner = 'managed'
+           AND (?2 OR x.run_id IS NOT NULL)",
+        params![job.id, job.latest_attempt.is_none()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional()?;
-    let Some(encoded) = encoded else {
+    let Some((encoded, paused_native, remaining)) = encoded else {
         return Ok(None);
     };
-    let definition: GoalDefinition = serde_json::from_slice(&protection::unprotect(&encoded)?)?;
+    let mut definition: GoalDefinition = serde_json::from_slice(&protection::unprotect(&encoded)?)?;
+    if paused_native.is_some() {
+        let remaining = remaining.map(u64::try_from).transpose()?;
+        if definition.token_budget.is_some() != remaining.is_some() {
+            return Ok(None);
+        }
+        definition.token_budget = remaining;
+    }
     Ok(
         candidate(db, &job.checkout_id, scope, &definition)?.map(|proof| NativeGoalSeed {
             proof,

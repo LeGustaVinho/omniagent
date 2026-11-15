@@ -43,14 +43,16 @@ pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
 pub use goal_control::{GoalControlState, GoalStopAction};
-pub(crate) use goal_control::{pause_revoked_goal, settle_goal_stop};
+pub(crate) use goal_control::{
+    pause_revoked_goal, settle_goal_stop, settle_owned_goal_cancellations,
+};
 pub use goals::{
     GoalCheckpoint, GoalContinuationOwner, GoalDefinition, GoalRevision, GoalTurnAction,
     GoalTurnReport,
 };
 pub(crate) use goals::{
     GoalExecution, accept_goal_checkpoint, is_native_goal_run, record_native_goal,
-    record_native_goal_turn, settle_native_goal_executor,
+    record_native_goal_turn, recover_native_goal_executors, settle_native_goal_executor,
 };
 pub use history::{QueueHistoryPolicy, QueueHistorySettings};
 pub(crate) use history::{apply_queue_history_policy, detached_question_context};
@@ -58,7 +60,9 @@ pub(crate) use inspection::{InspectionPolicy, InspectionQueue, load_inspection_q
 pub(crate) use instruction_delivery::validate_revisions as validate_instruction_revisions;
 pub(crate) use instructions::migrate_pending_instructions;
 pub use instructions::{InstructionDelivery, PendingInstruction};
-pub(crate) use native_goal_evidence::{late_native_goal_evidence, record_native_goal_control};
+pub(crate) use native_goal_evidence::{
+    late_native_goal_evidence, record_native_goal_control, recover_native_goal_output,
+};
 pub(crate) use native_goal_qualification::{NativeGoalSeed, effective_qualification_matches};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use pipeline::{
@@ -248,6 +252,7 @@ impl Store {
                         "SELECT c.project_id, c.id, a.conversation_id, a.context_id,
                         coalesce(scope.scope_task_id, parent.task_id),
                         EXISTS(SELECT 1 FROM active_agent_attempts WHERE run_id = a.run_id)
+                            AND NOT coalesce(attempt.cancel_requested, 0)
                  FROM agent_attempts a JOIN runs r ON r.id = a.run_id
                  JOIN checkouts c ON c.id = r.checkout_id
                  LEFT JOIN job_attempts attempt ON attempt.run_id = a.run_id
