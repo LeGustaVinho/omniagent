@@ -99,6 +99,7 @@ pub enum DispatchRejection {
     },
     ProfileUnavailable,
     WorktreeUnavailable,
+    WorktreeCheckpointChanged,
     NativeDelegationUnverified,
     NativeGoalUnverified,
     SubagentAuditUnverified,

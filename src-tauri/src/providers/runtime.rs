@@ -708,13 +708,21 @@ impl TurnExecution {
                 .block_on(self.store.save_plugin_inventory(plugins))?,
         );
         self.failure.phase = FailurePhase::EvidenceCapture;
-        let managed_writer = self
-            .app
-            .block_on(repository::capture_worktree_start(
-                &self.store,
-                self.plan.run.id.clone(),
-            ))
-            .inspect_err(|_| self.failure.cause = Some(FailureCause::EvidenceUnavailable))?;
+        let managed_writer = match self.app.block_on(repository::capture_worktree_start(
+            &self.store,
+            self.plan.run.id.clone(),
+        )) {
+            Ok(writer) => writer,
+            Err(error) if error.is::<repository::WorktreeCheckpointMismatch>() => {
+                self.reject_dispatch(DispatchRejection::WorktreeCheckpointChanged)?;
+                self.failure.cause = Some(FailureCause::WorktreeUnavailable);
+                return Err(error);
+            }
+            Err(error) => {
+                self.failure.cause = Some(FailureCause::EvidenceUnavailable);
+                return Err(error);
+            }
+        };
         self.failure.phase = FailurePhase::Launch;
         let mut process = {
             let _boundary = match &admission {

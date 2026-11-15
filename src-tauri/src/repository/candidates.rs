@@ -261,6 +261,23 @@ pub(super) fn capture_git(
     Ok(first)
 }
 
+#[derive(Debug)]
+pub(crate) enum WorktreeCheckpointMismatch {
+    Identity,
+    Content,
+}
+
+impl std::fmt::Display for WorktreeCheckpointMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Identity => "The worktree identity changed since the checkpoint was saved",
+            Self::Content => "The worktree content changed since the checkpoint was saved",
+        })
+    }
+}
+
+impl std::error::Error for WorktreeCheckpointMismatch {}
+
 pub(super) fn recheck_candidate(
     worktree: &ManagedWorktree,
     git_dir: &str,
@@ -274,7 +291,7 @@ pub(super) fn recheck_candidate(
     };
     ensure!(
         artifact.start.worktree == *worktree && artifact.start.git_common_dir == Path::new(common),
-        "The worktree identity changed since the checkpoint was saved"
+        WorktreeCheckpointMismatch::Identity
     );
     let current = capture_git(
         worktree,
@@ -284,7 +301,7 @@ pub(super) fn recheck_candidate(
     )?;
     ensure!(
         digest(&serde_json::to_vec(&current)?) == artifact.revision,
-        "The worktree content changed since the checkpoint was saved"
+        WorktreeCheckpointMismatch::Content
     );
     Ok(current.state)
 }

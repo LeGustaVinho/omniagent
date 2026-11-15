@@ -20,7 +20,9 @@ mod isolated_git;
 mod worktrees;
 pub(crate) mod writers;
 pub use candidates::{AttemptWorktreeEvidence, CandidateRevision, GitChanges, LiveWorktree};
-pub(crate) use candidates::{save_reconciled_native_candidate, save_worktree_candidate};
+pub(crate) use candidates::{
+    WorktreeCheckpointMismatch, save_reconciled_native_candidate, save_worktree_candidate,
+};
 pub use worktrees::{GitStartingState, ManagedWorktree, WorktreeStart, provision_task_worktree};
 pub(crate) use worktrees::{
     capture_worktree_start, verify_managed_recovery_candidate, verify_managed_recovery_checkout,

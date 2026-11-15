@@ -583,8 +583,15 @@ fn candidate_fixture_worker() -> Result<()> {
                             "threadId":thread,"requestId":72
                         }});
                         writeln!(output, "{question}\n{expired}")?;
-                    } else if root.join("fixture-native-complete").is_file() {
-                        native_goal["status"] = json!("complete");
+                    } else if root.join("fixture-native-budget-limited").is_file()
+                        || root.join("fixture-native-complete").is_file()
+                    {
+                        if root.join("fixture-native-budget-limited").is_file() {
+                            native_goal["status"] = json!("budgetLimited");
+                            native_goal["tokensUsed"] = native_goal["tokenBudget"].clone();
+                        } else {
+                            native_goal["status"] = json!("complete");
+                        }
                         let observed = json!({"method":"thread/goal/updated","params":{
                             "threadId":thread,"turnId":"native-second","goal":native_goal
                         }});
@@ -1862,9 +1869,9 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
     use omniagent::{
         jobs::{GoalContinuationOwner, GoalRevision},
         providers::{
-            Capability,
+            Capability, ProviderEventData,
             capabilities::{CapabilitySubject, EvidenceOrigin, ObservedResult},
-            goal::NativeGoalAction,
+            goal::{NativeGoalAction, NativeGoalState},
         },
     };
     use std::{collections::BTreeSet, time::Duration};
@@ -1889,7 +1896,7 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
     fs::create_dir_all(source.join(".git/info"))?;
     fs::write(
         source.join(".git/info/exclude"),
-        "ignored.txt\nfixture-native-goal\nfixture-native-complete\nfixture-native-profile-changed\nfixture-native-uncertain-stop\nfixture-native-question\n",
+        "ignored.txt\nfixture-native-goal\nfixture-native-complete\nfixture-native-profile-changed\nfixture-native-uncertain-stop\nfixture-native-question\nfixture-native-budget-limited\n",
     )?;
     fs::write(tree.root.join("fixture-native-goal"), [])?;
     let runner = Arc::new(NativeGoalFixture(AtomicBool::new(false)));
@@ -2307,11 +2314,26 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
         .latest_attempt
         .context("native wait lost its attempt")?
         .run_id;
-    let saved = store
+    let observer = Store::open(database.clone())?;
+    let saved = observer
         .saved_conversation_questions(chat.clone(), prior_run.clone())
         .await?;
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].state, "saved");
+    assert_eq!(saved[0].reason, "provider_expired");
+    assert!(!saved[0].answer_recorded);
+    let waiting_job = observer
+        .inspect_job(project.clone(), waiting.job.id, env.clone())
+        .await?
+        .context("missing job waiting for input")?;
+    assert_eq!(
+        waiting_job
+            .question_wait
+            .context("missing saved input reason")?
+            .saved,
+        1
+    );
+    assert!(observer.claim_next_job(env.clone()).await?.is_none());
     assert_eq!(
         store
             .inspect_project_queue(project.clone(), env.clone())
@@ -2367,6 +2389,57 @@ async fn qualified_native_goal_keeps_one_writer_reservation_across_autonomous_tu
         |row| row.get(0),
     )?;
     assert_eq!(budget, 40_000 - 137);
+
+    fs::write(tree.root.join("fixture-native-budget-limited"), [])?;
+    let (chat, capped) = queue("Exhaust a native writer's token budget", None, Some(256)).await?;
+    let limited = finished_goal(&store, &chat, 1)
+        .await
+        .context("native budget limit")?;
+    let run = limited
+        .job
+        .latest_attempt
+        .context("missing budget-limited attempt")?
+        .run_id;
+    assert_eq!(
+        limited
+            .checkpoint
+            .context("missing token limit checkpoint")?
+            .next_action,
+        "limit_reached"
+    );
+    assert!(
+        observer
+            .agent_observations(chat, run.clone(), 0)
+            .await?
+            .iter()
+            .any(|record| {
+                matches!(&record.event.data, ProviderEventData::GoalObserved { observation }
+            if observation.state == NativeGoalState::BudgetLimited
+                && observation.tokens_used == Some(256)
+                && observation.token_budget == Some(256))
+            })
+    );
+    assert!(matches!(
+        observer
+            .attempt_worktree_evidence(project.clone(), run)
+            .await?,
+        Some(AttemptWorktreeEvidence::Saved { .. })
+    ));
+    assert!(observer.claim_next_job(env.clone()).await?.is_none());
+    assert_eq!(
+        observer
+            .inspect_project_queue(project.clone(), env.clone())
+            .await?
+            .active,
+        0
+    );
+    assert_eq!(
+        observer
+            .request_goal_stop(project.clone(), capped.id, GoalStopAction::Cancel)
+            .await?,
+        GoalControlState::Cancelled
+    );
+    fs::remove_file(tree.root.join("fixture-native-budget-limited"))?;
 
     fs::remove_file(tree.root.join("fixture-native-complete"))?;
     let (chat, native) = queue("Hand off a paused native goal", None, None).await?;
@@ -2590,6 +2663,22 @@ async fn paused_goal_resumes_only_from_the_confirmed_writer_candidate() -> Resul
         anyhow::bail!("Expected a writer approval, got {:?}", pending.blockers);
     };
     assert!(store.claim_next_job(env.clone()).await?.is_none());
+    assert!(pending.job.latest_attempt.is_none());
+    assert_eq!(
+        store
+            .inspect_project_queue(project.clone(), env.clone())
+            .await?
+            .active,
+        0
+    );
+    with_managed_worktree_writer(
+        &store,
+        project.clone(),
+        tree.checkout_id.clone(),
+        task.id.clone(),
+        |_| Ok(()),
+    )
+    .await?;
     store
         .decide_job_approval(project.clone(), approval_id.clone(), true)
         .await?;
@@ -2711,6 +2800,40 @@ async fn paused_goal_resumes_only_from_the_confirmed_writer_candidate() -> Resul
     };
     let rejected = settled(3).await?;
     assert_eq!(rejected.status, RunStatus::Failed);
+    let inspection = store
+        .inspect_job(project.clone(), job.clone(), env.clone())
+        .await?
+        .unwrap();
+    assert_eq!(
+        inspection.blockers,
+        [AdmissionBlocker::DispatchRejected {
+            rejection: omniagent::jobs::DispatchRejection::WorktreeCheckpointChanged,
+        }]
+    );
+    let failure = store
+        .job_failure(project.clone(), rejected.run_id.clone())
+        .await?
+        .context("missing stale-worktree evidence")?;
+    assert_eq!(
+        failure.observation.cause,
+        Some(FailureCause::WorktreeUnavailable)
+    );
+    assert!(!failure.saved_diff_available);
+    assert_eq!(
+        store
+            .inspect_project_queue(project.clone(), env.clone())
+            .await?
+            .active,
+        0
+    );
+    with_managed_worktree_writer(
+        &store,
+        project.clone(),
+        tree.checkout_id.clone(),
+        task.id.clone(),
+        |_| Ok(()),
+    )
+    .await?;
     assert!(
         store
             .agent_dispatch(conversation.id.clone(), rejected.run_id.clone())
