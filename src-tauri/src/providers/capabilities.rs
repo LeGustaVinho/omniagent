@@ -885,6 +885,85 @@ mod tests {
         }
     }
 
+    #[test]
+    fn session_capabilities_distinguish_observation_and_unavailable_adapter_routes() {
+        let status = |reported: &ReportedCapabilities, scope: &CapabilityScope, capability| {
+            let descriptor = reported
+                .descriptors(scope)
+                .into_iter()
+                .find(|entry| entry.subject == CapabilitySubject::Protocol { capability })
+                .expect("protocol descriptor");
+            ResolvedCapability {
+                descriptor,
+                evidence: None,
+            }
+            .status()
+        };
+        let mut scope = scope();
+        let mut codex = ReportedCapabilities::default();
+        assert_eq!(
+            status(&codex, &scope, Capability::NativeTurnFork),
+            CapabilityStatus::Unverified
+        );
+        codex.observe(&ProviderEventData::NativeForkVerified {
+            source_session_id: "original".into(),
+            last_turn_id: "boundary".into(),
+        });
+        assert_eq!(
+            status(&codex, &scope, Capability::NativeTurnFork),
+            CapabilityStatus::Observed
+        );
+        codex.observe(&ProviderEventData::Compacted);
+        assert_eq!(
+            status(&codex, &scope, Capability::NativeCompaction),
+            CapabilityStatus::Observed
+        );
+        assert_eq!(
+            status(&codex, &scope, Capability::ManualNativeCompaction),
+            CapabilityStatus::Unverified
+        );
+        codex.observe(&ProviderEventData::NativeCompactionFinished {
+            outcome: super::super::TurnOutcome::Completed,
+        });
+        assert_eq!(
+            status(&codex, &scope, Capability::ManualNativeCompaction),
+            CapabilityStatus::Observed
+        );
+
+        let mut claude = ReportedCapabilities::default();
+        scope.provider = Provider::Claude;
+        scope.transport = Transport::ClaudeStreamJson;
+        claude.observe(&ProviderEventData::Compacted);
+        assert_eq!(
+            status(&claude, &scope, Capability::NativeCompaction),
+            CapabilityStatus::Observed
+        );
+        assert_eq!(
+            status(&claude, &scope, Capability::ManualNativeCompaction),
+            CapabilityStatus::Unavailable
+        );
+        assert_eq!(
+            status(&claude, &scope, Capability::NativeTurnFork),
+            CapabilityStatus::Unavailable
+        );
+
+        let antigravity = ReportedCapabilities::default();
+        scope.provider = Provider::Antigravity;
+        scope.transport = Transport::AgentClientProtocol;
+        assert_eq!(
+            status(&antigravity, &scope, Capability::NativeCompaction),
+            CapabilityStatus::Unverified
+        );
+        assert_eq!(
+            status(&antigravity, &scope, Capability::ManualNativeCompaction),
+            CapabilityStatus::Unavailable
+        );
+        assert_eq!(
+            status(&antigravity, &scope, Capability::NativeTurnFork),
+            CapabilityStatus::Unavailable
+        );
+    }
+
     fn descriptor() -> CapabilityDescriptor {
         CapabilityDescriptor {
             subject: CapabilitySubject::Tool {

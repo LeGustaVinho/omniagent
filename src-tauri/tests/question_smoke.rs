@@ -150,12 +150,47 @@ async fn exchange(
 ) -> Result<Exchange> {
     let (_sandbox, store, project, scope) = fixture(provider, model, SessionMode::Plan).await?;
     let checkout_path = scope.checkout.clone();
+    let source = "fixture_config.py";
+    let marker = uuid::Uuid::new_v4().simple().to_string();
+    let source_code = format!("RELEASE_MARKER = \"{marker}\"\n");
+    fs::write(checkout_path.join(source), &source_code)?;
+    let git = |args: &[&str]| -> Result<Vec<u8>> {
+        let output = Command::new("git.exe")
+            .args(args)
+            .current_dir(&checkout_path)
+            .output()?;
+        ensure!(
+            output.status.success(),
+            "fixture git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(output.stdout)
+    };
+    git(&["add", "--", source])?;
+    git(&[
+        "-c",
+        "user.name=OmniAgent Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "core.hooksPath=.git/no-hooks",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "Add the planning fixture",
+    ])?;
+    let head = git(&["rev-parse", "HEAD"])?;
+    let prompt = format!(
+        "{prompt}\nAfter answering the question rounds and before proposing the plan, read {source} and include the exact RELEASE_MARKER value from the file in the plan. Keep the checkout unchanged."
+    );
     let chat = store
         .create_conversation(project.checkout_id.clone(), "Planning qualification".into())
         .await?;
     let runner = Arc::new(RecordingRunner::default());
     let attempt = store
-        .prepare_agent_attempt(chat.id.clone(), chat.context_id, scope, prompt.into())
+        .prepare_agent_attempt(chat.id.clone(), chat.context_id, scope, prompt)
         .await?;
     let run_id = attempt.run.id.clone();
     let worker = start_managed_turn(store.clone(), runner.clone(), attempt, None);
@@ -164,6 +199,7 @@ async fn exchange(
     let mut output = String::new();
     let mut mode = None;
     let mut proposal = None;
+    let mut read_source = false;
     let mut review = None;
     let mut submitted = Vec::new();
     let mut prepared = Vec::new();
@@ -184,6 +220,9 @@ async fn exchange(
                     }
                     ProviderEventData::PlanProposed { text, source } => {
                         proposal = Some((source, text))
+                    }
+                    ProviderEventData::ContextRead { path, .. } => {
+                        read_source |= Path::new(&path).file_name() == Some(source.as_ref());
                     }
                     ProviderEventData::QuestionReplySettled {
                         request_id,
@@ -276,13 +315,11 @@ async fn exchange(
             .context("Claude plan review response was not delivered")?;
         assert_eq!(denial["response"]["response"]["behavior"], "deny");
     }
-    let status = Command::new("git.exe")
-        .args(["status", "--porcelain", "--untracked-files=all"])
-        .current_dir(&checkout_path)
-        .output()?;
     ensure!(
-        status.status.success() && status.stdout.is_empty(),
-        "native planning modified the disposable checkout"
+        git(&["status", "--porcelain", "--untracked-files=all"])?.is_empty()
+            && git(&["rev-parse", "HEAD"])? == head
+            && fs::read_to_string(checkout_path.join(source))? == source_code,
+        "{provider:?} planning modified the disposable checkout"
     );
     let result = Exchange {
         mode: mode.context("the native planning mode was not confirmed")?,
@@ -291,6 +328,10 @@ async fn exchange(
         })?,
         review_requested: review.is_some(),
     };
+    ensure!(
+        read_source && result.proposal.1.contains(&marker),
+        "{provider:?} did not report a read of the source file and use its marker in the plan"
+    );
 
     let evidence = store
         .agent_dispatch(chat.id, run_id)
