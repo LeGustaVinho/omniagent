@@ -19,7 +19,7 @@ use crate::{
     conversations::{AttemptPlan, MessageRevision, MessageRole, PermissionRoute},
     diagnostics,
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
-    jobs::LaunchGate,
+    jobs::{FailureCause, FailureObservation, FailurePhase, LaunchGate},
     mcp_bridge::{PERMISSION_PREFIX, Registration, RunBridge},
     process::TerminalOutcome,
     process_io::CapturedProcess,
@@ -296,11 +296,16 @@ fn start_turn(
             staged_attachments: StagedAttachments::default(),
             native_suggestions,
             admission,
+            failure: FailureObservation {
+                phase: FailurePhase::Preparation,
+                ..Default::default()
+            },
         };
         let outcome = execution
             .run(runner.as_ref(), &receiver, bridge_executable)
             .and_then(|status| {
                 if status == RunStatus::Succeeded && !execution.plan.question_route.is_native() {
+                    execution.failure.phase = FailurePhase::ResultValidation;
                     execution.complete_structured_planning()?;
                 }
                 Ok(status)
@@ -323,6 +328,12 @@ fn start_turn(
                 }
             }
         };
+        if status == RunStatus::Interrupted
+            && execution.exiting()
+            && execution.failure.cause.is_none()
+        {
+            execution.failure.cause = Some(FailureCause::Shutdown);
+        }
         let answer = execution.proposed_plan.unwrap_or_else(|| {
             if execution.final_answer.is_empty() {
                 execution.streamed_answer
@@ -332,10 +343,11 @@ fn start_turn(
         });
         execution
             .app
-            .block_on(execution.store.finish_agent_attempt(
+            .block_on(execution.store.finish_observed_agent_attempt(
                 execution.plan.run.id,
                 status,
                 Some(answer),
+                Some(execution.failure),
             ))?;
         Ok(status)
     });
@@ -347,6 +359,7 @@ fn start_turn(
 }
 
 struct TurnExecution {
+    failure: FailureObservation,
     admission: Option<LaunchGate>,
     app: Handle,
     store: Store,
@@ -470,11 +483,14 @@ impl TurnExecution {
             scope.runner == runner.identity(),
             "selected runner differs from admission"
         );
-        let checkout = self.app.block_on(repository::verify_checkout(
-            &self.store,
-            self.plan.run.checkout_id.clone(),
-            scope.checkout.clone(),
-        ))?;
+        let checkout = self
+            .app
+            .block_on(repository::verify_checkout(
+                &self.store,
+                self.plan.run.checkout_id.clone(),
+                scope.checkout.clone(),
+            ))
+            .inspect_err(|_| self.failure.cause = Some(FailureCause::WorktreeUnavailable))?;
         let adapter = scope.provider.adapter();
         let mut session = adapter.create_session(SessionRequest {
             checkout: scope.checkout.clone(),
@@ -603,10 +619,15 @@ impl TurnExecution {
             self.app
                 .block_on(self.store.save_plugin_inventory(plugins))?,
         );
-        let managed_writer = self.app.block_on(repository::capture_worktree_start(
-            &self.store,
-            self.plan.run.id.clone(),
-        ))?;
+        self.failure.phase = FailurePhase::EvidenceCapture;
+        let managed_writer = self
+            .app
+            .block_on(repository::capture_worktree_start(
+                &self.store,
+                self.plan.run.id.clone(),
+            ))
+            .inspect_err(|_| self.failure.cause = Some(FailureCause::EvidenceUnavailable))?;
+        self.failure.phase = FailurePhase::Launch;
         let mut process = {
             let _boundary = match &admission {
                 Some(gate) => match self.app.block_on(gate.enter()) {
@@ -621,15 +642,18 @@ impl TurnExecution {
             )? {
                 return Ok(RunStatus::Cancelled);
             }
-            runner.launch(LaunchRequest {
-                version: CONTRACT_VERSION,
-                executable: &scope.executable,
-                checkout: &scope.checkout,
-                arguments: &args,
-            })?
+            runner
+                .launch(LaunchRequest {
+                    version: CONTRACT_VERSION,
+                    executable: &scope.executable,
+                    checkout: &scope.checkout,
+                    arguments: &args,
+                })
+                .inspect_err(|_| self.failure.cause = Some(FailureCause::LaunchRejected))?
         };
         let control = process.control.clone();
         let endpoint = bridge.as_ref().map(|(endpoint, _)| endpoint);
+        self.failure.phase = FailurePhase::Startup;
         let run = self
             .app
             .block_on(self.store.mark_agent_running(self.plan.run.id.clone()))
@@ -643,19 +667,35 @@ impl TurnExecution {
                     runner,
                 )
             });
+        let prior_failure = self.failure;
+        self.failure.phase = FailurePhase::ProcessStop;
+        self.failure.cause = None;
         let stopped = control.cancel();
         let ended = control.wait();
+        if let Ok(exit) = ended.as_ref() {
+            self.failure.process = Some((*exit).into());
+        }
         if managed_writer || self.exiting() {
-            control.confirm_quiescence()?;
+            control
+                .confirm_quiescence()
+                .inspect_err(|_| self.failure.cause = Some(FailureCause::StopUnconfirmed))?;
         }
         if managed_writer {
+            self.failure.phase = FailurePhase::EvidenceCapture;
+            self.failure.cause = Some(FailureCause::EvidenceUnavailable);
             self.app.block_on(repository::save_worktree_candidate(
                 &self.store,
                 self.plan.run.id.clone(),
             ))?;
         }
+        self.failure.phase = FailurePhase::ProcessStop;
+        self.failure.cause = None;
         stopped?;
         ended?;
+        self.failure = FailureObservation {
+            process: self.failure.process,
+            ..prior_failure
+        };
         if let Some(endpoint) = endpoint {
             let registration = match endpoint.registration() {
                 Registration::Configured
@@ -793,16 +833,16 @@ impl TurnExecution {
                 && (inventory_complete
                     || inventory_deadline.is_some_and(|deadline| Instant::now() >= deadline))
             {
+                self.failure.phase = FailurePhase::Dispatch;
                 if !self.dispatch(process, session, checkout, runner)? {
                     return Ok(RunStatus::Interrupted);
                 }
                 sent = true;
+                self.failure.phase = FailurePhase::Execution;
             }
-            if !ready {
-                ensure!(
-                    Instant::now() < startup_deadline,
-                    "CLI session startup timed out"
-                );
+            if !ready && Instant::now() >= startup_deadline {
+                self.failure.cause = Some(FailureCause::StartupTimeout);
+                anyhow::bail!("CLI session startup timed out");
             }
             let frame = match process.output.recv_timeout(Duration::from_millis(50)) {
                 Ok(frame) => frame?,
@@ -810,12 +850,22 @@ impl TurnExecution {
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     process.control.cancel()?;
                     let terminal = process.control.wait()?;
+                    self.failure.process = Some(terminal.into());
                     let terminal = self.record_update(
                         process,
                         session.process_finished(terminal),
                         EventSource::Supervisor,
                     )?;
-                    return Ok(terminal.unwrap_or(RunStatus::Failed));
+                    let status = terminal.unwrap_or(RunStatus::Failed);
+                    if status == RunStatus::Failed {
+                        self.failure.cause = Some(match self.failure.process {
+                            Some(exit) if !exit.cancelled && exit.code != 0 => {
+                                FailureCause::ProcessExit
+                            }
+                            _ => FailureCause::TransportClosed,
+                        });
+                    }
+                    return Ok(status);
                 }
             };
             let update = session.receive(frame)?;
@@ -830,7 +880,14 @@ impl TurnExecution {
                     .events
                     .iter()
                     .any(|event| matches!(event.data, ProviderEventData::Error { .. }));
+            let provider_error = update.events.iter().any(|event| {
+                event.location.parent_item_id.is_none()
+                    && matches!(event.data, ProviderEventData::Error { .. })
+            });
             if let Some(status) = self.record_update(process, update, EventSource::Provider)? {
+                if status == RunStatus::Failed && provider_error {
+                    self.failure.cause = Some(FailureCause::ProviderError);
+                }
                 ensure!(sent, "CLI finished before prompt dispatch");
                 if status == RunStatus::Succeeded && self.native_suggestions {
                     self.collect_suggestion(process, session, commands)?;
@@ -838,6 +895,7 @@ impl TurnExecution {
                 return Ok(status);
             }
             if failed_start {
+                self.failure.cause = provider_error.then_some(FailureCause::ProviderError);
                 return Ok(RunStatus::Failed);
             }
             if session_ready {
@@ -1059,6 +1117,7 @@ impl TurnExecution {
                 source: PlanSource::StructuredTurn,
             },
             Err(error) => {
+                self.failure.cause = Some(FailureCause::InvalidResult);
                 self.record(
                     ProviderEvent {
                         location: ProviderLocation::default(),

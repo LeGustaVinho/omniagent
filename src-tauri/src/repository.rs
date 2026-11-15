@@ -21,8 +21,8 @@ mod worktrees;
 pub(crate) mod writers;
 pub(crate) use candidates::save_worktree_candidate;
 pub use candidates::{AttemptWorktreeEvidence, CandidateRevision, GitChanges, LiveWorktree};
-pub(crate) use worktrees::capture_worktree_start;
 pub use worktrees::{GitStartingState, ManagedWorktree, WorktreeStart, provision_task_worktree};
+pub(crate) use worktrees::{capture_worktree_start, verify_managed_recovery_checkout};
 pub use writers::with_managed_worktree_writer;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;

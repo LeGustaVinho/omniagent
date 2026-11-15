@@ -932,6 +932,55 @@ async fn conversation_job(
 }
 
 #[tokio::test]
+async fn recovery_refuses_a_checkout_whose_git_identity_changed_after_failure() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("queue.sqlite3"))?;
+    let (_, job, attempt) = conversation_job(&store, &temp.path().join("project")).await?;
+    let run_id = attempt.run.id;
+    store
+        .finish_agent_attempt(run_id.clone(), RunStatus::Failed, None)
+        .await?;
+    let failure = store
+        .job_failure(job.project_id.clone(), run_id.clone())
+        .await?
+        .context("failure should survive without logs or an artifact")?;
+    assert!(!failure.logs_available && !failure.saved_diff_available);
+    ensure!(
+        Command::new("git.exe")
+            .args(["init", "--quiet", "--separate-git-dir"])
+            .arg(temp.path().join("relocated-git"))
+            .current_dir(&attempt.scope.checkout)
+            .status()?
+            .success(),
+        "fixture could not relocate Git metadata"
+    );
+    assert!(
+        store
+            .queue_job_recovery(
+                job.project_id.clone(),
+                job.id.clone(),
+                run_id.clone(),
+                RecoveryAction::Retry
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .job(job.project_id.clone(), job.id)
+            .await?
+            .unwrap()
+            .queued_recovery
+            .is_none()
+    );
+    assert_eq!(
+        store.job_failure(job.project_id, run_id).await?,
+        Some(failure)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn crash_after_claim_requeues_unlaunched_jobs_but_honors_a_pending_cancel() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let database = temp.path().join("queue.sqlite3");

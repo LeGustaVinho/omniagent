@@ -493,6 +493,24 @@ pub(super) fn verify_managed(
     Ok(checkout)
 }
 
+pub(crate) async fn verify_managed_recovery_checkout(
+    store: &Store,
+    project: String,
+    owner: String,
+    checkout_id: String,
+) -> Result<()> {
+    let (worktree, git_dir, common) = store
+        .execute(move |db| load_worktree(db, &project, &owner))
+        .await?
+        .context("The managed worktree is unavailable")?;
+    ensure!(
+        worktree.checkout_id == checkout_id,
+        "The task's managed worktree changed"
+    );
+    tokio::task::spawn_blocking(move || verify_managed(&worktree, &git_dir, &common).map(|_| ()))
+        .await?
+}
+
 pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Result<bool> {
     let identity = store.execute({
         let run = run_id.clone();

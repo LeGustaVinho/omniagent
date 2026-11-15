@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { JobFailurePanel } from "@/job-failure";
 import { useQuery } from "@tanstack/react-query";
 import { CircleDot, FlaskConical, LibraryBig } from "lucide-react";
 import { useState } from "react";
@@ -81,6 +82,7 @@ function RecordedConversationRun({ conversationId, projectId, runId, onClose }: 
   return <div className="h-full overflow-auto">
     <ConversationActivity embedded conversationId={owner} run={run} projection={activity.projection} onClose={onClose} />
     <div className="work-inspection-body">
+      {(run.status === "failed" || run.status === "interrupted") && <JobFailurePanel projectId={projectId} runId={runId} />}
       <ConversationRequests conversationId={owner} runId={runId} activity={activity} />
       {activity.live && <StopConversation {...activity} />}
       {activity.error && <p role="alert">{String(activity.error)}</p>}

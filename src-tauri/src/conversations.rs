@@ -812,6 +812,17 @@ impl Store {
         outcome: RunStatus,
         response: Option<String>,
     ) -> Result<()> {
+        self.finish_observed_agent_attempt(run_id, outcome, response, None)
+            .await
+    }
+
+    pub(crate) async fn finish_observed_agent_attempt(
+        &self,
+        run_id: String,
+        outcome: RunStatus,
+        response: Option<String>,
+        failure: Option<crate::jobs::FailureObservation>,
+    ) -> Result<()> {
         ensure!(outcome.is_terminal(), "attempt outcome must be terminal");
         let encrypted = response
             .filter(|text| !text.is_empty())
@@ -822,6 +833,7 @@ impl Store {
             let active = active_attempt(&tx, &run_id)?;
             let run = runs::load_run(&tx, &run_id)?;
             runs::advance_run(&tx, &run, outcome)?;
+            crate::jobs::record_job_failure(&tx, &run_id, outcome, failure)?;
             let context_id = if let Some(encrypted) = encrypted {
                 let mut entries = context_entries(&tx, &active.conversation_id, &active.context_id)?;
                 entries.push(insert_message(&tx, &active.conversation_id, MessageRole::Assistant, encrypted)?);
@@ -872,6 +884,16 @@ impl Store {
             for id in active {
                 let run = runs::load_run(&tx, &id)?;
                 runs::advance_run(&tx, &run, RunStatus::Interrupted)?;
+                crate::jobs::record_job_failure(
+                    &tx,
+                    &id,
+                    RunStatus::Interrupted,
+                    Some(crate::jobs::FailureObservation {
+                        phase: crate::jobs::FailurePhase::Restart,
+                        cause: Some(crate::jobs::FailureCause::RuntimeRestart),
+                        process: None,
+                    }),
+                )?;
                 close_permissions(&tx, &id)?;
                 close_native_questions(&tx, &id)?;
                 close_unfinished_structured_questions(&tx, &id)?;

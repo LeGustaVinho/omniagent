@@ -474,6 +474,29 @@ struct Inputs {
     scope: Option<SessionScope>,
 }
 
+pub(super) fn recovery_scope(db: &Connection, job: &Job) -> Result<SessionScope> {
+    let scope = load_inputs(db, job)?
+        .scope
+        .context("The job needs an eligible CLI profile")?;
+    ensure!(
+        scope.executable.is_file(),
+        "The job's CLI executable is unavailable"
+    );
+    if job.mode == SessionMode::ApprovedWrite {
+        let task = job
+            .task_id
+            .as_deref()
+            .context("The write scope is unavailable")?;
+        ensure!(
+            writer_owner(db, &job.project_id, task, &job.checkout_id)?
+                == job.worktree_owner_task_id
+                && job.worktree_owner_task_id.is_some(),
+            "The task no longer owns this worktree"
+        );
+    }
+    Ok(scope)
+}
+
 fn load_inputs(db: &Connection, job: &Job) -> Result<Inputs> {
     let (request, operator_scope): (Vec<u8>, Option<Vec<u8>>) = db.query_row(
         "SELECT request, operator_scope FROM jobs WHERE id = ?1",

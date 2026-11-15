@@ -5,6 +5,7 @@ import { useState } from "react";
 import type { JobInspection } from "@/bindings/JobInspection";
 import type { QueueState } from "@/bindings/QueueState";
 import type { RecoveryAction } from "@/bindings/RecoveryAction";
+import { JobFailurePanel } from "@/job-failure";
 import { Button } from "@/components/ui/button";
 import { matchesQueueView, queueBlockerReason, queueJobState, queueViews, type QueueView } from "@/queue-model";
 import { DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
@@ -117,6 +118,9 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
           {attempt && <><dt className="text-muted-foreground">Run ID</dt><dd className="break-all font-mono text-xs">{attempt.runId}</dd></>}
           {attempt?.recovery && <><dt className="text-muted-foreground">Recovery</dt><dd>{attempt.recovery === "resume" ? "Resumed from checkpoint" : "Retried saved input"}</dd></>}
         </dl>
+        {attempt && (attempt.status === "failed" || attempt.status === "interrupted") &&
+          <JobFailurePanel projectId={job.projectId} runId={attempt.runId}
+            openLogs={() => openActivity(attempt.runId, attempt.conversationId)} />}
         {blockers.length > 0 && <section className="grid gap-1.5" aria-label="Admission blockers">
           <h4 className="text-xs font-semibold">Admission blockers</h4>
           <ul className="divide-y divide-border rounded border border-border">

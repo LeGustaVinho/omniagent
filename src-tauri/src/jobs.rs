@@ -10,11 +10,16 @@ use crate::{
 };
 
 mod admission;
+mod failures;
 mod notices;
 mod recovery;
 mod scheduler;
 pub use admission::{
     AdmissionBlocker, AdmissionEnvironment, JobInspection, ProjectQueue, QueueSettings,
+};
+pub(crate) use failures::record_job_failure;
+pub use failures::{
+    FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use recovery::RecoveryAction;

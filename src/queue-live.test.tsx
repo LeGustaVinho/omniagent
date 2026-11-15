@@ -100,7 +100,8 @@ describe("project queue", () => {
         },
       },
     };
-    vi.mocked(invoke).mockResolvedValue({ settings: { paused: false, capacity: 2 }, active: 0, jobs: [recovery] });
+    vi.mocked(invoke).mockImplementation(async (command) =>
+      command === "job_failure" ? null : { settings: { paused: false, capacity: 2 }, active: 0, jobs: [recovery] });
     const user = userEvent.setup();
     const { openActivity } = renderQueue();
     await user.click(screen.getByRole("button", { name: "Waiting" }));
@@ -146,6 +147,15 @@ describe("project queue", () => {
       blockers: [{ type: "approval", approvalId }],
     };
     vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "job_failure") return {
+        outcome: "interrupted",
+        checkoutId,
+        checkoutRoot: checkout.checkoutRoot,
+        observation: { phase: "execution", cause: "shutdown", process: { code: 1, cancelled: true } },
+        providerOutcome: "interrupted",
+        logsAvailable: true,
+        savedDiffAvailable: false,
+      };
       if (command === "pending_job_approval_request") return { instructions: "Inspect the exact queued task." };
       if (command === "decide_job_approval") inspection = runningJob;
       if (command === "interrupt_queued_job_attempt") {
@@ -173,6 +183,8 @@ describe("project queue", () => {
       recoveryActions: ["retry", "resume"],
     };
     await user.click(screen.getByRole("button", { name: "Refresh queue" }));
+    expect(await screen.findByText("Saved diff is unavailable.")).toBeDefined();
+    expect(screen.getByText("OmniAgent interrupted the attempt during exit.")).toBeDefined();
     await user.click(await screen.findByRole("button", { name: "Retry saved input" }));
     expect(invoke).toHaveBeenCalledWith("queue_job_recovery", { ...identity, action: "retry" });
     await user.click(screen.getByRole("button", { name: "Resume from checkpoint" }));

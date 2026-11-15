@@ -14,7 +14,10 @@ use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     conversations::SessionScope,
-    jobs::{AdmissionBlocker, AdmissionEnvironment, Job, JobRequest, JobScheduler},
+    jobs::{
+        AdmissionBlocker, AdmissionEnvironment, FailureCause, FailurePhase, Job, JobRequest,
+        JobScheduler,
+    },
     process_io::CapturedProcess,
     providers::{Provider, SessionMode, runtime::start_managed_turn},
     repository::{
@@ -493,6 +496,25 @@ async fn scheduled_writer_records_worktree_identity_and_git_state_before_launch(
         start.starting.unstaged_diff_digest
     );
     assert!(!managed.root.join("clean-ran").exists());
+    let failure = store
+        .job_failure(job.project_id.clone(), run_id.clone())
+        .await?
+        .context("failed launch has no record")?;
+    assert_eq!(failure.outcome, RunStatus::Failed);
+    assert_eq!(failure.checkout_id, managed.checkout_id);
+    assert_eq!(failure.observation.phase, FailurePhase::Launch);
+    assert_eq!(
+        failure.observation.cause,
+        Some(FailureCause::LaunchRejected)
+    );
+    assert!(failure.observation.process.is_none());
+    assert!(failure.logs_available && !failure.saved_diff_available);
+    assert!(
+        store
+            .job_failure("other-project".into(), run_id.clone())
+            .await?
+            .is_none()
+    );
     assert!(matches!(
         store
             .attempt_worktree_evidence(job.project_id, run_id.clone())
@@ -632,6 +654,15 @@ async fn exit_saves_partial_writer_evidence_and_keeps_it_on_restart() -> Result<
     assert!(interrupted.queued_recovery.is_none());
     let attempt = interrupted.latest_attempt.unwrap();
     assert_eq!(attempt.status, RunStatus::Interrupted);
+    let failure = store
+        .job_failure(project.project_id.clone(), attempt.run_id.clone())
+        .await?
+        .context("interrupted writer has no failure record")?;
+    assert_eq!(failure.observation.phase, FailurePhase::Execution);
+    assert_eq!(failure.observation.cause, Some(FailureCause::Shutdown));
+    assert!(failure.observation.process.is_some());
+    assert_eq!(failure.provider_outcome.as_deref(), Some("interrupted"));
+    assert!(failure.saved_diff_available);
     let saved = store
         .attempt_worktree_evidence(project.project_id.clone(), attempt.run_id.clone())
         .await?
@@ -653,6 +684,12 @@ async fn exit_saves_partial_writer_evidence_and_keeps_it_on_restart() -> Result<
     fs::write(tree.root.join("candidate.bin"), b"new live content")?;
     let reopened = Store::open(database)?;
     reopened.recover_agent_attempts_after_restart().await?;
+    assert_eq!(
+        reopened
+            .job_failure(project.project_id.clone(), attempt.run_id.clone())
+            .await?,
+        Some(failure)
+    );
     assert_eq!(
         reopened
             .attempt_worktree_evidence(project.project_id.clone(), attempt.run_id.clone())

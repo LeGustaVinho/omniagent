@@ -8,11 +8,12 @@ use crate::{
     dispatch::ContextSnapshot,
     protection,
     providers::{Provider, SessionMode},
+    repository,
     runs::RunStatus,
     store::Store,
 };
 
-use super::{Job, QueueState, load_job};
+use super::{Job, QueueState, admission::recovery_scope, load_job};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -216,6 +217,28 @@ impl Store {
         expected_run: String,
         action: RecoveryAction,
     ) -> Result<Job> {
+        let (checkout_id, owner, scope) = self
+            .execute({
+                let (project, id) = (project_id.clone(), job_id.clone());
+                move |db| {
+                    let job = load_job(db, &project, &id)?
+                        .context("Job is unavailable in this project")?;
+                    let scope = recovery_scope(db, &job)?;
+                    Ok((job.checkout_id, job.worktree_owner_task_id, scope))
+                }
+            })
+            .await?;
+        if let Some(owner) = owner.as_ref() {
+            repository::verify_managed_recovery_checkout(
+                self,
+                project_id.clone(),
+                owner.clone(),
+                checkout_id,
+            )
+            .await?;
+        } else {
+            repository::verify_checkout(self, checkout_id, scope.checkout.clone()).await?;
+        }
         let job = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -230,6 +253,10 @@ impl Store {
                 ensure!(
                     checkpoint.actions(job.mode).contains(&action),
                     "This recovery action needs a confirmed checkpoint"
+                );
+                ensure!(
+                    recovery_scope(&tx, &job)? == scope && job.worktree_owner_task_id == owner,
+                    "The effective job profile or worktree owner changed during recovery"
                 );
                 if let Some(queued_action) = job.queued_recovery {
                     ensure!(
