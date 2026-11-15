@@ -29,8 +29,9 @@ export function matchesQueueView(state: JobState, view: QueueView) {
   }
 }
 
-export function queueJobState({ job, blockers }: JobInspection): JobState {
+export function queueJobState({ job, blockers, questionWait }: JobInspection): JobState {
   if (job.queueState === "cancelled") return "Cancelled";
+  if (questionWait) return questionWait.count === questionWait.needsReview ? "Needs review" : "Waiting for input";
   if (job.latestAttempt && !job.queuedRecovery && !job.downstreamWait) return runLabels[job.latestAttempt.status];
   if (job.queueState === "paused") return "Paused";
   if (blockers.some(({ type }) => type === "approval")) return "Waiting for approval";

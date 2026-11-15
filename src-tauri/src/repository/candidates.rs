@@ -249,6 +249,34 @@ pub(super) fn capture_git(
     Ok(first)
 }
 
+pub(super) fn recheck_candidate(
+    worktree: &ManagedWorktree,
+    git_dir: &str,
+    common: &str,
+    payload: &[u8],
+) -> Result<GitStartingState> {
+    let AttemptWorktreeEvidence::Saved { artifact } =
+        serde_json::from_slice(&protection::unprotect(payload)?)?
+    else {
+        anyhow::bail!("The saved question has no worktree candidate");
+    };
+    ensure!(
+        artifact.start.worktree == *worktree && artifact.start.git_common_dir == Path::new(common),
+        "The worktree identity changed since the question was saved"
+    );
+    let current = capture_git(
+        worktree,
+        git_dir,
+        common,
+        Some(&artifact.start.starting.head),
+    )?;
+    ensure!(
+        digest(&serde_json::to_vec(&current)?) == artifact.revision,
+        "The worktree content changed since the question was saved"
+    );
+    Ok(current.state)
+}
+
 fn read_git(
     worktree: &ManagedWorktree,
     git_dir: &str,

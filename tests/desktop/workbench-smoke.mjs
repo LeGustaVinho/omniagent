@@ -840,6 +840,12 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     assert.equal(await invoke(browser, "conversation_draft", { conversationId: conversation.id }), unsent);
     await click(browser, 'button[aria-label="Settings"]');
     await click(browser, "button=Execution policies");
+    const liveQuestionTimeout = browser.$('input[id="live-wait"]');
+    await liveQuestionTimeout.waitForEnabled();
+    assert.equal(await liveQuestionTimeout.getValue(), "10");
+    await liveQuestionTimeout.setValue("3");
+    await click(browser, '[data-setting="live-wait"] button[type="submit"]');
+    await browser.waitUntil(async () => (await invoke(browser, "project_question_timeout", { projectId: main.projectId })) === 3);
     const projectSubagentLimit = browser.$('input[id="subagent-cap"]');
     await projectSubagentLimit.waitForEnabled();
     await projectSubagentLimit.setValue("2");
@@ -914,6 +920,7 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
       conversationOverride: "cancel",
     });
     const persistedQuota = await invoke(browser, "conversation_subagent_quota", { conversationId: conversation.id });
+    assert.equal(await invoke(browser, "project_question_timeout", { projectId: main.projectId }), 3);
     assert.equal(persistedQuota.requested, 5);
     assert.equal(persistedQuota.authorized, 2);
     assert.equal(persistedQuota.modeOverride, null);

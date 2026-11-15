@@ -136,7 +136,7 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
           {attempt && <><dt className="text-muted-foreground">Run ID</dt><dd className="break-all font-mono text-xs">{attempt.runId}</dd></>}
           {attempt?.recovery && <><dt className="text-muted-foreground">Recovery</dt><dd>{attempt.recovery === "resume" ? "Resumed from checkpoint" : "Retried saved input"}</dd></>}
         </dl>
-        {attempt && (!job.downstreamWait || job.downstreamWait.state === "needs_review")
+        {attempt && !inspection.questionWait && (!job.downstreamWait || job.downstreamWait.state === "needs_review")
           && (attempt.status === "failed" || attempt.status === "interrupted") &&
           <JobFailurePanel projectId={job.projectId} runId={attempt.runId}
             openLogs={() => openActivity(attempt.runId, attempt.conversationId ?? undefined)} />}
@@ -182,7 +182,9 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
           {conversationId && ownCheckout && <Button className={buttonClass} type="button" variant="outline" onClick={() => openWorkspace("conversations", conversationId)}>Open conversation <ArrowRight size={13} /></Button>}
           {conversationId && !ownCheckout && <p className="w-full text-xs text-muted-foreground">Select the linked worktree to open this conversation.</p>}
           {job.taskId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openWorkspace("tasks", job.taskId ?? undefined)}>Open task <ArrowRight size={13} /></Button>}
-          {attempt && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(attempt.runId, conversationId)}>Inspect attempt</Button>}
+          {attempt && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(attempt.runId, conversationId)}>
+            {inspection.questionWait ? "Open originating turn" : "Inspect attempt"}
+          </Button>}
           {attempt?.previousRunId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(attempt.previousRunId!, conversationId)}>Inspect previous attempt</Button>}
           {requestingRunId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(requestingRunId, job.context?.conversationId)}>Open requesting run</Button>}
         </div>
@@ -202,7 +204,11 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
     refetchInterval: active ? 1000 : false,
     refetchOnWindowFocus: active,
   });
-  const visible = query.data?.jobs.filter((job) => matchesQueueView(queueJobState(job), view)) ?? [];
+  const visible = query.data?.jobs.filter((inspection) => {
+    const state = queueJobState(inspection);
+    return matchesQueueView(state, view) && (view !== "Active" || !inspection.questionWait ||
+      inspection.job.latestAttempt?.status === "waiting_for_input");
+  }) ?? [];
   const selectedJob = query.data?.jobs.find(({ job }) => job.id === selected);
   const settings = query.data?.settings;
   const control = useMutation({

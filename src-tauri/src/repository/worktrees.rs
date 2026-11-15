@@ -527,15 +527,33 @@ pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Res
                     params![checkout, run], |row| row.get(0))?;
                 ensure!(holder, "writer job does not hold its worktree reservation");
             }
-            Ok(load_worktree(db, &project, &task)?.map(|identity| (identity, writes)))
+            let checkpoint = if writes {
+                db.query_row(
+                    "SELECT c.evidence, c.capture_confirmed
+                     FROM structured_question_continuations l
+                     JOIN agent_questions q ON q.request_event_seq = l.request_event_seq
+                     LEFT JOIN job_worktree_candidates c ON c.run_id = q.run_id
+                     WHERE l.continuation_run_id = ?1",
+                    [&run], |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?, row.get::<_, Option<bool>>(1)?)),
+                ).optional()?
+            } else {
+                None
+            };
+            Ok(load_worktree(db, &project, &task)?.map(|identity| (identity, writes, checkpoint)))
         }
     }).await?;
-    let Some(((worktree, git_dir, common), writes)) = identity else {
+    let Some(((worktree, git_dir, common), writes, checkpoint)) = identity else {
         return Ok(false);
     };
     let saved = tokio::task::spawn_blocking(move || {
         let paths = verify_managed(&worktree, &git_dir, &common)?;
-        let starting = capture_git(&worktree, &git_dir, &common, None)?.state;
+        let starting = match checkpoint {
+            Some((Some(payload), Some(true))) => {
+                super::candidates::recheck_candidate(&worktree, &git_dir, &common, &payload)?
+            }
+            Some(_) => anyhow::bail!("The saved question has no confirmed worktree candidate"),
+            None => capture_git(&worktree, &git_dir, &common, None)?.state,
+        };
         Ok::<_, anyhow::Error>(WorktreeStart {
             worktree,
             repository_root: PathBuf::from(paths.repository_root),

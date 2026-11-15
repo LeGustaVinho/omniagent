@@ -163,7 +163,7 @@ fn observe_child(db: &Connection, child: &Job) -> Result<()> {
             [&attempt.run_id],
             |row| row.get(0),
         )?;
-        if writer_unsettled {
+        if writer_unsettled || super::question_waits::has_open_questions(db, &attempt.run_id)? {
             return Ok(());
         }
         (Some(attempt.run_id.as_str()), attempt.status)

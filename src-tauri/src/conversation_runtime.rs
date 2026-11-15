@@ -242,6 +242,18 @@ pub async fn pending_conversation_inputs(
         .map_err(ui_error)
 }
 
+#[tauri::command]
+pub async fn saved_conversation_questions(
+    store: State<'_, Store>,
+    conversation_id: String,
+    run_id: String,
+) -> Result<Vec<omniagent::jobs::SavedConversationQuestion>, String> {
+    store
+        .saved_conversation_questions(conversation_id, run_id)
+        .await
+        .map_err(ui_error)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationPage {

@@ -275,7 +275,12 @@ fn archive_superseded_questions(db: &Connection, conversation: &str) -> Result<(
         let mut query = db.prepare(
             "SELECT q.request_event_seq, q.run_id FROM agent_questions q
              JOIN agent_attempts a ON a.run_id = q.run_id
-             WHERE a.conversation_id = ?1 AND q.delivery IN ('pending', 'prepared')",
+             WHERE a.conversation_id = ?1 AND (
+                 q.delivery IN ('pending', 'prepared') OR EXISTS (
+                     SELECT 1 FROM native_question_waits w WHERE w.request_event_seq = q.request_event_seq
+                         AND w.state IN ('saved', 'needs_review')
+                 )
+             )",
         )?;
         query
             .query_map([conversation], |row| {
@@ -290,9 +295,10 @@ fn archive_superseded_questions(db: &Connection, conversation: &str) -> Result<(
         db.execute(
             "UPDATE agent_questions
              SET delivery = CASE delivery WHEN 'prepared' THEN 'unconfirmed' ELSE 'closed' END
-             WHERE request_event_seq = ?1",
+             WHERE request_event_seq = ?1 AND delivery IN ('pending', 'prepared')",
             [seq],
         )?;
+        super::question_waits::archive_saved_question(db, seq)?;
     }
     Ok(())
 }
@@ -308,7 +314,10 @@ pub(crate) fn detached_question_context(
          JOIN agent_questions q ON q.request_event_seq = l.request_event_seq
          JOIN agent_attempts a ON a.run_id = q.run_id
          WHERE q.request_event_seq = ?1 AND a.run_id = ?2 AND a.conversation_id = ?3
-           AND q.delivery = 'pending' AND l.continuation_run_id IS NULL AND l.context_id = a.result_context_id",
+           AND (q.delivery = 'pending' OR EXISTS (
+                 SELECT 1 FROM native_question_waits w WHERE w.request_event_seq = q.request_event_seq
+                     AND w.state IN ('saved', 'needs_review')
+           )) AND l.continuation_run_id IS NULL AND l.context_id = a.result_context_id",
         params![seq, run, conversation],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional()?;

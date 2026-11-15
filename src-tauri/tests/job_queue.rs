@@ -1186,6 +1186,14 @@ async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -
     db.execute_batch(
         "DROP TABLE attempt_subagent_audit;
          DROP TABLE native_subagent_audit_candidates;
+         DROP VIEW deliverable_job_notices;
+         DROP VIEW open_agent_questions;
+         DROP VIEW unconfirmed_question_stops;
+         DROP TRIGGER notice_structured_question;
+         DROP TRIGGER notice_job_outcome;
+         DROP INDEX agent_questions_by_run;
+         DROP TABLE native_question_waits;
+         DROP TABLE project_question_timeouts;
          DROP TABLE project_subagent_audit;
          DROP TABLE conversation_subagent_audit;
          ALTER TABLE job_pipeline_nodes DROP COLUMN subagent_audit;

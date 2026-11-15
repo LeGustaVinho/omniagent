@@ -214,7 +214,7 @@ impl Store {
                  JOIN active_agent_attempts active ON active.run_id = e.run_id
                  WHERE active.conversation_id = ?1 AND e.run_id = ?2 AND (
                     EXISTS (SELECT 1 FROM agent_permissions p WHERE p.request_event_seq = e.seq AND p.delivery = 'pending')
-                    OR EXISTS (SELECT 1 FROM agent_questions q WHERE q.request_event_seq = e.seq AND q.delivery = 'pending')
+                    OR EXISTS (SELECT 1 FROM open_agent_questions q WHERE q.request_event_seq = e.seq AND q.state = 'live')
                  ) ORDER BY e.seq",
             )?;
             let rows = statement.query_map(params![conversation_id, run_id], |row| row.get::<_, Vec<u8>>(0))?;
@@ -655,7 +655,10 @@ impl Store {
     ) -> Result<()> {
         let wakes_notices = matches!(
             event.data,
-            ProviderEventData::Approval { .. } | ProviderEventData::Question { .. }
+            ProviderEventData::Approval { .. }
+                | ProviderEventData::Question { .. }
+                | ProviderEventData::QuestionClosed { .. }
+                | ProviderEventData::QuestionReplySettled { .. }
         );
         let payload = protection::protect(&serde_json::to_vec(&event)?)?;
         self.execute(move |db| {
@@ -717,21 +720,27 @@ impl Store {
             }
             match &event.data {
                 ProviderEventData::Question { request_id, normalized: Some(_), route, .. }
-                    if (source == EventSource::Provider && route.is_native())
-                        || (source == EventSource::Application && !route.is_native()) =>
+                    if (primary && route.is_native()) || (source == EventSource::Application
+                        && event.location.parent_item_id.is_none() && !route.is_native()) =>
                 {
+                    let request_event_seq = tx.last_insert_rowid();
                     tx.execute(
                         "INSERT INTO agent_questions(request_event_seq, run_id, turn_id, request_key, route, delivery)
                          VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
-                        params![tx.last_insert_rowid(), run_id, active.turn_id, permission_key(request_id)?,
+                        params![request_event_seq, run_id, active.turn_id, permission_key(request_id)?,
                             if route.is_native() { "native" } else { "structured_turn" }],
                     )?;
+                    if route.is_native() {
+                        crate::jobs::open_native_question(&tx, &run_id, request_event_seq)?;
+                    }
                 }
                 ProviderEventData::QuestionReplyPrepared { request_id, reply, .. } if source == EventSource::Application => {
                     let key = permission_key(request_id)?;
                     let open: Vec<u8> = tx.query_row(
                         "SELECT e.payload FROM agent_questions q JOIN agent_events e ON e.seq = q.request_event_seq
-                         WHERE q.run_id = ?1 AND q.turn_id = ?2 AND q.request_key = ?3 AND q.route = 'native' AND q.delivery = 'pending'",
+                         JOIN native_question_waits w ON w.request_event_seq = q.request_event_seq
+                         WHERE q.run_id = ?1 AND q.turn_id = ?2 AND q.request_key = ?3 AND q.route = 'native'
+                           AND q.delivery = 'pending' AND w.state = 'live'",
                         params![run_id, active.turn_id, key],
                         |row| row.get(0),
                     ).context("question request is absent or stale for this turn")?;
@@ -754,13 +763,10 @@ impl Store {
                         params![run_id, active.turn_id, permission_key(request_id)?, delivery.as_sql()],
                     )?;
                     ensure!(changed == 1, "question reply is no longer prepared");
+                    crate::jobs::close_live_question(&tx, &run_id, &permission_key(request_id)?)?;
                 }
-                ProviderEventData::QuestionClosed { request_id } if source == EventSource::Provider => {
-                    tx.execute(
-                        "UPDATE agent_questions SET delivery = 'closed'
-                         WHERE run_id = ?1 AND turn_id = ?2 AND request_key = ?3 AND route = 'native' AND delivery = 'pending'",
-                        params![run_id, active.turn_id, permission_key(request_id)?],
-                    )?;
+                ProviderEventData::QuestionClosed { request_id } if primary => {
+                    crate::jobs::stage_provider_expiry(&tx, &run_id, &permission_key(request_id)?)?;
                 }
                 _ => {}
             }
@@ -848,6 +854,7 @@ impl Store {
             let run = runs::load_run(&tx, &run_id)?;
             crate::jobs::record_process_launch(&tx, &run_id)?;
             runs::advance_run(&tx, &run, RunStatus::Running)?;
+            crate::jobs::refresh_live_question_status(&tx, &run_id)?;
             tx.commit()?;
             Ok(())
         })
@@ -919,11 +926,12 @@ impl Store {
             };
             tx.execute("UPDATE agent_attempts SET result_context_id = ?1 WHERE run_id = ?2", params![context_id, run_id])?;
             crate::jobs::release_settled_writer(&tx, &run_id)?;
+            let saved_input = crate::jobs::settle_question_waits(&tx, &run_id, &context_id, quiescence_confirmed)?;
             crate::jobs::settle_native_subagents(&tx, &run_id, quiescence_confirmed)?;
             let suspended = crate::jobs::settle_parent_wait(
                 &tx, &run_id, &context_id, outcome, quiescence_confirmed,
             )?;
-            if outcome == RunStatus::Succeeded && !suspended {
+            if outcome == RunStatus::Succeeded && !suspended && !saved_input {
                 tx.execute("UPDATE agent_sessions SET cursor_context_id = ?1 WHERE id = ?2 AND provider_session_id IS NOT NULL
                     AND EXISTS(SELECT 1 FROM agent_attempts a
                         JOIN context_snapshots s ON s.run_id = a.run_id
@@ -942,7 +950,7 @@ impl Store {
             close_permissions(&tx, &run_id)?;
             close_native_questions(&tx, &run_id)?;
             tx.execute("DELETE FROM active_agent_attempts WHERE run_id = ?1", [&run_id])?;
-            if outcome == RunStatus::Interrupted && !suspended {
+            if outcome == RunStatus::Interrupted && !suspended && !saved_input {
                 crate::jobs::requeue_unlaunched_job(&tx, &run_id)?;
             }
             crate::jobs::observe_child_run(&tx, &run_id)?;
@@ -976,7 +984,6 @@ impl Store {
                     }),
                 )?;
                 close_permissions(&tx, &id)?;
-                close_native_questions(&tx, &id)?;
                 close_unfinished_structured_questions(&tx, &id)?;
                 crate::jobs::settle_subagent_audit(&tx, &id, false)?;
                 tx.execute(
@@ -984,6 +991,13 @@ impl Store {
                     [&id],
                 )?;
                 crate::jobs::release_settled_writer(&tx, &id)?;
+                let context: String = tx.query_row(
+                    "SELECT context_id FROM agent_attempts WHERE run_id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )?;
+                crate::jobs::restart_question_waits(&tx, &id, &context)?;
+                close_native_questions(&tx, &id)?;
                 if !crate::jobs::recover_waiting_parent(&tx, &id)? {
                     crate::jobs::requeue_unlaunched_job(&tx, &id)?;
                 }
@@ -994,6 +1008,7 @@ impl Store {
                 [],
             )?;
             tx.execute("DELETE FROM active_agent_attempts", [])?;
+            crate::jobs::recover_question_stop_reservations(&tx)?;
             crate::jobs::recover_native_subagents(&tx)?;
             crate::jobs::recover_commands(&tx)?;
             tx.commit()?;
@@ -1430,13 +1445,16 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         );
         let changed = db.execute(
             "UPDATE agent_questions SET delivery = 'closed'
-             WHERE request_event_seq = ?1 AND delivery = 'pending'",
+             WHERE request_event_seq = ?1 AND (delivery = 'pending' OR EXISTS (
+                SELECT 1 FROM native_question_waits w WHERE w.request_event_seq = ?1 AND w.state = 'saved'
+             ))",
             [request_event_seq],
         )?;
         ensure!(
             changed == 1,
             "structured planning question is no longer pending"
         );
+        crate::jobs::archive_saved_question(db, request_event_seq)?;
         answered_question = Some(origin);
     }
     let native_job_recovery = match history {
@@ -1530,8 +1548,9 @@ fn validate_structured_reply(
          JOIN agent_events e ON e.seq = q.request_event_seq
          JOIN agent_attempts a ON a.run_id = q.run_id
          JOIN agent_sessions s ON s.id = a.agent_session_id
-         WHERE q.run_id = ?1 AND q.request_key = ?2 AND q.route = 'structured_turn'
-           AND q.delivery = 'pending' AND a.conversation_id = ?3
+         JOIN open_agent_questions pending ON pending.request_event_seq = q.request_event_seq
+         WHERE q.run_id = ?1 AND q.request_key = ?2
+           AND pending.state = 'saved' AND a.conversation_id = ?3
            AND link.continuation_run_id IS NULL",
             params![
                 origin.run_id,
@@ -1552,12 +1571,15 @@ fn validate_structured_reply(
         original_scope == scope,
         "the planning question belongs to another profile or checkout"
     );
+    ensure!(
+        crate::jobs::saved_checkpoint_is_current(db, &origin.run_id, seq)?,
+        "The saved question needs checkpoint or authorization review"
+    );
     let event: ProviderEvent = serde_json::from_slice(&protection::unprotect(&payload)?)?;
     let ProviderEventData::Question {
         request_id,
         form,
         normalized: Some(normalized),
-        route: QuestionRoute::StructuredTurn,
         ..
     } = event.data
     else {
@@ -1593,7 +1615,8 @@ fn check_idle_base(db: &Connection, id: &str, requested: &str) -> Result<Convers
         "conversation context changed"
     );
     let active: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM active_agent_attempts WHERE conversation_id = ?1)",
+        "SELECT EXISTS(SELECT 1 FROM active_agent_attempts WHERE conversation_id = ?1
+         UNION ALL SELECT 1 FROM unconfirmed_question_stops WHERE conversation_id = ?1)",
         [id],
         |row| row.get(0),
     )?;
@@ -1968,6 +1991,104 @@ mod tests {
             })
             .await?;
         assert_eq!(attempts, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn question_deadlines_preserve_their_original_requests() -> Result<()> {
+        use crate::{jobs::QuestionTimer, providers::questions::QuestionForm};
+
+        let (_dir, store, chat, scope) = setup().await?;
+        let attempt = prepare(&store, &chat.id, scope, "Multiple questions").await?;
+        let run = attempt.run.id.clone();
+        let project = attempt.run.project_id.clone();
+        store.mark_agent_running(run.clone()).await?;
+        let dispatch = prepare_fixture_dispatch(&store, &attempt).await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+
+        let record = |id| {
+            let store = &store;
+            let run = run.clone();
+            async move {
+                let raw = json!([{"id":"target","question":"Which target?","options":[{"label":"Desktop"}]}]);
+                store
+                    .record_agent_observation(
+                        run,
+                        EventSource::Provider,
+                        ProviderEvent {
+                            location: Default::default(),
+                            data: ProviderEventData::Question {
+                                request_id: id,
+                                normalized: Some(QuestionForm::codex(&raw)?),
+                                form: raw,
+                                route: QuestionRoute::Native,
+                            },
+                        },
+                    )
+                    .await
+            }
+        };
+        assert_eq!(store.project_question_timeout(project.clone()).await?, 10);
+        record(RequestId::Number(7)).await?;
+        store
+            .set_project_question_timeout(project.clone(), 1)
+            .await?;
+        assert!(
+            store
+                .set_project_question_timeout(project, 0)
+                .await
+                .is_err()
+        );
+        record(RequestId::Text("7".into())).await?;
+        let deadlines = store.execute(|db| {
+            let mut query = db.prepare("SELECT opened_ms, deadline_ms FROM native_question_waits ORDER BY request_event_seq")?;
+            Ok(query.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        }).await?;
+        assert_eq!(deadlines.len(), 2);
+        assert_eq!(deadlines[0].1 - deadlines[0].0, 600_000);
+        assert_eq!(deadlines[1].1 - deadlines[1].0, 60_000);
+        let due = deadlines[1].1;
+        assert_eq!(
+            store
+                .pending_conversation_inputs(chat.id.clone(), run.clone())
+                .await?
+                .len(),
+            2
+        );
+        assert!(
+            matches!(store.poll_question_timer(run.clone(), due - 1).await?, QuestionTimer::WakeAt(at) if at == due)
+        );
+        assert!(matches!(
+            store.poll_question_timer(run.clone(), due).await?,
+            QuestionTimer::Stop
+        ));
+        assert!(
+            store
+                .pending_conversation_inputs(chat.id.clone(), run.clone())
+                .await?
+                .is_empty()
+        );
+        store
+            .finish_observed_agent_attempt(run.clone(), RunStatus::Interrupted, None, None, true)
+            .await?;
+        let saved = store.saved_conversation_questions(chat.id, run).await?;
+        assert_eq!(saved.len(), 2);
+        assert_eq!(
+            (&*saved[0].state, &*saved[0].reason),
+            ("saved", "turn_stopped")
+        );
+        assert_eq!((&*saved[1].state, &*saved[1].reason), ("saved", "timeout"));
+        assert!(matches!(
+            &saved[0].event.data,
+            ProviderEventData::Question {
+                request_id: RequestId::Number(7),
+                ..
+            }
+        ));
+        assert!(
+            matches!(&saved[1].event.data, ProviderEventData::Question { request_id: RequestId::Text(id), .. } if id == "7")
+        );
         Ok(())
     }
 

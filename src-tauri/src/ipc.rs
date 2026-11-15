@@ -170,6 +170,29 @@ pub async fn set_conversation_queue_history_policy(
 }
 
 #[tauri::command]
+pub async fn project_question_timeout(
+    store: State<'_, Store>,
+    project_id: String,
+) -> Result<u32, String> {
+    store
+        .project_question_timeout(project_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_project_question_timeout(
+    store: State<'_, Store>,
+    project_id: String,
+    minutes: u32,
+) -> Result<(), String> {
+    store
+        .set_project_question_timeout(project_id, minutes)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn project_subagent_policy(
     store: State<'_, Store>,
     project_id: String,

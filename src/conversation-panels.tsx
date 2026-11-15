@@ -301,7 +301,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
   const cancelRequested = attempt?.runId === run?.id && Boolean(attempt?.cancelRequested);
   const activity = useConversationRun(conversationId, run, cancelRequested);
   const { live } = activity;
-  const busy = queued || live || isLiveRun(attempt);
+  const busy = queued || live || isLiveRun(attempt) || activity.savedQuestions.length > 0;
   const [inspectedRun, setInspectedRun] = useState<string>();
   const activityButton = useRef<HTMLButtonElement>(null);
   const showingActivity = visible && run && inspectedRun === run.id;
@@ -448,10 +448,10 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
           if (historyRegion.current) historyRegion.current.scrollTop = historyRegion.current.scrollHeight;
           setShowJump(false);
         }}><ArrowDown aria-hidden /> Jump to latest</button>}
-        {Boolean(activity.live && activity.inputs.length) && <button className="conv-request-link" type="button" onClick={() => {
-          const request = historyRegion.current?.querySelector('[aria-label="Pending requests"]');
+        {Boolean(activity.inputs.length || activity.savedQuestions.length) && <button className="conv-request-link" type="button" onClick={() => {
+          const request = historyRegion.current?.querySelector<HTMLElement>('[aria-label="Pending requests"]');
           request?.scrollIntoView({ block: "nearest" });
-          request?.querySelector<HTMLElement>("button, input, select")?.focus({ preventScroll: true });
+          (request?.querySelector<HTMLElement>("button, input, select") ?? request)?.focus({ preventScroll: true });
         }}>Waiting for input <ArrowUp aria-hidden /></button>}
         {queued && job && <div className="conv-queued">
           <strong>{job.job.downstreamWait ? "Waiting for downstream jobs" : "Queued message"}</strong>

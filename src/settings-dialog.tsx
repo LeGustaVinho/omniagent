@@ -63,6 +63,37 @@ const pages: readonly Page[] = [
   ] },
 ];
 
+function ProjectQuestionTimeout({ projectId }: { projectId: string }) {
+  const client = useQueryClient();
+  const key = ["project-question-timeout", projectId];
+  const timeout = useQuery({
+    queryKey: key,
+    queryFn: () => invoke<number>("project_question_timeout", { projectId }),
+  });
+  const [draft, setDraft] = useState<string>();
+  const save = useMutation({
+    mutationFn: (minutes: number) => invoke<void>("set_project_question_timeout", { projectId, minutes }),
+    onSuccess: (_, minutes) => {
+      client.setQueryData(key, minutes);
+      setDraft(undefined);
+    },
+  });
+  return <SettingRow id="live-wait" label="Live question timeout (minutes)"
+    description="After this time, OmniAgent saves the question and stops the live turn.">
+    <form className="flex flex-wrap items-center gap-2" onSubmit={(event) => {
+      event.preventDefault();
+      if (draft !== undefined) save.mutate(Number(draft));
+    }}>
+      <input id="live-wait" className="w-20 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+        aria-describedby="live-wait-description" type="number" min={1} max={120} required
+        disabled={timeout.data === undefined || save.isPending}
+        value={draft ?? timeout.data ?? ""} onChange={(event) => setDraft(event.target.value)} />
+      <Button type="submit" variant="outline" disabled={draft === undefined || save.isPending}>Save</Button>
+      {(timeout.error || save.error) && <p role="alert" className="w-full text-sm text-red-300">{String(save.error || timeout.error)}</p>}
+    </form>
+  </SettingRow>;
+}
+
 const groups: { scope: Scope; label: string }[] = [
   { scope: "device", label: "This device" },
   { scope: "project", label: "Project" },
@@ -221,7 +252,8 @@ function SettingsSession({
         return <>
           <ProjectSubagentControls key={checkout.projectId} projectId={checkout.projectId} />
           <ProjectSubagentAuditControl key={`audit-${checkout.projectId}`} projectId={checkout.projectId} />
-          <PolicyForm fields={policyFields.execution.filter(({ id }) => id !== "subagent-policy" && id !== "subagent-cap" && id !== "subagent-audit")}
+          <ProjectQuestionTimeout key={`timeout-${checkout.projectId}`} projectId={checkout.projectId} />
+          <PolicyForm fields={policyFields.execution.filter(({ id }) => !["subagent-policy", "subagent-cap", "subagent-audit", "live-wait"].includes(id))}
             stored={undefined} simulate={simulate} />
         </>;
       default:
@@ -398,3 +430,5 @@ function CustomizationExample({ approved, approve }: { approved: boolean; approv
     </section>
   </div>;
 }
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";

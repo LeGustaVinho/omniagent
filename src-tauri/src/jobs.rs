@@ -18,6 +18,7 @@ mod inspection;
 mod notices;
 mod pipeline;
 mod policy;
+mod question_waits;
 mod recovery;
 mod scheduler;
 mod subagent_audit;
@@ -45,6 +46,12 @@ pub use policy::{
     DispatchRejection, JobPermission, JobRequirements, JobRole, JobRule, JobWorkspace,
     RequiredCustomization,
 };
+pub(crate) use question_waits::{
+    QuestionTimer, archive_saved_question, close_live_question, now_ms, open_native_question,
+    recover_question_stop_reservations, refresh_live_question_status, restart_question_waits,
+    saved_checkpoint_is_current, settle_question_waits, stage_provider_expiry,
+};
+pub use question_waits::{QuestionWaitSummary, SavedConversationQuestion};
 pub use recovery::RecoveryAction;
 pub(crate) use recovery::requeue_unlaunched_job;
 pub use scheduler::JobScheduler;

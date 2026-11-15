@@ -21,7 +21,7 @@ use crate::{
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
     jobs::{
         DispatchRejection, FailureCause, FailureObservation, FailurePhase, LaunchGate,
-        SubagentAuditRoute,
+        QuestionTimer, SubagentAuditRoute, now_ms,
     },
     mcp_bridge::{PERMISSION_PREFIX, Registration, RunBridge},
     process::TerminalOutcome,
@@ -314,6 +314,7 @@ fn start_turn(
             },
             quiescence_confirmed: false,
             downstream_requested: false,
+            question_changed: false,
         };
         let outcome = execution
             .run(runner.as_ref(), &receiver, bridge_executable)
@@ -377,6 +378,7 @@ fn start_turn(
 }
 
 struct TurnExecution {
+    question_changed: bool,
     failure: FailureObservation,
     quiescence_confirmed: bool,
     downstream_requested: bool,
@@ -401,6 +403,13 @@ struct TurnExecution {
 
 impl TurnExecution {
     fn record(&mut self, event: ProviderEvent, source: EventSource) -> Result<()> {
+        let question_changed = event.location.parent_item_id.is_none()
+            && matches!(
+                event.data,
+                ProviderEventData::Question { .. }
+                    | ProviderEventData::QuestionClosed { .. }
+                    | ProviderEventData::QuestionReplySettled { .. }
+            );
         let delegation_violation = source == EventSource::Provider
             && self.plan.native_subagent_limit == Some(0)
             && event.data.observed_native_subagent();
@@ -446,6 +455,7 @@ impl TurnExecution {
             source,
             event,
         ))?;
+        self.question_changed |= question_changed;
         ensure!(
             !delegation_violation,
             "The CLI started a native child while native delegation was disabled"
@@ -709,6 +719,10 @@ impl TurnExecution {
                 )
             });
         let prior_failure = self.failure;
+        let awaiting_question = self.app.block_on(
+            self.store
+                .preserve_questions_after_turn(self.plan.run.id.clone(), run.is_err()),
+        );
         self.failure.phase = FailurePhase::ProcessStop;
         self.failure.cause = None;
         let stopped = control.cancel();
@@ -718,12 +732,14 @@ impl TurnExecution {
         }
         let registration = endpoint.map(RunBridge::registration);
         drop(bridge);
+        let awaiting_question = awaiting_question?;
         self.downstream_requested = self
             .app
             .block_on(self.store.has_yielding_wait(self.plan.run.id.clone()))?;
         if managed_writer
             || self.exiting()
             || self.downstream_requested
+            || awaiting_question
             || self.plan.native_subagent_limit.is_some()
         {
             control
@@ -786,6 +802,7 @@ impl TurnExecution {
         let mut inventory_deadline = None;
         let mut wait_for_configuration = false;
         let mut wait_for_skills = false;
+        let mut question_deadline = None;
         loop {
             let registration = bridge.map(RunBridge::registration);
             if let Some(registration) = &registration {
@@ -797,10 +814,42 @@ impl TurnExecution {
             } else {
                 commands.try_recv()
             };
+            if sent
+                && !matches!(
+                    &command,
+                    Ok(Command::Interrupt | Command::YieldToDownstream)
+                        | Err(mpsc::TryRecvError::Disconnected)
+                )
+            {
+                let now = now_ms();
+                if std::mem::take(&mut self.question_changed)
+                    || question_deadline.is_some_and(|deadline| now >= deadline)
+                {
+                    question_deadline = match self.app.block_on(
+                        self.store
+                            .poll_question_timer(self.plan.run.id.clone(), now),
+                    )? {
+                        QuestionTimer::Idle => None,
+                        QuestionTimer::WakeAt(deadline) => Some(deadline),
+                        QuestionTimer::Stop => {
+                            interrupt_to_completion(process, session, |event, source| {
+                                self.record(event, source)
+                            })?;
+                            return Ok(RunStatus::Interrupted);
+                        }
+                    };
+                }
+            }
             match command {
                 Ok(Command::Interrupt | Command::YieldToDownstream)
                 | Err(mpsc::TryRecvError::Disconnected) => {
                     let yielding = matches!(command, Ok(Command::YieldToDownstream));
+                    if sent && !exiting && !yielding && matches!(command, Ok(Command::Interrupt)) {
+                        self.app.block_on(
+                            self.store
+                                .close_questions_for_operator_stop(self.plan.run.id.clone()),
+                        )?;
+                    }
                     let outcome = if sent {
                         match interrupt_to_completion(process, session, |event, source| {
                             self.record(event, source)
@@ -903,6 +952,12 @@ impl TurnExecution {
                 Ok(frame) => frame?,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if sent {
+                        self.app.block_on(
+                            self.store
+                                .preserve_questions_after_turn(self.plan.run.id.clone(), true),
+                        )?;
+                    }
                     process.control.cancel()?;
                     let terminal = process.control.wait()?;
                     self.failure.process = Some(terminal.into());
@@ -944,7 +999,11 @@ impl TurnExecution {
                     self.failure.cause = Some(FailureCause::ProviderError);
                 }
                 ensure!(sent, "CLI finished before prompt dispatch");
-                if status == RunStatus::Succeeded && self.native_suggestions {
+                let awaiting_question = self.app.block_on(
+                    self.store
+                        .preserve_questions_after_turn(self.plan.run.id.clone(), false),
+                )?;
+                if status == RunStatus::Succeeded && self.native_suggestions && !awaiting_question {
                     self.collect_suggestion(process, session, commands)?;
                 }
                 return Ok(status);

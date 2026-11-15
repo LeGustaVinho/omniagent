@@ -27,6 +27,7 @@ use super::{
     history::{effective_release_blocker, load_binding, uses_recorded_checkpoint},
     insert_job, load_job,
     policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
+    question_waits::{QuestionWaitSummary, has_open_questions, question_wait_summary},
     recovery::{RecoveryCheckpoint, pending_recovery, recovery_source},
     subagents::{SubagentAllocation, job_subagent_allocation},
 };
@@ -121,6 +122,9 @@ pub struct JobInspection {
     pub job: Job,
     pub blockers: Vec<AdmissionBlocker>,
     pub recovery_actions: Vec<RecoveryAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub question_wait: Option<QuestionWaitSummary>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -192,6 +196,10 @@ impl Store {
                 ensure!(
                     !already_pending,
                     "this conversation already has a pending job"
+                );
+                ensure!(
+                    saved_question_run(&tx, &context.conversation_id, &context.context_id)?.is_none(),
+                    "This conversation still has a saved question"
                 );
                 consume_matching_draft(&tx, &context.conversation_id, &text)?;
                 let mut request = JobRequest {
@@ -527,8 +535,11 @@ pub(super) fn queue_settings(db: &Connection) -> Result<QueueSettings> {
 
 fn occupancy(db: &Connection) -> Result<u32> {
     Ok(db.query_row(
-        "SELECT count(*) FROM job_attempts a JOIN runs r ON r.id = a.run_id
-         WHERE r.status IN ('starting', 'running', 'waiting_for_input')",
+        "SELECT count(*) FROM (
+            SELECT a.run_id FROM job_attempts a JOIN runs r ON r.id = a.run_id
+            WHERE r.status IN ('starting', 'running', 'waiting_for_input')
+            UNION SELECT run_id FROM unconfirmed_question_stops
+         )",
         [],
         |row| row.get(0),
     )?)
@@ -801,6 +812,12 @@ pub(super) fn inspect(
     env: &AdmissionEnvironment,
 ) -> Result<JobInspection> {
     let awaiting_recovery = job.queued_recovery.is_some() || job.downstream_wait.is_some();
+    let question_wait = job
+        .latest_attempt
+        .as_ref()
+        .map(|attempt| question_wait_summary(db, &attempt.run_id))
+        .transpose()?
+        .flatten();
     let blockers = if let Some(attempt) = job.latest_attempt.as_ref().filter(|_| !awaiting_recovery)
     {
         dispatch_rejection(db, &attempt.run_id)?
@@ -810,7 +827,7 @@ pub(super) fn inspect(
     } else {
         evaluate(db, &job, &load_inputs(db, &job)?, env)?.0
     };
-    let recovery_actions = if awaiting_recovery {
+    let recovery_actions = if awaiting_recovery || question_wait.is_some() {
         Vec::new()
     } else {
         recovery_source(db, &job)?
@@ -821,6 +838,7 @@ pub(super) fn inspect(
         job,
         blockers,
         recovery_actions,
+        question_wait,
     })
 }
 
@@ -844,11 +862,13 @@ fn evaluate(
     for id in &inputs.request.dependencies {
         let dependency =
             load_job(db, &job.project_id, id)?.context("job dependency disappeared")?;
-        let status = if dependency.downstream_wait.is_some() {
-            None
-        } else {
-            dependency.latest_attempt.map(|attempt| attempt.status)
-        };
+        let mut status = None;
+        if dependency.downstream_wait.is_none()
+            && let Some(attempt) = dependency.latest_attempt
+            && !has_open_questions(db, &attempt.run_id)?
+        {
+            status = Some(attempt.status);
+        }
         if status != Some(RunStatus::Succeeded) {
             blockers.push(Dependency {
                 job_id: id.clone(),
@@ -953,6 +973,10 @@ fn evaluate(
         }
         if let Some(run_id) = active_conversation_run(db, &context.conversation_id)? {
             blockers.push(ConversationBusy { run_id });
+        } else if let Some(run_id) =
+            saved_question_run(db, &context.conversation_id, &context.context_id)?
+        {
+            blockers.push(ConversationBusy { run_id });
         }
     }
     if inputs.request.requires_bridge && !env.bridge_available {
@@ -1013,8 +1037,24 @@ fn evaluate(
 fn active_conversation_run(db: &Connection, conversation: &str) -> Result<Option<String>> {
     Ok(db
         .query_row(
-            "SELECT run_id FROM active_agent_attempts WHERE conversation_id = ?1",
+            "SELECT run_id FROM active_agent_attempts WHERE conversation_id = ?1
+             UNION ALL SELECT run_id FROM unconfirmed_question_stops WHERE conversation_id = ?1 LIMIT 1",
             [conversation],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn saved_question_run(
+    db: &Connection,
+    conversation: &str,
+    context: &str,
+) -> Result<Option<String>> {
+    Ok(db
+        .query_row(
+            "SELECT run_id FROM open_agent_questions WHERE conversation_id = ?1 AND context_id = ?2
+            AND state IN ('saved', 'needs_review') ORDER BY request_event_seq LIMIT 1",
+            params![conversation, context],
             |row| row.get(0),
         )
         .optional()?)

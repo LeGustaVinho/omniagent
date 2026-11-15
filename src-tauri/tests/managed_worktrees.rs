@@ -388,7 +388,16 @@ fn candidate_fixture_worker() -> Result<()> {
                 }});
                 let accepted = json!({"id":frame["id"],"result":{"turn":{"id":"turn"}}});
                 writeln!(output, "{accepted}")?;
-                if root.join("fixture-hold-open").exists() {
+                if root.join("fixture-expire-question").exists() {
+                    let request = json!({"id":71,"method":"item/tool/requestUserInput","params":{
+                        "threadId":"fixture","turnId":"turn","itemId":"question",
+                        "questions":[{"id":"target","question":"Where should I write?","options":[{"label":"This worktree"}]}]
+                    }});
+                    let expired = json!({"method":"serverRequest/resolved","params":{
+                        "threadId":"fixture","requestId":71
+                    }});
+                    writeln!(output, "{request}\n{expired}")?;
+                } else if root.join("fixture-hold-open").exists() {
                     fs::write(root.join("fixture-ready"), [])?;
                 } else {
                     writeln!(output, "{terminal}")?;
@@ -398,6 +407,9 @@ fn candidate_fixture_worker() -> Result<()> {
                 continue;
             }
             Some("turn/interrupt") => {
+                if root.join("fixture-expire-question").exists() {
+                    fs::write(root.join("fixture-interrupted"), [])?;
+                }
                 let reply = json!({"id":frame["id"],"result":{}});
                 let terminal = json!({"method":"turn/completed", "params":{
                     "threadId":"fixture", "turn":{"id":"turn","status":"interrupted"}
@@ -1307,6 +1319,98 @@ async fn pipeline_commands_need_the_exact_release_and_share_supervision_and_link
             .command_job_output("another-project".into(), retry.run_id)
             .await?
             .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn expired_writer_question_retains_partial_work_and_releases_the_slot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("store.sqlite");
+    let store = Store::open(database.clone())?;
+    let source = temp.path().join("source");
+    let project = repository(&store, &source).await?;
+    let task = store
+        .create_project_task(project.project_id.clone(), "Partial question".into())
+        .await?;
+    let tree = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project.project_id.clone(),
+        task.id.clone(),
+        project.checkout_id.clone(),
+    )
+    .await?;
+    fs::create_dir_all(source.join(".git/info"))?;
+    fs::write(
+        source.join(".git/info/exclude"),
+        "ignored.txt\nfixture-expire-question\nfixture-interrupted\n",
+    )?;
+    fs::write(tree.root.join("fixture-expire-question"), [])?;
+    let runner = Arc::new(CandidateWriter);
+    let parent = candidate_parent(&store, &project, &runner).await?;
+    let env = AdmissionEnvironment {
+        runner: runner.identity().into(),
+        bridge_available: false,
+    };
+    let job =
+        queue_approved_writer(&store, &env, &tree, &parent, &task.id, "question-writer").await?;
+    let scheduler = JobScheduler::start(store.clone(), runner, None);
+    let queue = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let queue = store
+                .inspect_project_queue(project.project_id.clone(), env.clone())
+                .await?;
+            if queue.jobs.iter().any(|entry| {
+                entry.job.id == job.id
+                    && entry
+                        .job
+                        .latest_attempt
+                        .as_ref()
+                        .is_some_and(|a| a.status.is_terminal())
+            }) {
+                break Ok::<_, anyhow::Error>(queue);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("writer did not settle after the provider expired its question")??;
+    assert!(tree.root.join("fixture-interrupted").exists());
+    assert_eq!(queue.active, 0);
+    let inspection = queue
+        .jobs
+        .into_iter()
+        .find(|entry| entry.job.id == job.id)
+        .unwrap();
+    assert_eq!(inspection.question_wait.unwrap().saved, 1);
+    let attempt = inspection.job.latest_attempt.unwrap();
+    let owner = attempt
+        .conversation_id
+        .context("writer missing a conversation")?;
+    assert!(matches!(
+        store.attempt_worktree_evidence(project.project_id.clone(), attempt.run_id.clone()).await?,
+        Some(AttemptWorktreeEvidence::Saved { artifact }) if artifact.candidate.changes.as_ref()
+            .is_some_and(|changes| changes.untracked.iter().any(|file| file.path == "candidate.bin"))
+    ));
+    with_managed_worktree_writer(
+        &store,
+        project.project_id,
+        tree.checkout_id,
+        task.id,
+        |_| Ok(()),
+    )
+    .await?;
+    scheduler.shutdown().await?;
+    let reopened = Store::open(database)?;
+    reopened.recover_agent_attempts_after_restart().await?;
+    let saved = reopened
+        .saved_conversation_questions(owner, attempt.run_id)
+        .await?;
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        (&*saved[0].state, &*saved[0].reason),
+        ("saved", "provider_expired")
     );
     Ok(())
 }

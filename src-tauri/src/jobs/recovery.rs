@@ -144,6 +144,9 @@ pub(super) fn recovery_source(db: &Connection, job: &Job) -> Result<Option<Recov
     }) else {
         return Ok(None);
     };
+    if super::question_waits::has_open_questions(db, &attempt.run_id)? {
+        return Ok(None);
+    }
     if job.kind == JobKind::Command {
         let launch_requested = db.query_row(
             "SELECT process_launch_requested FROM job_attempts WHERE run_id = ?1",

@@ -25,6 +25,19 @@ type Page = {
   more: boolean;
   events: { data: EventData; location: ChildLocation }[];
 };
+type SavedQuestion = {
+  event: ConversationPendingInput;
+  state: "saving" | "saved" | "needs_review";
+  reason: "timeout" | "provider_expired" | "turn_stopped" | "runtime_restart" | "transport_closed" | "structured_output";
+};
+const saveReasons: Record<SavedQuestion["reason"], string> = {
+  timeout: "The live reply deadline expired.",
+  provider_expired: "The provider closed the live request.",
+  turn_stopped: "The turn ended with this question open.",
+  runtime_restart: "The runtime restarted with this question open.",
+  transport_closed: "The provider connection closed.",
+  structured_output: "The turn returned a question.",
+};
 type Projection = {
   cursor: string;
   streamed: string;
@@ -106,6 +119,12 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
     refetchInterval: live ? 200 : false,
     queryFn: () => invoke<ConversationPendingInput[]>("pending_conversation_inputs", target),
   });
+  const saved = useQuery({
+    queryKey: ["conversation-run", runId, "saved-questions", live],
+    enabled: Boolean(runId),
+    refetchInterval: live ? 200 : false,
+    queryFn: () => invoke<SavedQuestion[]>("saved_conversation_questions", target),
+  });
   const currentStop = stopState?.runId === runId ? stopState : undefined;
   const stopping = cancelRequested || Boolean(currentStop && !currentStop.error);
   async function stop() {
@@ -121,8 +140,9 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
   return {
     projection: result.data,
     output: result.data?.plan || result.data?.final || result.data?.streamed,
-    error: currentStop?.error || result.data?.error || result.error || inputs.error,
-    inputs: inputs.data ?? [],
+    error: currentStop?.error || result.data?.error || result.error || inputs.error || saved.error,
+    inputs: live ? inputs.data ?? [] : [],
+    savedQuestions: saved.data ?? [],
     refreshInputs: () => void inputs.refetch(),
     live,
     stop,
@@ -141,12 +161,27 @@ export function ConversationRequests({ activity, conversationId, runId }: {
   conversationId: string;
   runId: string;
 }) {
-  if (!activity.live || !activity.inputs.length) return null;
+  if (!activity.inputs.length && !activity.savedQuestions.length) return null;
+  const needsReview = !activity.inputs.length &&
+    activity.savedQuestions.every((question) => question.state === "needs_review");
+  const savedIds = new Set(activity.savedQuestions.map(({ event }) => event.data.request_id));
   return (
-    <section aria-label="Pending requests" className="conv-requests">
-      <p className="conv-waiting" role="status">Waiting for input</p>
-      {activity.inputs.map((request) => <PendingInput key={JSON.stringify(request.data.request_id)}
+    <section aria-label="Pending requests" className="conv-requests" tabIndex={-1}>
+      <p className="conv-waiting" role="status">{needsReview ? "Question needs review" : "Waiting for input"}</p>
+      {activity.inputs.filter(({ data }) => !savedIds.has(data.request_id)).map((request) => <PendingInput key={JSON.stringify(request.data.request_id)}
         input={request} conversationId={conversationId} runId={runId} onResolved={activity.refreshInputs} />)}
+      {activity.savedQuestions.map(({ event, state, reason }) => event.data.type === "question" &&
+        <div key={JSON.stringify(event.data.request_id)} className="grid gap-2 rounded-md border border-border bg-card p-3">
+          <p className="text-sm font-medium">{event.data.normalized?.message || "Input requested"}</p>
+          <p className="text-xs text-muted-foreground">{state === "saving" ? "Saving the turn checkpoint…" : saveReasons[reason]}</p>
+          {event.data.normalized?.fields.map((field) => <div key={field.id} className="grid gap-1 text-sm">
+            <p>{field.label}</p>
+            {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}
+            {field.input.kind === "choice" && <ul className="list-disc pl-5 text-xs">
+              {field.input.options.map(({ id, label }) => <li key={id}>{label}</li>)}
+            </ul>}
+          </div>)}
+        </div>)}
     </section>
   );
 }
