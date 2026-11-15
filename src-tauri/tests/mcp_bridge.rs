@@ -170,7 +170,7 @@ async fn runtime_inspection_is_bounded_redacted_and_audited_on_the_bound_attempt
         bridge_available: true,
     };
     let active = store
-        .claim_next_job(env)
+        .claim_next_job(env.clone())
         .await?
         .context("The scoped fixture was not admitted")?;
     store.mark_agent_running(active.run.id.clone()).await?;
@@ -307,6 +307,13 @@ async fn runtime_inspection_is_bounded_redacted_and_audited_on_the_bound_attempt
     )
     .await?;
     assert!(spoofed["error"].is_object());
+    let (helper, protected_query) = invoke_tool(
+        helper,
+        "inspect_omniagent",
+        json!({ "includeTranscript": true }),
+    )
+    .await?;
+    assert!(protected_query["error"].is_object());
     let (helper, result) = invoke_tool(helper, "inspect_omniagent", json!({})).await?;
     let body = result["result"]["structuredContent"]
         .as_object()
@@ -335,8 +342,31 @@ async fn runtime_inspection_is_bounded_redacted_and_audited_on_the_bound_attempt
         body["task"],
         json!({ "id": task.id, "title": "Inspection fixture [redacted]" })
     );
-    assert_eq!(body["queue"]["settings"]["capacity"], 3);
-    assert_eq!(body["queue"]["current"]["id"], root.id);
+    let runtime = store.inspect_project_queue(project, env).await?;
+    assert_eq!(
+        body["queue"]["settings"],
+        serde_json::to_value(runtime.settings)?
+    );
+    let current = runtime
+        .jobs
+        .iter()
+        .find(|entry| entry.job.id == root.id)
+        .context("The runtime did not return the current job")?;
+    assert_eq!(body["queue"]["current"]["id"], current.job.id);
+    assert_eq!(
+        body["queue"]["current"]["state"],
+        serde_json::to_value(current.job.queue_state)?
+    );
+    assert_eq!(
+        body["queue"]["current"]["runStatus"],
+        serde_json::to_value(
+            current
+                .job
+                .latest_attempt
+                .as_ref()
+                .map(|attempt| attempt.status)
+        )?
+    );
     assert_eq!(body["queue"]["moreSubmitted"], true);
     let submitted = body["queue"]["submitted"].as_array().unwrap();
     assert_eq!(
@@ -350,7 +380,26 @@ async fn runtime_inspection_is_bounded_redacted_and_audited_on_the_bound_attempt
             .map(String::as_str)
             .collect::<Vec<_>>()
     );
-    assert_eq!(submitted[0]["blockers"], json!(["approval"]));
+    for disclosed in submitted {
+        let entry = runtime
+            .jobs
+            .iter()
+            .find(|entry| disclosed["id"] == entry.job.id)
+            .context("The bridge returned a job missing from the runtime queue")?;
+        assert_eq!(
+            disclosed["taskId"],
+            serde_json::to_value(&entry.job.task_id)?
+        );
+        assert_eq!(
+            disclosed["state"],
+            serde_json::to_value(entry.job.queue_state)?
+        );
+        assert!(matches!(
+            entry.blockers.as_slice(),
+            [AdmissionBlocker::Approval { .. }]
+        ));
+        assert_eq!(disclosed["blockers"], json!(["approval"]));
+    }
     let diagnostics = body["diagnostics"].as_array().unwrap();
     assert_eq!(diagnostics.len(), 4);
     assert_eq!(body["moreDiagnostics"], true);
