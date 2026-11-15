@@ -133,6 +133,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn advertisement_alone_always_selects_managed_continuation() {
+        for (reported, reason) in [
+            (None, ManagedGoalReason::Unqualified),
+            (Some(false), ManagedGoalReason::Unavailable),
+            (Some(true), ManagedGoalReason::IncompleteLifecycle),
+        ] {
+            assert_eq!(
+                NativeGoalSupport::from_advertisement(reported),
+                NativeGoalSupport::Managed { reason }
+            );
+        }
+    }
+
+    #[test]
     fn verifies_lifecycle_budget_and_scope_before_choosing_the_native_route() {
         use NativeGoalAction::*;
 

@@ -13,6 +13,7 @@ use super::{
     DelegationControls, ForkBoundary, Interrupt, ProbeKind, Provider, ProviderEvent,
     ProviderEventData, ProviderLocation, ReportedModel, RequestId, SessionIntent, SessionMode,
     SessionRequest, Transport, TurnInput, TurnOutcome, WireMessage, capabilities,
+    goal::{NativeGoalObservation, NativeGoalState, NativeGoalSupport},
     rpc::{self, Rpc},
     skills::{SkillCatalog, SkillCatalogIssue, SkillEntry, SkillSource},
 };
@@ -76,6 +77,7 @@ impl CliAdapter for CodexAdapter {
             handshake_started: false,
             session: None,
             pending_fork: None,
+            goal_command: None,
             active: None,
             model_pages: Vec::new(),
             workspace_instructions: None,
@@ -132,6 +134,7 @@ struct CodexSession {
     handshake_started: bool,
     session: Option<Session>,
     pending_fork: Option<Session>,
+    goal_command: Option<bool>,
     active: Option<ActiveTurn>,
     model_pages: Vec<ReportedModel>,
     workspace_instructions: Option<String>,
@@ -380,6 +383,14 @@ impl CodexSession {
                         || config.get("project_doc_max_bytes").is_some()
                     {
                         codex_instructions = serde_json::from_value(config.clone()).ok();
+                    }
+                    if let Some(available) =
+                        config.pointer("/features/goals").and_then(Value::as_bool)
+                    {
+                        self.goal_command = Some(available);
+                        events.push(
+                            self.event(ProviderEventData::NativeGoalCommandReported { available }),
+                        );
                     }
                     let agents = &config["agents"];
                     let enabled = agents["enabled"].as_bool();
@@ -634,6 +645,9 @@ impl CodexSession {
     }
 
     fn notification(&mut self, method: &str, params: &Value) -> Result<AdapterUpdate> {
+        if matches!(method, "thread/goal/updated" | "thread/goal/cleared") {
+            return self.goal_notification(method, params);
+        }
         if self.active.is_none() && method != "error" {
             return Ok(AdapterUpdate::default());
         }
@@ -788,6 +802,57 @@ impl CodexSession {
         let mut event = self.event(data);
         event.location.turn_id = string(params, "turnId").or(event.location.turn_id);
         event.location.item_id = string(params, "itemId");
+        Ok(self.events(vec![event]))
+    }
+
+    fn goal_notification(&self, method: &str, params: &Value) -> Result<AdapterUpdate> {
+        let id = required_string(params, "threadId")?;
+        if self.session.as_ref().is_none_or(|session| session.id != id) {
+            return Ok(AdapterUpdate::default());
+        }
+        let cleared = method == "thread/goal/cleared";
+        let goal = if cleared {
+            &Value::Null
+        } else {
+            &params["goal"]
+        };
+        let (state, reported_state) = if cleared {
+            (NativeGoalState::Cleared, None)
+        } else {
+            ensure!(
+                goal["threadId"].as_str() == Some(id),
+                "Codex goal belongs to another thread"
+            );
+            let status = required_string(goal, "status")?;
+            let state = match status {
+                "active" => NativeGoalState::Active,
+                "paused" => NativeGoalState::Paused,
+                "blocked" => NativeGoalState::Blocked,
+                "budgetLimited" => NativeGoalState::BudgetLimited,
+                "usageLimited" => NativeGoalState::UsageLimited,
+                "complete" => NativeGoalState::Completed,
+                _ => NativeGoalState::Unknown,
+            };
+            (state, Some(status.to_owned()))
+        };
+        let provider_turn_id = if cleared {
+            None
+        } else {
+            string(params, "turnId").filter(|id| !id.is_empty())
+        };
+        let observation = NativeGoalObservation {
+            provider_session_id: id.to_owned(),
+            provider_goal_id: None,
+            provider_turn_id: provider_turn_id.clone(),
+            state,
+            reported_state,
+            tokens_used: goal["tokensUsed"].as_u64(),
+            token_budget: goal["tokenBudget"].as_u64(),
+            elapsed_seconds: goal["timeUsedSeconds"].as_u64(),
+            evaluation: None,
+        };
+        let mut event = self.event(ProviderEventData::GoalObserved { observation });
+        event.location.turn_id = provider_turn_id;
         Ok(self.events(vec![event]))
     }
 
@@ -974,6 +1039,10 @@ impl CodexSession {
 }
 
 impl CliSession for CodexSession {
+    fn native_goal_support(&self) -> NativeGoalSupport {
+        NativeGoalSupport::from_advertisement(self.goal_command)
+    }
+
     fn set_question_route(&mut self, route: super::questions::QuestionRoute) {
         self.question_route = route;
     }
@@ -1262,6 +1331,87 @@ mod tests {
 
     fn outbound(update: &AdapterUpdate, index: usize) -> Result<Value> {
         Ok(serde_json::from_slice(update.outbound[index].as_bytes())?)
+    }
+
+    #[test]
+    fn restored_goal_state_and_clear_are_separate_from_turn_cancellation() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate(
+            SessionMode::ReadOnly,
+            SessionIntent::Resume {
+                provider_session_id: "session".into(),
+            },
+            checkout.path(),
+        )?;
+        let restored = inbound(
+            &mut *session,
+            json!({
+                "method":"thread/goal/updated","params":{
+                    "threadId":"session","goal":{"threadId":"session","status":"active","tokensUsed":5,"tokenBudget":256,"timeUsedSeconds":7}
+                }
+            }),
+        )?;
+        assert!(matches!(restored.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::GoalObserved { observation },
+            location
+        }] if observation.state == NativeGoalState::Active && observation.tokens_used == Some(5)
+            && observation.elapsed_seconds == Some(7) && location.turn_id.is_none()
+            && observation.provider_goal_id.is_none() && observation.evaluation.is_none()));
+
+        session.send(TurnInput {
+            message_id: "work".into(),
+            text: "offline fixture".into(),
+            attachments: Vec::new(),
+        })?;
+        inbound(
+            &mut *session,
+            json!({
+                "method":"turn/started","params":{"threadId":"session","turn":{"id":"turn"}}
+            }),
+        )?;
+        let unrelated = inbound(
+            &mut *session,
+            json!({
+                "method":"thread/goal/cleared","params":{"threadId":"other"}
+            }),
+        )?;
+        assert!(unrelated.events.is_empty());
+        let budget = inbound(
+            &mut *session,
+            json!({
+                "method":"thread/goal/updated","params":{
+                    "threadId":"session","turnId":"turn",
+                    "goal":{"threadId":"session","status":"budgetLimited","tokensUsed":4096,"tokenBudget":256}
+                }
+            }),
+        )?;
+        assert!(matches!(budget.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::GoalObserved { observation },
+            location
+        }] if observation.state == NativeGoalState::BudgetLimited && observation.token_budget == Some(256)
+            && observation.tokens_used == Some(4096) && location.turn_id.as_deref() == Some("turn")
+            && observation.provider_turn_id == location.turn_id));
+        let cleared = inbound(
+            &mut *session,
+            json!({
+                "method":"thread/goal/cleared","params":{"threadId":"session"}
+            }),
+        )?;
+        assert!(matches!(cleared.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::GoalObserved { observation },
+            location
+        }] if observation.state == NativeGoalState::Cleared && location.turn_id.is_none()));
+        let interrupted = inbound(
+            &mut *session,
+            json!({
+                "method":"turn/completed","params":{"threadId":"session","turn":{"id":"turn","status":"interrupted"}}
+            }),
+        )?;
+        assert!(matches!(interrupted.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::TurnFinished { outcome: TurnOutcome::Interrupted },
+            location
+        }] if location.turn_id.as_deref() == Some("turn")));
+        Ok(())
     }
 
     #[test]

@@ -90,6 +90,7 @@ pub enum Capability {
     PlanningAnswers,
     NativePlanOutput,
     NativeGoalCommand,
+    NativeGoalEvents,
     CancelTurn,
     SubagentEvents,
     PerChildEvents,
@@ -103,7 +104,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::ModelInventory,
         Self::FreshSession,
         Self::Resume,
@@ -115,6 +116,7 @@ impl Capability {
         Self::PlanningAnswers,
         Self::NativePlanOutput,
         Self::NativeGoalCommand,
+        Self::NativeGoalEvents,
         Self::CancelTurn,
         Self::SubagentEvents,
         Self::PerChildEvents,

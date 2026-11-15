@@ -8,8 +8,11 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use omniagent::{
-    process_io::{CapturedProcess, Stream},
-    providers::{CliAdapter, codex::CodexAdapter},
+    process_io::{CapturedProcess, OutputFrame, Stream},
+    providers::{
+        CliAdapter, ProviderEventData, SessionIntent, SessionMode, SessionRequest,
+        codex::CodexAdapter, goal::NativeGoalState,
+    },
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
 };
 use serde_json::{Value, json};
@@ -145,6 +148,20 @@ fn codex_native_goal_budget_control_and_restore() -> Result<()> {
         .context("missing fresh thread ID")?;
     let goal_params = || json!({"threadId":thread,"origin":"user"});
     let status = |status| json!({"threadId":thread,"origin":"user","status":status});
+    let mut adapter = CodexAdapter.create_session(SessionRequest {
+        checkout: checkout.clone(),
+        intent: SessionIntent::Start,
+        mode: SessionMode::ReadOnly,
+        model: Some("gpt-6-luna".into()),
+        effort: None,
+    })?;
+    let frame = |message: Value| OutputFrame {
+        stream: Stream::Stdout,
+        data: message.to_string(),
+    };
+    adapter.start()?;
+    adapter.receive(frame(json!({"id":1,"result":{"userAgent":"goal-fixture"}})))?;
+    adapter.receive(frame(json!({"id":2,"result":start})))?;
 
     let absent = server.request("thread/goal/get", json!({"threadId":thread}))?;
     assert!(absent["goal"].is_null());
@@ -175,6 +192,13 @@ fn codex_native_goal_budget_control_and_restore() -> Result<()> {
         .as_u64()
         .context("missing usage")?;
     assert!(used >= 256);
+    let decoded = adapter.receive(frame(budget))?;
+    assert!(decoded.events.iter().any(|event| matches!(&event.data,
+        ProviderEventData::GoalObserved { observation }
+            if observation.state == NativeGoalState::BudgetLimited && observation.tokens_used == Some(used)
+                && observation.token_budget == Some(256)
+                && observation.provider_turn_id.as_deref() == turn.as_str()
+    )));
     server.notification(|frame| {
         frame["method"] == "turn/completed" && frame["params"]["turn"]["id"] == *turn
     })?;
@@ -183,9 +207,14 @@ fn codex_native_goal_budget_control_and_restore() -> Result<()> {
     assert_eq!(first_goal["goal"]["tokenBudget"], 256);
     let cleared = server.request("thread/goal/clear", goal_params())?;
     assert_eq!(cleared["cleared"], true);
-    server.notification(|frame| {
+    let cleared = server.notification(|frame| {
         frame["method"] == "thread/goal/cleared" && frame["params"]["threadId"] == thread
     })?;
+    let decoded = adapter.receive(frame(cleared))?;
+    assert!(decoded.events.iter().any(|event| matches!(&event.data,
+        ProviderEventData::GoalObserved { observation }
+            if observation.state == NativeGoalState::Cleared && event.location.turn_id.is_none()
+    )));
 
     let second = server.request("thread/goal/set", json!({
         "threadId":thread, "origin":"user","status":"active","tokenBudget":40000,

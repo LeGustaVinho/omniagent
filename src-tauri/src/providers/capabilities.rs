@@ -505,6 +505,9 @@ impl ReportedCapabilities {
             ProviderEventData::NativeGoalCommandReported { available } => {
                 self.goal_command.replace(*available) != Some(*available)
             }
+            ProviderEventData::GoalObserved { .. } => {
+                self.observed.insert(Capability::NativeGoalEvents)
+            }
             ProviderEventData::FreshSessionOpened => self.observed.insert(Capability::FreshSession),
             ProviderEventData::NativeForkVerified { .. } => {
                 self.observed.insert(Capability::NativeTurnFork)
@@ -625,7 +628,9 @@ impl ReportedCapabilities {
                         || capability.is_planning()
                         || matches!(
                             capability,
-                            Capability::NativeTurnFork | Capability::NativeDelegationControls
+                            Capability::NativeTurnFork
+                                | Capability::NativeDelegationControls
+                                | Capability::NativeGoalEvents
                         ) {
                         EvidenceBoundary::ExactCheckout
                     } else {
