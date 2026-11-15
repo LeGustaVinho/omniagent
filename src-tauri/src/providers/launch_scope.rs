@@ -54,6 +54,34 @@ pub(crate) struct ScopedLaunch {
 }
 
 impl ScopedLaunch {
+    pub(crate) fn apply_codex_subagent_limit(&mut self, allowance: u32) -> Result<()> {
+        ensure!(
+            self.evidence.provider == Provider::Codex,
+            "The CLI has no verified subagent control"
+        );
+        let enabled = allowance > 0;
+        // V2 includes the primary thread and can be selected by the model.
+        let v2_cap = allowance + 1;
+        let settings = [
+            format!("agents.enabled={enabled}"),
+            format!("features.multi_agent_v2.max_concurrent_threads_per_session={v2_cap}"),
+            if enabled {
+                format!("agents.max_concurrent_threads_per_session={allowance}")
+            } else {
+                "features.multi_agent_v2.enabled=false".into()
+            },
+        ];
+        for contents in settings {
+            self.arguments
+                .extend([OsString::from("-c"), OsString::from(&contents)]);
+            self.evidence.inputs.push(LaunchInput {
+                name: "--config".into(),
+                contents,
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn prepare(
         provider: Provider,
         version: &str,

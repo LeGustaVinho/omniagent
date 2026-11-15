@@ -28,7 +28,7 @@ use super::{
     insert_job, load_job,
     policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
     recovery::{RecoveryCheckpoint, pending_recovery, recovery_source},
-    subagents::job_quota_blocker,
+    subagents::{SubagentAllocation, job_subagent_allocation},
 };
 
 #[derive(Debug, Clone)]
@@ -420,7 +420,8 @@ impl Store {
                     continue;
                 }
                 let inputs = load_inputs(&tx, &job)?;
-                if !evaluate(&tx, &job, &inputs, &env)?.is_empty() {
+                let (blockers, allocation) = evaluate(&tx, &job, &inputs, &env)?;
+                if !blockers.is_empty() {
                     continue;
                 }
                 let checkpoint = job
@@ -430,7 +431,7 @@ impl Store {
                             .context("The recovery checkpoint is no longer current")
                     })
                     .transpose()?;
-                let plan = build_attempt(&tx, &job, inputs, checkpoint.as_ref())?;
+                let plan = build_attempt(&tx, &job, inputs, checkpoint.as_ref(), allocation)?;
                 let wait = job.downstream_wait.as_ref();
                 let previous_run = wait.map(|wait| wait.parent_run_id.as_str())
                     .or_else(|| checkpoint.as_ref().map(RecoveryCheckpoint::run_id));
@@ -541,6 +542,7 @@ fn build_attempt(
     job: &Job,
     inputs: Inputs,
     checkpoint: Option<&RecoveryCheckpoint>,
+    allocation: SubagentAllocation,
 ) -> Result<ScheduledAttempt> {
     if let Some(invocation) = inputs.command {
         let (run, _) = runs::insert_run(db, job.checkout_id.clone(), "command")?;
@@ -557,9 +559,9 @@ fn build_attempt(
             .context("The downstream wait context changed")?;
         let text = continuation_prompt(db, wait)?;
         let plan = if let Some(recorded) = recorded {
-            insert_recorded_job_attempt(db, conversation, scope, recorded, &text)?
+            insert_recorded_job_attempt(db, conversation, scope, recorded, &text, allocation)?
         } else {
-            insert_downstream_attempt(db, conversation, scope, &text)?
+            insert_downstream_attempt(db, conversation, scope, &text, allocation)?
         };
         ensure!(
             plan.previous_run_id.as_ref() == Some(&wait.parent_run_id),
@@ -592,7 +594,14 @@ fn build_attempt(
                         },
                     },
                 };
-                let plan = insert_job_recovery_attempt(db, conversation, scope, history, recorded)?;
+                let plan = insert_job_recovery_attempt(
+                    db,
+                    conversation,
+                    scope,
+                    history,
+                    recorded,
+                    allocation,
+                )?;
                 ensure!(
                     plan.previous_run_id.as_ref() == Some(&checkpoint.source_run_id),
                     "The recovered attempt lost its lineage"
@@ -620,11 +629,18 @@ fn build_attempt(
                                 question_route: binding.question_route,
                             },
                             &inputs.request.instructions,
+                            allocation,
                         )?
                     }
                     (JobOrigin::Operator, Some(context), None) => {
                         let conversation = load_conversation(db, &context.conversation_id)?;
-                        insert_job_attempt(db, conversation, scope, &inputs.request.instructions)?
+                        insert_job_attempt(
+                            db,
+                            conversation,
+                            scope,
+                            &inputs.request.instructions,
+                            allocation,
+                        )?
                     }
                     _ => {
                         let conversation = insert_conversation(
@@ -633,7 +649,13 @@ fn build_attempt(
                             "Background job".into(),
                             true,
                         )?;
-                        insert_job_attempt(db, conversation, scope, &inputs.request.instructions)?
+                        insert_job_attempt(
+                            db,
+                            conversation,
+                            scope,
+                            &inputs.request.instructions,
+                            allocation,
+                        )?
                     }
                 }
             }
@@ -783,7 +805,7 @@ pub(super) fn inspect(
             .into_iter()
             .collect()
     } else {
-        evaluate(db, &job, &load_inputs(db, &job)?, env)?
+        evaluate(db, &job, &load_inputs(db, &job)?, env)?.0
     };
     let recovery_actions = if awaiting_recovery {
         Vec::new()
@@ -804,7 +826,7 @@ fn evaluate(
     job: &Job,
     inputs: &Inputs,
     env: &AdmissionEnvironment,
-) -> Result<Vec<AdmissionBlocker>> {
+) -> Result<(Vec<AdmissionBlocker>, SubagentAllocation)> {
     use AdmissionBlocker::*;
     let mut blockers = Vec::new();
     let settings = queue_settings(db)?;
@@ -814,7 +836,7 @@ fn evaluate(
     match job.queue_state {
         QueueState::Queued => {}
         QueueState::Paused => blockers.push(JobPaused),
-        QueueState::Cancelled => return Ok(vec![JobCancelled]),
+        QueueState::Cancelled => return Ok((vec![JobCancelled], SubagentAllocation::default())),
     }
     for id in &inputs.request.dependencies {
         let dependency =
@@ -975,10 +997,14 @@ fn evaluate(
             limit: settings.capacity,
         });
     }
-    if let Some(quota) = job_quota_blocker(db, job)? {
-        blockers.push(quota);
-    }
-    Ok(blockers)
+    let allocation = match job_subagent_allocation(db, job, inputs.scope.as_ref())? {
+        Ok(allocation) => allocation,
+        Err(blocker) => {
+            blockers.push(blocker);
+            SubagentAllocation::default()
+        }
+    };
+    Ok((blockers, allocation))
 }
 
 fn active_conversation_run(db: &Connection, conversation: &str) -> Result<Option<String>> {

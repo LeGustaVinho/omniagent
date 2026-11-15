@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use ts_rs::TS;
 
 use crate::{
+    conversations::SessionScope,
     protection,
     providers::{Provider, ProviderEvent, ProviderEventData},
     store::Store,
@@ -15,7 +16,7 @@ use super::{AdmissionBlocker, Job, JobKind, history::structured_job_run};
 const DEFAULT_LIMIT: u32 = 3;
 const MAX_LIMIT: u32 = 32;
 const STRICT_CONTROL_REQUIRED: &str =
-    "Strict total requires a profile with verified native delegation controls";
+    "Strict total needs verified native delegation controls on this CLI profile and runner";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -78,14 +79,37 @@ pub struct ConversationSubagentQuota {
     pub mode_override: Option<SubagentLimitMode>,
     pub requested: u32,
     pub authorized: u32,
+    pub native_requested: u32,
+    pub native_sessions: Vec<NativeSubagentSession>,
+    pub configuration_pending: bool,
     pub managed: SubagentCounts,
     pub native: Vec<NativeSubagentCounts>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct NativeSubagentSession {
+    pub session_id: String,
+    pub provider: Provider,
+    pub allowance: u32,
+    pub requested: u32,
+    pub verified: bool,
+    pub needs_review: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct SubagentAllocation {
+    pub conversation_id: Option<String>,
+    pub native_allowance: Option<u32>,
+    pub native_requested: u32,
 }
 
 struct EffectiveQuota {
     project: ProjectSubagentPolicy,
     mode_override: Option<SubagentLimitMode>,
     requested: u32,
+    native_requested: u32,
 }
 
 impl EffectiveQuota {
@@ -116,12 +140,17 @@ fn project_policy(db: &Connection, project: &str) -> Result<ProjectSubagentPolic
 }
 
 fn effective_quota(db: &Connection, conversation: &str) -> Result<EffectiveQuota> {
-    let (project, mode, requested): (String, Option<String>, Option<u32>) = db.query_row(
-        "SELECT w.project_id, q.mode, q.requested
+    let (project, mode, requested, native_requested): (
+        String,
+        Option<String>,
+        Option<u32>,
+        Option<u32>,
+    ) = db.query_row(
+        "SELECT w.project_id, q.mode, q.requested, q.native_requested
          FROM conversations c JOIN checkouts w ON w.id = c.checkout_id
          LEFT JOIN conversation_subagent_quotas q ON q.conversation_id = c.id WHERE c.id = ?1",
         [conversation],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
     Ok(EffectiveQuota {
         project: project_policy(db, &project)?,
@@ -130,6 +159,7 @@ fn effective_quota(db: &Connection, conversation: &str) -> Result<EffectiveQuota
             .map(SubagentLimitMode::from_key)
             .transpose()?,
         requested: requested.unwrap_or(DEFAULT_LIMIT),
+        native_requested: native_requested.unwrap_or_default(),
     })
 }
 
@@ -189,11 +219,27 @@ fn quota_snapshot(db: &Connection, conversation: &str) -> Result<ConversationSub
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let native_sessions = native_subagent_sessions(db, conversation)?;
+    let current_total = managed.active + native_sessions.iter().map(|s| s.allowance).sum::<u32>();
+    let desired = quota.native_requested.min(quota.authorized());
+    let configuration_pending = match quota.mode() {
+        SubagentLimitMode::Managed => !native_sessions.is_empty(),
+        SubagentLimitMode::Strict => {
+            current_total > quota.authorized()
+                || has_unbounded_session(db, conversation)?
+                || native_sessions
+                    .iter()
+                    .any(|session| session.requested != desired)
+        }
+    };
     Ok(ConversationSubagentQuota {
         project: quota.project,
         mode_override: quota.mode_override,
         requested: quota.requested,
         authorized: quota.authorized(),
+        native_requested: quota.native_requested,
+        native_sessions,
+        configuration_pending,
         managed,
         native,
     })
@@ -241,17 +287,24 @@ impl Store {
         conversation: String,
         mode_override: Option<SubagentLimitMode>,
         requested: u32,
+        native_requested: Option<u32>,
     ) -> Result<ConversationSubagentQuota> {
         ensure!(
             requested <= MAX_LIMIT,
             "Subagent limit must be between 0 and {MAX_LIMIT}"
         );
+        ensure!(
+            native_requested.is_none_or(|value| value <= MAX_LIMIT),
+            "Native subagent limit must be between 0 and {MAX_LIMIT}"
+        );
         let state = self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute(
-                "INSERT INTO conversation_subagent_quotas(conversation_id, mode, requested) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(conversation_id) DO UPDATE SET mode = excluded.mode, requested = excluded.requested",
-                params![conversation, mode_override.map(SubagentLimitMode::key), requested],
+                 "INSERT INTO conversation_subagent_quotas(conversation_id, mode, requested, native_requested)
+                  VALUES (?1, ?2, ?3, coalesce(?4, 0))
+                  ON CONFLICT(conversation_id) DO UPDATE SET mode = excluded.mode, requested = excluded.requested,
+                      native_requested = coalesce(?4, conversation_subagent_quotas.native_requested)",
+                 params![conversation, mode_override.map(SubagentLimitMode::key), requested, native_requested],
             )?;
             let snapshot = quota_snapshot(&tx, &conversation)?;
             tx.commit()?;
@@ -292,9 +345,13 @@ pub(super) fn record_delegation_owner(db: &Connection, job: &str, run: &str) -> 
     Ok(())
 }
 
-pub(super) fn job_quota_blocker(db: &Connection, job: &Job) -> Result<Option<AdmissionBlocker>> {
+pub(super) fn job_subagent_allocation(
+    db: &Connection,
+    job: &Job,
+    scope: Option<&SessionScope>,
+) -> Result<Result<SubagentAllocation, AdmissionBlocker>> {
     if job.kind != JobKind::Agent {
-        return Ok(None);
+        return Ok(Ok(SubagentAllocation::default()));
     }
     let root: Option<String> = db
         .query_row(
@@ -311,45 +368,207 @@ pub(super) fn job_quota_blocker(db: &Connection, job: &Job) -> Result<Option<Adm
                 .as_ref()
                 .and_then(|attempt| attempt.conversation_id.as_deref())
         });
-    let Some(conversation) = conversation else {
-        let strict = project_policy(db, &job.project_id)?.mode == SubagentLimitMode::Strict;
-        return Ok(strict.then_some(AdmissionBlocker::Policy {
-            reason: STRICT_CONTROL_REQUIRED,
-        }));
+    let quota = match conversation {
+        Some(conversation) => effective_quota(db, conversation)?,
+        None => EffectiveQuota {
+            project: project_policy(db, &job.project_id)?,
+            mode_override: None,
+            requested: DEFAULT_LIMIT,
+            native_requested: 0,
+        },
     };
-    let quota = effective_quota(db, conversation)?;
-    if quota.mode() == SubagentLimitMode::Strict {
-        return Ok(Some(AdmissionBlocker::Policy {
+    authorize(db, conversation, &quota, scope, u32::from(root.is_some()))
+}
+
+fn authorize(
+    db: &Connection,
+    conversation: Option<&str>,
+    quota: &EffectiveQuota,
+    scope: Option<&SessionScope>,
+    managed_slots: u32,
+) -> Result<Result<SubagentAllocation, AdmissionBlocker>> {
+    let native = conversation
+        .map(|id| native_subagent_sessions(db, id))
+        .transpose()?
+        .unwrap_or_default();
+    let strict = quota.mode() == SubagentLimitMode::Strict;
+    if !strict && !native.is_empty()
+        || strict
+            && conversation
+                .map(|id| has_unbounded_session(db, id))
+                .transpose()?
+                .unwrap_or_default()
+    {
+        return Ok(Err(AdmissionBlocker::Policy {
+            reason: "Waiting for existing CLI sessions to settle before applying the subagent policy",
+        }));
+    }
+    if strict
+        && !scope.is_some_and(|scope| {
+            scope.provider == Provider::Codex
+                && scope.runner == crate::runner::DirectWindowsRunner::IDENTITY
+        })
+    {
+        return Ok(Err(AdmissionBlocker::Policy {
             reason: STRICT_CONTROL_REQUIRED,
         }));
     }
-    let Some(conversation_id) = root else {
-        return Ok(None);
-    };
     let active: u32 = db.query_row(
         "SELECT count(*) FROM managed_subagent_states WHERE conversation_id = ?1 AND state = 'active'",
-        [&conversation_id],
+        [conversation],
         |row| row.get(0),
     )?;
+    let used = active + native.iter().map(|session| session.allowance).sum::<u32>();
     let limit = quota.authorized();
-    Ok(
-        (active >= limit).then_some(AdmissionBlocker::SubagentQuota {
-            conversation_id,
-            active,
+    if managed_slots > 0 && used + managed_slots > limit {
+        return Ok(Err(AdmissionBlocker::SubagentQuota {
+            conversation_id: conversation
+                .context("Delegated job lost its conversation")?
+                .into(),
+            active: used,
             limit,
-        }),
-    )
+        }));
+    }
+    let native_requested = quota.native_requested.min(limit);
+    Ok(Ok(SubagentAllocation {
+        conversation_id: conversation.map(str::to_owned),
+        native_allowance: strict
+            .then(|| native_requested.min(limit.saturating_sub(used + managed_slots))),
+        native_requested,
+    }))
 }
 
-pub(crate) fn check_conversation_subagent_controls(
+pub(crate) fn direct_subagent_allocation(
     db: &Connection,
     conversation: &str,
+    source_run: Option<&str>,
+    scope: &SessionScope,
+) -> Result<SubagentAllocation> {
+    if let Some(run) = source_run {
+        let same_conversation: bool = db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM agent_attempts WHERE run_id = ?1 AND conversation_id = ?2)",
+            params![run, conversation],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            same_conversation,
+            "The saved question belongs to another conversation"
+        );
+    }
+    let owner = source_run
+        .map(|run| delegation_owner(db, run))
+        .transpose()?;
+    let conversation = owner.as_deref().unwrap_or(conversation);
+    let quota = effective_quota(db, conversation)?;
+    match authorize(db, Some(conversation), &quota, Some(scope), 0)? {
+        Ok(allocation) => Ok(allocation),
+        Err(AdmissionBlocker::Policy { reason }) => anyhow::bail!("{reason}"),
+        Err(_) => anyhow::bail!("The conversation subagent quota is unavailable"),
+    }
+}
+
+fn has_unbounded_session(db: &Connection, conversation: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_attempts a
+         JOIN active_agent_attempts live ON live.run_id = a.run_id
+         JOIN agent_sessions s ON s.id = a.agent_session_id
+         WHERE a.subagent_conversation_id = ?1 AND s.native_subagent_limit IS NULL)",
+        [conversation],
+        |row| row.get(0),
+    )?)
+}
+
+fn native_subagent_sessions(
+    db: &Connection,
+    conversation: &str,
+) -> Result<Vec<NativeSubagentSession>> {
+    let mut query = db.prepare(
+        "SELECT s.id, json_quote(json_extract(s.scope, '$.provider')), s.native_subagent_limit, r.requested, r.state
+         FROM native_subagent_reservations r JOIN agent_attempts a ON a.run_id = r.run_id
+         JOIN agent_sessions s ON s.id = r.session_id
+         WHERE a.subagent_conversation_id = ?1 AND r.state <> 'released' ORDER BY a.run_id",
+    )?;
+    let rows = query.query_map([conversation], |row| {
+        Ok((
+            row.get(0)?,
+            row.get::<_, String>(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (session_id, provider, allowance, requested, state) = row?;
+        Ok(NativeSubagentSession {
+            session_id,
+            provider: serde_json::from_str(&provider)?,
+            allowance,
+            requested,
+            verified: state == "verified" || state == "needs_review",
+            needs_review: state == "needs_review",
+        })
+    })
+    .collect()
+}
+
+pub(crate) fn reserve_native_subagents(
+    db: &Connection,
+    run: &str,
+    session: &str,
+    requested: u32,
 ) -> Result<()> {
-    ensure!(
-        effective_quota(db, conversation)?.mode() != SubagentLimitMode::Strict,
-        STRICT_CONTROL_REQUIRED
-    );
+    db.execute(
+        "INSERT INTO native_subagent_reservations(run_id, session_id, requested, state)
+         VALUES (?1, ?2, ?3, 'reserved')",
+        params![run, session, requested],
+    )?;
     Ok(())
+}
+
+pub(crate) fn settle_native_subagents(db: &Connection, run: &str, stopped: bool) -> Result<()> {
+    db.execute(
+        "UPDATE native_subagent_reservations
+         SET state = CASE WHEN ?2 OR state = 'reserved' THEN 'released' ELSE 'needs_review' END
+         WHERE run_id = ?1",
+        params![run, stopped],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn recover_native_subagents(db: &Connection) -> Result<()> {
+    // The single-instance desktop owns the non-inheritable Windows job handle, which
+    // terminates the process tree when the previous runtime exits.
+    db.execute(
+        "UPDATE native_subagent_reservations SET state = 'released' WHERE state <> 'released'
+         AND session_id IN (SELECT id FROM agent_sessions WHERE json_extract(scope, '$.runner') = ?1)",
+        [crate::runner::DirectWindowsRunner::IDENTITY],
+    )?;
+    Ok(())
+}
+
+impl Store {
+    pub(crate) async fn verify_native_subagents(&self, run: String) -> Result<bool> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let updated = tx.execute(
+                "UPDATE native_subagent_reservations AS r SET state = 'verified'
+                 WHERE run_id = ?1 AND state = 'reserved'
+                   AND EXISTS (SELECT 1 FROM active_agent_attempts WHERE run_id = ?1)
+                   AND EXISTS (SELECT 1 FROM agent_sessions s WHERE s.id = r.session_id
+                       AND s.provider_session_id IS NOT NULL AND NOT EXISTS (
+                           SELECT 1 FROM native_subagent_reservations other
+                           JOIN agent_sessions t ON t.id = other.session_id
+                           WHERE other.state <> 'released' AND t.id <> s.id
+                             AND t.provider_session_id = s.provider_session_id
+                             AND json_extract(t.scope, '$.provider') = json_extract(s.scope, '$.provider')
+                             AND json_extract(t.scope, '$.accountBinding') IS json_extract(s.scope, '$.accountBinding')
+                       ))",
+                [&run],
+            )?;
+            tx.commit()?;
+            Ok(updated == 1)
+        }).await
+    }
 }
 
 pub(crate) fn record_native_subagent(

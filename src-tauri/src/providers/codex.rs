@@ -464,11 +464,18 @@ impl CodexSession {
                     let concurrent_spawned_threads = agents["max_concurrent_threads_per_session"]
                         .as_u64()
                         .or_else(|| agents["max_threads"].as_u64());
-                    if enabled.is_some() || concurrent_spawned_threads.is_some() {
+                    let v2_threads_including_root = config
+                        .pointer("/features/multi_agent_v2/max_concurrent_threads_per_session")
+                        .and_then(Value::as_u64);
+                    if enabled.is_some()
+                        || concurrent_spawned_threads.is_some()
+                        || v2_threads_including_root.is_some()
+                    {
                         events.push(self.event(ProviderEventData::DelegationControlsReported {
                             controls: DelegationControls::CodexSessionTree {
                                 enabled,
                                 concurrent_spawned_threads,
+                                v2_threads_including_root,
                             },
                         }));
                     }

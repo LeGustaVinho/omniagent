@@ -30,9 +30,9 @@ use crate::{
 };
 
 use super::{
-    AdapterUpdate, ApprovalDecision, CliSession, Provider, ProviderEvent, ProviderEventData,
-    ProviderLocation, RequestId, SessionIntent, SessionMode, SessionRequest, TurnInput,
-    TurnOutcome, WireMessage,
+    AdapterUpdate, ApprovalDecision, CliSession, DelegationControls, Provider, ProviderEvent,
+    ProviderEventData, ProviderLocation, RequestId, SessionIntent, SessionMode, SessionRequest,
+    TurnInput, TurnOutcome, WireMessage,
     capabilities::{
         CapabilityAssessment, CapabilityScope, CapabilitySubject, ReportedCapabilities,
         Verification,
@@ -582,6 +582,9 @@ impl TurnExecution {
             session.arguments(),
             registration,
         )?;
+        if let Some(allowance) = self.plan.native_subagent_limit {
+            launch.apply_codex_subagent_limit(allowance)?;
+        }
         if let Some(recovery) = &self.plan.native_job_recovery {
             ensure!(
                 launch.evidence.approved == recovery.approved_customizations,
@@ -708,7 +711,11 @@ impl TurnExecution {
         self.downstream_requested = self
             .app
             .block_on(self.store.has_yielding_wait(self.plan.run.id.clone()))?;
-        if managed_writer || self.exiting() || self.downstream_requested {
+        if managed_writer
+            || self.exiting()
+            || self.downstream_requested
+            || self.plan.native_subagent_limit.is_some()
+        {
             control
                 .confirm_quiescence()
                 .inspect_err(|_| self.failure.cause = Some(FailureCause::StopUnconfirmed))?;
@@ -955,6 +962,33 @@ impl TurnExecution {
         checkout: &CheckoutLayout,
         runner: &dyn Runner,
     ) -> Result<bool> {
+        if let Some(allowance) = self.plan.native_subagent_limit {
+            let matches = match &self.reported.delegation_controls {
+                Some(DelegationControls::CodexSessionTree {
+                    enabled: Some(false),
+                    v2_threads_including_root: Some(1),
+                    ..
+                }) => allowance == 0,
+                Some(DelegationControls::CodexSessionTree {
+                    enabled: Some(true),
+                    concurrent_spawned_threads: Some(observed),
+                    v2_threads_including_root: Some(v2_cap),
+                }) => {
+                    allowance > 0
+                        && *observed == u64::from(allowance)
+                        && *v2_cap == u64::from(allowance) + 1
+                }
+                _ => false,
+            };
+            if !matches
+                || !self
+                    .app
+                    .block_on(self.store.verify_native_subagents(self.plan.run.id.clone()))?
+            {
+                self.reject_dispatch(DispatchRejection::NativeDelegationUnverified)?;
+                anyhow::bail!("The CLI did not verify the reserved native subagent allowance");
+            }
+        }
         let native_history = if let Some(recovery) = &self.plan.native_job_recovery {
             NativeHistory::ProviderRecovery {
                 session_id: recovery.provider_session_id.clone(),

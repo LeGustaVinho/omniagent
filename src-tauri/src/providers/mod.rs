@@ -172,6 +172,8 @@ pub enum DelegationControls {
     CodexSessionTree {
         enabled: Option<bool>,
         concurrent_spawned_threads: Option<u64>,
+        #[serde(default)]
+        v2_threads_including_root: Option<u64>,
     },
     ClaudeSessionToolList {
         agent_tool_available: bool,

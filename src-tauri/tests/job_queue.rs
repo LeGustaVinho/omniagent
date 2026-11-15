@@ -612,7 +612,7 @@ async fn managed_quota_serializes_claims_and_shares_capacity_with_nested_childre
         )
         .await?;
     let quota = store
-        .set_conversation_subagent_quota(root.clone(), None, 8)
+        .set_conversation_subagent_quota(root.clone(), None, 8, None)
         .await?;
     assert_eq!((quota.requested, quota.authorized), (8, 1));
 
@@ -753,13 +753,134 @@ async fn managed_quota_serializes_claims_and_shares_capacity_with_nested_childre
     );
 
     let strict = store
-        .set_conversation_subagent_quota(root.clone(), Some(SubagentLimitMode::Strict), 8)
+        .set_conversation_subagent_quota(root.clone(), Some(SubagentLimitMode::Strict), 8, None)
         .await?;
     assert_eq!(strict.authorized, 1);
     let restarted = Store::open(path)?;
     let saved = restarted.conversation_subagent_quota(root.clone()).await?;
     assert_eq!(saved.mode_override, Some(SubagentLimitMode::Strict));
     assert_eq!(saved.managed.active, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn strict_quota_reserves_native_sessions_and_managed_children_in_one_budget() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("strict.sqlite"))?;
+    let initial = origin(&store, &temp.path().join("project")).await?;
+    let chat = initial.conversation_id;
+    let project = initial.run.project_id;
+    let scope = initial.scope;
+    let strict = Some(SubagentLimitMode::Strict);
+    let pending = store
+        .set_conversation_subagent_quota(chat.clone(), strict, 3, Some(1))
+        .await?;
+    assert!(pending.configuration_pending);
+    store
+        .finish_agent_attempt(initial.run.id, RunStatus::Cancelled, None)
+        .await?;
+    let current = store.conversation(chat.clone()).await?;
+    let root = store
+        .prepare_agent_attempt(
+            chat.clone(),
+            current.context_id,
+            scope.clone(),
+            "Capped session".into(),
+        )
+        .await?;
+    store.mark_agent_running(root.run.id.clone()).await?;
+
+    for (id, prompt) in [("first", "First fixture"), ("waiting", "Waiting fixture")] {
+        let job = store
+            .submit_agent_job(
+                root.run.id.clone(),
+                id.into(),
+                JobRequest {
+                    instructions: prompt.into(),
+                    ..request()
+                },
+            )
+            .await?;
+        approve(&store, &job).await?;
+    }
+    let child = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("Native cap left one managed slot")?;
+    let snapshot = store.conversation_subagent_quota(chat.clone()).await?;
+    assert_eq!(snapshot.managed.active, 1);
+    assert_eq!(snapshot.native_sessions.len(), 2);
+    assert!(!snapshot.configuration_pending);
+    for session in [&root.agent_session_id, &child.agent_session_id] {
+        let reserved = snapshot
+            .native_sessions
+            .iter()
+            .find(|native| &native.session_id == session)
+            .unwrap();
+        assert_eq!(reserved.allowance, 1);
+        assert!(!reserved.verified);
+    }
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+
+    let pending = store
+        .set_conversation_subagent_quota(chat.clone(), strict, 2, Some(0))
+        .await?;
+    assert!(pending.configuration_pending);
+    assert_eq!(
+        pending
+            .native_sessions
+            .iter()
+            .map(|s| s.allowance)
+            .sum::<u32>(),
+        2
+    );
+    store
+        .finish_agent_attempt(child.run.id, RunStatus::Cancelled, None)
+        .await?;
+    store
+        .finish_agent_attempt(root.run.id, RunStatus::Cancelled, None)
+        .await?;
+
+    let next = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("Retired reservation was not returned")?;
+    assert_eq!(next.input.last().unwrap().text, "Waiting fixture");
+    let updated = store.conversation_subagent_quota(chat.clone()).await?;
+    assert!(!updated.configuration_pending);
+    assert_eq!(updated.native_sessions.len(), 1);
+    assert_eq!(updated.native_sessions[0].allowance, 0);
+    let alternate = store
+        .create_conversation(next.run.checkout_id, "Unsupported native provider".into())
+        .await?;
+    store
+        .set_conversation_subagent_quota(alternate.id.clone(), strict, 2, Some(0))
+        .await?;
+    let prompt = "This test job must be blocked";
+    store
+        .save_conversation_draft(alternate.id.clone(), prompt.into())
+        .await?;
+    let blocked = store
+        .enqueue_conversation_turn(
+            JobContext {
+                conversation_id: alternate.id,
+                context_id: alternate.context_id,
+            },
+            SessionScope {
+                provider: Provider::Antigravity,
+                ..scope
+            },
+            prompt.into(),
+        )
+        .await?;
+    let inspection = store
+        .inspect_job(project, blocked.id, environment(false))
+        .await?
+        .unwrap();
+    assert!(inspection.blockers.iter().any(|item| matches!(item,
+        AdmissionBlocker::Policy { reason } if reason.contains("verified native delegation controls")
+    )));
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
     Ok(())
 }
 
@@ -837,6 +958,10 @@ async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -
     let db = rusqlite::Connection::open(&path)?;
     db.execute_batch(
         "DROP VIEW managed_subagent_states;
+         DROP TABLE native_subagent_reservations;
+         DROP INDEX agent_attempts_by_subagent_conversation;
+         ALTER TABLE agent_attempts DROP COLUMN subagent_conversation_id;
+         ALTER TABLE agent_sessions DROP COLUMN native_subagent_limit;
          DROP TABLE native_subagent_observations;
          DROP TABLE job_delegation_owners;
          DROP TABLE project_subagent_policies;

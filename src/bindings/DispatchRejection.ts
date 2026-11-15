@@ -3,4 +3,4 @@ import type { Capability } from "./Capability";
 import type { ReleaseBlocker } from "./ReleaseBlocker";
 import type { RequiredCustomization } from "./RequiredCustomization";
 
-export type DispatchRejection = { "type": "policy_changed" } | { "type": "pipeline_release", reason: ReleaseBlocker, } | { "type": "profile_unavailable" } | { "type": "worktree_unavailable" } | { "type": "requirements", capabilities: Array<Capability>, customizations: Array<RequiredCustomization>, };
+export type DispatchRejection = { "type": "policy_changed" } | { "type": "pipeline_release", reason: ReleaseBlocker, } | { "type": "profile_unavailable" } | { "type": "worktree_unavailable" } | { "type": "native_delegation_unverified" } | { "type": "requirements", capabilities: Array<Capability>, customizations: Array<RequiredCustomization>, };

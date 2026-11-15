@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::{
     attachments::{self, AttachmentPreview, CapturedAttachment},
     dispatch::{Delivery, EventSource},
+    jobs::SubagentAllocation,
     protection,
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionIntent,
@@ -102,6 +103,7 @@ pub struct AttemptPlan {
     pub(crate) answered_question: Option<QuestionOrigin>,
     pub(crate) requires_bridge: bool,
     pub(crate) native_job_recovery: Option<NativeJobRecovery>,
+    pub(crate) native_subagent_limit: Option<u32>,
 }
 
 pub(crate) struct NativeJobRecovery {
@@ -530,7 +532,9 @@ impl Store {
         };
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            crate::jobs::check_conversation_subagent_controls(&tx, &conversation_id)?;
+            let source = answer.as_ref().map(|(origin, _)| origin.run_id.as_str());
+            let allocation =
+                crate::jobs::direct_subagent_allocation(&tx, &conversation_id, source, &scope)?;
             if consume_draft {
                 consume_matching_draft(&tx, &conversation_id, &text)?;
             }
@@ -546,6 +550,7 @@ impl Store {
                     answer,
                     history: AttemptHistory::Automatic,
                     recorded: None,
+                    allocation,
                 },
             )?;
             tx.commit()?;
@@ -899,6 +904,7 @@ impl Store {
             };
             tx.execute("UPDATE agent_attempts SET result_context_id = ?1 WHERE run_id = ?2", params![context_id, run_id])?;
             crate::jobs::release_settled_writer(&tx, &run_id)?;
+            crate::jobs::settle_native_subagents(&tx, &run_id, quiescence_confirmed)?;
             let suspended = crate::jobs::settle_parent_wait(
                 &tx, &run_id, &context_id, outcome, quiescence_confirmed,
             )?;
@@ -972,6 +978,7 @@ impl Store {
                 [],
             )?;
             tx.execute("DELETE FROM active_agent_attempts", [])?;
+            crate::jobs::recover_native_subagents(&tx)?;
             crate::jobs::recover_commands(&tx)?;
             tx.commit()?;
             Ok(())
@@ -992,6 +999,7 @@ struct PreparedAttempt {
     answer: Option<(QuestionOrigin, QuestionReply)>,
     history: AttemptHistory,
     recorded: Option<RecordedAttempt>,
+    allocation: SubagentAllocation,
 }
 
 pub(crate) struct RecordedAttempt {
@@ -1032,6 +1040,7 @@ pub(crate) fn insert_job_attempt(
     conversation: Conversation,
     scope: SessionScope,
     text: &str,
+    allocation: SubagentAllocation,
 ) -> Result<AttemptPlan> {
     insert_attempt(
         db,
@@ -1045,6 +1054,7 @@ pub(crate) fn insert_job_attempt(
             answer: None,
             history: AttemptHistory::Automatic,
             recorded: None,
+            allocation,
         },
     )
 }
@@ -1055,6 +1065,7 @@ pub(crate) fn insert_job_recovery_attempt(
     scope: SessionScope,
     history: AttemptHistory,
     recorded: Option<RecordedAttempt>,
+    allocation: SubagentAllocation,
 ) -> Result<AttemptPlan> {
     let question_route = recorded
         .as_ref()
@@ -1076,6 +1087,7 @@ pub(crate) fn insert_job_recovery_attempt(
             answer: None,
             history,
             recorded,
+            allocation,
         },
     )
 }
@@ -1085,6 +1097,7 @@ pub(crate) fn insert_downstream_attempt(
     conversation: Conversation,
     scope: SessionScope,
     input: &str,
+    allocation: SubagentAllocation,
 ) -> Result<AttemptPlan> {
     insert_attempt(
         db,
@@ -1098,6 +1111,7 @@ pub(crate) fn insert_downstream_attempt(
             answer: None,
             history: AttemptHistory::Downstream,
             recorded: None,
+            allocation,
         },
     )
 }
@@ -1108,6 +1122,7 @@ pub(crate) fn insert_recorded_job_attempt(
     scope: SessionScope,
     recorded: RecordedAttempt,
     text: &str,
+    allocation: SubagentAllocation,
 ) -> Result<AttemptPlan> {
     insert_attempt(
         db,
@@ -1121,6 +1136,7 @@ pub(crate) fn insert_recorded_job_attempt(
             answer: None,
             history: AttemptHistory::Downstream,
             recorded: Some(recorded),
+            allocation,
         },
     )
 }
@@ -1161,6 +1177,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         answer,
         history,
         mut recorded,
+        allocation,
     } = prepared;
     let serialized = serde_json::to_string(&scope)?;
     let checkout = &scope.checkout;
@@ -1205,7 +1222,10 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
     };
     let mut entries = context_entries(db, &conversation_id, input_context_id)?;
     let previous = previous_attempt(db, &conversation_id)?;
-    let continuity = match (&history, &previous, &recorded) {
+    let eligible = previous.as_ref().filter(|prior| {
+        !prior.native_scope_reserved && prior.native_subagent_limit == allocation.native_allowance
+    });
+    let continuity = match (&history, eligible, &recorded) {
         (AttemptHistory::Automatic, Some(prior), None)
             if prior.scope == serialized
                 && scope
@@ -1237,28 +1257,32 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         _ => None,
     };
 
-    let (agent_session_id, resume_cursor_id, intent, consumed) =
-        if let Some((prior, cursor, consumed)) = continuity {
-            let provider_session_id = prior
-                .provider_session_id
-                .clone()
-                .expect("checked native ID");
-            (
-                prior.session_id.clone(),
-                Some(cursor),
-                SessionIntent::Resume {
-                    provider_session_id,
-                },
-                consumed,
-            )
-        } else {
-            let id = new_id();
-            db.execute(
-                "INSERT INTO agent_sessions(id, conversation_id, scope) VALUES (?1, ?2, ?3)",
-                params![id, conversation_id, serialized],
+    let (agent_session_id, resume_cursor_id, intent, consumed) = if let Some((
+        prior,
+        cursor,
+        consumed,
+    )) = continuity
+    {
+        let provider_session_id = prior
+            .provider_session_id
+            .clone()
+            .expect("checked native ID");
+        (
+            prior.session_id.clone(),
+            Some(cursor),
+            SessionIntent::Resume {
+                provider_session_id,
+            },
+            consumed,
+        )
+    } else {
+        let id = new_id();
+        db.execute(
+                "INSERT INTO agent_sessions(id, conversation_id, scope, native_subagent_limit) VALUES (?1, ?2, ?3, ?4)",
+                params![id, conversation_id, serialized, allocation.native_allowance],
             )?;
-            (id, None, SessionIntent::Start, 0)
-        };
+        (id, None, SessionIntent::Start, 0)
+    };
 
     let context_id = if let AttemptHistory::Retry { input_context_id } = &history {
         if recorded.is_none() {
@@ -1330,8 +1354,8 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
     };
     db.execute(
         "INSERT INTO agent_attempts(run_id, turn_id, conversation_id, ordinal, agent_session_id,
-         previous_run_id, context_id, resume_cursor_id, detached_context)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         previous_run_id, context_id, resume_cursor_id, detached_context, subagent_conversation_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             run.id,
             run.turn_id,
@@ -1341,13 +1365,25 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             previous_run_id,
             context_id,
             resume_cursor_id,
-            recorded.is_some()
+            recorded.is_some(),
+            allocation
+                .conversation_id
+                .as_deref()
+                .unwrap_or(&conversation_id),
         ],
     )?;
     db.execute(
         "INSERT INTO active_agent_attempts VALUES (?1, ?2)",
         params![conversation_id, run.id],
     )?;
+    if allocation.native_allowance.is_some() {
+        crate::jobs::reserve_native_subagents(
+            db,
+            &run.id,
+            &agent_session_id,
+            allocation.native_requested,
+        )?;
+    }
     let mut answered_question = None;
     if let (Some((origin, reply)), Some((request_event_seq, _))) = (answer, answered_request) {
         let event = ProviderEvent {
@@ -1384,6 +1420,10 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         );
         answered_question = Some(origin);
     }
+    let native_job_recovery = match history {
+        AttemptHistory::Resume { native } if resume_cursor_id.is_some() => native,
+        _ => None,
+    };
     Ok(AttemptPlan {
         run,
         conversation_id,
@@ -1398,10 +1438,8 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         question_route,
         answered_question,
         requires_bridge: false,
-        native_job_recovery: match history {
-            AttemptHistory::Resume { native } => native,
-            _ => None,
-        },
+        native_job_recovery,
+        native_subagent_limit: allocation.native_allowance,
     })
 }
 
@@ -1648,12 +1686,15 @@ struct PreviousAttempt {
     scope: String,
     provider_session_id: Option<String>,
     cursor: Option<String>,
+    native_subagent_limit: Option<u32>,
+    native_scope_reserved: bool,
 }
 
 fn previous_attempt(db: &Connection, conversation: &str) -> Result<Option<PreviousAttempt>> {
     Ok(db
         .query_row(
-            "SELECT a.run_id, s.id, s.scope, s.provider_session_id, s.cursor_context_id
+            "SELECT a.run_id, s.id, s.scope, s.provider_session_id, s.cursor_context_id, s.native_subagent_limit,
+                EXISTS (SELECT 1 FROM native_subagent_reservations WHERE session_id = s.id AND state <> 'released')
          FROM agent_attempts a JOIN agent_sessions s ON s.id = a.agent_session_id
          WHERE a.conversation_id = ?1 AND a.detached_context = 0 ORDER BY a.ordinal DESC LIMIT 1",
             [conversation],
@@ -1664,6 +1705,8 @@ fn previous_attempt(db: &Connection, conversation: &str) -> Result<Option<Previo
                     scope: row.get(2)?,
                     provider_session_id: row.get(3)?,
                     cursor: row.get(4)?,
+                    native_subagent_limit: row.get(5)?,
+                    native_scope_reserved: row.get(6)?,
                 })
             },
         )
@@ -2508,6 +2551,9 @@ mod tests {
         fn wait(&self) -> io::Result<TerminalOutcome> {
             Ok(TerminalOutcome::Exited(0))
         }
+        fn confirm_quiescence(&self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     #[derive(Clone)]
@@ -2562,6 +2608,19 @@ mod tests {
             DirectWindowsRunner.attachment_path(path)
         }
         fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
+            self.launch_with_config(
+                request,
+                json!({"approval_policy":"never","sandbox_mode":"read-only"}),
+            )
+        }
+    }
+
+    impl FixtureRunner {
+        fn launch_with_config(
+            &self,
+            request: LaunchRequest<'_>,
+            config: Value,
+        ) -> io::Result<CapturedProcess> {
             let (write, output) = mpsc::channel();
             if request.arguments == ["plugin", "list", "--json"].map(std::ffi::OsStr::new) {
                 write.send(Ok(OutputFrame {
@@ -2579,7 +2638,7 @@ mod tests {
                 json!({"id":2,"result":{"thread":{"id":"native-session","turns":[{"id":"history"}]},"model":"observed","cwd":request.checkout,
                     "sandbox":{"type":"readOnly"}}}),
                 json!({"id":3,"result":{"data":[]}}),
-                json!({"id":4,"result":{"config":{"approval_policy":"never","sandbox_mode":"read-only"}}}),
+                json!({"id":4,"result":{"config":config}}),
                 json!({"id":5,"result":{"data":[{"cwd":request.checkout,
                     "skills":[
                         {"name":"fixture","path":request.checkout.join(".agents/skills/fixture/SKILL.md"),"scope":"repo","enabled":true},
@@ -2616,6 +2675,140 @@ mod tests {
                 control: Arc::new(CompletedProcess),
             })
         }
+    }
+
+    struct NativeQuotaFixture {
+        wire: FixtureRunner,
+        requested: u32,
+        reported: u32,
+        reported_v2: u32,
+    }
+
+    impl Runner for NativeQuotaFixture {
+        fn identity(&self) -> &str {
+            DirectWindowsRunner::IDENTITY
+        }
+
+        fn execution_platform(&self) -> Option<ExecutionPlatform> {
+            self.wire.execution_platform()
+        }
+
+        fn executable_revision(&self, path: &Path) -> Option<String> {
+            self.wire.executable_revision(path)
+        }
+
+        fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
+            if request
+                .arguments
+                .first()
+                .is_some_and(|arg| *arg == "app-server")
+            {
+                let enabled = format!("agents.enabled={}", self.requested > 0);
+                assert!(request.arguments.contains(&std::ffi::OsStr::new(&enabled)));
+                let v2 = format!(
+                    "features.multi_agent_v2.max_concurrent_threads_per_session={}",
+                    self.requested + 1
+                );
+                assert!(request.arguments.contains(&std::ffi::OsStr::new(&v2)));
+                if self.requested > 0 {
+                    let cap = format!(
+                        "agents.max_concurrent_threads_per_session={}",
+                        self.requested
+                    );
+                    assert!(request.arguments.contains(&std::ffi::OsStr::new(&cap)));
+                }
+            }
+            self.wire.launch_with_config(
+                request,
+                json!({
+                    "approval_policy":"never", "sandbox_mode":"read-only",
+                    "agents": {
+                        "enabled": self.reported > 0,
+                        "max_concurrent_threads_per_session": self.reported,
+                    },
+                    "features": { "multi_agent_v2": { "max_concurrent_threads_per_session": self.reported_v2 } }
+                }),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_subagent_allowances_are_verified_before_the_prompt_and_pin_the_session()
+    -> Result<()> {
+        use crate::jobs::SubagentLimitMode;
+
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.runner = DirectWindowsRunner::IDENTITY.into();
+        let strict = Some(SubagentLimitMode::Strict);
+        let mut first_session = None;
+        for (requested, reported, reported_v2, expected) in [
+            (1, 1, 2, RunStatus::Succeeded),
+            (0, 0, 1, RunStatus::Succeeded),
+            (1, 1, 3, RunStatus::Failed),
+        ] {
+            store
+                .set_conversation_subagent_quota(
+                    conversation.id.clone(),
+                    strict,
+                    2,
+                    Some(requested),
+                )
+                .await?;
+            let turn = prepare(
+                &store,
+                &conversation.id,
+                scope.clone(),
+                "Test the native quota",
+            )
+            .await?;
+            assert!(matches!(turn.intent, SessionIntent::Start));
+            if let Some(prior) = first_session.replace(turn.agent_session_id.clone()) {
+                assert_ne!(prior, turn.agent_session_id);
+            }
+            assert_eq!(turn.native_subagent_limit, Some(requested));
+            let before = store
+                .conversation_subagent_quota(conversation.id.clone())
+                .await?;
+            assert_eq!(before.native_sessions[0].allowance, requested);
+            assert!(!before.native_sessions[0].verified);
+            let run = turn.run.id.clone();
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let runner = Arc::new(NativeQuotaFixture {
+                wire: FixtureRunner(WireLog {
+                    store: store.clone(),
+                    runtime: tokio::runtime::Handle::current(),
+                    conversation: conversation.id.clone(),
+                    frames: log.clone(),
+                }),
+                requested,
+                reported,
+                reported_v2,
+            });
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(10),
+                start_managed_turn(store.clone(), runner, turn, None).wait(),
+            )
+            .await??;
+            assert_eq!(outcome, expected);
+            let dispatched = store.agent_dispatch(conversation.id.clone(), run).await?;
+            assert_eq!(dispatched.is_some(), expected == RunStatus::Succeeded);
+            if let Some(dispatched) = dispatched {
+                let flags = dispatched.snapshot.scoped_launch.unwrap().inputs;
+                let cap = format!(
+                    "features.multi_agent_v2.max_concurrent_threads_per_session={}",
+                    requested + 1
+                );
+                assert!(flags.iter().any(|input| input.contents == cap));
+            }
+            assert!(
+                store
+                    .conversation_subagent_quota(conversation.id.clone())
+                    .await?
+                    .native_sessions
+                    .is_empty()
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]

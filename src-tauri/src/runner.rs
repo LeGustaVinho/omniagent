@@ -95,9 +95,13 @@ pub struct ExecutionPlatform {
 
 pub struct DirectWindowsRunner;
 
+impl DirectWindowsRunner {
+    pub const IDENTITY: &str = "windows-direct";
+}
+
 impl Runner for DirectWindowsRunner {
     fn identity(&self) -> &str {
-        "windows-direct"
+        Self::IDENTITY
     }
 
     fn attachment_path(&self, staged: &Path) -> Option<PathBuf> {

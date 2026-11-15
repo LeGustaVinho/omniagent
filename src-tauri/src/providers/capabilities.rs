@@ -419,6 +419,7 @@ pub(crate) struct ReportedCapabilities {
     pub configuration_revision: Option<String>,
     pub configuration_qualification: Option<super::configuration::ReportedConfiguration>,
     pub codex_instruction_settings: Option<super::configuration::CodexInstructionSettings>,
+    pub delegation_controls: Option<super::DelegationControls>,
     pub bridge_registration: Option<Registration>,
     pub native_attachments: Vec<(AttachmentFormat, NativeAttachmentEncoding)>,
     pub context_usage: Option<AttachmentContextUsage>,
@@ -518,8 +519,10 @@ impl ReportedCapabilities {
             ProviderEventData::NativeForkVerified { .. } => {
                 self.observed.insert(Capability::NativeTurnFork)
             }
-            ProviderEventData::DelegationControlsReported { .. } => {
-                self.available.insert(Capability::NativeDelegationControls)
+            ProviderEventData::DelegationControlsReported { controls } => {
+                let changed = self.delegation_controls.as_ref() != Some(controls);
+                self.delegation_controls = Some(controls.clone());
+                self.available.insert(Capability::NativeDelegationControls) || changed
             }
             ProviderEventData::ChildActivity { child_id, .. } => {
                 let changed = self.observed.insert(Capability::SubagentEvents);

@@ -49,11 +49,13 @@ pub(crate) use recovery::requeue_unlaunched_job;
 pub use scheduler::JobScheduler;
 pub(crate) use scheduler::LaunchGate;
 pub use subagents::{
-    ConversationSubagentQuota, NativeSubagentCounts, ProjectSubagentPolicy, SubagentCounts,
-    SubagentLimitMode,
+    ConversationSubagentQuota, NativeSubagentCounts, NativeSubagentSession, ProjectSubagentPolicy,
+    SubagentCounts, SubagentLimitMode,
 };
 pub(crate) use subagents::{
-    check_conversation_subagent_controls, migrate_subagent_observations, record_native_subagent,
+    SubagentAllocation, direct_subagent_allocation, migrate_subagent_observations,
+    record_native_subagent, recover_native_subagents, reserve_native_subagents,
+    settle_native_subagents,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

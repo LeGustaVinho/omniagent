@@ -81,6 +81,7 @@ export function ConversationSubagentControls({ conversationId }: { conversationI
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<SubagentLimitMode | null>();
   const [requested, setRequested] = useState<string>();
+  const [requestedNative, setRequestedNative] = useState<string>();
   const client = useQueryClient();
   const key = ["conversation-subagent-quota", conversationId];
   const quota = useQuery({
@@ -92,19 +93,25 @@ export function ConversationSubagentControls({ conversationId }: { conversationI
   const { data } = quota;
   const resolvedMode = mode === undefined ? data?.modeOverride ?? null : mode;
   const resolvedRequested = requested ?? String(data?.requested ?? "");
+  const resolvedNative = requestedNative ?? String(data?.nativeRequested ?? "");
+  const editingStrict = (resolvedMode ?? data?.project.mode) === "strict";
   const save = useMutation({
-    mutationFn: (settings: { modeOverride: SubagentLimitMode | null; requested: number }) =>
+    mutationFn: (settings: { modeOverride: SubagentLimitMode | null; requested: number; nativeRequested: number }) =>
       invoke<ConversationSubagentQuota>("set_conversation_subagent_quota", { conversationId, ...settings }),
     onSuccess: async (updated) => {
       await client.cancelQueries({ queryKey: key });
       client.setQueryData(key, updated);
       setMode(undefined);
       setRequested(undefined);
+      setRequestedNative(undefined);
       void client.invalidateQueries({ queryKey: ["project-job-queue"] });
     },
   });
-  const dirty = resolvedMode !== data?.modeOverride || resolvedRequested !== String(data?.requested ?? "");
+  const dirty = resolvedMode !== data?.modeOverride
+    || resolvedRequested !== String(data?.requested ?? "")
+    || resolvedNative !== String(data?.nativeRequested ?? "");
   const disabled = !data || save.isPending;
+  const canSave = !disabled && dirty && validLimit(resolvedRequested) && validLimit(resolvedNative);
 
   return <Dialog.Root open={open} onOpenChange={(next) => {
     if (!next && save.isPending) return;
@@ -112,6 +119,7 @@ export function ConversationSubagentControls({ conversationId }: { conversationI
     if (!next) {
       setMode(undefined);
       setRequested(undefined);
+      setRequestedNative(undefined);
       save.reset();
     }
   }}>
@@ -125,8 +133,10 @@ export function ConversationSubagentControls({ conversationId }: { conversationI
         <Dialog.Description>The project maximum caps the requested limit for this conversation.</Dialog.Description>
         <form className="conv-dialog-form" onSubmit={(event) => {
           event.preventDefault();
-          if (!disabled && dirty && validLimit(resolvedRequested)) {
-            save.mutate({ modeOverride: resolvedMode, requested: Number(resolvedRequested) });
+          if (canSave) {
+            save.mutate({
+              modeOverride: resolvedMode, requested: Number(resolvedRequested), nativeRequested: Number(resolvedNative),
+            });
           }
         }}>
           <label>
@@ -137,6 +147,12 @@ export function ConversationSubagentControls({ conversationId }: { conversationI
               {modeOptions()}
             </select>
           </label>
+          {editingStrict && <label>
+            Requested native allowance per CLI session
+            <input type="number" min={0} max={32} step={1} required value={resolvedNative}
+              disabled={disabled} onChange={(event) => setRequestedNative(event.currentTarget.value)} />
+            <span className="text-muted-foreground">Set zero to use managed subagents only. Native reservations share the conversation limit.</span>
+          </label>}
           <label>
             Requested simultaneous subagents
             <input type="number" min={0} max={32} step={1} required value={resolvedRequested}
@@ -150,9 +166,16 @@ export function ConversationSubagentControls({ conversationId }: { conversationI
             <dt>Managed by OmniAgent</dt>
             <dd className="text-right"><ActivityCounts counts={data.managed} /></dd>
           </dl>}
-          {data && (data.modeOverride ?? data.project.mode) === "strict" && <p className="text-muted-foreground">
-            Dispatch in strict total mode requires verified native delegation controls.
+          {data?.configurationPending && <p role="status" className="text-muted-foreground">
+            Subagent policy changes are pending. Existing sessions keep their allowances until they stop.
           </p>}
+          {Boolean(data?.nativeSessions.length) && <section aria-label="Native subagent reservations" className="grid gap-1">
+            <h3 className="font-medium">Native subagent reservations</h3>
+            {data?.nativeSessions.map((session) => <div className="flex flex-wrap justify-between gap-x-3" key={session.sessionId}>
+              <span>{providerNames[session.provider]} session</span>
+              <span className="tabular-nums">{session.allowance} reserved · {session.needsReview ? "Stop unconfirmed" : session.verified ? "Verified" : "Verifying"}</span>
+            </div>)}
+          </section>}
           {data && <section className="grid gap-2" aria-label="Provider-reported subagents">
             <h3 className="font-medium">Native activity reported by providers</h3>
             {data.native.length === 0 && <p className="text-muted-foreground">No native subagent activity has been reported.</p>}
@@ -167,7 +190,7 @@ export function ConversationSubagentControls({ conversationId }: { conversationI
           {(quota.error || save.error) && <p className="conv-alert" role="alert">{String(quota.error || save.error)}</p>}
           <footer>
             <Dialog.Close asChild><Button type="button" variant="outline" disabled={save.isPending}>Close</Button></Dialog.Close>
-            <Button type="submit" disabled={disabled || !dirty || !validLimit(resolvedRequested)}>Save limit</Button>
+            <Button type="submit" disabled={!canSave}>Save limit</Button>
           </footer>
         </form>
       </Dialog.Content>

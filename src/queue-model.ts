@@ -76,6 +76,7 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
         case "pipeline_release": return releaseReasons[rejection.reason];
         case "profile_unavailable": return "The selected CLI profile changed or could not be verified.";
         case "worktree_unavailable": return "The worktree identity could not be verified.";
+        case "native_delegation_unverified": return "The CLI did not confirm its reserved native subagent limit.";
         case "requirements": {
           const missing = [
             ...rejection.capabilities.map((capability) => capability.replaceAll("_", " ")),

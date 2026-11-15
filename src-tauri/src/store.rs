@@ -47,6 +47,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/032-downstream-job-waits.sql"),
     include_str!("../migrations/033-conversation-history-policy.sql"),
     include_str!("../migrations/034-subagent-quotas.sql"),
+    include_str!("../migrations/035-native-subagent-reservations.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

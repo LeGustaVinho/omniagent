@@ -209,9 +209,15 @@ pub async fn set_conversation_subagent_quota(
     conversation_id: String,
     mode_override: Option<SubagentLimitMode>,
     requested: u32,
+    native_requested: Option<u32>,
 ) -> Result<ConversationSubagentQuota, String> {
     store
-        .set_conversation_subagent_quota(conversation_id, mode_override, requested)
+        .set_conversation_subagent_quota(
+            conversation_id,
+            mode_override,
+            requested,
+            native_requested,
+        )
         .await
         .map_err(|error| error.to_string())
 }
