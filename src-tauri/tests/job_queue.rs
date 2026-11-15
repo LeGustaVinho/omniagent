@@ -581,19 +581,106 @@ async fn approve(store: &Store, job: &Job) -> Result<()> {
 }
 
 #[tokio::test]
-async fn managed_quota_serializes_claims_and_shares_capacity_with_nested_children() -> Result<()> {
+async fn managed_quota_separates_forks_and_shares_capacity_with_nested_children() -> Result<()> {
+    use omniagent::{
+        dispatch::EventSource,
+        providers::{ProviderEvent, ProviderEventData, ProviderLocation, TurnOutcome},
+    };
     let temporary = tempfile::tempdir()?;
     let path = temporary.path().join("quota.sqlite");
     let store = Store::open(path.clone())?;
-    let parent = origin(&store, &temporary.path().join("project")).await?;
-    let project = &parent.run.project_id;
-    let root = &parent.conversation_id;
-    let second_chat = store
-        .create_conversation(
-            parent.run.checkout_id.clone(),
-            "Another conversation".into(),
+    let seed = origin(&store, &temporary.path().join("project")).await?;
+    store
+        .record_agent_observation(
+            seed.run.id.clone(),
+            EventSource::Provider,
+            ProviderEvent {
+                location: ProviderLocation {
+                    session_id: Some("completed-original".into()),
+                    ..Default::default()
+                },
+                data: ProviderEventData::TurnFinished {
+                    outcome: TurnOutcome::Completed,
+                },
+            },
         )
         .await?;
+    store
+        .finish_agent_attempt(
+            seed.run.id,
+            RunStatus::Succeeded,
+            Some("Recorded fork boundary".into()),
+        )
+        .await?;
+    let history = store
+        .conversation_history(seed.conversation_id.clone())
+        .await?;
+    assert!(
+        store
+            .fork_conversation(
+                seed.conversation_id.clone(),
+                seed.context_id,
+                None,
+                "Stale head".into()
+            )
+            .await
+            .is_err()
+    );
+    let prefix = store
+        .fork_conversation(
+            seed.conversation_id.clone(),
+            history.context_id.clone(),
+            Some(history.messages[0].revision_id.clone()),
+            "Fork from prompt".into(),
+        )
+        .await?;
+    let prefix_history = store.conversation_history(prefix.id).await?;
+    assert_eq!(prefix_history.messages.len(), 1);
+    assert_eq!(prefix_history.messages[0].text, history.messages[0].text);
+    let second_chat = store
+        .fork_conversation(
+            seed.conversation_id.clone(),
+            history.context_id.clone(),
+            None,
+            "Independent fork".into(),
+        )
+        .await?;
+    assert_eq!(second_chat.checkout_id, seed.run.checkout_id);
+    let fork_history = store.conversation_history(second_chat.id.clone()).await?;
+    assert_eq!(fork_history.messages.len(), history.messages.len());
+    for (original, copied) in history.messages.iter().zip(&fork_history.messages) {
+        assert_eq!(
+            (&original.role, &original.text),
+            (&copied.role, &copied.text)
+        );
+        assert_ne!(original.revision_id, copied.revision_id);
+    }
+    let lineage: (String, String, String, String) = rusqlite::Connection::open(&path)?.query_row(
+        "SELECT source_conversation_id, source_context_id, source_revision_id, source_session_id
+         FROM conversation_forks WHERE conversation_id = ?1",
+        [&second_chat.id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    assert_eq!(
+        lineage,
+        (
+            seed.conversation_id.clone(),
+            history.context_id.clone(),
+            history.messages.last().unwrap().revision_id.clone(),
+            seed.agent_session_id,
+        )
+    );
+    let parent = store
+        .prepare_agent_attempt(
+            seed.conversation_id,
+            history.context_id,
+            seed.scope,
+            "Original after the fork".into(),
+        )
+        .await?;
+    store.mark_agent_running(parent.run.id.clone()).await?;
+    let project = &parent.run.project_id;
+    let root = &parent.conversation_id;
     let second = store
         .prepare_agent_attempt(
             second_chat.id.clone(),
@@ -602,6 +689,14 @@ async fn managed_quota_serializes_claims_and_shares_capacity_with_nested_childre
             "Second conversation".into(),
         )
         .await?;
+    assert!(matches!(second.intent, SessionIntent::Start));
+    assert!(second.previous_run_id.is_none());
+    assert!(
+        second
+            .input
+            .iter()
+            .any(|message| message.text == "Recorded fork boundary")
+    );
     store.mark_agent_running(second.run.id.clone()).await?;
     store.set_job_queue_capacity(4).await?;
     store
@@ -617,35 +712,38 @@ async fn managed_quota_serializes_claims_and_shares_capacity_with_nested_childre
         .set_conversation_subagent_quota(root.clone(), None, 8, None)
         .await?;
     assert_eq!((quota.requested, quota.authorized), (8, 1));
+    let fork_quota = store
+        .set_conversation_subagent_quota(second_chat.id.clone(), None, 2, None)
+        .await?;
+    assert_eq!((fork_quota.requested, fork_quota.authorized), (2, 1));
 
-    let first = store
-        .submit_agent_job(parent.run.id.clone(), "first".into(), request())
-        .await?;
-    let waiting = store
-        .submit_agent_job(parent.run.id, "same-chat".into(), request())
-        .await?;
-    let independent = store
-        .submit_agent_job(second.run.id, "independent".into(), request())
-        .await?;
-    for job in [&first, &waiting, &independent] {
+    let concurrent = Store::open(path.clone())?;
+    let fork_connection = Store::open(path.clone())?;
+    let (one, two, independent) = tokio::try_join!(
+        store.submit_agent_job(parent.run.id.clone(), "first".into(), request()),
+        concurrent.submit_agent_job(parent.run.id, "same-chat".into(), request()),
+        fork_connection.submit_agent_job(second.run.id.clone(), "first".into(), request()),
+    )?;
+    assert_ne!(one.id, independent.id);
+    for job in [&one, &two, &independent] {
         approve(&store, job).await?;
     }
 
-    let concurrent = Store::open(path.clone())?;
     let (a, b) = tokio::join!(
         store.claim_next_job(environment(false)),
         concurrent.claim_next_job(environment(false)),
     );
     let first_claim = a?.context("First claim lost")?;
     let second_claim = b?.context("Independent conversation should have a slot")?;
-    let current = store
-        .job(project.clone(), first.id.clone())
-        .await?
-        .unwrap()
-        .latest_attempt
-        .unwrap();
+    let one = store.job(project.clone(), one.id).await?.unwrap();
+    let two = store.job(project.clone(), two.id).await?.unwrap();
+    let (current, waiting) = match (one.latest_attempt, two.latest_attempt) {
+        (Some(current), None) => (current, two.id),
+        (None, Some(current)) => (current, one.id),
+        _ => anyhow::bail!("Exactly one child should acquire the shared original quota"),
+    };
     let other_run = store
-        .job(project.clone(), independent.id)
+        .job(project.clone(), independent.id.clone())
         .await?
         .unwrap()
         .latest_attempt
@@ -654,7 +752,7 @@ async fn managed_quota_serializes_claims_and_shares_capacity_with_nested_childre
     assert!([&first_claim.run.id, &second_claim.run.id].contains(&&other_run.run_id));
     assert!(
         store
-            .job(project.clone(), waiting.id.clone())
+            .job(project.clone(), waiting.clone())
             .await?
             .unwrap()
             .latest_attempt
@@ -674,7 +772,7 @@ async fn managed_quota_serializes_claims_and_shares_capacity_with_nested_childre
     );
     assert_eq!(
         store
-            .conversation_subagent_quota(second_chat.id)
+            .conversation_subagent_quota(second_chat.id.clone())
             .await?
             .managed
             .active,
@@ -682,6 +780,7 @@ async fn managed_quota_serializes_claims_and_shares_capacity_with_nested_childre
     );
 
     store.mark_agent_running(current.run_id.clone()).await?;
+    store.mark_agent_running(other_run.run_id.clone()).await?;
     let grandchild = store
         .submit_agent_job(current.run_id.clone(), "nested".into(), request())
         .await?;
@@ -712,6 +811,32 @@ async fn managed_quota_serializes_claims_and_shares_capacity_with_nested_childre
             .active,
         1
     );
+    let new_fork_job = store
+        .submit_agent_job(second.run.id, "after-project-cap".into(), request())
+        .await?;
+    approve(&store, &new_fork_job).await?;
+    let blocked = store
+        .inspect_job(project.clone(), new_fork_job.id, environment(false))
+        .await?
+        .unwrap();
+    assert_eq!(
+        blocked.blockers,
+        [AdmissionBlocker::SubagentQuota {
+            conversation_id: second_chat.id,
+            active: 1,
+            limit: 0,
+        }]
+    );
+    assert_eq!(
+        store
+            .job(project.clone(), independent.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap()
+            .status,
+        RunStatus::Running
+    );
     store
         .finish_agent_attempt(current.run_id, RunStatus::Cancelled, None)
         .await?;
@@ -728,7 +853,7 @@ async fn managed_quota_serializes_claims_and_shares_capacity_with_nested_childre
         }
     );
     store
-        .set_pending_job_state(project.clone(), waiting.id, QueueState::Paused)
+        .set_pending_job_state(project.clone(), waiting, QueueState::Paused)
         .await?;
     store
         .set_project_subagent_policy(
@@ -1187,6 +1312,7 @@ async fn native_subagent_observations_are_scoped_deduplicated_and_backfilled() -
     db.execute_batch(
         "DROP TABLE attempt_subagent_audit;
          DROP TABLE native_subagent_audit_candidates;
+         DROP TABLE conversation_forks;
          DROP VIEW unconfirmed_agent_stops;
          DROP TABLE unconfirmed_managed_goal_stops;
          DROP TABLE goal_writer_attempts;
@@ -1810,7 +1936,8 @@ async fn queued_conversation_draft_and_snapshot_survive_reopen_without_creating_
     drop(store);
     // A pending conversation job from the previous schema already owns its prompt and scope.
     rusqlite::Connection::open(&database)?.execute_batch(
-        "DROP VIEW unconfirmed_agent_stops;
+        "DROP TABLE conversation_forks;
+         DROP VIEW unconfirmed_agent_stops;
          DROP TABLE unconfirmed_managed_goal_stops;
          DROP TABLE goal_writer_attempts;
          DROP TABLE goal_writer_recoveries;

@@ -69,6 +69,25 @@ pub async fn create_conversation(
 }
 
 #[tauri::command]
+pub async fn fork_conversation(
+    store: State<'_, Store>,
+    conversation_id: String,
+    expected_context_id: String,
+    through_revision: Option<String>,
+    title: String,
+) -> Result<Conversation, String> {
+    store
+        .fork_conversation(
+            conversation_id,
+            expected_context_id,
+            through_revision,
+            title,
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn rename_conversation(
     store: State<'_, Store>,
     checkout_id: String,

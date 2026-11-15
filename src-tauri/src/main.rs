@@ -174,6 +174,7 @@ fn main() {
             ipc::list_conversations,
             ipc::checkout_conversation,
             ipc::create_conversation,
+            ipc::fork_conversation,
             ipc::rename_conversation,
             ipc::conversation_messages,
             ipc::conversation_history,

@@ -306,6 +306,66 @@ impl Store {
         .await
     }
 
+    /// Creates a branch with its own messages and session lineage on the current checkout.
+    pub async fn fork_conversation(
+        &self,
+        conversation_id: String,
+        expected_context_id: String,
+        through_revision: Option<String>,
+        title: String,
+    ) -> Result<Conversation> {
+        ensure!(!title.trim().is_empty(), "conversation title is empty");
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let source = check_idle_base(&tx, &conversation_id, &expected_context_id)?;
+            let mut entries = context_entries(&tx, &source.id, &expected_context_id)?;
+            if let Some(revision) = &through_revision {
+                let index = entries.iter().position(|entry| entry == revision).context(
+                    "The selected message is outside the current conversation history",
+                )?;
+                entries.truncate(index + 1);
+            }
+            let source_session: Option<String> = tx.query_row(
+                "SELECT a.agent_session_id FROM agent_attempts a
+                 JOIN agent_sessions s ON s.id = a.agent_session_id
+                 JOIN conversation_contexts c ON c.id = a.result_context_id
+                 WHERE a.conversation_id = ?1 AND c.entries = ?2 AND s.provider_session_id IS NOT NULL
+                 ORDER BY a.ordinal DESC LIMIT 1",
+                params![source.id, serde_json::to_string(&entries)?], |row| row.get(0),
+            ).optional()?;
+            let mut fork = insert_conversation(&tx, source.checkout_id, title, false)?;
+            let mut copied = Vec::with_capacity(entries.len());
+            let mut read = tx.prepare(
+                "SELECT m.role, r.content FROM messages m JOIN message_revisions r ON r.message_id = m.id
+                 WHERE m.conversation_id = ?1 AND r.id = ?2",
+            )?;
+            for revision in &entries {
+                let (role, payload): (String, Vec<u8>) = read.query_row(
+                    params![source.id, revision], |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let role = if role == "user" { MessageRole::User } else { MessageRole::Assistant };
+                let copy = insert_message(&tx, &fork.id, role, payload)?;
+                tx.execute(
+                    "INSERT INTO message_attachments (message_revision_id, payload)
+                     SELECT ?1, payload FROM message_attachments WHERE message_revision_id = ?2",
+                    params![copy, revision],
+                )?;
+                copied.push(copy);
+            }
+            drop(read);
+            if !copied.is_empty() {
+                fork.context_id = activate_context(&tx, &fork.id, &copied)?;
+            }
+            tx.execute(
+                "INSERT INTO conversation_forks (conversation_id, source_conversation_id,
+                    source_context_id, source_revision_id, source_session_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![fork.id, source.id, expected_context_id, entries.last(), source_session],
+            )?;
+            tx.commit()?;
+            Ok(fork)
+        }).await
+    }
+
     pub async fn select_conversation_context(
         &self,
         conversation_id: String,
