@@ -191,11 +191,16 @@ impl ClaudeSession {
                     let id = string(model, "value")?;
                     Some(ReportedModel {
                         name: string(model, "displayName").unwrap_or_else(|| id.clone()),
-                        canonical_id: string(model, "modelId"),
+                        canonical_id: string(model, "resolvedModel"),
                         input_modalities: None,
+                        output_modalities: None,
                         effort_levels: strings(model, "supportedEffortLevels"),
                         default_effort: string(model, "defaultEffortLevel"),
-                        selectable: model["isAvailable"].as_bool(),
+                        selectable: model["isAvailable"].as_bool().or_else(|| {
+                            model["disabledReason"]
+                                .as_str()
+                                .map(|reason| reason.is_empty())
+                        }),
                         id,
                     })
                 })

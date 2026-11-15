@@ -1,12 +1,17 @@
-use std::{collections::HashMap, ffi::OsString, path::Path, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::OsString,
+    path::Path,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
 use super::{
     AdapterUpdate, ApprovalDecision, AuthProbe, Authentication, CliAdapter, CliSession, Interrupt,
-    ProbeKind, Provider, ProviderEvent, ProviderEventData, ProviderLocation, RequestId,
-    SessionIntent, SessionMode, SessionRequest, Transport, TurnInput, TurnOutcome,
+    ProbeKind, Provider, ProviderEvent, ProviderEventData, ProviderLocation, ReportedModel,
+    RequestId, SessionIntent, SessionMode, SessionRequest, Transport, TurnInput, TurnOutcome,
     rpc::{self, Rpc},
 };
 use crate::{
@@ -54,6 +59,8 @@ impl CliAdapter for CodexAdapter {
             handshake_started: false,
             session: None,
             active: None,
+            model_pages: Vec::new(),
+            model_cursors: HashSet::new(),
             approvals: HashMap::new(),
             questions: HashMap::new(),
         }))
@@ -64,6 +71,7 @@ impl CliAdapter for CodexAdapter {
 enum Request {
     Initialize,
     OpenSession,
+    ModelPage,
     StartTurn,
     Interrupt,
 }
@@ -90,6 +98,8 @@ struct CodexSession {
     handshake_started: bool,
     session: Option<Session>,
     active: Option<ActiveTurn>,
+    model_pages: Vec<ReportedModel>,
+    model_cursors: HashSet<String>,
     approvals: HashMap<RequestId, Approval>,
     questions: HashMap<RequestId, Vec<String>>,
 }
@@ -167,6 +177,11 @@ impl CodexSession {
         if let Some(error) = response.get("error") {
             let message =
                 diagnostics::preview(error["message"].as_str().unwrap_or("Codex request failed"));
+            if request == Request::ModelPage {
+                return Ok(
+                    self.diagnostic(&format!("Codex model inventory unavailable: {message}"))
+                );
+            }
             let mut events = vec![self.event(ProviderEventData::Error { message })];
             if request == Request::StartTurn {
                 events.extend(self.finish_turn(TurnOutcome::Failed));
@@ -213,13 +228,19 @@ impl CodexSession {
                     model: model.to_owned(),
                     effort: effort.clone(),
                 });
-                Ok(
-                    self.events(vec![self.event(ProviderEventData::SessionReady {
+                Ok(AdapterUpdate {
+                    outbound: vec![self.rpc.request(
+                        "model/list",
+                        json!({"limit":100}),
+                        Request::ModelPage,
+                    )?],
+                    events: vec![self.event(ProviderEventData::SessionReady {
                         model: Some(model.to_owned()),
                         effort,
-                    })]),
-                )
+                    })],
+                })
             }
+            Request::ModelPage => self.model_page(result),
             Request::StartTurn => {
                 let id = required_string(&result["turn"], "id")?;
                 let events = self.learn_turn(id)?;
@@ -227,6 +248,56 @@ impl CodexSession {
             }
             Request::Interrupt => Ok(AdapterUpdate::default()),
         }
+    }
+
+    fn model_page(&mut self, result: &Value) -> Result<AdapterUpdate> {
+        let Some(data) = result["data"].as_array() else {
+            return Ok(self.diagnostic("Codex model page has no data array"));
+        };
+        self.model_pages.extend(data.iter().filter_map(|model| {
+            let id = string(model, "id")?;
+            Some(ReportedModel {
+                name: string(model, "displayName").unwrap_or_else(|| id.clone()),
+                id,
+                canonical_id: string(model, "model"),
+                input_modalities: model["inputModalities"].as_array().map(|modalities| {
+                    modalities
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                }),
+                output_modalities: None,
+                effort_levels: model["supportedReasoningEfforts"].as_array().map(|levels| {
+                    levels
+                        .iter()
+                        .filter_map(|level| string(level, "reasoningEffort"))
+                        .collect()
+                }),
+                default_effort: string(model, "defaultReasoningEffort"),
+                selectable: model["hidden"].as_bool().map(|hidden| !hidden),
+            })
+        }));
+        if let Some(cursor) = result["nextCursor"]
+            .as_str()
+            .filter(|cursor| !cursor.is_empty())
+        {
+            if self.model_cursors.len() >= 64 || !self.model_cursors.insert(cursor.to_owned()) {
+                return Ok(self.diagnostic("Codex stopped advancing the model inventory cursor"));
+            }
+            return Ok(AdapterUpdate {
+                outbound: vec![self.rpc.request(
+                    "model/list",
+                    json!({"limit":100,"cursor":cursor}),
+                    Request::ModelPage,
+                )?],
+                events: Vec::new(),
+            });
+        }
+        let models = std::mem::take(&mut self.model_pages);
+        Ok(self.events(vec![
+            self.event(ProviderEventData::ModelInventory { models }),
+        ]))
     }
 
     fn learn_turn(&mut self, id: &str) -> Result<Vec<ProviderEvent>> {
@@ -341,6 +412,12 @@ impl CodexSession {
             event
         };
         let data = match (kind, completed) {
+            ("imageGeneration", _) => ProviderEventData::MediaGeneration {
+                media_type: "image".into(),
+                tool: "imageGeneration".into(),
+                producing_model: string(item, "model"),
+                status: string(item, "status"),
+            },
             ("agentMessage", true) => ProviderEventData::AssistantMessage {
                 text: required_string(item, "text")?.to_owned(),
             },
@@ -682,7 +759,79 @@ mod tests {
             opened.events[0].data,
             ProviderEventData::SessionReady { .. }
         ));
+        assert_eq!(outbound(&opened, 0)?["method"], "model/list");
         Ok(session)
+    }
+
+    #[test]
+    fn separates_reported_generation_from_image_input() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate(SessionMode::ReadOnly, SessionIntent::Start, checkout.path())?;
+        session.send(TurnInput {
+            message_id: "message".into(),
+            text: "fixture".into(),
+        })?;
+        inbound(
+            &mut *session,
+            json!({"id":4,"result":{"turn":{"id":"turn"}}}),
+        )?;
+        let update = |kind: &str| {
+            json!({"method":"item/completed","params":{
+                "threadId":"session","turnId":"turn","item":{"id":"image","type":kind,"status":"completed"}
+            }})
+        };
+        assert!(
+            inbound(&mut *session, update("imageView"))?
+                .events
+                .is_empty()
+        );
+        let generated = inbound(&mut *session, update("imageGeneration"))?;
+        assert_eq!(
+            generated.events[0].data,
+            ProviderEventData::MediaGeneration {
+                media_type: "image".into(),
+                tool: "imageGeneration".into(),
+                producing_model: None,
+                status: Some("completed".into()),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gathers_model_pages_and_preserves_unknown_output_modalities() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate(SessionMode::ReadOnly, SessionIntent::Start, checkout.path())?;
+        let page = inbound(
+            &mut *session,
+            json!({"id":3,"result":{"nextCursor":"next","data":[{
+                "id":"catalog-id","model":"gpt-6-luna","displayName":"Luna","hidden":false,
+                "inputModalities":["text","image"],
+                "supportedReasoningEfforts":[{"reasoningEffort":"low"}],"defaultReasoningEffort":"low"
+            }]}}),
+        )?;
+        assert_eq!(outbound(&page, 0)?["params"]["cursor"], "next");
+        assert!(page.events.is_empty());
+        let last = inbound(
+            &mut *session,
+            json!({"id":4,"result":{"data":[{
+                "id":"hidden-id","hidden":true
+            }]}}),
+        )?;
+        let ProviderEventData::ModelInventory { models } = &last.events[0].data else {
+            anyhow::bail!("model inventory missing")
+        };
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].canonical_id.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(
+            models[0].input_modalities.as_deref(),
+            Some(&["text".into(), "image".into()][..])
+        );
+        assert_eq!(models[0].output_modalities, None);
+        assert_eq!(models[0].default_effort.as_deref(), Some("low"));
+        assert_eq!(models[1].selectable, Some(false));
+        assert_eq!(models[1].input_modalities, None);
+        Ok(())
     }
 
     #[test]
@@ -723,7 +872,7 @@ mod tests {
         assert!(
             inbound(
                 &mut *session,
-                json!({"id":3,"result":{"turn":{"id":"turn"}}})
+                json!({"id":4,"result":{"turn":{"id":"turn"}}})
             )?
             .events
             .is_empty()
@@ -810,7 +959,7 @@ mod tests {
         })?;
         inbound(
             &mut *session,
-            json!({"id":3,"result":{"turn":{"id":"turn"}}}),
+            json!({"id":4,"result":{"turn":{"id":"turn"}}}),
         )?;
         let request = inbound(
             &mut *session,

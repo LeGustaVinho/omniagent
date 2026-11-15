@@ -169,9 +169,26 @@ pub struct ReportedModel {
     pub canonical_id: Option<String>,
     pub name: String,
     pub input_modalities: Option<Vec<String>>,
+    pub output_modalities: Option<Vec<String>>,
     pub effort_levels: Option<Vec<String>>,
     pub default_effort: Option<String>,
     pub selectable: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionOption {
+    pub id: String,
+    pub name: String,
+    pub category: Option<String>,
+    pub current: Option<String>,
+    pub choices: Vec<SessionChoice>,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SessionChoice {
+    pub value: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -190,6 +207,14 @@ pub enum ProviderEventData {
     },
     ModelInventory {
         models: Vec<ReportedModel>,
+    },
+    SessionOptions {
+        options: Vec<SessionOption>,
+    },
+    PromptCapabilities {
+        image: Option<bool>,
+        audio: Option<bool>,
+        embedded_context: Option<bool>,
     },
     AvailableCommands {
         names: Vec<String>,
@@ -213,6 +238,12 @@ pub enum ProviderEventData {
     Tool {
         name: String,
         phase: String,
+    },
+    MediaGeneration {
+        media_type: String,
+        tool: String,
+        producing_model: Option<String>,
+        status: Option<String>,
     },
     ChildActivity {
         child_id: Option<String>,

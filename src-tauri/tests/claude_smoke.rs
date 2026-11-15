@@ -48,6 +48,7 @@ fn run_turn(
     send(&mut process, &session.start()?)?;
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut session_id = None;
+    let mut observed_model = false;
     let mut text = String::new();
     let mut deltas = String::new();
     loop {
@@ -75,6 +76,12 @@ fn run_turn(
                     );
                     session_id = event.location.session_id;
                 }
+                ProviderEventData::ModelInventory { models } => {
+                    observed_model = models.iter().any(|model| {
+                        model.id == "haiku"
+                            && model.canonical_id.as_deref() == Some("claude-haiku-5-5")
+                    });
+                }
                 ProviderEventData::AssistantMessage { text: message } => text.push_str(&message),
                 ProviderEventData::AssistantDelta { text } => deltas.push_str(&text),
                 ProviderEventData::Approval { request_id, .. } => send(
@@ -84,6 +91,10 @@ fn run_turn(
                 ProviderEventData::Error { message } => bail!("Claude smoke failed: {message}"),
                 ProviderEventData::TurnFinished { outcome } => {
                     ensure!(outcome == TurnOutcome::Completed, "Claude turn failed");
+                    ensure!(
+                        observed_model,
+                        "Claude did not report a resolved Haiku model"
+                    );
                     ensure!(text.trim() == word, "Claude returned unexpected final text");
                     ensure!(deltas.contains(word), "Claude did not stream text");
                     process.control.cancel()?;

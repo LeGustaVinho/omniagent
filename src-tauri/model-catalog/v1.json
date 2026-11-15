@@ -8,7 +8,7 @@
     {
       "provider": "claude", "id": "claude-opus-5-5", "name": "Claude Opus 5.5",
       "intelligenceTenths": 876, "apiReferenceCents": 800, "priceScore": 80,
-      "aliases": [{"provider":"antigravity","id":"claude-opus-5-5-low"},{"provider":"antigravity","id":"claude-opus-5-5-medium"},{"provider":"antigravity","id":"claude-opus-5-5-high"}]
+      "aliases": [{"provider":"antigravity","id":"claude-opus-5-5"},{"provider":"antigravity","id":"claude-opus-5-5-low"},{"provider":"antigravity","id":"claude-opus-5-5-medium"},{"provider":"antigravity","id":"claude-opus-5-5-high"}]
     },
     {
       "provider": "antigravity", "id": "gemini-4-argon", "name": "Gemini 4 Argon",
@@ -27,7 +27,7 @@
     {
       "provider": "claude", "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5",
       "intelligenceTenths": 739, "apiReferenceCents": 400, "priceScore": 65,
-      "aliases": [{"provider":"antigravity","id":"claude-sonnet-5-5-low"},{"provider":"antigravity","id":"claude-sonnet-5-5-medium"},{"provider":"antigravity","id":"claude-sonnet-5-5-high"}]
+      "aliases": [{"provider":"antigravity","id":"claude-sonnet-5-5"},{"provider":"antigravity","id":"claude-sonnet-5-5-low"},{"provider":"antigravity","id":"claude-sonnet-5-5-medium"},{"provider":"antigravity","id":"claude-sonnet-5-5-high"}]
     },
     {
       "provider": "codex", "id": "gpt-6.1-sol", "name": "GPT‑6.1 Sol",

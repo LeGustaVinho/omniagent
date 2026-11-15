@@ -69,6 +69,14 @@ fn run_turn(
                         "Codex selected a different model"
                     );
                     thread = event.location.session_id;
+                }
+                ProviderEventData::ModelInventory { models } => {
+                    ensure!(
+                        models
+                            .iter()
+                            .any(|model| model.canonical_id.as_deref() == Some("gpt-6-luna")),
+                        "Codex did not report the selected model in its inventory"
+                    );
                     let message = session.send(TurnInput {
                         message_id: expected.to_owned(),
                         text: format!("Reply with exactly this word and no punctuation: {expected}. Do not use tools."),

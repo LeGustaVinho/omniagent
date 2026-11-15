@@ -12,8 +12,8 @@ use crate::{
 use super::{
     AdapterUpdate, ApprovalDecision, AuthProbe, Authentication, Capability, CliAdapter, CliSession,
     Interrupt, ProbeKind, Provider, ProviderEvent, ProviderEventData, ProviderLocation,
-    ReportedModel, RequestId, SessionIntent, SessionMode, SessionRequest, Transport, TurnInput,
-    TurnOutcome, WireMessage,
+    ReportedModel, RequestId, SessionChoice, SessionIntent, SessionMode, SessionOption,
+    SessionRequest, Transport, TurnInput, TurnOutcome, WireMessage,
     rpc::{self, Rpc},
 };
 
@@ -170,6 +170,7 @@ impl Configuration {
                         id,
                         canonical_id: None,
                         input_modalities: None,
+                        output_modalities: None,
                         // Options for thinking may change after selecting another model.
                         effort_levels: None,
                         default_effort: None,
@@ -179,6 +180,31 @@ impl Configuration {
                 .collect(),
         )
         .filter(|models: &Vec<_>| !models.is_empty())
+    }
+
+    fn reported_options(&self) -> Vec<SessionOption> {
+        self.options
+            .iter()
+            .filter(|option| option["type"] == "select")
+            .filter_map(|option| {
+                let id = string(option, "id")?;
+                Some(SessionOption {
+                    name: string(option, "name").unwrap_or_else(|| id.clone()),
+                    id,
+                    category: string(option, "category"),
+                    current: string(option, "currentValue"),
+                    choices: choices(&option["options"])
+                        .filter_map(|choice| {
+                            let value = string(choice, "value")?;
+                            Some(SessionChoice {
+                                name: string(choice, "name").unwrap_or_else(|| value.clone()),
+                                value,
+                            })
+                        })
+                        .collect(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -250,16 +276,27 @@ impl AcpSession {
                 }
             }
         };
+        let mut observations = vec![self.event(ProviderEventData::Handshake {
+            protocol: "acp-v1".into(),
+            capabilities: if can_resume || can_load {
+                vec![Capability::Resume]
+            } else {
+                Vec::new()
+            },
+        })];
+        if let Some(prompt) = agent
+            .get("promptCapabilities")
+            .filter(|data| data.is_object())
+        {
+            observations.push(self.event(ProviderEventData::PromptCapabilities {
+                image: prompt["image"].as_bool(),
+                audio: prompt["audio"].as_bool(),
+                embedded_context: prompt["embeddedContext"].as_bool(),
+            }));
+        }
         Ok(AdapterUpdate {
             outbound: vec![self.rpc.request(method, params, Request::Open)?],
-            events: vec![self.event(ProviderEventData::Handshake {
-                protocol: "acp-v1".into(),
-                capabilities: if can_resume || can_load {
-                    vec![Capability::Resume]
-                } else {
-                    Vec::new()
-                },
-            })],
+            events: observations,
         })
     }
 
@@ -366,6 +403,10 @@ impl AcpSession {
         let mut announced = Vec::new();
         if let Some(models) = self.configuration.reported_models() {
             announced.push(self.event(ProviderEventData::ModelInventory { models }));
+        }
+        let opts = self.configuration.reported_options();
+        if !opts.is_empty() {
+            announced.push(self.event(ProviderEventData::SessionOptions { options: opts }));
         }
         if let Some((session, names)) = self.available_commands.take()
             && session == id

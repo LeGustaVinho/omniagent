@@ -50,6 +50,7 @@ fn launch_ready(
     })?;
     send(&mut process, &session.start()?)?;
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut observed_config = false;
     loop {
         let frame = process
             .output
@@ -59,7 +60,18 @@ fn launch_ready(
         send(&mut process, &update)?;
         for event in update.events {
             match event.data {
+                ProviderEventData::SessionOptions { options } => {
+                    observed_config = options.iter().any(|option| {
+                        option.id == "thought_level"
+                            && option.current.as_deref() == Some("low")
+                            && option.choices.iter().any(|choice| choice.value == "low")
+                    });
+                }
                 ProviderEventData::SessionReady { model, effort } => {
+                    ensure!(
+                        observed_config,
+                        "ACP did not publish the resolved thinking options"
+                    );
                     ensure!(
                         model.as_deref() == Some("gemini-3.8-flash"),
                         "ACP selected another model"
