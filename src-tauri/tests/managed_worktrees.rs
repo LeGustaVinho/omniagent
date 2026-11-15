@@ -1147,6 +1147,16 @@ async fn waiting_writer_yields_its_only_slot_and_resumes_once_with_frozen_child_
         .latest_attempt
         .unwrap();
     assert_eq!(current.status, RunStatus::Running);
+    let app_blocker = with_managed_worktree_writer(
+        &store,
+        project.project_id.clone(),
+        managed.checkout_id.clone(),
+        task.id.clone(),
+        |_| Ok(()),
+    )
+    .await
+    .unwrap_err();
+    assert!(app_blocker.to_string().contains(&current.run_id));
     let submit = |request_id: &str, instructions: &str| {
         store.submit_agent_job(
             current.run_id.clone(),
@@ -1272,6 +1282,21 @@ async fn waiting_writer_yields_its_only_slot_and_resumes_once_with_frozen_child_
     })
     .await??;
     assert_eq!(parked.state, DownstreamWaitState::Waiting);
+    assert!(
+        store
+            .job(project.project_id.clone(), selected.id.clone())
+            .await?
+            .unwrap()
+            .latest_attempt
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .inspect_project_queue(project.project_id.clone(), env.clone())
+            .await?
+            .active,
+        0
+    );
     let text = "Wait for the owning pipeline before opening a separate turn";
     store
         .save_conversation_draft(conversation.id.clone(), text.into())
@@ -3403,11 +3428,12 @@ async fn app_and_cli_writers_share_reservations_and_keep_uncertain_writes_after_
             tree.checkout_id.clone(),
         )
         .await?;
-    let runner = CandidateWriter;
+    let runner = Arc::new(CandidateWriter);
     let parent = candidate_parent(&store, &project, &runner).await?;
+    let bridge = std::path::PathBuf::from(env!("CARGO_BIN_EXE_omniagent"));
     let env = AdmissionEnvironment {
         runner: runner.identity().into(),
-        bridge_available: false,
+        bridge_available: true,
     };
     let owner_job = queue_approved_writer(&store, &env, &tree, &parent, &owner.id, "owner").await?;
     let (entered, wait_entered) = tokio::sync::oneshot::channel();
@@ -3484,9 +3510,85 @@ async fn app_and_cli_writers_share_reservations_and_keep_uncertain_writes_after_
             .to_string()
             .contains(&before_launch.run.id)
     );
+    let chat = store
+        .create_conversation(tree.checkout_id.clone(), "Conversation writer".into())
+        .await?;
+    let goal = store
+        .start_conversation_goal(
+            JobContext {
+                conversation_id: chat.id.clone(),
+                context_id: chat.context_id,
+            },
+            before_launch.scope.clone(),
+            Some(scope.id.clone()),
+            GoalDefinition {
+                objective: "Edit the same task's worktree from the conversation".into(),
+                criteria: vec![],
+                max_turns: Some(1),
+                max_seconds: None,
+                token_budget: None,
+            },
+            None,
+        )
+        .await?;
+    let pending = store
+        .inspect_job(project.project_id.clone(), goal.job.id.clone(), env.clone())
+        .await?
+        .unwrap();
+    let approval = pending
+        .blockers
+        .iter()
+        .find_map(|blocker| match blocker {
+            AdmissionBlocker::Approval { approval_id } => Some(approval_id.clone()),
+            _ => None,
+        })
+        .context("the conversation writer needs its own approval")?;
+    store
+        .decide_job_approval(project.project_id.clone(), approval, true)
+        .await?;
+    let pending = store
+        .inspect_job(project.project_id.clone(), goal.job.id.clone(), env.clone())
+        .await?
+        .unwrap();
+    assert_eq!(
+        pending.blockers,
+        [AdmissionBlocker::Writer {
+            checkout_id: tree.checkout_id.clone(),
+            run_id: before_launch.run.id.clone(),
+            needs_review: false,
+        }]
+    );
+    assert!(pending.job.latest_attempt.is_none());
+    assert!(store.claim_next_job(env.clone()).await?.is_none());
     store
         .finish_agent_attempt(before_launch.run.id, RunStatus::Cancelled, None)
         .await?;
+    app_attempt().await?;
+    let writer = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("conversation writer did not claim the released worktree")?;
+    assert_eq!(writer.conversation_id, chat.id);
+    assert!(
+        app_attempt()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains(&writer.run.id)
+    );
+    let writer_run = writer.run.id.clone();
+    assert_eq!(
+        start_managed_turn(store.clone(), runner.clone(), writer, Some(bridge))
+            .wait()
+            .await?,
+        RunStatus::Succeeded
+    );
+    assert!(matches!(
+        store
+            .attempt_worktree_evidence(project.project_id.clone(), writer_run)
+            .await?,
+        Some(AttemptWorktreeEvidence::Saved { .. })
+    ));
     app_attempt().await?;
 
     queue_approved_writer(&store, &env, &tree, &parent, &scope.id, "lost-after-launch").await?;
