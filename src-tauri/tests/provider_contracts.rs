@@ -29,7 +29,7 @@ use omniagent::{
     },
     repository,
     runner::{DirectWindowsRunner, LaunchRequest, RunControl, Runner},
-    runs::RunStatus,
+    runs::{RunRecord, RunStatus},
     store::Store,
 };
 use serde_json::{Value, json};
@@ -340,6 +340,24 @@ async fn all_managed_adapters_deliver_protected_dispatch_over_native_pipes() -> 
     Ok(())
 }
 
+async fn fixture_approval(store: &Store, conversation: &str) -> Result<RunRecord> {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(run) = store.latest_conversation_run(conversation.into()).await?
+                && !store
+                    .pending_conversation_inputs(conversation.into(), run.id.clone())
+                    .await?
+                    .is_empty()
+            {
+                return Ok(run);
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .context("scheduler did not reach the provider approval")?
+}
+
 #[tokio::test]
 async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confirms_stop()
 -> Result<()> {
@@ -385,21 +403,7 @@ async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confir
         })
         .await?;
 
-    let run = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            if let Some(run) = store.latest_conversation_run(chat.id.clone()).await?
-                && !store
-                    .pending_conversation_inputs(chat.id.clone(), run.id.clone())
-                    .await?
-                    .is_empty()
-            {
-                return Ok::<_, anyhow::Error>(run);
-            }
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
-    })
-    .await
-    .context("detached scheduler did not reach the provider approval")??;
+    let run = fixture_approval(&store, &chat.id).await?;
     assert_eq!(run.status, RunStatus::Running);
     tokio::time::sleep(Duration::from_millis(1200)).await;
     let quiet = store
@@ -554,6 +558,138 @@ async fn detached_scheduler_preserves_a_quiet_approval_until_the_provider_confir
         store.agent_dispatch(chat.id, run.id).await?.unwrap().frames
     );
     scheduler.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_stops_admission_before_reaping_a_live_cli_and_keeps_unclaimed_jobs() -> Result<()>
+{
+    let sandbox = tempfile::tempdir()?;
+    let (store, first, runner, scope) = open_wire_fixture(Provider::Codex, sandbox.path()).await?;
+    let checkout = scope.checkout.clone();
+    let database = checkout.join("fixture.sqlite");
+    let second = store
+        .create_conversation(first.checkout_id.clone(), "Pending at exit".into())
+        .await?;
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: false,
+            capacity: 1,
+        })
+        .await?;
+    for chat in [&first, &second] {
+        store
+            .save_conversation_draft(chat.id.clone(), PROMPT.into())
+            .await?;
+        store
+            .enqueue_conversation_turn(
+                JobContext {
+                    conversation_id: chat.id.clone(),
+                    context_id: chat.context_id.clone(),
+                },
+                scope.clone(),
+                PROMPT.into(),
+            )
+            .await?;
+    }
+    let scheduler = JobScheduler::start(store.clone(), runner.clone(), None);
+    let live = fixture_approval(&store, &first.id).await?;
+    let old_dispatch = store
+        .agent_dispatch(first.id.clone(), live.id.clone())
+        .await?
+        .context("missing live dispatch")?;
+    let pending = store
+        .latest_conversation_job(second.id.clone(), scheduler.environment())
+        .await?
+        .context("pending job missing")?;
+    assert_eq!(
+        pending.blockers,
+        [AdmissionBlocker::Capacity {
+            active: 1,
+            limit: 1
+        }]
+    );
+    let stopping = tokio::spawn(async move { scheduler.shutdown().await });
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while !checkout.join("received-interrupt.ndjson").is_file() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("exit did not send a provider interrupt")?;
+    assert!(
+        store
+            .latest_conversation_run(second.id.clone())
+            .await?
+            .is_none()
+    );
+    fs::write(checkout.join("settle-interrupt"), b"")?;
+    tokio::time::timeout(Duration::from_secs(10), stopping)
+        .await
+        .context("scheduler failed to settle on exit")???;
+    assert_eq!(
+        store
+            .latest_conversation_run(first.id.clone())
+            .await?
+            .unwrap()
+            .status,
+        RunStatus::Cancelled
+    );
+    assert!(
+        store
+            .latest_conversation_run(second.id.clone())
+            .await?
+            .is_none()
+    );
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: true,
+            capacity: 1,
+        })
+        .await?;
+    drop(store);
+
+    let store = Store::open(database)?;
+    store.recover_agent_attempts_after_restart().await?;
+    let restored = JobScheduler::start(store.clone(), runner, None);
+    let pending_after_restart = store
+        .latest_conversation_job(second.id.clone(), restored.environment())
+        .await?
+        .unwrap();
+    assert_eq!(pending_after_restart.job.id, pending.job.id);
+    assert_eq!(
+        pending_after_restart.blockers,
+        [AdmissionBlocker::QueuePaused]
+    );
+    assert!(
+        store
+            .latest_conversation_run(second.id.clone())
+            .await?
+            .is_none()
+    );
+    let restored_dispatch = store
+        .agent_dispatch(first.id.clone(), live.id.clone())
+        .await?
+        .context("original dispatch was lost during restart")?;
+    assert_eq!(restored_dispatch.frames, old_dispatch.frames);
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: false,
+            capacity: 1,
+        })
+        .await?;
+    let next = fixture_approval(&store, &second.id).await?;
+    let resumed = store
+        .latest_conversation_job(second.id.clone(), restored.environment())
+        .await?
+        .unwrap()
+        .job;
+    assert_eq!(resumed.latest_attempt.unwrap().run_id, next.id);
+    assert_eq!(
+        store.latest_conversation_run(first.id).await?.unwrap().id,
+        live.id
+    );
+    restored.shutdown().await?;
     Ok(())
 }
 

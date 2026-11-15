@@ -2141,6 +2141,129 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn queue_recovers_an_ambiguous_dispatch_only_on_request_and_records_one_terminal_event()
+    -> Result<()> {
+        use crate::jobs::{AdmissionEnvironment, JobContext, RecoveryAction};
+
+        let (_dir, store, chat, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let database = scope.checkout.join("store.sqlite");
+        let environment = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: false,
+        };
+        let prompt = "Protect this queued input after a crash.";
+        store
+            .save_conversation_draft(chat.id.clone(), prompt.into())
+            .await?;
+        let job = store
+            .enqueue_conversation_turn(
+                JobContext {
+                    conversation_id: chat.id.clone(),
+                    context_id: chat.context_id,
+                },
+                scope,
+                prompt.into(),
+            )
+            .await?;
+        let first = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("initial claim missing")?;
+        let lost_run = first.run.id.clone();
+        assert!(store.record_agent_launch_intent(lost_run.clone()).await?);
+        store.mark_agent_running(lost_run.clone()).await?;
+        let dispatch_id = prepare_fixture_dispatch(&store, &first).await?;
+        let before = store
+            .agent_dispatch(chat.id.clone(), lost_run.clone())
+            .await?
+            .context("prepared evidence missing")?;
+        assert_eq!(before.delivery, Delivery::Prepared);
+        drop(store);
+
+        let store = Store::open(database.clone())?;
+        store.recover_agent_attempts_after_restart().await?;
+        assert!(store.claim_next_job(environment.clone()).await?.is_none());
+        let interrupted = store
+            .job(job.project_id.clone(), job.id.clone())
+            .await?
+            .unwrap();
+        assert_eq!(
+            interrupted.latest_attempt.unwrap().status,
+            RunStatus::Interrupted
+        );
+        let saved = store
+            .agent_dispatch(chat.id.clone(), lost_run.clone())
+            .await?
+            .context("dispatch evidence was lost")?;
+        assert_eq!(saved.id, dispatch_id);
+        assert_eq!(saved.delivery, Delivery::Unconfirmed);
+        assert_eq!(saved.frames, before.frames);
+        store
+            .queue_job_recovery(
+                job.project_id.clone(),
+                job.id.clone(),
+                lost_run.clone(),
+                RecoveryAction::Resume,
+            )
+            .await?;
+        let resumed = store
+            .claim_next_job(environment.clone())
+            .await?
+            .context("explicit resume was not claimed")?;
+        assert!(matches!(resumed.intent, SessionIntent::Start));
+        assert_eq!(resumed.previous_run_id, Some(lost_run));
+        assert_eq!(resumed.input[0].text, prompt);
+        store.mark_agent_running(resumed.run.id.clone()).await?;
+        store
+            .record_agent_observation(
+                resumed.run.id.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: ProviderLocation::default(),
+                    data: ProviderEventData::TurnFinished {
+                        outcome: TurnOutcome::Completed,
+                    },
+                },
+            )
+            .await?;
+
+        let canceller = Store::open(database.clone())?;
+        let (cancel, complete) = tokio::join!(
+            canceller.request_job_interrupt(chat.id.clone(), resumed.run.id.clone()),
+            store.finish_agent_attempt(
+                resumed.run.id.clone(),
+                RunStatus::Succeeded,
+                Some("Confirmed answer".into())
+            ),
+        );
+        complete?;
+        if let Err(error) = cancel {
+            assert!(error.to_string().contains("no longer active"));
+        }
+        assert!(
+            canceller
+                .finish_agent_attempt(resumed.run.id.clone(), RunStatus::Cancelled, None)
+                .await
+                .is_err()
+        );
+        let terminal = store
+            .job(job.project_id, job.id)
+            .await?
+            .unwrap()
+            .latest_attempt
+            .unwrap();
+        assert_eq!(terminal.status, RunStatus::Succeeded);
+        assert!(!terminal.cancel_requested);
+        let db = rusqlite::Connection::open(database)?;
+        let statuses = db.prepare("SELECT json_extract(payload, '$.status') FROM run_events WHERE turn_id = ?1 ORDER BY seq")?
+            .query_map([resumed.run.turn_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(statuses, ["starting", "running", "succeeded"]);
+        Ok(())
+    }
+
     struct CompletedProcess;
 
     impl RunControl for CompletedProcess {
