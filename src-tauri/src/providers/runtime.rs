@@ -41,6 +41,7 @@ use super::{
     plugins::{PluginInventory, probe_run_plugins},
     skills::{SkillCatalog, explicit_skill_request},
     steering::{SteerOutcome, SteerTarget},
+    suggestions::SuggestionOutcome,
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -214,6 +215,26 @@ pub fn start_managed_turn(
     plan: AttemptPlan,
     bridge_executable: Option<PathBuf>,
 ) -> ManagedTurn {
+    start_turn(store, runner, plan, bridge_executable, false)
+}
+
+/// Start a supervised turn whose selected profile permits native prompt suggestions.
+pub fn start_managed_turn_with_native_suggestions(
+    store: Store,
+    runner: Arc<dyn Runner>,
+    plan: AttemptPlan,
+    bridge_executable: Option<PathBuf>,
+) -> ManagedTurn {
+    start_turn(store, runner, plan, bridge_executable, true)
+}
+
+fn start_turn(
+    store: Store,
+    runner: Arc<dyn Runner>,
+    plan: AttemptPlan,
+    bridge_executable: Option<PathBuf>,
+    native_suggestions: bool,
+) -> ManagedTurn {
     let id = plan.run.id.clone();
     let handle = Handle::current();
     let (commands, receiver) = mpsc::sync_channel(16);
@@ -234,6 +255,7 @@ pub fn start_managed_turn(
             executable_revision: None,
             platform: None,
             staged_attachments: StagedAttachments::default(),
+            native_suggestions,
         };
         let outcome = execution
             .run(runner.as_ref(), &receiver, bridge_executable)
@@ -296,6 +318,7 @@ struct TurnExecution {
     executable_revision: Option<String>,
     platform: Option<ExecutionPlatform>,
     staged_attachments: StagedAttachments,
+    native_suggestions: bool,
 }
 
 impl TurnExecution {
@@ -409,6 +432,9 @@ impl TurnExecution {
             model: scope.model.clone(),
             effort: scope.effort.clone(),
         })?;
+        if self.native_suggestions && self.plan.question_route.is_native() {
+            session.enable_native_suggestions();
+        }
         session.set_checkout_root(&checkout.root);
         session.set_question_route(self.plan.question_route);
         let review = self.app.block_on(self.store.resolve_launch_review(
@@ -657,6 +683,9 @@ impl TurnExecution {
                     .any(|event| matches!(event.data, ProviderEventData::Error { .. }));
             if let Some(status) = self.record_update(process, update, EventSource::Provider)? {
                 ensure!(sent, "CLI finished before prompt dispatch");
+                if status == RunStatus::Succeeded && self.native_suggestions {
+                    self.collect_suggestion(process, session)?;
+                }
                 return Ok(status);
             }
             if failed_start {
@@ -1061,6 +1090,57 @@ impl TurnExecution {
             }
             _ => anyhow::bail!("adapter omitted steering evidence or supplied a mismatched frame"),
         }
+    }
+
+    fn collect_suggestion(
+        &mut self,
+        process: &mut CapturedProcess,
+        session: &mut dyn CliSession,
+    ) -> Result<()> {
+        if let Ok(update) = session.request_suggestion() {
+            if bounded_write(process, update.outbound).is_err() {
+                return self.finish_suggestion(session, SuggestionOutcome::Failed);
+            }
+            self.record_suggestion_events(update.events)?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.suggestion_pending() {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return self.finish_suggestion(session, SuggestionOutcome::TimedOut);
+            };
+            let update = match process.output.recv_timeout(remaining) {
+                Ok(Ok(frame)) => session.receive(frame),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return self.finish_suggestion(session, SuggestionOutcome::TimedOut);
+                }
+                _ => return self.finish_suggestion(session, SuggestionOutcome::Failed),
+            };
+            match update {
+                Ok(update) => self.record_suggestion_events(update.events)?,
+                Err(_) => return self.finish_suggestion(session, SuggestionOutcome::Failed),
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_suggestion(
+        &mut self,
+        session: &mut dyn CliSession,
+        outcome: SuggestionOutcome,
+    ) -> Result<()> {
+        if let Some(event) = session.abandon_suggestion(outcome) {
+            self.record(event, EventSource::Supervisor)?;
+        }
+        Ok(())
+    }
+
+    fn record_suggestion_events(&mut self, events: Vec<ProviderEvent>) -> Result<()> {
+        for event in events {
+            if matches!(event.data, ProviderEventData::PromptSuggestion { .. }) {
+                self.record(event, EventSource::Provider)?;
+            }
+        }
+        Ok(())
     }
 
     fn deliver_decision(

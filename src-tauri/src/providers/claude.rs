@@ -72,7 +72,9 @@ impl CliAdapter for ClaudeAdapter {
             session_id: None,
             turn: None,
             pending: HashMap::new(),
-            completed_turn: false,
+            suggestion_enabled: false,
+            suggestion_turn_started: false,
+            suggestion: None,
             goal_command: None,
             question_route: Default::default(),
         }))
@@ -86,13 +88,16 @@ struct ClaudeSession {
     session_id: Option<String>,
     turn: Option<Turn>,
     pending: HashMap<RequestId, PendingInput>,
-    completed_turn: bool,
+    suggestion_enabled: bool,
+    suggestion_turn_started: bool,
+    suggestion: Option<super::suggestions::SuggestionSource>,
     goal_command: Option<bool>,
     question_route: super::questions::QuestionRoute,
 }
 
 #[derive(Default)]
 struct Turn {
+    message_id: String,
     interrupted: bool,
     saw_final_message: bool,
     last_parent_text: Option<String>,
@@ -543,7 +548,18 @@ impl ClaudeSession {
             return AdapterUpdate::default();
         };
         self.pending.clear();
-        self.completed_turn = true;
+        if self.suggestion_enabled
+            && outcome == TurnOutcome::Completed
+            && frame["num_turns"].as_u64().is_some_and(|turns| turns > 0)
+            && let (Some(session_id), Some(result_id)) = (&self.session_id, string(frame, "uuid"))
+        {
+            self.suggestion = Some(super::suggestions::SuggestionSource {
+                provider_session_id: session_id.clone(),
+                provider_turn_id: None,
+                provider_result_id: Some(result_id),
+                message_id: turn.message_id.clone(),
+            });
+        }
         let mut reported = Vec::new();
         if let Some(usage) = frame.get("usage").filter(|usage| usage.is_object()) {
             reported.push(self.event(
@@ -590,6 +606,23 @@ impl ClaudeSession {
 }
 
 impl CliSession for ClaudeSession {
+    fn enable_native_suggestions(&mut self) {
+        self.suggestion_enabled = !self.initializing && self.permission_mode() != "plan";
+    }
+
+    fn suggestion_pending(&self) -> bool {
+        self.suggestion.is_some()
+    }
+
+    fn abandon_suggestion(
+        &mut self,
+        outcome: super::suggestions::SuggestionOutcome,
+    ) -> Option<ProviderEvent> {
+        self.suggestion
+            .take()
+            .map(|source| source.settlement(outcome))
+    }
+
     fn native_goal_support(&self) -> super::goal::NativeGoalSupport {
         super::goal::NativeGoalSupport::from_advertisement(self.goal_command)
     }
@@ -641,6 +674,9 @@ impl CliSession for ClaudeSession {
         if self.request.mode == SessionMode::Plan {
             arguments.extend(args(["--permission-prompt-tool", "stdio"]));
         }
+        if self.suggestion_enabled {
+            arguments.push("--prompt-suggestions".into());
+        }
         if let Some(model) = &self.request.model {
             arguments.extend(args(["--model", model]));
         }
@@ -682,8 +718,15 @@ impl CliSession for ClaudeSession {
         let message = WireMessage::json(&json!({
             "type": "user", "message": {"role": "user", "content": content}, "parent_tool_use_id": null
         }))?;
-        self.completed_turn = false;
-        self.turn = Some(Turn::default());
+        ensure!(
+            !self.suggestion_enabled || !self.suggestion_turn_started,
+            "Claude suggestion attribution requires one supervised turn per invocation"
+        );
+        self.suggestion_turn_started = true;
+        self.turn = Some(Turn {
+            message_id: input.message_id,
+            ..Turn::default()
+        });
         Ok(AdapterUpdate {
             outbound: vec![message],
             events: vec![self.event(&Value::Null, ProviderEventData::TurnStarted)],
@@ -777,18 +820,16 @@ impl CliSession for ClaudeSession {
                 self.frame_diagnostic(&frame, "Malformed Claude assistant message")
             })),
             Some("user") if self.turn.is_some() => Ok(self.tool_results(&frame)),
-            Some("prompt_suggestion") if self.completed_turn => Ok(frame["suggestion"]
-                .as_str()
-                .filter(|text| !text.trim().is_empty())
-                .map(|text| {
-                    events([self.event(
-                        &frame,
-                        ProviderEventData::Suggestion {
-                            text: text.to_owned(),
-                        },
-                    )])
-                })
-                .unwrap_or_default()),
+            Some("prompt_suggestion") => {
+                if self.suggestion.as_ref().is_none_or(|source| {
+                    frame["session_id"].as_str() != Some(&source.provider_session_id)
+                }) {
+                    return Ok(AdapterUpdate::default());
+                }
+                let outcome =
+                    super::suggestions::SuggestionOutcome::from_text(frame["suggestion"].as_str());
+                Ok(events(self.abandon_suggestion(outcome)))
+            }
             Some("result") if string(&frame, "parent_tool_use_id").is_some() => {
                 Ok(AdapterUpdate::default())
             }

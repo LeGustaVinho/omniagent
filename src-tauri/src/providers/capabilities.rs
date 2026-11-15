@@ -411,6 +411,7 @@ pub(crate) struct ReportedCapabilities {
     available: BTreeSet<Capability>,
     observed: BTreeSet<Capability>,
     goal_command: Option<bool>,
+    native_suggestions_unavailable: bool,
     pub model: Option<String>,
     models: Vec<super::ReportedModel>,
     pub effort: Option<String>,
@@ -474,6 +475,7 @@ impl ReportedCapabilities {
                         )
                     });
                     self.context_usage = None;
+                    self.native_suggestions_unavailable = false;
                 }
                 changed
             }
@@ -538,6 +540,17 @@ impl ReportedCapabilities {
             ProviderEventData::Suggestion { .. } => {
                 self.observed.insert(Capability::NativeSuggestions)
             }
+            ProviderEventData::PromptSuggestion { suggestion } => match suggestion.outcome {
+                super::suggestions::SuggestionOutcome::Available { .. } => {
+                    self.native_suggestions_unavailable = false;
+                    self.observed.insert(Capability::NativeSuggestions)
+                }
+                super::suggestions::SuggestionOutcome::Unavailable => {
+                    self.observed.remove(&Capability::NativeSuggestions);
+                    !std::mem::replace(&mut self.native_suggestions_unavailable, true)
+                }
+                _ => false,
+            },
             ProviderEventData::SideResponse { response }
                 if matches!(response.outcome, super::side::SideOutcome::Answered { .. }) =>
             {
@@ -601,19 +614,27 @@ impl ReportedCapabilities {
                 let observed = self.observed.contains(&capability);
                 let announced = self.available.contains(&capability);
                 let unavailable = match scope.provider {
-                    Provider::Codex => false,
-                    Provider::Claude => matches!(
-                        capability,
-                        Capability::NativeTurnFork
-                            | Capability::ManualNativeCompaction
-                            | Capability::LiveSteering
-                    ),
+                    Provider::Codex => {
+                        capability == Capability::NativeSuggestions
+                            && self.native_suggestions_unavailable
+                    }
+                    Provider::Claude => {
+                        (capability == Capability::NativeSuggestions
+                            && scope.mode != SessionMode::ApprovedWrite)
+                            || matches!(
+                                capability,
+                                Capability::NativeTurnFork
+                                    | Capability::ManualNativeCompaction
+                                    | Capability::LiveSteering
+                            )
+                    }
                     Provider::Antigravity => matches!(
                         capability,
                         Capability::NativeTurnFork
                             | Capability::ManualNativeCompaction
                             | Capability::LiveSteering
                             | Capability::NativeDelegationControls
+                            | Capability::NativeSuggestions
                     ),
                 };
                 let blocked = capability == Capability::WorkspaceWrite

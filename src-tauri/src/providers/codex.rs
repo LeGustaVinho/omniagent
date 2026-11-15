@@ -18,6 +18,7 @@ use super::{
     side::{SideInput, SideOutcome, SideRoute, SideUnavailable, SideUsage},
     skills::{SkillCatalog, SkillCatalogIssue, SkillEntry, SkillSource},
     steering::{SteerOutcome, SteerTarget},
+    suggestions::{SuggestionOutcome, SuggestionSource},
 };
 use crate::{
     diagnostics,
@@ -84,6 +85,9 @@ impl CliAdapter for CodexAdapter {
             pending_steer: None,
             pending_sample: None,
             sample_ids: HashSet::new(),
+            suggestion_enabled: false,
+            completed_suggestion_source: None,
+            prediction: None,
             model_pages: Vec::new(),
             workspace_instructions: None,
             model_cursors: HashSet::new(),
@@ -105,6 +109,7 @@ enum Request {
     StartTurn,
     Steer,
     Sample,
+    Prediction,
     StartCompaction,
     Interrupt,
 }
@@ -117,6 +122,7 @@ struct Session {
 
 struct ActiveTurn {
     id: Option<String>,
+    message_id: Option<String>,
     interrupt_requested: bool,
     compaction: Option<Compaction>,
 }
@@ -125,6 +131,13 @@ struct PendingSteer {
     request_id: RequestId,
     message_id: String,
     target: SteerTarget,
+}
+
+struct Prediction {
+    request_id: RequestId,
+    source: SuggestionSource,
+    acknowledged: bool,
+    outcome: Option<SuggestionOutcome>,
 }
 
 #[derive(Default)]
@@ -152,6 +165,9 @@ struct CodexSession {
     pending_steer: Option<PendingSteer>,
     pending_sample: Option<SideInput>,
     sample_ids: HashSet<String>,
+    suggestion_enabled: bool,
+    completed_suggestion_source: Option<SuggestionSource>,
+    prediction: Option<Prediction>,
     model_pages: Vec<ReportedModel>,
     workspace_instructions: Option<String>,
     model_cursors: HashSet<String>,
@@ -265,6 +281,27 @@ impl CodexSession {
         }
         if request == Request::Sample {
             return Ok(self.finish_sample(response));
+        }
+        if request == Request::Prediction {
+            let result = if let Some(error) = response.get("error") {
+                Some(if error["code"] == -32601 {
+                    SuggestionOutcome::Unavailable
+                } else {
+                    SuggestionOutcome::Failed
+                })
+            } else if !response["result"].is_object() {
+                Some(SuggestionOutcome::Failed)
+            } else {
+                None
+            };
+            if let Some(outcome) = result {
+                let event = self.abandon_suggestion(outcome);
+                return Ok(self.events(event.into_iter().collect()));
+            }
+            if let Some(prediction) = &mut self.prediction {
+                prediction.acknowledged = true;
+            }
+            return Ok(self.settle_prediction());
         }
         if let Some(error) = response.get("error") {
             if request == Request::ReadConfiguration {
@@ -473,6 +510,9 @@ impl CodexSession {
             }
             Request::Steer => unreachable!("steering replies are handled before other responses"),
             Request::Sample => unreachable!("sample replies are handled before other responses"),
+            Request::Prediction => {
+                unreachable!("prediction replies are handled before other responses")
+            }
             Request::StartCompaction => {
                 if let Some(progress) = self
                     .active
@@ -645,6 +685,24 @@ impl CodexSession {
             return Vec::new();
         }
         let finished = self.event(ProviderEventData::TurnFinished { outcome });
+        if self.suggestion_enabled
+            && outcome == TurnOutcome::Completed
+            && self.questions.is_empty()
+            && let (Some(session_id), Some(turn_id), Some(message_id)) = (
+                &finished.location.session_id,
+                &finished.location.turn_id,
+                self.active
+                    .as_ref()
+                    .and_then(|turn| turn.message_id.as_ref()),
+            )
+        {
+            self.completed_suggestion_source = Some(SuggestionSource {
+                provider_session_id: session_id.clone(),
+                provider_turn_id: Some(turn_id.clone()),
+                provider_result_id: None,
+                message_id: message_id.clone(),
+            });
+        }
         self.active = None;
         self.approvals.clear();
         self.questions.clear();
@@ -752,6 +810,9 @@ impl CodexSession {
     }
 
     fn notification(&mut self, method: &str, params: &Value) -> Result<AdapterUpdate> {
+        if method == "thread/prediction/updated" {
+            return Ok(self.prediction_notification(params));
+        }
         if matches!(method, "thread/goal/updated" | "thread/goal/cleared") {
             return self.goal_notification(method, params);
         }
@@ -963,6 +1024,37 @@ impl CodexSession {
         Ok(self.events(vec![event]))
     }
 
+    fn prediction_notification(&mut self, params: &Value) -> AdapterUpdate {
+        let Some(prediction) = self.prediction.as_mut() else {
+            return AdapterUpdate::default();
+        };
+        if params["threadId"].as_str() != Some(&prediction.source.provider_session_id)
+            || params["sourceTurnId"].as_str() != prediction.source.provider_turn_id.as_deref()
+            || prediction.outcome.is_some()
+        {
+            return AdapterUpdate::default();
+        }
+        let result = &params["result"];
+        prediction.outcome = Some(match result["type"].as_str() {
+            Some("completed") => SuggestionOutcome::from_text(result["text"].as_str()),
+            _ => SuggestionOutcome::Failed,
+        });
+        self.settle_prediction()
+    }
+
+    fn settle_prediction(&mut self) -> AdapterUpdate {
+        let outcome = self
+            .prediction
+            .as_mut()
+            .filter(|prediction| prediction.acknowledged)
+            .and_then(|prediction| prediction.outcome.take());
+        let events = outcome
+            .and_then(|outcome| self.abandon_suggestion(outcome))
+            .into_iter()
+            .collect();
+        self.events(events)
+    }
+
     fn item(&self, params: &Value, completed: bool) -> Result<AdapterUpdate> {
         let item = &params["item"];
         let kind = required_string(item, "type")?;
@@ -1146,6 +1238,44 @@ impl CodexSession {
 }
 
 impl CliSession for CodexSession {
+    fn enable_native_suggestions(&mut self) {
+        self.suggestion_enabled = !self.handshake_started && self.request.mode != SessionMode::Plan;
+    }
+
+    fn suggestion_pending(&self) -> bool {
+        self.prediction.is_some()
+    }
+
+    fn abandon_suggestion(&mut self, outcome: SuggestionOutcome) -> Option<ProviderEvent> {
+        self.prediction.take().map(|prediction| {
+            self.rpc.take_request(&prediction.request_id);
+            prediction.source.settlement(outcome)
+        })
+    }
+
+    fn request_suggestion(&mut self) -> Result<AdapterUpdate> {
+        let Some(source) = self.completed_suggestion_source.take() else {
+            return Ok(AdapterUpdate::default());
+        };
+        let (request_id, message) = self.rpc.request_with_id(
+            "thread/prediction/request",
+            json!({
+                "threadId":source.provider_session_id,"sourceTurnId":source.provider_turn_id,
+            }),
+            Request::Prediction,
+        )?;
+        self.prediction = Some(Prediction {
+            request_id,
+            source,
+            acknowledged: false,
+            outcome: None,
+        });
+        Ok(AdapterUpdate {
+            outbound: vec![message],
+            events: Vec::new(),
+        })
+    }
+
     fn native_goal_support(&self) -> NativeGoalSupport {
         NativeGoalSupport::from_advertisement(self.goal_command)
     }
@@ -1217,6 +1347,11 @@ impl CliSession for CodexSession {
             self.active.is_none(),
             "Codex already has a turn in progress"
         );
+        ensure!(
+            self.prediction.is_none(),
+            "Codex already has a prediction in progress"
+        );
+        self.completed_suggestion_source = None;
         let session = self
             .session
             .as_ref()
@@ -1241,6 +1376,7 @@ impl CliSession for CodexSession {
         let message = self.rpc.request("turn/start", params, Request::StartTurn)?;
         self.active = Some(ActiveTurn {
             id: None,
+            message_id: Some(input.message_id),
             interrupt_requested: false,
             compaction: None,
         });
@@ -1266,6 +1402,7 @@ impl CliSession for CodexSession {
         )?;
         self.active = Some(ActiveTurn {
             id: None,
+            message_id: None,
             interrupt_requested: false,
             compaction: Some(Compaction::default()),
         });
@@ -1819,6 +1956,15 @@ mod tests {
         intent: SessionIntent,
         checkout: &Path,
     ) -> Result<Box<dyn CliSession>> {
+        negotiate_configured(mode, intent, checkout, |_| {})
+    }
+
+    fn negotiate_configured(
+        mode: SessionMode,
+        intent: SessionIntent,
+        checkout: &Path,
+        configure: impl FnOnce(&mut dyn CliSession),
+    ) -> Result<Box<dyn CliSession>> {
         let resuming = matches!(&intent, SessionIntent::Resume { .. });
         let mut session = CodexAdapter.create_session(SessionRequest {
             checkout: checkout.to_path_buf(),
@@ -1827,6 +1973,7 @@ mod tests {
             model: Some("gpt-6.1-sol".into()),
             effort: Some("high".into()),
         })?;
+        configure(session.as_mut());
         assert_eq!(outbound(&session.start()?, 0)?["method"], "initialize");
         let initialized = inbound(
             &mut *session,
@@ -1854,6 +2001,60 @@ mod tests {
         ));
         assert_eq!(outbound(&opened, 0)?["method"], "model/list");
         Ok(session)
+    }
+
+    #[test]
+    fn prediction_requires_the_negotiated_request_and_exact_completed_source() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate_configured(
+            SessionMode::ReadOnly,
+            SessionIntent::Start,
+            checkout.path(),
+            |session| session.enable_native_suggestions(),
+        )?;
+        let finish = |id: &str| {
+            json!({"method":"turn/completed",
+                "params":{"threadId":"session","turn":{"id":id,"status":"completed"}}
+            })
+        };
+        let update = |thread: &str, source: &str| {
+            json!({"method":"thread/prediction/updated",
+                "params":{"threadId":thread,"sourceTurnId":source,"result":{"type":"completed","text":"Try it"}}
+            })
+        };
+        let no_candidate = session.request_suggestion()?;
+        assert!(no_candidate.outbound.is_empty());
+        session.send(TurnInput {
+            attachments: Vec::new(),
+            message_id: "source-message".into(),
+            text: "Fixture".into(),
+        })?;
+        inbound(&mut *session, finish("completed"))?;
+        let request = outbound(&session.request_suggestion()?, 0)?;
+        assert_eq!(request["method"], "thread/prediction/request");
+        assert_eq!(
+            request["params"],
+            json!({"threadId":"session","sourceTurnId":"completed"})
+        );
+        assert!(session.request_suggestion()?.outbound.is_empty());
+        for frame in [
+            update("other", "completed"),
+            update("session", "different-turn"),
+            update("session", "completed"),
+        ] {
+            // A matching notification can arrive before the acknowledgment.
+            assert!(inbound(&mut *session, frame)?.events.is_empty());
+        }
+        let settled = inbound(&mut *session, json!({"id":request["id"],"result":{}}))?;
+        assert!(matches!(settled.events.as_slice(), [ProviderEvent {
+            data: ProviderEventData::PromptSuggestion { suggestion }, location
+        }] if suggestion.outcome == (SuggestionOutcome::Available { text:"Try it".into() })
+            && suggestion.source.message_id == "source-message"
+            && location.turn_id.as_deref() == Some("completed")));
+        let replay = inbound(&mut *session, update("session", "completed"))?;
+        assert!(replay.events.is_empty() && replay.outbound.is_empty());
+        assert!(session.request_suggestion()?.outbound.is_empty());
+        Ok(())
     }
 
     #[test]

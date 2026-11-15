@@ -509,6 +509,9 @@ pub enum ProviderEventData {
     Suggestion {
         text: String,
     },
+    PromptSuggestion {
+        suggestion: suggestions::PromptSuggestion,
+    },
     Diagnostic {
         message: String,
     },
@@ -574,6 +577,19 @@ pub trait CliSession: Send {
                 reason: side::SideUnavailable::NativeRouteUnavailable,
             })
             .update())
+    }
+    fn enable_native_suggestions(&mut self) {}
+    fn request_suggestion(&mut self) -> anyhow::Result<AdapterUpdate> {
+        Ok(AdapterUpdate::default())
+    }
+    fn suggestion_pending(&self) -> bool {
+        false
+    }
+    fn abandon_suggestion(
+        &mut self,
+        _outcome: suggestions::SuggestionOutcome,
+    ) -> Option<ProviderEvent> {
+        None
     }
     fn compact_native(&mut self) -> anyhow::Result<AdapterUpdate> {
         anyhow::bail!("this adapter has no qualified manual native compaction route")
@@ -704,3 +720,4 @@ pub mod runtime;
 pub mod side;
 pub mod skills;
 pub mod steering;
+pub mod suggestions;
