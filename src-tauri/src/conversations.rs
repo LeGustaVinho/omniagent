@@ -933,6 +933,7 @@ impl Store {
             let suspended = crate::jobs::settle_parent_wait(
                 &tx, &run_id, &context_id, outcome, quiescence_confirmed,
             )?;
+            crate::jobs::settle_goal_stop(&tx, &run_id, quiescence_confirmed)?;
             if outcome == RunStatus::Succeeded && !suspended && !saved_input {
                 if quiescence_confirmed {
                     crate::jobs::accept_goal_checkpoint(&tx, &run_id, &context_id)?;
@@ -1004,6 +1005,7 @@ impl Store {
                 if !crate::jobs::recover_waiting_parent(&tx, &id)? {
                     crate::jobs::requeue_unlaunched_job(&tx, &id)?;
                 }
+                crate::jobs::settle_goal_stop(&tx, &id, false)?;
                 crate::jobs::observe_child_run(&tx, &id)?;
             }
             tx.execute(
@@ -2885,6 +2887,238 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_goal_pause_fences_the_current_run_and_resumes_its_checkpoint() -> Result<()> {
+        exercise_goal_stop(GoalStopScenario::ConfirmedPause).await
+    }
+
+    #[tokio::test]
+    async fn restarting_with_a_goal_stop_in_flight_keeps_the_revision_for_review() -> Result<()> {
+        exercise_goal_stop(GoalStopScenario::RestartDuringPause).await
+    }
+
+    #[tokio::test]
+    async fn restarting_during_goal_execution_requires_stop_review_before_resume() -> Result<()> {
+        exercise_goal_stop(GoalStopScenario::RestartDuringExecution).await
+    }
+
+    #[tokio::test]
+    async fn cancel_history_policy_waits_for_an_uncertain_goal_executor() -> Result<()> {
+        exercise_goal_stop(GoalStopScenario::CancelAfterRestart).await
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum GoalStopScenario {
+        ConfirmedPause,
+        RestartDuringPause,
+        RestartDuringExecution,
+        CancelAfterRestart,
+    }
+
+    async fn exercise_goal_stop(scenario: GoalStopScenario) -> Result<()> {
+        use crate::jobs::{
+            AdmissionEnvironment, GoalControlState, GoalDefinition, GoalStopAction, JobContext,
+        };
+
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let database = scope.checkout.join("store.sqlite");
+        let env = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: true,
+        };
+        let definition = GoalDefinition {
+            objective: "Verify controlled interruption".into(),
+            criteria: Vec::new(),
+            max_turns: 2,
+            max_seconds: None,
+            token_budget: None,
+        };
+        let goal = store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: conversation.id.clone(),
+                    context_id: conversation.context_id,
+                },
+                scope.clone(),
+                None,
+                definition,
+                None,
+            )
+            .await?;
+        let project = goal.job.project_id;
+        assert!(
+            store
+                .request_goal_stop("foreign".into(), goal.id.clone(), GoalStopAction::Pause)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Pause)
+                .await?,
+            GoalControlState::Paused
+        );
+        assert!(store.claim_next_job(env.clone()).await?.is_none());
+        store.resume_goal(project.clone(), goal.id.clone()).await?;
+        let initial = store
+            .claim_next_job(env.clone())
+            .await?
+            .context("Resumed goal lacked a queued attempt")?;
+        store.mark_agent_running(initial.run.id.clone()).await?;
+        if matches!(
+            scenario,
+            GoalStopScenario::ConfirmedPause | GoalStopScenario::RestartDuringPause
+        ) {
+            assert_eq!(
+                store
+                    .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Pause)
+                    .await?,
+                GoalControlState::Pausing
+            );
+            assert!(
+                store
+                    .goal_pause_requests_input_retention(initial.run.id.clone())
+                    .await?
+            );
+        }
+        assert!(
+            store
+                .resume_goal(project.clone(), goal.id.clone())
+                .await
+                .is_err()
+        );
+        assert!(store.claim_next_job(env.clone()).await?.is_none());
+        if scenario == GoalStopScenario::ConfirmedPause {
+            store
+                .finish_observed_agent_attempt(
+                    initial.run.id.clone(),
+                    RunStatus::Interrupted,
+                    None,
+                    None,
+                    true,
+                )
+                .await?;
+        }
+        drop(store);
+        let store = Store::open(database)?;
+        store.recover_agent_attempts_after_restart().await?;
+        let persisted = store
+            .active_conversation_goal(conversation.id.clone())
+            .await?
+            .unwrap();
+        assert_eq!(persisted.id, goal.id);
+        assert!(store.claim_next_job(env.clone()).await?.is_none());
+        if scenario != GoalStopScenario::ConfirmedPause {
+            assert_eq!(persisted.control_state, GoalControlState::NeedsReview);
+            if scenario == GoalStopScenario::CancelAfterRestart {
+                use crate::jobs::QueueHistoryPolicy;
+                store
+                    .set_conversation_queue_history_policy(
+                        conversation.id.clone(),
+                        Some(QueueHistoryPolicy::Cancel),
+                    )
+                    .await?;
+                let current = store.conversation(conversation.id.clone()).await?;
+                store
+                    .rewind_conversation_history(conversation.id.clone(), current.context_id, None)
+                    .await?;
+                assert_eq!(
+                    store
+                        .active_conversation_goal(conversation.id.clone())
+                        .await?
+                        .unwrap()
+                        .control_state,
+                    GoalControlState::NeedsReview
+                );
+                assert!(store.claim_next_job(env).await?.is_none());
+                assert_eq!(
+                    store
+                        .confirm_managed_goal_stop(project, goal.id, initial.run.id)
+                        .await?,
+                    GoalControlState::Cancelled
+                );
+                assert!(
+                    store
+                        .active_conversation_goal(conversation.id)
+                        .await?
+                        .is_none()
+                );
+                return Ok(());
+            }
+            assert!(
+                store
+                    .resume_goal(project.clone(), goal.id.clone())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                store
+                    .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Cancel)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                store
+                    .confirm_managed_goal_stop(project.clone(), goal.id.clone(), "other-run".into())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                store
+                    .confirm_managed_goal_stop(
+                        project.clone(),
+                        goal.id.clone(),
+                        initial.run.id.clone()
+                    )
+                    .await?,
+                GoalControlState::Paused
+            );
+        } else {
+            assert_eq!(persisted.control_state, GoalControlState::Paused);
+        }
+        store.resume_goal(project.clone(), goal.id.clone()).await?;
+        let resumed = store
+            .claim_next_job(env.clone())
+            .await?
+            .context("The paused checkpoint did not resume")?;
+        assert_eq!(
+            resumed.previous_run_id.as_deref(),
+            Some(initial.run.id.as_str())
+        );
+        assert_ne!(resumed.run.id, initial.run.id);
+        store.mark_agent_running(resumed.run.id.clone()).await?;
+        assert_eq!(
+            store
+                .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Cancel)
+                .await?,
+            GoalControlState::Cancelling
+        );
+        assert!(
+            store
+                .active_conversation_goal(conversation.id.clone())
+                .await?
+                .is_some()
+        );
+        store
+            .finish_observed_agent_attempt(resumed.run.id, RunStatus::Cancelled, None, None, true)
+            .await?;
+        assert!(
+            store
+                .active_conversation_goal(conversation.id)
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .request_goal_stop(project, goal.id, GoalStopAction::Cancel)
+                .await?,
+            GoalControlState::Cancelled
+        );
+        assert!(store.claim_next_job(env).await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn goal_revision_keeps_its_selected_scope_and_checkpoint_after_restart() -> Result<()> {
         use crate::jobs::{
             AdmissionBlocker, AdmissionEnvironment, GoalContinuationOwner, GoalDefinition,
@@ -3262,6 +3496,364 @@ mod tests {
             Some("native-session")
         );
         assert_eq!(revision.provider_goal_id.as_deref(), Some("provider-goal"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_goal_continuations_follow_history_policy_and_recheck_authority() -> Result<()> {
+        use crate::jobs::{
+            AdmissionBlocker, AdmissionEnvironment, GoalDefinition, GoalTurnAction, GoalTurnReport,
+            JobContext, JobPermission, JobRole, JobRule, JobWorkspace, QueueHistoryPolicy,
+            QueueState,
+        };
+
+        for policy in [
+            QueueHistoryPolicy::Recorded,
+            QueueHistoryPolicy::Review,
+            QueueHistoryPolicy::Cancel,
+        ] {
+            let (_dir, store, conversation, mut scope) = setup().await?;
+            scope.executable = std::env::current_exe()?;
+            let env = AdmissionEnvironment {
+                runner: scope.runner.clone(),
+                bridge_available: true,
+            };
+            let goal = store
+                .start_conversation_goal(
+                    JobContext {
+                        conversation_id: conversation.id.clone(),
+                        context_id: conversation.context_id,
+                    },
+                    scope.clone(),
+                    None,
+                    GoalDefinition {
+                        objective: "Retain the recorded scope".into(),
+                        criteria: Vec::new(),
+                        max_turns: 2,
+                        max_seconds: None,
+                        token_budget: None,
+                    },
+                    None,
+                )
+                .await?;
+            let project = goal.job.project_id;
+            let initial = store
+                .claim_next_job(env.clone())
+                .await?
+                .context("Initial goal did not start")?;
+            store.mark_agent_running(initial.run.id.clone()).await?;
+            let dispatch = prepare_fixture_dispatch(&store, &initial).await?;
+            store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+            store
+                .record_goal_turn_report(
+                    initial.run.id.clone(),
+                    GoalTurnReport {
+                        evidence: "Intermediate result".into(),
+                        action: GoalTurnAction::Continue,
+                    },
+                )
+                .await?;
+            store
+                .record_agent_observation(
+                    initial.run.id.clone(),
+                    EventSource::Provider,
+                    ProviderEvent {
+                        data: ProviderEventData::TurnFinished {
+                            outcome: TurnOutcome::Completed,
+                        },
+                        location: ProviderLocation::default(),
+                    },
+                )
+                .await?;
+            store
+                .finish_observed_agent_attempt(
+                    initial.run.id.clone(),
+                    RunStatus::Succeeded,
+                    Some("Retained checkpoint content".into()),
+                    None,
+                    true,
+                )
+                .await?;
+            let before = store
+                .active_conversation_goal(conversation.id.clone())
+                .await?
+                .unwrap();
+            let checkpoint = before.checkpoint.unwrap();
+            store
+                .set_conversation_queue_history_policy(conversation.id.clone(), Some(policy))
+                .await?;
+            let cleared = store
+                .rewind_conversation_history(
+                    conversation.id.clone(),
+                    checkpoint.context_id.clone(),
+                    None,
+                )
+                .await?;
+            let pending = store
+                .job(project.clone(), before.job.id.clone())
+                .await?
+                .unwrap();
+            if policy == QueueHistoryPolicy::Cancel {
+                assert_eq!(pending.queue_state, QueueState::Cancelled);
+                assert!(
+                    store
+                        .active_conversation_goal(conversation.id)
+                        .await?
+                        .is_none()
+                );
+                assert!(store.claim_next_job(env).await?.is_none());
+                continue;
+            }
+            if policy == QueueHistoryPolicy::Review {
+                assert_eq!(pending.queue_state, QueueState::Paused);
+                assert!(store.claim_next_job(env.clone()).await?.is_none());
+                store
+                    .set_pending_job_state(project.clone(), pending.id.clone(), QueueState::Queued)
+                    .await?;
+            }
+            let denied = JobRule {
+                role: JobRole::Operator,
+                operation: SessionMode::ReadOnly,
+                workspace: JobWorkspace::Project,
+                permission: JobPermission::Deny,
+                requirements: Default::default(),
+            };
+            store
+                .set_project_job_rules(project.clone(), vec![], vec![denied.clone()])
+                .await?;
+            assert!(
+                store
+                    .inspect_job(project.clone(), pending.id.clone(), env.clone())
+                    .await?
+                    .unwrap()
+                    .blockers
+                    .iter()
+                    .any(|blocker| matches!(blocker, AdmissionBlocker::Policy { .. }))
+            );
+            assert!(store.claim_next_job(env.clone()).await?.is_none());
+            store
+                .set_project_job_rules(project, vec![denied], vec![])
+                .await?;
+            let resumed = store
+                .claim_next_job(env)
+                .await?
+                .context("Retained continuation did not start")?;
+            assert_eq!(resumed.previous_run_id.as_ref(), Some(&initial.run.id));
+            assert!(resumed.scope == scope);
+            assert_eq!(resumed.run.checkout_id, conversation.checkout_id);
+            assert!(matches!(resumed.intent, SessionIntent::Start));
+            assert!(
+                resumed
+                    .input
+                    .iter()
+                    .any(|message| message.text == "Retained checkpoint content")
+            );
+            assert_eq!(
+                store.conversation(conversation.id).await?.context_id,
+                cleared
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn paused_goal_retains_its_sealed_context_across_clear_until_explicit_resume()
+    -> Result<()> {
+        use crate::jobs::{
+            AdmissionEnvironment, GoalControlState, GoalDefinition, GoalStopAction, JobContext,
+            QueueHistoryPolicy,
+        };
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let env = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: true,
+        };
+        let goal = store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: conversation.id.clone(),
+                    context_id: conversation.context_id,
+                },
+                scope.clone(),
+                None,
+                GoalDefinition {
+                    objective: "Continue only the recorded history".into(),
+                    criteria: Vec::new(),
+                    max_turns: 2,
+                    max_seconds: None,
+                    token_budget: None,
+                },
+                None,
+            )
+            .await?;
+        let project = goal.job.project_id;
+        let first = store.claim_next_job(env.clone()).await?.unwrap();
+        store.mark_agent_running(first.run.id.clone()).await?;
+        let dispatch = prepare_fixture_dispatch(&store, &first).await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        assert_eq!(
+            store
+                .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Pause)
+                .await?,
+            GoalControlState::Pausing
+        );
+        store
+            .finish_observed_agent_attempt(
+                first.run.id.clone(),
+                RunStatus::Interrupted,
+                Some("Paused partial progress".into()),
+                None,
+                true,
+            )
+            .await?;
+        let before = store.conversation(conversation.id.clone()).await?;
+        store
+            .set_conversation_queue_history_policy(
+                conversation.id.clone(),
+                Some(QueueHistoryPolicy::Recorded),
+            )
+            .await?;
+        let cleared = store
+            .rewind_conversation_history(conversation.id.clone(), before.context_id, None)
+            .await?;
+        assert_eq!(
+            store
+                .active_conversation_goal(conversation.id.clone())
+                .await?
+                .unwrap()
+                .control_state,
+            GoalControlState::Paused
+        );
+        assert!(store.claim_next_job(env.clone()).await?.is_none());
+        store.resume_goal(project, goal.id).await?;
+        let resumed = store
+            .claim_next_job(env)
+            .await?
+            .context("Missing parked goal recovery")?;
+        assert_eq!(resumed.previous_run_id.as_ref(), Some(&first.run.id));
+        assert!(resumed.scope == scope);
+        assert!(matches!(resumed.intent, SessionIntent::Start));
+        assert!(
+            resumed
+                .input
+                .iter()
+                .any(|message| message.text == "Paused partial progress")
+        );
+        assert_eq!(
+            store.conversation(conversation.id).await?.context_id,
+            cleared
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recorded_history_goal_can_collect_fresh_input_after_clear() -> Result<()> {
+        use crate::jobs::{AdmissionEnvironment, GoalDefinition, JobContext, QueueHistoryPolicy};
+
+        let (_dir, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let env = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: true,
+        };
+        store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: conversation.id.clone(),
+                    context_id: conversation.context_id,
+                },
+                scope.clone(),
+                None,
+                GoalDefinition {
+                    objective: "Ask what scope to retain".into(),
+                    criteria: Vec::new(),
+                    max_turns: 2,
+                    max_seconds: None,
+                    token_budget: None,
+                },
+                None,
+            )
+            .await?;
+        let first = store.claim_next_job(env.clone()).await?.unwrap();
+        store.mark_agent_running(first.run.id.clone()).await?;
+        let dispatch = prepare_fixture_dispatch(&store, &first).await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        let schema = json!({"type":"object","properties":{"continue":{"type":"boolean"}},"required":["continue"]});
+        let request_id = RequestId::Number(43);
+        for data in [
+            ProviderEventData::Question {
+                request_id: request_id.clone(),
+                form: json!({"message":"Continue in this scope?","schema":schema}),
+                normalized: Some(QuestionForm::schema(
+                    "Continue in this scope?".into(),
+                    &schema,
+                )?),
+                route: QuestionRoute::Native,
+            },
+            ProviderEventData::QuestionClosed { request_id },
+        ] {
+            store
+                .record_agent_observation(
+                    first.run.id.clone(),
+                    EventSource::Provider,
+                    ProviderEvent {
+                        data,
+                        location: ProviderLocation::default(),
+                    },
+                )
+                .await?;
+        }
+        store
+            .finish_observed_agent_attempt(
+                first.run.id.clone(),
+                RunStatus::Interrupted,
+                Some("The goal still needs input.".into()),
+                None,
+                true,
+            )
+            .await?;
+        assert_eq!(
+            store
+                .saved_conversation_questions(conversation.id.clone(), first.run.id.clone())
+                .await?
+                .len(),
+            1
+        );
+        assert!(store.claim_next_job(env.clone()).await?.is_none());
+        store
+            .set_conversation_queue_history_policy(
+                conversation.id.clone(),
+                Some(QueueHistoryPolicy::Recorded),
+            )
+            .await?;
+        let before = store.conversation(conversation.id.clone()).await?;
+        let cleared = store
+            .rewind_conversation_history(conversation.id.clone(), before.context_id, None)
+            .await?;
+        assert!(
+            store
+                .saved_conversation_questions(conversation.id.clone(), first.run.id.clone())
+                .await?
+                .is_empty()
+        );
+        let resumed = store
+            .claim_next_job(env)
+            .await?
+            .context("The retained goal did not receive a fresh request")?;
+        assert_eq!(resumed.previous_run_id.as_ref(), Some(&first.run.id));
+        assert!(resumed.scope == scope);
+        assert!(matches!(resumed.intent, SessionIntent::Start));
+        assert!(
+            resumed
+                .input
+                .iter()
+                .any(|message| message.text == "The goal still needs input.")
+        );
+        assert_eq!(
+            store.conversation(conversation.id).await?.context_id,
+            cleared
+        );
         Ok(())
     }
 

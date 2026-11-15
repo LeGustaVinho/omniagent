@@ -34,7 +34,7 @@ use super::{
     policy::{bind_attempt_policy, dispatch_rejection, effective_policy},
     question_answers::{self, QuestionContinuation, load_continuation},
     question_waits::{QuestionWaitSummary, has_open_questions, question_wait_summary},
-    recovery::{RecoveryCheckpoint, pending_recovery, recovery_source},
+    recovery::{RecoveryCheckpoint, pending_recovery, pending_writer_checkpoint, recovery_source},
     subagents::{SubagentAllocation, job_subagent_allocation},
 };
 
@@ -481,6 +481,7 @@ impl Store {
                             .context("The recovery checkpoint is no longer current")
                     })
                     .transpose()?;
+                let writer_checkpoint = pending_writer_checkpoint(&tx, &job)?;
                 let wait = job.downstream_wait.as_ref();
                 let question_run = inputs.question.as_ref().map(|question| question.run.clone());
                 let goal_run = inputs.goal.as_ref().map(|boundary| boundary.run.clone());
@@ -518,6 +519,12 @@ impl Store {
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![job.id, ordinal, plan.run().id, previous_run, kind],
                 )?;
+                if let Some(writer_checkpoint) = writer_checkpoint {
+                    tx.execute(
+                        "INSERT INTO goal_writer_attempts(run_id, checkpoint_run_id) VALUES (?1, ?2)",
+                        params![plan.run().id, writer_checkpoint],
+                    )?;
+                }
                 bind_attempt_policy(&tx, &job, &plan.run().id)?;
                 if let ScheduledAttempt::Agent(plan) = &plan {
                     if let Some(claim) = adopted.or(standalone) {
@@ -710,7 +717,9 @@ fn build_attempt(
                         input_context_id: checkpoint.input_context_id.clone(),
                     },
                     RecoveryAction::Resume => AttemptHistory::Resume {
-                        native: if recorded.is_some() {
+                        native: if recorded.is_some()
+                            || pending_writer_checkpoint(db, job)?.is_some()
+                        {
                             None
                         } else {
                             checkpoint.native_resume(db, &scope)?
@@ -1197,10 +1206,13 @@ fn evaluate(
     } else if let (None, Some(action)) = (&inputs.question, job.queued_recovery) {
         let (source_run, context_id) =
             pending_recovery(db, job)?.context("Missing queued recovery")?;
+        let writer_checkpoint = pending_writer_checkpoint(db, job)?;
         let matching = recovery_source(db, job)?.is_some_and(|source| {
             source.run_id() == source_run
                 && source.context_id() == context_id.as_deref()
-                && source.actions(job.mode).contains(&action)
+                && (source.actions(job.mode).contains(&action)
+                    || (action == RecoveryAction::Resume
+                        && writer_checkpoint.as_deref() == Some(source_run.as_str())))
         });
         if !matching {
             blockers.push(match context_id {

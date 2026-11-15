@@ -3,8 +3,8 @@ use omniagent::{
     conversations::SessionScope,
     diagnostics,
     jobs::{
-        Job, JobContext, JobInspection, JobScheduler, PendingInstruction, ProjectQueue, QueueState,
-        RecoveryAction,
+        GoalControlState, GoalStopAction, Job, JobContext, JobInspection, JobScheduler,
+        PendingInstruction, ProjectQueue, QueueState, RecoveryAction,
     },
     model_catalog::ModelSelection,
     providers::{
@@ -166,6 +166,44 @@ pub async fn resolve_uncertain_steering(
             run_id,
             confirmed_undelivered,
         )
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn request_goal_stop(
+    store: State<'_, Store>,
+    project_id: String,
+    revision_id: String,
+    action: GoalStopAction,
+) -> Result<GoalControlState, String> {
+    store
+        .request_goal_stop(project_id, revision_id, action)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn resume_goal(
+    store: State<'_, Store>,
+    project_id: String,
+    revision_id: String,
+) -> Result<(), String> {
+    store
+        .resume_goal(project_id, revision_id)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn confirm_managed_goal_stop(
+    store: State<'_, Store>,
+    project_id: String,
+    revision_id: String,
+    run_id: String,
+) -> Result<GoalControlState, String> {
+    store
+        .confirm_managed_goal_stop(project_id, revision_id, run_id)
         .await
         .map_err(ui_error)
 }

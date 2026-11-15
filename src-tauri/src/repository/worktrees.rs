@@ -528,7 +528,15 @@ pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Res
                 ensure!(holder, "writer job does not hold its worktree reservation");
             }
             let checkpoint = if writes {
-                db.query_row(
+                let goal_checkpoint = db.query_row(
+                    "SELECT c.evidence, c.capture_confirmed FROM goal_writer_attempts g
+                     JOIN job_worktree_candidates c ON c.run_id = g.checkpoint_run_id WHERE g.run_id = ?1",
+                    [&run], |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?, row.get::<_, Option<bool>>(1)?)),
+                ).optional()?;
+                if goal_checkpoint.is_some() {
+                    goal_checkpoint
+                } else {
+                    db.query_row(
                     "WITH RECURSIVE lineage(run_id) AS (
                          SELECT ?1
                          UNION
@@ -546,7 +554,8 @@ pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Res
                      LEFT JOIN job_worktree_candidates c ON c.run_id = q.run_id
                      ORDER BY l.request_event_seq LIMIT 1",
                     [&run], |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?, row.get::<_, Option<bool>>(1)?)),
-                ).optional()?
+                    ).optional()?
+                }
             } else {
                 None
             };
@@ -562,7 +571,7 @@ pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Res
             Some((Some(payload), Some(true))) => {
                 super::candidates::recheck_candidate(&worktree, &git_dir, &common, &payload)?
             }
-            Some(_) => anyhow::bail!("The saved question has no confirmed worktree candidate"),
+            Some(_) => anyhow::bail!("The continuation has no confirmed worktree candidate"),
             None => capture_git(&worktree, &git_dir, &common, None)?.state,
         };
         Ok::<_, anyhow::Error>(WorktreeStart {
@@ -584,4 +593,28 @@ pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Res
         })
         .await?;
     Ok(writes)
+}
+
+pub(crate) async fn verify_managed_recovery_candidate(
+    store: &Store,
+    project: String,
+    owner: String,
+    checkout_id: String,
+    run: String,
+) -> Result<()> {
+    let (worktree, git_dir, common, candidate) = store.execute(move |db| {
+        let (worktree, git_dir, common) = load_worktree(db, &project, &owner)?
+            .context("The managed worktree is unavailable")?;
+        ensure!(worktree.checkout_id == checkout_id, "The task's managed worktree changed");
+        let candidate: Vec<u8> = db.query_row(
+            "SELECT c.evidence FROM job_worktree_candidates c JOIN job_worktree_starts s ON s.run_id = c.run_id
+             WHERE c.run_id = ?1 AND c.capture_confirmed AND s.checkout_id = ?2",
+            params![run, checkout_id], |row| row.get(0),
+        ).optional()?.context("The paused goal has no confirmed worktree candidate")?;
+        Ok((worktree, git_dir, common, candidate))
+    }).await?;
+    tokio::task::spawn_blocking(move || {
+        super::candidates::recheck_candidate(&worktree, &git_dir, &common, &candidate).map(|_| ())
+    })
+    .await?
 }

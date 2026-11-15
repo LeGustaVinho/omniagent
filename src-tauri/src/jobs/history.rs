@@ -261,7 +261,149 @@ pub(crate) fn apply_queue_history_policy(db: &Connection, conversation: &str) ->
         }
         apply_job_history_policy(db, &job, &context, answered_question, policy)?;
     }
+    apply_parked_goal_history_policy(db, &project, conversation, policy)?;
+    apply_saved_goal_input_history_policy(db, &project, conversation, policy)?;
     archive_superseded_questions(db, conversation)
+}
+
+fn apply_parked_goal_history_policy(
+    db: &Connection,
+    project: &str,
+    conversation: &str,
+    policy: QueueHistoryPolicy,
+) -> Result<()> {
+    let affected = {
+        let mut query = db.prepare(
+            "SELECT g.revision_id, controls.state, c.job_id,
+                    coalesce(recovery.context_id, attempt.result_context_id, j.context_id)
+             FROM active_goals g JOIN goals owner ON owner.id = g.goal_id
+             JOIN goal_revision_controls controls ON controls.revision_id = g.revision_id
+             JOIN goal_continuations c ON c.revision_id = g.revision_id
+             JOIN jobs j ON j.id = c.job_id
+             LEFT JOIN job_recoveries recovery ON recovery.job_id = j.id
+             LEFT JOIN agent_attempts attempt ON attempt.run_id = controls.stop_run_id
+             WHERE owner.project_id = ?1 AND owner.conversation_id = ?2
+               AND controls.state IN ('paused','needs_review')
+               AND c.checkpoint_ordinal = (SELECT max(next.checkpoint_ordinal)
+                                            FROM goal_continuations next WHERE next.revision_id = c.revision_id)",
+        )?;
+        query
+            .query_map(params![project, conversation], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (revision, state, id, context) in affected {
+        let job = load_job(db, project, &id)?.context("History changed with a missing goal job")?;
+        if pipeline_pin_is_valid(db, &job)? {
+            continue;
+        }
+        if policy == QueueHistoryPolicy::Cancel {
+            super::goal_control::cancel_parked_goal_for_history(
+                db,
+                &revision,
+                state == "paused",
+                None,
+            )?;
+        } else {
+            bind_recorded_goal_context(db, &job.id, &context)?;
+        }
+    }
+    Ok(())
+}
+
+fn bind_recorded_goal_context(db: &Connection, job: &str, context: &str) -> Result<()> {
+    db.execute(
+        "INSERT INTO job_history_bindings(job_id, context_id, pipeline_pin) VALUES (?1, ?2, 0)
+         ON CONFLICT(job_id) DO UPDATE SET context_id = excluded.context_id WHERE pipeline_pin = 0",
+        params![job, context],
+    )?;
+    Ok(())
+}
+
+fn apply_saved_goal_input_history_policy(
+    db: &Connection,
+    project: &str,
+    conversation: &str,
+    policy: QueueHistoryPolicy,
+) -> Result<()> {
+    let waiting = {
+        let mut query = db.prepare(
+            "SELECT c.revision_id, c.job_id, a.run_id, attempt.result_context_id,
+                    (SELECT min(request_event_seq) FROM open_agent_questions WHERE run_id = a.run_id AND state = 'saved')
+             FROM goal_continuations c JOIN active_goals active ON active.revision_id = c.revision_id
+             JOIN goal_revisions r ON r.id = c.revision_id JOIN goals g ON g.id = r.goal_id
+             JOIN goal_revision_controls control ON control.revision_id = c.revision_id
+             JOIN job_attempts a ON a.job_id = c.job_id JOIN agent_attempts attempt ON attempt.run_id = a.run_id
+             JOIN jobs j ON j.id = c.job_id
+             WHERE g.project_id = ?1 AND attempt.conversation_id = ?2 AND r.continuation_owner = 'managed'
+               AND control.state = 'active' AND j.queue_state IN ('queued','paused')
+               AND NOT EXISTS (SELECT 1 FROM active_agent_attempts WHERE run_id = a.run_id)
+               AND NOT EXISTS (SELECT 1 FROM job_recoveries WHERE job_id = c.job_id)
+               AND NOT EXISTS (SELECT 1 FROM ready_question_continuations WHERE job_id = c.job_id)
+               AND NOT EXISTS (SELECT 1 FROM job_downstream_waits WHERE parent_run_id = a.run_id
+                               AND state IN ('waiting','needs_review'))
+               AND EXISTS (SELECT 1 FROM open_agent_questions WHERE run_id = a.run_id AND state = 'saved')
+               AND a.ordinal = (SELECT max(last.ordinal) FROM job_attempts last WHERE last.job_id = c.job_id)
+               AND c.checkpoint_ordinal = (SELECT max(last.checkpoint_ordinal) FROM goal_continuations last
+                                            WHERE last.revision_id = c.revision_id)",
+        )?;
+        query
+            .query_map(params![project, conversation], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (revision, id, run, context, question) in waiting {
+        let job = load_job(db, project, &id)?.context("The goal waiting for input lost its job")?;
+        if pipeline_pin_is_valid(db, &job)? {
+            continue;
+        }
+        if policy == QueueHistoryPolicy::Cancel {
+            super::goal_control::cancel_parked_goal_for_history(db, &revision, true, Some(&run))?;
+            continue;
+        }
+        if detached_question_context(db, conversation, &run, question)?.is_some() {
+            continue;
+        }
+        bind_recorded_goal_context(db, &id, &context)?;
+        let writer = job.mode == crate::providers::SessionMode::ApprovedWrite;
+        if writer {
+            let confirmed: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM job_worktree_candidates c JOIN job_worktree_starts s ON s.run_id = c.run_id
+                 WHERE c.run_id = ?1 AND c.capture_confirmed AND s.checkout_id = ?2)",
+                params![run, job.checkout_id], |row| row.get(0),
+            )?;
+            if !confirmed {
+                super::goal_control::hold_goal_for_stop_review(db, &revision, &run)?;
+                continue;
+            }
+        }
+        db.execute(
+            "INSERT INTO job_recoveries(job_id, source_run_id, action, context_id) VALUES (?1, ?2, 'resume', ?3)",
+            params![id, run, context],
+        )?;
+        if writer {
+            db.execute(
+                "INSERT INTO goal_writer_recoveries(job_id, checkpoint_run_id) VALUES (?1, ?2)",
+                params![id, run],
+            )?;
+        }
+        apply_job_history_policy(db, &job, &context, false, policy)?;
+        super::policy::reconcile_approval(db, &job)?;
+    }
+    Ok(())
 }
 
 pub(super) fn apply_job_history_policy(

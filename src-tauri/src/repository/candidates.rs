@@ -258,11 +258,11 @@ pub(super) fn recheck_candidate(
     let AttemptWorktreeEvidence::Saved { artifact } =
         serde_json::from_slice(&protection::unprotect(payload)?)?
     else {
-        anyhow::bail!("The saved question has no worktree candidate");
+        anyhow::bail!("The saved checkpoint has no worktree candidate");
     };
     ensure!(
         artifact.start.worktree == *worktree && artifact.start.git_common_dir == Path::new(common),
-        "The worktree identity changed since the question was saved"
+        "The worktree identity changed since the checkpoint was saved"
     );
     let current = capture_git(
         worktree,
@@ -272,7 +272,7 @@ pub(super) fn recheck_candidate(
     )?;
     ensure!(
         digest(&serde_json::to_vec(&current)?) == artifact.revision,
-        "The worktree content changed since the question was saved"
+        "The worktree content changed since the checkpoint was saved"
     );
     Ok(current.state)
 }

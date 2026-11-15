@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    Job, JobContext, JobOrigin, JobRequest, PipelineDispatch,
+    GoalControlState, Job, JobContext, JobOrigin, JobRequest, PipelineDispatch,
     history::{bind_pipeline_context, load_binding},
     insert_job, now_ms,
     pipeline::resolve_node_checkout,
@@ -101,6 +101,7 @@ pub struct GoalRevision {
     pub id: String,
     pub definition: GoalDefinition,
     pub continuation_owner: GoalContinuationOwner,
+    pub control_state: GoalControlState,
     pub provider: Provider,
     pub model: Option<String>,
     pub job: Job,
@@ -238,10 +239,12 @@ impl Store {
                     started, deadline, definition.token_budget.is_some()],
             )?;
             tx.execute("INSERT INTO active_goals VALUES (?1, ?2)", params![goal_id, id])?;
+            tx.execute("INSERT INTO goal_revision_controls(revision_id, state) VALUES (?1, 'active')", [&id])?;
             tx.execute("INSERT INTO goal_continuations VALUES (?1, 0, ?2)", params![id, job.id])?;
             tx.commit()?;
             Ok(GoalRevision {
                 goal_id, id, definition, continuation_owner: GoalContinuationOwner::Managed,
+                control_state: GoalControlState::Active,
                 provider: scope.provider, model: scope.model,
                 job, checkpoint: None, provider_session_id: None, provider_goal_id: None,
             })
@@ -356,6 +359,11 @@ fn load_revision(db: &Connection, id: String) -> Result<GoalRevision> {
             ).optional()?.map(|(ordinal, run_id, context_id, next_action, report)| -> Result<_> {
                 Ok(GoalCheckpoint { ordinal, run_id, context_id, next_action, report: decode_report(report)? })
             }).transpose()?;
+    let control_state: String = db.query_row(
+        "SELECT state FROM goal_revision_controls WHERE revision_id = ?1",
+        [&id],
+        |row| row.get(0),
+    )?;
     Ok(GoalRevision {
         goal_id,
         id,
@@ -367,35 +375,43 @@ fn load_revision(db: &Connection, id: String) -> Result<GoalRevision> {
         model: profile.model,
         definition: serde_json::from_slice(&protection::unprotect(&contents)?)?,
         continuation_owner: serde_json::from_value(serde_json::Value::String(owner))?,
+        control_state: GoalControlState::from_key(&control_state)?,
     })
 }
 
 pub(super) fn limit_blocker(db: &Connection, job: &str) -> Result<Option<&'static str>> {
-    let limits: Option<(Option<i64>, bool)> = db
+    let limits: Option<(Option<i64>, bool, String)> = db
         .query_row(
-            "SELECT r.deadline_ms, r.continuation_owner = 'managed' AND r.token_budget_requested
+            "SELECT r.deadline_ms, r.continuation_owner = 'managed' AND r.token_budget_requested, controls.state
          FROM goal_continuations c JOIN goal_revisions r ON r.id = c.revision_id
+         JOIN goal_revision_controls controls ON controls.revision_id = r.id
          WHERE c.job_id = ?1",
             [job],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    Ok(match limits {
-        Some((Some(deadline), _)) if now_ms() >= deadline => {
-            Some("The goal reached its time limit")
-        }
-        Some((_, true)) => Some("The managed goal route cannot enforce this token budget"),
+    let Some((deadline, unsupported_budget, state)) = limits else {
+        return Ok(None);
+    };
+    if let Some(reason) = GoalControlState::from_key(&state)?.blocker() {
+        return Ok(Some(reason));
+    }
+    Ok(match (deadline, unsupported_budget) {
+        (Some(deadline), _) if now_ms() >= deadline => Some("The goal reached its time limit"),
+        (_, true) => Some("The managed goal route cannot enforce this token budget"),
         _ => None,
     })
 }
 
 pub(super) fn deactivate_cancelled_job(db: &Connection, job: &str) -> Result<()> {
-    db.execute(
+    let cancelled: Option<String> = db.query_row(
         "DELETE FROM active_goals
          WHERE revision_id IN (
              SELECT c.revision_id FROM goal_continuations c
              JOIN goal_revisions r ON r.id = c.revision_id
+             JOIN goal_revision_controls controls ON controls.revision_id = c.revision_id
              WHERE c.job_id = ?1 AND r.continuation_owner = 'managed'
+               AND controls.state IN ('active','paused')
                AND NOT EXISTS (SELECT 1 FROM goal_continuations next
                                WHERE next.revision_id = c.revision_id AND next.checkpoint_ordinal > c.checkpoint_ordinal)
                AND NOT EXISTS (
@@ -406,9 +422,17 @@ pub(super) fn deactivate_cancelled_job(db: &Connection, job: &str) -> Result<()>
                        OR EXISTS (SELECT 1 FROM unconfirmed_question_stops WHERE run_id = a.run_id)
                    )
                )
-         )",
+         ) RETURNING revision_id",
         [job],
-    )?;
+        |row| row.get(0),
+    ).optional()?;
+    if let Some(revision) = cancelled {
+        db.execute(
+            "UPDATE goal_revision_controls SET state = 'cancelled', stop_action = 'cancel', confirmed_by = 'recorded_idle',
+                    requested_ms = ?2, settled_ms = ?2 WHERE revision_id = ?1",
+            params![revision, now_ms()],
+        )?;
+    }
     Ok(())
 }
 

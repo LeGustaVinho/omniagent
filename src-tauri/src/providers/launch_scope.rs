@@ -12,8 +12,8 @@ use serde_json::{Map, Value, json};
 use crate::{
     customizations::{CustomizationKind, LaunchReview, ReviewState},
     mcp_bridge::{
-        BridgeLaunch, GET_JOB_STATUS, INSPECT_OMNIAGENT, INSPECT_SCOPE, REQUEST_PERMISSION,
-        SERVER_NAME, SUBMIT_JOB, WAIT_FOR_JOBS,
+        BridgeLaunch, GET_JOB_STATUS, INSPECT_OMNIAGENT, INSPECT_SCOPE, REPORT_GOAL_PROGRESS,
+        REQUEST_PERMISSION, SERVER_NAME, SUBMIT_JOB, WAIT_FOR_JOBS,
     },
     repository::CheckoutLayout,
     runner::Runner,
@@ -199,6 +199,7 @@ impl ScopedLaunch {
                     SUBMIT_JOB,
                     GET_JOB_STATUS,
                     WAIT_FOR_JOBS,
+                    REPORT_GOAL_PROGRESS,
                 ]
                 .map(|tool| format!("mcp__{SERVER_NAME}__{tool}"))
                 .join(","),
@@ -341,6 +342,7 @@ impl ScopedLaunch {
                         SUBMIT_JOB: {"approval_mode": "approve"},
                         GET_JOB_STATUS: {"approval_mode": "approve"},
                         WAIT_FOR_JOBS: {"approval_mode": "approve"},
+                        REPORT_GOAL_PROGRESS: {"approval_mode": "approve"},
                     },
                 }))?,
             );

@@ -237,7 +237,9 @@ pub(crate) fn settle_parent_wait(
         .optional()?;
     let Some(id) = id else { return Ok(false) };
     let (cancelled, writer_unsettled): (bool, bool) = db.query_row(
-        "SELECT cancel_requested, EXISTS(SELECT 1 FROM job_writer_reservations WHERE run_id = ?1)
+        "SELECT cancel_requested AND NOT EXISTS (
+                    SELECT 1 FROM goal_revision_controls WHERE stop_run_id = ?1 AND state = 'pausing'
+                ), EXISTS(SELECT 1 FROM job_writer_reservations WHERE run_id = ?1)
          FROM job_attempts WHERE run_id = ?1",
         [run],
         |row| Ok((row.get(0)?, row.get(1)?)),

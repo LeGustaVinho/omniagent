@@ -16,11 +16,11 @@ use omniagent::{
     conversations::SessionScope,
     jobs::{
         AdmissionBlocker, AdmissionEnvironment, DownstreamWaitState, FailureCause, FailurePhase,
-        Job, JobContext, JobKind, JobPermission, JobRequest, JobRole, JobRule, JobScheduler,
-        JobWorkspace, PipelineCommand, PipelineDispatch, PipelineNodeKind, QueueHistoryPolicy,
-        RecoveryAction, ReleaseBlocker,
+        GoalControlState, GoalDefinition, GoalStopAction, Job, JobContext, JobKind, JobPermission,
+        JobRequest, JobRole, JobRule, JobScheduler, JobWorkspace, PipelineCommand,
+        PipelineDispatch, PipelineNodeKind, QueueHistoryPolicy, RecoveryAction, ReleaseBlocker,
     },
-    process_io::CapturedProcess,
+    process_io::{CapturedProcess, Stream},
     providers::{
         Provider, RequestId, SessionMode,
         questions::{QuestionAction, QuestionOrigin, QuestionReply, QuestionRoute},
@@ -30,7 +30,7 @@ use omniagent::{
         self, AttemptWorktreeEvidence, ManagedWorktree, ProjectCheckout, provision_task_worktree,
         with_managed_worktree_writer,
     },
-    runner::{DirectWindowsRunner, LaunchRequest, Runner},
+    runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
     runs::RunStatus,
     store::Store,
 };
@@ -285,6 +285,7 @@ impl Runner for CandidateWriter {
 
     fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
         if request.arguments.contains(&OsStr::new("app-server")) {
+            register_fixture_bridge(&request).map_err(io::Error::other)?;
             return DirectWindowsRunner.launch(LaunchRequest {
                 arguments: &[
                     "--ignored",
@@ -300,6 +301,81 @@ impl Runner for CandidateWriter {
             "the fixture only implements the app server",
         ))
     }
+}
+
+fn register_fixture_bridge(request: &LaunchRequest<'_>) -> Result<()> {
+    let Some(config) = request
+        .arguments
+        .iter()
+        .filter_map(|arg| arg.to_str())
+        .find(|arg| arg.starts_with("mcp_servers="))
+    else {
+        return Ok(());
+    };
+    let config = config.parse::<toml::Table>()?;
+    let Some(server) = config
+        .get("mcp_servers")
+        .and_then(|entry| entry.get("omniagent_runtime"))
+    else {
+        return Ok(());
+    };
+    let command = server
+        .get("command")
+        .and_then(toml::Value::as_str)
+        .context("fixture bridge command")?;
+    let arguments = server
+        .get("args")
+        .and_then(toml::Value::as_array)
+        .context("fixture bridge arguments")?;
+    let arguments = arguments
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(OsStr::new)
+                .context("non-text fixture bridge argument")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut process = DirectWindowsRunner.launch(LaunchRequest {
+        version: CONTRACT_VERSION,
+        executable: Path::new(command),
+        checkout: request.checkout,
+        arguments: &arguments,
+    })?;
+    let result = (|| -> Result<()> {
+        for message in [
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-11-25", "capabilities":{}, "clientInfo":{"name":"writer-fixture","version":"1"}
+            }}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+        ] {
+            process.input.send(format!("{message}\n").as_bytes())?;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+            let frame = process.output.recv_timeout(remaining)??;
+            if frame.stream != Stream::Stdout {
+                continue;
+            }
+            let frame: Value = serde_json::from_str(&frame.data)?;
+            if frame["id"] == 2 {
+                ensure!(
+                    frame["result"]["tools"]
+                        .as_array()
+                        .is_some_and(|tools| tools
+                            .iter()
+                            .any(|tool| tool["name"] == "report_goal_progress")),
+                    "fixture could not register the goal bridge"
+                );
+                return Ok(());
+            }
+        }
+        anyhow::bail!("fixture bridge registration timed out")
+    })();
+    process.control.cancel()?;
+    process.control.wait()?;
+    result
 }
 
 #[test]
@@ -1556,6 +1632,252 @@ async fn expired_writer_question_retains_partial_work_and_releases_the_slot() ->
         .await?;
     assert_eq!(settled(3).await?.status, RunStatus::Succeeded);
     assert!(tree.root.join("fixture-continued").is_file());
+    scheduler.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn paused_goal_resumes_only_from_the_confirmed_writer_candidate() -> Result<()> {
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("goal.sqlite");
+    let store = Store::open(database.clone())?;
+    let source = temp.path().join("source");
+    let checkout = repository(&store, &source).await?;
+    let project = checkout.project_id;
+    let task = store
+        .create_project_task(project.clone(), "Goal writer".into())
+        .await?;
+    let tree = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project.clone(),
+        task.id.clone(),
+        checkout.checkout_id,
+    )
+    .await?;
+    fs::create_dir_all(source.join(".git/info"))?;
+    fs::write(
+        source.join(".git/info/exclude"),
+        "ignored.txt\nfixture-hold-open\nfixture-ready\n",
+    )?;
+    fs::write(tree.root.join("fixture-hold-open"), [])?;
+    let ready = tree.root.join("fixture-ready");
+    let conversation = store
+        .create_conversation(tree.checkout_id.clone(), "Writer goal".into())
+        .await?;
+    let runner = Arc::new(CandidateWriter);
+    let bridge = std::path::PathBuf::from(env!("CARGO_BIN_EXE_omniagent"));
+    let env = AdmissionEnvironment {
+        runner: runner.identity().into(),
+        bridge_available: true,
+    };
+    let goal = store
+        .start_conversation_goal(
+            JobContext {
+                conversation_id: conversation.id.clone(),
+                context_id: conversation.context_id,
+            },
+            SessionScope {
+                provider: Provider::Codex,
+                profile_id: "writer".into(),
+                account_binding: None,
+                checkout: tree.root.clone(),
+                executable: std::env::current_exe()?,
+                cli_version: "0.169.0-alpha.11.1".into(),
+                runner: runner.identity().into(),
+                permission_revision: "writer-fixture".into(),
+                mode: SessionMode::ApprovedWrite,
+                model: None,
+                effort: None,
+            },
+            Some(task.id.clone()),
+            GoalDefinition {
+                objective: "Edit a candidate and wait for the operator".into(),
+                criteria: Vec::new(),
+                max_turns: 2,
+                max_seconds: None,
+                token_budget: None,
+            },
+            None,
+        )
+        .await?;
+    let job = &goal.job.id;
+    let pending = store
+        .inspect_job(project.clone(), job.clone(), env.clone())
+        .await?
+        .unwrap();
+    let [AdmissionBlocker::Approval { approval_id }] = pending.blockers.as_slice() else {
+        anyhow::bail!("Expected a writer approval, got {:?}", pending.blockers);
+    };
+    assert!(store.claim_next_job(env.clone()).await?.is_none());
+    store
+        .decide_job_approval(project.clone(), approval_id.clone(), true)
+        .await?;
+    let scheduler = JobScheduler::start(store.clone(), runner.clone(), Some(bridge.clone()));
+    tokio::time::timeout(Duration::from_secs(90), async {
+        while !ready.is_file() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("The goal writer did not reach the provider")?;
+    let original = store
+        .job(project.clone(), job.clone())
+        .await?
+        .unwrap()
+        .latest_attempt
+        .unwrap();
+    assert_eq!(
+        store
+            .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Pause)
+            .await?,
+        GoalControlState::Pausing
+    );
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            let current = store
+                .active_conversation_goal(conversation.id.clone())
+                .await?
+                .unwrap();
+            if current.control_state == GoalControlState::Paused {
+                break Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await??;
+    assert!(matches!(
+        store
+            .attempt_worktree_evidence(project.clone(), original.run_id.clone())
+            .await?,
+        Some(AttemptWorktreeEvidence::Saved { .. })
+    ));
+    assert_eq!(
+        store
+            .inspect_project_queue(project.clone(), env.clone())
+            .await?
+            .active,
+        0
+    );
+    assert!(
+        store
+            .queue_job_recovery(
+                project.clone(),
+                job.clone(),
+                original.run_id.clone(),
+                RecoveryAction::Resume
+            )
+            .await
+            .is_err()
+    );
+    scheduler.shutdown().await?;
+    drop(store);
+    let store = Store::open(database)?;
+    store.recover_agent_attempts_after_restart().await?;
+    fs::remove_file(&ready)?;
+    let file = tree.root.join("candidate.bin");
+    let prior = fs::read(&file)?;
+    fs::write(&file, b"External edit before requesting resume")?;
+    assert!(
+        store
+            .resume_goal(project.clone(), goal.id.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("worktree content changed")
+    );
+    assert_eq!(
+        store
+            .active_conversation_goal(conversation.id.clone())
+            .await?
+            .unwrap()
+            .control_state,
+        GoalControlState::Paused
+    );
+    fs::write(&file, &prior)?;
+    store.resume_goal(project.clone(), goal.id.clone()).await?;
+    let reserved = store
+        .claim_next_job(env.clone())
+        .await?
+        .context("Resume did not claim a writer")?;
+    assert_eq!(reserved.previous_run_id.as_ref(), Some(&original.run_id));
+    assert!(matches!(
+        reserved.intent,
+        omniagent::providers::SessionIntent::Start
+    ));
+    store.recover_agent_attempts_after_restart().await?;
+    fs::write(&file, b"External edit after reserving the resumed attempt")?;
+    let scheduler = JobScheduler::start(store.clone(), runner, Some(bridge));
+    let settled = |ordinal| {
+        let (store, project, job) = (&store, &project, job.clone());
+        async move {
+            tokio::time::timeout(Duration::from_secs(90), async {
+                loop {
+                    if let Some(attempt) = store
+                        .job(project.clone(), job.clone())
+                        .await?
+                        .unwrap()
+                        .latest_attempt
+                        && attempt.ordinal == ordinal
+                        && attempt.status.is_terminal()
+                    {
+                        break Ok::<_, anyhow::Error>(attempt);
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await?
+        }
+    };
+    let rejected = settled(3).await?;
+    assert_eq!(rejected.status, RunStatus::Failed);
+    assert!(
+        store
+            .agent_dispatch(conversation.id.clone(), rejected.run_id.clone())
+            .await?
+            .is_none()
+    );
+    assert!(!ready.is_file());
+    fs::write(&file, &prior)?;
+    store
+        .queue_job_recovery(
+            project.clone(),
+            job.clone(),
+            rejected.run_id,
+            RecoveryAction::Retry,
+        )
+        .await?;
+    tokio::time::timeout(Duration::from_secs(90), async {
+        while !ready.is_file() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("The restored candidate was not resumed")?;
+    assert_eq!(fs::read(&file)?, b"Later file revision\n");
+    assert_eq!(
+        store
+            .request_goal_stop(project.clone(), goal.id.clone(), GoalStopAction::Cancel)
+            .await?,
+        GoalControlState::Cancelling
+    );
+    let cancelled = settled(4).await?;
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
+    assert!(
+        store
+            .active_conversation_goal(conversation.id)
+            .await?
+            .is_none()
+    );
+    assert!(matches!(
+        store
+            .attempt_worktree_evidence(project.clone(), cancelled.run_id)
+            .await?,
+        Some(AttemptWorktreeEvidence::Saved { .. })
+    ));
+    with_managed_worktree_writer(&store, project, tree.checkout_id, task.id, |_| Ok(())).await?;
     scheduler.shutdown().await?;
     Ok(())
 }

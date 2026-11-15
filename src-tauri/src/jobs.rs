@@ -13,6 +13,7 @@ mod admission;
 mod command;
 mod downstream;
 mod failures;
+mod goal_control;
 mod goals;
 mod history;
 mod inspection;
@@ -39,6 +40,8 @@ pub(crate) use failures::record_job_failure;
 pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
+pub(crate) use goal_control::settle_goal_stop;
+pub use goal_control::{GoalControlState, GoalStopAction};
 pub use goals::{
     GoalCheckpoint, GoalContinuationOwner, GoalDefinition, GoalRevision, GoalTurnAction,
     GoalTurnReport,

@@ -875,11 +875,22 @@ impl TurnExecution {
                 Ok(Command::Interrupt | Command::YieldToDownstream)
                 | Err(mpsc::TryRecvError::Disconnected) => {
                     let yielding = matches!(command, Ok(Command::YieldToDownstream));
-                    if sent && !exiting && !yielding && matches!(command, Ok(Command::Interrupt)) {
-                        self.app.block_on(
+                    let paused = self.goal.is_some()
+                        && !exiting
+                        && matches!(command, Ok(Command::Interrupt))
+                        && self.app.block_on(
                             self.store
-                                .close_questions_for_operator_stop(self.plan.run.id.clone()),
+                                .goal_pause_requests_input_retention(self.plan.run.id.clone()),
                         )?;
+                    if sent && !exiting && !yielding && matches!(command, Ok(Command::Interrupt)) {
+                        let run = self.plan.run.id.clone();
+                        if paused {
+                            self.app
+                                .block_on(self.store.preserve_questions_after_turn(run, false))?;
+                        } else {
+                            self.app
+                                .block_on(self.store.close_questions_for_operator_stop(run))?;
+                        }
                     }
                     let outcome = if sent {
                         match interrupt_to_completion(process, session, |event, source| {
@@ -892,7 +903,7 @@ impl TurnExecution {
                         RunStatus::Cancelled
                     };
                     return Ok(
-                        if (exiting || yielding) && outcome == RunStatus::Cancelled {
+                        if (exiting || yielding || paused) && outcome == RunStatus::Cancelled {
                             RunStatus::Interrupted
                         } else {
                             outcome

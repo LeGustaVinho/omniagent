@@ -136,14 +136,39 @@ impl RecoveryCheckpoint {
 }
 
 pub(super) fn recovery_source(db: &Connection, job: &Job) -> Result<Option<RecoveryCheckpoint>> {
-    let Some(attempt) = job.latest_attempt.as_ref().filter(|attempt| {
-        matches!(
-            attempt.status,
-            RunStatus::Failed | RunStatus::Cancelled | RunStatus::Interrupted
-        )
-    }) else {
+    load_recovery_source(db, job, None)
+}
+
+pub(super) fn recovery_source_for_goal_resume(
+    db: &Connection,
+    job: &Job,
+    revision: &str,
+) -> Result<Option<RecoveryCheckpoint>> {
+    load_recovery_source(db, job, Some(revision))
+}
+
+fn load_recovery_source(
+    db: &Connection,
+    job: &Job,
+    goal_revision: Option<&str>,
+) -> Result<Option<RecoveryCheckpoint>> {
+    let Some(attempt) = job.latest_attempt.as_ref() else {
         return Ok(None);
     };
+    match attempt.status {
+        RunStatus::Failed | RunStatus::Cancelled | RunStatus::Interrupted => {}
+        RunStatus::Succeeded
+            if pending_recovery(db, job)?.is_some_and(|(run, _)| run == attempt.run_id) => {}
+        RunStatus::Succeeded
+            if let Some(revision) = goal_revision
+                && super::goal_control::worker_confirmed_goal_pause(
+                    db,
+                    job,
+                    revision,
+                    &attempt.run_id,
+                )? => {}
+        _ => return Ok(None),
+    }
     if super::instruction_delivery::adopted_run(db, &job.id)?.is_some()
         || super::instruction_delivery::unconfirmed_adoption(db, &attempt.run_id)?
         || super::question_waits::has_open_questions(db, &attempt.run_id)?
@@ -301,9 +326,45 @@ pub(crate) fn requeue_unlaunched_job(db: &Connection, run_id: &str) -> Result<()
     )?;
     if queued != 0 {
         let job = load_attempt_job(db, run_id)?.context("Recovery job disappeared")?;
+        db.execute(
+            "INSERT INTO goal_writer_recoveries(job_id, checkpoint_run_id)
+             SELECT ?1, checkpoint_run_id FROM goal_writer_attempts WHERE run_id = ?2",
+            params![job.id, run_id],
+        )?;
         reconcile_approval(db, &job)?;
     }
     Ok(())
+}
+
+pub(super) fn pending_writer_checkpoint(db: &Connection, job: &Job) -> Result<Option<String>> {
+    Ok(db
+        .query_row(
+            "SELECT checkpoint_run_id FROM goal_writer_recoveries WHERE job_id = ?1",
+            [&job.id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn writer_checkpoint_for_recovery(
+    db: &Connection,
+    job: &Job,
+    run: &str,
+    action: RecoveryAction,
+    goal_revision: Option<&str>,
+) -> Result<Option<String>> {
+    if action == RecoveryAction::Resume
+        && let Some(revision) = goal_revision
+        && super::goal_control::writer_pause_checkpoint(db, job, revision, run)?
+    {
+        return Ok(Some(run.to_owned()));
+    }
+    Ok(db.query_row(
+        "SELECT checkpoint.checkpoint_run_id FROM goal_writer_attempts checkpoint
+         JOIN job_attempts attempt ON attempt.run_id = checkpoint.run_id
+         WHERE checkpoint.run_id = ?1 AND attempt.job_id = ?2 AND attempt.process_launch_requested = 0",
+        params![run, job.id], |row| row.get(0),
+    ).optional()?)
 }
 
 pub(super) fn pending_recovery(
@@ -327,9 +388,22 @@ impl Store {
         expected_run: String,
         action: RecoveryAction,
     ) -> Result<Job> {
-        let (checkout_id, owner, scope, refresh_desktop) = self
+        self.queue_job_recovery_with_goal(project_id, job_id, expected_run, action, None)
+            .await
+    }
+
+    pub(super) async fn queue_job_recovery_with_goal(
+        &self,
+        project_id: String,
+        job_id: String,
+        expected_run: String,
+        action: RecoveryAction,
+        goal_revision: Option<String>,
+    ) -> Result<Job> {
+        let (checkout_id, owner, scope, refresh_desktop, writer_checkpoint) = self
             .execute({
                 let (project, id) = (project_id.clone(), job_id.clone());
+                let (run, revision) = (expected_run.clone(), goal_revision.clone());
                 move |db| {
                     let job = load_job(db, &project, &id)?
                         .context("Job is unavailable in this project")?;
@@ -340,18 +414,30 @@ impl Store {
                     let refresh = job.origin == JobOrigin::Operator
                         && matches!(&scope, RecoveryProfile::Agent(profile)
                             if profile.permission_revision == DESKTOP_PERMISSION_REVISION && profile.account_binding.is_none());
-                    Ok((job.checkout_id, job.worktree_owner_task_id, scope, refresh))
+                    let writer_checkpoint = writer_checkpoint_for_recovery(db, &job, &run, action, revision.as_deref())?;
+                    Ok((job.checkout_id, job.worktree_owner_task_id, scope, refresh, writer_checkpoint))
                 }
             })
             .await?;
         if let Some(owner) = owner.as_ref() {
-            repository::verify_managed_recovery_checkout(
-                self,
-                project_id.clone(),
-                owner.clone(),
-                checkout_id,
-            )
-            .await?;
+            if let Some(checkpoint) = &writer_checkpoint {
+                repository::verify_managed_recovery_candidate(
+                    self,
+                    project_id.clone(),
+                    owner.clone(),
+                    checkout_id,
+                    checkpoint.clone(),
+                )
+                .await?;
+            } else {
+                repository::verify_managed_recovery_checkout(
+                    self,
+                    project_id.clone(),
+                    owner.clone(),
+                    checkout_id,
+                )
+                .await?;
+            }
         } else {
             repository::verify_checkout(self, checkout_id, scope.checkout().to_owned()).await?;
         }
@@ -404,14 +490,17 @@ impl Store {
                     effective_release_blocker(&tx, &job)?.is_none(),
                     "The pipeline job needs an accepted release for the current plan and worktree"
                 );
-                let checkpoint = recovery_source(&tx, &job)?
+                let checkpoint = load_recovery_source(&tx, &job, goal_revision.as_deref())?
                     .context("The job no longer has a recoverable checkpoint")?;
                 ensure!(
                     checkpoint.run_id() == expected_run,
                     "The job has a newer attempt"
                 );
+                let current_writer = writer_checkpoint_for_recovery(&tx, &job, &expected_run, action, goal_revision.as_deref())?;
+                ensure!(current_writer == writer_checkpoint, "The goal's worktree checkpoint changed during recovery");
                 ensure!(
-                    checkpoint.actions(job.mode).contains(&action),
+                    checkpoint.actions(job.mode).contains(&action)
+                        || (action == RecoveryAction::Resume && goal_revision.is_some() && writer_checkpoint.as_deref() == Some(&expected_run)),
                     "This recovery action needs a confirmed checkpoint"
                 );
                 ensure!(
@@ -423,6 +512,15 @@ impl Store {
                         queued_action == action,
                         "A different recovery is already queued"
                     );
+                    if let Some(revision) = &goal_revision {
+                        super::goal_control::activate_paused_goal(
+                            &tx,
+                            &project_id,
+                            revision,
+                            &job_id,
+                        )?;
+                    }
+                    tx.commit()?;
                     return Ok(job);
                 }
                 if let Some((configured, current)) = refreshed {
@@ -451,6 +549,12 @@ impl Store {
                         checkpoint.context_id()
                     ],
                 )?;
+                if let Some(writer_checkpoint) = writer_checkpoint {
+                    tx.execute(
+                        "INSERT INTO goal_writer_recoveries(job_id, checkpoint_run_id) VALUES (?1, ?2)",
+                        params![job.id, writer_checkpoint],
+                    )?;
+                }
                 if job.queue_state != QueueState::Paused {
                     tx.execute(
                         "UPDATE jobs SET queue_state = 'queued' WHERE id = ?1",
@@ -460,6 +564,9 @@ impl Store {
                 let job =
                     load_job(&tx, &project_id, &job_id)?.context("Recovery job disappeared")?;
                 reconcile_approval(&tx, &job)?;
+                if let Some(revision) = &goal_revision {
+                    super::goal_control::activate_paused_goal(&tx, &project_id, revision, &job_id)?;
+                }
                 tx.commit()?;
                 Ok(job)
             })
