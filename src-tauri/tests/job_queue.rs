@@ -6,7 +6,8 @@ use omniagent::{
     jobs::{
         AdmissionBlocker, AdmissionEnvironment, Job, JobContext, JobNoticeKind, JobOrigin,
         JobPermission, JobRequest, JobRequestConflict, JobRole, JobRule, JobWorkspace,
-        QueueSettings, QueueState, RecoveryAction,
+        PipelineDispatch, PipelineNodeKind, QueueHistoryPolicy, QueueSettings, QueueState,
+        RecoveryAction,
     },
     providers::{Capability, Provider, SessionIntent, SessionMode},
     repository,
@@ -575,6 +576,419 @@ async fn approve(store: &Store, job: &Job) -> Result<()> {
     store
         .decide_job_approval(job.project_id.clone(), approval, true)
         .await
+}
+
+#[tokio::test]
+async fn history_switch_applies_project_defaults_and_overrides_atomically() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("queue.sqlite");
+    let store = Store::open(database.clone())?;
+    let first = origin(&store, &temporary.path().join("project")).await?;
+    let chat = first.conversation_id;
+    let project = first.run.project_id;
+
+    assert!(
+        store
+            .rewind_conversation_history(chat.clone(), first.context_id, None)
+            .await
+            .is_err()
+    );
+    store
+        .finish_agent_attempt(
+            first.run.id,
+            RunStatus::Succeeded,
+            Some("Original answer".into()),
+        )
+        .await?;
+
+    for policy in [
+        QueueHistoryPolicy::Review,
+        QueueHistoryPolicy::Recorded,
+        QueueHistoryPolicy::Cancel,
+    ] {
+        let history = store.conversation_history(chat.clone()).await?;
+        let seed = if history.messages.is_empty() {
+            let turn = store
+                .prepare_agent_attempt(
+                    chat.clone(),
+                    history.context_id,
+                    first.scope.clone(),
+                    "New visible input".into(),
+                )
+                .await?;
+            store.mark_agent_running(turn.run.id.clone()).await?;
+            store
+                .finish_agent_attempt(
+                    turn.run.id,
+                    RunStatus::Succeeded,
+                    Some("Visible answer".into()),
+                )
+                .await?;
+            store.conversation_history(chat.clone()).await?
+        } else {
+            history
+        };
+        match policy {
+            QueueHistoryPolicy::Review => {
+                assert_eq!(
+                    store.project_queue_history_policy(project.clone()).await?,
+                    policy
+                );
+            }
+            QueueHistoryPolicy::Recorded => {
+                store
+                    .set_project_queue_history_policy(project.clone(), policy)
+                    .await?;
+            }
+            QueueHistoryPolicy::Cancel => {
+                let settings = store
+                    .set_conversation_queue_history_policy(chat.clone(), Some(policy))
+                    .await?;
+                assert_eq!(settings.project_default, QueueHistoryPolicy::Recorded);
+                assert_eq!(settings.conversation_override, Some(policy));
+            }
+        }
+        store
+            .save_conversation_draft(chat.clone(), "Frozen job instruction".into())
+            .await?;
+        let job = store
+            .enqueue_conversation_turn(
+                JobContext {
+                    conversation_id: chat.clone(),
+                    context_id: seed.context_id.clone(),
+                },
+                first.scope.clone(),
+                "Frozen job instruction".into(),
+            )
+            .await?;
+
+        assert!(
+            store
+                .rewind_conversation_history(chat.clone(), "old-base".into(), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .job(project.clone(), job.id.clone())
+                .await?
+                .unwrap()
+                .queue_state,
+            QueueState::Queued
+        );
+
+        let through =
+            (policy == QueueHistoryPolicy::Recorded).then(|| seed.messages[0].revision_id.clone());
+        let active = store
+            .rewind_conversation_history(chat.clone(), seed.context_id.clone(), through.clone())
+            .await?;
+        let reopened = Store::open(database.clone())?;
+        assert_ne!(active, seed.context_id);
+        let visible = reopened.conversation_history(chat.clone()).await?;
+        assert_eq!(visible.context_id, active);
+        assert_eq!(visible.messages.len(), usize::from(through.is_some()));
+        let latest = reopened
+            .job(project.clone(), job.id.clone())
+            .await?
+            .context("Job disappeared")?;
+        match policy {
+            QueueHistoryPolicy::Review => {
+                assert_eq!(latest.queue_state, QueueState::Paused);
+                assert!(reopened.claim_next_job(environment(false)).await?.is_none());
+                reopened
+                    .set_pending_job_state(project.clone(), job.id, QueueState::Queued)
+                    .await?;
+            }
+            QueueHistoryPolicy::Recorded => assert_eq!(latest.queue_state, QueueState::Queued),
+            QueueHistoryPolicy::Cancel => {
+                assert_eq!(latest.queue_state, QueueState::Cancelled);
+                assert!(reopened.claim_next_job(environment(false)).await?.is_none());
+                continue;
+            }
+        }
+        let attempt = reopened
+            .claim_next_job(environment(false))
+            .await?
+            .context("Retained job did not start")?;
+        assert!(matches!(attempt.intent, SessionIntent::Start));
+        assert!(attempt.input.starts_with(&seed.messages));
+        assert_eq!(attempt.input.last().unwrap().text, "Frozen job instruction");
+        assert_eq!(
+            reopened.conversation(chat.clone()).await?.context_id,
+            active
+        );
+        reopened.mark_agent_running(attempt.run.id.clone()).await?;
+        reopened
+            .finish_agent_attempt(
+                attempt.run.id,
+                RunStatus::Succeeded,
+                Some("Retained job output".into()),
+            )
+            .await?;
+        assert_eq!(
+            reopened.conversation_messages(chat.clone()).await?,
+            visible.messages
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn history_switch_archives_old_questions_and_keeps_the_pinned_stage_wait() -> Result<()> {
+    use omniagent::{
+        dispatch::EventSource,
+        providers::{
+            ProviderEvent, ProviderEventData, RequestId,
+            questions::{
+                QuestionAction, QuestionField, QuestionForm, QuestionInput, QuestionOrigin,
+                QuestionReply, QuestionRoute,
+            },
+        },
+    };
+
+    let temporary = tempfile::tempdir()?;
+    let database = temporary.path().join("queue.sqlite");
+    let store = Store::open(database.clone())?;
+    let first = origin(&store, &temporary.path().join("project")).await?;
+    let chat = first.conversation_id;
+    let project = first.run.project_id;
+    store
+        .finish_agent_attempt(
+            first.run.id,
+            RunStatus::Succeeded,
+            Some("Source answer".into()),
+        )
+        .await?;
+
+    let scope = first.scope;
+    let record_question = |attempt: &AttemptPlan| {
+        let origin = QuestionOrigin {
+            run_id: attempt.run.id.clone(),
+            request_id: RequestId::Text(format!("question:{}", attempt.run.turn_id)),
+        };
+        let schema = serde_json::json!({"type":"object","properties":{"summary":{"type":"boolean"}},"required":["summary"]});
+        let message = "Include a summary?";
+        let form = QuestionForm {
+            message: Some(message.into()),
+            fields: vec![QuestionField {
+                id: "summary".into(),
+                label: "summary".into(),
+                header: None,
+                description: None,
+                secret: false,
+                required: true,
+                default: None,
+                input: QuestionInput::Boolean,
+            }],
+            actions: vec![
+                QuestionAction::Accept,
+                QuestionAction::Decline,
+                QuestionAction::Cancel,
+            ],
+        };
+        let event = ProviderEvent {
+            location: Default::default(),
+            data: ProviderEventData::Question {
+                request_id: origin.request_id.clone(),
+                form: serde_json::json!({"message": message, "schema": schema}),
+                normalized: Some(form),
+                route: QuestionRoute::StructuredTurn,
+            },
+        };
+        let store = &store;
+        async move {
+            store.mark_agent_running(origin.run_id.clone()).await?;
+            store
+                .record_agent_observation(origin.run_id.clone(), EventSource::Application, event)
+                .await?;
+            store
+                .finish_agent_attempt(
+                    origin.run_id.clone(),
+                    RunStatus::Succeeded,
+                    Some(message.into()),
+                )
+                .await?;
+            Ok::<_, anyhow::Error>(origin)
+        }
+    };
+    let current = store.conversation(chat.clone()).await?;
+    let abandoned = store
+        .prepare_structured_planning_attempt(
+            chat.clone(),
+            current.context_id,
+            scope.clone(),
+            "Old planning branch".into(),
+            Vec::new(),
+        )
+        .await?;
+    let old_question = record_question(&abandoned).await?;
+    let recorded = store.conversation_history(chat.clone()).await?;
+    let pipeline = "history-pipeline".to_owned();
+    store
+        .register_job_pipeline(project.clone(), pipeline.clone())
+        .await?;
+    store
+        .register_job_pipeline_node(
+            project.clone(),
+            pipeline.clone(),
+            "stage".into(),
+            PipelineNodeKind::Execution,
+        )
+        .await?;
+    store
+        .set_job_pipeline_plan(project.clone(), pipeline.clone(), None, "plan-v1".into())
+        .await?;
+    store
+        .set_project_job_rules(
+            project.clone(),
+            vec![],
+            vec![JobRule {
+                role: JobRole::Pipeline,
+                operation: SessionMode::ReadOnly,
+                workspace: JobWorkspace::Project,
+                permission: JobPermission::Review,
+                requirements: Default::default(),
+            }],
+        )
+        .await?;
+
+    let stage = store
+        .submit_pinned_pipeline_agent_job(
+            PipelineDispatch {
+                pipeline_run_id: pipeline,
+                node_instance_id: "stage".into(),
+                plan_revision: Some("plan-v1".into()),
+                release_id: None,
+            },
+            scope.clone(),
+            JobRequest {
+                checkout_id: Some(first.run.checkout_id),
+                mode: SessionMode::ReadOnly,
+                ..request()
+            },
+            JobContext {
+                conversation_id: chat.clone(),
+                context_id: recorded.context_id.clone(),
+            },
+            QuestionRoute::StructuredTurn,
+        )
+        .await?;
+    store
+        .set_project_queue_history_policy(project.clone(), QueueHistoryPolicy::Cancel)
+        .await?;
+    let clear = store
+        .rewind_conversation_history(chat.clone(), recorded.context_id.clone(), None)
+        .await?;
+    assert_eq!(
+        store
+            .job(project.clone(), stage.id.clone())
+            .await?
+            .unwrap()
+            .queue_state,
+        QueueState::Queued
+    );
+    assert!(store.claim_next_job(environment(false)).await?.is_none());
+    approve(&store, &stage).await?;
+    let execution = store
+        .claim_next_job(environment(false))
+        .await?
+        .context("Approved stage stayed blocked")?;
+    assert!(execution.input.starts_with(&recorded.messages));
+    assert!(matches!(execution.intent, SessionIntent::Start));
+    let pinned_question = record_question(&execution).await?;
+
+    let clear_again = store
+        .rewind_conversation_history(chat.clone(), clear, None)
+        .await?;
+    let reply = QuestionReply {
+        action: QuestionAction::Accept,
+        values: [("summary".into(), serde_json::json!(true))]
+            .into_iter()
+            .collect(),
+    };
+    assert!(
+        store
+            .prepare_structured_planning_reply(
+                chat.clone(),
+                clear_again.clone(),
+                scope.clone(),
+                old_question.clone(),
+                reply.clone(),
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .agent_observations(chat.clone(), old_question.run_id.clone(), 0)
+            .await?
+            .iter()
+            .any(|saved| matches!(&saved.event.data, ProviderEventData::Question { .. }))
+    );
+    let delivery: String = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?
+    .query_row(
+        "SELECT delivery FROM agent_questions WHERE run_id = ?1",
+        [old_question.run_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(delivery, "closed");
+
+    let mut notices = store.job_notices();
+    let mut found = false;
+    for _ in 0..2 {
+        if let Ok(notice) = tokio::time::timeout(Duration::from_millis(500), notices.next()).await {
+            let notice = notice?;
+            found |= notice.kind == JobNoticeKind::Question
+                && notice.run_id.as_ref() == Some(&execution.run.id);
+            notices.acknowledge(&notice).await?;
+        }
+    }
+    assert!(
+        found,
+        "The originating question lost its notification after the clear"
+    );
+
+    let followup = store
+        .prepare_structured_planning_reply(
+            chat.clone(),
+            clear_again.clone(),
+            scope.clone(),
+            pinned_question.clone(),
+            reply.clone(),
+        )
+        .await?;
+    assert!(matches!(followup.intent, SessionIntent::Start));
+    assert_eq!(followup.previous_run_id.as_ref(), Some(&execution.run.id));
+    assert!(followup.input.starts_with(&execution.input));
+    store.mark_agent_running(followup.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(
+            followup.run.id,
+            RunStatus::Succeeded,
+            Some("Saved answer".into()),
+        )
+        .await?;
+    assert!(
+        store
+            .prepare_structured_planning_reply(
+                chat.clone(),
+                clear_again.clone(),
+                scope,
+                pinned_question,
+                reply,
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.conversation(chat.clone()).await?.context_id,
+        clear_again
+    );
+    assert!(store.conversation_messages(chat).await?.is_empty());
+    Ok(())
 }
 
 #[tokio::test]

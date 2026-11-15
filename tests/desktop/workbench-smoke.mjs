@@ -818,6 +818,26 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     const [conversation] = await invoke(browser, "list_conversations", { checkoutId: main.checkoutId });
     assert.equal(await invoke(browser, "conversation_draft", { conversationId: conversation.id }), unsent);
     assert.deepEqual(await invoke(browser, "conversation_messages", { conversationId: conversation.id }), []);
+    await click(browser, 'button[aria-label="Settings"]');
+    await click(browser, "button=Conversation defaults");
+    const projectHistoryPolicy = browser.$('select[id="queued-context"]');
+    await projectHistoryPolicy.waitForEnabled();
+    assert.equal(await projectHistoryPolicy.getValue(), "review");
+    await projectHistoryPolicy.selectByAttribute("value", "recorded");
+    await browser.waitUntil(async () => (await invoke(browser, "project_queue_history_policy", { projectId: main.projectId })) === "recorded");
+    await browser.keys("Escape");
+    await click(browser, "button=History");
+    const historyDialog = browser.$('.conv-dialog[role="dialog"]');
+    const conversationHistoryPolicy = historyDialog.$('select:has(option[value="review"])');
+    await conversationHistoryPolicy.waitForEnabled();
+    assert.ok((await conversationHistoryPolicy.$('option[value=""]').getText()).includes("Use recorded context"));
+    await conversationHistoryPolicy.selectByAttribute("value", "cancel");
+    await click(browser, "button=Clear conversation");
+    await historyDialog.waitForExist({ reverse: true });
+    const cleared = await invoke(browser, "conversation_history", { conversationId: conversation.id });
+    assert.notEqual(cleared.contextId, conversation.contextId);
+    assert.deepEqual(cleared.messages, []);
+    assert.equal(await invoke(browser, "conversation_draft", { conversationId: conversation.id }), unsent);
     const otherConversation = await invoke(browser, "create_conversation", { checkoutId: main.checkoutId, title: "Other conversation" });
 
     killTestApplication(application);
@@ -841,6 +861,10 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     await recoveredDraft.waitForEnabled();
     assert.equal(await recoveredDraft.getValue(), unsent);
     assert.deepEqual(await invoke(browser, "conversation_messages", { conversationId: conversation.id }), []);
+    assert.deepEqual(await invoke(browser, "conversation_queue_history_policy", { conversationId: conversation.id }), {
+      projectDefault: "recorded",
+      conversationOverride: "cancel",
+    });
     const mode = browser.$(`section[aria-label="${conversation.title}"] select[aria-label="Conversation mode"]`);
     await mode.selectByAttribute("value", "goal");
     assert.equal(await browser.$("button=Start goal").isEnabled(), false);

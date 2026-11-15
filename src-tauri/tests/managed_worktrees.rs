@@ -16,11 +16,12 @@ use omniagent::{
     conversations::SessionScope,
     jobs::{
         AdmissionBlocker, AdmissionEnvironment, DownstreamWaitState, FailureCause, FailurePhase,
-        Job, JobKind, JobPermission, JobRequest, JobRole, JobRule, JobScheduler, JobWorkspace,
-        PipelineCommand, PipelineDispatch, PipelineNodeKind, RecoveryAction, ReleaseBlocker,
+        Job, JobContext, JobKind, JobPermission, JobRequest, JobRole, JobRule, JobScheduler,
+        JobWorkspace, PipelineCommand, PipelineDispatch, PipelineNodeKind, QueueHistoryPolicy,
+        RecoveryAction, ReleaseBlocker,
     },
     process_io::CapturedProcess,
-    providers::{Provider, SessionMode, runtime::start_managed_turn},
+    providers::{Provider, SessionMode, questions::QuestionRoute, runtime::start_managed_turn},
     repository::{
         self, AttemptWorktreeEvidence, ManagedWorktree, ProjectCheckout, provision_task_worktree,
         with_managed_worktree_writer,
@@ -754,8 +755,11 @@ async fn waiting_writer_yields_its_only_slot_and_resumes_once_with_frozen_child_
             }],
         )
         .await?;
+    let conversation = store
+        .create_conversation(managed.checkout_id.clone(), "Pinned stage".into())
+        .await?;
     let parent = store
-        .submit_pipeline_agent_job(
+        .submit_pinned_pipeline_agent_job(
             binding("parent"),
             SessionScope {
                 provider: Provider::Codex,
@@ -778,6 +782,11 @@ async fn waiting_writer_yields_its_only_slot_and_resumes_once_with_frozen_child_
                 dependencies: vec![],
                 requires_bridge: false,
             },
+            JobContext {
+                conversation_id: conversation.id.clone(),
+                context_id: conversation.context_id.clone(),
+            },
+            QuestionRoute::Native,
         )
         .await?;
     let scheduler = JobScheduler::start(store.clone(), runtime.clone(), None);
@@ -923,15 +932,17 @@ async fn waiting_writer_yields_its_only_slot_and_resumes_once_with_frozen_child_
         .conversation_id
         .as_ref()
         .context("The parent conversation is unavailable")?;
-    assert_eq!(
-        parked.context_id.as_ref(),
-        Some(
-            &store
-                .conversation(parent_conversation.clone())
-                .await?
-                .context_id
+    assert_eq!(parent_conversation, &conversation.id);
+    assert_ne!(parked.context_id.as_ref(), Some(&conversation.context_id));
+    store
+        .set_conversation_queue_history_policy(
+            conversation.id.clone(),
+            Some(QueueHistoryPolicy::Recorded),
         )
-    );
+        .await?;
+    let visible_after_clear = store
+        .rewind_conversation_history(conversation.id.clone(), conversation.context_id, None)
+        .await?;
     let queue = store
         .inspect_project_queue(project.project_id.clone(), env.clone())
         .await?;
@@ -1028,6 +1039,19 @@ async fn waiting_writer_yields_its_only_slot_and_resumes_once_with_frozen_child_
     assert!(continuation.contains("Selected downstream report") && continuation.contains(&wait.id));
     assert!(continuation.contains("Selected command report"));
     assert!(!continuation.contains("non-selected report"));
+    assert_eq!(
+        store
+            .conversation(conversation.id.clone())
+            .await?
+            .context_id,
+        visible_after_clear
+    );
+    assert!(
+        store
+            .conversation_messages(conversation.id)
+            .await?
+            .is_empty()
+    );
     assert!(managed.root.join("downstream.txt").is_file());
     scheduler.shutdown().await?;
     assert!(store.claim_next_job(env).await?.is_none());
