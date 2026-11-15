@@ -6,7 +6,11 @@ use uuid::Uuid;
 use crate::{
     conversations::{MessageRevision, SessionScope},
     protection,
-    providers::{ProviderEvent, capabilities::CapabilityAssessment},
+    providers::{
+        ProviderEvent,
+        capabilities::CapabilityAssessment,
+        skills::{SkillCatalog, SkillEntry},
+    },
     store::Store,
 };
 
@@ -21,6 +25,10 @@ pub struct ContextSnapshot {
     pub native_history: NativeHistory,
     #[serde(default)]
     pub capabilities: Option<CapabilityAssessment>,
+    #[serde(default)]
+    pub filesystem_skills: Vec<SkillEntry>,
+    #[serde(default)]
+    pub reported_skills: Option<SkillCatalog>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

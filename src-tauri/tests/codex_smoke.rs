@@ -15,6 +15,8 @@ use omniagent::{
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
 };
 
+mod support;
+
 fn send(process: &mut CapturedProcess, update: AdapterUpdate) -> Result<Vec<ProviderEventData>> {
     for message in update.outbound {
         process.input.send(message.as_bytes())?;
@@ -87,6 +89,24 @@ fn run_turn(
                         revision.is_some_and(|revision| revision.len() == 64),
                         "Codex did not report a configuration for the actual checkout"
                     );
+                    let probe = session
+                        .query_skill_inventory()?
+                        .context("Codex did not request the skill catalog")?;
+                    process.input.send(probe.as_bytes())?;
+                }
+                ProviderEventData::SkillsReported { catalog } => {
+                    ensure!(
+                        catalog.reported,
+                        "Codex skills/list did not return the scoped catalog"
+                    );
+                    ensure!(
+                        catalog
+                            .entries
+                            .iter()
+                            .any(|skill| skill.name == "omniagent-skill-fixture"
+                                && skill.enabled == Some(true)),
+                        "Codex did not report the fixture skill"
+                    );
                     let message = session.send(TurnInput {
                         message_id: expected.to_owned(),
                         text: format!("Reply with exactly this word and no punctuation: {expected}. Do not use tools."),
@@ -138,6 +158,7 @@ fn codex_starts_streams_and_resumes_a_read_only_session() -> Result<()> {
         "could not initialize the disposable checkout"
     );
     let executable = CodexAdapter.discover(None)?;
+    support::write_skill(checkout.path(), ".agents/skills")?;
     assert!(
         DirectWindowsRunner
             .executable_revision(&executable)

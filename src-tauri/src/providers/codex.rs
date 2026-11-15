@@ -14,6 +14,7 @@ use super::{
     RequestId, SessionIntent, SessionMode, SessionRequest, Transport, TurnInput, TurnOutcome,
     WireMessage, capabilities,
     rpc::{self, Rpc},
+    skills::{SkillCatalog, SkillCatalogIssue, SkillEntry, SkillSource},
 };
 use crate::{
     diagnostics,
@@ -73,6 +74,7 @@ enum Request {
     Initialize,
     OpenSession,
     ReadConfiguration,
+    ListSkills,
     ModelPage,
     StartTurn,
     Interrupt,
@@ -191,6 +193,17 @@ impl CodexSession {
                     self.event(ProviderEventData::ConfigurationReported { revision: None }),
                 ]));
             }
+            if request == Request::ListSkills {
+                let message = error["message"]
+                    .as_str()
+                    .map(diagnostics::preview)
+                    .unwrap_or_else(|| "Codex skills/list failed".into());
+                return Ok(
+                    self.events(vec![self.event(ProviderEventData::SkillsReported {
+                        catalog: SkillCatalog::unavailable(&message),
+                    })]),
+                );
+            }
             let message =
                 diagnostics::preview(error["message"].as_str().unwrap_or("Codex request failed"));
             if request == Request::ModelPage {
@@ -281,6 +294,12 @@ impl CodexSession {
                     self.event(ProviderEventData::ConfigurationReported { revision }),
                 ]))
             }
+            Request::ListSkills => {
+                let catalog = self.decode_skills(result)?;
+                Ok(self.events(vec![
+                    self.event(ProviderEventData::SkillsReported { catalog }),
+                ]))
+            }
             Request::ModelPage => self.model_page(result),
             Request::StartTurn => {
                 let id = required_string(&result["turn"], "id")?;
@@ -289,6 +308,70 @@ impl CodexSession {
             }
             Request::Interrupt => Ok(AdapterUpdate::default()),
         }
+    }
+
+    fn decode_skills(&self, result: &Value) -> Result<SkillCatalog> {
+        let scope = result["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|entry| {
+                entry["cwd"].as_str().is_some_and(|cwd| {
+                    dunce::simplified(Path::new(cwd)) == dunce::simplified(&self.request.checkout)
+                })
+            });
+        let Some((scope, skills)) =
+            scope.and_then(|entry| Some((entry, entry["skills"].as_array()?)))
+        else {
+            return Ok(SkillCatalog::unavailable(
+                "Codex did not report skills for the active checkout",
+            ));
+        };
+        let mut catalog = SkillCatalog {
+            entries: Vec::new(),
+            issues: Vec::new(),
+            reported: true,
+        };
+        for skill in skills {
+            let path = string(skill, "path")
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute());
+            let name = string(skill, "name").filter(|name| !name.trim().is_empty());
+            let (Some(path), Some(name)) = (path, name) else {
+                catalog.issues.push(SkillCatalogIssue {
+                    path: None,
+                    message: "Codex reported a skill without an absolute source path or name"
+                        .into(),
+                });
+                continue;
+            };
+            catalog.entries.push(SkillEntry {
+                id: SkillEntry::identity(Provider::Codex, &path)?,
+                provider: Provider::Codex,
+                source: SkillSource::Provider,
+                name,
+                path,
+                scope: string(skill, "scope"),
+                plugin_id: string(skill, "pluginId"),
+                enabled: skill["enabled"].as_bool(),
+                revision: None,
+            });
+        }
+        catalog
+            .issues
+            .extend(
+                scope["errors"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|error| {
+                        Some(SkillCatalogIssue {
+                            path: string(error, "path").map(Into::into),
+                            message: diagnostics::preview(error["message"].as_str()?),
+                        })
+                    }),
+            );
+        Ok(catalog)
     }
 
     fn model_page(&mut self, result: &Value) -> Result<AdapterUpdate> {
@@ -645,6 +728,14 @@ impl CliSession for CodexSession {
             "config/read",
             json!({"cwd": self.request.checkout, "includeLayers": false}),
             Request::ReadConfiguration,
+        )?))
+    }
+
+    fn query_skill_inventory(&mut self) -> Result<Option<WireMessage>> {
+        Ok(Some(self.rpc.request(
+            "skills/list",
+            json!({"cwds":[self.request.checkout], "forceReload":true}),
+            Request::ListSkills,
         )?))
     }
 

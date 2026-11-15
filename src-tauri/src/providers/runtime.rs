@@ -26,6 +26,7 @@ use super::{
     WireMessage,
     capabilities::{CapabilityScope, ReportedCapabilities},
     configuration,
+    skills::SkillCatalog,
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -188,6 +189,7 @@ pub fn start_managed_turn(store: Store, runner: Arc<dyn Runner>, plan: AttemptPl
             final_answer: String::new(),
             streamed_answer: String::new(),
             reported: ReportedCapabilities::default(),
+            reported_skills: None,
             capability_scope: None,
             executable_revision: None,
             platform: None,
@@ -235,6 +237,7 @@ struct TurnExecution {
     final_answer: String,
     streamed_answer: String,
     reported: ReportedCapabilities,
+    reported_skills: Option<SkillCatalog>,
     capability_scope: Option<CapabilityScope>,
     executable_revision: Option<String>,
     platform: Option<ExecutionPlatform>,
@@ -247,6 +250,9 @@ impl TurnExecution {
         if event.location.parent_item_id.is_none() {
             if source == EventSource::Provider {
                 scope_changed = self.reported.observe(&event.data);
+                if let ProviderEventData::SkillsReported { catalog } = &event.data {
+                    self.reported_skills = Some(catalog.clone());
+                }
             }
             match &event.data {
                 ProviderEventData::AssistantDelta { text } => self.streamed_answer.push_str(text),
@@ -341,7 +347,9 @@ impl TurnExecution {
         let startup_deadline = Instant::now() + Duration::from_secs(20);
         let mut sent = false;
         let mut ready = false;
-        let mut configuration_deadline = None;
+        let mut inventory_deadline = None;
+        let mut wait_for_configuration = false;
+        let mut wait_for_skills = false;
         loop {
             let command = commands.try_recv();
             match command {
@@ -365,10 +373,13 @@ impl TurnExecution {
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
+            let inventory_complete = (!wait_for_configuration
+                || self.reported.configuration_reported)
+                && (!wait_for_skills || self.reported_skills.is_some());
             if ready
                 && !sent
-                && (self.reported.configuration_reported
-                    || configuration_deadline.is_none_or(|deadline| Instant::now() >= deadline))
+                && (inventory_complete
+                    || inventory_deadline.is_some_and(|deadline| Instant::now() >= deadline))
             {
                 self.dispatch(process, session)?;
                 sent = true;
@@ -414,10 +425,12 @@ impl TurnExecution {
             }
             if session_ready {
                 ready = true;
-                if let Some(probe) = session.query_effective_configuration()? {
-                    bounded_write(process, vec![probe])?;
-                    configuration_deadline = Some(Instant::now() + Duration::from_secs(2));
-                }
+                let configuration = session.query_effective_configuration()?;
+                let skills = session.query_skill_inventory()?;
+                wait_for_configuration = configuration.is_some();
+                wait_for_skills = skills.is_some();
+                bounded_write(process, configuration.into_iter().chain(skills).collect())?;
+                inventory_deadline = Some(Instant::now() + Duration::from_secs(2));
             }
         }
     }
@@ -441,7 +454,7 @@ impl TurnExecution {
             },
             _ => anyhow::bail!("inconsistent resume cursor"),
         };
-        let configuration = configuration::inspect(
+        let (configuration, filesystem_skills) = configuration::inspect(
             self.plan.scope.provider,
             &self.plan.scope.checkout,
             self.reported.configuration_revision.as_deref(),
@@ -461,14 +474,25 @@ impl TurnExecution {
                 .resolve_capability_assessment(scope.clone(), descriptors),
         )?;
         self.capability_scope = Some(scope);
+        let reported_skills = self.reported_skills.clone().unwrap_or_else(|| {
+            SkillCatalog::unavailable(match self.plan.scope.provider {
+                Provider::Codex => "Codex did not report its skill inventory before dispatch",
+                Provider::Claude => "Claude safe mode disables skill loading",
+                Provider::Antigravity => {
+                    "ACP reports available commands without skill source paths"
+                }
+            })
+        });
         let snapshot = ContextSnapshot {
-            version: 2,
+            version: 3,
             context_id: self.plan.context_id.clone(),
             scope: self.plan.scope.clone(),
             base_commit: repository::base_commit(&self.plan.scope.checkout)?,
             submitted_messages: self.plan.input.clone(),
             native_history,
             capabilities: Some(capabilities),
+            filesystem_skills,
+            reported_skills: Some(reported_skills),
         };
         let frames = update
             .outbound

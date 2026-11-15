@@ -18,6 +18,8 @@ use omniagent::{
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
 };
 
+mod support;
+
 fn send(process: &mut CapturedProcess, update: &AdapterUpdate) -> Result<()> {
     for message in &update.outbound {
         process.input.send(message.as_bytes())?;
@@ -98,13 +100,16 @@ fn run_turn(
     checkout: &Path,
     intent: SessionIntent,
     word: &str,
+    prompt: Option<&str>,
 ) -> Result<String> {
     let (mut session, mut process, native_id) = launch_ready(executable, checkout, intent)?;
     send(
         &mut process,
         &session.send(TurnInput {
             message_id: word.into(),
-            text: format!("Reply with exactly {word} and no punctuation. Do not use tools."),
+            text: prompt.map(str::to_owned).unwrap_or_else(|| {
+                format!("Reply with exactly {word} and no punctuation. Do not use tools.")
+            }),
         })?,
     )?;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -261,6 +266,7 @@ fn antigravity_negotiates_streams_and_resumes_a_plan_session() -> Result<()> {
         checkout.path(),
         SessionIntent::Start,
         "OMNIAGENT_ACP",
+        None,
     )?;
     let resumed = run_turn(
         &executable,
@@ -269,7 +275,24 @@ fn antigravity_negotiates_streams_and_resumes_a_plan_session() -> Result<()> {
             provider_session_id: id.clone(),
         },
         "OMNIAGENT_ACP_RESUME",
+        None,
     )?;
     assert_eq!(id, resumed);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires authenticated Antigravity and Gemini 3.8 Flash"]
+fn antigravity_invokes_a_project_skill_through_acp() -> Result<()> {
+    let checkout = tempfile::tempdir()?;
+    let reply = support::write_skill(checkout.path(), ".agents/skills")?;
+    let executable = AntigravityAdapter.discover(None)?;
+    run_turn(
+        &executable,
+        checkout.path(),
+        SessionIntent::Start,
+        &reply,
+        Some("/omniagent-skill-fixture"),
+    )?;
     Ok(())
 }

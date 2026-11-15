@@ -239,6 +239,9 @@ pub enum ProviderEventData {
     ConfigurationReported {
         revision: Option<String>,
     },
+    SkillsReported {
+        catalog: skills::SkillCatalog,
+    },
     CapabilityAssessmentUpdated {
         assessment: Box<capabilities::CapabilityAssessment>,
     },
@@ -365,6 +368,9 @@ pub trait CliSession: Send {
     fn query_effective_configuration(&mut self) -> anyhow::Result<Option<WireMessage>> {
         Ok(None)
     }
+    fn query_skill_inventory(&mut self) -> anyhow::Result<Option<WireMessage>> {
+        Ok(None)
+    }
     fn send(&mut self, input: TurnInput) -> anyhow::Result<AdapterUpdate>;
     fn receive(&mut self, frame: OutputFrame) -> anyhow::Result<AdapterUpdate>;
     fn respond_approval(
@@ -486,3 +492,4 @@ pub mod plugins;
 pub mod profiles;
 mod rpc;
 pub mod runtime;
+pub mod skills;

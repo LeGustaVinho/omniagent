@@ -19,6 +19,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use super::{
     Provider,
     capabilities::{ConfigurationEvidence, ConfigurationFile},
+    skills::{SkillEntry, SkillSource},
 };
 
 const REPARSE_POINT: u32 = 0x400;
@@ -29,7 +30,7 @@ pub(crate) fn inspect(
     provider: Provider,
     checkout: &Path,
     reported_revision: Option<&str>,
-) -> anyhow::Result<ConfigurationEvidence> {
+) -> anyhow::Result<(ConfigurationEvidence, Vec<SkillEntry>)> {
     let mut discovery = Discovery::default();
     let home = configured_directory("USERPROFILE");
     match provider {
@@ -116,7 +117,38 @@ pub(crate) fn inspect(
             }
         }
     }
-    discovery.finish(checkout, reported_revision)
+    let configuration = discovery.finish(checkout, reported_revision)?;
+    let skills = configuration
+        .detected
+        .iter()
+        .filter_map(|file| {
+            if !file.path.ends_with("SKILL.md") {
+                return None;
+            }
+            let name = file.path.parent()?.file_name()?.to_str()?.to_owned();
+            Some(SkillEntry::identity(provider, &file.path).map(|id| {
+                SkillEntry {
+                    id,
+                    provider,
+                    source: SkillSource::Filesystem,
+                    name,
+                    path: file.path.clone(),
+                    scope: Some(
+                        if file.path.starts_with(checkout) {
+                            "repo"
+                        } else {
+                            "user"
+                        }
+                        .into(),
+                    ),
+                    plugin_id: None,
+                    enabled: None,
+                    revision: Some(file.revision.clone()),
+                }
+            }))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok((configuration, skills))
 }
 
 fn profile_root(variable: &str, home: Option<&Path>, fallback: &str) -> Option<PathBuf> {

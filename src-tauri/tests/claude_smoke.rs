@@ -14,6 +14,8 @@ use omniagent::{
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
 };
 
+mod support;
+
 fn send(process: &mut CapturedProcess, update: &AdapterUpdate) -> Result<()> {
     for message in &update.outbound {
         process.input.send(message.as_bytes())?;
@@ -26,6 +28,8 @@ fn run_turn(
     checkout: &Path,
     intent: SessionIntent,
     word: &str,
+    prompt: Option<&str>,
+    expected: bool,
 ) -> Result<String> {
     let mut session = ClaudeAdapter.create_session(SessionRequest {
         checkout: checkout.into(),
@@ -64,9 +68,11 @@ fn run_turn(
                     &mut process,
                     &session.send(TurnInput {
                         message_id: word.into(),
-                        text: format!(
-                            "Reply with exactly {word} and no punctuation. Do not use tools."
-                        ),
+                        text: prompt.map(str::to_owned).unwrap_or_else(|| {
+                            format!(
+                                "Reply with exactly {word} and no punctuation. Do not use tools."
+                            )
+                        }),
                     })?,
                 )?,
                 ProviderEventData::SessionReady { model, .. } => {
@@ -95,8 +101,15 @@ fn run_turn(
                         observed_model,
                         "Claude did not report a resolved Haiku model"
                     );
-                    ensure!(text.trim() == word, "Claude returned unexpected final text");
-                    ensure!(deltas.contains(word), "Claude did not stream text");
+                    if expected {
+                        ensure!(text.trim() == word, "Claude returned unexpected final text");
+                        ensure!(deltas.contains(word), "Claude did not stream text");
+                    } else {
+                        ensure!(
+                            !text.contains(word) && !deltas.contains(word),
+                            "Claude loaded the project skill in safe mode"
+                        );
+                    }
                     process.control.cancel()?;
                     process.control.wait()?;
                     return session_id.context("Claude did not publish a session ID");
@@ -125,6 +138,8 @@ fn claude_starts_streams_and_resumes_through_the_runner() -> Result<()> {
         checkout.path(),
         SessionIntent::Start,
         "OMNIAGENT_CLAUDE",
+        None,
+        true,
     )?;
     let resumed = run_turn(
         &executable,
@@ -133,7 +148,26 @@ fn claude_starts_streams_and_resumes_through_the_runner() -> Result<()> {
             provider_session_id: started.clone(),
         },
         "OMNIAGENT_CLAUDE_RESUME",
+        None,
+        true,
     )?;
     assert_eq!(started, resumed);
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires authenticated Claude Code and Haiku 5.5"]
+fn claude_safe_mode_excludes_a_project_skill_from_stream_json_invocation() -> Result<()> {
+    let checkout = tempfile::tempdir()?;
+    let reply = support::write_skill(checkout.path(), ".claude/skills")?;
+    let executable = ClaudeAdapter.discover(None)?;
+    run_turn(
+        &executable,
+        checkout.path(),
+        SessionIntent::Start,
+        &reply,
+        Some("/omniagent-skill-fixture"),
+        false,
+    )?;
     Ok(())
 }

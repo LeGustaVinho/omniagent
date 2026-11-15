@@ -714,6 +714,8 @@ mod tests {
                     submitted_messages: attempt.input.clone(),
                     native_history,
                     capabilities: None,
+                    filesystem_skills: Vec::new(),
+                    reported_skills: None,
                 },
                 vec![b"{\"fixture\":true}\n".to_vec()],
             )
@@ -963,8 +965,13 @@ mod tests {
                     "sandbox":{"type":"readOnly"}}}),
                 json!({"id":3,"result":{"data":[]}}),
                 json!({"id":4,"result":{"config":{"approval_policy":"never","sandbox_mode":"read-only"}}}),
+                json!({"id":5,"result":{"data":[{"cwd":request.checkout,
+                    "skills":[
+                        {"name":"fixture","path":request.checkout.join(".agents/skills/fixture/SKILL.md"),"scope":"repo","enabled":true},
+                        {"name":"fixture","path":request.checkout.join("other-profile/skills/fixture/SKILL.md"),"scope":"user","enabled":false}],
+                    "errors":[]}]}}),
                 json!({"method":"item/agentMessage/delta","params":{"threadId":"native-session","turnId":"diagnostic-only","itemId":"bad","delta":15}}),
-                json!({"id":5,"result":{"turn":{"id":"native-turn"}}}),
+                json!({"id":6,"result":{"turn":{"id":"native-turn"}}}),
                 json!({"method":"thread/settings/updated","params":{"threadId":"native-session",
                     "threadSettings":{"model":"observed-later","effort":"high"}}}),
                 json!({"method":"item/completed","params":{"threadId":"native-session","turnId":"native-turn",
@@ -1006,6 +1013,13 @@ mod tests {
             frames: log.clone(),
         }));
         let first_prompt = "Primeira mensagem ☕\nsegunda linha";
+        let fixture_skill = scope
+            .checkout
+            .join(".agents")
+            .join("skills")
+            .join("fixture");
+        std::fs::create_dir_all(&fixture_skill)?;
+        std::fs::write(fixture_skill.join("SKILL.md"), "fixture skill")?;
         let first = prepare(&store, &conversation.id, scope.clone(), first_prompt).await?;
         let first_session = first.agent_session_id.clone();
         let first_run = first.run.id.clone();
@@ -1040,6 +1054,19 @@ mod tests {
             first_prompt
         );
         let assessment = first_dispatch.snapshot.capabilities.as_ref().unwrap();
+        let skills = first_dispatch.snapshot.reported_skills.as_ref().unwrap();
+        assert!(skills.reported);
+        assert_eq!(skills.entries[0].name, "fixture");
+        assert_eq!(skills.entries[1].name, "fixture");
+        assert_ne!(skills.entries[0].id, skills.entries[1].id);
+        let local_skill = first_dispatch
+            .snapshot
+            .filesystem_skills
+            .iter()
+            .find(|skill| skill.path == fixture_skill.join("SKILL.md"))
+            .unwrap();
+        assert_eq!(local_skill.id, skills.entries[0].id);
+        assert_ne!(local_skill.source, skills.entries[0].source);
         assert_eq!(assessment.scope.checkout.id, conversation.checkout_id);
         assert_eq!(assessment.scope.reported_model.as_deref(), Some("observed"));
         assert!(assessment.scope.configuration.provider_revision.is_some());
