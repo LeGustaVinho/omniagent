@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { IDockviewPanelProps } from "dockview-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { MessageRevision } from "@/bindings/MessageRevision";
 import type { ModelOption } from "@/bindings/ModelOption";
@@ -15,6 +15,7 @@ import { openConversation } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
 
 const draftWrites = new Map<string, Promise<void>>();
+const historyOffsets = new Map<string, number>();
 
 function saveDraft(conversationId: string, text: string) {
   const pending = draftWrites.get(conversationId);
@@ -76,11 +77,19 @@ type DesktopModel = { option: ModelOption; efforts: string[] };
 type ProfileMode = "read_only" | "plan";
 const selectorClass = "rounded-md border border-input bg-background px-2 py-2 text-sm";
 
-export function ConversationPanel({ params }: IDockviewPanelProps<PanelParams>) {
-  return <ConversationContent key={params.conversationId} {...params} />;
+export function ConversationPanel({ params, api }: IDockviewPanelProps<PanelParams>) {
+  const subscribe = useCallback((update: () => void) => {
+    const listener = api.onDidVisibilityChange(update);
+    return () => listener.dispose();
+  }, [api]);
+  const visible = useSyncExternalStore(subscribe, () => api.isVisible);
+  useEffect(() => {
+    if (api.renderer !== "always") api.setRenderer("always");
+  }, [api]);
+  return <ConversationContent key={params.conversationId} {...params} visible={visible} />;
 }
 
-function ConversationContent({ conversationId, title }: PanelParams) {
+function ConversationContent({ conversationId, title, visible }: PanelParams & { visible: boolean }) {
   const queryClient = useQueryClient();
   const draftKey = ["conversation", conversationId, "draft"];
   const draft = useQuery({
@@ -96,6 +105,11 @@ function ConversationContent({ conversationId, title }: PanelParams) {
     queryKey: historyKey,
     queryFn: () => invoke<MessageRevision[]>("conversation_messages", { conversationId }),
   });
+  const historyRegion = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!visible || !history.data || !historyRegion.current) return;
+    historyRegion.current.scrollTop = historyOffsets.get(conversationId) ?? 0;
+  }, [conversationId, visible, history.data]);
   const activeEdit = useRef(0);
   const [draftError, setDraftError] = useState("");
   const [draftStatus, setDraftStatus] = useState("");
@@ -164,7 +178,10 @@ function ConversationContent({ conversationId, title }: PanelParams) {
       <header className="border-b border-border px-6 py-4">
         <h1 className="text-xl font-semibold">{title}</h1>
       </header>
-      <div className="min-h-0 flex-1 overflow-auto px-6 py-4" role="region" aria-label="Conversation history">
+      <div ref={historyRegion} className="min-h-0 flex-1 overflow-auto px-6 py-4" role="region" aria-label="Conversation history"
+        onScroll={(event) => {
+          if (visible && event.currentTarget.clientHeight > 0) historyOffsets.set(conversationId, event.currentTarget.scrollTop);
+        }}>
         {history.isPending && <p role="status" className="text-sm text-muted-foreground">Loading messages…</p>}
         {history.error && <p role="alert" className="text-sm text-red-300">{String(history.error)}</p>}
         <ol className="mx-auto grid max-w-3xl gap-4">

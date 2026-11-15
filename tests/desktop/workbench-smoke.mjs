@@ -285,7 +285,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     const [conversation] = await invoke(browser, "list_conversations", { checkoutId: main.checkoutId });
     assert.equal(await invoke(browser, "conversation_draft", { conversationId: conversation.id }), unsent);
     assert.deepEqual(await invoke(browser, "conversation_messages", { conversationId: conversation.id }), []);
-    await invoke(browser, "create_conversation", { checkoutId: main.checkoutId, title: "Other conversation" });
+    const otherConversation = await invoke(browser, "create_conversation", { checkoutId: main.checkoutId, title: "Other conversation" });
 
     killTestApplication(application);
     await browser.deleteSession().catch(() => undefined);
@@ -299,12 +299,14 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
     }
     await browser.$("button=Conversations").click();
     await browser.$("button=Other conversation").click();
-    await browser.$('textarea[id^="draft-"]').waitForEnabled();
-    assert.equal(await browser.$('textarea[id^="draft-"]').getValue(), "");
+    const otherDraft = browser.$(`textarea[id="draft-${otherConversation.id}"]`);
+    await otherDraft.waitForEnabled();
+    assert.equal(await otherDraft.getValue(), "");
     await browser.$("button=Conversations").click();
     await browser.$(`button=${conversation.title}`).click();
-    await browser.$('textarea[id^="draft-"]').waitForEnabled();
-    assert.equal(await browser.$('textarea[id^="draft-"]').getValue(), unsent);
+    const recoveredDraft = browser.$(`textarea[id="draft-${conversation.id}"]`);
+    await recoveredDraft.waitForEnabled();
+    assert.equal(await recoveredDraft.getValue(), unsent);
     assert.deepEqual(await invoke(browser, "conversation_messages", { conversationId: conversation.id }), []);
 
     if (process.env.OMNIAGENT_LIVE_CONVERSATION === "1") {
@@ -317,7 +319,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       await modelRadio.click();
       await browser.$('summary span[aria-label="Selected models"]').click();
       const prompt = "Reply exactly OMNIAGENT_DESKTOP_REPLY without tools.";
-      await browser.$('textarea[id^="draft-"]').setValue(prompt);
+      await recoveredDraft.setValue(prompt);
       await browser.$("button=Send").click();
       await browser.$("p=OMNIAGENT_DESKTOP_REPLY").waitForDisplayed({ timeout: 45_000 });
       await browser.waitUntil(async () => (await invoke(browser, "latest_conversation_run", {
@@ -331,7 +333,7 @@ test("registers a Git checkout and runs a fixture in the Windows desktop", { tim
       const wire = JSON.parse(await browser.$('section[aria-label="Exact provider input"] pre').getText());
       assert.equal(wire.params.input[0].text, prompt);
 
-      await browser.$('textarea[id^="draft-"]').setValue("Write every number from one to two thousand in words on separate lines. Do not use tools.");
+      await recoveredDraft.setValue("Write every number from one to two thousand in words on separate lines. Do not use tools.");
       await browser.$("button=Send").click();
       await browser.$('div[aria-label="Streaming response"]').waitForDisplayed({ timeout: 45_000 });
       await browser.$("button=Stop").click();

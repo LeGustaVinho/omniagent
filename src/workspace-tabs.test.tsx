@@ -3,7 +3,7 @@ import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { DockviewReact, type DockviewApi } from "dockview-react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
-import { openFixtureRun, persistFixtureLayout, restoreFixtureLayout } from "@/workspace-tabs";
+import { openConversation, openConversations, openFixtureRun, persistFixtureLayout, restoreFixtureLayout } from "@/workspace-tabs";
 
 const checkout: ProjectCheckout = {
   projectId: "project",
@@ -11,7 +11,7 @@ const checkout: ProjectCheckout = {
   checkoutId: "checkout",
   checkoutRoot: "C:\\repos\\checkout",
 };
-const panels = { fixtures: () => null, run: () => null };
+const panels = { fixtures: () => null, run: () => null, conversation: () => null, conversations: () => null };
 
 beforeEach(() => {
   vi.stubGlobal("ResizeObserver", class {
@@ -65,4 +65,31 @@ it("restores panel identities, tab order, selection and split groups for the sel
   const other = await openDock({ ...checkout, checkoutId: "another-worktree" });
   expect(other.api.panels.map((panel) => panel.id)).toEqual(["fixture:list"]);
   other.close();
+});
+
+it("keys conversation panels by ID and focuses the existing panel from the list", async () => {
+  const dock = await openDock(checkout);
+  const alpha = { id: "alpha", title: "Same title", checkoutId: checkout.checkoutId, contextId: "rev-a" };
+  const bravo = { ...alpha, id: "bravo", contextId: "rev-b" };
+  act(() => {
+    openConversations(dock.api);
+    openConversation(dock.api, alpha);
+    openConversation(dock.api, bravo);
+  });
+  const first = dock.api.getPanel("conversation:alpha");
+  expect(first?.api.renderer).toBe("always");
+  expect(dock.api.activePanel?.id).toBe("conversation:bravo");
+  act(() => {
+    openConversations(dock.api);
+    openConversation(dock.api, alpha);
+  });
+  expect(dock.api.activePanel).toBe(first);
+  expect(dock.api.panels.filter((panel) => panel.id.startsWith("conversation:"))).toHaveLength(3);
+  act(() => {
+    first?.api.close();
+    openConversation(dock.api, alpha);
+  });
+  expect(dock.api.activePanel?.id).toBe("conversation:alpha");
+  expect(dock.api.getPanel("conversation:bravo")).toBeDefined();
+  dock.close();
 });

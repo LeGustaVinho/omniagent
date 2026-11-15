@@ -80,6 +80,7 @@ export function openConversation(api: DockviewApi, conversation: Conversation) {
     id,
     title: conversation.title,
     component: "conversation",
+    renderer: "always",
     params: { conversationId: conversation.id, title: conversation.title },
   });
 }
