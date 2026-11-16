@@ -6,11 +6,16 @@ use std::{
 use anyhow::{Context, Result, bail};
 use omniagent::{
     conversations::SessionScope,
+    dispatch::EventSource,
     jobs::{ComposerSuggestionMode, JobContext, JobScheduler, SidePurpose, SideSubmission},
     process_io::{CapturedProcess, Stream},
     providers::{
-        AdapterUpdate, CliSession, Provider, ProviderEventData, SessionIntent, SessionMode,
-        SessionRequest, TurnInput, TurnOutcome,
+        AdapterUpdate, Capability, CliSession, Provider, ProviderEventData, SessionIntent,
+        SessionMode, SessionRequest, TurnInput, TurnOutcome,
+        capabilities::{
+            Availability, CapabilityDescriptor, CapabilityStatus, CapabilitySubject,
+            EvidenceOrigin, ObservedResult, PolicyBlocker,
+        },
         profiles::{ConfiguredExecutable, DESKTOP_PERMISSION_REVISION, desktop_profile, probe_cli},
         side::{self, SideInput, SideOutcome, SidePin, SideRoute, SideSource},
     },
@@ -415,6 +420,86 @@ async fn desktop_validates_side_requests(provider: Provider) -> Result<()> {
     wait(job.id.clone())
         .await
         .context("preparing the committed source turn")?;
+    let source_run = store
+        .job(job.project_id.clone(), job.id.clone())
+        .await?
+        .and_then(|job| job.latest_attempt)
+        .context("the selected profile produced no source attempt")?
+        .run_id;
+    let historical = store
+        .dispatch_profile_evidence(
+            job.project_id.clone(),
+            conversation.id.clone(),
+            source_run.clone(),
+        )
+        .await?
+        .context("the selected profile produced no dispatch assessment")?;
+    assert_eq!(historical.profile.provider, scope.provider);
+    assert_eq!(historical.profile.profile_id, scope.profile_id);
+    assert_eq!(historical.profile.requested_model, scope.model);
+    let assessment = historical
+        .assessment
+        .as_ref()
+        .context("capabilities were not saved")?;
+    assert!(assessment.capabilities.iter().any(|entry| {
+        entry.descriptor.availability == Availability::Available
+            && matches!(
+                entry.status,
+                CapabilityStatus::Reported | CapabilityStatus::Observed
+            )
+    }));
+    assert!(
+        assessment
+            .capabilities
+            .iter()
+            .any(|entry| entry.status == CapabilityStatus::Unverified)
+    );
+    let workspace_write = assessment
+        .capabilities
+        .iter()
+        .find(|entry| {
+            entry.descriptor.subject
+                == CapabilitySubject::Protocol {
+                    capability: Capability::WorkspaceWrite,
+                }
+        })
+        .context("workspace write assessment is missing")?;
+    assert_eq!(workspace_write.status, CapabilityStatus::Blocked);
+    assert_eq!(
+        workspace_write.descriptor.blocker,
+        Some(PolicyBlocker::ReadOnlyProfile)
+    );
+    let historical = serde_json::to_value(historical)?;
+    let mut effective_scope = store
+        .agent_dispatch(conversation.id.clone(), source_run.clone())
+        .await?
+        .and_then(|dispatch| dispatch.snapshot.capabilities)
+        .context("the fixture has no saved capability scope")?
+        .scope;
+    let mut cursor = 0;
+    loop {
+        let observations = store
+            .agent_observations(conversation.id.clone(), source_run.clone(), cursor)
+            .await?;
+        let Some(last) = observations.last() else {
+            break;
+        };
+        cursor = last.seq;
+        for entry in observations {
+            if entry.source == EventSource::Application
+                && let ProviderEventData::CapabilityAssessmentUpdated { assessment } =
+                    entry.event.data
+            {
+                effective_scope = assessment.scope;
+            }
+        }
+    }
+    let side = CapabilityDescriptor::side_request(provider);
+    let before = store
+        .resolve_capability_assessment(effective_scope.clone(), vec![side.clone()])
+        .await?;
+    assert_eq!(before.entries[0].status(), CapabilityStatus::Unverified);
+
     let current = store.conversation(conversation.id.clone()).await?;
     let enqueue = |purpose, question: &str| {
         let (store, id, context, scope, question) = (
@@ -457,7 +542,31 @@ async fn desktop_validates_side_requests(provider: Provider) -> Result<()> {
     .await
     .context("running the side question using the saved validation")?;
     let records = store.saved_side_requests(current.id.clone()).await?;
-    assert!(records[0].evidence_id.is_some());
+    let validation = records
+        .iter()
+        .find(|record| record.purpose == SidePurpose::Validation)
+        .context("the fixture validation was not saved")?;
+    let verified = store
+        .resolve_capability_assessment(effective_scope, vec![side])
+        .await?;
+    let entry = &verified.entries[0];
+    assert_eq!(entry.status(), CapabilityStatus::Verified);
+    let proof = entry
+        .evidence
+        .as_ref()
+        .context("the verified capability has no receipt")?;
+    assert_eq!(validation.evidence_id.as_deref(), Some(proof.id.as_str()));
+    assert!(!proof.checked_at.is_empty());
+    assert_eq!(proof.origin, EvidenceOrigin::AuthenticatedFixture);
+    assert_eq!(proof.result, ObservedResult::Succeeded);
+    assert_eq!(
+        validation
+            .job
+            .latest_attempt
+            .as_ref()
+            .map(|attempt| &attempt.run_id),
+        Some(&proof.artifact_id)
+    );
     assert!(matches!(
         &records[1].response.as_ref().unwrap().outcome,
         SideOutcome::Answered { text, .. } if text.contains("BLUE_SIDE_PROFILE")
@@ -478,8 +587,16 @@ async fn desktop_validates_side_requests(provider: Provider) -> Result<()> {
     assert!(
         matches!(&suggested.outcome, SideOutcome::Answered { text, .. } if !text.trim().is_empty())
     );
-    let history = store.conversation_history(current.id).await?;
+    let history = store.conversation_history(current.id.clone()).await?;
     assert_eq!(history.messages.len(), 2);
+    assert_eq!(
+        serde_json::to_value(
+            store
+                .dispatch_profile_evidence(job.project_id, current.id, source_run)
+                .await?
+        )?,
+        historical,
+    );
     scheduler.shutdown().await?;
     Ok(())
 }

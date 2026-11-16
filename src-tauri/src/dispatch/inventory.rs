@@ -452,7 +452,7 @@ fn within_path(path: &Path, root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, process::Command};
+    use std::{collections::BTreeMap, fs, process::Command};
 
     use anyhow::{Context, ensure};
     use serde_json::json;
@@ -461,8 +461,11 @@ mod tests {
         conversations::{Conversation, SessionScope},
         dispatch::{Delivery, EventSource},
         providers::{
-            Provider, SessionMode, SessionPlugin, capabilities::ReportedCapabilities,
-            configuration, skills::SkillSource,
+            Provider, SessionMode, SessionPlugin,
+            capabilities::{CapabilityScope, ConfigurationEvidence, ReportedCapabilities},
+            configuration::{self, ReportedConfiguration},
+            launch_scope::ScopedLaunchEvidence,
+            skills::SkillSource,
         },
         repository::{self, CheckoutLayout},
         runs::RunStatus,
@@ -486,8 +489,18 @@ mod tests {
             )
             .await?;
         store.mark_agent_running(attempt.run.id.clone()).await?;
+        let reported = ReportedCapabilities::default();
         let (_, filesystem_skills, instructions) =
-            configuration::inspect(scope, layout, &ReportedCapabilities::default())?;
+            configuration::inspect(scope, layout, &reported)?;
+        let plugins: PluginInventory =
+            serde_json::from_slice(&fs::read(layout.root.join("plugins.json"))?)?;
+        let reported_skills = fixture_skills(plugin_skill);
+        let profile =
+            fixture_profile(scope, &chat.checkout_id, layout, &plugins, &reported_skills)?;
+        let descriptors = reported.descriptors(&profile);
+        let assessment = store
+            .resolve_capability_assessment(profile, descriptors)
+            .await?;
         let snapshot = serde_json::from_value(json!({
             "version": 13,
             "contextId": attempt.context_id,
@@ -496,8 +509,9 @@ mod tests {
             "nativeHistory": { "mode": "fresh" },
             "instructions": instructions,
             "filesystemSkills": filesystem_skills,
-            "reportedSkills": SkillCatalog { entries: vec![plugin_skill.clone()], reported: true, issues: Vec::new() },
-            "pluginInventory": serde_json::from_slice::<PluginInventory>(&fs::read(layout.root.join("plugins.json"))?)?,
+            "reportedSkills": reported_skills,
+            "pluginInventory": plugins,
+            "capabilities": assessment,
         }))?;
         let run = attempt.run.id;
         let dispatch = store
@@ -507,6 +521,64 @@ mod tests {
             .settle_dispatch(dispatch.clone(), Delivery::Submitted)
             .await?;
         Ok((run, dispatch))
+    }
+
+    fn fixture_skills(plugin_skill: &SkillEntry) -> SkillCatalog {
+        SkillCatalog {
+            entries: vec![plugin_skill.clone()],
+            reported: true,
+            issues: Vec::new(),
+        }
+    }
+
+    fn fixture_profile(
+        scope: &SessionScope,
+        checkout_id: &str,
+        layout: &CheckoutLayout,
+        plugins: &PluginInventory,
+        skills: &SkillCatalog,
+    ) -> Result<CapabilityScope> {
+        let mut observed = ConfigurationEvidence {
+            detected: Vec::new(),
+            unresolved: Vec::new(),
+            provider_revision: Some("fixture".into()),
+            effective_revision: None,
+            scoped_launch_revision: None,
+            environment_revision: None,
+            tool_revisions: BTreeMap::new(),
+        };
+        let launch = ScopedLaunchEvidence {
+            provider: scope.provider,
+            strategy: "fixture".into(),
+            approved: BTreeMap::new(),
+            excluded: BTreeMap::new(),
+            instruction_sources: Vec::new(),
+            inputs: Vec::new(),
+            candidate_checkout: None,
+            mcp_sources: BTreeMap::new(),
+            non_mcp_approvals: BTreeMap::new(),
+        };
+        let configuration = ReportedConfiguration {
+            environment_revision: "same-provider-configuration".into(),
+            tool_revisions: BTreeMap::new(),
+        };
+        configuration::resolve_effective_configuration(
+            &mut observed,
+            layout,
+            Some(&configuration),
+            &launch,
+            Some(plugins),
+            Some(skills),
+        )?;
+        Ok(CapabilityScope::from_dispatch(
+            scope,
+            checkout_id.into(),
+            Some("fixture-cli".into()),
+            None,
+            observed,
+            None,
+            None,
+        ))
     }
 
     fn write_registry(checkout: &Path, install: &Path, version: &str, enabled: bool) -> Result<()> {
@@ -778,11 +850,47 @@ mod tests {
             .finish_agent_attempt(run.clone(), RunStatus::Succeeded, None)
             .await?;
 
+        let original_profile = store
+            .dispatch_profile_evidence(repo.project_id.clone(), chat.id.clone(), run.clone())
+            .await?
+            .context("the original dispatch profile is unavailable")?;
+        let original_configuration = original_profile
+            .assessment
+            .as_ref()
+            .context("the original dispatch has no assessment")?
+            .configuration_revision
+            .clone();
+        assert!(original_configuration.is_some());
+        let original_profile = serde_json::to_value(original_profile)?;
+        write_registry(&checkout, &install, "2.0.0", false)?;
+        let edited_plugins = serde_json::from_slice(&fs::read(checkout.join("plugins.json"))?)?;
+        let edited_configuration = fixture_profile(
+            &scope,
+            &chat.checkout_id,
+            &layout,
+            &edited_plugins,
+            &fixture_skills(&plugin_skill),
+        )?
+        .configuration
+        .effective_revision;
+        assert!(edited_configuration.is_some());
+        assert_ne!(edited_configuration, original_configuration);
         fs::write(&guide, "Edited guide")?;
         fs::remove_file(&discovery_only)?;
-        write_registry(&checkout, &install, "2.0.0", false)?;
         drop(store);
         let store = Store::open(db)?;
+        assert_eq!(
+            serde_json::to_value(
+                store
+                    .dispatch_profile_evidence(
+                        repo.project_id.clone(),
+                        chat.id.clone(),
+                        run.clone()
+                    )
+                    .await?
+            )?,
+            original_profile,
+        );
         let historical = store
             .dispatch_inventory(chat.id.clone(), run.clone())
             .await?
@@ -858,6 +966,16 @@ mod tests {
         let chat = store.conversation(chat.id).await?;
         let (next_run, _) =
             prepare_inventory(&store, &chat, &scope, &layout, &plugin_skill).await?;
+        let next_profile = store
+            .dispatch_profile_evidence(repo.project_id, chat.id.clone(), next_run.clone())
+            .await?
+            .context("the next dispatch profile is unavailable")?;
+        assert_eq!(
+            next_profile
+                .assessment
+                .and_then(|value| value.configuration_revision),
+            edited_configuration
+        );
         let next = store.dispatch_inventory(chat.id, next_run).await?.unwrap();
         assert!(
             next.inventory
