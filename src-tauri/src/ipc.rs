@@ -26,6 +26,18 @@ use tauri::{State, ipc::Channel};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+#[tauri::command]
+pub async fn conversation_question_timeline(
+    store: State<'_, Store>,
+    conversation_id: String,
+    run_id: String,
+) -> Result<Vec<omniagent::jobs::ConversationQuestionTimelineEntry>, String> {
+    store
+        .conversation_question_timeline(conversation_id, run_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
 #[derive(Default)]
 pub struct EventSubscriptions(Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>);
 

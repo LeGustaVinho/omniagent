@@ -2,14 +2,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { useId, useRef, useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 
-type RequestId = string | number;
-type FieldValue = string | number | boolean | string[];
-type QuestionAction = "accept" | "decline" | "cancel";
+export type RequestId = string | number;
+export type FieldValue = string | number | boolean | string[];
+export type QuestionAction = "accept" | "decline" | "cancel";
 type Input =
   | { kind: "text"; minLength: number | null; maxLength: number | null }
   | { kind: "boolean" }
   | { kind: "number"; integer: boolean; minimum: number | null; maximum: number | null }
-  | { kind: "choice"; options: { id: string; label: string }[]; multiple: boolean; allowCustom: boolean };
+  | { kind: "choice"; options: { id: string; label: string; description?: string | null }[];
+      multiple: boolean; allowCustom: boolean; minSelections?: number; maxSelections?: number };
 type Field = {
   id: string;
   label: string;
@@ -33,46 +34,53 @@ function FieldControl({ field, value, update }: {
 }) {
   const id = useId();
   const input = field.input;
-  let control;
-  if (input.kind === "choice" && input.multiple) {
-    const selected = Array.isArray(value) ? value : [];
-    const optionIds = new Set(input.options.map((option) => option.id));
-    const custom = selected.find((choice) => !optionIds.has(choice));
+  if (input.kind === "choice") {
+    const custom = typeof value === "string" && (input.multiple || !input.options.some((option) => option.id === value))
+      ? value : undefined;
+    const selected = Array.isArray(value) ? value : typeof value === "string" && custom === undefined ? [value] : [];
     return (
       <fieldset className="grid gap-1.5">
         <legend className="mb-1 text-xs font-medium">{field.label}</legend>
         {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}
         {input.options.map((option) => <label key={option.id} className="conv-checkbox text-sm">
-          <input type="checkbox" checked={selected.includes(option.id)}
-            onChange={(event) => update(event.currentTarget.checked ? [...selected, option.id] : selected.filter((choice) => choice !== option.id))} />
+          <input type={input.multiple ? "checkbox" : "radio"} name={id} checked={selected.includes(option.id)}
+            onChange={(event) => {
+              if (!input.multiple) update(option.id);
+              else if (event.currentTarget.checked) update([...selected, option.id]);
+              else {
+                const remaining = selected.filter((choice) => choice !== option.id);
+                update(remaining.length || field.required ? remaining : undefined);
+              }
+            }} />
           {option.label}
+          {option.description && <span className="text-xs text-muted-foreground">{option.description}</span>}
         </label>)}
         {input.allowCustom && <input className={inputClass} aria-label={`Other ${field.label}`} value={custom ?? ""}
-          onChange={(event) => update([...selected.filter((choice) => optionIds.has(choice)), ...(event.target.value ? [event.target.value] : [])])} />}
+          onChange={(event) => update(event.currentTarget.value || undefined)} />}
+        {!input.multiple && selected.length > 0 && !field.required && <Button type="button" variant="ghost" className="justify-self-start text-xs"
+          onClick={() => update(undefined)}>Clear {field.label}</Button>}
       </fieldset>
     );
-  } else if (input.kind === "choice" && input.allowCustom) {
-    control = (
-      <>
-        <input id={id} className={inputClass} list={`${id}-choices`} required={field.required}
-          value={String(value ?? "")} onChange={(event) => update(event.target.value || undefined)} />
-        <datalist id={`${id}-choices`}>
-          {input.options.map((option) => <option key={option.id} value={option.id} label={option.label} />)}
-        </datalist>
-      </>
-    );
-  } else if (input.kind === "choice" || input.kind === "boolean") {
-    control = (
-      <select id={id} className={inputClass} required={field.required} value={String(value ?? "")}
-        onChange={(event) => update(!event.target.value ? undefined : input.kind === "boolean" ? event.target.value === "true" : event.target.value)}>
-        <option value="">Choose…</option>
-        {input.kind === "boolean"
-          ? <><option value="true">Yes</option><option value="false">No</option></>
-          : input.options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
-      </select>
-    );
-  } else {
-    control = (
+  }
+  if (input.kind === "boolean") {
+    return <div className="grid gap-1">
+      <label className="conv-checkbox text-sm">
+        <input type="checkbox" role="switch" checked={value === true}
+          aria-describedby={field.description ? id : undefined}
+          onChange={(event) => update(event.currentTarget.checked)} />
+        {field.label}
+      </label>
+      {field.description && <p id={id} className="text-xs text-muted-foreground">{field.description}</p>}
+      {value === undefined && <Button type="button" variant="ghost" className="justify-self-start text-xs"
+        onClick={() => update(false)}>Set {field.label} to No</Button>}
+      {!field.required && value !== undefined && <Button type="button" variant="ghost" className="justify-self-start text-xs"
+        onClick={() => update(undefined)}>Clear {field.label}</Button>}
+    </div>;
+  }
+  return (
+    <div className="grid gap-1">
+      <label className="text-xs font-medium" htmlFor={id}>{field.label}</label>
+      {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}
       <input id={id} className={inputClass} required={field.required} value={String(value ?? "")}
         type={input.kind === "number" ? "number" : field.secret ? "password" : "text"}
         min={input.kind === "number" ? input.minimum ?? undefined : undefined}
@@ -80,14 +88,8 @@ function FieldControl({ field, value, update }: {
         step={input.kind === "number" ? (input.integer ? 1 : "any") : undefined}
         minLength={input.kind === "text" ? input.minLength ?? undefined : undefined}
         maxLength={input.kind === "text" ? input.maxLength ?? undefined : undefined}
-        onChange={(event) => update(input.kind === "number" ? (event.target.value === "" ? undefined : event.target.valueAsNumber) : event.target.value)} />
-    );
-  }
-  return (
-    <div className="grid gap-1">
-      <label className="text-xs font-medium" htmlFor={id}>{field.label}</label>
-      {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}
-      {control}
+        onChange={(event) => update(input.kind === "number"
+          ? (event.target.value === "" ? undefined : event.target.valueAsNumber) : event.target.value)} />
     </div>
   );
 }
@@ -102,7 +104,11 @@ export function PendingInput({ input, conversationId, runId, onResolved, savedRe
   const request = input.data;
   const form = request.type === "question" ? request.normalized : undefined;
   const [values, setValues] = useState<Record<string, FieldValue | undefined>>(() =>
-    Object.fromEntries(form?.fields.map((field) => [field.id, field.default ?? undefined]) ?? []));
+    Object.fromEntries(form?.fields.map((field) => {
+      const input = field.input;
+      const permitsEmpty = field.required && input.kind === "choice" && input.multiple && input.minSelections === 0;
+      return [field.id, field.default ?? (permitsEmpty ? [] : undefined)];
+    }) ?? []));
   const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
   const [error, setError] = useState("");
@@ -124,17 +130,29 @@ export function PendingInput({ input, conversationId, runId, onResolved, savedRe
   }
 
   const answer = (action: QuestionAction) => submit(savedReason ? "answer_saved_conversation_question" : "answer_conversation_question", {
-    answer: { action, values: action === "accept" ? values : {} },
+    answer: { action, values: action === "accept"
+      ? Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined)) : {} },
   });
   function accept(event: FormEvent) {
     event.preventDefault();
-    const missing = form?.fields.find((field) => {
+    if (!form?.actions.includes("accept")) return;
+    for (const field of form.fields) {
       const value = values[field.id];
-      return field.required && (value === undefined || value === "" || (Array.isArray(value) && value.length === 0));
-    });
-    if (missing) {
-      setError(`Choose a value for ${missing.label}.`);
-      return;
+      if (field.required && (value === undefined || value === "")) {
+        setError(`Choose a value for ${field.label}.`);
+        return;
+      }
+      if (field.input.kind === "choice" && Array.isArray(value)) {
+        const { minSelections = Number(field.required), maxSelections = field.input.options.length } = field.input;
+        if (value.length < minSelections || value.length > maxSelections) {
+          setError(`Choose between ${minSelections} and ${maxSelections} options for ${field.label}.`);
+          return;
+        }
+      }
+      if (field.input.kind === "choice" && typeof value === "string" && !value.trim()) {
+        setError(`Enter a value for ${field.label}.`);
+        return;
+      }
     }
     void answer("accept");
   }
@@ -146,16 +164,18 @@ export function PendingInput({ input, conversationId, runId, onResolved, savedRe
           <p className="text-sm font-medium">Approval requested for {request.operation}</p>
           {request.description && <p className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{request.description}</p>}
           <div className="mt-2 flex flex-wrap gap-2">
-            <Button disabled={busy} onClick={() => void submit("approve_conversation_input", { decision: "allow_once" })}>Allow once</Button>
-            <Button variant="outline" disabled={busy} onClick={() => void submit("approve_conversation_input", { decision: "deny" })}>Deny</Button>
+            <Button type="button" disabled={busy} onClick={() => void submit("approve_conversation_input", { decision: "allow_once" })}>Allow once</Button>
+            <Button type="button" variant="outline" disabled={busy} onClick={() => void submit("approve_conversation_input", { decision: "deny" })}>Deny</Button>
           </div>
         </>
       ) : form ? (
         <form onSubmit={accept} className="grid gap-2">
           <p className="text-sm font-medium">{form.message || "Input requested"}</p>
           {savedReason && <p className="text-xs text-muted-foreground">{savedReason}</p>}
-          {form.fields.map((field) => <FieldControl key={field.id} field={field} value={values[field.id]}
-            update={(value) => setValues((current) => ({ ...current, [field.id]: value }))} />)}
+          <fieldset className="grid gap-2" disabled={busy}>
+            {form.fields.map((field) => <FieldControl key={field.id} field={field} value={values[field.id]}
+              update={(value) => setValues((current) => ({ ...current, [field.id]: value }))} />)}
+          </fieldset>
           <div className="flex flex-wrap gap-2">
             {form.actions.includes("accept") && <Button type="submit" disabled={busy}>Reply</Button>}
             {form.actions.includes("decline") && <Button type="button" variant="outline" disabled={busy} onClick={() => void answer("decline")}>Decline</Button>}

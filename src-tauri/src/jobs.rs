@@ -68,6 +68,7 @@ pub(crate) use native_goal_evidence::{
 };
 pub(crate) use native_goal_qualification::{NativeGoalSeed, effective_qualification_matches};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
+pub use question_answers::ConversationQuestionTimelineEntry;
 pub use pipeline::{
     PipelineAgentInput, PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease,
     ReleaseBlocker,

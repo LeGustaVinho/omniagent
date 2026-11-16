@@ -11,6 +11,7 @@ import { ConversationDeliveries, type ConversationInput } from "@/conversation-d
 import { ConversationInventory } from "@/conversation-inventory";
 import { ConversationProfile } from "@/conversation-profile";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
+import { ConversationQuestionTimeline } from "@/conversation-question-timeline";
 import { ConversationSubagentQuotaPanel } from "@/subagent-quota";
 import { AttemptSubagentAudit } from "@/subagent-audit-controls";
 
@@ -161,6 +162,7 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
     refreshRequests: () => {
       if (live) void inputs.refetch();
       void saved.refetch();
+      void queryClient.invalidateQueries({ queryKey: ["conversation-run", runId, "question-timeline"] });
       void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-job"] });
       void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-run"] });
       void queryClient.invalidateQueries({ queryKey: ["project-job-queue"] });
@@ -261,6 +263,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
       <ConversationSubagentQuotaPanel conversationId={conversationId} runId={run.id} live={live} />
       <ConversationChecklistProgress projectId={run.projectId} runId={run.id} live={live} />
       <AttemptSubagentAudit conversationId={conversationId} runId={run.id} live={live} gaps={projection?.auditGaps ?? []} />
+      <ConversationQuestionTimeline conversationId={conversationId} runId={run.id} live={live} />
       {Boolean(projection?.tools.length) && <details>
         <summary>Tool activity</summary>
         <ol>{projection?.tools.map((tool, index) => <li key={index}>{tool.name} · {tool.phase}</li>)}</ol>

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::Serialize;
 
 use crate::{
     conversations::{
@@ -9,8 +10,8 @@ use crate::{
     },
     protection,
     providers::{
-        ProviderEvent, ProviderEventData,
-        questions::{QuestionAction, QuestionOrigin, QuestionReply},
+        Provider, ProviderEvent, ProviderEventData,
+        questions::{QuestionAction, QuestionOrigin, QuestionReply, QuestionRoute},
     },
     store::Store,
 };
@@ -19,6 +20,51 @@ use super::{
     Job, QueueState, change_pending_job_state, pipeline::load_attempt_job,
     question_waits::saved_checkpoint_is_current, subagents::SubagentAllocation,
 };
+
+#[cfg(test)]
+mod tests;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationQuestionTimelineEntry {
+    pub sequence: String,
+    pub origin: QuestionOrigin,
+    pub provider: Provider,
+    pub route: QuestionRoute,
+    pub message: Option<String>,
+    pub state: QuestionTimelineState,
+    pub reason: Option<String>,
+    pub continuation_run_id: Option<String>,
+    pub reply: Option<QuestionTimelineReply>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionTimelineState {
+    Pending,
+    Saving,
+    Saved,
+    NeedsReview,
+    Prepared,
+    Submitted,
+    Unconfirmed,
+    Recorded,
+    Continued,
+    Closed,
+}
+
+#[derive(Serialize)]
+pub struct QuestionTimelineReply {
+    pub action: QuestionAction,
+    pub fields: Vec<QuestionTimelineValue>,
+}
+
+#[derive(Serialize)]
+pub struct QuestionTimelineValue {
+    pub id: String,
+    pub label: String,
+    pub value: Option<serde_json::Value>,
+}
 
 pub(super) struct QuestionContinuation {
     pub run: String,
@@ -190,6 +236,104 @@ fn earlier_replies(db: &Connection, run: &str) -> Result<Vec<RecordedQuestionAns
 }
 
 impl Store {
+    pub async fn conversation_question_timeline(
+        &self,
+        conversation: String,
+        run: String,
+    ) -> Result<Vec<ConversationQuestionTimelineEntry>> {
+        self.execute(move |db| {
+            let tx = db.transaction()?;
+            let provider: String = tx.query_row(
+                "SELECT json_quote(json_extract(s.scope, '$.provider')) FROM agent_attempts a
+                 JOIN agent_sessions s ON s.id = a.agent_session_id
+                 WHERE a.conversation_id = ?1 AND a.run_id = ?2",
+                params![conversation, run], |row| row.get(0),
+            ).optional()?.context("The attempt is unavailable in this conversation")?;
+            let provider = serde_json::from_str::<Provider>(&provider)?;
+            let mut query = tx.prepare(
+                "SELECT q.request_event_seq, request.payload, q.delivery, w.state, w.reason,
+                        l.request_event_seq IS NOT NULL, l.continuation_run_id, native.payload,
+                        recorded.payload, continuation.payload
+                 FROM agent_questions q JOIN agent_events request ON request.seq = q.request_event_seq
+                 LEFT JOIN native_question_waits w ON w.request_event_seq = q.request_event_seq
+                 LEFT JOIN structured_question_continuations l ON l.request_event_seq = q.request_event_seq
+                 LEFT JOIN agent_events native ON native.seq = q.reply_event_seq
+                 LEFT JOIN agent_events continuation ON continuation.seq = l.reply_event_seq
+                 LEFT JOIN recorded_question_answers recorded ON recorded.request_event_seq = q.request_event_seq
+                 WHERE q.run_id = ?1 ORDER BY q.request_event_seq",
+            )?;
+            let mut rows = query.query([&run])?;
+            let mut timeline = Vec::new();
+            while let Some(row) = rows.next()? {
+                let event: ProviderEvent =
+                    serde_json::from_slice(&protection::unprotect(row.get_ref(1)?.as_blob()?)?)?;
+                let ProviderEventData::Question { request_id, normalized: Some(form), route, .. } = event.data else {
+                    anyhow::bail!("The recorded question is missing its validated form");
+                };
+                let origin = QuestionOrigin { run_id: run.clone(), request_id };
+                let delivery: String = row.get(2)?;
+                let wait: Option<String> = row.get(3)?;
+                let checkpoint: bool = row.get(5)?;
+                let (state, reply) = match (row.get_ref(9)?, row.get_ref(8)?, row.get_ref(7)?) {
+                    (rusqlite::types::ValueRef::Blob(linked), _, _) => {
+                        let linked: ProviderEvent = serde_json::from_slice(&protection::unprotect(linked)?)?;
+                        let ProviderEventData::StructuredQuestionReplyLinked { origin: related, reply, .. } = linked.data else {
+                            anyhow::bail!("The recorded continuation is missing its question reply");
+                        };
+                        ensure!(related == origin, "The continuation reply belongs to another question");
+                        (QuestionTimelineState::Continued, Some(reply))
+                    }
+                    (_, rusqlite::types::ValueRef::Blob(recorded), _) => {
+                        let recorded: RecordedQuestionAnswer = serde_json::from_slice(&protection::unprotect(recorded)?)?;
+                        ensure!(recorded.origin == origin, "The recorded answer belongs to another question");
+                        (QuestionTimelineState::Recorded, Some(recorded.reply))
+                    }
+                    (_, _, rusqlite::types::ValueRef::Blob(native)) => {
+                        let native: ProviderEvent = serde_json::from_slice(&protection::unprotect(native)?)?;
+                        let ProviderEventData::QuestionReplyPrepared { request_id, reply, .. } = native.data else {
+                            anyhow::bail!("The recorded native response is missing its question reply");
+                        };
+                        ensure!(request_id == origin.request_id, "The native reply belongs to another question");
+                        let state = match delivery.as_str() {
+                            "prepared" => QuestionTimelineState::Prepared,
+                            "submitted" => QuestionTimelineState::Submitted,
+                            _ => QuestionTimelineState::Unconfirmed,
+                        };
+                        (state, Some(reply))
+                    }
+                    _ => {
+                        let state = match (delivery.as_str(), wait.as_deref(), checkpoint) {
+                            (_, Some("saving"), _) => QuestionTimelineState::Saving,
+                            (_, Some("needs_review"), _) => QuestionTimelineState::NeedsReview,
+                            (_, Some("saved"), _) => QuestionTimelineState::Saved,
+                            ("closed", _, _) | (_, Some("closed"), _) => QuestionTimelineState::Closed,
+                            (_, None, true) => QuestionTimelineState::Saved,
+                            _ => QuestionTimelineState::Pending,
+                        };
+                        (state, None)
+                    }
+                };
+                let message = form.message.or_else(|| form.fields.first().map(|field| field.label.clone()));
+                let reply = reply.map(|reply| QuestionTimelineReply {
+                    action: reply.action,
+                    fields: form.fields.into_iter().filter_map(|field| {
+                        let value = reply.values.get(&field.id)?;
+                        Some(QuestionTimelineValue {
+                            id: field.id,
+                            label: field.label,
+                            value: (!field.secret).then(|| value.clone()),
+                        })
+                    }).collect(),
+                });
+                timeline.push(ConversationQuestionTimelineEntry {
+                    sequence: row.get::<_, i64>(0)?.to_string(), origin, provider, route,
+                    message, state, reason: row.get(4)?, continuation_run_id: row.get(6)?, reply,
+                });
+            }
+            Ok(timeline)
+        }).await
+    }
+
     pub async fn answer_saved_question(
         &self,
         conversation: String,
