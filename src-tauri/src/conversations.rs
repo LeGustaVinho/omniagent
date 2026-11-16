@@ -6230,6 +6230,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsupported_side_profile_leaves_committed_history_and_draft_untouched() -> Result<()> {
+        use crate::{
+            jobs::{SidePurpose, SideSubmission},
+            providers::side::SideUnavailable,
+        };
+
+        let (directory, store, conversation, mut scope) = setup().await?;
+        let original = prepare(&store, &conversation.id, scope.clone(), "Confirmed turn").await?;
+        confirm(&store, &original).await?;
+        let history = store.conversation_history(conversation.id.clone()).await?;
+        let submitted = "/btw Is there a side answer?";
+        store.save_conversation_draft(conversation.id.clone(), submitted.into()).await?;
+        async fn counts(store: &Store) -> Result<(i64, i64, i64)> {
+            store.execute(|db| {
+                Ok(db.query_row(
+                    "SELECT (SELECT count(*) FROM jobs), (SELECT count(*) FROM runs),
+                            (SELECT count(*) FROM dispatches)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?)
+            }).await
+        }
+        let before = counts(&store).await?;
+        scope.provider = Provider::Antigravity;
+        scope.profile_id = "selected-side-profile".into();
+        scope.model = Some("selected-side-model".into());
+        assert!(matches!(
+            store.enqueue_side_request(
+                conversation.id.clone(), Some(history.context_id.clone()), None, scope,
+                SidePurpose::Question, "Is there a side answer?".into(),
+            ).await?,
+            SideSubmission::Unavailable {
+                provider: Provider::Antigravity,
+                model: Some(model),
+                reason: SideUnavailable::ToolFreeFreshRouteUnavailable,
+            } if model == "selected-side-model"
+        ));
+        drop(store);
+        let reopened = Store::open(directory.path().join("store.sqlite"))?;
+        assert_eq!(counts(&reopened).await?, before);
+        assert!(reopened.saved_side_requests(conversation.id.clone()).await?.is_empty());
+        assert_eq!(reopened.conversation_draft(conversation.id.clone()).await?, submitted);
+        let after = reopened.conversation_history(conversation.id).await?;
+        assert_eq!(after.context_id, history.context_id);
+        assert_eq!(after.messages, history.messages);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn side_requests_share_capacity_without_joining_main_history() -> Result<()> {
         use crate::{
             jobs::{

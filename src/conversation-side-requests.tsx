@@ -87,6 +87,7 @@ const providers: Record<Provider, string> = { codex: "Codex", claude: "Claude Co
 
 export function sideUnavailableReason(reason: string) {
   switch (reason) {
+    case "tool_free_fresh_route_unavailable": return "This profile has no qualified tool-free route for a side question.";
     case "source_boundary_unavailable": return "An eligible completed source turn is required.";
     case "invalid_input": return "The question or saved context exceeds the side request limit.";
     case "profile_mismatch": return "The selected profile differs from the saved source.";
