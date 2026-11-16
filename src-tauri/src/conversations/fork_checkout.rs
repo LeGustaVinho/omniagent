@@ -397,3 +397,6 @@ pub(super) fn resolve_continuation_checkout(
         root,
     })
 }
+
+#[cfg(test)]
+mod tests;
