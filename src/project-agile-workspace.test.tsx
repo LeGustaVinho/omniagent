@@ -192,3 +192,38 @@ it("routes board moves and the detail control through the same guarded transitio
   dropWork(gitWaiting.id, "completed");
   expect(invoke).not.toHaveBeenCalledWith("transition_project_work", expect.objectContaining({ taskId: gitWaiting.id }));
 });
+
+it("creates the hierarchy from the work form and keeps a direct checklist beside a subtask", async () => {
+  const { user } = testWorkspace(false);
+  await user.click(screen.getByText("New work"));
+  const kind = screen.getByRole("combobox", { name: "Work type" });
+  const titleInput = screen.getByRole("textbox", { name: "Title" });
+  const create = screen.getByRole("button", { name: "Create work" });
+  async function add(kindValue: string, title: string, owner?: { label: string; id: string }) {
+    await user.selectOptions(kind, kindValue);
+    if (owner) await user.selectOptions(screen.getByRole("combobox", { name: owner.label }), owner.id);
+    await user.type(titleInput, title);
+    await user.click(create);
+    await screen.findByRole("region", { name: title });
+  }
+  await add("epic", "New ship");
+  await add("task", "Prepare docs", { label: "Epic", id: "new-ship" });
+  await user.type(screen.getByRole("textbox", { name: "New checklist item" }), "Check headings");
+  await user.click(screen.getByRole("button", { name: "Add checklist item" }));
+  await screen.findByRole("checkbox", { name: "Check headings" });
+  await add("subtask", "Proofread guide", { label: "Parent Task", id: "prepare-docs" });
+  await add("task", "Independent audit");
+  expect(invoke).toHaveBeenCalledWith("create_workspace_work", { projectId, title: "New ship", placement: { kind: "epic" } });
+  expect(invoke).toHaveBeenCalledWith("create_workspace_work", { projectId, title: "Prepare docs", placement: { kind: "task", epicId: "new-ship" } });
+  expect(invoke).toHaveBeenCalledWith("create_workspace_work", { projectId, title: "Proofread guide", placement: { kind: "subtask", parentTaskId: "prepare-docs" } });
+  expect(invoke).toHaveBeenCalledWith("create_workspace_work", { projectId, title: "Independent audit", placement: { kind: "task", epicId: null } });
+  expect(invoke).toHaveBeenCalledWith("append_project_checklist_item", { projectId, taskId: "prepare-docs", body: "Check headings" });
+
+  await user.click(screen.getByRole("button", { name: "Table" }));
+  const table = within(screen.getByRole("table", { name: "Agile table" }));
+  await user.click(table.getByRole("button", { name: "Expand New ship" }));
+  await user.click(table.getByRole("button", { name: "Expand Prepare docs" }));
+  expect(table.getByRole("checkbox", { name: "Check headings" })).toBeTruthy();
+  expect(table.getByRole("button", { name: /Proofread guide/ })).toBeTruthy();
+  expect(table.getByRole("button", { name: /Independent audit/ })).toBeTruthy();
+});
