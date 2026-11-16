@@ -2704,6 +2704,7 @@ mod tests {
                     requested_skill: None,
                     plugin_inventory: None,
                     attachments: Vec::new(),
+                    task_context: None,
                     question_route: QuestionRoute::Native,
                     answered_question: None,
                 },
@@ -6644,6 +6645,228 @@ mod tests {
                 true,
             )
         }
+    }
+
+    #[tokio::test]
+    async fn task_dispatch_freezes_hierarchy_and_selected_checklist_revisions() -> Result<()> {
+        use crate::{
+            jobs::{AdmissionEnvironment, JobRequest, PipelineDispatch, PipelineNodeKind},
+            tasks::{DescriptionOwner, TaskRunScope},
+        };
+
+        let (dir, store, chat, scope) = setup().await?;
+        std::fs::write(&scope.executable, b"fixture")?;
+        let registered = crate::repository::register(&store, scope.checkout.clone()).await?;
+        let project = registered.project_id;
+        let epic = store
+            .create_project_epic(project.clone(), "Release".into())
+            .await?;
+        let task = store
+            .create_project_task(project.clone(), "API".into())
+            .await?;
+        store
+            .set_project_task_epic(project.clone(), task.id.clone(), Some(epic.id.clone()))
+            .await?;
+        let child = store
+            .create_project_subtask(project.clone(), task.id.clone(), "Review".into())
+            .await?;
+        let epic_owner = DescriptionOwner::Epic(epic.id);
+        let task_owner = DescriptionOwner::Work(task.id);
+        let epic_revision = store
+            .save_project_description(
+                project.clone(),
+                epic_owner.clone(),
+                None,
+                Some("# Original Epic".into()),
+            )
+            .await?;
+        let task_revision = store
+            .save_project_description(
+                project.clone(),
+                task_owner.clone(),
+                None,
+                Some("# Original API".into()),
+            )
+            .await?;
+        let child_revision = store
+            .save_project_description(
+                project.clone(),
+                DescriptionOwner::Work(child.id.clone()),
+                None,
+                Some("# Review API".into()),
+            )
+            .await?;
+        let checklist = store
+            .ensure_project_checklist(project.clone(), child.id.clone())
+            .await?;
+        let selected = store
+            .append_project_checklist_item(
+                project.clone(),
+                child.id.clone(),
+                "Check status codes".into(),
+            )
+            .await?;
+        let sibling = store
+            .append_project_checklist_item(
+                project.clone(),
+                child.id.clone(),
+                "Check HTTP headers".into(),
+            )
+            .await?;
+        let pipeline = "description-pipeline".to_owned();
+        store
+            .register_job_pipeline(project.clone(), pipeline.clone())
+            .await?;
+        store
+            .register_job_pipeline_node(
+                project.clone(),
+                pipeline.clone(),
+                "review".into(),
+                PipelineNodeKind::Execution,
+            )
+            .await?;
+        let binding = PipelineDispatch {
+            pipeline_run_id: pipeline,
+            node_instance_id: "review".into(),
+            plan_revision: None,
+            release_id: None,
+        };
+        let request = JobRequest {
+            checkout_id: Some(chat.checkout_id),
+            task_id: Some(child.id.clone()),
+            mode: SessionMode::ReadOnly,
+            instructions: "Review the saved changes".into(),
+            dependencies: Vec::new(),
+            requires_bridge: false,
+        };
+        let env = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: false,
+        };
+        let dispatch = |store: Store, item: Option<String>| {
+            let (binding, scope, request, env) =
+                (binding.clone(), scope.clone(), request.clone(), env.clone());
+            async move {
+                store
+                    .submit_pipeline_task_agent_job(
+                        binding,
+                        scope,
+                        request,
+                        TaskRunScope {
+                            role: "reviewer".into(),
+                            checklist_item_id: item,
+                        },
+                    )
+                    .await?;
+                let plan = store
+                    .claim_next_job(env)
+                    .await?
+                    .context("missing review job")?;
+                let chat = plan.conversation_id.clone();
+                let run = plan.run.id.clone();
+                let runner = Arc::new(FixtureRunner(WireLog {
+                    store: store.clone(),
+                    runtime: tokio::runtime::Handle::current(),
+                    conversation: chat.clone(),
+                    frames: Arc::new(Mutex::new(Vec::new())),
+                }));
+                assert_eq!(
+                    start_managed_turn(store, runner, plan, None).wait().await?,
+                    RunStatus::Succeeded
+                );
+                Ok::<_, anyhow::Error>((chat, run))
+            }
+        };
+
+        let (first_chat, first_run) = dispatch(store.clone(), Some(selected.id.clone())).await?;
+        let edited = store
+            .save_project_description(
+                project.clone(),
+                task_owner.clone(),
+                Some(task_revision.id.clone()),
+                Some("# Updated API".into()),
+            )
+            .await?;
+        assert!(
+            store
+                .save_project_description(
+                    project.clone(),
+                    task_owner,
+                    Some(task_revision.id.clone()),
+                    Some("Stale write".into())
+                )
+                .await
+                .is_err()
+        );
+        store
+            .save_project_description(
+                project.clone(),
+                epic_owner,
+                Some(epic_revision.id.clone()),
+                None,
+            )
+            .await?;
+        let db_path = dir.path().join("store.sqlite");
+        drop(store);
+        let store = Store::open(db_path.clone())?;
+        let first = store
+            .agent_dispatch(first_chat, first_run)
+            .await?
+            .context("first dispatch evidence was lost")?;
+        let frozen = first
+            .snapshot
+            .task_context
+            .context("the selected task context was not saved")?;
+        assert_eq!(frozen.task_id, child.id);
+        assert_eq!(frozen.descriptions.epic.as_ref(), Some(&epic_revision));
+        assert_eq!(frozen.descriptions.task.as_ref(), Some(&task_revision));
+        assert_eq!(frozen.descriptions.subtask.as_ref(), Some(&child_revision));
+        assert_eq!(frozen.checklist_item_id.as_ref(), Some(&selected.id));
+        assert_eq!(frozen.checklist_id.as_ref(), Some(&checklist));
+        assert_eq!(frozen.checklist, [selected.clone()]);
+        let frame: Value = serde_json::from_slice(&first.frames[0])?;
+        let text = frame
+            .pointer("/params/input/0/text")
+            .and_then(Value::as_str)
+            .context("missing submitted prompt")?;
+        let (_, block) = text
+            .split_once("\n\nSaved task context\n")
+            .context("missing task context in submitted prompt")?;
+        assert_eq!(
+            serde_json::from_str::<crate::tasks::TaskDispatchContext>(block)?,
+            frozen
+        );
+        assert_eq!(
+            store
+                .project_description_revision(project.clone(), task_revision.id.clone())
+                .await?,
+            Some(task_revision.clone())
+        );
+        let db = rusqlite::Connection::open(db_path)?;
+        let body: Vec<u8> = db.query_row(
+            "SELECT body FROM project_description_revisions WHERE id = ?1",
+            [&task_revision.id],
+            |row| row.get(0),
+        )?;
+        assert_ne!(body, b"# Original API");
+        assert_eq!(protection::unprotect(&body)?, b"# Original API");
+        drop(db);
+
+        let (second_chat, second_run) = dispatch(store.clone(), None).await?;
+        let second = store
+            .agent_dispatch(second_chat, second_run)
+            .await?
+            .context("second dispatch missing")?;
+        let current = second
+            .snapshot
+            .task_context
+            .context("missing current task context")?;
+        assert_eq!(current.descriptions.epic, None);
+        assert_eq!(current.descriptions.task, Some(edited));
+        assert_eq!(current.descriptions.subtask, Some(child_revision));
+        assert_eq!(current.checklist_item_id, None);
+        assert_eq!(current.checklist, [selected, sibling]);
+        Ok(())
     }
 
     #[tokio::test]

@@ -1415,6 +1415,12 @@ impl TurnExecution {
         } else {
             format_input(&self.plan.input)?
         };
+        let task_context = self
+            .app
+            .block_on(self.store.task_dispatch_context(self.plan.run.id.clone()))?;
+        if let Some(context) = &task_context {
+            context.append_to_prompt(&mut input.text)?;
+        }
         if !self.plan.question_route.is_native() {
             input.text.push_str("\n\n");
             input.text.push_str(STRUCTURED_PLANNING_PROMPT);
@@ -1485,7 +1491,7 @@ impl TurnExecution {
             )
         });
         let snapshot = ContextSnapshot {
-            version: 10,
+            version: 11,
             context_id: self.plan.context_id.clone(),
             scope: self.plan.scope.clone(),
             base_commit: repository::base_commit(&self.plan.scope.checkout)?,
@@ -1499,6 +1505,7 @@ impl TurnExecution {
             requested_skill,
             plugin_inventory: self.plugin_inventory.clone(),
             attachments,
+            task_context,
             question_route: self.plan.question_route,
             answered_question: self.plan.answered_question.clone(),
         };

@@ -111,7 +111,8 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
 
     let legacy = rusqlite::Connection::open(&database)?;
     legacy.execute_batch(
-        "DROP VIEW task_runs;
+        "DROP TABLE project_description_revisions;
+         DROP VIEW task_runs;
          DROP TABLE job_task_run_scopes;
          DROP TABLE project_checklist_item_revisions;
          DROP TABLE project_checklist_items;

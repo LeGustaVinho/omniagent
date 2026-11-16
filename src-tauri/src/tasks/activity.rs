@@ -67,7 +67,8 @@ struct ProtectedTaskDetails {
     planned_assignments: Vec<PlannedAssignment>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChecklistItem {
     pub id: String,
     pub position: i64,

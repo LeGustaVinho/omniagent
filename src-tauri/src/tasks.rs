@@ -5,10 +5,14 @@ use uuid::Uuid;
 use crate::store::Store;
 
 mod activity;
+mod descriptions;
 pub(crate) use activity::bind_task_run_scope;
 pub use activity::{
     ChecklistItem, PlannedAssignment, TaskDetails, TaskRun, TaskRunRole, TaskRunScope,
     TaskWorkflowState,
+};
+pub use descriptions::{
+    DescriptionOwner, DescriptionRevision, TaskDispatchContext, WorkDescriptions,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
