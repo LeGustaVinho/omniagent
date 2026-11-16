@@ -119,6 +119,7 @@ it("shows the anchored revision, copies an answer, and scopes cancel and delete 
   const writeText = vi.spyOn(navigator.clipboard, "writeText");
   const answered: SideRequest = {
     contextId: "committed-revision", sourceRunId: "source-run", provider: "codex", profileId: "qualified-profile",
+    compactionArtifactId: "retained-summary",
     model: "qualified-model", effort: null, mode: "read_only", purpose: "question", question: "Saved side question",
     response: { outcome: { kind: "answered", text: "Saved side answer", route: "fresh_codex_session" } },
     evidenceId: null, evidenceCheckedAt: null,
@@ -158,6 +159,7 @@ it("shows the anchored revision, copies an answer, and scopes cancel and delete 
   expect(items).toHaveLength(2);
   const savedItem = within(items[0]!);
   expect(savedItem.getByText("committed-revision")).toBeTruthy();
+  expect(savedItem.getByText("retained-summary")).toBeTruthy();
   expect(savedItem.getByText("source-run")).toBeTruthy();
   expect(savedItem.getByText("Saved side answer")).toBeTruthy();
   await user.click(savedItem.getByRole("button", { name: "Copy answer" }));
@@ -175,4 +177,66 @@ it("shows the anchored revision, copies an answer, and scopes cancel and delete 
     conversationId: "conversation", jobId: "answered-side-job",
   });
   expect(screen.getByText("Active side question")).toBeTruthy();
+});
+
+it("submits /btw during a main stream and cancels only the side request", async () => {
+  const conversationId = "streaming-chat";
+  const selection = { provider: "codex", profileId: "qualified-profile", modelId: "qualified-model" };
+  let queued = false;
+  let cancelled = false;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    switch (command) {
+      case "conversation_draft": return "/btw Can I cancel this separately?";
+      case "conversation_history": return { contextId: "main-in-flight", messages: [] };
+      case "conversation_models": return [{ option: { name: "Qualified model", selection, selectable: true }, efforts: [] }];
+      case "conversation_goal_overview":
+      case "latest_conversation_job": return null;
+      case "latest_conversation_run": return {
+        id: "main-run", projectId: "project", checkoutId: "checkout", turnId: "main-turn", status: "running",
+      };
+      case "conversation_events": {
+        const after = (args as { after: string }).after;
+        const text = after === "0" ? "Main stream started" : cancelled && after === "1" ? " and continued." : "";
+        return {
+          cursor: text ? (after === "0" ? "1" : "2") : after,
+          more: false,
+          events: text ? [{ location: { parentItemId: null }, data: { type: "assistant_delta", text } }] : [],
+        };
+      }
+      case "pending_conversation_inputs":
+      case "saved_conversation_questions":
+      case "pending_conversation_instructions": return [];
+      case "composer_suggestion_mode": return "off";
+      case "save_conversation_draft": return undefined;
+      case "enqueue_conversation_side_request": queued = true; return { status: "queued", jobId: "side-job" };
+      case "conversation_side_requests": return queued ? [{
+        contextId: "last-committed", sourceRunId: "preceding-main", provider: "codex",
+        profileId: selection.profileId, model: selection.modelId, purpose: "question",
+        question: "Can I cancel this separately?",
+        job: { id: "side-job", projectId: "project", queueState: "queued",
+          latestAttempt: { runId: "side-run", status: cancelled ? "cancelled" : "running" } },
+      }] : [];
+      case "interrupt_queued_job_attempt": cancelled = true; return undefined;
+      default: throw new Error(`Unexpected command ${command}`);
+    }
+  });
+  renderConversation(conversationId);
+  const user = userEvent.setup();
+  const stream = await screen.findByLabelText("Streaming response");
+  expect(stream.textContent).toContain("Main stream started");
+  await user.click(await screen.findByRole("button", { name: "Model · Choose model" }));
+  await user.click(await screen.findByRole("menuitemradio", { name: "Qualified model" }));
+  await user.click(screen.getByRole("button", { name: "Ask side question" }));
+  const panel = within(await screen.findByRole("complementary", { name: "Side questions" }));
+  await user.click(await panel.findByRole("button", { name: "Cancel side question" }));
+  expect(await panel.findByText("Cancelled")).toBeTruthy();
+  await waitFor(() => expect(stream.textContent).toContain("Main stream started and continued."));
+  expect(invoke).toHaveBeenCalledWith("enqueue_conversation_side_request", {
+    conversationId, expectedContextId: "main-in-flight", selection, effort: null, mode: "read_only",
+    purpose: "question", question: "Can I cancel this separately?",
+  });
+  expect(invoke).toHaveBeenCalledWith("interrupt_queued_job_attempt", {
+    projectId: "project", jobId: "side-job", runId: "side-run",
+  });
+  expect(invoke).not.toHaveBeenCalledWith("stop_conversation_turn", expect.anything());
 });

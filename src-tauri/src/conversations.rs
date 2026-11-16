@@ -2222,6 +2222,8 @@ fn close_permissions(db: &Connection, run_id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod phase07_side_privacy;
+
     mod attachment_composer_acceptance;
 
     use super::*;
@@ -6372,7 +6374,7 @@ mod tests {
         use crate::{
             dispatch::{ConversationSelection, SelectedMessageSpan},
             jobs::{
-                AdmissionEnvironment, ComposerSuggestionMode, JobContext, JobRequest, JobScheduler,
+                AdmissionEnvironment, ComposerSuggestionMode, JobContext, JobScheduler,
                 RecoveryAction, SidePurpose, SideSubmission,
             },
             providers::{
@@ -6412,6 +6414,8 @@ mod tests {
             }
             fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
                 assert_ne!(request.checkout, self.source_checkout);
+                assert!(request.arguments.contains(&std::ffi::OsStr::new("--no-session-persistence")));
+                assert!(!request.arguments.contains(&std::ffi::OsStr::new("--resume")));
                 assert!(
                     request
                         .arguments
@@ -6449,10 +6453,14 @@ mod tests {
         });
         scope.runner = runner.identity().into();
         scope.provider = Provider::Claude;
+        scope.cli_version = "2.1.257".into();
         scope.executable = std::env::current_exe()?;
         scope.model = Some("side-selected".into());
-        let completed =
-            prepare(&store, &chat.id, scope.clone(), "Original permitted source").await?;
+        let original = format!(
+            "Original permitted source. {}",
+            phase07_side_privacy::OLDER_TRANSCRIPT.repeat(70),
+        );
+        let completed = prepare(&store, &chat.id, scope.clone(), &original).await?;
         let profile = CapabilityScope::from_dispatch(
             &scope,
             chat.checkout_id.clone(),
@@ -6498,7 +6506,7 @@ mod tests {
                     EventSource::Provider,
                     ProviderEvent {
                         location: ProviderLocation {
-                            session_id: Some("primary-thread".into()),
+                            session_id: Some(phase07_side_privacy::PRIMARY_SESSION.into()),
                             turn_id: Some("primary-turn".into()),
                             ..Default::default()
                         },
@@ -6508,7 +6516,7 @@ mod tests {
                 .await?;
         }
         let source = SuggestionSource {
-            provider_session_id: "primary-thread".into(),
+            provider_session_id: phase07_side_privacy::PRIMARY_SESSION.into(),
             provider_turn_id: Some("primary-turn".into()),
             provider_result_id: None,
             message_id: completed.input.last().context("missing source message")?.message_id.clone(),
@@ -6588,7 +6596,7 @@ mod tests {
         .await??;
         assert_eq!(verified.purpose, SidePurpose::Validation);
         let evidence = store
-            .resolve_capability_assessment(profile, vec![descriptor])
+            .resolve_capability_assessment(profile.clone(), vec![descriptor])
             .await?
             .entries
             .remove(0);
@@ -6649,26 +6657,7 @@ mod tests {
         assert_eq!(store.conversation_messages(chat.id.clone()).await?, before);
         worker.shutdown().await?;
         outputs.lock().unwrap().clear();
-        for question in [
-            "side-private-cancel",
-            "side-private-finish",
-            "side-private-attempted-tool",
-            "side-private-restart",
-        ] {
-            assert!(matches!(
-                store
-                    .enqueue_side_request(
-                        chat.id.clone(),
-                        Some(current.context_id.clone()),
-                        None,
-                        scope.clone(),
-                        SidePurpose::Question,
-                        question.into()
-                    )
-                    .await?,
-                SideSubmission::Queued { .. }
-            ));
-        }
+        phase07_side_privacy::queue_question(&store, &chat.id, &current.context_id, &scope, "side-private-cancel").await?;
         store
             .save_conversation_draft(chat.id.clone(), "Main turn after the side pin".into())
             .await?;
@@ -6704,6 +6693,12 @@ mod tests {
             main.input.last().unwrap().text,
             "Main turn after the side pin"
         );
+        let dispatch = prepare_fixture_dispatch(&store, &main).await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        phase07_side_privacy::stream_main(&store, &main, "Main delta before side cancellation").await?;
+        for question in ["side-private-finish", "side-private-attempted-tool", "side-private-restart"] {
+            phase07_side_privacy::queue_question(&store, &chat.id, &main.context_id, &scope, question).await?;
+        }
         let scheduler = JobScheduler::start(store.clone(), runner, None);
         let wait = |index: usize, status: RunStatus| {
             let (store, id) = (store.clone(), chat.id.clone());
@@ -6758,6 +6753,8 @@ mod tests {
                 .outcome,
             SideOutcome::Cancelled
         );
+        assert_eq!(store.latest_conversation_run(chat.id.clone()).await?.unwrap().status, RunStatus::Running);
+        phase07_side_privacy::stream_main(&store, &main, "Main delta after side cancellation").await?;
         let send = |index: usize, data: Value| {
             let outputs = outputs.clone();
             async move {
@@ -6784,6 +6781,7 @@ mod tests {
         ).await?;
         let second = wait(1, RunStatus::Succeeded).await?;
         let saved_job_id = second.job.id.clone();
+        let saved_side_run_id = second.job.latest_attempt.as_ref().context("missing side attempt")?.run_id.clone();
         assert!(
             matches!(second.response.unwrap().outcome, SideOutcome::Answered { ref text, .. } if text == "protected-response-canary")
         );
@@ -6895,9 +6893,7 @@ mod tests {
             json!({"type":"result","subtype":"success","is_error":false,"session_id":"side-only","result":"late-private-side-answer","modelUsage":{"side-selected":{}}}),
         ).await;
         scheduler.shutdown().await?;
-        store
-            .finish_agent_attempt(main.run.id, RunStatus::Succeeded, None)
-            .await?;
+        phase07_side_privacy::finish_main(&store, &main, "Main answer after side cancellation").await?;
         drop(store);
         let reopened = Store::open(database.clone())?;
         reopened.recover_agent_attempts_after_restart().await?;
@@ -6933,27 +6929,14 @@ mod tests {
         let excerpt = serde_json::to_string(&excerpt)?;
         assert!(excerpt.contains("Original permitted source"));
         assert_without_side(&excerpt);
-        let summary = reopened.enqueue_conversation_summary(selected, scope.clone()).await?;
-        let summary_input = reopened.execute(move |db| {
-            let request: Vec<u8> = db.query_row("SELECT request FROM jobs WHERE id = ?1", [summary.job.id], |row| row.get(0))?;
-            let request: JobRequest = serde_json::from_slice(&protection::unprotect(&request)?)?;
-            Ok(request.instructions)
-        }).await?;
-        assert!(summary_input.contains("Original permitted source"));
-        assert_without_side(&summary_input);
-        assert!(reopened.conversation_library(Some("protected-response-canary".into()), None).await?.is_empty());
+        for query in ["side-private-finish", "protected-response-canary"] {
+            assert!(reopened.conversation_library(Some(query.into()), None).await?.is_empty());
+        }
+        assert!(reopened.agent_dispatch(chat.id.clone(), saved_side_run_id.clone()).await?.is_none());
+        assert!(reopened.agent_observations(chat.id.clone(), saved_side_run_id, 0).await?.is_empty());
         assert!(reopened.agent_dispatch(chat.id.clone(), removed_run_id.clone()).await?.is_none());
 
-        let next = prepare(&reopened, &chat.id, scope, "Next main prompt").await?;
-        reopened.mark_agent_running(next.run.id.clone()).await?;
-        let dispatch = prepare_fixture_dispatch(&reopened, &next).await?;
-        reopened.settle_dispatch(dispatch, Delivery::Submitted).await?;
-        let dispatch = reopened.agent_dispatch(chat.id.clone(), next.run.id.clone()).await?
-            .context("missing next main dispatch")?;
-        let submitted = serde_json::to_string(&dispatch.snapshot.submitted_messages)?;
-        assert!(submitted.contains("Next main prompt"));
-        assert_without_side(&submitted);
-        reopened.finish_agent_attempt(next.run.id, RunStatus::Succeeded, None).await?;
+        phase07_side_privacy::verify_after_restart(&reopened, &chat, &scope, &profile, &assert_without_side).await?;
 
         let history = reopened.conversation_history(chat.id.clone()).await?;
         let fork = reopened.fork_conversation(
