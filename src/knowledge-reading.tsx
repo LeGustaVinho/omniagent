@@ -11,6 +11,7 @@ import {
 import { fileName, type ExampleFile } from "@/ide-knowledge-data";
 import { NoteDiagram, noteAttachments, type NoteAttachment } from "@/knowledge-media";
 import { noteAttachmentCandidates, RepositoryNoteMedia } from "@/repository-note-media";
+import type { IndexedLinkResolution } from "@/repository-note-links";
 import "katex/dist/katex.css";
 
 const markdownPlugins = [remarkGfm, remarkMath];
@@ -84,6 +85,8 @@ type ReadingProps = {
   sampleAttachments?: boolean;
   checkoutId?: string;
   onRepositoryAttachment?: (paths: string[], label: string) => void;
+  resolveLinks?: (link: NoteTarget, from: string) => IndexedLinkResolution | undefined;
+  previewFor?: (path: string) => { title: string; preview?: string | null } | undefined;
 };
 const ReadingContext = createContext<ReadingProps & { anchorScope: string }>(null!);
 
@@ -98,28 +101,35 @@ const components: Components = {
     return <pre>{children}</pre>;
   },
   a: function ReadingLink({ href, children, id, className, "aria-describedby": describedBy, "aria-label": label }) {
-    const { path, files, onLink, onAttachment, sampleAttachments = true, checkoutId, onRepositoryAttachment, anchorScope } = useContext(ReadingContext);
+    const { path, files, onLink, onAttachment, sampleAttachments = true, checkoutId, onRepositoryAttachment, anchorScope, resolveLinks, previewFor } = useContext(ReadingContext);
     if (href?.startsWith("omni-mark:")) return <mark>{children}</mark>;
     if (href?.startsWith("omni-wiki:")) {
       const link = parseReadingAddress(href);
       if (!link) return <span>{children}</span>;
       const attachment = sampleAttachments ? noteAttachments.find(({ name }) => link.target.split("/").at(-1)?.toLowerCase() === name) : undefined;
       if (attachment) return <button type="button" className="note-inline-link" onClick={() => onAttachment(attachment)}><FileText size={13} />{children}</button>;
-      const paths = noteAttachmentCandidates(link.target, link.sourcePath ?? path, true);
+      const resolution = resolveLinks?.(link, path);
+      const paths = resolveLinks
+        ? resolution?.status === "attachment" ? resolution.paths : []
+        : noteAttachmentCandidates(link.target, link.sourcePath ?? path, true);
       if (checkoutId && paths.length > 0) {
         const label = link.alias ?? link.target;
         if (link.embed) return <RepositoryNoteMedia checkoutId={checkoutId} paths={paths} title={label} />;
         if (onRepositoryAttachment) return <button type="button" className="note-inline-link"
           onClick={() => onRepositoryAttachment(paths, label)}>{children}</button>;
       }
-      const targets = resolveWiki(link, link.sourcePath ?? path, files);
-      const note = targets.length === 1 ? files.find(({ path: filePath }) => filePath === targets[0]?.path) : undefined;
-      const excerpt = note && withoutProperties(note.content).split("\n").filter((line) => line.trim() && !line.startsWith("#")).slice(0, 2).join(" ");
-      const problem = targets.length > 1 ? "Ambiguous note reference" : "Unresolved note reference";
+      const targets = resolveLinks ? [] : resolveWiki(link, link.sourcePath ?? path, files);
+      const resolved = resolution?.status === "resolved" ? resolution.location.path : targets.length === 1 ? targets[0]?.path : undefined;
+      const note = resolved ? files.find(({ path: filePath }) => filePath === resolved) : undefined;
+      const indexed = resolved && previewFor?.(resolved);
+      const excerpt = indexed ? indexed.preview : note && withoutProperties(note.content).split("\n").filter((line) => line.trim() && !line.startsWith("#")).slice(0, 2).join(" ");
+      const problem = resolution?.status === "ambiguous" || targets.length > 1 ? "Ambiguous note reference"
+        : resolution?.status === "missing_anchor" ? "The heading or block is unavailable in this note."
+          : resolveLinks && !resolution ? "Resolving note reference…" : "Unresolved note reference";
       return (
         <span className="note-preview-anchor">
           <button type="button" className="note-inline-link" data-invalid={!note} onClick={() => onLink(link)}>{children}<ArrowUpRight size={11} /></button>
-          <span className="note-link-preview" role="tooltip"><strong>{note ? fileName(note.path) : problem}</strong>{excerpt && <span>{excerpt}</span>}</span>
+          <span className="note-link-preview" role="tooltip"><strong>{indexed ? indexed.title : note ? fileName(note.path) : problem}</strong>{excerpt && <span>{excerpt}</span>}</span>
         </span>
       );
     }
@@ -136,7 +146,7 @@ const components: Components = {
   },
   li: function ReadingListItem({ id, className, children }) {
     const { anchorScope } = useContext(ReadingContext);
-    return <li id={id && anchorScope + id} className={className}>{children}</li>;
+    return <li id={id && anchorScope + id} className={className} data-note-anchor={readingBlockAnchor(children)}>{children}</li>;
   },
   img: function ReadingImage({ alt, src }) {
     const { checkoutId } = useContext(ReadingContext);
@@ -146,25 +156,30 @@ const components: Components = {
     }
     return <span className="file-help">Attachment preview unavailable · {alt}</span>;
   },
-  p: ({ children }) => {
-    const body = textContent(children);
-    const block = /\s+(\^[\w-]+)\s*$/.exec(body)?.[1];
-    return <p data-note-anchor={block && anchorKey(block)}>{children}</p>;
-  },
+  p: ({ children }) => <p data-note-anchor={readingBlockAnchor(children)}>{children}</p>,
 };
 
+function readingBlockAnchor(children: ReactNode) {
+  const block = /(?:^|\s)(\^[\w-]+)\s*$/.exec(textContent(children))?.[1];
+  return block && anchorKey(block);
+}
+
 export function NoteReading(props: ReadingProps) {
-  const { path, content, files, jump } = props;
+  const { path, content, files, jump, resolveLinks } = props;
   const anchorScope = useId() + "-";
   const root = useRef<HTMLDivElement>(null);
-  const rendered = prepareReading(content, path, files);
+  const rendered = prepareReading(content, path, files, undefined, resolveLinks ? (link, from) => {
+    const target = resolveLinks(link, from);
+    if (target?.status !== "resolved") return [];
+    return [{ path: target.location.path, anchor: target.location.anchor ?? undefined }];
+  } : undefined);
   const properties = getProperties(content);
   useEffect(() => {
     if (!jump?.anchor || !root.current) return;
     const key = anchorKey(jump.anchor);
     const target = [...root.current.querySelectorAll("[data-note-anchor]")].find((entry) =>
       entry.getAttribute("data-note-anchor") === key);
-    target?.scrollIntoView({ block: "start" });
+    target?.scrollIntoView?.({ block: "start" });
   }, [jump, path]);
 
   return (

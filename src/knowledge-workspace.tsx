@@ -11,17 +11,19 @@ import {
 } from "@/ide-file-workspace";
 import { deliveryNote, exampleNotes, fileName, findFileText, normalizeRepositoryPath } from "@/ide-knowledge-data";
 import {
-  anchorLine, getProperties, headings, repairWikiAddress, resolveWiki, rewriteNoteReferences,
+  anchorLine, getProperties, headings, parseReadingAddress, readingLocalAddress, repairWikiAddress, resolveWiki, rewriteNoteReferences,
   updateProperty, wikiLinks, type NoteLocation, type NoteTarget,
 } from "@/knowledge-document";
 import { AttachmentPreview, noteAttachments, type NoteAttachment } from "@/knowledge-media";
 import type { NoteJump } from "@/knowledge-editor";
 import { useRepositoryNotes, type NoteBuffer } from "@/repository-note-buffers";
-import { noteAttachmentCandidates, RepositoryNoteMedia } from "@/repository-note-media";
+import { RepositoryNoteMedia } from "@/repository-note-media";
 import { NotePropertyEditor } from "@/note-property-editor";
-import { KnowledgeSearch } from "@/knowledge-navigation";
+import { KnowledgeLinks, KnowledgeOutline, KnowledgeSearch, type KnowledgeLocation, type KnowledgeOutgoingLink } from "@/knowledge-navigation";
 import { useRepositoryNoteIndex } from "@/repository-note-index";
 import { RepositoryNoteRename } from "@/repository-note-rename";
+import { asNoteLocation, linkPreviewValue, resolveRepositoryLink, suggestRepositoryLinks, useRepositoryLinkPreviews,
+  type IndexedLinkLocation, type IndexedLinkResolution, type IndexedNoteDetails, type IndexedNoteRelationships } from "@/repository-note-links";
 import type { NoteGraphProjection } from "@/knowledge-graph";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -51,7 +53,7 @@ type KnowledgeDialog =
   | { kind: "rename"; path: string }
   | { kind: "repositoryRename"; path: string; revision: string }
   | { kind: "rewrite"; path: string; destination: string; edits: RewrittenNote[] }
-  | { kind: "link"; from: string; link: NoteTarget; matches: NoteLocation[]; sourceLine?: number }
+  | { kind: "link"; from: string; link: NoteTarget; matches: NoteLocation[]; sourceLine?: number; manual?: boolean }
   | { kind: "repositoryAttachment"; paths: string[]; label: string }
   | { kind: "attachment"; attachment: NoteAttachment };
 
@@ -106,15 +108,30 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const conflictRecovery = dialog?.kind === "conflict" ? repository.notes[dialog.path]?.recovery : undefined;
   const source = note?.content ?? "";
   const activeMode = active ? modes[active] ?? "live" : "live";
+  const showIndexed = !simulated && Boolean(active) && noteIndex.index.isSuccess;
+  const outlineIndex = useQuery({
+    queryKey: ["repository-indexed-note", checkout.checkoutId, active, noteIndex.index.dataUpdatedAt],
+    enabled: showIndexed && inspector === "outline" && !isDirty(note),
+    queryFn: () => invoke<IndexedNoteDetails | null>("repository_indexed_note", { checkoutId: checkout.checkoutId, path: active }),
+  });
+  const relationships = useQuery({
+    queryKey: ["repository-note-relationships", checkout.checkoutId, active, noteIndex.index.dataUpdatedAt],
+    enabled: showIndexed && inspector === "links",
+    queryFn: () => invoke<IndexedNoteRelationships>("repository_note_relationships", { checkoutId: checkout.checkoutId, path: active }),
+  });
   const catalog = useMemo(() => {
     const indexed = new Map((noteIndex.index.data ?? repository.catalog).map(({ path, frontmatter }) => [path, frontmatter ?? ""]));
     for (const path of repository.draftPaths) if (!indexed.has(path)) indexed.set(path, "");
-    for (const [path, value] of Object.entries(notes)) indexed.set(path, value.content);
+    for (const [path, value] of Object.entries(notes)) {
+      if (simulated || indexed.has(path) || isDirty(value)) indexed.set(path, value.content);
+    }
     return [...indexed].map(([path, content]) => ({ path, content }));
-  }, [notes, noteIndex.index.data, repository.catalog, repository.draftPaths]);
+  }, [notes, noteIndex.index.data, repository.catalog, repository.draftPaths, simulated]);
+  const previews = useRepositoryLinkPreviews(checkout.checkoutId, catalog, noteIndex.index.dataUpdatedAt, !simulated);
+  const lookupLink = useCallback((link: NoteTarget, from: string) => linkPreviewValue(previews.data, link, from), [previews.data]);
   const matches = simulated ? findFileText(catalog, query, true) : [];
   const outgoing = wikiLinks(source);
-  const backlinks = active ? catalog.flatMap(({ path, content }) => {
+  const backlinks = simulated && active ? catalog.flatMap(({ path, content }) => {
     if (path === active) return [];
     const inbound = wikiLinks(content).filter((link) => {
       const resolved = resolveWiki(link, path, catalog);
@@ -122,21 +139,46 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     });
     return inbound.length ? [{ path, count: inbound.length }] : [];
   }) : [];
+  const previewCatalog = useMemo(() => new Map(noteIndex.index.data?.map((note) => [note.path, note])), [noteIndex.index.data]);
+  const previewNote = (path: string) => previewCatalog.get(path);
+  const previewTarget = (location: IndexedLinkLocation) => {
+    const note = previewNote(location.path);
+    return { ...location, title: note?.title, snippet: note?.preview };
+  };
+  const describeLink = (reference: NoteTarget, resolution: IndexedLinkResolution | undefined,
+    line?: number, wiki = true): KnowledgeOutgoingLink | undefined => {
+    if (resolution?.status === "attachment") return;
+    const view: KnowledgeOutgoingLink["resolution"] = resolution?.status === "resolved"
+      ? { kind: "resolved", target: previewTarget(resolution.location) }
+      : resolution?.status === "missing_anchor" ? { kind: "missing_anchor", target: previewTarget(resolution.location) }
+        : resolution?.status === "ambiguous" ? { kind: "ambiguous", candidates: resolution.candidates.map(previewTarget) }
+          : { kind: "missing" };
+    return { label: reference.alias || reference.raw, source: { path: active!, line }, rawTarget: reference.raw,
+      reference: { ...reference, wiki }, resolution: view };
+  };
+  const indexedOutgoing = active && inspector === "links" && !simulated ? (
+    isDirty(note) ? outgoing.map((reference) => describeLink(reference, lookupLink(reference, active)))
+      : relationships.data?.outgoing.map(({ link, resolution }) => {
+        const raw = link.target + (link.anchor ? `#${link.anchor}` : "") + (link.alias ? `|${link.alias}` : "");
+        const parsed = link.syntax === "markdown" ? parseReadingAddress(readingLocalAddress(active, link.target)) : undefined;
+        const reference = link.syntax === "wiki" ? { raw, target: link.target, alias: link.alias ?? undefined, anchor: link.anchor ?? undefined, embed: link.embed }
+          : parsed && { ...parsed, alias: link.alias ?? undefined };
+        return reference && describeLink(reference, resolution, link.line, link.syntax === "wiki");
+      }) ?? []
+  ).filter((link): link is KnowledgeOutgoingLink => Boolean(link)) : [];
 
   const open = useCallback((path: string, line?: number, anchor?: string) => {
-    const focus = (file: string) => {
-      if (line || anchor) setJumps((before) => ({ ...before, [file]: { line, anchor, token: (before[file]?.token ?? 0) + 1 } }));
+    const focus = (file: string, targetLine?: number) => {
+      if (targetLine || anchor) setJumps((before) => ({ ...before, [file]: { line: targetLine, anchor, token: (before[file]?.token ?? 0) + 1 } }));
       setGraph(false);
       dock.open(file);
     };
-    if (simulated) { focus(path); return; }
+    if (simulated) { focus(path, line); return; }
     const request = ++lastOpen.current;
     void loadNote(path).then((file) => {
       if (!file || request !== lastOpen.current) return;
-      const anchorTarget = !line && anchor ? anchorLine(getNote(file)?.content ?? "", anchor) : undefined;
-      if (anchorTarget) setJumps((before) => ({ ...before, [file]: { line: anchorTarget, anchor, token: (before[file]?.token ?? 0) + 1 } }));
-      else focus(file);
-      if (anchorTarget) { setGraph(false); dock.open(file); }
+      const anchorTarget = anchor ? anchorLine(getNote(file)?.content ?? "", anchor) : undefined;
+      focus(file, anchorTarget ?? line);
       watchNote(file);
     });
   }, [dock.open, getNote, loadNote, simulated, watchNote]);
@@ -163,8 +205,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       visitedDepth.set(path, depth);
       for (const embed of wikiLinks(content)) {
         if (!embed.embed) continue;
-        const targets = resolveWiki(embed, path, catalog);
-        const target = targets.length === 1 ? targets[0] : undefined;
+        const resolution = lookupLink(embed, path);
+        const target = resolution?.status === "resolved" ? resolution.location : undefined;
         if (!target || (visitedDepth.get(target.path) ?? Infinity) <= depth + 1) continue;
         const buffer = notes[target.path];
         if (buffer) inspect(target.path, buffer.content, depth + 1);
@@ -172,7 +214,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       }
     };
     inspect(active, note.content, 0);
-  }, [active, catalog, loadNote, note, notes, repository.failures, simulated]);
+  }, [active, loadNote, lookupLink, note, notes, repository.failures, simulated]);
 
   useEffect(() => {
     if (!target || !dock.ready) return;
@@ -236,6 +278,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     const targetSource = notes[path]?.content ?? "";
     open(path, anchor ? anchorLine(targetSource, anchor) : undefined, anchor);
   };
+  const openLocation = ({ path, line, anchor }: KnowledgeLocation) => open(path, line ?? undefined, anchor ?? undefined);
+  const offerLinkRepair = (from: string, link: NoteTarget, matches: NoteLocation[], anchor = "", sourceLine?: number, manual?: boolean) => {
+    setSelection(matches.length === 1 ? matches[0]!.path : "");
+    setSelectedAnchor(anchor);
+    setDialog({ kind: "link", from, link, matches, sourceLine, manual });
+  };
   const repairReference = async (proposal: Extract<KnowledgeDialog, { kind: "link" }>) => {
     const current = simulated ? examples[proposal.from] : getNote(proposal.from);
     if (!current) return;
@@ -255,23 +303,34 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       closeDialog();
     } catch (failure) { setProblem(String(failure)); }
   };
-  const navigateLink = (from: string, link: NoteTarget) => {
+  const navigateLink = async (from: string, link: NoteTarget) => {
     from = link.sourcePath ?? from;
     const attachment = simulated ? noteAttachments.find(({ name }) => link.target === name) : undefined;
     if (attachment) { setDialog({ kind: "attachment", attachment }); return; }
     if (!simulated) {
-      const paths = noteAttachmentCandidates(link.target, from, true);
-      if (paths.length) { setDialog({ kind: "repositoryAttachment", paths, label: link.alias ?? link.target }); return; }
+      try {
+        if (!noteIndex.index.data) await noteIndex.index.refetch();
+        const result = await resolveRepositoryLink(checkout.checkoutId, link, from);
+        if (result?.status === "resolved") openLocation(result.location);
+        else if (result?.status === "attachment") setDialog({ kind: "repositoryAttachment", paths: result.paths, label: link.alias ?? link.target });
+        else if (result?.status === "ambiguous") offerLinkRepair(from, link, result.candidates.map(asNoteLocation), undefined, link.sourceLine);
+        else if (result?.status === "missing_anchor") {
+          const target = asNoteLocation(result.location);
+          void loadNote(target.path);
+          offerLinkRepair(from, link, [target], link.anchor, link.sourceLine);
+        } else offerLinkRepair(from, link, [], undefined, link.sourceLine);
+      } catch (failure) {
+        setStatus(String(failure));
+      }
+      return;
     }
     const targets = resolveWiki(link, from, catalog);
     const only = targets[0];
-    if (targets.length === 1 && only && (!simulated || !only.anchor || anchorLine(notes[only.path]?.content ?? "", only.anchor))) {
+    if (targets.length === 1 && only && (!only.anchor || anchorLine(notes[only.path]?.content ?? "", only.anchor))) {
       navigateLocation(only);
       return;
     }
-    setSelection(only?.path ?? "");
-    setSelectedAnchor(only && link.anchor && anchorLine(notes[only.path]?.content ?? "", link.anchor) ? link.anchor : "");
-    setDialog({ kind: "link", from, link, matches: targets });
+    offerLinkRepair(from, link, targets);
   };
 
   const previewRename = (path: string) => {
@@ -328,7 +387,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           {display === "search" ? simulated ? <FileSearch query={query} setQuery={setQuery} results={matches} unavailable={false}
             placeholder="Find notes and content" onOpen={open} />
             : <KnowledgeSearch query={query} onQueryChange={setQuery} results={noteIndex.hits} pending={noteIndex.searching}
-              error={noteIndex.error ? String(noteIndex.error) : undefined} onOpen={({ path, line, anchor }) => open(path, line ?? undefined, anchor ?? undefined)} />
+              error={noteIndex.error ? String(noteIndex.error) : undefined} onOpen={openLocation} />
             : <FileTree paths={catalog.map(({ path }) => path)} active={active} onOpen={open} />}
         </div>
       </FileSidebar>}
@@ -389,7 +448,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                     : <p role="status" className="file-help">Loading {path}…</p>;
                 }
                 const selectedMode = view === "reading" ? "reading" : modes[path] ?? "live";
-                const onLink = (link: NoteTarget) => navigateLink(path, link);
+                const onLink = (link: NoteTarget) => { void navigateLink(path, link); };
                 const sourceProblem = repository.notes[path]?.sourceProblem;
                 return (
                   <div className="note-file-view">
@@ -402,10 +461,14 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                       onClick={() => setDialog({ kind: "conflict", path, external: entry.external! })}>Review external change</button>}
                     <Suspense fallback={<p role="status" className="file-help">Loading note view…</p>}>
                       {view === "editor" && <div className="note-editable-view" hidden={selectedMode === "reading"}>
-                        <Editor mode={selectedMode === "source" ? "source" : "live"} path={path} source={entry.content} files={catalog} jump={jumps[path]} analyze onChange={(content) => update(path, content)} onLink={onLink} />
+                        <Editor mode={selectedMode === "source" ? "source" : "live"} path={path} source={entry.content} files={catalog} jump={jumps[path]} analyze
+                          suggestLinks={simulated ? undefined : (prefix) => suggestRepositoryLinks(checkout.checkoutId, path, prefix)}
+                          onChange={(content) => update(path, content)} onLink={onLink} />
                       </div>}
                       {selectedMode === "reading" && <Reading path={path} content={entry.content} files={catalog} jump={jumps[path]} onLink={onLink}
                         checkoutId={simulated ? undefined : checkout.checkoutId} sampleAttachments={simulated}
+                        resolveLinks={simulated ? undefined : lookupLink}
+                        previewFor={simulated ? undefined : previewNote}
                         onAttachment={(attachment) => setDialog({ kind: "attachment", attachment })}
                         onRepositoryAttachment={(paths, label) => setDialog({ kind: "repositoryAttachment", paths, label })} />}
                     </Suspense>
@@ -435,12 +498,25 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
             </div>
             <div className="note-inspector-content">
               {!active || !note ? <p className="file-help">Open a note to see its details.</p> : <>
-                {inspector === "outline" && <section aria-label="Outline">
-                  <h3>Outline</h3>
-                  {headings(source).map((entry) => <button type="button" key={entry.line} title={entry.label}
-                    style={{ paddingLeft: Math.min(entry.level - 1, 4) * 10 + 5 }} onClick={() => open(active, entry.line, entry.anchor)}>{entry.label}</button>)}
-                </section>}
-                {inspector === "links" && <>
+                {inspector === "outline" && <KnowledgeOutline
+                  entries={(isDirty(note) ? headings(source) : outlineIndex.data?.headings ?? headings(source))
+                    .map((entry) => ({ ...entry, path: active, anchor: entry.label }))} onOpen={openLocation} />}
+                {inspector === "links" && !simulated && <KnowledgeLinks outgoing={indexedOutgoing}
+                  backlinks={(relationships.data?.backlinks ?? []).map((link) => ({
+                    source: { path: link.path, line: link.line, title: link.title, snippet: previewNote(link.path)?.preview },
+                    label: link.label ?? undefined,
+                  }))} onOpen={openLocation} pending={showIndexed && relationships.isPending}
+                  error={relationships.error ? String(relationships.error) : undefined}
+                  onRepair={(entry) => {
+                    const resolution = entry.resolution;
+                    const link = entry.reference;
+                    if (!link) return;
+                    const targets = resolution.kind === "ambiguous" ? resolution.candidates : resolution.kind === "missing_anchor" ? [resolution.target] : [];
+                    if (targets.length === 1) void loadNote(targets[0]!.path);
+                    offerLinkRepair(active, { ...link, raw: entry.rawTarget }, targets.map((target) => ({ path: target.path, anchor: target.anchor ?? undefined })),
+                      resolution.kind === "missing_anchor" ? link.anchor : undefined, entry.source.line ?? undefined, !link.wiki);
+                  }} />}
+                {inspector === "links" && simulated && <>
                   <section aria-label="Outgoing links"><h3>Outgoing links</h3>
                     {outgoing.length ? outgoing.map((link, index) => {
                       const found = resolveWiki(link, active, catalog);
@@ -467,7 +543,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                   {simulated && noteAttachments.map((attachment) => <button type="button" className="note-attachment-row" key={attachment.name} onClick={() => setDialog({ kind: "attachment", attachment })}>
                     <strong>{attachment.name}</strong><small>{attachment.detail}</small>
                   </button>)}
-                  {!simulated && outgoing.flatMap((link, index) => noteAttachmentCandidates(link.target, active, true).length ? [
+                  {!simulated && outgoing.flatMap((link, index) => lookupLink(link, active)?.status === "attachment" ? [
                     <button type="button" className="note-attachment-row" key={index} onClick={() => navigateLink(active, link)}>
                       {link.alias ?? link.target}
                     </button>,
@@ -549,6 +625,18 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         {problem && <p role="alert">{problem}</p>}
         <div className="file-dialog-footer"><button type="button" className="fw-btn fw-primary" onClick={() => previewRename(dialog.path)}>Preview link rewrites</button></div>
       </FileDialog>}
+      {dialog?.kind === "repositoryRename" && <RepositoryNoteRename key={dialog.path} checkoutId={checkout.checkoutId}
+        path={dialog.path} sourceRevisionId={dialog.revision}
+        canApply={!isDirty(notes[dialog.path]) && getNote(dialog.path)?.base.id === dialog.revision && !getNote(dialog.path)?.sourceProblem}
+        onClose={closeDialog} onSettled={(moved) => {
+          void noteIndex.index.refetch();
+          if (!moved) return;
+          for (const panel of [...dock.api?.panels ?? []]) {
+            if ((panel.params as { path?: string } | undefined)?.path === dialog.path) closePanel(dialog.path, panel.api);
+          }
+          repository.forget(dialog.path);
+          open(moved);
+        }} />}
       {dialog?.kind === "rewrite" && <FileDialog title="Review link rewrites" description={`${dialog.path} → ${dialog.destination}`} onClose={closeDialog}>
         <ul className="note-rewrite-list">{dialog.edits.map((edit) => <li key={edit.path}>
           <details><summary>{edit.path}</summary><div className="file-dialog-comparison"><div><h3>Current</h3><pre>{edit.before}</pre></div><div><h3>Proposed</h3><pre>{edit.after}</pre></div></div></details>
@@ -569,7 +657,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           const path = event.target.value;
           const originalAnchor = dialog.link.anchor;
           setSelection(path);
-          setSelectedAnchor(originalAnchor && anchorLine(notes[path]?.content ?? "", originalAnchor) ? originalAnchor : "");
+          setSelectedAnchor(originalAnchor ?? "");
+          if (!simulated && path) void loadNote(path);
         }}>
           <option value="">Select a note</option>
           {(dialog.matches.length > 1 ? dialog.matches : catalog).map(({ path }) => <option key={path} value={path}>{path}</option>)}
@@ -581,21 +670,14 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         <div className="file-dialog-footer">
           <button type="button" className="fw-btn fw-outlined" disabled={!selection || Boolean(selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()))}
             onClick={() => { navigateLocation({ path: selection, anchor: selectedAnchor.trim() || undefined }); closeDialog(); }}>Open note</button>
-          <button type="button" className="fw-btn fw-primary" disabled={!selection || Boolean(selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()))} onClick={() => { void repairReference(dialog); }}>Update link</button>
+          {dialog.manual ? <button type="button" className="fw-btn fw-primary" onClick={() => {
+            setModes((before) => ({ ...before, [dialog.from]: "source" }));
+            open(dialog.from, dialog.sourceLine);
+            closeDialog();
+          }}>Edit source link</button> : <button type="button" className="fw-btn fw-primary" disabled={!selection || Boolean(selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()))}
+            onClick={() => { void repairReference(dialog); }}>Update link</button>}
         </div>
       </FileDialog>}
-      {dialog?.kind === "repositoryRename" && <RepositoryNoteRename key={dialog.path} checkoutId={checkout.checkoutId}
-        path={dialog.path} sourceRevisionId={dialog.revision}
-        canApply={!isDirty(notes[dialog.path]) && getNote(dialog.path)?.base.id === dialog.revision && !getNote(dialog.path)?.sourceProblem}
-        onClose={closeDialog} onSettled={(moved) => {
-          void noteIndex.index.refetch();
-          if (!moved) return;
-          for (const panel of [...dock.api?.panels ?? []]) {
-            if ((panel.params as { path?: string } | undefined)?.path === dialog.path) closePanel(dialog.path, panel.api);
-          }
-          repository.forget(dialog.path);
-          open(moved);
-        }} />}
       {dialog?.kind === "attachment" && <FileDialog title={dialog.attachment.name} description={dialog.attachment.detail} onClose={closeDialog}>
         <AttachmentPreview attachment={dialog.attachment} />
       </FileDialog>}

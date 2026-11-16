@@ -97,6 +97,9 @@ function mockRepository() {
       case "search_repository_note_index": return [
         { path: checklist, title: "Launch notes", snippet: "Keep the saved checklist." },
       ];
+      case "resolve_repository_note_links": return ((args as { queries: { target: string }[] }).queries).map(({ target }) =>
+        target === "Launch checklist" ? { status: "resolved", location: { path: checklist, anchor: null, line: null } } : { status: "missing" });
+      case "suggest_repository_note_links": return [];
       case "list_repository_markdown_drafts": return Array.from(drafts.keys());
       case "open_repository_document": {
         const document = Array.from(onDisk.values()).find(({ revision }) => revision.relativePath.toLowerCase() === input.path.toLowerCase());

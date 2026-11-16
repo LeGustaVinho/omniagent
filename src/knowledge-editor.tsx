@@ -1,4 +1,4 @@
-import { autocompletion } from "@codemirror/autocomplete";
+import { autocompletion, type Completion } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, redo, undo } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
@@ -188,7 +188,7 @@ const canonicalLivePreview = ViewPlugin.fromClass(class {
   }
 }, { decorations: (plugin) => plugin.decorations });
 
-export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLink, analyze = false }: {
+export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLink, analyze = false, suggestLinks }: {
   mode: "source" | "live";
   path: string;
   source: string;
@@ -197,15 +197,16 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
   onChange: (content: string) => void;
   onLink: (link: NoteTarget) => void;
   analyze?: boolean;
+  suggestLinks?: (prefix: string) => Promise<Completion[]>;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const instance = useRef<EditorView>(undefined);
   const compartment = useRef(new Compartment()).current;
-  const fresh = useRef({ source, onChange, onLink, mode, files, analyze });
+  const fresh = useRef({ source, onChange, onLink, mode, files, analyze, suggestLinks });
   const generation = useRef(0);
   const reflected = useRef(source);
   const updating = useRef(false);
-  useEffect(() => { fresh.current = { source, onChange, onLink, mode, files, analyze }; }, [source, onChange, onLink, mode, files, analyze]);
+  useEffect(() => { fresh.current = { source, onChange, onLink, mode, files, analyze, suggestLinks }; }, [source, onChange, onLink, mode, files, analyze, suggestLinks]);
 
   useEffect(() => {
     const target = mount.current;
@@ -224,10 +225,19 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
           compartment.of(fresh.current.mode === "live" ? (fresh.current.analyze ? canonicalLivePreview : livePreview) : []),
           EditorView.contentAttributes.of({ "aria-label": `Markdown editor for ${path}` }),
           EditorView.lineWrapping,
-          autocompletion({ override: [(context) => {
+          autocompletion({ override: [async (context) => {
             const entered = context.matchBefore(/\[\[[^\]\n]*/);
             if (!entered) return null;
             const remaining = context.state.sliceDoc(context.pos, context.pos + 2);
+            if (fresh.current.suggestLinks) {
+              try {
+                const matches = await fresh.current.suggestLinks(entered.text.slice(2));
+                if (context.aborted) return null;
+                return { from: entered.from + 2, filter: false, options: matches.map((match) => ({
+                  ...match, apply: (typeof match.apply === "string" ? match.apply : match.label) + (remaining === "]]" ? "" : "]]"),
+                })) };
+              } catch { return null; }
+            }
             return {
               from: entered.from + 2,
               options: fresh.current.files.map(({ path: notePath }) => {
@@ -255,6 +265,7 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
                 fresh.current.onLink({
                   target: link.target ?? "", alias: link.alias ?? undefined, anchor: link.anchor ?? undefined,
                   raw: editor.state.sliceDoc(link.range.from, link.range.to).replace(/^!?\[\[|\]\]$/g, ""), embed: link.kind === "embed",
+                  sourceLine: editor.state.doc.lineAt(link.range.from).number,
                 });
                 return true;
               }

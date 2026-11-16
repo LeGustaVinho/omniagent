@@ -9,12 +9,15 @@ export interface NoteTarget {
   anchor?: string;
   embed: boolean;
   sourcePath?: string;
+  sourceLine?: number;
 }
 
 export interface NoteLocation {
   path: string;
   anchor?: string;
 }
+
+export type PreviewLinkResolver = (link: NoteTarget, path: string, files: readonly ExampleFile[]) => NoteLocation[];
 
 export interface NoteHeading {
   label: string;
@@ -342,12 +345,28 @@ export function parseReadingFile(href: string): [string, string] | undefined {
   }
 }
 
-export function prepareReading(source: string, path: string, files: readonly ExampleFile[], lineage: readonly string[] = [path]): string {
+const markdownDestination = /(\]\()(<[^>]+>|[^()\s]+)(?=[\s)])/g;
+
+export function notePreviewLinks(source: string, path: string): NoteTarget[] {
+  const links = wikiLinks(source);
+  byText(withoutProperties(source), (text) => {
+    for (const match of text.matchAll(markdownDestination)) {
+      if (!match[2]) continue;
+      const address = readingLocalAddress(path, match[2].replace(/^<|>$/g, ""));
+      const link = parseReadingAddress(address);
+      if (link) links.push(link);
+    }
+    return text;
+  });
+  return links;
+}
+
+export function prepareReading(source: string, path: string, files: readonly ExampleFile[], lineage: readonly string[] = [path], resolve: PreviewLinkResolver = resolveWiki): string {
   const content = byText(withoutProperties(source), (text) => text, true);
   return byMarkdownLine(content, (line) => {
     const wholeEmbed = /^\s*!\[\[([^\]]+)\]\]\s*$/.exec(line)?.[1];
     if (wholeEmbed) {
-      const matches = resolveWiki(parseWiki(wholeEmbed, true), path, files);
+      const matches = resolve(parseWiki(wholeEmbed, true), path, files);
       const target = matches.length === 1 ? matches[0] : undefined;
       const note = files.find((file) => file.path === target?.path);
       if (target && note) {
@@ -357,12 +376,12 @@ export function prepareReading(source: string, path: string, files: readonly Exa
         if (lineage.length >= 4) return "> This transclusion reached the maximum embed depth.";
         const excerptSource = excerpt(note.content, target.anchor);
         if (excerptSource !== undefined) {
-          const embedded = prepareReading(excerptSource, target.path, files, [...lineage, scope]);
+          const embedded = prepareReading(excerptSource, target.path, files, [...lineage, scope], resolve);
           return `> **Embedded · ${fileName(target.path)}**\n>\n` + embedded.split("\n").map((row) => `> ${row}`).join("\n");
         }
       }
     }
-    return byText(line, (text) => text.replace(/(\]\()(<[^>]+>|[^()\s]+)(?=[\s)])/g,
+    return byText(line, (text) => text.replace(markdownDestination,
       (original, prefix: string, destination: string) => {
         const url = readingLocalAddress(path, destination.replace(/^<|>$/g, ""));
         return url ? prefix + url : original;

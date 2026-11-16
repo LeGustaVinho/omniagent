@@ -22,9 +22,11 @@ export type KnowledgeOutgoingLink = {
   label: string;
   source: KnowledgeLocation;
   rawTarget: string;
+  reference?: { target: string; anchor?: string; alias?: string; embed: boolean; wiki: boolean };
   resolution:
     | { kind: "resolved"; target: KnowledgeResolvedTarget }
     | { kind: "missing" }
+    | { kind: "missing_anchor"; target: KnowledgeResolvedTarget }
     | { kind: "ambiguous"; candidates: readonly KnowledgeResolvedTarget[] };
 };
 
@@ -192,7 +194,8 @@ export function KnowledgeLinkPreview({ link, onOpen, onRepair, className, childr
 }) {
   const resolution = link.resolution;
   const target = resolution.kind === "resolved" ? resolution.target : undefined;
-  const status = resolution.kind === "missing" ? "Missing" : resolution.kind === "ambiguous" ? "Ambiguous" : undefined;
+  const status = resolution.kind === "missing" ? "Missing" : resolution.kind === "ambiguous" ? "Ambiguous"
+    : resolution.kind === "missing_anchor" ? "Missing heading or block" : undefined;
   return <PreviewButton className={className} title={target ? locationLabel(target) : link.rawTarget}
     preview={target ? <TargetDescription location={target} /> : <>
       <strong>{status} note reference</strong>

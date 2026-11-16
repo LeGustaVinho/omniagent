@@ -9,6 +9,7 @@ export type IndexedNote = {
   title: string;
   tags: string[];
   frontmatter: string | null;
+  preview?: string | null;
 };
 
 type IndexInvalidation = { checkoutId: string } & ({ kind: "paths"; paths: string[] } | { kind: "rebuild"; reason: string });
