@@ -8,7 +8,7 @@ use crate::{
     conversations::SessionScope,
     protection,
     providers::{SessionMode, questions::QuestionRoute},
-    repository::writers::writer_owner,
+    repository::{bind_job_markdown, writers::writer_owner},
     store::Store,
     tasks::{TaskRunScope, bind_task_run_scope},
 };
@@ -31,6 +31,13 @@ pub struct PipelineDispatch {
     pub node_instance_id: String,
     pub plan_revision: Option<String>,
     pub release_id: Option<String>,
+}
+
+#[derive(Default)]
+struct PipelineAgentInput {
+    pinned: Option<(JobContext, QuestionRoute)>,
+    target: Option<TaskRunScope>,
+    markdown_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
@@ -338,8 +345,13 @@ impl Store {
         scope: SessionScope,
         request: JobRequest,
     ) -> Result<Job> {
-        self.submit_pipeline_agent_job_with_context(binding, scope, request, None, None)
-            .await
+        self.submit_pipeline_agent_job_with_input(
+            binding,
+            scope,
+            request,
+            PipelineAgentInput::default(),
+        )
+        .await
     }
 
     pub async fn submit_pipeline_task_agent_job(
@@ -349,8 +361,35 @@ impl Store {
         request: JobRequest,
         target: TaskRunScope,
     ) -> Result<Job> {
-        self.submit_pipeline_agent_job_with_context(binding, scope, request, None, Some(target))
-            .await
+        self.submit_pipeline_agent_job_with_input(
+            binding,
+            scope,
+            request,
+            PipelineAgentInput {
+                target: Some(target),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn submit_pipeline_agent_job_from_markdown(
+        &self,
+        binding: PipelineDispatch,
+        scope: SessionScope,
+        request: JobRequest,
+        markdown_revision: String,
+    ) -> Result<Job> {
+        self.submit_pipeline_agent_job_with_input(
+            binding,
+            scope,
+            request,
+            PipelineAgentInput {
+                markdown_revision: Some(markdown_revision),
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     pub async fn submit_pinned_pipeline_agent_job(
@@ -365,23 +404,24 @@ impl Store {
             question_route.is_native() || scope.mode == SessionMode::ReadOnly,
             "structured planning needs a read-only profile"
         );
-        self.submit_pipeline_agent_job_with_context(
+        self.submit_pipeline_agent_job_with_input(
             binding,
             scope,
             request,
-            Some((context, question_route)),
-            None,
+            PipelineAgentInput {
+                pinned: Some((context, question_route)),
+                ..Default::default()
+            },
         )
         .await
     }
 
-    async fn submit_pipeline_agent_job_with_context(
+    async fn submit_pipeline_agent_job_with_input(
         &self,
         binding: PipelineDispatch,
         scope: SessionScope,
         mut request: JobRequest,
-        pinned: Option<(JobContext, QuestionRoute)>,
-        target: Option<TaskRunScope>,
+        input: PipelineAgentInput,
     ) -> Result<Job> {
         ensure!(
             scope.mode == request.mode
@@ -404,7 +444,7 @@ impl Store {
                     scope.checkout.starts_with(root),
                     "The CLI directory is outside the pipeline checkout"
                 );
-                if let Some((context, _)) = &pinned {
+                if let Some((context, _)) = &input.pinned {
                     let valid: bool = tx.query_row(
                         "SELECT EXISTS(SELECT 1 FROM conversation_contexts x
                          JOIN conversations c ON c.id = x.conversation_id
@@ -417,13 +457,16 @@ impl Store {
                 let job = insert_job(
                     &tx,
                     project,
-                    pinned.as_ref().map(|(context, _)| context.clone()),
+                    input.pinned.as_ref().map(|(context, _)| context.clone()),
                     JobOrigin::Pipeline,
                     request,
                     0,
                     Some(&binding),
                 )?;
-                if let Some(target) = &target {
+                if let Some(revision) = &input.markdown_revision {
+                    bind_job_markdown(&tx, &job.id, revision)?;
+                }
+                if let Some(target) = &input.target {
                     bind_task_run_scope(
                         &tx,
                         &job.project_id,
@@ -432,7 +475,7 @@ impl Store {
                         target,
                     )?;
                 }
-                if let Some((context, route)) = &pinned {
+                if let Some((context, route)) = &input.pinned {
                     history::bind_pipeline_context(&tx, &job.id, &context.context_id, *route)?;
                 }
                 tx.execute(

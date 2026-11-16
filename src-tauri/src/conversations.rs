@@ -2705,6 +2705,7 @@ mod tests {
                     plugin_inventory: None,
                     attachments: Vec::new(),
                     task_context: None,
+                    repository_markdown: None,
                     question_route: QuestionRoute::Native,
                     answered_question: None,
                 },
@@ -6866,6 +6867,134 @@ mod tests {
         assert_eq!(current.descriptions.subtask, Some(child_revision));
         assert_eq!(current.checklist_item_id, None);
         assert_eq!(current.checklist, [selected, sibling]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pipeline_dispatch_reproduces_a_selected_repository_markdown_after_rename() -> Result<()>
+    {
+        use crate::jobs::{AdmissionEnvironment, JobRequest, PipelineDispatch, PipelineNodeKind};
+
+        let (_dir, store, chat, scope) = setup().await?;
+        std::fs::write(&scope.executable, b"fixture")?;
+        let registered = crate::repository::register(&store, scope.checkout.clone()).await?;
+        let project = registered.project_id;
+        let path = scope.checkout.join("release.md");
+        let bytes = b"\xef\xbb\xbf# Release\r\n\r\nReview this version.\r\n";
+        std::fs::write(&path, bytes)?;
+        let outsider = tempfile::tempdir()?;
+        let external = outsider.path().join("external.md");
+        std::fs::write(&external, b"outside source")?;
+        assert!(
+            store
+                .capture_repository_markdown(chat.checkout_id.clone(), external)
+                .await
+                .is_err()
+        );
+        let selected = store
+            .capture_repository_markdown(chat.checkout_id.clone(), path.clone())
+            .await?;
+        assert_eq!(selected.markdown.as_bytes(), bytes);
+        assert_eq!(selected.revision.relative_path, "release.md");
+
+        std::fs::write(&path, b"# Changed source")?;
+        std::fs::rename(&path, scope.checkout.join("new-name.md"))?;
+        assert_eq!(
+            store
+                .repository_markdown_revisions(chat.checkout_id.clone())
+                .await?,
+            [selected.revision.clone()]
+        );
+        assert_eq!(
+            store
+                .repository_markdown("other-checkout".into(), selected.revision.id.clone())
+                .await?,
+            None
+        );
+
+        let pipeline = "repository-source-fixture".to_owned();
+        store
+            .register_job_pipeline(project.clone(), pipeline.clone())
+            .await?;
+        store
+            .register_job_pipeline_node(
+                project,
+                pipeline.clone(),
+                "planning".into(),
+                PipelineNodeKind::Execution,
+            )
+            .await?;
+        let env = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: false,
+        };
+        store
+            .submit_pipeline_agent_job_from_markdown(
+                PipelineDispatch {
+                    pipeline_run_id: pipeline,
+                    node_instance_id: "planning".into(),
+                    plan_revision: None,
+                    release_id: None,
+                },
+                scope.clone(),
+                JobRequest {
+                    checkout_id: Some(chat.checkout_id.clone()),
+                    task_id: None,
+                    mode: SessionMode::ReadOnly,
+                    instructions: "Propose a plan from this repository source".into(),
+                    dependencies: Vec::new(),
+                    requires_bridge: false,
+                },
+                selected.revision.id.clone(),
+            )
+            .await?;
+        let plan = store
+            .claim_next_job(env)
+            .await?
+            .context("missing planning job")?;
+        let run = plan.run.id.clone();
+        let conversation = plan.conversation_id.clone();
+        let runner = Arc::new(FixtureRunner(WireLog {
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            conversation: conversation.clone(),
+            frames: Arc::new(Mutex::new(Vec::new())),
+        }));
+        assert_eq!(
+            start_managed_turn(store.clone(), runner, plan, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
+        drop(store);
+
+        let store = Store::open(scope.checkout.join("store.sqlite"))?;
+        let dispatch = store
+            .agent_dispatch(conversation, run)
+            .await?
+            .context("missing dispatch")?;
+        assert_eq!(
+            dispatch.snapshot.repository_markdown.as_ref(),
+            Some(&selected)
+        );
+        let frame: Value = serde_json::from_slice(&dispatch.frames[0])?;
+        let prompt = frame
+            .pointer("/params/input/0/text")
+            .and_then(Value::as_str)
+            .context("missing prompt")?;
+        let (_, source) = prompt
+            .split_once("\n\nRepository Markdown source\n")
+            .context("missing saved source bytes")?;
+        assert_eq!(
+            serde_json::from_str::<crate::repository::RepositoryMarkdown>(source)?,
+            selected
+        );
+        assert_eq!(
+            store
+                .repository_markdown(chat.checkout_id, selected.revision.id.clone())
+                .await?,
+            Some(selected)
+        );
         Ok(())
     }
 

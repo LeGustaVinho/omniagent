@@ -7,6 +7,7 @@ import { ArrowUpRight, Check, CircleAlert, CirclePlay, GitBranch, GitCommitHoriz
 import { Dialog } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
+import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { useGitSimulation } from "@/git-simulation";
 import { PipelineCatalog } from "@/pipeline-catalog";
@@ -444,6 +445,8 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
               <StageConfiguration key={selectedId} draft={draft} activeId={selectedId} onPatch={patchStage} onConnect={(source, branch) => setDraft({
                 ...draft, edges: addEdge({ id: source + "-" + selectedId, source, target: selectedId, label: branch ? "If migration" : undefined, data: { branch } }, draft.edges),
               })} />
+            ) : view === "Builder" && !simulation ? (
+              <RepositoryMarkdownPicker key={props.checkout.checkoutId} checkoutId={props.checkout.checkoutId} />
             ) : <p className="pipeline-note">Stage properties appear here when a workflow is open.</p>}
           </aside>
         </div>

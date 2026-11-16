@@ -1,7 +1,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use tauri::{
-    App, AppHandle, Manager, WindowEvent,
+    App, AppHandle, Manager, State, WindowEvent,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -12,6 +12,8 @@ use crate::fixture_runtime::FixtureRuns;
 use omniagent::{
     diagnostics,
     jobs::{JobNoticeKind, JobNotices, JobScheduler},
+    repository::{self, RepositoryMarkdown, RepositoryMarkdownRevision},
+    store::Store,
 };
 
 pub fn show(app: &AppHandle) {
@@ -132,4 +134,68 @@ pub async fn choose_repository(app: AppHandle) -> Result<Option<PathBuf>, String
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn choose_repository_markdown(
+    app: AppHandle,
+    store: State<'_, Store>,
+    checkout_id: String,
+) -> Result<Option<RepositoryMarkdown>, String> {
+    let root = repository::checkout_root(&store, checkout_id.clone())
+        .await
+        .map_err(markdown_error)?;
+    let path = tauri::async_runtime::spawn_blocking(move || {
+        let mut picker = app
+            .dialog()
+            .file()
+            .set_title("Select repository Markdown")
+            .set_directory(root)
+            .add_filter("Markdown", &["md", "markdown"]);
+        if let Some(window) = app.get_webview_window("main") {
+            picker = picker.set_parent(&window);
+        }
+        picker
+            .blocking_pick_file()
+            .map(|path| path.into_path())
+            .transpose()
+    })
+    .await
+    .map_err(markdown_error)?
+    .map_err(markdown_error)?;
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    store
+        .capture_repository_markdown(checkout_id, path)
+        .await
+        .map(Some)
+        .map_err(markdown_error)
+}
+
+#[tauri::command]
+pub async fn list_repository_markdown_revisions(
+    store: State<'_, Store>,
+    checkout_id: String,
+) -> Result<Vec<RepositoryMarkdownRevision>, String> {
+    store
+        .repository_markdown_revisions(checkout_id)
+        .await
+        .map_err(markdown_error)
+}
+
+#[tauri::command]
+pub async fn read_repository_markdown(
+    store: State<'_, Store>,
+    checkout_id: String,
+    revision_id: String,
+) -> Result<Option<RepositoryMarkdown>, String> {
+    store
+        .repository_markdown(checkout_id, revision_id)
+        .await
+        .map_err(markdown_error)
+}
+
+fn markdown_error(error: impl std::fmt::Display) -> String {
+    diagnostics::preview(&error.to_string())
 }

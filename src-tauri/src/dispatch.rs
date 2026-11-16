@@ -16,6 +16,7 @@ use crate::{
         questions::{QuestionOrigin, QuestionRoute},
         skills::{SkillCatalog, SkillEntry, SkillRequest},
     },
+    repository::RepositoryMarkdown,
     store::Store,
     tasks::TaskDispatchContext,
 };
@@ -47,6 +48,8 @@ pub struct ContextSnapshot {
     pub attachments: Vec<AttachmentDispatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_context: Option<TaskDispatchContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_markdown: Option<RepositoryMarkdown>,
     #[serde(default, skip_serializing_if = "QuestionRoute::is_native")]
     pub question_route: QuestionRoute,
     #[serde(default, skip_serializing_if = "Option::is_none")]
