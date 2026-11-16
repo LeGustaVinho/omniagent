@@ -95,6 +95,27 @@ it("rewinds inclusively, clears a new context, and inspects or forks the preserv
     throughRevision: later.revisionId, title: "Scoped chat (fork)" });
 });
 
+it("opens a head fork and an edited-message fork through the conversation tab callback", async () => {
+  const { user, opened } = setup();
+  await screen.findByRole("region", { name: first.text });
+  await user.click(screen.getByRole("button", { name: "History" }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Action" }), "fork");
+  await user.click(screen.getByRole("button", { name: "Create fork" }));
+  await waitFor(() => expect(opened).toHaveBeenCalledWith(expect.objectContaining({ id: "new-chat" })));
+  expect(invoke).toHaveBeenCalledWith("fork_conversation", { conversationId, expectedContextId: original.contextId, throughRevision: null, title: "Scoped chat (fork)" });
+
+  await user.click(within(screen.getByRole("region", { name: first.text })).getByRole("button", { name: "Edit in a fork" }));
+  const input = screen.getByRole("textbox", { name: "Edit user message" });
+  expect((input as HTMLTextAreaElement).value).toBe(first.text);
+  await user.clear(input);
+  await user.type(input, "Alternative request");
+  await user.click(screen.getByRole("button", { name: "Create fork with edit" }));
+  await waitFor(() => expect(opened).toHaveBeenCalledTimes(2));
+  expect(invoke).toHaveBeenCalledWith("fork_conversation_with_message_edit", { conversationId, expectedContextId: original.contextId,
+    throughRevision: first.revisionId, title: "Scoped chat (fork)", text: "Alternative request" });
+  expect(screen.getByRole("region", { name: first.text })).toBeTruthy();
+});
+
 it("disables a reviewed action if the active turn starts or the saved context changes", async () => {
   const { user, client, updateBusy } = setup();
   await screen.findByRole("region", { name: first.text });
