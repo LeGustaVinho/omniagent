@@ -52,6 +52,7 @@ type RecordedCheckout = {
 type NativeHistory =
   | { mode: "fresh" }
   | { mode: "provider_cursor"; sessionId: string; contextId: string }
+  | { mode: "provider_fork"; sessionId: string; contextId: string; sourceRunId: string; sourceTurnId: string }
   | { mode: "provider_recovery"; sessionId: string; contextId: string; sourceRunId: string; sourceTurnId: string | null };
 
 type DispatchInventory = {
@@ -105,15 +106,16 @@ function CheckoutLocation({ checkout }: { checkout: RecordedCheckout }) {
 function NativeContext({ evidence }: { evidence: DispatchInventory }) {
   const { nativeHistory, inheritedCheckout, historyReports } = evidence;
   const sourceRunId = inheritedCheckout?.runId ??
-    (nativeHistory.mode === "provider_recovery" ? nativeHistory.sourceRunId : undefined);
+    ("sourceRunId" in nativeHistory ? nativeHistory.sourceRunId : undefined);
   return <div className="grid gap-1">
     <h3 className="font-medium">Provider-managed context</h3>
     {nativeHistory.mode === "fresh" ? <p className="text-muted-foreground">Fresh session requested.</p> : <>
       <dl className="grid break-all text-muted-foreground">
-        <dt>Requested history</dt><dd>{nativeHistory.mode === "provider_cursor" ? "Resume session" : "Recover session"}</dd>
+        <dt>Requested history</dt><dd>{nativeHistory.mode === "provider_cursor" ? "Resume session" :
+          nativeHistory.mode === "provider_fork" ? "Fork session" : "Recover session"}</dd>
         <dt>Source session</dt><dd>{nativeHistory.sessionId}</dd>
         <dt>Context boundary</dt><dd>{nativeHistory.contextId}</dd>
-        {nativeHistory.mode === "provider_recovery" && nativeHistory.sourceTurnId &&
+        {"sourceTurnId" in nativeHistory && nativeHistory.sourceTurnId &&
           <><dt>Source turn</dt><dd>{nativeHistory.sourceTurnId}</dd></>}
         {sourceRunId && <><dt>Source attempt</dt><dd>{sourceRunId}</dd></>}
       </dl>

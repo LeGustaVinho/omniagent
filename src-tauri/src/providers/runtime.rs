@@ -612,6 +612,22 @@ impl TurnExecution {
         let (checkout, candidate_checkout) = self.isolate_candidate_review(registered)?;
         let is_candidate_review = candidate_checkout.is_some();
         scope.checkout.clone_from(&checkout.cwd);
+        self.executable_revision = runner.executable_revision(&scope.executable);
+        self.platform = runner.execution_platform();
+        if let Some(seed) = self.plan.native_fork.clone()
+            && let Some(input) = self.app.block_on(self.store.recheck_native_fork(
+                self.plan.conversation_id.clone(),
+                self.plan.context_id.clone(),
+                self.plan.scope.clone(),
+                seed,
+                self.executable_revision.clone(),
+                self.platform.clone(),
+            ))?
+        {
+            self.plan.native_fork = None;
+            self.plan.intent = SessionIntent::Start;
+            self.plan.input = input;
+        }
         let adapter = scope.provider.adapter();
         let mut session = adapter.create_session(SessionRequest {
             checkout: scope.checkout.clone(),
@@ -620,6 +636,9 @@ impl TurnExecution {
             model: scope.model.clone(),
             effort: scope.effort.clone(),
         })?;
+        if self.plan.native_fork.is_some() {
+            session.allow_native_fork_fallback();
+        }
         if self.native_suggestions && !adapter_route_unavailable(&self.plan.scope) {
             session.enable_native_suggestions();
         }
@@ -743,14 +762,12 @@ impl TurnExecution {
             .iter()
             .map(|argument| argument.as_os_str())
             .collect::<Vec<_>>();
-        self.executable_revision = runner.executable_revision(&scope.executable);
         if let Some(recovery) = &self.plan.native_job_recovery {
             ensure!(
                 self.executable_revision.as_ref() == Some(&recovery.executable_revision),
                 "The CLI executable changed since the provider checkpoint"
             );
         }
-        self.platform = runner.execution_platform();
         let admission = self.admission.clone();
         let plugins = probe_run_plugins(&scope, |request| {
             let _boundary = match &admission {
@@ -1262,6 +1279,19 @@ impl TurnExecution {
                 }
             };
             let update = session.receive(frame)?;
+            if update.events.iter().any(|event| {
+                matches!(event.data, ProviderEventData::NativeForkUnavailable { .. })
+            }) {
+                ensure!(
+                    !ready && !sent && self.plan.native_fork.take().is_some(),
+                    "Unexpected native fork fallback after startup"
+                );
+                self.plan.input = self.app.block_on(self.store.fresh_fork_input(
+                    self.plan.conversation_id.clone(),
+                    self.plan.context_id.clone(),
+                ))?;
+                self.plan.intent = SessionIntent::Start;
+            }
             let native_seed_receipt = update.events.iter().find_map(|event| {
                 if let ProviderEventData::NativeGoalContextSeeded { accepted, .. } = event.data {
                     Some(accepted)
@@ -1408,6 +1438,8 @@ impl TurnExecution {
                 source_turn_id: recovery.provider_turn_id.clone(),
                 context_id: recovery.context_id.clone(),
             }
+        } else if let Some(fork) = &self.plan.native_fork {
+            fork.history()
         } else {
             match (&self.plan.intent, &self.plan.resume_cursor_id) {
                 (SessionIntent::Start, None) => NativeHistory::Fresh,

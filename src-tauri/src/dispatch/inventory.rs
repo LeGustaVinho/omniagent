@@ -200,25 +200,36 @@ fn inherited_checkout(
     run_id: &str,
     history: &NativeHistory,
 ) -> Result<Option<RecordedCheckout>> {
-    let (source_run, context, session) = match history {
+    let (source_run, context, session, fork_turn) = match history {
         NativeHistory::Fresh => return Ok(None),
         NativeHistory::ProviderCursor {
             session_id,
             context_id,
-        } => (None, context_id, session_id),
+        } => (None, context_id, session_id, None),
+        NativeHistory::ProviderFork {
+            session_id,
+            source_run_id,
+            source_turn_id,
+            context_id,
+        } => (Some(source_run_id), context_id, session_id, Some(source_turn_id)),
         NativeHistory::ProviderRecovery {
             session_id,
             source_run_id,
             context_id,
             ..
-        } => (Some(source_run_id), context_id, session_id),
+        } => (Some(source_run_id), context_id, session_id, None),
     };
     let record = db
         .query_row(
             "SELECT source.run_id, r.checkout_id, s.payload
          FROM agent_attempts current
-         JOIN agent_attempts source ON source.conversation_id = current.conversation_id
-           AND source.ordinal < current.ordinal
+         LEFT JOIN conversation_forks fork ON fork.conversation_id = current.conversation_id
+         JOIN agent_attempts source ON (
+           (?5 IS NULL AND source.conversation_id = current.conversation_id AND source.ordinal < current.ordinal)
+           OR (?5 IS NOT NULL AND source.conversation_id = fork.source_conversation_id
+             AND source.agent_session_id = fork.source_session_id AND source.provider_turn_id = ?5
+             AND source.provider_terminal = 'completed')
+         )
          JOIN agent_sessions n ON n.id = source.agent_session_id
          JOIN runs r ON r.id = source.run_id
          JOIN context_snapshots s ON s.run_id = source.run_id
@@ -229,7 +240,7 @@ fn inherited_checkout(
                 (?4 IS NULL AND source.agent_session_id = current.agent_session_id
                  AND source.provider_terminal = 'completed' AND r.status = 'succeeded'))
          ORDER BY source.ordinal DESC LIMIT 1",
-            params![run_id, context, session, source_run],
+            params![run_id, context, session, source_run, fork_turn],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,

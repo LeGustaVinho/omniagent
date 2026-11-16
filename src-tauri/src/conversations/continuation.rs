@@ -151,6 +151,7 @@ enum ContinuationRoute {
     Queue,
     Empty,
     Native(String),
+    NativeFork(String),
     Review(ContinuationReason),
 }
 
@@ -328,7 +329,7 @@ impl Store {
                     ContinuationRoute::Empty => {
                         pin_continuation(&tx, &job.id, &conversation, None)?
                     }
-                    ContinuationRoute::Native(session) => {
+                    ContinuationRoute::Native(session) | ContinuationRoute::NativeFork(session) => {
                         pin_continuation(&tx, &job.id, &conversation, Some(&session))?
                     }
                     ContinuationRoute::Review(_) => unreachable!("review returns without queuing"),
@@ -465,11 +466,15 @@ fn continuation_route(
     );
     let entries = context_entries(db, &conversation.id, &conversation.context_id)?;
     let Some(prior) = previous_attempt(db, &conversation.id)? else {
-        return Ok(if entries.is_empty() {
-            ContinuationRoute::Empty
-        } else {
-            ContinuationRoute::Review(ContinuationReason::SessionUnavailable)
-        });
+        if entries.is_empty() {
+            return Ok(ContinuationRoute::Empty);
+        }
+        if let Some(source_session) =
+            super::native_fork::continuation_source_session(db, conversation, scope, &entries)?
+        {
+            return Ok(ContinuationRoute::NativeFork(source_session));
+        }
+        return Ok(ContinuationRoute::Review(ContinuationReason::SessionUnavailable));
     };
     let serialized = serde_json::to_string(scope)?;
     if prior.scope != serialized {
@@ -629,7 +634,9 @@ impl PinnedContinuation {
             return Ok(true);
         };
         let Some(prior) = previous_attempt(db, &conversation.id)? else {
-            return Ok(false);
+            // The fork's copied seed is already pinned by history_is_current.
+            // Admission may replay it when its source session is unavailable.
+            return Ok(super::native_fork::source_session(db, &conversation.id)?.as_ref() == Some(session));
         };
         if &prior.session_id != session || !prior.matches_allocation(allocation) {
             return Ok(false);

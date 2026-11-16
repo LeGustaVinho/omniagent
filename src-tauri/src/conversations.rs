@@ -31,6 +31,7 @@ pub mod fork_checkout;
 pub mod draft_files;
 mod history;
 mod library;
+pub(crate) mod native_fork;
 pub mod references;
 pub(crate) mod reference_delivery;
 pub use approval_evidence::{ApprovalDelivery, ConversationApprovalEvidence};
@@ -121,6 +122,7 @@ pub struct AttemptPlan {
     pub(crate) answered_question: Option<QuestionOrigin>,
     pub(crate) requires_bridge: bool,
     pub(crate) native_job_recovery: Option<NativeJobRecovery>,
+    pub(crate) native_fork: Option<native_fork::NativeForkSeed>,
     pub(crate) native_goal_seed: Option<crate::jobs::NativeGoalSeed>,
     pub(crate) native_subagent_limit: Option<u32>,
     pub(crate) subagent_audit: SubagentAuditRoute,
@@ -737,6 +739,9 @@ impl Store {
                 && !matches!(event.data, ProviderEventData::Diagnostic { .. });
             let native_goal = primary && crate::jobs::is_native_goal_run(&tx, &run_id)?;
             if primary && let Some(id) = &event.location.session_id {
+                if matches!(event.data, ProviderEventData::NativeForkVerified { .. }) {
+                    native_fork::require_independent_session(&tx, &active.session_id, id)?;
+                }
                 let old: Option<String> = tx.query_row(
                     "SELECT provider_session_id FROM agent_sessions WHERE id = ?1", [&active.session_id], |row| row.get(0),
                 )?;
@@ -1578,6 +1583,17 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         _ => None,
     };
 
+    let native_fork = if previous.is_none()
+        && recorded.is_none()
+        && matches!(
+            history,
+            AttemptHistory::Automatic | AttemptHistory::QueuedInstruction { force_fresh: false, .. }
+        )
+    {
+        native_fork::qualify(db, &conversation, &scope, &allocation, &entries)?
+    } else {
+        None
+    };
     let (agent_session_id, resume_cursor_id, intent, consumed) = if let Some((
         prior,
         cursor,
@@ -1602,7 +1618,10 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
                 "INSERT INTO agent_sessions(id, conversation_id, scope, native_subagent_limit) VALUES (?1, ?2, ?3, ?4)",
                 params![id, conversation_id, serialized, allocation.native_allowance],
             )?;
-        (id, None, SessionIntent::Start, 0)
+        let (intent, consumed) = native_fork.as_ref().map_or((SessionIntent::Start, 0), |fork| {
+            (fork.intent(), entries.len())
+        });
+        (id, None, intent, consumed)
     };
 
     let context_id = if let AttemptHistory::Retry { input_context_id } = &history {
@@ -1743,6 +1762,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         answered_question,
         requires_bridge: false,
         native_job_recovery,
+        native_fork,
         native_goal_seed: None,
         native_subagent_limit: allocation.native_allowance,
         subagent_audit: allocation.audit,

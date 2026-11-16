@@ -119,6 +119,12 @@ pub enum NativeHistory {
         session_id: String,
         context_id: String,
     },
+    ProviderFork {
+        session_id: String,
+        source_run_id: String,
+        source_turn_id: String,
+        context_id: String,
+    },
     ProviderRecovery {
         session_id: String,
         source_run_id: String,

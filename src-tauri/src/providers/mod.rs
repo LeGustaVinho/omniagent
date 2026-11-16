@@ -418,6 +418,9 @@ pub enum ProviderEventData {
         source_session_id: String,
         last_turn_id: String,
     },
+    NativeForkUnavailable {
+        reason: String,
+    },
     DelegationControlsReported {
         controls: DelegationControls,
     },
@@ -639,6 +642,7 @@ pub trait CliSession: Send {
         None
     }
     fn set_checkout_root(&mut self, _root: &Path) {}
+    fn allow_native_fork_fallback(&mut self) {}
     fn set_question_route(&mut self, _route: questions::QuestionRoute) {}
     fn configure_mcp_bridge(&mut self, _launch: crate::mcp_bridge::BridgeLaunch) {}
     fn set_workspace_instructions(&mut self, _instructions: String) -> anyhow::Result<()> {

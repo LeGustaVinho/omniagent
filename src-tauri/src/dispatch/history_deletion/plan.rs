@@ -291,6 +291,7 @@ fn inspect_dispatches(
         let cursor = match snapshot.native_history {
             NativeHistory::Fresh => continue,
             NativeHistory::ProviderCursor { context_id, .. }
+            | NativeHistory::ProviderFork { context_id, .. }
             | NativeHistory::ProviderRecovery { context_id, .. } => context_id,
         };
         let native_depends = db.query_row(

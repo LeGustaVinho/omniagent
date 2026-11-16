@@ -83,6 +83,8 @@ impl CliAdapter for CodexAdapter {
             handshake_started: false,
             session: None,
             pending_fork: None,
+            allow_fresh_after_fork: false,
+            abandoned_fork_ids: Vec::new(),
             goal_command: None,
             pending_goal_control: None,
             native_goal_turns: None,
@@ -322,6 +324,8 @@ struct CodexSession {
     handshake_started: bool,
     session: Option<Session>,
     pending_fork: Option<Session>,
+    allow_fresh_after_fork: bool,
+    abandoned_fork_ids: Vec<String>,
     goal_command: Option<bool>,
     pending_goal_control: Option<PendingGoalControl>,
     native_goal_turns: Option<HashSet<String>>,
@@ -351,6 +355,17 @@ impl CodexSession {
     }
 
     fn open_session(&mut self) -> Result<AdapterUpdate> {
+        let initialized = self.rpc.notify("initialized", None)?;
+        Ok(AdapterUpdate {
+            outbound: vec![initialized, self.open_session_request()?],
+            events: vec![self.event(ProviderEventData::Handshake {
+                protocol: "codex-app-server-v2".into(),
+                capabilities: Vec::new(),
+            })],
+        })
+    }
+
+    fn open_session_request(&mut self) -> Result<WireMessage> {
         let approval = match self.request.mode {
             SessionMode::ApprovedWrite => "on-request",
             _ => "never",
@@ -385,15 +400,22 @@ impl CodexSession {
             }
             SessionIntent::Fork { .. } => bail!("unsupported Codex fork boundary"),
         };
+        self.rpc.request(method, params, Request::OpenSession)
+    }
+
+    fn fresh_after_failed_fork(&mut self, reason: &str) -> Result<AdapterUpdate> {
+        ensure!(self.allow_fresh_after_fork, "{reason}");
+        let SessionIntent::Fork { provider_session_id, .. } = &self.request.intent else {
+            bail!("unexpected Codex fork fallback");
+        };
+        self.abandoned_fork_ids.push(provider_session_id.clone());
+        if let Some(abandoned) = self.pending_fork.take() {
+            self.abandoned_fork_ids.push(abandoned.id);
+        }
+        self.request.intent = SessionIntent::Start;
         Ok(AdapterUpdate {
-            outbound: vec![
-                self.rpc.notify("initialized", None)?,
-                self.rpc.request(method, params, Request::OpenSession)?,
-            ],
-            events: vec![self.event(ProviderEventData::Handshake {
-                protocol: "codex-app-server-v2".into(),
-                capabilities: Vec::new(),
-            })],
+            outbound: vec![self.open_session_request()?],
+            events: vec![self.event(ProviderEventData::NativeForkUnavailable { reason: reason.into() })],
         })
     }
 
@@ -515,6 +537,12 @@ impl CodexSession {
                     self.diagnostic(&format!("Codex model inventory unavailable: {message}"))
                 );
             }
+            if self.allow_fresh_after_fork
+                && matches!(self.request.intent, SessionIntent::Fork { .. })
+                && matches!(request, Request::OpenSession | Request::VerifyFork)
+            {
+                return self.fresh_after_failed_fork(&message);
+            }
             let mut events = vec![self.event(ProviderEventData::Error { message })];
             if request == Request::StartTurn {
                 events.extend(self.finish_turn(TurnOutcome::Failed));
@@ -537,6 +565,10 @@ impl CodexSession {
             }
             Request::OpenSession => {
                 let id = required_string(&result["thread"], "id")?;
+                ensure!(
+                    !self.abandoned_fork_ids.iter().any(|abandoned| abandoned == id),
+                    "Codex reused a session from the abandoned fork"
+                );
                 let model = required_string(result, "model")?;
                 let cwd = required_string(result, "cwd")?;
                 ensure!(
@@ -568,10 +600,9 @@ impl CodexSession {
                     ..
                 } = &self.request.intent
                 {
-                    ensure!(
-                        provider_session_id != id,
-                        "Codex returned the source session for a fork"
-                    );
+                    if provider_session_id == id {
+                        return self.fresh_after_failed_fork("Codex returned the source session for a fork");
+                    }
                     let request = self.rpc.request(
                         "thread/turns/list",
                         json!({"threadId": id, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded"}),
@@ -613,17 +644,16 @@ impl CodexSession {
                 else {
                     bail!("unexpected Codex fork verification");
                 };
+                if !matches!(
+                    result["data"].as_array().map(Vec::as_slice),
+                    Some([last]) if last["id"].as_str() == Some(turn_id) && last["status"] == "completed"
+                ) {
+                    return self.fresh_after_failed_fork("Codex fork did not end at the requested completed turn");
+                }
                 let session = self
                     .pending_fork
                     .take()
                     .context("Codex did not return a fork session")?;
-                let turns = result["data"]
-                    .as_array()
-                    .context("Codex did not return fork turns")?;
-                ensure!(
-                    matches!(turns.as_slice(), [last] if last["id"].as_str() == Some(turn_id) && last["status"] == "completed"),
-                    "Codex fork did not end at the requested completed turn"
-                );
                 let verification = ProviderEventData::NativeForkVerified {
                     source_session_id: provider_session_id.clone(),
                     last_turn_id: turn_id.clone(),
@@ -1671,6 +1701,10 @@ impl CliSession for CodexSession {
     }
     fn set_checkout_root(&mut self, root: &Path) {
         self.checkout_root = root.to_owned();
+    }
+
+    fn allow_native_fork_fallback(&mut self) {
+        self.allow_fresh_after_fork = true;
     }
 
     fn configure_mcp_bridge(&mut self, launch: crate::mcp_bridge::BridgeLaunch) {
