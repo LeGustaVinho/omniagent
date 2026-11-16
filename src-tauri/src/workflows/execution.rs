@@ -209,6 +209,8 @@ impl Store {
                 {
                     return Ok(saved);
                 }
+                let declared = inputs.iter().map(|(port, artifact)| (port.clone(), artifact.id.clone())).collect();
+                super::control::require_stage(&tx, &project_id, &run_id, &node_id, None, &declared)?;
                 let artifact = match action {
                     HostAction::Publish(port, value) => {
                         if let ArtifactValue::Task(task) = &value {
@@ -248,6 +250,7 @@ impl Store {
                 };
                 record_host_completion(&tx, &artifact, &execution_key, &request_revision)?;
                 super::inspection::record_workflow_completion_inputs(&tx, &artifact, &execution_key, &inputs)?;
+                super::control::refresh(&tx, &project_id, &artifact.workflow_run_id)?;
                 tx.commit()?;
                 Ok(artifact)
             })
@@ -272,7 +275,7 @@ impl Store {
             .await?
             .context("workflow run is outside this project")?;
         let definition = self
-            .workflow_definition(project.into(), workflow.version)
+            .workflow_definition(project.into(), workflow.version.clone())
             .await?
             .context("workflow definition is unavailable")?;
         let pinned = self
@@ -287,6 +290,16 @@ impl Store {
             pinned.definition.kind.per_unit() == unit_id.is_some(),
             "workflow node has the wrong logical unit scope"
         );
+        let control_checked = if super::control::uses_control(&definition) {
+            self.refresh_control(project.into(), run.into()).await?;
+            let (node, unit, supplied) = (node.to_owned(), unit_id.map(str::to_owned), artifacts.clone());
+            let (definition, workflow) = (definition.clone(), workflow.clone());
+            self.execute(move |db| super::control::require_dependencies(
+                db, &definition, &workflow, &node, unit.as_deref(), &supplied,
+            )).await?
+        } else {
+            false
+        };
         let mut resolved = BTreeMap::new();
         for port in &pinned.definition.inputs {
             let source = definition
@@ -306,6 +319,9 @@ impl Store {
             };
             match port.value {
                 PortType::Control => {
+                    if control_checked {
+                        continue;
+                    }
                     let (run, node, unit) = (
                         run.to_owned(),
                         source.from.node.clone(),
@@ -349,6 +365,7 @@ impl Store {
                     );
                     resolved.insert(port.name.clone(), artifact);
                 }
+                PortType::Evidence => anyhow::bail!("Conditions execute through the pinned control scheduler"),
             }
         }
         ensure!(

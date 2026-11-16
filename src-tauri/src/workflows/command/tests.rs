@@ -161,6 +161,18 @@ switch ($Mode) {
             });
         }
     }
+    for (id, from, port) in [
+        ("valid-result", "invalid", "completed"),
+        ("diagnose-result", "invalid", "failed"),
+    ] {
+        graph.nodes.push(NodeInstance {
+            id: id.into(), kind: super::super::BuiltinNode::Parallel, configuration: NodeConfiguration::None,
+        });
+        graph.wires.push(Wire {
+            from: Endpoint { node: from.into(), port: port.into() },
+            to: Endpoint { node: id.into(), port: "ready".into() },
+        });
+    }
     let version = store
         .save_workflow_revision(repo.project_id.clone(), "command-test".into(), graph)
         .await?;
@@ -287,6 +299,12 @@ switch ($Mode) {
         .inspect_workflow_execution(fixture.project.clone(), fixture.run.id.clone())
         .await?
         .context("Missing workflow inspection after Command failure")?;
+    let routed = inspected.control.iter().find(|record| record.node_id == "invalid")
+        .context("The Command failure did not select its wired outcome")?;
+    assert_eq!(routed.selected_ports, ["failed"]);
+    assert_eq!(routed.source_run_id.as_deref(), Some(invalid.run_id.as_str()));
+    assert!(inspected.control.iter().any(|record| record.node_id == "diagnose-result" && record.selected_ports == ["branches"]));
+    assert!(inspected.control.iter().any(|record| record.node_id == "valid-result" && record.selected_ports.is_empty()));
     let invalid_node = inspected
         .jobs
         .iter()

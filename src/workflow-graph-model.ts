@@ -3,7 +3,7 @@ export type WorkflowWire = { from: WorkflowEndpoint; to: WorkflowEndpoint };
 export type WorkflowNodeConfiguration = { kind: string; [field: string]: unknown };
 export type WorkflowGraphNode = { id: string; kind: string; configuration: WorkflowNodeConfiguration };
 export type WorkflowGraph = { name: string; nodes: WorkflowGraphNode[]; wires: WorkflowWire[] };
-export type WorkflowPortType = { kind: "control" } | { kind: "data"; artifact: string };
+export type WorkflowPortType = { kind: "control" } | { kind: "data"; artifact: string } | { kind: "evidence" };
 export type WorkflowPort = { name: string; value: WorkflowPortType };
 
 export type WorkflowDefinition = {
@@ -25,13 +25,15 @@ export function defaultConfiguration(kind: string): WorkflowNodeConfiguration {
   switch (kind) {
     case "agent_role": return { kind, role: "" };
     case "required_checks": return { kind, names: [] };
+    case "condition": return { kind, predicate: { op: "exists", pointer: "/evidence" } };
     case "command": return { kind, registrationId: "", registrationRevision: "", arguments: [], input: {}, output: "text" };
     default: return { kind };
   }
 }
 
 export function portType(value: WorkflowPortType) {
-  return value.kind === "control" ? "Control" : value.artifact.replaceAll("_", " ");
+  if (value.kind === "data") return value.artifact.replaceAll("_", " ");
+  return value.kind === "evidence" ? "Structured evidence" : "Control";
 }
 
 export function wireKey({ from, to }: WorkflowWire) {
@@ -47,7 +49,7 @@ function inputPort(definitions: WorkflowDefinitions, endpoint: WorkflowEndpoint)
 }
 
 function sameType(a: WorkflowPortType, b: WorkflowPortType) {
-  return a.kind === b.kind && (a.kind === "control" || (b.kind === "data" && a.artifact === b.artifact));
+  return a.kind === b.kind && (a.kind !== "data" || (b.kind === "data" && a.artifact === b.artifact));
 }
 
 export function incompatibility(definitions: WorkflowDefinitions, { from, to }: WorkflowWire) {
@@ -55,14 +57,16 @@ export function incompatibility(definitions: WorkflowDefinitions, { from, to }: 
   const input = inputPort(definitions, to);
   if (!output) return `Output ${from.node}.${from.port} is unavailable.`;
   if (!input) return `Input ${to.node}.${to.port} is unavailable.`;
-  return sameType(output.value, input.value) ? null
+  return sameType(output.value, input.value) || (output.value.kind === "data" && input.value.kind === "evidence") ? null
     : `${from.node}.${from.port} (${portType(output.value)}) cannot connect to ${to.node}.${to.port} (${portType(input.value)}).`;
 }
 
 export function connectionProblem(graph: WorkflowGraph, definitions: WorkflowDefinitions, wire: WorkflowWire) {
   const incompatible = incompatibility(definitions, wire);
   if (incompatible) return incompatible;
-  if (graph.wires.some(({ to }) => to.node === wire.to.node && to.port === wire.to.port)) {
+  const multiple = definitions[wire.to.node]?.kind === "join" && wire.to.port === "branches";
+  if (graph.wires.some((existing) => wireKey(existing) === wireKey(wire))) return "These ports are already connected.";
+  if (!multiple && graph.wires.some(({ to }) => to.node === wire.to.node && to.port === wire.to.port)) {
     return `Input ${wire.to.node}.${wire.to.port} accepts one connection.`;
   }
   const pending = [wire.to.node];
@@ -83,6 +87,16 @@ export function configurationProblem(configuration: WorkflowNodeConfiguration, d
     case "agent_role": return typeof configuration.role === "string" && configuration.role.trim() ? null : "Agent role is required.";
     case "required_checks": return Array.isArray(configuration.names) && configuration.names.every((name) => typeof name === "string" && name.trim())
       ? null : "Check names must contain text.";
+    case "condition": {
+      const predicate = configuration.predicate as { op?: unknown; pointer?: unknown; value?: unknown } | undefined;
+      if (typeof predicate?.pointer !== "string" || predicate.pointer.length > 1024 ||
+        (predicate.pointer !== "" && !predicate.pointer.startsWith("/")) || /~(?![01])/.test(predicate.pointer)) {
+        return "Enter a valid JSON Pointer.";
+      }
+      if (predicate.op === "exists") return null;
+      return predicate.op === "equals" && (predicate.value === null || ["string", "number", "boolean"].includes(typeof predicate.value))
+        ? null : "Choose existence or equality with a JSON scalar.";
+    }
     case "command":
       if (!configuration.registrationId || !configuration.registrationRevision) return "A registered command revision is required.";
       return configuration.input && typeof configuration.input === "object" && !Array.isArray(configuration.input)

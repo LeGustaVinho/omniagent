@@ -7,7 +7,7 @@ import { JobFailurePanel } from "@/job-failure";
 import { commitQuery } from "@/project-agile-model";
 import { queueBlockerReason } from "@/queue-model";
 import type { WorkspaceProps } from "@/workbench-contract";
-import type { ExecutionArtifact, ExecutionJob, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
+import type { ExecutionArtifact, ExecutionControl, ExecutionJob, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 
 type Navigation = Pick<WorkspaceProps, "openWorkspace" | "openActivity" | "openQueueJob">;
 type Task = { projectId: string; taskId: string };
@@ -96,6 +96,7 @@ function WorkflowJobEvidence({ entry, snapshot, scope, navigation }: { entry: Ex
   });
   const latest = job.latestAttempt;
   const recovery = inspection.data?.job.latestAttempt?.runId === latest?.runId ? inspection.data?.recoveryActions : undefined;
+  const failed = latest?.status === "failed" || latest?.status === "interrupted";
   const blockers = inspection.data?.blockers ?? [];
   return <section className="workflow-record-card" aria-label={`Scheduled job ${job.id}`}>
     <p>Job <code>{job.id}</code></p>
@@ -104,6 +105,7 @@ function WorkflowJobEvidence({ entry, snapshot, scope, navigation }: { entry: Ex
     {inspection.error && <p role="alert">{String(inspection.error)}</p>}
     {!!blockers.length && <ul aria-label="Admission blockers">{blockers.map((blocker, index) => <li key={index}>{queueBlockerReason(blocker)}</li>)}</ul>}
     {!!recovery?.length && <p>Permitted recovery · {recovery.map((action) => action === "retry" ? "Retry saved input" : "Resume checkpoint").join(" · ")}</p>}
+    {recovery?.length === 0 && failed && !job.queuedRecovery && <p>No recovery action is currently available.</p>}
     <div className="workflow-execution-links">
       {navigation.openQueueJob && <Button type="button" variant="outline" onClick={() => navigation.openQueueJob?.(job.id)}>Open queue job</Button>}
       {job.taskId && <LinkedWork task={{ projectId: scope.projectId, taskId: job.taskId }} projectId={scope.projectId} navigation={navigation} />}
@@ -121,18 +123,50 @@ function WorkflowJobEvidence({ entry, snapshot, scope, navigation }: { entry: Ex
   </section>;
 }
 
-export function WorkflowNodeEvidence({ node, snapshot, unitId, navigation }: { node: ExecutionPinnedNode; snapshot: WorkflowExecutionSnapshot; unitId?: string; navigation: Navigation }) {
+function ControlEvidence({ control, snapshot, jobs, navigation }: {
+  control: ExecutionControl; snapshot: WorkflowExecutionSnapshot; jobs: ExecutionJob[]; navigation: Navigation;
+}) {
+  const runId = control.sourceRunId;
+  const attempt = runId ? snapshot.jobs.flatMap(({ attempts }) => attempts).find((entry) => entry.runId === runId) : undefined;
+  const shownInJobs = jobs.some(({ attempts }) => attempts.some((entry) => entry.runId === runId));
+  const showFailure = !shownInJobs && (attempt?.status === "failed" || attempt?.status === "interrupted");
+  const inputs = Object.fromEntries((control.dependencies ?? []).flatMap(({ toPort, artifactId }) => artifactId ? [[toPort, artifactId]] : []));
+  return <section className="workflow-record-card" aria-label="Recorded control decision">
+    {control.reason && <p>{control.reason}</p>}
+    {control.selectedPorts.length > 0 && <p>Selected ports · {control.selectedPorts.map(text).join(" · ")}</p>}
+    {!!control.dependencies?.length && <ul aria-label="Control dependencies">{control.dependencies.map(({ from, toPort, selected }) => <li key={`${from.node}:${from.port}:${toPort}`}>
+      {toPort} · {from.node}.{from.port} · {selected ? "Selected" : "Skipped input"}
+    </li>)}</ul>}
+    {Object.keys(inputs).length > 0 && <RecordedInputs inputs={inputs} snapshot={snapshot}
+      scope={{ projectId: snapshot.run.projectId, runId: snapshot.run.id }} navigation={navigation} />}
+    {runId && <p>Triggering attempt <code>{runId}</code></p>}
+    {attempt && <>
+      <Button type="button" variant="outline" onClick={() => navigation.openActivity(attempt.runId, attempt.conversationId ?? undefined)}>Open triggering attempt</Button>
+      {showFailure && <JobFailurePanel projectId={snapshot.run.projectId} runId={attempt.runId} />}
+    </>}
+  </section>;
+}
+
+export function WorkflowNodeEvidence({ node, snapshot, unitId, control, navigation }: {
+  node: ExecutionPinnedNode; snapshot: WorkflowExecutionSnapshot; unitId?: string; control?: ExecutionControl; navigation: Navigation;
+}) {
   const { id, projectId } = snapshot.run;
   const scope = { runId: id, projectId };
   const belongs = (nodeId: string, unit: string | null) => nodeId === node.instance.id &&
     (!snapshot.unitNodeIds.includes(nodeId) || !unitId || unit === unitId);
   const jobs = snapshot.jobs.filter(({ nodeId, unitId }) => belongs(nodeId, unitId));
   const outputs = snapshot.outputs.filter(({ artifact }) => belongs(artifact.nodeInstanceId, artifact.unitId));
+  const pastControl = snapshot.control.filter((receipt) => receipt !== control && belongs(receipt.nodeId, receipt.unitId ?? null));
   return <div className="pipeline-stack">
     <details><summary>Pinned node configuration</summary>
       <p>Definition version {node.definition.revision} · <code className="break-all">{node.revision}</code></p>
       <pre className="workflow-evidence-json">{JSON.stringify(node.instance.configuration, null, 2)}</pre>
     </details>
+    {control && <ControlEvidence control={control} snapshot={snapshot} jobs={jobs} navigation={navigation} />}
+    {pastControl.map((receipt) => <details key={`${receipt.planRevision ?? ""}:${receipt.unitId ?? ""}`}>
+      <summary>Earlier control decision · {text(receipt.state)}{receipt.planRevision && ` · Plan ${receipt.planRevision.slice(0, 12)}`}</summary>
+      <ControlEvidence control={receipt} snapshot={snapshot} jobs={jobs} navigation={navigation} />
+    </details>)}
     {!!jobs.length && <section aria-label="Scheduled executions" className="pipeline-stack">
       <h3>Scheduled executions</h3>
       {jobs.map((job) => <WorkflowJobEvidence key={job.job.id} entry={job} snapshot={snapshot} scope={scope} navigation={navigation} />)}
@@ -151,6 +185,6 @@ export function WorkflowNodeEvidence({ node, snapshot, unitId, navigation }: { n
         </details>)}
       </section>)}
     </section>}
-    {!jobs.length && !outputs.length && <p>No execution evidence has been recorded for this node.</p>}
+    {!control && !pastControl.length && !jobs.length && !outputs.length && <p>No execution evidence has been recorded for this node.</p>}
   </div>;
 }

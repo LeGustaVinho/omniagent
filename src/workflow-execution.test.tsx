@@ -63,6 +63,7 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
     job("queued", [], "command"),
     job("running", [{ runId: "command-now", ordinal: 1, previousRunId: null, conversationId: null, status: "running" }], "command"),
     job("command", [{ runId: "command-saved", ordinal: 1, previousRunId: null, conversationId: null, status: "succeeded" }], "command"),
+    job("command-failed", [{ runId: "command-invalid", ordinal: 1, previousRunId: null, conversationId: null, status: "failed" }], "command"),
     job("question", [{ runId: "pending-question", ordinal: 1, previousRunId: null, conversationId: "questions", status: "waiting_for_input" }]),
   ];
   const task = { taskId: "linked-task", projectId };
@@ -70,10 +71,22 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
     run: { id: runId, version, planRevision: "selected-plan", projectId },
     definition: { version, name: "Recorded pipeline title", nodes: [start, plan, review, approval, commit,
       node("queued", "Queued command"), node("running", "Active command"), node("question", "User question"),
-      node("command", "Saved command", [], [port("result", "command_result")])],
+      node("command", "Saved command", [], [port("result", "command_result")]),
+      node("command-failed", "Invalid command", [], [control("completed"), control("failed"), port("result", "command_result")]),
+      node("remediation", "Remediation", [control("ready")]), node("unselected", "Success branch", [control("ready")])],
       wires: [{ from: { node: "start", port: "document" }, to: { node: "planner", port: "context" } },
-        { from: { node: "planner", port: "plan" }, to: { node: "review", port: "plan" } }] },
+        { from: { node: "planner", port: "plan" }, to: { node: "review", port: "plan" } },
+        { from: { node: "command-failed", port: "failed" }, to: { node: "remediation", port: "ready" } },
+        { from: { node: "command-failed", port: "completed" }, to: { node: "unselected", port: "ready" } }] },
     unitNodeIds: ["commit"], units: [logical], jobs,
+    control: [
+      { nodeId: "command-failed", planRevision: "selected-plan", state: "failed", selectedPorts: ["failed"],
+        reason: "The recorded command failure selected the error branch", sourceRunId: "command-invalid" },
+      { nodeId: "unselected", planRevision: "selected-plan", state: "skipped", selectedPorts: [],
+        reason: "No execution reaches this stage through the selected branches",
+        dependencies: [{ from: { node: "command-failed", port: "completed" }, toPort: "ready", selected: false }] },
+      { nodeId: "review", planRevision: "older-plan", state: "skipped", selectedPorts: [], reason: "Earlier revision outcome" },
+    ],
     outputs: [
       output("start", "original-markdown", "document", "markdown", { relativePath: "old-brief.md", id: "frozen-source" }),
       { ...output("approval", "approval-receipt", "decision", "approval", { task, source: "automatic_rule", planRevision: "selected-plan", ruleEvidence: { revision: "rule-reviewed" } }),
@@ -86,7 +99,10 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
     switch (command) {
       case "list_repository_deliveries": return [snapshot.run, { ...snapshot.run, id: "newer-run", version: { id: "pipeline", revision: "new-edited-draft" } }];
       case "inspect_workflow_execution": expect(input).toEqual({ projectId, runId }); return snapshot;
-      case "inspect_workflow_execution_job": return { job: jobs[0]!.job, blockers: [], recoveryActions: ["retry"] };
+      case "inspect_workflow_execution_job": {
+        const matched = jobs.find(({ job }) => job.id === (input as { jobId: string }).jobId)!;
+        return { job: matched.job, blockers: [], recoveryActions: matched.nodeId === "planner" ? ["retry"] : [] };
+      }
       case "job_failure": return { checkoutRoot: "D:\\frozen-checkout", logsAvailable: true, savedDiffAvailable: false,
         observation: { cause: "invalid_result", phase: "result_validation", process: null } };
       case "verified_delivery_commit": return { id: "verified-commit", projectId, taskId: "linked-task", branch: "archived-branch", sha: "fixed-sha", captureRunId: "frozen-git-attempt" };
@@ -106,6 +122,8 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   const inspector = within(screen.getByRole("complementary", { name: "Execution node evidence" }));
   await user.click(graph.getByRole("button", { name: "Review pinned plan · Waiting" }));
   expect(inspector.getByText("plan needs planner.plan")).toBeTruthy();
+  await user.click(inspector.getByText(/Earlier control decision · skipped/));
+  expect(inspector.getByText("Earlier revision outcome")).toBeTruthy();
   await user.click(graph.getByRole("button", { name: "Historical plan · Failed" }));
   expect(await inspector.findByText(/Permitted recovery · Retry saved input/)).toBeTruthy();
   await waitFor(() => expect(inspector.getAllByText("The structured result failed validation.")).toHaveLength(2));
@@ -128,6 +146,19 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   expect(inspector.getByText("command-receipt")).toBeTruthy();
   await user.click(inspector.getByRole("button", { name: "Open command output and logs" }));
   expect(props.openActivity).toHaveBeenCalledWith("command-saved");
+  await user.click(graph.getByRole("button", { name: "Invalid command · Failed" }));
+  expect(await inspector.findByText("No recovery action is currently available.")).toBeTruthy();
+  expect(await inspector.findByText("The structured result failed validation.")).toBeTruthy();
+  await user.click(inspector.getByRole("button", { name: "Open command logs" }));
+  expect(props.openActivity).toHaveBeenCalledWith("command-invalid", undefined);
+  expect(inspector.getByText("Selected ports · failed")).toBeTruthy();
+  await user.click(inspector.getByRole("button", { name: "Open triggering attempt" }));
+  expect(props.openActivity).toHaveBeenLastCalledWith("command-invalid", undefined);
+  await user.click(graph.getByRole("button", { name: "Remediation · Waiting" }));
+  expect(inspector.queryByLabelText("Waiting for dependencies")).toBeNull();
+  await user.click(graph.getByRole("button", { name: "Success branch · Skipped" }));
+  expect(inspector.getByText("No execution reaches this stage through the selected branches")).toBeTruthy();
+  expect(inspector.getByText("ready · command-failed.completed · Skipped input")).toBeTruthy();
   await user.selectOptions(screen.getByRole("combobox", { name: "Saved workflow run" }), "newer-run");
   expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", "run:newer-run");
 });

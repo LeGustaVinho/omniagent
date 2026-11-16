@@ -4,7 +4,7 @@ import type { WorkflowDefinition, WorkflowGraphNode, WorkflowWire } from "@/work
 
 export const workflowRunTarget = (runId: string) => `run:${runId}`;
 
-export type WorkflowExecutionState = "queued" | "running" | "waiting" | "failed" | "completed" | "interrupted" | "cancelled";
+export type WorkflowExecutionState = "queued" | "running" | "waiting" | "skipped" | "failed" | "completed" | "interrupted" | "cancelled";
 export type WorkflowVersion = { id: string; revision: string };
 export type WorkflowRun = { id: string; projectId: string; version: WorkflowVersion; planRevision: string | null };
 export type ExecutionPinnedNode = { instance: WorkflowGraphNode; revision: string; definition: WorkflowDefinition };
@@ -16,6 +16,16 @@ export type ExecutionArtifact = { id: string; workflowRunId: string; nodeInstanc
   value: { kind: string; evidence: unknown } };
 export type ExecutionOutput = { artifact: ExecutionArtifact; current: boolean; inputReceipts: { executionKey: string; revision: string; inputs: Inputs }[] };
 export type ExecutionUnit = { planRevision: string; taskId: string; unit: { id: string; ordinal: number; purpose: string } };
+export type ExecutionControl = {
+  nodeId: string;
+  unitId?: string | null;
+  planRevision?: string | null;
+  state: "completed" | "skipped" | "failed";
+  selectedPorts: string[];
+  reason?: string | null;
+  sourceRunId?: string | null;
+  dependencies?: { from: WorkflowWire["from"]; toPort: string; selected: boolean; artifactId?: string | null }[];
+};
 export type WorkflowExecutionSnapshot = {
   run: WorkflowRun;
   definition: { version: WorkflowVersion; name: string; nodes: ExecutionPinnedNode[]; wires: WorkflowWire[] };
@@ -23,7 +33,17 @@ export type WorkflowExecutionSnapshot = {
   units: ExecutionUnit[];
   jobs: ExecutionJob[];
   outputs: ExecutionOutput[];
+  control: ExecutionControl[];
 };
+
+export function controlForNode(snapshot: WorkflowExecutionSnapshot, nodeId: string, unit?: ExecutionUnit) {
+  const unitScoped = snapshot.unitNodeIds.includes(nodeId);
+  const scope = unitScoped ? unit : undefined;
+  if (unitScoped && !scope) return undefined;
+  const plan = scope?.planRevision ?? snapshot.run.planRevision;
+  return snapshot.control.find((receipt) => receipt.nodeId === nodeId &&
+    (receipt.unitId ?? null) === (scope?.unit.id ?? null) && (receipt.planRevision ?? null) === plan);
+}
 
 export function presentation(snapshot: WorkflowExecutionSnapshot, node: ExecutionPinnedNode, unit?: ExecutionUnit): {
   status: WorkflowExecutionState;
@@ -53,10 +73,16 @@ export function presentation(snapshot: WorkflowExecutionSnapshot, node: Executio
     if (started === "failed" || started === "interrupted" || started === "cancelled") return { status: started };
     if (job.queueState === "cancelled" && !started) return { status: "cancelled" };
   }
+  const control = controlForNode(snapshot, nodeId, unit);
+  if (control) return { status: control.state };
   if (completed || (job?.latestAttempt?.status === "succeeded" && node.definition.outputs.every(({ value }) => value.kind === "control"))) return { status: "completed" };
   const missing = snapshot.definition.wires.filter(({ from, to }) => {
     if (to.node !== nodeId) return false;
     const control = node.definition.inputs.find(({ name }) => name === to.port)?.value.kind === "control";
+    const decision = controlForNode(snapshot, from.node, unit);
+    if (decision?.state === "skipped") return true;
+    if (decision && control) return !decision.selectedPorts.includes(from.port);
+    if (decision?.state === "failed") return true;
     return !snapshot.outputs.some((output) => output.artifact.nodeInstanceId === from.node && eligible(output) &&
       (control || output.artifact.port === from.port));
   });

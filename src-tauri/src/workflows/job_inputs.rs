@@ -48,6 +48,8 @@ pub(crate) fn stage_job_input(
     if let Some(plan) = &binding.plan_revision {
         require_current_plan(db, project, &binding.pipeline_run_id, plan)?;
     }
+    super::control::require_stage(db, project, &binding.pipeline_run_id, &binding.node_instance_id,
+        input.unit_id.as_deref(), &input.artifacts)?;
     if let Some(revision) = &input.plan_revision_request {
         ensure!(
             pinned.definition.kind == BuiltinNode::Plan,

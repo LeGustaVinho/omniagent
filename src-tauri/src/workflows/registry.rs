@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use super::command::CommandConfiguration;
+
+use super::{ConditionPredicate, command::CommandConfiguration};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +20,9 @@ pub enum BuiltinNode {
     VerifyCommit,
     VerifyMerge,
     Command,
+    Condition,
+    Parallel,
+    Join,
     Result,
 }
 
@@ -60,6 +64,13 @@ pub enum ArtifactKind {
 pub enum PortType {
     Control,
     Data(ArtifactKind),
+    Evidence,
+}
+
+impl PortType {
+    pub(super) fn accepts(self, source: Self) -> bool {
+        self == source || matches!((self, source), (Self::Evidence, Self::Data(_)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +87,7 @@ pub enum ConfigurationKind {
     AgentRole,
     RequiredChecks,
     Command,
+    Condition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +97,7 @@ pub enum NodeConfiguration {
     AgentRole { role: String },
     RequiredChecks { names: Vec<String> },
     Command(CommandConfiguration),
+    Condition { predicate: ConditionPredicate },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +116,9 @@ pub enum Executor {
     VerifyGitCommit,
     VerifyGitMerge,
     ExecuteCommand,
+    EvaluateCondition,
+    FanOut,
+    JoinBranches,
     PublishResult,
 }
 
@@ -146,13 +162,17 @@ pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
         (BuiltinNode::VerifyMerge, "Merge") => current.title = "Merge".into(),
         _ => {}
     }
+    if pinned.kind == BuiltinNode::Command && pinned.revision == 1 {
+        current.revision = 1;
+        current.outputs.retain(|port| port.name != "failed");
+    }
     *current == *pinned
 }
 
 pub fn builtin_registry() -> Vec<NodeDefinition> {
     use ArtifactKind::*;
     use BuiltinNode::*;
-    use PortType::{Control, Data};
+    use PortType::{Control, Data, Evidence};
 
     let entries = [
         (
@@ -309,7 +329,34 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             ConfigurationKind::Command,
             Effect::WriteRepository,
             &[("ready", Control), ("release", Data(Release)), ("worktree", Data(Worktree))],
-            &[("completed", Control), ("result", Data(CommandResult))],
+            &[("completed", Control), ("failed", Control), ("result", Data(CommandResult))],
+        ),
+        (
+            Condition,
+            "Condition",
+            Executor::EvaluateCondition,
+            ConfigurationKind::Condition,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("value", Evidence)],
+            &[("matched", Control), ("unmatched", Control)],
+        ),
+        (
+            Parallel,
+            "Parallel",
+            Executor::FanOut,
+            ConfigurationKind::None,
+            Effect::None,
+            &[("ready", Control)],
+            &[("branches", Control)],
+        ),
+        (
+            Join,
+            "Join",
+            Executor::JoinBranches,
+            ConfigurationKind::None,
+            Effect::None,
+            &[("branches", Control)],
+            &[("joined", Control)],
         ),
         (
             Result,
@@ -335,7 +382,7 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
         .map(
             |(kind, title, executor, configuration, effect, inputs, outputs)| NodeDefinition {
                 kind,
-                revision: 1,
+                revision: if kind == BuiltinNode::Command { 2 } else { 1 },
                 title: title.into(),
                 executor,
                 configuration,
@@ -377,6 +424,7 @@ impl NodeConfiguration {
                 names.iter().all(|name| !name.trim().is_empty())
             }
             (Self::Command(config), ConfigurationKind::Command) => config.is_valid(),
+            (Self::Condition { predicate }, ConfigurationKind::Condition) => predicate.valid(),
             _ => false,
         }
     }

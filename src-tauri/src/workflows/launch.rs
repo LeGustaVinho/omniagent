@@ -293,6 +293,7 @@ pub(crate) fn launch_workflow_in_tx(
         source: document,
         origin: origin.clone(),
     };
+    super::control::refresh(db, project, &run.id)?;
     db.execute(
         "INSERT INTO workflow_launches VALUES (?1, ?2, ?3, ?4)",
         params![

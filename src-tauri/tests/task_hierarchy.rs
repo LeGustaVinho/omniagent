@@ -248,6 +248,7 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
          DROP TABLE workflow_approval_rule_heads;
          DROP TABLE workflow_approval_rule_revisions;
          DROP TABLE workflow_completion_inputs;
+         DROP TABLE workflow_control_receipts;
          DROP TABLE workflow_host_completions;
          DROP TABLE workflow_artifacts;
          DROP TABLE workflow_node_pins;

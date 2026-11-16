@@ -221,8 +221,13 @@ impl Store {
             .workflow_attempt(project.clone(), attempt_id.clone())
             .await?
             .and_then(|attempt| attempt.pin.unit_id);
-        self.execute(move |db| insert_scoped_artifact(db, &project, run, node, port, unit, value))
-            .await
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let artifact = insert_scoped_artifact(&tx, &project, run, node, port, unit, value)?;
+            super::control::refresh(&tx, &project, &artifact.workflow_run_id)?;
+            tx.commit()?;
+            Ok(artifact)
+        }).await
     }
 
     pub async fn resolve_workflow_artifact(

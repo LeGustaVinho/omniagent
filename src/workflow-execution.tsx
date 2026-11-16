@@ -8,12 +8,12 @@ import { WorkflowPortColumn } from "@/workflow-graph-editor";
 import { initialNodePositions, wireKey } from "@/workflow-graph-model";
 import { WorkflowNodeEvidence } from "@/workflow-execution-evidence";
 import {
-  presentation, workflowRunTarget, type ExecutionPinnedNode, type WorkflowExecutionSnapshot, type WorkflowExecutionState, type WorkflowRun,
+  controlForNode, presentation, workflowRunTarget, type ExecutionPinnedNode, type WorkflowExecutionSnapshot, type WorkflowExecutionState, type WorkflowRun,
 } from "@/workflow-execution-model";
 import "./workflow-execution.css";
 
 const stateLabel: Record<WorkflowExecutionState, string> = {
-  queued: "Queued", running: "Running", waiting: "Waiting", completed: "Completed", failed: "Failed", interrupted: "Interrupted", cancelled: "Cancelled",
+  queued: "Queued", running: "Running", waiting: "Waiting", skipped: "Skipped", completed: "Completed", failed: "Failed", interrupted: "Interrupted", cancelled: "Cancelled",
 };
 
 type ExecutionNode = Node<{ pinned: ExecutionPinnedNode; status: WorkflowExecutionState }, "execution">;
@@ -96,7 +96,8 @@ function WorkflowExecutionCanvas({ snapshot, navigation }: {
               {wire.to.port} needs {wire.from.node}.{wire.from.port}
             </li>)}</ul>
           </section>}
-          <WorkflowNodeEvidence key={`${active.node.instance.id}:${unit?.unit.id ?? ""}`} node={active.node} snapshot={snapshot} unitId={unit?.unit.id} navigation={navigation} />
+          <WorkflowNodeEvidence key={`${active.node.instance.id}:${unit?.unit.id ?? ""}`} node={active.node} snapshot={snapshot}
+            unitId={unit?.unit.id} control={controlForNode(snapshot, active.node.instance.id, unit)} navigation={navigation} />
         </>}
       </aside>
     </div>

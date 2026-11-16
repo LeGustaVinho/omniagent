@@ -10,6 +10,7 @@ pub mod authoring;
 pub mod comparison;
 mod builtin;
 mod command;
+mod control;
 mod execution;
 pub mod inspection;
 #[cfg(test)]
@@ -42,6 +43,8 @@ pub use artifacts::{
     WorkflowAcceptanceReference, WorkflowArtifact, WorkflowMergeReference,
 };
 pub use builtin::{DeliveryRoles, builtin_delivery_graph};
+pub use control::{ConditionPredicate, ControlStageReceipt};
+pub(crate) use control::{refresh_from_attempt, validate_attempt_control};
 pub use command::{
     CommandConfiguration, CommandData, CommandOutputFormat, CommandRegistration,
     CommandRegistrationRequest, CommandTarget, WorkflowCommandResult, WorkflowCommandSubmission,
@@ -184,6 +187,7 @@ fn compile_resolved<'definition>(
         "a workflow needs one Start node"
     );
     let mut incoming = HashSet::new();
+    let mut connections = HashSet::new();
     let mut dependents = vec![Vec::new(); nodes.len()];
     let mut inputs_remaining = vec![0; nodes.len()];
     for wire in &graph.wires {
@@ -205,9 +209,11 @@ fn compile_resolved<'definition>(
             .iter()
             .find(|port| port.name == wire.to.port)
             .context("wire target port is unavailable")?;
-        ensure!(output.value == input.value, "incompatible workflow ports");
+        ensure!(input.value.accepts(output.value), "incompatible workflow ports");
+        ensure!(connections.insert((&wire.from, &wire.to)), "workflow wire already exists");
+        let accepts_multiple = nodes[to].instance.kind == BuiltinNode::Join && input.name == "branches";
         ensure!(
-            incoming.insert((wire.to.node.as_str(), wire.to.port.as_str())),
+            incoming.insert((wire.to.node.as_str(), wire.to.port.as_str())) || accepts_multiple,
             "an input port accepts one wire"
         );
         dependents[from].push(to);
@@ -239,6 +245,7 @@ fn compile_resolved<'definition>(
         }
     }
     ensure!(visited == nodes.len(), "workflow graph contains a cycle");
+    control::validate_release_wires(&nodes, &graph.wires)?;
     let revision = digest(&serde_json::to_vec(&(&graph.name, &nodes, &graph.wires))?);
     Ok(WorkflowDefinition {
         version: WorkflowRevision { id, revision },

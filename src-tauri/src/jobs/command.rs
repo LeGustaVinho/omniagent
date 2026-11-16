@@ -323,6 +323,7 @@ pub(super) fn start_command(
             if let Some(result) = result {
                 publish_command_result(&tx, &run_id, result)?;
             }
+            crate::workflows::refresh_from_attempt(&tx, &run_id)?;
             tx.commit()?;
             Ok(())
         }))?;

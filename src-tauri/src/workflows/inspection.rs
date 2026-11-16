@@ -12,8 +12,11 @@ use crate::{
 };
 
 use super::{
-    ArtifactValue, NodeInputs, WorkflowArtifact, WorkflowDefinition, WorkflowJobInput,
-    WorkflowPlanUnit, WorkflowRevision, WorkflowRun, digest, runtime::load_definition,
+    ArtifactValue, ControlStageReceipt, NodeInputs, WorkflowArtifact, WorkflowDefinition,
+    WorkflowJobInput, WorkflowPlanUnit, WorkflowRevision, WorkflowRun,
+    control::{recorded_control, unit_nodes},
+    digest,
+    runtime::load_definition,
 };
 
 #[derive(Serialize)]
@@ -25,6 +28,7 @@ pub struct WorkflowExecutionInspection {
     pub units: Vec<WorkflowExecutionUnit>,
     pub jobs: Vec<WorkflowExecutionJob>,
     pub outputs: Vec<WorkflowExecutionOutput>,
+    pub control: Vec<ControlStageReceipt>,
 }
 
 #[derive(Serialize)]
@@ -110,6 +114,8 @@ impl Store {
         project: String,
         run_id: String,
     ) -> Result<Option<WorkflowExecutionInspection>> {
+        self.refresh_control(project.clone(), run_id.clone())
+            .await?;
         self.execute(move |db| {
             let tx = db.transaction()?;
             let run = tx
@@ -134,15 +140,17 @@ impl Store {
             let Some(run) = run else { return Ok(None) };
             let definition = load_definition(&tx, &project, &run.version)?
                 .context("The pinned workflow definition is unavailable")?;
+            let scoped_nodes = unit_nodes(&definition);
             let unit_node_ids = definition
                 .nodes
                 .iter()
-                .filter(|node| node.definition.kind.per_unit())
+                .filter(|node| scoped_nodes.contains(node.instance.id.as_str()))
                 .map(|node| node.instance.id.clone())
                 .collect();
             let units = load_units(&tx, &run)?;
             let jobs = load_jobs(&tx, &run)?;
             let outputs = load_outputs(&tx, &run, &jobs, &units)?;
+            let control = recorded_control(&tx, &run)?;
             Ok(Some(WorkflowExecutionInspection {
                 run,
                 definition,
@@ -150,6 +158,7 @@ impl Store {
                 units,
                 jobs,
                 outputs,
+                control,
             }))
         })
         .await

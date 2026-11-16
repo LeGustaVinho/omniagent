@@ -236,6 +236,10 @@ function NodeFields({ projectId, node, definition, disabled, onChange }: {
       <small>Enter one check name per line.</small>
     </label>;
     case "command": return <CommandNodeConfiguration projectId={projectId} configuration={configuration} onChange={onChange} disabled={disabled} />;
+    case "condition": return <>
+      <p className="pipeline-meta">Use a JSON Pointer into the source artifact, such as <code>/evidence/relativePath</code>. Equality compares JSON values by type.</p>
+      <JsonConfiguration configuration={configuration} kind="condition" disabled={disabled} onChange={onChange} />
+    </>;
     default: return <JsonConfiguration key={`${node.id}:${definition.revision}`} configuration={configuration}
       kind={definition.configuration} disabled={disabled} onChange={onChange} />;
   }
