@@ -7,7 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ModelPicker } from "@/components/model-picker";
 import { ConversationPanel } from "@/conversation-panels";
-import type { ConversationGoalOverview, GoalDefinition } from "@/conversation-goal";
+import type { ConversationGoalOverview, GoalDefinition, GoalTransitionReview } from "@/conversation-goal";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -28,6 +28,20 @@ function openPanel(initialDraft: string, native: boolean) {
   const active = vi.fn();
   let draft = initialDraft;
   let value: ConversationGoalOverview | null = null;
+  function review(goal: ConversationGoalOverview["goal"], controlState: "paused" | "needs_review"): GoalTransitionReview {
+    return {
+      revisionId: goal.id, definition: goal.definition, continuationOwner: goal.continuationOwner,
+      controlState, checkpoint: { ordinal: 2, runId, nextAction: "continue" },
+      checkpointContextId: "saved-checkpoint", checkpointRunId: runId, reviewToken: "sealed-resume",
+      stopReviewRunId: controlState === "needs_review" ? runId : null,
+      scope: { projectId, checkoutId: "checkout-original", checkoutRoot: "D:/release", provider: selection.provider,
+        profileId: selection.profileId, model: selection.modelId, effort: null, mode: "read_only" },
+    };
+  }
+  function recoverAfterRestart() {
+    if (!value) throw new Error("No goal to recover");
+    value = { ...value, goal: { ...value.goal, controlState: "needs_review" }, transition: review(value.goal, "needs_review") };
+  }
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     switch (command) {
@@ -58,15 +72,14 @@ function openPanel(initialDraft: string, native: boolean) {
         const action = (args as { action: string }).action;
         if (value) value = {
           ...value, goal: { ...value.goal, controlState: action === "pause" ? "paused" : "cancelled" },
-          transition: action === "pause" ? {
-            revisionId: value.goal.id, definition: value.goal.definition, continuationOwner: value.goal.continuationOwner,
-            controlState: "paused", checkpoint: { ordinal: 2, runId, nextAction: "continue" },
-            checkpointContextId: "saved-checkpoint", checkpointRunId: runId, stopReviewRunId: null, reviewToken: "sealed-resume",
-            scope: { projectId, checkoutId: "checkout-original", checkoutRoot: "D:/release", provider: selection.provider,
-              profileId: selection.profileId, model: selection.modelId, effort: null, mode: "read_only" },
-          } : null,
+          transition: action === "pause" ? review(value.goal, "paused") : null,
         };
         return value?.goal.controlState;
+      }
+      case "confirm_native_goal_stop": {
+        if ((args as { runId: string }).runId !== runId) throw new Error("Wrong native executor");
+        if (value) value = { ...value, goal: { ...value.goal, controlState: "paused" }, transition: review(value.goal, "paused") };
+        return "paused";
       }
       case "resume_goal": {
         if (value) value = { ...value, goal: { ...value.goal, controlState: "active" }, transition: null };
@@ -84,13 +97,13 @@ function openPanel(initialDraft: string, native: boolean) {
       <ConversationPanel {...props} />
     </RunInspectorNavigation.Provider>
   </QueryClientProvider>);
-  return { mount, selection, conversationId, projectId, runId, active };
+  return { mount, selection, conversationId, projectId, runId, active, recoverAfterRestart };
 }
 
-it("submits a slash goal through the selected profile and displays native usage", async () => {
+it("submits a slash goal and reviews the original native executor after reopening", async () => {
   const submittedDraft = "/goal Verify the release artifacts";
   const fixture = openPanel(submittedDraft, true);
-  fixture.mount();
+  const initial = fixture.mount();
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "Selected model" }));
   await user.click(await screen.findByRole("button", { name: "Start goal" }));
@@ -103,6 +116,25 @@ it("submits a slash goal through the selected profile and displays native usage"
     definition: { objective: "Verify the release artifacts", criteria: [], maxTurns: null, maxSeconds: null, tokenBudget: null }, submittedDraft,
   });
   expect((screen.getByRole("textbox", { name: "Message draft" }) as HTMLTextAreaElement).value).toBe("");
+  initial.unmount();
+  fixture.recoverAfterRestart();
+  fixture.mount();
+  const reopened = within(await screen.findByRole("region", { name: "Conversation goal" }));
+  expect(reopened.getByText("Needs review")).toBeTruthy();
+  expect(reopened.getByText("234")).toBeTruthy();
+  expect(reopened.queryByRole("button", { name: "Resume goal" })).toBeNull();
+  await user.click(reopened.getByRole("button", { name: "Review executor stop" }));
+  const stop = within(reopened.getByRole("region", { name: "Review executor stop" }));
+  expect(stop.getByText(fixture.runId)).toBeTruthy();
+  await user.click(stop.getByRole("button", { name: "Verify saved stop evidence" }));
+  expect(invoke).toHaveBeenCalledWith("confirm_native_goal_stop", { projectId: fixture.projectId, revisionId: "goal-revision", runId: fixture.runId });
+  await user.click(await reopened.findByRole("button", { name: "Resume goal" }));
+  const checkpoint = within(reopened.getByRole("region", { name: "Review goal resume" }));
+  expect(checkpoint.getByText("Resume from this checkpoint in a fresh provider session.")).toBeTruthy();
+  await user.click(checkpoint.getByRole("button", { name: "Confirm goal resume" }));
+  expect(await reopened.findByText("Active")).toBeTruthy();
+  await user.click(await reopened.findByRole("button", { name: "Cancel goal" }));
+  expect(await reopened.findByText("Cancelled")).toBeTruthy();
 });
 
 it("opens bare goal controls, persists configured limits, and restores stopped goal evidence on reopen", async () => {
