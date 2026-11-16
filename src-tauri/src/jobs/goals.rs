@@ -441,6 +441,12 @@ fn load_revision(db: &Connection, id: String) -> Result<GoalRevision> {
     })
 }
 
+pub(super) fn orchestrator_goal(db: &Connection, run: &str) -> Result<Option<GoalRevision>> {
+    run_goal_membership(db, run)?
+        .map(|(_, membership)| load_revision(db, membership.revision))
+        .transpose()
+}
+
 pub(super) fn limit_blocker(
     db: &Connection,
     job: &str,

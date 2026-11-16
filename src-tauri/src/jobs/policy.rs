@@ -6,6 +6,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{
+    protection,
     providers::{Capability, SessionMode},
     repository::writers::writer_owner,
     store::Store,
@@ -115,11 +116,26 @@ pub enum DispatchRejection {
     },
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct EffectivePolicy {
     pub role: JobRole,
     pub permission: JobPermission,
     pub key: String,
     pub requirements: JobRequirements,
+    pub source: PolicySource,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub(super) enum PolicySource {
+    ProjectRule { workspace: JobWorkspace },
+    ImplementationRelease { release_id: String },
+    Default,
 }
 
 pub(super) fn rules(db: &Connection, project: &str) -> Result<Vec<JobRule>> {
@@ -156,6 +172,9 @@ pub(super) fn effective_policy(db: &Connection, job: &Job) -> Result<EffectivePo
             permission: rule.permission,
             key: format!("{:x}", Sha256::digest(serde_json::to_vec(&rule)?)),
             requirements: rule.requirements,
+            source: PolicySource::ProjectRule {
+                workspace: rule.workspace,
+            },
         });
     }
     if role == JobRole::Pipeline
@@ -174,6 +193,9 @@ pub(super) fn effective_policy(db: &Connection, job: &Job) -> Result<EffectivePo
             permission: JobPermission::Allow,
             key: format!("workflow-approval:{}", release.id),
             requirements: JobRequirements::default(),
+            source: PolicySource::ImplementationRelease {
+                release_id: release.id.clone(),
+            },
         });
     }
     Ok(EffectivePolicy {
@@ -185,13 +207,16 @@ pub(super) fn effective_policy(db: &Connection, job: &Job) -> Result<EffectivePo
         },
         key: "default".into(),
         requirements: JobRequirements::default(),
+        source: PolicySource::Default,
     })
 }
 
 pub(super) fn bind_attempt_policy(db: &Connection, job: &Job, run: &str) -> Result<()> {
+    let policy = effective_policy(db, job)?;
+    let evidence = protection::protect(&serde_json::to_vec(&policy)?)?;
     db.execute(
-        "INSERT INTO job_attempt_policies (run_id, policy_key) VALUES (?1, ?2)",
-        params![run, effective_policy(db, job)?.key],
+        "INSERT INTO job_attempt_policies (run_id, policy_key, evidence) VALUES (?1, ?2, ?3)",
+        params![run, policy.key, evidence],
     )?;
     Ok(())
 }

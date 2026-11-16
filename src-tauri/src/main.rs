@@ -288,6 +288,7 @@ fn main() {
             ipc::save_workbench_layout,
             ipc::run_snapshot,
             ipc::inspect_conversation_run,
+            ipc::run_orchestration,
             ipc::list_conversations,
             ipc::checkout_conversation,
             ipc::create_conversation,

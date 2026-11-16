@@ -27,6 +27,19 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 #[tauri::command]
+pub async fn run_orchestration(
+    store: State<'_, Store>,
+    project_id: String,
+    run_id: String,
+    conversation_id: Option<String>,
+) -> Result<Option<omniagent::jobs::RunOrchestration>, String> {
+    store
+        .run_orchestration(project_id, run_id, conversation_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
 pub async fn conversation_question_timeline(
     store: State<'_, Store>,
     conversation_id: String,

@@ -21,7 +21,8 @@ use omniagent::{
 
 fn remove_recent_schema(db: &rusqlite::Connection) -> Result<()> {
     db.execute_batch(
-        "DROP TABLE attempt_subagent_audit_routing;
+        "ALTER TABLE job_attempt_policies DROP COLUMN evidence;
+         DROP TABLE attempt_subagent_audit_routing;
          DROP TABLE task_delivery_events;
          DROP TABLE verified_delivery_commits;
          DROP TABLE delivery_commit_intents;
@@ -425,7 +426,7 @@ async fn project_job_rules_match_the_role_operation_and_workspace() -> Result<()
         .await?;
     let changed = vec![task_allow, checkout_review, deny];
     store
-        .set_project_job_rules(project.clone(), rules, changed)
+        .set_project_job_rules(project.clone(), rules, changed.clone())
         .await?;
     let pending = inspect(&review).await?.unwrap().blockers;
     assert!(
@@ -433,7 +434,7 @@ async fn project_job_rules_match_the_role_operation_and_workspace() -> Result<()
     );
     assert!(
         store
-            .decide_job_approval(project, approval_id, true)
+            .decide_job_approval(project.clone(), approval_id, true)
             .await
             .is_err()
     );
@@ -452,6 +453,20 @@ async fn project_job_rules_match_the_role_operation_and_workspace() -> Result<()
         plan.run.id
     );
     assert!(store.claim_next_job(environment(false)).await?.is_none());
+    let admitted = store.run_orchestration(
+        project.clone(), plan.run.id.clone(), Some(plan.conversation_id.clone()),
+    ).await?.context("missing admitted rule evidence")?;
+    let admitted = serde_json::to_value(admitted)?;
+    assert_eq!(admitted["policy"]["evidence"]["permission"], "allow");
+    assert_eq!(admitted["policy"]["evidence"]["source"]["workspace"]["type"], "task");
+    let mut replacement = changed.clone();
+    replacement[0].permission = JobPermission::Deny;
+    store.set_project_job_rules(project.clone(), changed, replacement).await?;
+    let historical = store.run_orchestration(
+        project.clone(), plan.run.id.clone(), Some(plan.conversation_id),
+    ).await?.context("the saved rule disappeared after a policy change")?;
+    assert_eq!(serde_json::to_value(historical)?["policy"], admitted["policy"]);
+    assert!(store.run_orchestration(project, plan.run.id, Some("unrelated".into())).await?.is_none());
     Ok(())
 }
 

@@ -11,11 +11,13 @@ import { ConversationDeliveries, type ConversationInput } from "@/conversation-d
 import { ConversationInventory } from "@/conversation-inventory";
 import { ConversationProfile } from "@/conversation-profile";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
+import { RunOrchestrationPanel } from "@/run-orchestration";
 import { ConversationQuestionTimeline } from "@/conversation-question-timeline";
 import {
   ConversationResponseEvidence, cloneTurnResponseEvidence, newTurnResponseEvidence, recordResponseEvidence,
   type ResponseObservation, type TurnResponseEvidence,
 } from "@/conversation-response-evidence";
+import type { WorkspaceProps } from "@/workbench-contract";
 import { ConversationSubagentQuotaPanel } from "@/subagent-quota";
 import { AttemptSubagentAudit } from "@/subagent-audit-controls";
 
@@ -230,12 +232,13 @@ export function ConversationRequests({ activity, conversationId, runId }: {
   );
 }
 
-export function ConversationActivity({ conversationId, run, projection, onClose, embedded }: {
+export function ConversationActivity({ conversationId, run, projection, onClose, embedded, navigation }: {
   conversationId: string;
   run: RunRecord;
   projection?: Projection;
   onClose: () => void;
   embedded?: boolean;
+  navigation?: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
 }) {
   const [showInput, setShowInput] = useState(false);
   const heading = useRef<HTMLButtonElement>(null);
@@ -264,6 +267,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
         <dt>Execution</dt><dd role="status">{labels[run.status]}</dd>
         <dt>Run ID</dt><dd className="break-all font-mono">{run.id}</dd>
       </dl>
+      <RunOrchestrationPanel scope={{ projectId: run.projectId, conversationId, runId: run.id }} live={live} navigation={navigation} />
       {projection && <ConversationChildren delegation={projection.delegation} />}
       <ConversationSubagentQuotaPanel conversationId={conversationId} runId={run.id} live={live} />
       <ConversationChecklistProgress projectId={run.projectId} runId={run.id} live={live} />

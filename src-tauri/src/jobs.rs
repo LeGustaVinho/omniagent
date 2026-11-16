@@ -22,6 +22,7 @@ mod instructions;
 mod native_goal_evidence;
 mod native_goal_qualification;
 mod notices;
+mod orchestration;
 mod pipeline;
 mod policy;
 mod question_answers;
@@ -68,6 +69,7 @@ pub(crate) use native_goal_evidence::{
 };
 pub(crate) use native_goal_qualification::{NativeGoalSeed, effective_qualification_matches};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
+pub use orchestration::RunOrchestration;
 pub use question_answers::ConversationQuestionTimelineEntry;
 pub use pipeline::{
     PipelineAgentInput, PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease,

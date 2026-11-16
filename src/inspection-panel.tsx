@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
 import { deliveryBase, deliveryBranch, deliveryNotePath, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
 import type { DeliveryStep, WorkspaceProps } from "@/workbench-contract";
-import { WorktreeEvidence } from "@/worktree-evidence";
+import { RunOrchestrationPanel } from "@/run-orchestration";
 
 const steps: Record<DeliveryStep, string> = {
   note: "Ready to plan", question: "Waiting for input", plan: "Awaiting implementation approval",
@@ -26,7 +26,7 @@ type InspectorProps = WorkspaceProps & { runId: string; conversationId?: string;
 export function RunInspector({ runId, conversationId, onClose, checkout, simulation, openWorkspace, openChanges, openActivity }: InspectorProps) {
   const [page, setPage] = useState<InspectorPage>("Overview");
   if (!simulation) return <RecordedExecutionRun projectId={checkout.projectId} runId={runId}
-    conversationId={conversationId} onClose={onClose} openActivity={openActivity} />;
+    conversationId={conversationId} onClose={onClose} openActivity={openActivity} openWorkspace={openWorkspace} />;
 
   const step = simulation.delivery;
   const status = steps[step];
@@ -67,7 +67,7 @@ export function RunInspector({ runId, conversationId, onClose, checkout, simulat
   );
 }
 
-type RecordedRunProps = Pick<InspectorProps, "conversationId" | "runId" | "onClose" | "openActivity"> & { projectId: string };
+type RecordedRunProps = Pick<InspectorProps, "conversationId" | "runId" | "onClose" | "openActivity" | "openWorkspace"> & { projectId: string };
 
 function RecordedExecutionRun(props: RecordedRunProps) {
   const { projectId, conversationId, runId } = props;
@@ -80,11 +80,14 @@ function RecordedExecutionRun(props: RecordedRunProps) {
   if (conversationId) return <RecordedConversationRun {...props} />;
   if (command.isError) return <p className="work-progress" role="alert">{String(command.error)}</p>;
   if (command.isPending) return <p className="work-progress" role="status">Loading execution…</p>;
-  return command.data ? <RecordedCommandRun run={command.data} onClose={props.onClose} />
+  return command.data ? <RecordedCommandRun run={command.data} onClose={props.onClose} navigation={props} />
     : <RecordedConversationRun {...props} />;
 }
 
-function RecordedCommandRun({ run, onClose }: { run: RunRecord; onClose: () => void }) {
+function RecordedCommandRun({ run, onClose, navigation }: {
+  run: RunRecord; onClose: () => void;
+  navigation: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
+}) {
   const { id: runId, projectId, status } = run;
   const [open, setOpen] = useState(false);
   const live = isLiveRun(run);
@@ -102,7 +105,7 @@ function RecordedCommandRun({ run, onClose }: { run: RunRecord; onClose: () => v
     <p className="work-tag capitalize" role="status">{status.replaceAll("_", " ")}</p>
     <div className="work-inspection-body">
       {failure && <JobFailurePanel projectId={projectId} runId={runId} />}
-      {!live && !failure && <WorktreeEvidence projectId={projectId} runId={runId} ownerTaskId={null} />}
+      <RunOrchestrationPanel scope={{ projectId, runId }} live={live} navigation={navigation} />
       {!live && <details onToggle={(event) => setOpen(event.currentTarget.open)}>
         <summary>Command output</summary>
         {open && <>
@@ -121,7 +124,7 @@ function RecordedCommandRun({ run, onClose }: { run: RunRecord; onClose: () => v
   </section>;
 }
 
-function RecordedConversationRun({ conversationId, projectId, runId, onClose, openActivity }: RecordedRunProps) {
+function RecordedConversationRun({ conversationId, projectId, runId, onClose, openActivity, openWorkspace }: RecordedRunProps) {
   const current = useQuery({
     queryKey: ["inspect-conversation-run", projectId, conversationId, runId],
     queryFn: () => invoke<[RunRecord, string]>("inspect_conversation_run", { projectId, conversationId, runId }),
@@ -132,7 +135,8 @@ function RecordedConversationRun({ conversationId, projectId, runId, onClose, op
   if (current.error) return <p className="work-progress" role="alert">{String(current.error)}</p>;
   if (!run || !owner) return <p className="work-progress" role="status">Loading execution…</p>;
   return <div className="h-full overflow-auto">
-    <ConversationActivity embedded conversationId={owner} run={run} projection={activity.projection} onClose={onClose} />
+    <ConversationActivity embedded conversationId={owner} run={run} projection={activity.projection} onClose={onClose}
+      navigation={{ openActivity, openWorkspace }} />
     <div className="work-inspection-body">
       {!activity.live && <DownstreamHistory projectId={projectId} runId={runId} openActivity={openActivity} />}
       {(run.status === "failed" || run.status === "interrupted") && <JobFailurePanel projectId={projectId} runId={runId} />}

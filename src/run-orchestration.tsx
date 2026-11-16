@@ -1,0 +1,171 @@
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
+import type { JobOrigin } from "@/bindings/JobOrigin";
+import type { JobRequirements } from "@/bindings/JobRequirements";
+import type { JobWorkspace } from "@/bindings/JobWorkspace";
+import type { PipelineJobOrigin } from "@/bindings/PipelineJobOrigin";
+import { Button } from "@/components/ui/button";
+import { WorktreeEvidence } from "@/worktree-evidence";
+import type { WorkspaceProps } from "@/workbench-contract";
+
+type Scope = { projectId: string; runId: string; conversationId?: string };
+type SourceDocument = { revisionId: string; checkoutId: string; path: string; sha256: string; baseCommit: string | null };
+type Orchestration = {
+  job: {
+    id: string; kind: string; taskId: string | null; ownerTaskId: string | null; origin: JobOrigin;
+    operatorRequested: boolean; stage: PipelineJobOrigin | null;
+  } | null;
+  route: { mode: string; questionRoute: string } | null;
+  stagePin: { workflowRevision: string; instanceRevision: string; definitionRevision: number; schedulerProfile: string | null } | null;
+  policy: {
+    revision: string;
+    evidence: {
+      role: string; permission: string; requirements: JobRequirements;
+      source: { kind: "default" } | { kind: "project_rule"; workspace: JobWorkspace } |
+        { kind: "implementation_release"; releaseId: string };
+    } | null;
+  } | null;
+  context: {
+    role: string; policyRevision: string; availableBytes: number; usedBytes: number;
+    decisions: { title: string; reason: string; selectionOrder: number | null; encodedBytes: number }[];
+  } | null;
+  document: SourceDocument | null;
+  goal: {
+    revisionId: string; continuationOwner: string;
+    definition: { objective: string; maxTurns: number | null; maxSeconds: number | null; tokenBudget: number | null };
+  } | null;
+  unit: { purpose: string; ordinal: number } | null;
+};
+
+function words(value: string) {
+  return value.replaceAll(/[_-]/g, " ");
+}
+
+function originLabel(job: NonNullable<Orchestration["job"]>) {
+  if (job.origin.type === "pipeline") return "Workflow stage";
+  if (job.origin.type === "operator" || job.operatorRequested) return "Operator request";
+  return "Delegated by another attempt";
+}
+
+function SavedDocument({ document }: { document: SourceDocument }) {
+  const [open, setOpen] = useState(false);
+  const query = useQuery({
+    queryKey: ["repository-markdown", document.checkoutId, document.revisionId],
+    queryFn: () => invoke<{ markdown: string } | null>("read_repository_markdown", {
+      checkoutId: document.checkoutId, revisionId: document.revisionId,
+    }),
+    enabled: open,
+    staleTime: Infinity,
+  });
+  return <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>Saved Markdown · {document.path}</summary>
+    <p className="break-all">Revision {document.revisionId} · SHA-256 {document.sha256}</p>
+    {document.baseCommit && <p className="break-all">Base commit {document.baseCommit}</p>}
+    {open && query.isPending && <p role="status">Loading saved Markdown…</p>}
+    {query.error && <p role="alert">{String(query.error)}</p>}
+    {query.data === null && <p>Saved Markdown unavailable.</p>}
+    {query.data && <pre className="max-h-72 overflow-auto whitespace-pre-wrap">{query.data.markdown}</pre>}
+  </details>;
+}
+
+function OrchestrationDetails({ data, scope, navigation }: {
+  data: Orchestration; scope: Scope;
+  navigation?: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
+}) {
+  const { context, document, goal, job, policy, route, stagePin, unit } = data;
+  const stage = job?.stage;
+  const taskId = job?.taskId;
+  const requestingRun = job?.origin.type === "agent" ? job.origin.runId : undefined;
+  const source = policy?.evidence?.source;
+  const goalBudgets = goal && [
+    goal.definition.maxTurns !== null && `${goal.definition.maxTurns} turns`,
+    goal.definition.maxSeconds !== null && `${goal.definition.maxSeconds} seconds`,
+    goal.definition.tokenBudget !== null && `${goal.definition.tokenBudget.toLocaleString()} tokens`,
+  ].filter(Boolean);
+  return <>
+    <dl className="grid gap-1">
+      {goal && <>
+        <dt>Goal objective</dt><dd className="whitespace-pre-wrap break-words">{goal.definition.objective}</dd>
+        <dt>Goal revision</dt><dd className="break-all">{goal.revisionId}</dd>
+        <dt>Continuation owner</dt><dd>{words(goal.continuationOwner)}</dd>
+        {!!goalBudgets?.length && <><dt>Goal budget</dt><dd>{goalBudgets.join(" · ")}</dd></>}
+      </>}
+      {unit && <><dt>Unit {unit.ordinal} objective</dt><dd className="break-words">{unit.purpose}</dd></>}
+      {job && <><dt>Routing source</dt><dd>{originLabel(job)}</dd></>}
+      {stage && <>
+        <dt>Workflow stage</dt><dd className="capitalize">{words(stage.nodeInstanceId)}</dd>
+        {stage.planRevision && <><dt>Plan revision</dt><dd className="break-all">{stage.planRevision}</dd></>}
+        {stage.release && <><dt>Implementation release</dt><dd className="break-all">{stage.release.id}</dd></>}
+      </>}
+      {stagePin && <>
+        <dt>Workflow revision</dt><dd className="break-all">{stagePin.workflowRevision}</dd>
+        <dt>Stage revision</dt><dd className="break-all">{stagePin.instanceRevision} · Definition {stagePin.definitionRevision}</dd>
+        {stagePin.schedulerProfile && <><dt>Stage scheduler profile</dt><dd className="capitalize">{words(stagePin.schedulerProfile)}</dd></>}
+      </>}
+      {route && <>
+        <dt>Dispatch mode</dt><dd className="capitalize">{words(route.mode)}</dd>
+        <dt>Question route</dt><dd className="capitalize">{words(route.questionRoute)}</dd>
+      </>}
+      {policy && <>
+        <dt>Admitted policy revision</dt><dd className="break-all">{policy.revision}</dd>
+        <dt>Effective rule at admission</dt>
+        {policy.evidence && source ? <>
+          <dd className="capitalize">{words(policy.evidence.role)} · {words(policy.evidence.permission)} · {words(source.kind)}
+            {source.kind === "project_rule" && ` · ${words(source.workspace.type)} scope`}
+          </dd>
+          {source.kind === "project_rule" && source.workspace.type !== "project" && <>
+            <dt>Rule scope ID</dt><dd className="break-all">{source.workspace.type === "checkout" ? source.workspace.checkoutId : source.workspace.taskId}</dd>
+          </>}
+          {!!policy.evidence.requirements.capabilities.length && <><dt>Required capabilities</dt><dd>{policy.evidence.requirements.capabilities.map(words).join(", ")}</dd></>}
+          {!!policy.evidence.requirements.customizations.length && <>
+            <dt>Required customizations</dt>
+            <dd><ul>{policy.evidence.requirements.customizations.map((entry, index) => <li key={index} className="break-all">
+              {words(entry.type)} · {"path" in entry ? entry.path : entry.id}
+            </li>)}</ul></dd>
+          </>}
+        </> : <dd>Rule details unavailable for this attempt.</dd>}
+      </>}
+      {context && <>
+        <dt>Context selection</dt><dd>{context.role} · {context.usedBytes.toLocaleString()} of {context.availableBytes.toLocaleString()} bytes</dd>
+        <dt>Context policy revision</dt><dd className="break-all">{context.policyRevision}</dd>
+      </>}
+    </dl>
+    {context && context.decisions.length > 0 && <details>
+      <summary>Context selection reasons</summary>
+      <ul className="grid gap-1">{context.decisions.map((decision, index) => <li key={index}>
+        <span className="break-words">{decision.title}</span> · {words(decision.reason)} · {decision.encodedBytes.toLocaleString()} bytes
+        {decision.selectionOrder !== null && ` · Included ${decision.selectionOrder + 1}`}
+      </li>)}</ul>
+    </details>}
+    {document && <SavedDocument document={document} />}
+    {navigation && <div className="flex flex-wrap gap-2">
+      {taskId && <Button variant="outline" onClick={() => navigation.openWorkspace("tasks", taskId)}>Open task</Button>}
+      {stage && <Button variant="outline" onClick={() => navigation.openWorkspace("pipelines", stage.pipelineRunId)}>Open workflow</Button>}
+      {requestingRun && <Button variant="outline" onClick={() => navigation.openActivity(requestingRun)}>Open requesting attempt</Button>}
+    </div>}
+    {job && <WorktreeEvidence projectId={scope.projectId} runId={scope.runId} ownerTaskId={job.ownerTaskId} />}
+  </>;
+}
+
+export function RunOrchestrationPanel({ scope, live, navigation }: {
+  scope: Scope; live: boolean;
+  navigation?: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const record = useQuery({
+    queryKey: ["run-orchestration", scope.projectId, scope.runId, scope.conversationId],
+    queryFn: () => invoke<Orchestration | null>("run_orchestration", scope),
+    enabled: expanded,
+    refetchInterval: expanded && live ? 1500 : false,
+  });
+  return <details onToggle={(event) => setExpanded(event.currentTarget.open)} className="min-w-0">
+    <summary>Orchestration and worktree</summary>
+    {expanded && <div className="grid gap-2">
+      {record.isPending && <p role="status">Loading routing and policy…</p>}
+      {record.error && <p role="alert">{String(record.error)}</p>}
+      {record.data === null && <p>Orchestration evidence is unavailable.</p>}
+      {record.data && <OrchestrationDetails data={record.data} scope={scope} navigation={navigation} />}
+    </div>}
+  </details>;
+}
