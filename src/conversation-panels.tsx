@@ -27,7 +27,8 @@ import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun
 import { ConversationInstructions, useConversationInstructions } from "@/conversation-instructions";
 import { ConversationHistoryControls, ConversationMessageHistoryActions, type ConversationMessageHistoryAction } from "@/conversation-history-controls";
 import { ConversationSubagentControls } from "@/subagent-quota";
-import { SideQuestionPanel, type SideSubmission, useSideRequests, useSuggestionMode } from "@/conversation-side-requests";
+import { SideQuestionPanel, type SideSubmission } from "@/conversation-side-requests";
+import { ConversationSuggestionButton, useConversationSuggestion } from "@/conversation-suggestions";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
 import { ConversationReferenceChips, type ConversationReferencePreview } from "@/conversation-reference";
@@ -507,24 +508,12 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "side-requests"] }),
   });
-  const suggestionsEnabled = useSuggestionMode(visible).data === "omniagent";
-  const sideHistory = useSideRequests(conversationId, visible && suggestionsEnabled);
-  const suggestionSource = useRef<string>(undefined);
-  useEffect(() => {
-    if (run && isLiveRun(run)) suggestionSource.current = run.id;
-    if (!visible || !suggestionsEnabled || busy || hasReferences || hasAttachments || text.trim() || !selection || !selected?.option.selectable
-      || run?.status !== "succeeded" || suggestionSource.current !== run.id) return;
-    suggestionSource.current = undefined;
-    void invoke<SideSubmission>("enqueue_conversation_side_request", {
-      conversationId, expectedSourceRunId: run.id, selection, effort: sideEffort, mode: sideMode,
-      purpose: "suggestion", question: "",
-    }).then(() => queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "side-requests"] }), () => {});
-  }, [run, visible, suggestionsEnabled, busy, hasReferences, hasAttachments, text, selection, selected, conversationId, queryClient, sideEffort, sideMode]);
-  const suggested = suggestionsEnabled && !busy && !hasReferences && !hasAttachments && !text.trim() ? sideHistory.data?.find((item) =>
-    item.purpose === "suggestion" && item.contextId === history.data?.contextId
-    && item.sourceRunId === run?.id && item.provider === selection?.provider && item.profileId === selection?.profileId
-    && item.model === selection?.modelId && item.effort === sideEffort && item.mode === sideMode)?.response?.outcome : undefined;
-  const suggestion = suggested?.kind === "answered" ? suggested.text : undefined;
+  const suggestion = useConversationSuggestion({
+    conversationId, contextId: history.data?.contextId, run, selection, effort: sideEffort, mode,
+    draft: text, draftVersion: activeEdit.current, visible, liveFresh: latest.isFetchedAfterMount,
+    eligible: !busy && draft.isSuccess && !send.isPending && !continueSend.isPending && !startGoal.isPending
+      && !hasReferences && !hasAttachments && !hasSkills && !isSideQuestion && !composingGoal && Boolean(selected?.option.selectable),
+  });
   const recover = useMutation({
     mutationFn: ({ jobId, runId, action }: { jobId: string; runId: string; action: RecoveryAction }) =>
       invoke<Job>("recover_conversation_job", { conversationId, jobId, runId, action }),
@@ -721,9 +710,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           {sideCompletion && <button type="button" className="conv-quiet-button" onClick={completeSideQuestion}>
             <code>/btw</code> Ask a side question
           </button>}
-          {suggestion && <button type="button" className="conv-quiet-button" onClick={() => editDraft(suggestion)}>
-            Use suggested draft · {suggestion}
-          </button>}
+          {suggestion && <ConversationSuggestionButton suggestion={suggestion} onAccept={() => editDraft(suggestion.text)} />}
           <label htmlFor={`draft-${conversationId}`} className="sr-only">Message draft</label>
           <textarea ref={composer} id={`draft-${conversationId}`} placeholder="Ask about this repository…"
             aria-autocomplete="list"
@@ -760,7 +747,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
               }
               if (suggestion && event.key === "Tab" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
-                editDraft(suggestion);
+                editDraft(suggestion.text);
                 return;
               }
               if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.nativeEvent.isComposing) {
