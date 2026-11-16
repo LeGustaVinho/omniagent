@@ -157,3 +157,38 @@ it("shares hierarchy, checklist rows, filters, and saved Git evidence between bo
   expect(within(screen.getByRole("region", { name: "Completed" })).getByRole("button", { name: standalone.title })).toBeTruthy();
   expect(within(screen.getByRole("region", { name: "Ready" })).queryByRole("button", { name: parent.title })).toBeNull();
 });
+
+it("routes board moves and the detail control through the same guarded transition", async () => {
+  const { user, states } = testWorkspace();
+  await user.click(await within(screen.getByRole("region", { name: "Ready" })).findByRole("button", { name: parent.title }));
+  const detail = within(screen.getByRole("region", { name: parent.title }));
+  dropWork(parent.id, "in_progress");
+  await within(screen.getByRole("region", { name: "In Progress" })).findByRole("button", { name: parent.title });
+  expect(invoke).toHaveBeenCalledWith("transition_project_work", { projectId, taskId: parent.id, expectedState: "ready", nextState: "in_progress" });
+  await waitFor(() => expect(detail.getByRole("status").textContent).toBe("In Progress"));
+
+  dropWork(blocked.id, "ready");
+  expect(invoke).not.toHaveBeenCalledWith("transition_project_work", expect.objectContaining({ taskId: blocked.id }));
+  await user.click(within(screen.getByRole("region", { name: "Blocked" })).getByRole("button", { name: blocked.title }));
+  const dependency = within(screen.getByRole("region", { name: "Task dependency blockers" }));
+  expect(dependency.getByRole("button", { name: parent.title })).toBeTruthy();
+
+  await user.click(dependency.getByRole("button", { name: parent.title }));
+  states[parent.id] = "in_review";
+  await user.selectOptions(await screen.findByRole("combobox", { name: "Move work to" }), "ready");
+  expect(await screen.findByText(/The work state changed/)).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("transition_project_work", { projectId, taskId: parent.id, expectedState: "in_progress", nextState: "ready" });
+  await within(screen.getByRole("region", { name: "In Review" })).findByRole("button", { name: parent.title });
+  await user.click(screen.getByRole("button", { name: "Table" }));
+  const table = within(screen.getByRole("table", { name: "Agile table" }));
+  await user.click(table.getByRole("button", { name: `Expand ${epic.title}` }));
+  const row = table.getByText(parent.title, { selector: "strong" }).closest("tr")!;
+  expect(within(row).getByText("In Review")).toBeTruthy();
+  const gitWaitingRow = table.getByText(gitWaiting.title, { selector: "strong" }).closest("tr")!;
+  expect(within(gitWaitingRow).getByText("Waiting for commit")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Kanban" }));
+  const inReview = within(screen.getByRole("region", { name: "In Review" }));
+  expect(inReview.getByText("Waiting for commit")).toBeTruthy();
+  dropWork(gitWaiting.id, "completed");
+  expect(invoke).not.toHaveBeenCalledWith("transition_project_work", expect.objectContaining({ taskId: gitWaiting.id }));
+});
