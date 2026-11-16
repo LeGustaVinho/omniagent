@@ -84,6 +84,8 @@ function mockRepository() {
     switch (command) {
       case "workbench_layout": return null;
       case "save_workbench_layout": return;
+      case "watch_repository_note_index": return "watch-index";
+      case "unwatch_repository_note_index": return;
       case "repository_note_catalog": return [
         { path: release, frontmatter: null },
         { path: checklist, frontmatter: checklistProperties },

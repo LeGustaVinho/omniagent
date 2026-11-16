@@ -220,6 +220,7 @@ fn main() {
             app.manage(scheduler);
             app.manage(ipc::EventSubscriptions::default());
             app.manage(note_runtime::NoteWatches::default());
+            app.manage(note_index_runtime::NoteIndexWatches::default());
             app.manage(fixture_runtime::FixtureRuns::default());
             desktop::create_tray(app)?;
             desktop::notify_job_activity(app.handle().clone(), notices)?;
@@ -286,8 +287,15 @@ fn main() {
             desktop::read_repository_markdown,
             desktop::repository_note_catalog,
             note_index_runtime::rebuild_repository_note_index,
+            note_index_runtime::reconcile_repository_note_index,
+            note_index_runtime::watch_repository_note_index,
+            note_index_runtime::unwatch_repository_note_index,
             note_index_runtime::repository_indexed_note,
             note_index_runtime::search_repository_note_index,
+            note_index_runtime::repository_note_edges,
+            note_index_runtime::repository_note_relationships,
+            note_index_runtime::resolve_repository_note_links,
+            note_index_runtime::suggest_repository_note_links,
             note_runtime::open_repository_document,
             note_runtime::save_repository_document,
             note_runtime::read_repository_attachment,

@@ -88,6 +88,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/071-attachment-history-deletion.sql"),
     include_str!("../migrations/072-project-description-drafts.sql"),
     include_str!("../migrations/073-repository-note-index.sql"),
+    include_str!("../migrations/074-repository-note-links.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

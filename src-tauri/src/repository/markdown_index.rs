@@ -12,12 +12,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{providers::configuration::open_locked_local_file, store::Store};
 
-use super::{checkout_root, markdown_catalog::note_paths, verify_checkout};
+use super::{
+    checkout_root, markdown_catalog::note_paths, markdown_links::MarkdownLinkNote, verify_checkout,
+};
+pub use links::{IndexedBacklink, IndexedNoteEdge, IndexedNoteRelationships, IndexedOutgoingLink};
 pub use metadata::{
     IndexedBlock, IndexedHeading, IndexedLinkSyntax, IndexedNoteLink, IndexedProperty,
 };
 use metadata::{NoteMetadata, project};
 
+mod links;
 mod metadata;
 
 #[cfg(test)]
@@ -71,6 +75,14 @@ impl Store {
         &self,
         checkout: String,
     ) -> Result<Vec<IndexedNote>> {
+        self.reconcile_repository_note_index(checkout, None).await
+    }
+
+    pub async fn reconcile_repository_note_index(
+        &self,
+        checkout: String,
+        paths: Option<Vec<String>>,
+    ) -> Result<Vec<IndexedNote>> {
         let lock = {
             let mut locks = self
                 .note_index_locks
@@ -97,12 +109,20 @@ impl Store {
                 move |db| index_hashes(db, &checkout)
             })
             .await?;
-        let scan =
-            tokio::task::spawn_blocking(move || scan_checkout(&layout.root, max_bytes, &known))
-                .await??;
+        let scan = tokio::task::spawn_blocking(move || {
+            let paths = paths.map(|paths| {
+                paths
+                    .into_iter()
+                    .map(|path| path.replace('\\', "/").to_lowercase())
+                    .collect::<BTreeSet<_>>()
+            });
+            scan_checkout(&layout.root, max_bytes, &known, paths.as_ref())
+        })
+        .await??;
         self.execute(move |db| {
             let tx = db.transaction()?;
-            replace_index(&tx, &checkout, scan)?;
+            let changed = replace_index(&tx, &checkout, scan)?;
+            links::rebuild_edges(&tx, &checkout, changed)?;
             let notes = list_indexed_notes(&tx, &checkout)?;
             tx.commit()?;
             Ok(notes)
@@ -161,6 +181,11 @@ impl Store {
     }
 }
 
+pub(super) fn source_link_note(path: &str, source: &str) -> MarkdownLinkNote {
+    let (title, metadata) = project(path, source, "rename-preview");
+    links::link_note(path.to_owned(), title, metadata)
+}
+
 fn index_hashes(db: &Connection, checkout: &str) -> Result<BTreeMap<String, String>> {
     let mut statement =
         db.prepare("SELECT path, sha256 FROM repository_note_index WHERE checkout_id = ?1")?;
@@ -174,12 +199,17 @@ fn scan_checkout(
     root: &Path,
     max_bytes: u64,
     known: &BTreeMap<String, String>,
+    paths: Option<&BTreeSet<String>>,
 ) -> Result<NoteScan> {
     let mut scan = NoteScan {
         present: BTreeSet::new(),
         updates: Vec::new(),
     };
     for path in note_paths(root)? {
+        if known.contains_key(&path) && paths.is_some_and(|hints| !is_affected(&path, hints)) {
+            scan.present.insert(path);
+            continue;
+        }
         let Some(search_text) = read_source(&root.join(&path), max_bytes) else {
             continue;
         };
@@ -200,6 +230,15 @@ fn scan_checkout(
     Ok(scan)
 }
 
+fn is_affected(path: &str, hints: &BTreeSet<String>) -> bool {
+    let path = path.to_lowercase();
+    if hints.contains(&path) {
+        return true;
+    }
+    path.match_indices('/')
+        .any(|(index, _)| hints.contains(&path[..index]))
+}
+
 fn read_source(path: &Path, max_bytes: u64) -> Option<String> {
     let file = open_locked_local_file(path).ok()?;
     let mut bytes = Vec::new();
@@ -215,12 +254,13 @@ fn read_source(path: &Path, max_bytes: u64) -> Option<String> {
     (!text.contains('\0')).then_some(text)
 }
 
-fn replace_index(db: &Connection, checkout: &str, scan: NoteScan) -> Result<()> {
+fn replace_index(db: &Connection, checkout: &str, scan: NoteScan) -> Result<bool> {
     let known = index_hashes(db, checkout)?;
+    let mut changed = !scan.updates.is_empty();
     let mut discard =
         db.prepare("DELETE FROM repository_note_index WHERE checkout_id = ?1 AND path = ?2")?;
     for path in known.keys().filter(|path| !scan.present.contains(*path)) {
-        discard.execute(params![checkout, path])?;
+        changed |= discard.execute(params![checkout, path])? != 0;
     }
     let mut replace = db.prepare(
         "INSERT INTO repository_note_index(checkout_id, path, sha256, title, search_text, metadata) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -237,7 +277,7 @@ fn replace_index(db: &Connection, checkout: &str, scan: NoteScan) -> Result<()> 
             serde_json::to_string(&note.metadata)?
         ])?;
     }
-    Ok(())
+    Ok(changed)
 }
 
 fn list_indexed_notes(db: &Connection, checkout: &str) -> Result<Vec<IndexedNote>> {

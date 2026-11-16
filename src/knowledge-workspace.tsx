@@ -1,6 +1,6 @@
 import {
   AlertCircle, BookOpen, BookOpenText, FilePenLine, FileText, GitFork, Link2,
-  ListTree, Network, PanelRight, Paperclip, Save, Search, SplitSquareHorizontal, Wand2,
+  ListTree, Network, PanelRight, Paperclip, RotateCw, Save, Search, SplitSquareHorizontal, Wand2,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -307,12 +307,15 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           <SidebarToggle open={sidebar} setOpen={setSidebar} label="Toggle Knowledge navigation" />
           <BookOpenText size={17} /><h1>Knowledge</h1>
           <div className="file-toolbar">
+            {!simulated && <button type="button" className="fw-icon" title="Rebuild note index" aria-label="Rebuild note index"
+              disabled={noteIndex.index.isFetching} onClick={() => { void noteIndex.index.refetch(); }}><RotateCw size={15} /></button>}
             <button type="button" className="fw-btn note-graph-toggle" aria-pressed={graph} onClick={() => setGraph(!graph)}><Network size={15} />Graph</button>
             <button type="button" className="fw-icon" title="Note details" aria-label="Note details" aria-expanded={Boolean(inspector)} onClick={() => setInspector(inspector ? null : "outline")}><PanelRight size={16} /></button>
           </div>
         </header>
         {dock.error && <p role="alert" className="file-status"><AlertCircle size={15} />{dock.error}</p>}
         {repository.error && <p role="alert" className="file-status"><AlertCircle size={15} />{repository.error}</p>}
+        {noteIndex.watchError && <p role="alert" className="file-status"><AlertCircle size={15} />{noteIndex.watchError}</p>}
         {status && <p role="status" className="file-status">{status}</p>}
         {!graph && <div className="note-mode-bar">
           <div className="note-modes" aria-label="Note display modes">
