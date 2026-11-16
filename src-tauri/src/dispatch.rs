@@ -22,7 +22,9 @@ use crate::{
     tasks::TaskDispatchContext,
 };
 
+mod attachment_evidence;
 mod instruction_evidence;
+pub use attachment_evidence::{AttachmentEvidence, AttachmentTransport};
 pub use instruction_evidence::{
     InstructionDispatch, InstructionDispatchMode, InstructionDispatchStatus, InstructionReceipt,
     InstructionReview,

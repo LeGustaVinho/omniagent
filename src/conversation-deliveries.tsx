@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
+import { SavedAttachments, type AttachmentEvidence } from "@/conversation-attachment-evidence";
 
 type InstructionDispatch = {
   instructionId: string;
@@ -20,6 +21,7 @@ export type ConversationInput = {
   delivery: "prepared" | "submitted" | "unconfirmed";
   turnId: string;
   frames: string[];
+  attachments: AttachmentEvidence[];
   instructions: InstructionDispatch[];
 };
 
@@ -90,6 +92,7 @@ export function ConversationDeliveries({ input, conversationId, runId, live }: {
     <p className="break-all text-xs text-muted-foreground">Turn {input.turnId}</p>
     <p className="text-xs text-muted-foreground">Delivery {input.delivery}</p>
     <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{input.frames.join("")}</pre>
+    <SavedAttachments attachments={input.attachments} conversationId={conversationId} runId={runId} />
     {input.instructions.length > 0 && <ol aria-label="Instruction deliveries" className="mt-2 grid gap-2">
       {input.instructions.map((item) => <DeliveryRow key={item.instructionId} item={item}
         conversationId={conversationId} runId={runId} live={live} />)}

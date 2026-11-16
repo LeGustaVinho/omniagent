@@ -10,6 +10,8 @@ import { ConversationDeliveries, type ConversationInput } from "@/conversation-d
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
 
 type EventData =
+  | { type: "dispatch_submitted"; dispatch_id: string }
+  | { type: "context_read"; path: string; tool: string }
   | { type: "assistant_delta" | "assistant_message" | "plan_proposed"; text: string }
   | { type: "error"; message: string }
   | { type: "tool"; name: string; phase: string }
@@ -50,12 +52,15 @@ type Projection = {
   auditGaps: SubagentAuditGap[];
   reasoning: Extract<EventData, { type: "reasoning" }>[];
   tools: Extract<EventData, { type: "tool" }>[];
+  promptSubmitted: boolean;
+  fileReads: Extract<EventData, { type: "context_read" }>[];
   usage?: Extract<EventData, { type: "usage" }>;
   contextWindow?: Extract<EventData, { type: "context_window_usage" }>;
 };
 const emptyProjection: Projection = {
   cursor: "0", streamed: "", final: "", plan: "", error: "", reasoning: [], tools: [],
   delegation: { children: {}, parentActivity: {} }, auditGaps: [],
+  promptSubmitted: false, fileReads: [],
 };
 const labels = {
   starting: "Starting", running: "Running", waiting_for_input: "Waiting for input",
@@ -87,6 +92,7 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
         ...prior,
         reasoning: [...prior.reasoning],
         tools: [...prior.tools],
+        fileReads: [...prior.fileReads],
         delegation: { children: { ...prior.delegation.children }, parentActivity: { ...prior.delegation.parentActivity } },
         auditGaps: [...prior.auditGaps],
       };
@@ -99,6 +105,8 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
           if (data.type === "child_activity") recordChildActivity(current.delegation, data, event.location);
           if (data.type === "subagent_audit_gap") current.auditGaps.push(data.report);
           if (event.location.parentItemId !== null) continue;
+          if (data.type === "dispatch_submitted") current.promptSubmitted = true;
+          if (data.type === "context_read" && current.promptSubmitted) current.fileReads.push(data);
           if (data.type === "assistant_delta") current.streamed += data.text;
           if (data.type === "assistant_message") current.final += data.text;
           if (data.type === "plan_proposed") current.plan = data.text;
@@ -258,6 +266,10 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
       {Boolean(projection?.tools.length) && <details>
         <summary>Tool activity</summary>
         <ol>{projection?.tools.map((tool, index) => <li key={index}>{tool.name} · {tool.phase}</li>)}</ol>
+      </details>}
+      {Boolean(projection?.fileReads.length) && <details>
+        <summary>Reported file reads after input</summary>
+        <ol>{projection?.fileReads.map((read, index) => <li key={index} className="break-all text-xs">{read.path} · {read.tool}</li>)}</ol>
       </details>}
       {Boolean(projection?.reasoning.length) && <details>
         <summary>Reported reasoning</summary>

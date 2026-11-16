@@ -17,7 +17,7 @@ it("reviews the exact uncertain revision in the receiving run and keeps earlier 
     receipt: { kind: "turn_started", eventSequence: "17" }, steeringFrame: null, review: null,
   } as const;
   const input: ConversationInput = {
-    delivery: "submitted", turnId: "turn-id", frames: ["original wire"],
+    delivery: "submitted", turnId: "turn-id", frames: ["original wire"], attachments: [],
     instructions: [initial, {
       ...initial, instructionId: "uncertain", revisionId: "revision-2", text: "Uncertain follow-up",
       mode: "steering", status: "unconfirmed", receipt: null, steeringFrame: "follow-up wire",
@@ -39,4 +39,30 @@ it("reviews the exact uncertain revision in the receiving run and keeps earlier 
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("resolve_uncertain_steering", {
     conversationId: "chat-id", runId: "run-id", instructionId: "uncertain", revisionId: "revision-2", confirmedUndelivered: true,
   }));
+});
+
+it("shows the frozen excerpt and original runner path and requests native bytes from the selected dispatch", async () => {
+  const client = new QueryClient();
+  const metadata = {
+    name: "notes.txt", mimeType: "text/plain", source: { kind: "checkout" as const, relativePath: "docs/notes.txt" },
+    sourceSha256: "f".repeat(64), sourceSize: 128, messageRevisionId: "revision-before-edit",
+  };
+  vi.mocked(invoke).mockResolvedValue(null);
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={client}>
+    <ConversationDeliveries input={{
+      delivery: "submitted", turnId: "turn-id", frames: [], instructions: [], attachments: [
+        { ...metadata, transport: { method: "excerpt", start: 11, end: 20, text: "café ☕" } },
+        { ...metadata, transport: { method: "reference", runnerPath: "C:\\checkout\\before-rename.txt", uri: null } },
+        { ...metadata, transport: { method: "native", encoding: "acp_resource", runnerPath: null, resourceUri: "file:///original" } },
+      ],
+    }} conversationId="chat-id" runId="run-id" live={false} />
+  </QueryClientProvider>);
+  await user.click(screen.getByText("Saved attachments", { selector: "summary" }));
+  const list = within(screen.getByRole("list", { name: "Saved attachments" }));
+  expect(list.getByText("UTF-8 bytes 11–20")).toBeTruthy();
+  expect(list.getByText("café ☕")).toBeTruthy();
+  expect(list.getByText("Runner path C:\\checkout\\before-rename.txt")).toBeTruthy();
+  await user.click(list.getByRole("button", { name: "Download saved bytes" }));
+  expect(invoke).toHaveBeenCalledWith("conversation_attachment_content", { conversationId: "chat-id", runId: "run-id", index: 2 });
 });

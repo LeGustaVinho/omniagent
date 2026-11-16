@@ -248,6 +248,7 @@ fn main() {
             conversation_runtime::saved_conversation_questions,
             conversation_runtime::conversation_events,
             conversation_runtime::conversation_input,
+            conversation_runtime::conversation_attachment_content,
             ipc::fixture_input_evidence,
             ipc::subscribe_events,
             ipc::unsubscribe_events,

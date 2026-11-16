@@ -518,11 +518,17 @@ pub async fn conversation_events(
     let more = rows.len() == 128;
     let events = rows
         .into_iter()
+        .filter(|row| {
+            !matches!(row.event.data, ProviderEventData::ContextRead { .. })
+                || row.source == omniagent::dispatch::EventSource::Provider
+        })
         .map(|row| row.event)
         .filter(|event| {
             matches!(
                 event.data,
                 ProviderEventData::AssistantDelta { .. }
+                    | ProviderEventData::DispatchSubmitted { .. }
+                    | ProviderEventData::ContextRead { .. }
                     | ProviderEventData::AssistantMessage { .. }
                     | ProviderEventData::PlanProposed { .. }
                     | ProviderEventData::Error { .. }
@@ -551,6 +557,7 @@ pub struct ConversationInput {
     delivery: omniagent::dispatch::Delivery,
     turn_id: String,
     frames: Vec<String>,
+    attachments: Vec<omniagent::dispatch::AttachmentEvidence>,
     instructions: Vec<omniagent::dispatch::InstructionDispatch>,
 }
 
@@ -576,8 +583,27 @@ pub async fn conversation_input(
                 delivery: dispatch.delivery,
                 turn_id: dispatch.turn_id,
                 frames,
+                attachments: dispatch
+                    .snapshot
+                    .attachments
+                    .iter()
+                    .map(Into::into)
+                    .collect(),
                 instructions: dispatch.instructions,
             })
         })
         .transpose()
+}
+
+#[tauri::command]
+pub async fn conversation_attachment_content(
+    store: State<'_, Store>,
+    conversation_id: String,
+    run_id: String,
+    index: usize,
+) -> Result<Option<String>, String> {
+    store
+        .attachment_dispatch_content(conversation_id, run_id, index)
+        .await
+        .map_err(ui_error)
 }

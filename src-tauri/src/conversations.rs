@@ -8026,7 +8026,11 @@ mod tests {
                 .await?,
             RunStatus::Succeeded
         );
-        let committed = store.agent_dispatch(chat.id.clone(), run).await?.unwrap();
+        std::fs::rename(&file, file.with_file_name("renamed-after-dispatch.png"))?;
+        let committed = store
+            .agent_dispatch(chat.id.clone(), run.clone())
+            .await?
+            .unwrap();
         let attachment = &committed.snapshot.attachments[0];
         assert_eq!(attachment.metadata, expected);
         assert_eq!(
@@ -8035,6 +8039,23 @@ mod tests {
         );
         let native = attachment.input.native().unwrap();
         assert_eq!(native.content, PNG);
+        assert_eq!(
+            store
+                .attachment_dispatch_content(chat.id.clone(), run.clone(), 0)
+                .await?
+                .as_deref(),
+            Some(PNG)
+        );
+        assert!(
+            store
+                .attachment_dispatch_content("unrelated".into(), run, 0)
+                .await?
+                .is_none()
+        );
+        assert!(
+            matches!(crate::dispatch::AttachmentEvidence::from(attachment).transport,
+            crate::dispatch::AttachmentTransport::Native { runner_path, .. } if runner_path == native.path)
+        );
         assert_eq!(
             attachment.message_revision_id,
             committed.snapshot.submitted_messages[0].revision_id
@@ -8202,14 +8223,25 @@ mod tests {
             )
             .await?;
         let run = plan.run.id.clone();
-        std::fs::write(excerpt_path, "edited after admission")?;
+        std::fs::write(&excerpt_path, "edited after admission")?;
         assert_eq!(
             start_managed_turn(store.clone(), runner, plan, None)
                 .wait()
                 .await?,
             RunStatus::Succeeded
         );
-        let saved = store.agent_dispatch(chat.id, run).await?.unwrap();
+        std::fs::rename(
+            &excerpt_path,
+            excerpt_path.with_file_name("renamed-excerpt.txt"),
+        )?;
+        std::fs::rename(
+            &checkout_path,
+            checkout_path.with_file_name("renamed-reference.bin"),
+        )?;
+        let saved = store
+            .agent_dispatch(chat.id.clone(), run.clone())
+            .await?
+            .unwrap();
         let frame: Value = serde_json::from_slice(&saved.frames[0])?;
         assert_eq!(saved.snapshot.attachments.len(), 3);
         let AttachmentInput::Excerpt(excerpt) = &saved.snapshot.attachments[0].input else {
@@ -8217,12 +8249,27 @@ mod tests {
         };
         assert_eq!(excerpt.text, "café ☕");
         assert_eq!(
+            crate::dispatch::AttachmentEvidence::from(&saved.snapshot.attachments[0]).transport,
+            crate::dispatch::AttachmentTransport::Excerpt {
+                start: 11,
+                end: 20,
+                text: "café ☕".into()
+            }
+        );
+        assert_eq!(
             frame["params"]["input"][1]["text"],
             "Excerpt from attachment \"excerpt.txt\" (UTF-8 bytes 11..20):\ncafé ☕"
         );
         assert_eq!(
             saved.snapshot.attachments[1].input.path(),
             Some(checkout_path.as_path())
+        );
+        assert_eq!(
+            crate::dispatch::AttachmentEvidence::from(&saved.snapshot.attachments[1]).transport,
+            crate::dispatch::AttachmentTransport::Reference {
+                runner_path: checkout_path.clone(),
+                uri: None
+            }
         );
         let staged = saved.snapshot.attachments[2].input.path().unwrap();
         assert_ne!(staged, external);
@@ -8241,6 +8288,22 @@ mod tests {
                 "Attachment reference \"selected.txt\" (local file path): {}",
                 staged.display()
             )
+        );
+        let observations = store.agent_observations(chat.id, run, 0).await?;
+        let sent = observations
+            .iter()
+            .find(|row| {
+                matches!(&row.event.data,
+            ProviderEventData::DispatchSubmitted { dispatch_id } if dispatch_id == &saved.id)
+            })
+            .context("missing dispatch submission")?;
+        assert!(observations.iter().any(|row| row.seq > sent.seq && row.source == EventSource::Provider
+            && matches!(&row.event.data, ProviderEventData::ContextRead { path, .. } if path == "test.txt")));
+        assert!(
+            saved
+                .frames
+                .iter()
+                .all(|bytes| !String::from_utf8_lossy(bytes).contains("test.txt"))
         );
         Ok(())
     }
