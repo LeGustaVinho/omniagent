@@ -6,10 +6,10 @@ use serde_json::json;
 use crate::{
     conversations::AttemptPlan,
     dispatch::{ContextSnapshot, Delivery},
-    jobs::{AdmissionEnvironment, Job},
+    jobs::{AdmissionBlocker, AdmissionEnvironment, Job},
     providers::{Provider, SessionMode},
     repository::{
-        self, AttemptWorktreeEvidence, ManagedWorktree,
+        self, AttemptWorktreeEvidence, BranchStrategy, ManagedWorktree,
         verification::{CandidateSelection, CandidateTarget, SelectedCandidate},
         verified_git::{CommitSource, DeliveryGitPolicy, VerifiedCommit},
     },
@@ -21,7 +21,10 @@ use crate::{
 use super::{
     ArtifactValue, NodeInputs, WorkflowArtifact, WorkflowDeliveryUnit, WorkflowUnitOutcome,
     WorkflowUnitRequest, WorkflowUnitSubmission,
-    tests::{ApprovedDeliveryFixture, approved_delivery_fixture, submission},
+    tests::{
+        ApprovedDeliveryFixture, approve_delivery_fixture_for_work, approved_delivery_fixture,
+        approved_delivery_repository, submission,
+    },
 };
 
 #[tokio::test]
@@ -110,7 +113,11 @@ async fn verified_commit_publishes_ordered_units_and_accepts_only_the_manual_wor
     )
     .await?;
     fs::write(other_checkout.root.join("second.txt"), b"second.txt\n")?;
-    let foreign = user_commit(&other_checkout.root, "second.txt", "A different Sub-Task commit")?;
+    let foreign = user_commit(
+        &other_checkout.root,
+        "second.txt",
+        "A different Sub-Task commit",
+    )?;
     assert!(
         commit(&store, &fixture, second, &accepted_second, Some(foreign))
             .await
@@ -137,7 +144,10 @@ async fn verified_commit_publishes_ordered_units_and_accepts_only_the_manual_wor
         verified_second
     );
 
-    let WorkflowUnitOutcome::Artifact { artifact: git_artifact } = verified_second else {
+    let WorkflowUnitOutcome::Artifact {
+        artifact: git_artifact,
+    } = verified_second
+    else {
         unreachable!()
     };
     store
@@ -147,7 +157,7 @@ async fn verified_commit_publishes_ordered_units_and_accepts_only_the_manual_wor
             "result",
             NodeInputs::from([
                 ("task".into(), fixture.task.id.clone()),
-                    ("git".into(), git_artifact.id),
+                ("git".into(), git_artifact.id),
             ]),
             WorkflowUnitRequest::Result,
         ))
@@ -193,6 +203,282 @@ async fn verified_commit_publishes_ordered_units_and_accepts_only_the_manual_wor
     Ok(())
 }
 
+#[tokio::test]
+async fn verified_subtask_commits_preserve_writer_ownership_and_hierarchy_history() -> Result<()> {
+    exercise_subtask_delivery(BranchStrategy::Independent).await?;
+    exercise_subtask_delivery(BranchStrategy::SharedBranchPerTask).await
+}
+
+async fn exercise_subtask_delivery(strategy: BranchStrategy) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("delivery.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, temp.path()).await?;
+    let project = &repo.project_id;
+    store
+        .set_project_branch_strategy(project.clone(), strategy)
+        .await?;
+    let epic = store
+        .create_project_epic(project.clone(), "Scoped repository delivery".into())
+        .await?;
+    let parent = store
+        .create_project_task(project.clone(), "Deliver both changes".into())
+        .await?;
+    store
+        .set_project_task_epic(project.clone(), parent.id.clone(), Some(epic.id.clone()))
+        .await?;
+    let first_task = store
+        .create_project_subtask(project.clone(), parent.id.clone(), "First change".into())
+        .await?;
+    let second_task = store
+        .create_project_subtask(project.clone(), parent.id.clone(), "Second change".into())
+        .await?;
+
+    let first = approve_delivery_fixture_for_work(
+        &store,
+        temp.path(),
+        repo.clone(),
+        Some(first_task.id.clone()),
+    )
+    .await?;
+    let second = approve_delivery_fixture_for_work(
+        &store,
+        temp.path(),
+        repo.clone(),
+        Some(second_task.id.clone()),
+    )
+    .await?;
+    let first_unit = &first.units[0];
+    let second_unit = &second.units[0];
+    let shared = strategy == BranchStrategy::SharedBranchPerTask;
+    let first_owner = if shared { &parent.id } else { &first_task.id };
+    let second_owner = if shared { &parent.id } else { &second_task.id };
+    let first_tree = store
+        .live_managed_worktree(project.clone(), first_owner.clone())
+        .await?
+        .context("first managed worktree is unavailable")?
+        .worktree;
+    let second_tree = store
+        .live_managed_worktree(project.clone(), second_owner.clone())
+        .await?
+        .context("second managed worktree is unavailable")?
+        .worktree;
+    assert_eq!(first_tree.checkout_id == second_tree.checkout_id, shared);
+    assert_eq!(first_tree.branch == second_tree.branch, shared);
+    assert_eq!(&first_tree.owner_task_id, first_owner);
+    assert_eq!(&second_tree.owner_task_id, second_owner);
+    assert_eq!(first_tree.checkout_id, first_unit.checkout_id);
+    assert_eq!(second_tree.checkout_id, second_unit.checkout_id);
+
+    let accepted_first =
+        capture_and_review(&store, &first, &first_tree, first_unit, "first.txt").await?;
+    let ArtifactValue::Candidate(first_candidate) = &accepted_first.candidate.value else {
+        anyhow::bail!("missing first candidate");
+    };
+    let second_job = queue_implementation(&store, &second, &second_tree, second_unit).await?;
+    assert_eq!(
+        second_job.worktree_owner_task_id.as_ref(),
+        Some(second_owner)
+    );
+    let env = fixture_admission();
+    let blocked = store
+        .inspect_job(project.clone(), second_job.id.clone(), env.clone())
+        .await?
+        .context("second writer disappeared from the queue")?;
+    let independent_acceptance = if shared {
+        assert!(blocked.blockers.iter().any(|blocker| matches!(
+            blocker,
+            AdmissionBlocker::PendingWorktreeChanges { checkout_id, scope_task_id, producing_run_id }
+                if checkout_id == &first_tree.checkout_id && scope_task_id == &first_task.id
+                    && producing_run_id.as_ref() == Some(&first_candidate.target.run_id)
+        )));
+        assert!(store.claim_next_job(env.clone()).await?.is_none());
+        None
+    } else {
+        assert!(blocked.blockers.is_empty(), "{:?}", blocked.blockers);
+        Some(
+            capture_queued_implementation_and_review(
+                &store,
+                &second,
+                &second_tree,
+                second_unit,
+                "second.txt",
+                second_job.clone(),
+            )
+            .await?,
+        )
+    };
+
+    let first_evidence = verified(
+        &store,
+        &first,
+        first_unit,
+        commit(&store, &first, first_unit, &accepted_first, None).await?,
+    )
+    .await?;
+    assert_eq!(first_evidence.task_id, first_task.id);
+    assert_eq!(first_evidence.branch, first_tree.branch);
+    assert_eq!(first_evidence.capture_run_id, first_candidate.target.run_id);
+    assert!(!first_evidence.pending_changes_retained);
+    assert_ne!(
+        store
+            .project_epic_delivery_state(project.clone(), epic.id.clone())
+            .await?,
+        Some(TaskWorkflowState::Completed)
+    );
+    assert!(
+        store
+            .verified_delivery_commit(
+                project.clone(),
+                second_task.id.clone(),
+                first_evidence.id.clone()
+            )
+            .await?
+            .is_none()
+    );
+
+    let accepted_second = if let Some(accepted) = independent_acceptance {
+        accepted
+    } else {
+        let handed_off = store
+            .inspect_job(project.clone(), second_job.id.clone(), env)
+            .await?
+            .context("second queued writer disappeared after the commit")?;
+        assert!(handed_off.blockers.is_empty(), "{:?}", handed_off.blockers);
+        capture_queued_implementation_and_review(
+            &store,
+            &second,
+            &second_tree,
+            second_unit,
+            "second.txt",
+            second_job.clone(),
+        )
+        .await?
+    };
+    let second_evidence = verified(
+        &store,
+        &second,
+        second_unit,
+        commit(&store, &second, second_unit, &accepted_second, None).await?,
+    )
+    .await?;
+    let second_attempt = store
+        .workflow_attempt(project.clone(), second_evidence.capture_run_id.clone())
+        .await?
+        .context("second commit attempt is unavailable")?;
+    assert_eq!(second_attempt.job_id, second_job.id);
+    assert_eq!(second_evidence.task_id, second_task.id);
+    assert_eq!(second_evidence.branch, second_tree.branch);
+    assert_eq!(second_evidence.checkout_id, second_tree.checkout_id);
+    assert_eq!(
+        second_evidence.base_commit,
+        if shared {
+            first_evidence.sha.as_str()
+        } else {
+            second_tree.base_commit.as_str()
+        }
+    );
+    assert_eq!(
+        git(
+            &first_tree.root,
+            &["show", &format!("{}:second.txt", first_evidence.sha)]
+        )?,
+        "original second"
+    );
+    assert_eq!(
+        git(
+            &second_tree.root,
+            &["show", &format!("{}:first.txt", second_evidence.sha)]
+        )?,
+        if shared {
+            "first.txt"
+        } else {
+            "original first"
+        }
+    );
+    assert_eq!(
+        git(
+            &second_tree.root,
+            &["show", &format!("{}:second.txt", second_evidence.sha)]
+        )?,
+        "second.txt"
+    );
+    assert_eq!(
+        store
+            .project_task_delivery_state(project.clone(), parent.id.clone())
+            .await?
+            .map(|state| state.state),
+        Some(TaskWorkflowState::Completed)
+    );
+    assert_eq!(
+        store
+            .project_epic_delivery_state(project.clone(), epic.id.clone())
+            .await?,
+        Some(TaskWorkflowState::Completed)
+    );
+
+    store
+        .reopen_task_delivery(project.clone(), first_task.id.clone())
+        .await?;
+    let reopened = store
+        .project_task_delivery_state(project.clone(), first_task.id.clone())
+        .await?
+        .context("reopened Sub-Task is no longer visible")?;
+    assert!(!matches!(
+        reopened.state,
+        TaskWorkflowState::Completed | TaskWorkflowState::Cancelled
+    ));
+    assert!(reopened.completion.is_none());
+    assert_ne!(
+        store
+            .project_task_delivery_state(project.clone(), parent.id.clone())
+            .await?
+            .map(|state| state.state),
+        Some(TaskWorkflowState::Completed)
+    );
+    assert_ne!(
+        store
+            .project_epic_delivery_state(project.clone(), epic.id.clone())
+            .await?,
+        Some(TaskWorkflowState::Completed)
+    );
+
+    drop(store);
+    let reopened = Store::open(database)?;
+    assert_ne!(
+        reopened
+            .project_task_delivery_state(project.clone(), parent.id)
+            .await?
+            .map(|state| state.state),
+        Some(TaskWorkflowState::Completed)
+    );
+    assert_ne!(
+        reopened
+            .project_epic_delivery_state(project.clone(), epic.id)
+            .await?,
+        Some(TaskWorkflowState::Completed)
+    );
+    let history = reopened
+        .project_task_deliveries(project.clone(), first_task.id.clone())
+        .await?;
+    assert!(matches!(history.as_slice(), [receipt] if matches!(
+        &receipt.evidence, TaskDeliveryEvidence::VerifiedCommit { completion_sha, unit_evidence_ids, .. }
+            if completion_sha == &first_evidence.sha && unit_evidence_ids == std::slice::from_ref(&first_evidence.id)
+    )));
+    assert_eq!(
+        reopened
+            .verified_delivery_commit(project.clone(), first_task.id, first_evidence.id.clone())
+            .await?,
+        Some(first_evidence)
+    );
+    let task = reopened
+        .project_task_delivery_state(project.clone(), second_task.id)
+        .await?
+        .context("second completed Sub-Task is no longer visible")?;
+    assert_eq!(task.state, TaskWorkflowState::Completed);
+    Ok(())
+}
+
 struct AcceptedUnit {
     candidate: WorkflowArtifact,
     acceptance: WorkflowArtifact,
@@ -205,6 +491,16 @@ async fn capture_and_review(
     unit: &WorkflowDeliveryUnit,
     name: &str,
 ) -> Result<AcceptedUnit> {
+    let implement = queue_implementation(store, fixture, worktree, unit).await?;
+    capture_queued_implementation_and_review(store, fixture, worktree, unit, name, implement).await
+}
+
+async fn queue_implementation(
+    store: &Store,
+    fixture: &ApprovedDeliveryFixture,
+    worktree: &ManagedWorktree,
+    unit: &WorkflowDeliveryUnit,
+) -> Result<Job> {
     let unit_id = &unit.unit.id;
     let ArtifactValue::Release(release) = &fixture.release.value else {
         anyhow::bail!("fixture did not issue an implementation release");
@@ -228,11 +524,19 @@ async fn capture_and_review(
         ("worktree".into(), fixture.worktree.id.clone()),
         ("release".into(), fixture.release.id.clone()),
     ]);
-    let implement = store.submit_workflow_agent(implement).await?;
-    let env = AdmissionEnvironment {
-        runner: "fixture-runner".into(),
-        bridge_available: false,
-    };
+    store.submit_workflow_agent(implement).await
+}
+
+async fn capture_queued_implementation_and_review(
+    store: &Store,
+    fixture: &ApprovedDeliveryFixture,
+    worktree: &ManagedWorktree,
+    unit: &WorkflowDeliveryUnit,
+    name: &str,
+    implement: Job,
+) -> Result<AcceptedUnit> {
+    let unit_id = &unit.unit.id;
+    let env = fixture_admission();
     let writer = claim_fixture_job(store, implement, env.clone()).await?;
     let run = writer.run.id;
     store.mark_agent_running(run.clone()).await?;
@@ -283,7 +587,7 @@ async fn capture_and_review(
     review.scope.provider = Provider::Claude;
     review.scope.profile_id = "candidate-reviewer".into();
     review.scope.checkout = worktree.root.clone();
-    review.scope.executable = executable;
+    review.scope.executable = Path::new(&fixture.checkout.repository_root).join("codex.exe");
     review.request.checkout_id = Some(worktree.checkout_id.clone());
     review.request.task_id = Some(unit.task_id.clone());
     review.unit_id = Some(unit_id.clone());
@@ -343,6 +647,13 @@ async fn capture_and_review(
     })
 }
 
+fn fixture_admission() -> AdmissionEnvironment {
+    AdmissionEnvironment {
+        runner: "fixture-runner".into(),
+        bridge_available: false,
+    }
+}
+
 async fn seal_review(
     store: &Store,
     candidate: &SelectedCandidate,
@@ -387,7 +698,11 @@ async fn seal_review(
     Ok(())
 }
 
-async fn claim_fixture_job(store: &Store, job: Job, environment: AdmissionEnvironment) -> Result<AttemptPlan> {
+async fn claim_fixture_job(
+    store: &Store,
+    job: Job,
+    environment: AdmissionEnvironment,
+) -> Result<AttemptPlan> {
     if let Some(attempt) = store.claim_next_job(environment.clone()).await? {
         return Ok(attempt);
     }

@@ -615,8 +615,15 @@ pub(super) async fn approved_delivery_fixture(
     store: &Store,
     temp_path: &Path,
 ) -> Result<ApprovedDeliveryFixture> {
+    let repo = approved_delivery_repository(store, temp_path).await?;
+    approve_delivery_fixture_for_work(store, temp_path, repo, None).await
+}
+
+pub(super) async fn approved_delivery_repository(
+    store: &Store,
+    temp_path: &Path,
+) -> Result<ProjectCheckout> {
     let repo = checkout(store, &temp_path.join("builtin-source")).await?;
-    let project = repo.project_id.clone();
     let root = Path::new(&repo.checkout_root);
     std::fs::write(root.join("brief.md"), "Two independent changes")?;
     std::fs::write(root.join("first.txt"), "original first\n")?;
@@ -641,6 +648,23 @@ pub(super) async fn approved_delivery_fixture(
                 .success()
         );
     }
+    Ok(repo)
+}
+
+pub(super) async fn approve_delivery_fixture_for_work(
+    store: &Store,
+    temp_path: &Path,
+    repo: ProjectCheckout,
+    task_id: Option<String>,
+) -> Result<ApprovedDeliveryFixture> {
+    let project = repo.project_id.clone();
+    let root = Path::new(&repo.checkout_root);
+    let planned_text = if task_id.is_some() {
+        "Deliver the change for this Sub-Task.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"Deliver the scoped change\",\"completionCriteria\":[\"Scoped file updated\"]}]}\n```"
+    } else {
+        "Do each change separately.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"First change\",\"completionCriteria\":[\"First file updated\"]},{\"purpose\":\"Second change\",\"completionCriteria\":[\"Second file updated\"]}]}\n```"
+    };
+    let unit_count = if task_id.is_some() { 1 } else { 2 };
     let run = store
         .start_builtin_delivery(project.clone(), DeliveryRoles::default())
         .await?;
@@ -682,12 +706,19 @@ pub(super) async fn approved_delivery_fixture(
         .await?
         .context("planner was not admitted")?;
     store.mark_agent_running(planned.run.id.clone()).await?;
-    store.record_agent_observation(planned.run.id.clone(), EventSource::Provider, ProviderEvent {
-        location: ProviderLocation::default(), data: ProviderEventData::PlanProposed {
-            text: "Do each change separately.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"First change\",\"completionCriteria\":[\"First file updated\"]},{\"purpose\":\"Second change\",\"completionCriteria\":[\"Second file updated\"]}]}\n```".into(),
-            source: PlanSource::CodexPlanItem,
-        },
-    }).await?;
+    store
+        .record_agent_observation(
+            planned.run.id.clone(),
+            EventSource::Provider,
+            ProviderEvent {
+                location: ProviderLocation::default(),
+                data: ProviderEventData::PlanProposed {
+                    text: planned_text.into(),
+                    source: PlanSource::CodexPlanItem,
+                },
+            },
+        )
+        .await?;
     store.record_agent_observation(planned.run.id.clone(), EventSource::Provider, ProviderEvent {
         location: ProviderLocation::default(), data: ProviderEventData::PlanProposed {
             text: "Alternative: deliver only the first change.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"First change\",\"completionCriteria\":[\"First file updated\"]}]}\n```".into(),
@@ -773,15 +804,18 @@ pub(super) async fn approved_delivery_fixture(
         ("plan".into(), plan.id.clone()),
         ("review".into(), review.id),
     ]);
-    let create = WorkflowHostRequest::CreateTask {
-        title: "Two sequential changes".into(),
+    let work = match task_id {
+        Some(task_id) => WorkflowHostRequest::LinkExistingTask { task_id },
+        None => WorkflowHostRequest::CreateTask {
+            title: "Two sequential changes".into(),
+        },
     };
     let task = store
-        .execute_workflow_host(host("work", links.clone(), create.clone()))
+        .execute_workflow_host(host("work", links.clone(), work.clone()))
         .await?;
     assert_eq!(
         store
-            .execute_workflow_host(host("work", links, create))
+            .execute_workflow_host(host("work", links, work))
             .await?,
         task
     );
@@ -845,7 +879,7 @@ pub(super) async fn approved_delivery_fixture(
     let units = store
         .workflow_delivery_units(project.clone(), task_ref.task_id.clone(), run.id.clone())
         .await?;
-    assert_eq!(units.len(), 2);
+    assert_eq!(units.len(), unit_count);
     assert!(
         units
             .iter()
