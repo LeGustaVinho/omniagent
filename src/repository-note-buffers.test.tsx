@@ -90,4 +90,10 @@ it("restores the original revision and unsaved content beside an external revisi
   expect(result.current.notes[path]).toMatchObject({
     base: revision("r1"), content: "# Recovered buffer", external: "# External", saved: "# Original\n", draftRevision: "draft",
   });
+  await act(async () => { expect(await result.current.save(path)).toBe(false); });
+  const calls = vi.mocked(invoke).mock.calls.map(([command]) => command);
+  expect(calls).not.toContain("save_repository_document");
+  expect(calls).not.toContain("discard_repository_markdown_draft");
+  expect(result.current.notes[path]?.incoming?.revision.id).toBe("r2");
+  expect(result.current.notes[path]?.draftRevision).toBe("draft");
 });
