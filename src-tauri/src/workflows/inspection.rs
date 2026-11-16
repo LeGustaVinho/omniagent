@@ -14,6 +14,7 @@ use crate::{
 use super::{
     ArtifactValue, ControlStageReceipt, NodeInputs, WorkflowArtifact, WorkflowDefinition,
     WorkflowJobInput, WorkflowPlanUnit, WorkflowRevision, WorkflowRun,
+    authoring::package::roles::{WorkflowRolePin, role_pins},
     control::{recorded_control, unit_nodes},
     digest,
     runtime::load_definition,
@@ -24,6 +25,7 @@ use super::{
 pub struct WorkflowExecutionInspection {
     pub run: WorkflowRun,
     pub definition: WorkflowDefinition,
+    pub role_pins: Vec<WorkflowRolePin>,
     pub unit_node_ids: Vec<String>,
     pub units: Vec<WorkflowExecutionUnit>,
     pub jobs: Vec<WorkflowExecutionJob>,
@@ -140,6 +142,7 @@ impl Store {
             let Some(run) = run else { return Ok(None) };
             let definition = load_definition(&tx, &project, &run.version)?
                 .context("The pinned workflow definition is unavailable")?;
+            let role_pins = role_pins(&tx, &project, &definition)?;
             let scoped_nodes = unit_nodes(&definition);
             let unit_node_ids = definition
                 .nodes
@@ -154,6 +157,7 @@ impl Store {
             Ok(Some(WorkflowExecutionInspection {
                 run,
                 definition,
+                role_pins,
                 unit_node_ids,
                 units,
                 jobs,

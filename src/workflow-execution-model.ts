@@ -1,5 +1,7 @@
 import type { Job } from "@/bindings/Job";
+import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { RunStatus } from "@/bindings/RunStatus";
+import type { SessionMode } from "@/bindings/SessionMode";
 import type { WorkflowDefinition, WorkflowGraphNode, WorkflowWire } from "@/workflow-graph-model";
 
 export const workflowRunTarget = (runId: string) => `run:${runId}`;
@@ -33,9 +35,23 @@ export type ExecutionSubflow = {
   nodes: string[];
   outputs: Record<string, WorkflowWire["from"]>;
 };
+export type ExecutionRolePin = {
+  nodeId: string;
+  nodeRevision: string;
+  version: WorkflowVersion & { destination: "project" | "library"; kind: "role" };
+  requirementsOnly: boolean;
+  role: {
+    name: string;
+    model: ModelSelection;
+    effort: string | null;
+    toolScope: SessionMode;
+    reviewPolicy: "independent" | "cross_review" | "human_approval";
+  } | null;
+};
 export type WorkflowExecutionSnapshot = {
   run: WorkflowRun;
   definition: { version: WorkflowVersion; name: string; nodes: ExecutionPinnedNode[]; wires: WorkflowWire[]; subflows?: ExecutionSubflow[] };
+  rolePins?: ExecutionRolePin[];
   unitNodeIds: string[];
   units: ExecutionUnit[];
   jobs: ExecutionJob[];

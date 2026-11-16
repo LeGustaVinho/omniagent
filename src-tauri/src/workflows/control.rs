@@ -331,6 +331,7 @@ pub(crate) fn validate_attempt_control(db: &Connection, attempt: &str) -> Result
             input.unit_id.as_deref(),
             &input.artifacts,
         )?;
+        super::authoring::package::roles::validate_attempt_role(db, &project, &run, &node, attempt)?;
     }
     Ok(())
 }

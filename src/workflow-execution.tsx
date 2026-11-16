@@ -8,7 +8,7 @@ import { WorkflowPortColumn } from "@/workflow-graph-editor";
 import { initialNodePositions, wireKey } from "@/workflow-graph-model";
 import { WorkflowNodeEvidence } from "@/workflow-execution-evidence";
 import {
-  controlForNode, presentation, workflowRunTarget, type ExecutionPinnedNode, type WorkflowExecutionSnapshot, type WorkflowExecutionState, type WorkflowRun,
+  controlForNode, presentation, workflowRunTarget, type ExecutionPinnedNode, type ExecutionRolePin, type WorkflowExecutionSnapshot, type WorkflowExecutionState, type WorkflowRun,
 } from "@/workflow-execution-model";
 import "./workflow-execution.css";
 
@@ -34,6 +34,21 @@ function ExecutionNodeCard({ data, selected }: NodeProps<ExecutionNode>) {
 }
 
 const executionNodeTypes = { execution: ExecutionNodeCard };
+
+const roleTools = { read_only: "Repository read", plan: "Planning", approved_write: "Approved worktree write" };
+const roleReview = { independent: "Independent", cross_review: "Cross-review required", human_approval: "Human approval required" };
+
+function PinnedRole({ pin }: { pin: ExecutionRolePin }) {
+  const { role, version } = pin;
+  return <section aria-label={pin.requirementsOnly ? "Pinned role requirements" : "Pinned role template"}>
+    <p>{pin.requirementsOnly ? "Role requirements" : "Role template"} · {role?.name ?? "Revision unavailable"}</p>
+    <p>{version.destination === "library" ? "Local library" : "Project"} · <code className="break-all">{version.revision}</code></p>
+    {role && !pin.requirementsOnly && <>
+      <p>{role.model.provider} · {role.model.modelId}{role.effort ? ` · ${role.effort}` : ""}</p>
+      <p>{roleTools[role.toolScope]} · {roleReview[role.reviewPolicy]}</p>
+    </>}
+  </section>;
+}
 
 function WorkflowExecutionCanvas({ snapshot, navigation }: {
   snapshot: WorkflowExecutionSnapshot;
@@ -114,6 +129,8 @@ function WorkflowExecutionCanvas({ snapshot, navigation }: {
         </label>
         {active && <>
           <div><h3 className="font-semibold">{active.node.definition.title}</h3><State status={active.detail.status} /></div>
+          {snapshot.rolePins?.filter((pin) => pin.nodeId === active.node.instance.id && pin.nodeRevision === active.node.revision)
+            .map((pin) => <PinnedRole key={`${pin.version.destination}:${pin.version.id}:${pin.version.revision}`} pin={pin} />)}
           {active.detail.reason && <p>{active.detail.reason}</p>}
           {!!active.detail.missing?.length && <section aria-label="Waiting for dependencies">
             <p>Waiting for recorded upstream outputs.</p>

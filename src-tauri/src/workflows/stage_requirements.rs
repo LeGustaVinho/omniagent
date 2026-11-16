@@ -23,7 +23,11 @@ use crate::{
     store::Store,
 };
 
-use super::{NodeConfiguration, role_templates, runtime::load_pinned_node};
+use super::{
+    NodeConfiguration,
+    authoring::package::{PackageArtifactVersion, roles},
+    runtime::load_pinned_node,
+};
 
 mod history;
 
@@ -41,6 +45,8 @@ pub struct StageRequirements {
 pub struct StageRequirementConfiguration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_template: Option<StageRoleRevision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_role: Option<PackageArtifactVersion>,
     #[serde(default, skip_serializing_if = "StageRequirements::is_empty")]
     pub stage: StageRequirements,
 }
@@ -208,11 +214,12 @@ impl StageRequirements {
 
 impl StageRequirementConfiguration {
     pub(crate) fn is_empty(&self) -> bool {
-        self.role_template.is_none() && self.stage.is_empty()
+        self.role_template.is_none() && self.bound_role.is_none() && self.stage.is_empty()
     }
 
     pub(crate) fn is_valid(&self) -> bool {
         self.stage.is_valid()
+            && self.bound_role.as_ref().is_none_or(roles::valid_bound_role)
             && self.role_template.as_ref().is_none_or(|role| {
                 !role.template_id.trim().is_empty() && !role.revision.trim().is_empty()
             })
@@ -232,28 +239,33 @@ fn effective_requirements(
     project: &str,
     configured: &StageRequirementConfiguration,
 ) -> Result<StageRequirements> {
-    let mut effective = if let Some(role) = &configured.role_template {
-        role_templates::load_revision(db, project, &role.template_id, &role.revision)?
-            .template
-            .requirements
-    } else {
-        StageRequirements::default()
-    };
-    for item in &configured.stage.capabilities {
-        if !effective.capabilities.contains(item) {
-            effective.capabilities.push(item.clone());
-        }
+    let requirements_only = configured.role_template.as_ref().map(roles::role_version)
+        .filter(|version| configured.bound_role.as_ref() != Some(version));
+    let mut effective = StageRequirements::default();
+    for version in configured.bound_role.iter().chain(requirements_only.iter()) {
+        let template = roles::load_role(db, project, version)?
+            .context("A pinned workflow role revision is unavailable")?;
+        merge_requirements(&mut effective, &template.requirements);
     }
-    for item in &configured.stage.sources {
-        if !effective.sources.contains(item) {
-            effective.sources.push(item.clone());
-        }
-    }
+    merge_requirements(&mut effective, &configured.stage);
     ensure!(
         effective.is_valid(),
         "The combined role and stage requirements are invalid or exceed the limits"
     );
     Ok(effective)
+}
+
+fn merge_requirements(effective: &mut StageRequirements, next: &StageRequirements) {
+    for subject in &next.capabilities {
+        if !effective.capabilities.contains(subject) {
+            effective.capabilities.push(subject.clone());
+        }
+    }
+    for source in &next.sources {
+        if !effective.sources.contains(source) {
+            effective.sources.push(source.clone());
+        }
+    }
 }
 
 pub(crate) async fn validate_stage_requirements(

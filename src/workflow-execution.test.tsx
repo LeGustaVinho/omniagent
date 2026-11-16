@@ -82,6 +82,13 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
         { from: { node: "planner", port: "plan" }, to: { node: "review", port: "plan" } },
         { from: { node: "command-failed", port: "failed" }, to: { node: "remediation", port: "ready" } },
         { from: { node: "command-failed", port: "completed" }, to: { node: "unselected", port: "ready" } }] },
+    rolePins: [{
+      nodeId: review.instance.id, nodeRevision: review.revision,
+      version: { destination: "library", kind: "role", id: "reviewer-role", revision: "saved-role-revision" },
+      requirementsOnly: false,
+      role: { name: "Historical reviewer", model: { provider: "codex", profileId: "reviewer", modelId: "old-model" },
+        effort: null, toolScope: "read_only", reviewPolicy: "independent" },
+    }],
     unitNodeIds: ["commit"], units: [logical], jobs,
     control: [
       { nodeId: "command-failed", planRevision: "selected-plan", state: "failed", selectedPorts: ["failed"],
@@ -125,6 +132,9 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   expect(graph.getByRole("button", { name: "User question · Waiting" })).toBeTruthy();
   const inspector = within(screen.getByRole("complementary", { name: "Execution node evidence" }));
   await user.click(graph.getByRole("button", { name: "Review pinned plan · Waiting" }));
+  const role = within(inspector.getByRole("region", { name: "Pinned role template" }));
+  expect(role.getByText(/Historical reviewer/)).toBeTruthy();
+  expect(role.getByText("saved-role-revision")).toBeTruthy();
   expect(inspector.getByText("plan needs planner.plan")).toBeTruthy();
   await user.click(inspector.getByText(/Earlier control decision · skipped/));
   expect(inspector.getByText("Earlier revision outcome")).toBeTruthy();

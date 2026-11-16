@@ -15,6 +15,7 @@ use crate::{
 use super::{
     ArtifactKind, ArtifactValue, Executor, NodeConfiguration, NodeInputs, PinnedNode, PortType,
     WorkflowDefinition, WorkflowGraph, WorkflowJobInput, WorkflowRevision, compile,
+    authoring::package::roles,
     units::PLAN_UNITS_INSTRUCTIONS,
 };
 
@@ -67,6 +68,7 @@ pub(super) fn insert_workflow_run(
     workflow: &WorkflowDefinition,
 ) -> Result<WorkflowRun> {
     super::authoring::ensure_package_runnable(db, project, &workflow.version)?;
+    roles::validate_role_pins(db, project, workflow)?;
     ensure!(workflow.nodes.iter().all(|node| !matches!(node.instance.kind, super::BuiltinNode::Subflow | super::BuiltinNode::RepeatUntil)),
         "An unbound subflow or repeat cannot launch");
     let id = Uuid::new_v4().to_string();
@@ -348,6 +350,13 @@ impl Store {
         };
         if !requirements.is_empty() {
             super::stage_requirements::validate_stage_requirements(self, project_id.clone(), requirements.clone()).await?;
+        }
+        if let Some(version) = &requirements.bound_role {
+            let (project, version) = (project_id.clone(), version.clone());
+            let template = self.execute(move |db| roles::load_role(db, &project, &version)).await?
+                .context("The pinned workflow role is unavailable")?;
+            roles::qualify_bound_role(&template, model.as_ref(), &scope)?;
+            request.instructions = roles::role_instructions(&template, &request.instructions);
         }
         ensure!(
             model.as_ref().is_none_or(|selection| selection.provider == scope.provider

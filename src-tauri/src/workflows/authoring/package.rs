@@ -16,6 +16,7 @@ mod model;
 mod preview;
 mod publish;
 mod request;
+pub(crate) mod roles;
 mod simulation;
 #[cfg(test)]
 mod authoring_acceptance;
@@ -232,6 +233,7 @@ fn validate_structure(package: &WorkflowPackage) -> Result<()> {
     for member in &package.members {
         bounded_name(&member.name)?;
         bounded_name(&member.key)?;
+        roles::validate_authoring_body(&member.body, member.destination)?;
         ensure!(
             keys.insert(&member.key),
             "Duplicate package member {}",

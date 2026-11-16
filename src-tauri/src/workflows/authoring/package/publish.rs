@@ -314,6 +314,7 @@ fn publish_member(
         .map_or_else(new_id, |base| base.id.clone());
     let mut workflow = None;
     let mut role_revision = None;
+    let mut role_execution_revision = None;
     match &mut body {
         PackageArtifactBody::Pipeline { graph } | PackageArtifactBody::Subflow { graph, .. } => {
             let named_commands = references
@@ -374,6 +375,9 @@ fn publish_member(
                     &mut blockers,
                 )?
             };
+            if roles::has_bound_roles(&compiled) {
+                role_execution_revision = Some(compiled.version.revision.clone());
+            }
             if kind == PackageArtifactKind::Pipeline {
                 workflow = Some(compiled);
             }
@@ -464,14 +468,12 @@ fn publish_member(
             &configured_command(&body).context("Invalid Command configuration")?,
         )?;
     }
-    let revision = match role_revision {
-        Some(revision) => revision,
-        None => digest(&serde_json::to_vec(&(
-            &member.name,
-            &body,
-            &references,
-            pins,
+    let revision = match (role_revision, role_execution_revision) {
+        (Some(revision), _) => revision,
+        (None, Some(execution)) => digest(&serde_json::to_vec(&(
+            &member.name, &body, &references, pins, &execution,
         ))?),
+        (None, None) => digest(&serde_json::to_vec(&(&member.name, &body, &references, pins))?),
     };
     let version = PackageArtifactVersion {
         destination: member.destination,
@@ -680,16 +682,8 @@ impl<'a> GraphCompiler<'a> {
                         unbound_commands.insert(slot.clone());
                     }
                 }
-                PackageArtifactBody::Role { .. } => {
-                    ensure!(
-                        matches!(node.configuration, NodeConfiguration::AgentRole { .. }),
-                        "The role reference for {slot} requires an Agent node"
-                    );
-                    blockers.push(format!(
-                        "The node {slot} requires the pinned role {}.",
-                        artifact.name
-                    ));
-                }
+                PackageArtifactBody::Role { .. } => roles::bind(&mut node.configuration, artifact)
+                    .with_context(|| format!("The role reference for {slot} is invalid"))?,
                 PackageArtifactBody::Subflow { .. } if node.kind == BuiltinNode::Subflow => {
                     ensure!(
                         matches!(node.configuration, NodeConfiguration::None),
