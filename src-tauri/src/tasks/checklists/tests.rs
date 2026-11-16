@@ -552,6 +552,7 @@ async fn checklist_write_uses_its_scoped_branch_and_waits_for_the_current_worktr
 async fn checklist_progress_authenticates_and_preserves_scoped_receipts_in_both_modes() -> Result<()>
 {
     use crate::{
+        conversations::AttemptPlan,
         dispatch::EventSource,
         mcp_bridge::{RunBridge, exchange_test_checklist_progress},
         providers::{
@@ -562,7 +563,20 @@ async fn checklist_progress_authenticates_and_preserves_scoped_receipts_in_both_
                 ResolvedCapability,
             },
         },
+        tasks::TaskDispatchContext,
     };
+
+    fn snapshot(
+        attempt: &AttemptPlan,
+        context: TaskDispatchContext,
+        assessment: &CapabilityAssessment,
+    ) -> Result<ContextSnapshot> {
+        Ok(serde_json::from_value(json!({
+            "version": 1, "contextId": attempt.context_id, "scope": attempt.scope,
+            "baseCommit": null, "submittedMessages": attempt.input, "nativeHistory": {"mode": "fresh"},
+            "taskContext": context, "capabilities": assessment,
+        }))?)
+    }
 
     for mode in [Mode::TrackProgress, Mode::RunByItem] {
         let temp = tempfile::tempdir()?;
@@ -593,7 +607,7 @@ async fn checklist_progress_authenticates_and_preserves_scoped_receipts_in_both_
 
         let profile = scope(&root, SessionMode::ReadOnly)?;
         let binding = pipeline(&store, &project).await?;
-        store
+        let job = store
             .submit_pipeline_checklist_job(
                 binding,
                 profile.clone(),
@@ -605,7 +619,7 @@ async fn checklist_progress_authenticates_and_preserves_scoped_receipts_in_both_
             .claim_next_job(environment())
             .await?
             .context("missing checklist run")?;
-        let run = attempt.run.id;
+        let run = attempt.run.id.clone();
         assert_eq!(
             store
                 .run_checklist_progress(project.clone(), run.clone())
@@ -667,13 +681,12 @@ async fn checklist_progress_authenticates_and_preserves_scoped_receipts_in_both_
             }],
         };
         let context = store.task_dispatch_context(run.clone()).await?.unwrap();
-        let snapshot: ContextSnapshot = serde_json::from_value(json!({
-            "version": 1, "contextId": attempt.context_id, "scope": attempt.scope,
-            "baseCommit": null, "submittedMessages": attempt.input, "nativeHistory": {"mode": "fresh"},
-            "taskContext": context, "capabilities": assessment,
-        }))?;
         let dispatch = store
-            .prepare_dispatch(run.clone(), snapshot, vec![b"fixture".to_vec()])
+            .prepare_dispatch(
+                run.clone(),
+                snapshot(&attempt, context, &assessment)?,
+                vec![b"fixture".to_vec()],
+            )
             .await?;
         assert_eq!(
             update(report("prepared", &item.id, 1, true)).await?["status"],
@@ -710,7 +723,7 @@ async fn checklist_progress_authenticates_and_preserves_scoped_receipts_in_both_
                 ProviderEvent {
                     location: Default::default(),
                     data: ProviderEventData::CapabilityAssessmentUpdated {
-                        assessment: Box::new(assessment),
+                        assessment: Box::new(assessment.clone()),
                     },
                 },
             )
@@ -762,11 +775,12 @@ async fn checklist_progress_authenticates_and_preserves_scoped_receipts_in_both_
             "checklist_progress_request_conflict"
         );
         let reopened = store
-            .set_project_checklist_item_checked(
+            .revise_project_checklist_item(
                 project.clone(),
                 task.id.clone(),
                 item.id.clone(),
                 2,
+                "Inspect the updated query".into(),
                 false,
             )
             .await?;
@@ -789,17 +803,17 @@ async fn checklist_progress_authenticates_and_preserves_scoped_receipts_in_both_
             .await?;
         assert_eq!(manually_checked.revision, 4);
         assert!(manually_checked.checked);
-        store
-            .finish_agent_attempt(run.clone(), RunStatus::Succeeded, None)
-            .await?;
-        assert_eq!(
-            update(report("late", &item.id, 4, false)).await?["status"],
-            "unavailable"
-        );
-
         drop(bridge);
         drop(store);
         let store = Store::open(database)?;
+        store.recover_agent_attempts_after_restart().await?;
+        let recovered = store.job(project.clone(), job.id.clone()).await?.unwrap();
+        let stopped = recovered
+            .latest_attempt
+            .context("missing interrupted attempt")?;
+        assert_eq!(stopped.run_id, run);
+        assert_eq!(stopped.status, RunStatus::Interrupted);
+        assert!(RunBridge::start(&store, run.clone()).await.is_err());
         let history = store
             .checklist_progress_history(project.clone(), task.id.clone(), item.id.clone())
             .await?;
@@ -821,14 +835,75 @@ async fn checklist_progress_authenticates_and_preserves_scoped_receipts_in_both_
         );
         assert!(!history[1].after.checked);
         let current = store
-            .project_checklist_item_revision(project.clone(), task.id, item.id, 4)
+            .project_checklist_item_revision(project.clone(), task.id.clone(), item.id.clone(), 4)
             .await?
             .unwrap();
         assert!(current.checked);
-        assert_eq!(current.body, "Inspect query");
-        let saved = store.run_checklist_progress(project, run).await?.unwrap();
+        assert_eq!(current.body, "Inspect the updated query");
+        let saved = store
+            .run_checklist_progress(project.clone(), run.clone())
+            .await?
+            .unwrap();
         assert_eq!(saved.availability, ChecklistProgressAvailability::Inactive);
         assert_eq!(saved.items[0].revision, 1);
+
+        store
+            .queue_job_recovery(project.clone(), job.id, run.clone(), RecoveryAction::Retry)
+            .await?;
+        let retry = store
+            .claim_next_job(environment())
+            .await?
+            .context("missing restarted checklist attempt")?;
+        let retry_run = retry.run.id.clone();
+        assert_ne!(retry_run, run);
+        assert_eq!(retry.previous_run_id.as_deref(), Some(run.as_str()));
+        store.mark_agent_running(retry_run.clone()).await?;
+        let bridge = RunBridge::start(&store, retry_run.clone()).await?;
+        let context = store
+            .task_dispatch_context(retry_run.clone())
+            .await?
+            .unwrap();
+        assert_eq!(context.checklist_mode, Some(mode));
+        assert_eq!(context.checklist.first(), Some(&current));
+        let retry_dispatch = store
+            .prepare_dispatch(
+                retry_run.clone(),
+                snapshot(&retry, context, &assessment)?,
+                vec![b"retry fixture".to_vec()],
+            )
+            .await?;
+        store
+            .settle_dispatch(retry_dispatch.clone(), Delivery::Submitted)
+            .await?;
+        assert_eq!(
+            exchange_test_checklist_progress(&bridge, report("first", &item.id, 4, false), true)
+                .await?,
+            json!({"status":"checklist_progress_recorded", "payload":{"itemId":item.id,"revision":5,"checked":false}})
+        );
+        store
+            .finish_agent_attempt(retry_run.clone(), RunStatus::Succeeded, None)
+            .await?;
+        assert_eq!(
+            exchange_test_checklist_progress(&bridge, report("late", &item.id, 5, true), true)
+                .await?["status"],
+            "unavailable"
+        );
+        let revised = store
+            .checklist_progress_history(project, task.id, item.id)
+            .await?;
+        assert_eq!(revised.len(), 4);
+        assert_eq!(&revised[..3], history);
+        assert_eq!(
+            revised[3].actor,
+            ChecklistProgressActor::Agent {
+                run_id: retry_run,
+                dispatch_id: retry_dispatch,
+                request_id: "first".into(),
+            }
+        );
+        assert_eq!(revised[3].before_revision, 4);
+        assert_eq!(revised[3].after.revision, 5);
+        assert!(!revised[3].after.checked);
     }
     Ok(())
 }

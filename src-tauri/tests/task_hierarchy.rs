@@ -4,7 +4,10 @@ use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::SessionScope,
     dispatch::EventSource,
-    jobs::{AdmissionEnvironment, JobRequest, PipelineDispatch, PipelineNodeKind, RecoveryAction},
+    jobs::{
+        AdmissionBlocker, AdmissionEnvironment, JobRequest, PipelineDispatch, PipelineNodeKind,
+        RecoveryAction,
+    },
     providers::{Provider, ProviderEvent, ProviderEventData, SessionMode},
     repository::{self, provision_task_worktree},
     runner::{DirectWindowsRunner, Runner},
@@ -90,7 +93,7 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
         )
         .await?;
     store.mark_agent_running(parent.run.id.clone()).await?;
-    let legacy_job = store
+    let job = store
         .submit_agent_job(
             parent.run.id.clone(),
             "legacy-request".into(),
@@ -107,6 +110,50 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
     store
         .finish_agent_attempt(parent.run.id, RunStatus::Succeeded, None)
         .await?;
+    let environment = AdmissionEnvironment {
+        runner: DirectWindowsRunner.identity().into(),
+        bridge_available: false,
+    };
+    let inspection = store
+        .inspect_job(project_id.clone(), job.id.clone(), environment.clone())
+        .await?
+        .context("legacy job is missing from the queue")?;
+    let [AdmissionBlocker::Approval { approval_id }] = inspection.blockers.as_slice() else {
+        anyhow::bail!("unexpected legacy job blockers: {:?}", inspection.blockers);
+    };
+    store
+        .decide_job_approval(project_id.clone(), approval_id.clone(), true)
+        .await?;
+    let completed = store
+        .claim_next_job(environment)
+        .await?
+        .context("legacy job did not start")?;
+    store.mark_agent_running(completed.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(completed.run.id.clone(), RunStatus::Succeeded, None)
+        .await?;
+    let legacy_job = store.job(project_id.clone(), job.id).await?.unwrap();
+    assert_eq!(completed.run.project_id, project_id);
+    assert_eq!(completed.run.checkout_id, worktree.checkout_id);
+    let legacy_runs = store
+        .project_task_runs(project_id.clone(), legacy_task.id.clone())
+        .await?;
+    let [run] = legacy_runs.as_slice() else {
+        anyhow::bail!("expected exactly one finished attempt for the legacy task");
+    };
+    assert_eq!(run.job_id, legacy_job.id);
+    assert_eq!(run.run_id, completed.run.id);
+    assert_eq!(run.turn_id, completed.run.turn_id);
+    assert_eq!(run.ordinal, 1);
+    assert_eq!(run.status, RunStatus::Succeeded);
+    assert_eq!(run.role, TaskRunRole::Session(SessionMode::ReadOnly));
+    assert_eq!(run.profile_id, "fixture");
+    let other_checkout = temp.path().join("other-project");
+    std::fs::create_dir(&other_checkout)?;
+    git(&other_checkout, &["init", "--quiet"])?;
+    let other_project = repository::register(&store, other_checkout)
+        .await?
+        .project_id;
     drop(store);
 
     let legacy = rusqlite::Connection::open(&database)?;
@@ -151,7 +198,31 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
     );
     assert_eq!(
         store.job(project_id.clone(), legacy_job.id.clone()).await?,
-        Some(legacy_job)
+        Some(legacy_job.clone())
+    );
+    assert!(
+        store
+            .job(other_project.clone(), legacy_job.id.clone())
+            .await?
+            .is_none()
+    );
+    assert!(
+        store
+            .project_task(other_project.clone(), legacy_task.id.clone())
+            .await?
+            .is_none()
+    );
+    assert!(
+        store
+            .project_task_runs(other_project, legacy_task.id.clone())
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .project_task_runs(project_id.clone(), legacy_task.id.clone())
+            .await?,
+        legacy_runs
     );
     assert_eq!(
         provision_task_worktree(
