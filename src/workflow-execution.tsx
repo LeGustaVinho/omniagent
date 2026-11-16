@@ -7,6 +7,7 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowPortColumn } from "@/workflow-graph-editor";
 import { initialNodePositions, wireKey } from "@/workflow-graph-model";
 import { WorkflowNodeEvidence } from "@/workflow-execution-evidence";
+import { WorkflowApprovalInspector } from "@/workflow-approval";
 import {
   controlForNode, presentation, workflowRunTarget, type ExecutionPinnedNode, type ExecutionRolePin, type WorkflowExecutionSnapshot, type WorkflowExecutionState, type WorkflowRun,
 } from "@/workflow-execution-model";
@@ -69,6 +70,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation }: {
     .map((node) => ({ node, detail: presentation(snapshot, node, unit) }));
   const positions = useMemo(() => initialNodePositions(graph), [graph]);
   const active = stages.find(({ node }) => node.instance.id === selected);
+  const approval = active?.node.instance.kind === "approve_implementation";
   const nodes: ExecutionNode[] = stages.map(({ node, detail }) => ({
     id: node.instance.id, position: positions[node.instance.id]!, type: "execution", selected: node.instance.id === selected,
     ariaLabel: `${node.definition.title} · ${stateLabel[detail.status]}`, data: { pinned: node, status: detail.status },
@@ -135,8 +137,10 @@ function WorkflowExecutionCanvas({ snapshot, navigation }: {
           <div><h3 className="font-semibold">{active.node.definition.title}</h3><State status={active.detail.status} /></div>
           {snapshot.rolePins?.filter((pin) => pin.nodeId === active.node.instance.id && pin.nodeRevision === active.node.revision)
             .map((pin) => <PinnedRole key={`${pin.version.destination}:${pin.version.id}:${pin.version.revision}`} pin={pin} />)}
-          {active.detail.reason && <p>{active.detail.reason}</p>}
-          {!!active.detail.missing?.length && <section aria-label="Waiting for dependencies">
+          {approval && <WorkflowApprovalInspector key={active.node.instance.id}
+            scope={{ projectId: run.projectId, runId: run.id }} nodeId={active.node.instance.id} planRevision={run.planRevision} />}
+          {!approval && active.detail.reason && <p>{active.detail.reason}</p>}
+          {!approval && !!active.detail.missing?.length && <section aria-label="Waiting for dependencies">
             <p>Waiting for recorded upstream outputs.</p>
             <ul className="list-disc pl-4">{active.detail.missing.map((wire) => <li key={wireKey(wire)}>
               {wire.to.port} needs {wire.from.node}.{wire.from.port}

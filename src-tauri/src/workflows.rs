@@ -41,7 +41,8 @@ mod units;
 
 pub use approval::{
     ApprovalDecision, ApprovalDecisionSource, ApprovalFacts, ApprovalRuleEvidence, ApprovalRuleOutcome,
-    ApprovalRuleSettings, UnmetApproval, WorkflowApprovalPreview, WorkflowApprovalSubmission,
+    ApprovalRuleSettings, UnmetApproval, WorkflowApprovalPreview, WorkflowApprovalStage,
+    WorkflowApprovalSubmission,
 };
 pub(crate) use approval::{
     active_delivery_workflow, detach_active_delivery_workflow, workflow_release_authorized,

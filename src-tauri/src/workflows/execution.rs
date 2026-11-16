@@ -114,8 +114,8 @@ impl Store {
             })
             .await?;
         if let Some(saved) = saved {
-            if matches!(&saved.value, ArtifactValue::Task(_)) {
-                self.approve_after_link(&project_id, &saved, &execution_key).await?;
+            if matches!(saved.value, ArtifactValue::Task(_)) {
+                self.refresh_control(project_id, run_id).await?;
             }
             return Ok(saved);
         }
@@ -197,7 +197,6 @@ impl Store {
             self.check_artifact_source(&project_id, &run_id, &node_id, value)
                 .await?;
         }
-        let approval_plan = execution_key.clone();
         let completed = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -256,9 +255,6 @@ impl Store {
             })
             .await?;
         self.job_signal.send_replace(());
-        if let ArtifactValue::Task(task) = &completed.value {
-            self.approve_after_link(&task.project_id, &completed, &approval_plan).await?;
-        }
         Ok(completed)
     }
 

@@ -18,9 +18,10 @@ use super::{
 mod rules;
 #[cfg(test)]
 mod tests;
+pub(super) use rules::activate_selected_approval;
 pub use rules::{
     ApprovalFacts, ApprovalRuleEvidence, ApprovalRuleOutcome, ApprovalRuleSettings, UnmetApproval,
-    WorkflowApprovalPreview, WorkflowApprovalSubmission,
+    WorkflowApprovalPreview, WorkflowApprovalStage, WorkflowApprovalSubmission,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,18 +99,19 @@ impl Store {
         attempt: &str,
     ) -> Result<String> {
         let (project, attempt) = (project.to_owned(), attempt.to_owned());
-        self.execute(move |db| {
-            db.query_row(
-                "SELECT j.checkout_id FROM jobs j JOIN job_attempts a ON a.job_id = j.id
-                 WHERE j.project_id = ?1 AND a.run_id = ?2",
-                params![project, attempt],
-                |row| row.get(0),
-            )
-            .optional()?
-            .context("the plan's captured checkout is unavailable")
-        })
-        .await
+        self.execute(move |db| load_plan_checkout(db, &project, &attempt)).await
     }
+}
+
+fn load_plan_checkout(db: &Connection, project: &str, attempt: &str) -> Result<String> {
+    db.query_row(
+        "SELECT j.checkout_id FROM jobs j JOIN job_attempts a ON a.job_id = j.id
+         WHERE j.project_id = ?1 AND a.run_id = ?2",
+        params![project, attempt],
+        |row| row.get(0),
+    )
+    .optional()?
+    .context("the plan's captured checkout is unavailable")
 }
 
 pub(crate) fn active_delivery_workflow(

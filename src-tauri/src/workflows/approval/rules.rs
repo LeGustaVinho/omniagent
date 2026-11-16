@@ -6,12 +6,14 @@ use uuid::Uuid;
 use crate::{protection, store::Store};
 
 use super::{
-    ApprovalDecision, ApprovalDecisionSource, active_approval, record_decision,
+    ApprovalDecision, ApprovalDecisionSource, active_approval, load_plan_checkout, record_decision,
     require_current_plan, validate_linked_task,
 };
 use crate::workflows::{
-    ArtifactKind, ArtifactValue, BuiltinNode, NodeInputs, WorkflowArtifact,
-    artifacts::load_artifact,
+    ArtifactKind, ArtifactValue, BuiltinNode, NodeInputs, PinnedNode, WorkflowArtifact, WorkflowRun,
+    artifacts::{load_artifact, load_plan_text},
+    runtime::load_workflow_run,
+    units::parse_plan_units,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -77,6 +79,19 @@ pub struct WorkflowApprovalPreview {
     pub decision_artifact_id: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", rename_all_fields = "camelCase")]
+pub enum WorkflowApprovalStage {
+    Waiting { reason: String },
+    Skipped { reason: String },
+    Ready {
+        plan_id: String,
+        task_artifact_id: String,
+        source: Option<ApprovalDecisionSource>,
+        preview: Box<WorkflowApprovalPreview>,
+    },
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowApprovalSubmission {
@@ -93,7 +108,77 @@ struct ApprovalContext {
     inputs: NodeInputs,
 }
 
+impl ApprovalContext {
+    fn from_inputs(
+        db: &Connection,
+        run: &WorkflowRun,
+        node_id: &str,
+        plan: &WorkflowArtifact,
+        task: &WorkflowArtifact,
+    ) -> Result<Self> {
+        let ArtifactValue::Task(task_ref) = &task.value else {
+            anyhow::bail!("approval requires linked work");
+        };
+        let ArtifactValue::Plan { run_id: attempt, event_sequence } = &plan.value else {
+            anyhow::bail!("approval requires a plan");
+        };
+        ensure!(
+            task_ref.project_id == run.project_id
+                && task.workflow_run_id == run.id
+                && plan.workflow_run_id == run.id,
+            "approval evidence is outside this workflow"
+        );
+        let text = load_plan_text(db, attempt, *event_sequence)?;
+        let unit_count = parse_plan_units(&plan.id, &text)?.len().try_into()?;
+        let source_checkout_id = load_plan_checkout(db, &run.project_id, attempt)?;
+        let facts = ApprovalFacts {
+            plan_revision: plan.id.clone(),
+            task_artifact_id: task.id.clone(),
+            task_id: task_ref.task_id.clone(),
+            source_checkout_id: source_checkout_id.clone(),
+            unit_count,
+        };
+        Ok(Self {
+            facts,
+            workflow_id: run.version.id.clone(),
+            inputs: NodeInputs::from([("plan".into(), plan.id.clone()), ("task".into(), task.id.clone())]),
+            decision: ApprovalDecision {
+                workflow_run_id: run.id.clone(),
+                node_instance_id: node_id.into(),
+                plan_revision: plan.id.clone(),
+                task: task_ref.clone(),
+                task_artifact_id: task.id.clone(),
+                source_checkout_id,
+                source: ApprovalDecisionSource::Operator,
+                rule_evidence: None,
+            },
+        })
+    }
+}
+
 impl Store {
+    pub async fn workflow_approval_stage(
+        &self,
+        project: String,
+        run_id: String,
+        node_id: String,
+    ) -> Result<WorkflowApprovalStage> {
+        use super::super::control::{ApprovalSelection, approval_selection, refresh};
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let run = load_workflow_run(&tx, &project, &run_id)?
+                .context("the approval workflow is unavailable")?;
+            refresh(&tx, &project, &run_id)?;
+            let stage = match approval_selection(&tx, &run, &node_id)? {
+                ApprovalSelection::Waiting { reason } => WorkflowApprovalStage::Waiting { reason },
+                ApprovalSelection::Skipped { reason } => WorkflowApprovalStage::Skipped { reason },
+                ApprovalSelection::Ready { plan, task } => approval_stage_ready(&tx, &run, &node_id, &plan, &task)?,
+            };
+            tx.commit()?;
+            Ok(stage)
+        }).await
+    }
+
     async fn approval_context(
         &self,
         submission: WorkflowApprovalSubmission,
@@ -111,50 +196,11 @@ impl Store {
             node.definition.kind == BuiltinNode::ApproveImplementation,
             "the stage does not approve implementation"
         );
-        let ArtifactValue::Task(task) = &resolved["task"].value else {
-            anyhow::bail!("approval requires linked work");
-        };
-        let plan = &resolved["plan"];
-        let ArtifactValue::Plan {
-            run_id: attempt, ..
-        } = &plan.value
-        else {
-            anyhow::bail!("approval requires a plan");
-        };
-        let unit_count = self
-            .workflow_plan_units(project_id.clone(), run_id.clone(), plan.id.clone())
-            .await?
-            .len()
-            .try_into()?;
-        let source_checkout_id = self.workflow_plan_checkout(&project_id, attempt).await?;
-        let workflow_id = self
-            .workflow_run(project_id.clone(), run_id.clone())
-            .await?
-            .context("the approval workflow is unavailable")?
-            .version
-            .id;
-        let facts = ApprovalFacts {
-            plan_revision: plan.id.clone(),
-            task_artifact_id: resolved["task"].id.clone(),
-            task_id: task.task_id.clone(),
-            source_checkout_id: source_checkout_id.clone(),
-            unit_count,
-        };
-        Ok(ApprovalContext {
-            facts,
-            workflow_id,
-            inputs,
-            decision: ApprovalDecision {
-                workflow_run_id: run_id,
-                node_instance_id: node_id,
-                plan_revision: plan.id.clone(),
-                task: task.clone(),
-                task_artifact_id: resolved["task"].id.clone(),
-                source_checkout_id,
-                source: ApprovalDecisionSource::Operator,
-                rule_evidence: None,
-            },
-        })
+        self.execute(move |db| {
+            let run = load_workflow_run(db, &project_id, &run_id)?
+                .context("the approval workflow is unavailable")?;
+            ApprovalContext::from_inputs(db, &run, &node_id, &resolved["plan"], &resolved["task"])
+        }).await
     }
 
     pub async fn workflow_approval_preview(
@@ -219,7 +265,7 @@ impl Store {
                 }
             }
             let preview = inspect(&tx, &context)?;
-            let preview = apply_if_automatic(&tx, &context, preview)?;
+            let preview = apply_and_refresh(&tx, &context, preview)?;
             tx.commit()?;
             Ok(preview)
         }).await?;
@@ -232,27 +278,16 @@ impl Store {
         submission: WorkflowApprovalSubmission,
         expected_revision: String,
     ) -> Result<WorkflowApprovalPreview> {
-        self.evaluate_current_approval(submission, Some(expected_revision))
-            .await
-    }
-
-    async fn evaluate_current_approval(
-        &self,
-        submission: WorkflowApprovalSubmission,
-        expected_revision: Option<String>,
-    ) -> Result<WorkflowApprovalPreview> {
         let context = self.approval_context(submission).await?;
         let preview = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let preview = inspect(&tx, &context)?;
-                if let Some(expected_revision) = expected_revision {
-                    ensure!(
-                        preview.revision.as_ref() == Some(&expected_revision),
-                        "the automatic approval rule changed; refresh its preview"
-                    );
-                }
-                let preview = apply_if_automatic(&tx, &context, preview)?;
+                ensure!(
+                    preview.revision.as_ref() == Some(&expected_revision),
+                    "the automatic approval rule changed; refresh its preview"
+                );
+                let preview = apply_and_refresh(&tx, &context, preview)?;
                 tx.commit()?;
                 Ok(preview)
             })
@@ -294,6 +329,9 @@ impl Store {
                     ApprovalDecisionSource::Operator,
                     rule_evidence,
                 )?;
+                super::super::control::refresh(
+                    &tx, &context.decision.task.project_id, &context.decision.workflow_run_id,
+                )?;
                 tx.commit()?;
                 Ok(artifact)
             })
@@ -302,69 +340,56 @@ impl Store {
         Ok(completed)
     }
 
-    pub(in crate::workflows) async fn approve_after_link(
-        &self,
-        project: &str,
-        task: &WorkflowArtifact,
-        plan_id: &str,
-    ) -> Result<()> {
-        let run = &task.workflow_run_id;
-        let workflow = self
-            .workflow_run(project.into(), run.clone())
-            .await?
-            .context("the approval workflow is unavailable")?;
-        if workflow.plan_revision.as_deref() != Some(plan_id) {
-            return Ok(());
-        }
-        let definition = self
-            .workflow_definition(project.into(), workflow.version)
-            .await?
-            .context("the approval definition is unavailable")?;
-        for node in definition
-            .nodes
-            .iter()
-            .filter(|node| node.instance.kind == BuiltinNode::ApproveImplementation)
-        {
-            let node_id = &node.instance.id;
-            if !definition.wires.iter().any(|wire| {
-                wire.from.node == task.node_instance_id
-                    && wire.from.port == task.port
-                    && &wire.to.node == node_id
-                    && wire.to.port == "task"
-            }) {
-                continue;
-            }
-            let saved = self
-                .execute({
-                    let (project, workflow, node) = (
-                        project.to_owned(),
-                        definition.version.id.clone(),
-                        node_id.clone(),
-                    );
-                    move |db| load_rule(db, &project, &workflow, &node)
-                })
-                .await?;
-            if let Some((_, ApprovalRuleSettings::Automatic { .. })) = saved {
-                self.evaluate_current_approval(
-                    WorkflowApprovalSubmission {
-                        project_id: project.into(),
-                        run_id: run.clone(),
-                        node_id: node_id.clone(),
-                        inputs: NodeInputs::from([
-                            ("plan".into(), plan_id.into()),
-                            ("task".into(), task.id.clone()),
-                        ]),
-                    },
-                    None,
-                )
-                .await?;
-            }
-        }
-        Ok(())
-    }
+}
+
+fn approval_stage_ready(
+    db: &Connection,
+    run: &WorkflowRun,
+    node_id: &str,
+    plan: &WorkflowArtifact,
+    task: &WorkflowArtifact,
+) -> Result<WorkflowApprovalStage> {
+    let preview = ApprovalContext::from_inputs(db, run, node_id, plan, task)
+        .and_then(|context| inspect(db, &context));
+    let preview = match preview {
+        Ok(preview) => preview,
+        Err(error) => return Ok(WorkflowApprovalStage::Waiting {
+            reason: crate::diagnostics::preview(&error.to_string()),
+        }),
+    };
+    let source = if let Some(id) = &preview.decision_artifact_id {
+        let artifact = load_artifact(db, &run.project_id, &run.id, id, ArtifactKind::Approval)?
+            .context("the current approval decision is unavailable")?;
+        let ArtifactValue::Approval(decision) = artifact.value else {
+            anyhow::bail!("the current approval decision has the wrong type");
+        };
+        Some(decision.source)
+    } else {
+        None
+    };
+    Ok(WorkflowApprovalStage::Ready {
+        plan_id: plan.id.clone(),
+        task_artifact_id: task.id.clone(),
+        source,
+        preview: Box::new(preview),
+    })
 }
 
 fn inspect(db: &Connection, context: &ApprovalContext) -> Result<WorkflowApprovalPreview> {
+    let decision = &context.decision;
+    super::super::control::require_stage(
+        db, &decision.task.project_id, &decision.workflow_run_id,
+        &decision.node_instance_id, None, &context.inputs,
+    )?;
+    let rule = load_rule(db, &decision.task.project_id, &context.workflow_id, &decision.node_instance_id)?;
+    inspect_selected(db, context, rule)
+}
+
+fn inspect_selected(
+    db: &Connection,
+    context: &ApprovalContext,
+    rule: Option<(String, ApprovalRuleSettings)>,
+) -> Result<WorkflowApprovalPreview> {
     let decision = &context.decision;
     require_current_plan(
         db,
@@ -373,12 +398,6 @@ fn inspect(db: &Connection, context: &ApprovalContext) -> Result<WorkflowApprova
         &decision.plan_revision,
     )?;
     validate_linked_task(db, decision)?;
-    let rule = load_rule(
-        db,
-        &decision.task.project_id,
-        &context.workflow_id,
-        &decision.node_instance_id,
-    )?;
     let (revision, settings) = rule.map_or_else(
         || (None, ApprovalRuleSettings::default()),
         |(revision, settings)| (Some(revision), settings),
@@ -416,6 +435,35 @@ fn inspect(db: &Connection, context: &ApprovalContext) -> Result<WorkflowApprova
         facts: context.facts.clone(),
         decision_artifact_id: active,
     })
+}
+
+pub(in crate::workflows) fn activate_selected_approval(
+    db: &Connection,
+    run: &WorkflowRun,
+    node: &PinnedNode,
+    plan: &WorkflowArtifact,
+    task: &WorkflowArtifact,
+) -> Result<bool> {
+    let node_id = &node.instance.id;
+    let rule = load_rule(db, &run.project_id, &run.version.id, node_id)?;
+    if !matches!(&rule, Some((_, ApprovalRuleSettings::Automatic { .. })))
+        || !super::super::registry::supports_pinned_execution(&node.definition)
+    {
+        return Ok(false);
+    }
+    let Ok(context) = ApprovalContext::from_inputs(db, run, node_id, plan, task) else {
+        // Missing plan evidence leaves this approval waiting. Its ordinary preview explains the error.
+        return Ok(false);
+    };
+    let preview = inspect_selected(db, &context, rule)?;
+    if preview.decision_artifact_id.is_some()
+        || preview.outcome != ApprovalRuleOutcome::ConditionsMet
+        || super::super::authoring::ensure_package_runnable(db, &run.project_id, &run.version).is_err()
+        || crate::tasks::validate_repository_delivery_open(db, &run.project_id, &context.facts.task_id).is_err()
+    {
+        return Ok(false);
+    }
+    Ok(apply_if_automatic(db, &context, preview)?.decision_artifact_id.is_some())
 }
 
 fn outcome(settings: &ApprovalRuleSettings, facts: &ApprovalFacts) -> ApprovalRuleOutcome {
@@ -461,6 +509,21 @@ fn apply_if_automatic(
             )?
             .id,
         );
+    }
+    Ok(preview)
+}
+
+fn apply_and_refresh(
+    db: &Connection,
+    context: &ApprovalContext,
+    preview: WorkflowApprovalPreview,
+) -> Result<WorkflowApprovalPreview> {
+    let pending = preview.decision_artifact_id.is_none();
+    let preview = apply_if_automatic(db, context, preview)?;
+    if pending && preview.decision_artifact_id.is_some() {
+        super::super::control::refresh(
+            db, &context.decision.task.project_id, &context.decision.workflow_run_id,
+        )?;
     }
     Ok(preview)
 }

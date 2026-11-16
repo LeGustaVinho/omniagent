@@ -460,27 +460,8 @@ impl Store {
     }
 
     pub(super) async fn workflow_plan_text(&self, run_id: String, sequence: i64) -> Result<String> {
-        self.execute(move |db| {
-            let payload: Vec<u8> = db
-                .query_row(
-                    "SELECT payload FROM agent_events WHERE run_id = ?1 AND seq = ?2
-                 AND source IN ('provider', 'application')",
-                    params![run_id, sequence],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .context("plan proposal event is unavailable on the issuing attempt")?;
-            let event: ProviderEvent = serde_json::from_slice(&protection::unprotect(&payload)?)?;
-            match event.data {
-                ProviderEventData::PlanProposed { text, .. }
-                    if event.location.parent_item_id.is_none() =>
-                {
-                    Ok(text)
-                }
-                _ => anyhow::bail!("the evidence is outside the owning attempt's plan proposals"),
-            }
-        })
-        .await
+        self.execute(move |db| load_plan_text(db, &run_id, sequence))
+            .await
     }
 
     async fn check_artifact_attempt(
@@ -531,6 +512,23 @@ impl Store {
             .await?;
         ensure!(belongs, "artifact checkout is outside the workflow project");
         Ok(())
+    }
+}
+
+pub(super) fn load_plan_text(db: &Connection, run_id: &str, sequence: i64) -> Result<String> {
+    let payload: Vec<u8> = db
+        .query_row(
+            "SELECT payload FROM agent_events WHERE run_id = ?1 AND seq = ?2
+             AND source IN ('provider', 'application')",
+            params![run_id, sequence],
+            |row| row.get(0),
+        )
+        .optional()?
+        .context("plan proposal event is unavailable on the issuing attempt")?;
+    let event: ProviderEvent = serde_json::from_slice(&protection::unprotect(&payload)?)?;
+    match event.data {
+        ProviderEventData::PlanProposed { text, .. } if event.location.parent_item_id.is_none() => Ok(text),
+        _ => anyhow::bail!("the evidence is outside the owning attempt's plan proposals"),
     }
 }
 

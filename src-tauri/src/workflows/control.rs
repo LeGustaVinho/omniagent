@@ -201,16 +201,20 @@ pub(super) fn refresh(db: &Connection, project: &str, pipeline: &str) -> Result<
     };
     let definition = load_definition(db, project, &run.version)?
         .context("missing pinned workflow definition")?;
-    if !uses_control(&definition) {
+    let controls = uses_control(&definition);
+    if !controls && !definition.nodes.iter().any(|node| node.instance.kind == BuiltinNode::ApproveImplementation) {
         return Ok(());
+    }
+    let mut state = Evaluation::new(db, &definition, &run)?;
+    if !controls {
+        return state.settle(None, false);
     }
     let unit_ids = db.prepare(
         "SELECT unit_id FROM workflow_delivery_units WHERE project_id = ?1 AND pipeline_run_id = ?2 AND plan_revision = ?3 ORDER BY ordinal",
     )?.query_map(params![project, pipeline, run.plan_revision], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut state = Evaluation::new(db, &definition, &run)?;
     for unit in std::iter::once(None).chain(unit_ids.iter().map(|id| Some(id.as_str()))) {
-        state.settle(unit)?;
+        state.settle(unit, true)?;
     }
     Ok(())
 }
@@ -342,6 +346,26 @@ enum Arrival {
     Pending,
 }
 
+pub(super) enum ApprovalSelection {
+    Ready { plan: WorkflowArtifact, task: WorkflowArtifact },
+    Waiting { reason: String },
+    Skipped { reason: String },
+}
+
+pub(super) fn approval_selection(
+    db: &Connection,
+    run: &WorkflowRun,
+    node_id: &str,
+) -> Result<ApprovalSelection> {
+    let definition = load_definition(db, &run.project_id, &run.version)?
+        .context("the pinned approval workflow is unavailable")?;
+    let state = Evaluation::new(db, &definition, run)?;
+    let node = state.nodes.get(node_id)
+        .filter(|node| node.instance.kind == BuiltinNode::ApproveImplementation)
+        .context("the selected stage does not approve implementation")?;
+    state.approval_inputs(node)
+}
+
 struct Evaluation<'a> {
     db: &'a Connection,
     definition: &'a WorkflowDefinition,
@@ -397,21 +421,73 @@ impl<'a> Evaluation<'a> {
         Ok(())
     }
 
-    fn settle(&mut self, unit: Option<&str>) -> Result<()> {
-        // Published node order is independent of topological order. A pass
-        // only adds immutable receipts, so at most N passes can add work.
+    fn settle(&mut self, unit: Option<&str>, controls: bool) -> Result<()> {
+        // A pass can make new control receipts or activate a ready approval.
+        // Revisit downstream nodes regardless of their published order.
         loop {
             let before = self.receipts.len();
+            let mut approved = false;
             for node in &self.definition.nodes {
                 if self.unit_nodes.contains(node.instance.id.as_str()) == unit.is_some() {
-                    if let Some(receipt) = self.evaluate(node, unit)? {
+                    if controls && let Some(receipt) = self.evaluate(node, unit)? {
                         self.save(receipt)?;
+                    }
+                    if node.instance.kind == BuiltinNode::ApproveImplementation && unit.is_none() {
+                        approved |= self.activate_approval(node)?;
                     }
                 }
             }
-            if before == self.receipts.len() {
+            if !approved && before == self.receipts.len() {
                 return Ok(());
             }
+        }
+    }
+
+    fn activate_approval(&self, node: &PinnedNode) -> Result<bool> {
+        let ApprovalSelection::Ready { plan, task } = self.approval_inputs(node)? else {
+            return Ok(false);
+        };
+        super::approval::activate_selected_approval(self.db, self.run, node, &plan, &task)
+    }
+
+    fn approval_inputs(&self, node: &PinnedNode) -> Result<ApprovalSelection> {
+        if let Some(receipt) = self.receipt(&node.instance.id, None)
+            && receipt.state == ControlStageState::Skipped
+        {
+            return Ok(ApprovalSelection::Skipped {
+                reason: receipt.reason.clone().unwrap_or_else(|| "The approval's branch was skipped.".into()),
+            });
+        }
+        let (mut ready, mut plan, mut task) = (false, None, None);
+        let mut waiting = None;
+        for wire in self.definition.wires.iter().filter(|wire| wire.to.node == node.instance.id) {
+            let artifact = match self.dependency(wire, None)? {
+                Arrival::Ignored => return Ok(ApprovalSelection::Skipped {
+                    reason: format!("The selected branches did not reach approval input {}.", wire.to.port),
+                }),
+                Arrival::Pending => {
+                    waiting.get_or_insert_with(|| format!(
+                        "Waiting for {} from {}.{}.", wire.to.port, wire.from.node, wire.from.port,
+                    ));
+                    continue;
+                }
+                Arrival::Selected(artifact) => artifact,
+            };
+            match wire.to.port.as_str() {
+                "ready" => ready = true,
+                "plan" => plan = artifact,
+                "task" => task = artifact,
+                _ => {}
+            }
+        }
+        if let Some(reason) = waiting {
+            return Ok(ApprovalSelection::Waiting { reason });
+        }
+        match (ready, plan, task) {
+            (true, Some(plan), Some(task)) => Ok(ApprovalSelection::Ready { plan, task }),
+            _ => Ok(ApprovalSelection::Waiting {
+                reason: "Implementation approval needs the selected plan and linked work.".into(),
+            }),
         }
     }
 

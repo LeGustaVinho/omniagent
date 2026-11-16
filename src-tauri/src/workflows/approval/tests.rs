@@ -22,6 +22,8 @@ use crate::{
 
 use super::*;
 
+mod branches;
+
 #[tokio::test]
 async fn automatic_approval_rechecks_typed_scope_rule_and_plan_for_release_recovery_and_children()
 -> Result<()> {

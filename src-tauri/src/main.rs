@@ -329,6 +329,7 @@ fn main() {
             workflow_ipc::inspect_repository_delivery,
             workflow_ipc::execute_repository_delivery_host,
             workflow_ipc::approval::preview_workflow_approval,
+            workflow_ipc::approval::workflow_approval_stage,
             workflow_ipc::approval::set_workflow_approval_rule,
             workflow_ipc::approval::evaluate_workflow_approval,
             workflow_ipc::approval::approve_workflow_implementation,

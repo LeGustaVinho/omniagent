@@ -56,6 +56,7 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   const plan = node("planner", "Historical plan", [port("context", "markdown")], [port("plan", "plan")]);
   const review = node("review", "Review pinned plan", [port("plan", "plan")]);
   const approval = node("approval", "Saved plan approval", [], [port("decision", "approval")]);
+  approval.instance.kind = "approve_implementation";
   const commit = node("commit", "Verified Git", [], [port("git", "git")]);
   const jobs = [
     job("planner", [{ runId: "attempt-first", ordinal: 1, previousRunId: null, conversationId: "original-conversation", status: "failed" },
@@ -108,10 +109,30 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
       output("command", "command-receipt", "result", "command_result", { runId: "command-saved", output: { format: "json", value: { count: 2 } } }),
     ],
   };
+  let approvalPreview = { revision: "rule-reviewed", settings: { mode: "automatic", taskId: task.taskId,
+    sourceCheckoutId: exampleCheckout.checkoutId, maximumUnits: 2, ifUnmet: "wait" },
+    facts: { planRevision: "selected-plan", taskId: task.taskId, sourceCheckoutId: exampleCheckout.checkoutId, unitCount: 2 },
+    outcome: "conditions_met", allowsHuman: false, decisionArtifactId: "approval-receipt" as string | null };
   vi.mocked(invoke).mockImplementation(async (command, input) => {
     switch (command) {
       case "list_repository_deliveries": return [snapshot.run, { ...snapshot.run, id: "newer-run", version: { id: "pipeline", revision: "new-edited-draft" } }];
       case "inspect_workflow_execution": expect(input).toEqual({ projectId, runId }); return snapshot;
+      case "workflow_approval_stage":
+        expect(input).toEqual({ projectId, runId, nodeId: "approval" });
+        return { status: "ready", planId: "selected-plan", taskArtifactId: "linked-task-artifact",
+          source: approvalPreview.decisionArtifactId ? "automatic_rule" : null, preview: approvalPreview };
+      case "preview_workflow_approval":
+        expect(input).toEqual({ submission: { projectId, runId, nodeId: "approval",
+          inputs: { plan: "selected-plan", task: "linked-task-artifact" } } });
+        return approvalPreview;
+      case "set_workflow_approval_rule":
+        expect(input).toEqual({
+          submission: { projectId, runId, nodeId: "approval", inputs: { plan: "selected-plan", task: "linked-task-artifact" } },
+          expectedRevision: "rule-reviewed", settings: { ...approvalPreview.settings, maximumUnits: 1 },
+        });
+        approvalPreview = { ...approvalPreview, revision: "updated-rule", decisionArtifactId: null,
+          settings: { ...approvalPreview.settings, maximumUnits: 1 }, outcome: "unit_limit_exceeded" };
+        return approvalPreview;
       case "inspect_workflow_execution_job": {
         const matched = jobs.find(({ job }) => job.id === (input as { jobId: string }).jobId)!;
         return { job: matched.job, blockers: [], recoveryActions: matched.nodeId === "planner" ? ["retry"] : [] };
@@ -154,7 +175,14 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   await user.click(inspector.getByRole("button", { name: "Open queue job" }));
   expect(props.openQueueJob).toHaveBeenCalledWith("job-planner");
   await user.click(graph.getByRole("button", { name: "Saved plan approval · Completed" }));
+  expect(await inspector.findByText("Automatic implementation approval recorded.")).toBeTruthy();
   expect(inspector.getByText("rule-reviewed")).toBeTruthy();
+  await user.click(inspector.getByText("Implementation approval settings"));
+  const limit = inspector.getByRole("spinbutton", { name: "Maximum logical units" });
+  await user.clear(limit);
+  await user.type(limit, "1");
+  await user.click(inspector.getByRole("button", { name: "Save approval settings" }));
+  expect(await inspector.findByText("The reviewed plan has 2 logical units. The rule permits 1.")).toBeTruthy();
   await user.click(inspector.getByRole("button", { name: "Open Agile work" }));
   expect(props.openWorkspace).toHaveBeenCalledWith("tasks", "linked-task");
   await user.click(graph.getByRole("button", { name: "Verified Git · Completed" }));

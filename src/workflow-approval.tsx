@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import type { DeliveryActions, DeliveryTarget } from "@/repository-delivery-model";
@@ -22,6 +22,9 @@ type ApprovalPreview = {
   allowsHuman: boolean;
   decisionArtifactId: string | null;
 };
+type ApprovalStage =
+  | { status: "waiting" | "skipped"; reason: string }
+  | { status: "ready"; planId: string; taskArtifactId: string; source: "operator" | "automatic_rule" | null; preview: ApprovalPreview };
 
 function status(preview: ApprovalPreview) {
   switch (preview.outcome) {
@@ -71,15 +74,16 @@ function RuleForm({ preview, onSave, busy }: {
   </details>;
 }
 
-export function WorkflowApproval({ scope, nodeId, planId, taskArtifactId, source, actions }: {
+export function WorkflowApproval({ scope, nodeId, planId, taskArtifactId, source, actions, initialPreview }: {
   scope: DeliveryTarget; nodeId: string; planId: string; taskArtifactId: string;
-  source?: "operator" | "automatic_rule"; actions: DeliveryActions;
+  source?: "operator" | "automatic_rule"; actions: DeliveryActions; initialPreview?: ApprovalPreview;
 }) {
   const client = useQueryClient();
   const submission = { ...scope, nodeId, inputs: { plan: planId, task: taskArtifactId } };
   const queryKey = ["repository-delivery", scope.projectId, scope.runId, "approval", nodeId, planId, taskArtifactId];
   const preview = useQuery({ queryKey,
     queryFn: () => invoke<ApprovalPreview>("preview_workflow_approval", { submission }),
+    initialData: initialPreview,
   });
   const data = preview.data;
   const refreshRule = (command: string, args: object) => actions.execute(async () => {
@@ -102,4 +106,31 @@ export function WorkflowApproval({ scope, nodeId, planId, taskArtifactId, source
         onSave={(settings) => refreshRule("set_workflow_approval_rule", { expectedRevision: data.revision, settings })} />
     </>}
   </section>;
+}
+
+export function WorkflowApprovalInspector({ scope, nodeId, planRevision }: {
+  scope: DeliveryTarget; nodeId: string; planRevision: string | null;
+}) {
+  const client = useQueryClient();
+  const projectQueries = ["repository-delivery", scope.projectId];
+  const stage = useQuery({
+    queryKey: [...projectQueries, scope.runId, "approval-stage", nodeId, planRevision],
+    queryFn: () => invoke<ApprovalStage>("workflow_approval_stage", { ...scope, nodeId }),
+    refetchInterval: ({ state }) => state.data?.status === "waiting" ? 900 : false,
+  });
+  const decision = useMutation({
+    mutationFn: (operation: () => Promise<unknown>) => operation(),
+    onSuccess: () => client.invalidateQueries({ queryKey: projectQueries }),
+  });
+  if (stage.error) return <p role="alert">{String(stage.error)}</p>;
+  if (!stage.data) return <p role="status">Checking implementation approval.</p>;
+  if (stage.data.status !== "ready") return <p role="status">{stage.data.reason}</p>;
+  const { planId, taskArtifactId, source, preview } = stage.data;
+  return <>
+    <WorkflowApproval key={`${nodeId}:${planId}:${taskArtifactId}`}
+      scope={scope} nodeId={nodeId} planId={planId} taskArtifactId={taskArtifactId}
+      source={source ?? undefined} initialPreview={preview}
+      actions={{ execute: decision.mutate, busy: decision.isPending }} />
+    {decision.error && <p role="alert">{String(decision.error)}</p>}
+  </>;
 }
