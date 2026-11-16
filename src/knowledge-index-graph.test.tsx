@@ -86,7 +86,8 @@ function mockIndex() {
   const watchers = new Map<string, (notice: IndexNotice) => void>();
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     const input = (args ?? {}) as {
-      checkoutId: string; path: string; baseRevision: string; bufferRevision: string; channel: { onmessage: (notice: IndexNotice) => void };
+      checkoutId: string; path: string; baseRevision: string; bufferRevision: string; query: string;
+      channel: { onmessage: (notice: IndexNotice) => void };
     };
     const projection = projections.get(input.checkoutId);
     switch (command) {
@@ -104,6 +105,8 @@ function mockIndex() {
       case "repository_note_edges":
         if (!projection) throw new Error("Unknown edge checkout");
         return projection.edges;
+      case "search_repository_note_index":
+        return projection?.notes.filter((note) => note.title.toLowerCase().includes(input.query.toLowerCase()));
       case "repository_note_catalog":
       case "list_repository_markdown_drafts": return [];
       case "read_repository_markdown_draft": return null;
@@ -161,8 +164,14 @@ it("uses a checkout's indexed edges to focus a canonical tab and keeps identitie
   const user = userEvent.setup();
   await screen.findByRole("button", { name: "Close Start.md" });
   const fileTree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
-  await user.click(await fileTree.findByRole("button", { name: "Guia.md" }));
+  await user.click(fileTree.getByRole("button", { name: "Search notes" }));
+  const search = fileTree.getByRole("combobox", { name: "Find notes and content" });
+  await user.click(search);
+  await user.paste("Guia ativo");
+  await fileTree.findByRole("option", { name: /Guia ativo/ });
+  await user.keyboard("{Enter}");
   await screen.findByRole("button", { name: "Close Guia.md" });
+  await user.click(fileTree.getByRole("button", { name: "Show notes" }));
   await user.click(screen.getByRole("button", { name: "Graph" }));
   await screen.findByRole("list", { name: "Graph notes" });
   await waitFor(() => expect(edgePaths(currentGraph())).toContainEqual([start, guide]));
