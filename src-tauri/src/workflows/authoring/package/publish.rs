@@ -8,6 +8,7 @@ use crate::workflows::{
     NodeDefinition, WorkflowDefinition, WorkflowGraph, WorkflowRevision,
     command::validate_command_binding,
     compile_resolved_graph, digest,
+    mcp_tools::{McpToolConfiguration, validate_mcp_binding, validate_reusable_mcp_binding},
     registry::supports_pinned_execution,
     role_templates::{
         SaveConversationTemplate, TemplateBase, load_revision, save_conversation_template_in_tx,
@@ -290,8 +291,8 @@ fn publish_member(
             "Library artifact {} requires a library reference or a named parameter for {slot}",
             member.name
         );
-        check_transitive_references(db, project, &artifact, &mut BTreeSet::new(), false)?;
-        blockers.extend(artifact.blockers.iter().cloned());
+        check_transitive_references(db, project, &artifact, &mut BTreeSet::new(), false, None)?;
+        blockers.extend(dependency_blockers(&member.body, &slot, &artifact));
         references.insert(
             slot.clone(),
             ResolvedPackageReference::Published {
@@ -300,6 +301,11 @@ fn publish_member(
         );
         dependencies.insert(slot, artifact);
     }
+    let bound_mcp = dependencies
+        .iter()
+        .filter(|(slot, dependency)| configured_mcp_edge(&member.body, slot, dependency).is_some())
+        .map(|(slot, dependency)| (slot, &dependency.version))
+        .collect::<Vec<_>>();
     let mut body = member.body;
     let kind = body.kind();
     let interface = match &body {
@@ -348,6 +354,9 @@ fn publish_member(
                             "Library Command node {} requires a named local binding",
                             node.id
                         );
+                    }
+                    if let NodeConfiguration::McpTool(tool) = &node.configuration {
+                        require_portable_mcp(tool, &node.id, &references, &dependencies)?;
                     }
                 }
             }
@@ -428,6 +437,18 @@ fn publish_member(
                 );
                 validate_command_binding(db, project, command)?;
             }
+            if let NodeConfiguration::McpTool(tool) = configuration {
+                if member.destination == PackageDestination::Library {
+                    require_portable_mcp(tool, "$preset", &references, &dependencies)?;
+                }
+                if let Some(declaration) = dependencies.get("$preset").filter(|artifact| matches!(artifact.body, PackageArtifactBody::McpTool { .. })) {
+                    check_mcp_declaration(db, project, tool, declaration, true, &mut blockers)?;
+                } else if tool.is_package_placeholder() {
+                    blockers.push("Bind the local MCP tool for this preset.".into());
+                } else {
+                    validate_mcp_binding(db, project, tool)?;
+                }
+            }
         }
         PackageArtifactBody::Command { binding, .. } => {
             if let PackageCommandBinding::Required { name } = binding {
@@ -454,7 +475,7 @@ fn publish_member(
                 input_schema.get("type").and_then(serde_json::Value::as_str) == Some("object"),
                 "An MCP tool needs an object input schema"
             );
-            blockers.push(format!("Register and bind the local MCP server {binding}."));
+            blockers.push(mcp_binding_requirement(binding));
         }
     }
     if let PackageArtifactBody::Command {
@@ -468,12 +489,30 @@ fn publish_member(
             &configured_command(&body).context("Invalid Command configuration")?,
         )?;
     }
-    let revision = match (role_revision, role_execution_revision) {
-        (Some(revision), _) => revision,
-        (None, Some(execution)) => digest(&serde_json::to_vec(&(
-            &member.name, &body, &references, pins, &execution,
+    let revision = match (role_revision, role_execution_revision, bound_mcp.is_empty()) {
+        (Some(revision), _, _) => revision,
+        (None, execution, false) => digest(&serde_json::to_vec(&(
+            &member.name,
+            &body,
+            &references,
+            pins,
+            execution,
+            &bound_mcp,
+            "local_mcp_binding_v1",
         ))?),
-        (None, None) => digest(&serde_json::to_vec(&(&member.name, &body, &references, pins))?),
+        (None, Some(execution), true) => digest(&serde_json::to_vec(&(
+            &member.name,
+            &body,
+            &references,
+            pins,
+            &execution,
+        ))?),
+        (None, None, true) => digest(&serde_json::to_vec(&(
+            &member.name,
+            &body,
+            &references,
+            pins,
+        ))?),
     };
     let version = PackageArtifactVersion {
         destination: member.destination,
@@ -529,6 +568,124 @@ fn configured_command(body: &PackageArtifactBody) -> Option<CommandConfiguration
         input: input.clone(),
         output: output.clone(),
     })
+}
+
+fn mcp_binding_requirement(binding: &str) -> String {
+    format!("Register and bind the local MCP server {binding}.")
+}
+
+pub(super) fn require_portable_mcp(
+    config: &McpToolConfiguration,
+    slot: &str,
+    references: &BTreeMap<String, ResolvedPackageReference>,
+    dependencies: &BTreeMap<String, PublishedPackageArtifact>,
+) -> Result<()> {
+    let parameter = matches!(
+        references.get(slot),
+        Some(ResolvedPackageReference::Parameter {
+            kind: PackageArtifactKind::McpTool,
+            ..
+        })
+    );
+    let declaration = dependencies
+        .get(slot)
+        .is_some_and(|artifact| matches!(artifact.body, PackageArtifactBody::McpTool { .. }));
+    ensure!(
+        config.is_package_placeholder() && (parameter || declaration),
+        "Library MCP node {slot} requires a named local binding without a project server pin"
+    );
+    Ok(())
+}
+
+fn configured_mcp_edge<'a>(
+    consumer: &'a PackageArtifactBody,
+    slot: &str,
+    declaration: &PublishedPackageArtifact,
+) -> Option<&'a McpToolConfiguration> {
+    if !matches!(declaration.body, PackageArtifactBody::McpTool { .. }) {
+        return None;
+    }
+    let configuration = match consumer {
+        PackageArtifactBody::Pipeline { graph } | PackageArtifactBody::Subflow { graph, .. } => {
+            &graph
+                .nodes
+                .iter()
+                .find(|node| node.id == slot && node.kind == BuiltinNode::McpTool)?
+                .configuration
+        }
+        PackageArtifactBody::Preset {
+            node_kind: BuiltinNode::McpTool,
+            configuration,
+            ..
+        } if slot == "$preset" => configuration,
+        _ => return None,
+    };
+    let NodeConfiguration::McpTool(config) = configuration else {
+        return None;
+    };
+    (!config.is_package_placeholder()).then_some(config)
+}
+
+pub(super) fn dependency_blockers(
+    consumer: &PackageArtifactBody,
+    slot: &str,
+    dependency: &PublishedPackageArtifact,
+) -> Vec<String> {
+    let resolved = configured_mcp_edge(consumer, slot, dependency).is_some();
+    applicable_blockers(dependency, resolved)
+}
+
+fn applicable_blockers(artifact: &PublishedPackageArtifact, resolved: bool) -> Vec<String> {
+    if let PackageArtifactBody::McpTool { binding, .. } = &artifact.body
+        && resolved
+    {
+        let resolved = mcp_binding_requirement(binding);
+        return artifact
+            .blockers
+            .iter()
+            .filter(|blocker| **blocker != resolved)
+            .cloned()
+            .collect();
+    }
+    artifact.blockers.clone()
+}
+
+fn check_mcp_declaration(
+    db: &Connection,
+    project: &str,
+    config: &McpToolConfiguration,
+    artifact: &PublishedPackageArtifact,
+    strict: bool,
+    blockers: &mut Vec<String>,
+) -> Result<()> {
+    let PackageArtifactBody::McpTool {
+        binding,
+        tool,
+        input_schema,
+        output_schema,
+    } = &artifact.body
+    else {
+        anyhow::bail!("Expected a reusable MCP tool declaration");
+    };
+    if config.is_package_placeholder() {
+        blockers.push(mcp_binding_requirement(binding));
+    } else if let Err(error) = validate_reusable_mcp_binding(
+        db,
+        project,
+        config,
+        tool,
+        input_schema,
+        output_schema.as_ref(),
+    ) {
+        if strict {
+            return Err(error);
+        }
+        blockers.push(format!(
+            "{} requires a matching local MCP binding. {error}",
+            artifact.name
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn compile_graph(
@@ -645,6 +802,7 @@ impl<'a> GraphCompiler<'a> {
         let mut graph = graph.clone();
         let mut effective_pins = pins.clone();
         let mut calls = BTreeMap::new();
+        let mut declared_mcp = BTreeSet::new();
         for (slot, artifact) in dependencies {
             let node = graph
                 .nodes
@@ -708,12 +866,31 @@ impl<'a> GraphCompiler<'a> {
                     let body = self.child(artifact, blockers)?;
                     calls.insert(slot.clone(), crate::workflows::iteration::expand_for_each(body, configuration)?);
                 }
-                PackageArtifactBody::Subflow { .. } | PackageArtifactBody::McpTool { .. } => {
-                    blockers.push(format!(
-                        "The node {slot} requires the reusable artifact {}.",
-                        artifact.name
-                    ))
+                PackageArtifactBody::McpTool { .. } => {
+                    let NodeConfiguration::McpTool(config) = &node.configuration else {
+                        anyhow::bail!(
+                            "The reusable MCP reference for {slot} requires an MCP tool node"
+                        );
+                    };
+                    ensure!(
+                        node.kind == BuiltinNode::McpTool,
+                        "The reusable MCP reference for {slot} requires an MCP tool node"
+                    );
+                    check_mcp_declaration(
+                        self.db,
+                        self.project,
+                        config,
+                        artifact,
+                        self.validate_bindings,
+                        blockers,
+                    )
+                    .with_context(|| format!("The reusable MCP binding for {slot} is invalid"))?;
+                    declared_mcp.insert(slot.as_str());
                 }
+                PackageArtifactBody::Subflow { .. } => blockers.push(format!(
+                    "The node {slot} requires the reusable artifact {}.",
+                    artifact.name
+                )),
                 PackageArtifactBody::Pipeline { .. } => {
                     anyhow::bail!("A pipeline reference requires a published subflow")
                 }
@@ -751,13 +928,16 @@ impl<'a> GraphCompiler<'a> {
                     format!("The Command registration for {} is unavailable", node.id)
                 })?;
             }
-            if self.validate_bindings
+            if !declared_mcp.contains(node.id.as_str())
                 && let NodeConfiguration::McpTool(tool) = &node.configuration
             {
-                crate::workflows::mcp_tools::validate_mcp_binding(self.db, self.project, tool)
-                    .with_context(|| {
+                if tool.is_package_placeholder() {
+                    blockers.push(format!("Bind the local MCP tool for {}.", node.id));
+                } else if self.validate_bindings {
+                    validate_mcp_binding(self.db, self.project, tool).with_context(|| {
                         format!("The MCP tool binding for {} is unavailable", node.id)
                     })?;
+                }
             }
         }
         let mut authoring_definitions = BTreeMap::new();
@@ -1014,7 +1194,7 @@ pub(crate) fn ensure_package_runnable(
     workflow: &WorkflowRevision,
 ) -> Result<()> {
     if let Some(artifact) = stored_artifact(db, project, &pipeline_reference(workflow))? {
-        check_transitive_references(db, project, &artifact, &mut BTreeSet::new(), true)?;
+        check_transitive_references(db, project, &artifact, &mut BTreeSet::new(), true, None)?;
     }
     Ok(())
 }
@@ -1025,21 +1205,22 @@ fn check_transitive_references(
     artifact: &PublishedPackageArtifact,
     seen: &mut BTreeSet<PackageArtifactVersion>,
     runnable: bool,
+    local_mcp: Option<&McpToolConfiguration>,
 ) -> Result<()> {
-    if !seen.insert(artifact.version.clone()) {
-        return Ok(());
-    }
     if runnable {
-        ensure!(
-            artifact.blockers.is_empty(),
-            "{}",
-            artifact.blockers.join(" ")
-        );
+        if let Some(config) = local_mcp {
+            check_mcp_declaration(db, project, config, artifact, true, &mut Vec::new())?;
+        }
+        let blockers = applicable_blockers(artifact, local_mcp.is_some());
+        ensure!(blockers.is_empty(), "{}", blockers.join(" "));
         if let Some(command) = configured_command(&artifact.body) {
             validate_command_binding(db, project, &command)?;
         }
     }
-    for reference in artifact.references.values() {
+    if !seen.insert(artifact.version.clone()) {
+        return Ok(());
+    }
+    for (slot, reference) in &artifact.references {
         match reference {
             ResolvedPackageReference::Published { version } => {
                 ensure!(
@@ -1049,7 +1230,8 @@ fn check_transitive_references(
                 );
                 let dependency = load_published(db, project, version)?
                     .context("A required published dependency is unavailable")?;
-                check_transitive_references(db, project, &dependency, seen, runnable)?;
+                let local_mcp = configured_mcp_edge(&artifact.body, slot, &dependency);
+                check_transitive_references(db, project, &dependency, seen, runnable, local_mcp)?;
             }
             ResolvedPackageReference::Parameter { name, .. } if runnable => {
                 anyhow::bail!("Choose the binding for {name}.")

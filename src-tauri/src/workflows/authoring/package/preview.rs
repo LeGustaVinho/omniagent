@@ -217,11 +217,27 @@ impl<'a> ReviewCatalog<'a> {
                         "Library artifact {} requires a library reference or named parameter for {slot}",
                         member.name
                     );
-                    requirements.extend(dependency.blockers.iter().cloned());
+                    requirements.extend(publish::dependency_blockers(
+                        &member.body,
+                        slot,
+                        &dependency,
+                    ));
                     dependencies.insert(slot.clone(), dependency);
                 }
                 ResolvedPackageReference::Parameter { name, .. } => {
                     requirements.push(format!("Bind {name} for execution."))
+                }
+            }
+        }
+        if member.destination == PackageDestination::Library {
+            for node in &graph.nodes {
+                if let NodeConfiguration::McpTool(tool) = &node.configuration {
+                    publish::require_portable_mcp(
+                        tool,
+                        &node.id,
+                        &artifact.references,
+                        &dependencies,
+                    )?;
                 }
             }
         }
@@ -241,7 +257,7 @@ impl<'a> ReviewCatalog<'a> {
                 NodeConfiguration::Command(command) => {
                     validate_command_binding(self.db, self.project, command)
                 }
-                NodeConfiguration::McpTool(tool) => {
+                NodeConfiguration::McpTool(tool) if !tool.is_package_placeholder() => {
                     validate_mcp_binding(self.db, self.project, tool)
                 }
                 _ => continue,
@@ -310,7 +326,11 @@ fn preview_member(
                 )),
             PackageReference::Published { version } => {
                 match publish::load_published(catalog.db, catalog.project, version)? {
-                    Some(artifact) => requirements.extend(artifact.blockers),
+                    Some(artifact) => requirements.extend(publish::dependency_blockers(
+                        &member.body,
+                        slot,
+                        &artifact,
+                    )),
                     None => diagnostics.push(format!(
                         "The published reference {slot} is unavailable in this scope."
                     )),

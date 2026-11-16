@@ -12,6 +12,8 @@ use crate::{
 use super::{new_id, open, seal};
 
 pub(crate) mod mcp;
+#[cfg(test)]
+mod mcp_binding_acceptance;
 mod model;
 mod preview;
 mod publish;

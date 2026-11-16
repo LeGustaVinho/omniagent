@@ -37,6 +37,12 @@ pub struct McpToolConfiguration {
 }
 
 impl McpToolConfiguration {
+    pub(crate) fn is_package_placeholder(&self) -> bool {
+        self.server_id == Uuid::nil().to_string()
+            && self.server_revision.len() == 64
+            && self.server_revision.bytes().all(|byte| byte == b'0')
+    }
+
     pub(super) fn is_valid(&self) -> bool {
         Uuid::parse_str(&self.server_id).is_ok()
             && sha(&self.server_revision)
@@ -310,6 +316,81 @@ pub(crate) fn validate_mcp_binding(
     config: &McpToolConfiguration,
 ) -> Result<()> {
     binding(db, project, config).map(|_| ())
+}
+
+pub(crate) fn validate_reusable_mcp_binding(
+    db: &Connection,
+    project: &str,
+    config: &McpToolConfiguration,
+    tool: &str,
+    input_schema: &Map<String, Value>,
+    output_schema: Option<&Map<String, Value>>,
+) -> Result<()> {
+    let (_, contract) = binding(db, project, config)?;
+    let matching_output = match (contract.output_schema.as_ref(), output_schema) {
+        (None, None) => true,
+        (Some(local), Some(declared)) => local.as_object() == Some(declared),
+        _ => false,
+    };
+    ensure!(
+        contract.name == tool
+            && contract.input_schema.as_object() == Some(input_schema)
+            && matching_output,
+        "The pinned local MCP tool name or schema differs from the reusable tool declaration"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn persist_mcp_binding_fixture(
+    store: &Store,
+    project: String,
+    executable: PathBuf,
+    tool: Value,
+    arguments: Map<String, Value>,
+    destination_pointer: Option<String>,
+) -> Result<McpToolConfiguration> {
+    let contract = McpToolContract::from_server(&tool)?;
+    let executable_revision = DirectWindowsRunner
+        .executable_revision(&executable)
+        .context("The fixture executable is unavailable")?;
+    let mut server = SavedServer {
+        summary: McpServer {
+            id: "4111fc12-b28a-445c-bf75-2a8978b0e961".into(),
+            revision: String::new(),
+            name: "Reusable MCP fixture".into(),
+            executable,
+            arguments: Vec::new(),
+            outbound_network: false,
+            tools: vec![contract.clone()],
+        },
+        executable_revision,
+    };
+    server.summary.revision = digest(&serde_json::to_vec(&server)?);
+    let config = McpToolConfiguration {
+        server_id: server.summary.id.clone(),
+        server_revision: server.summary.revision.clone(),
+        tool_name: contract.name,
+        contract_revision: contract.revision,
+        arguments,
+        argument_mappings: BTreeMap::new(),
+        destination_pointer,
+    };
+    store
+        .execute(move |db| {
+            db.execute(
+                "INSERT INTO workflow_mcp_servers VALUES (?1,?2,?3,?4)",
+                params![
+                    project,
+                    server.summary.id,
+                    server.summary.revision,
+                    seal(&server)?
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+    Ok(config)
 }
 
 fn destination(config: &McpToolConfiguration) -> Result<Option<String>> {
