@@ -18,7 +18,7 @@ use super::{
         issue_prepared_release, record_decision, require_active_decision, require_current_plan,
     },
     artifacts::insert_artifact,
-    builtin_registry, digest,
+    digest, registry::supports_pinned_execution,
 };
 
 pub type NodeInputs = BTreeMap<String, String>;
@@ -291,7 +291,7 @@ impl Store {
             .await?
             .context("workflow node is outside this run")?;
         ensure!(
-            builtin_registry().contains(&pinned.definition),
+            supports_pinned_execution(&pinned.definition),
             "the pinned executor definition is unavailable"
         );
         ensure!(

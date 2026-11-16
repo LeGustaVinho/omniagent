@@ -6,6 +6,30 @@ use crate::{
 
 use super::*;
 
+#[test]
+fn persisted_git_stage_titles_maintain_exact_execution_contracts() {
+    use crate::workflows::registry::supports_pinned_execution;
+    use crate::workflows::{BuiltinNode, builtin_registry};
+
+    let registry = builtin_registry();
+    for (kind, original, published) in [
+        (BuiltinNode::VerifyCommit, "Verify commit", "Commit"),
+        (BuiltinNode::VerifyMerge, "Verify merge", "Merge"),
+    ] {
+        let mut pinned = registry
+            .iter()
+            .find(|definition| definition.kind == kind)
+            .unwrap()
+            .clone();
+        assert_eq!(pinned.title, original);
+        assert!(supports_pinned_execution(&pinned));
+        pinned.title = published.into();
+        assert!(supports_pinned_execution(&pinned));
+        pinned.inputs.clear();
+        assert!(!supports_pinned_execution(&pinned));
+    }
+}
+
 #[tokio::test]
 async fn automatic_delivery_merges_only_the_complete_chain_and_reuses_its_pinned_result()
 -> Result<()> {
@@ -239,15 +263,19 @@ async fn default_commit_waits_for_an_explicit_local_merge_of_the_expected_destin
         .workflow_definition(fixture.project.clone(), fixture.run.version.clone())
         .await?
         .context("the delivery definition must remain pinned")?;
-    assert!(definition.nodes.iter().any(
-        |node| node.instance.id == commit.node_instance_id && node.definition.title == "Commit"
-    ));
+    assert!(
+        definition
+            .nodes
+            .iter()
+            .any(|node| node.instance.id == commit.node_instance_id
+                && node.definition.title == "Verify commit")
+    );
     assert!(
         definition
             .nodes
             .iter()
             .any(|node| node.instance.id == integration.node_instance_id
-                && node.definition.title == "Merge")
+                && node.definition.title == "Verify merge")
     );
     let history = reopened
         .project_task_deliveries(fixture.project.clone(), last.task_id.clone())

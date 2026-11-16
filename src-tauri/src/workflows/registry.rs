@@ -135,6 +135,20 @@ pub struct NodeDefinition {
     pub outputs: Vec<Port>,
 }
 
+pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
+    let mut registry = builtin_registry();
+    let Some(current) = registry.iter_mut().find(|entry| entry.kind == pinned.kind) else {
+        return false;
+    };
+    // A published Git graph used these two display titles in its persisted definitions.
+    match (pinned.kind, pinned.title.as_str()) {
+        (BuiltinNode::VerifyCommit, "Commit") => current.title = "Commit".into(),
+        (BuiltinNode::VerifyMerge, "Merge") => current.title = "Merge".into(),
+        _ => {}
+    }
+    *current == *pinned
+}
+
 pub fn builtin_registry() -> Vec<NodeDefinition> {
     use ArtifactKind::*;
     use BuiltinNode::*;
@@ -268,7 +282,7 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
         ),
         (
             VerifyCommit,
-            "Commit",
+            "Verify commit",
             Executor::VerifyGitCommit,
             ConfigurationKind::None,
             Effect::VerifyRepositoryCommit,
@@ -281,7 +295,7 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
         ),
         (
             VerifyMerge,
-            "Merge",
+            "Verify merge",
             Executor::VerifyGitMerge,
             ConfigurationKind::None,
             Effect::VerifyRepositoryMerge,
