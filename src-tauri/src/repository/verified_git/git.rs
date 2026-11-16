@@ -1,7 +1,12 @@
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
-    io::{Seek, Write},
-    os::windows::fs::OpenOptionsExt,
+    io::{self, Seek, Write},
+    mem::size_of,
+    os::windows::{
+        fs::{MetadataExt, OpenOptionsExt},
+        io::AsRawHandle,
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -9,7 +14,11 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_DELETE_ON_CLOSE;
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FileAttributeTagInfo,
+    GetFileInformationByHandleEx,
+};
 
 use super::CommitIntent;
 use crate::{
@@ -17,6 +26,7 @@ use crate::{
     repository::{
         CheckoutPaths, ManagedWorktree,
         candidates::read_status,
+        documents::{lock_directories, relative_name},
         git_command, git_path,
         isolated_git::{IsolatedGit, check},
         verification::{CandidateAcceptance, SelectedCandidate},
@@ -157,6 +167,131 @@ impl DeliveryCheckout {
             captured_index_digest,
             acceptance_artifact_id: None,
         })
+    }
+
+    /// Recheck only entries contributed by the approved tree. The synthetic index
+    /// and Git's passive options apply the same worktree comparison as capture.
+    /// Keep existing inputs locked through ref publication.
+    pub(super) fn lock_current_selection(
+        &self,
+        candidate: &SelectedCandidate,
+    ) -> Result<Vec<File>> {
+        let diff = self.read(&[
+            "diff-tree",
+            "--raw",
+            "--no-abbrev",
+            "--no-commit-id",
+            "--no-renames",
+            "-r",
+            "-z",
+            &candidate.base_commit,
+            &candidate.tree,
+        ])?;
+        let view = IsolatedGit::open(&self.paths, &self.root, &candidate.base_commit)?;
+        view.copy_index(&self.paths)?;
+        let index = String::from_utf8(view.read(&["ls-files", "-z"])?)?;
+        let tracked: HashSet<_> = index.split_terminator('\0').collect();
+        fs::remove_file(view.index_path())?;
+        view.read(&["read-tree", &candidate.tree])?;
+        let mut locks = Vec::new();
+        let mut parents = HashSet::new();
+        let mut paths = Vec::new();
+        let mut deleted = Vec::new();
+        for change in tree_changes(&diff)? {
+            let name = std::str::from_utf8(change.path)?;
+            let path = self.root.join(name);
+            ensure!(
+                relative_name(&self.root, &path)? == name,
+                "invalid approved path: {name}"
+            );
+            // A staged removal may deliberately leave a local untracked file.
+            if change.mode == "000000" && !tracked.contains(name) {
+                continue;
+            }
+            let addition = candidate
+                .selection
+                .untracked_paths
+                .iter()
+                .any(|path| path == name);
+            ensure!(
+                addition || tracked.contains(name),
+                "selected path is no longer tracked: {name}"
+            );
+            let parent = approved_parent(&path)?;
+            if parents.insert(parent.to_owned()) {
+                locks.extend(lock_directories(parent)?);
+            }
+            if change.mode == "000000" {
+                deleted.push(path);
+                continue;
+            }
+            if change.mode == "160000" {
+                locks.extend(lock_directories(&path)?);
+                paths.push(format!(":(top,literal){name}"));
+                continue;
+            }
+            let file = if change.mode == "120000"
+                && fs::symlink_metadata(&path)?.file_type().is_symlink()
+            {
+                lock_symlink(&path)?
+            } else {
+                open_locked_local_file(&path)
+                    .with_context(|| format!("open approved path {name}"))?
+            };
+            if addition {
+                // Untracked selections are stored as raw blobs, with no filters.
+                let actual = text_oid(check(
+                    view.command()
+                        .args(["hash-object", "--stdin"])
+                        .stdin(Stdio::from(file.try_clone()?))
+                        .output()?,
+                    "read selected addition",
+                )?)?;
+                ensure!(actual == change.oid, "selected addition changed: {name}");
+            } else {
+                paths.push(format!(":(top,literal){name}"));
+            }
+            locks.push(file);
+        }
+        for batch in paths.chunks(32) {
+            let mut args = vec![
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--ignore-submodules=dirty",
+                "-z",
+                "--",
+            ];
+            args.extend(batch.iter().map(String::as_str));
+            let changed = view.read(&args)?;
+            let listed = String::from_utf8(changed)?;
+            ensure!(
+                listed.is_empty(),
+                "selected worktree paths changed: {}",
+                listed.trim_end_matches('\0').replace('\0', ", ")
+            );
+        }
+        for path in deleted {
+            match fs::symlink_metadata(&path) {
+                // A directory may contain unrelated files at a formerly tracked file's path.
+                Ok(entry)
+                    if entry.is_dir()
+                        && entry.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 =>
+                {
+                    locks.extend(lock_directories(&path)?);
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(error) => return Err(error.into()),
+                _ => anyhow::bail!("selected deletion was replaced: {}", path.display()),
+            }
+        }
+        Ok(locks)
     }
 
     pub(super) fn advance(&self, base: &str, sha: &str) -> Result<()> {
@@ -305,20 +440,13 @@ fn with_input(mut command: Command, bytes: &[u8], operation: &str) -> Result<Vec
 fn index_updates(diff: &[u8]) -> Result<Vec<u8>> {
     let mut clears = Vec::new();
     let mut entries = Vec::new();
-    let fields = diff.split(|byte| *byte == 0);
-    let mut fields = fields.take_while(|field| !field.is_empty());
-    while let Some(metadata) = fields.next() {
-        let path = fields.next().context("missing changed Git path")?;
-        let details = std::str::from_utf8(metadata)?;
-        let mut details = details
-            .strip_prefix(':')
-            .context("invalid Git tree change")?
-            .split(' ');
-        let before = details.next().context("missing previous Git file mode")?;
-        let mode = details.next().context("missing new Git file mode")?;
-        let _previous = details.next().context("missing previous Git object")?;
-        let oid = details.next().context("missing new Git object")?;
-        validate_oid(oid)?;
+    for change in tree_changes(diff)? {
+        let TreeChange {
+            path,
+            before,
+            mode,
+            oid,
+        } = change;
         // Deletions precede additions, including replacement of a file by a directory.
         if before != "000000" {
             write!(clears, "0 {:0<width$}\t", "", width = oid.len())?;
@@ -333,6 +461,78 @@ fn index_updates(diff: &[u8]) -> Result<Vec<u8>> {
     }
     clears.extend(entries);
     Ok(clears)
+}
+
+struct TreeChange<'a> {
+    path: &'a [u8],
+    before: &'a str,
+    mode: &'a str,
+    oid: &'a str,
+}
+
+fn tree_changes(diff: &[u8]) -> Result<Vec<TreeChange<'_>>> {
+    let mut changes = Vec::new();
+    let fields = diff.split(|byte| *byte == 0);
+    let mut fields = fields.take_while(|field| !field.is_empty());
+    while let Some(metadata) = fields.next() {
+        let path = fields.next().context("missing changed Git path")?;
+        let details = std::str::from_utf8(metadata)?;
+        let mut details = details
+            .strip_prefix(':')
+            .context("invalid Git tree change")?
+            .split(' ');
+        let before = details.next().context("missing previous Git file mode")?;
+        let mode = details.next().context("missing new Git file mode")?;
+        let _previous = details.next().context("missing previous Git object")?;
+        let oid = details.next().context("missing new Git object")?;
+        validate_oid(oid)?;
+        changes.push(TreeChange {
+            path,
+            before,
+            mode,
+            oid,
+        });
+    }
+    Ok(changes)
+}
+
+fn approved_parent(path: &Path) -> Result<&Path> {
+    for parent in path.ancestors().skip(1) {
+        match plain_metadata(parent) {
+            Ok(Some(entry)) if entry.is_dir() => return Ok(parent),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    anyhow::bail!("approved path has no existing directory")
+}
+
+fn lock_symlink(path: &Path) -> Result<File> {
+    // Pin the link itself, and reject junctions and other reparse points.
+    const SYMLINK_REPARSE_TAG: u32 = 0xA000000C;
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let mut tag = FILE_ATTRIBUTE_TAG_INFO::default();
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileAttributeTagInfo,
+            std::ptr::from_mut(&mut tag).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    ensure!(
+        tag.ReparseTag == SYMLINK_REPARSE_TAG,
+        "the selected path is not a symbolic link"
+    );
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -354,7 +554,15 @@ mod tests {
         git_query(&git, &live, &["config", "core.autocrlf", "false"])?;
         fs::write(live.join("selected.txt"), "base\n")?;
         fs::write(live.join("staged.txt"), "unselected base\n")?;
-        git_query(&git, &live, &["add", "--", "selected.txt", "staged.txt"])?;
+        fs::write(
+            live.join("removed.txt"),
+            "keep locally after removing from Git\n",
+        )?;
+        git_query(
+            &git,
+            &live,
+            &["add", "--", "selected.txt", "staged.txt", "removed.txt"],
+        )?;
         let base = fixture_commit(&git, &live, "Initial checkout")?;
         let paths = inspect(&live)?;
 
@@ -362,9 +570,16 @@ mod tests {
         git_query(
             &git,
             &live,
-            &["clone", "--quiet", "--no-local", ".", isolated_path],
+            &[
+                "clone",
+                "--quiet",
+                "--no-local",
+                "--config",
+                "core.autocrlf=false",
+                ".",
+                isolated_path,
+            ],
         )?;
-        git_query(&git, &isolated, &["config", "core.autocrlf", "false"])?;
         fs::write(isolated.join("selected.txt"), "accepted\n")?;
         fs::write(isolated.join("accepted.bin"), [0, 5, 255])?;
         git_query(
@@ -372,6 +587,7 @@ mod tests {
             &isolated,
             &["add", "--", "selected.txt", "accepted.bin"],
         )?;
+        git_query(&git, &isolated, &["rm", "--", "removed.txt"])?;
         let tree = git_query(&git, &isolated, &["write-tree"])?
             .trim()
             .to_owned();
@@ -381,6 +597,7 @@ mod tests {
         fs::write(live.join("staged.txt"), "unrelated stage\n")?;
         fs::write(live.join("other.txt"), "other working copy change\n")?;
         git_query(&git, &live, &["add", "--", "staged.txt"])?;
+        git_query(&git, &live, &["rm", "--cached", "--", "removed.txt"])?;
         let index = Path::new(&paths.git_dir).join("index");
         let index_digest = format!("{:x}", Sha256::digest(fs::read(index)?));
 
@@ -405,7 +622,10 @@ mod tests {
             branch: "work".into(),
             base_commit: base.clone(),
             tree,
-            selection: CandidateSelection::default(),
+            selection: CandidateSelection {
+                tracked_paths: None,
+                untracked_paths: vec!["accepted.bin".into()],
+            },
         };
         let acceptance = CandidateAcceptance {
             id: "acceptance".into(),
@@ -429,12 +649,27 @@ mod tests {
         assert!(checkout.matches(&base, &acceptance.candidate).is_err());
         let intent = checkout.prepare(&isolated, &acceptance, "Implement unit", index_digest)?;
         assert_eq!(checkout.head()?, base);
+        let attributes = live.join(".gitattributes");
+        fs::write(&attributes, "selected.txt filter=unapproved\n")?;
+        git_query(
+            &git,
+            &live,
+            &[
+                "config",
+                "filter.unapproved.clean",
+                "echo unexpected > filter-ran; cat",
+            ],
+        )?;
+        let selected = checkout.lock_current_selection(&acceptance.candidate)?;
         checkout.advance(&base, &intent.sha)?;
+        assert!(!live.join("filter-ran").exists());
+        drop(selected);
+        fs::remove_file(attributes)?;
         checkout.align_index(&intent, &base)?;
         let status = git_query(&git, &live, &["status", "--porcelain"])?;
         assert_eq!(
             status.lines().collect::<Vec<_>>(),
-            ["M  staged.txt", "?? other.txt"]
+            ["M  staged.txt", "?? other.txt", "?? removed.txt"]
         );
         assert_eq!(checkout.head()?, intent.sha);
         assert!(!checkout.clean(&intent.sha));

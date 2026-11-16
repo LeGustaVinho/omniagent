@@ -18,6 +18,9 @@ use super::{
 };
 use anyhow::{Context, Result, ensure};
 
+const SELECTED_TEXT: &str = "Included history canary\n";
+const SELECTED_ADDITION: &str = "Selected untracked bytes\r\n";
+
 #[tokio::test]
 async fn completed_task_preserves_accepted_patch_and_dispatch_sources_after_restart() -> Result<()>
 {
@@ -128,14 +131,14 @@ async fn completed_task_preserves_accepted_patch_and_dispatch_sources_after_rest
     store
         .settle_dispatch(dispatch.clone(), Delivery::Submitted)
         .await?;
-    fs::write(worktree.root.join("first.txt"), "Included history canary\n")?;
+    fs::write(worktree.root.join("first.txt"), SELECTED_TEXT)?;
     fs::write(
         worktree.root.join("second.txt"),
         "Excluded history canary\n",
     )?;
     fs::write(
         worktree.root.join("accepted-addition.txt"),
-        "Selected untracked bytes\n",
+        SELECTED_ADDITION,
     )?;
     repository::save_worktree_candidate(&store, writer_id.clone()).await?;
     let response = ProviderEventData::AssistantFinal {
@@ -167,7 +170,7 @@ async fn completed_task_preserves_accepted_patch_and_dispatch_sources_after_rest
                 task_id: task.clone(),
                 unit_id: unit.unit.id.clone(),
                 run_id: writer_id.clone(),
-                capture_revision: capture.revision,
+                capture_revision: capture.revision.clone(),
             },
             CandidateSelection {
                 tracked_paths: Some(vec!["first.txt".into()]),
@@ -215,6 +218,37 @@ async fn completed_task_preserves_accepted_patch_and_dispatch_sources_after_rest
         candidate,
         acceptance,
     };
+    let old_head = git(&worktree.root, &["rev-parse", "HEAD"])?;
+    for (path, reviewed) in [
+        ("first.txt", SELECTED_TEXT),
+        ("accepted-addition.txt", SELECTED_ADDITION),
+    ] {
+        let path = worktree.root.join(path);
+        fs::write(&path, "New worktree text after approval\n")?;
+        let failure = commit(&store, &fixture, unit, &accepted, None)
+            .await
+            .unwrap_err();
+        assert!(
+            failure.to_string().contains("approved candidate is stale"),
+            "{failure:#}"
+        );
+        assert_eq!(git(&worktree.root, &["rev-parse", "HEAD"])?, old_head);
+        assert_eq!(
+            fs::read_to_string(&path)?,
+            "New worktree text after approval\n"
+        );
+        assert!(
+            store
+                .project_task_deliveries(project.clone(), task.clone())
+                .await?
+                .is_empty()
+        );
+        fs::write(&path, reviewed)?;
+    }
+    fs::write(
+        worktree.root.join("second.txt"),
+        "Unselected text edited after approval\n",
+    )?;
     let receipt = verified(
         &store,
         &fixture,
@@ -224,6 +258,14 @@ async fn completed_task_preserves_accepted_patch_and_dispatch_sources_after_rest
     .await?;
 
     assert!(receipt.pending_changes_retained);
+    assert_eq!(
+        fs::read_to_string(worktree.root.join("second.txt"))?,
+        "Unselected text edited after approval\n"
+    );
+    let reviewed_patch = store
+        .verified_delivery_patch(project.clone(), task.clone(), receipt.id.clone())
+        .await?
+        .context("missing patch before switching tasks")?;
     let awaiting = store
         .project_task_delivery_state(project.clone(), task.clone())
         .await?
@@ -282,6 +324,7 @@ async fn completed_task_preserves_accepted_patch_and_dispatch_sources_after_rest
             ContextReviewDecision::Accept,
         )
         .await?;
+
     drop(store);
 
     let store = Store::open(db)?;
@@ -307,12 +350,19 @@ async fn completed_task_preserves_accepted_patch_and_dispatch_sources_after_rest
         .verified_delivery_patch(project.clone(), task.clone(), reopened.id.clone())
         .await?
         .context("missing accepted patch")?;
+    assert_eq!(patch, reviewed_patch);
     assert_eq!(patch.candidate_id, selected.id);
     assert_eq!(patch.tree, reopened.tree);
     let diff = String::from_utf8(STANDARD.decode(patch.patch_base64)?)?;
     assert!(
         diff.contains("+Included history canary") && diff.contains("+Selected untracked bytes"),
         "{diff}"
+    );
+    assert_eq!(
+        store
+            .attempt_worktree_evidence(project.clone(), writer_id.clone())
+            .await?,
+        Some(AttemptWorktreeEvidence::Saved { artifact: capture }),
     );
     assert!(
         !diff.contains("second.txt") && !diff.contains("Excluded history canary"),

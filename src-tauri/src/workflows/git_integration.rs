@@ -290,6 +290,14 @@ async fn exercise_subtask_delivery(strategy: BranchStrategy) -> Result<()> {
     let ArtifactValue::Candidate(first_candidate) = &accepted_first.candidate.value else {
         anyhow::bail!("missing first candidate");
     };
+    let first_capture = store
+        .attempt_worktree_evidence(project.clone(), first_candidate.target.run_id.clone())
+        .await?
+        .context("missing the first participant's captured diff")?;
+    assert!(matches!(
+        first_capture,
+        AttemptWorktreeEvidence::Saved { .. }
+    ));
     let second_job = queue_implementation(&store, &second, &second_tree, second_unit).await?;
     assert_eq!(
         second_job.worktree_owner_task_id.as_ref(),
@@ -335,6 +343,14 @@ async fn exercise_subtask_delivery(strategy: BranchStrategy) -> Result<()> {
     assert_eq!(first_evidence.branch, first_tree.branch);
     assert_eq!(first_evidence.capture_run_id, first_candidate.target.run_id);
     assert!(!first_evidence.pending_changes_retained);
+    let first_patch = store
+        .verified_delivery_patch(
+            project.clone(),
+            first_task.id.clone(),
+            first_evidence.id.clone(),
+        )
+        .await?
+        .context("missing the first accepted diff")?;
     assert_ne!(
         store
             .project_epic_delivery_state(project.clone(), epic.id.clone())
@@ -382,6 +398,21 @@ async fn exercise_subtask_delivery(strategy: BranchStrategy) -> Result<()> {
         .await?
         .context("second commit attempt is unavailable")?;
     assert_eq!(second_attempt.job_id, second_job.id);
+    let previous_writer = store
+        .project_task_runs(project.clone(), first_task.id.clone())
+        .await?
+        .into_iter()
+        .find(|entry| entry.run_id == first_evidence.capture_run_id)
+        .context("missing the first implementation participant")?;
+    let current_writer = store
+        .project_task_runs(project.clone(), second_task.id.clone())
+        .await?
+        .into_iter()
+        .find(|entry| entry.run_id == second_evidence.capture_run_id)
+        .context("missing the second implementation participant")?;
+    assert_eq!(previous_writer.provider, current_writer.provider);
+    assert_eq!(previous_writer.profile_id, current_writer.profile_id);
+    assert_ne!(previous_writer.run_id, current_writer.run_id);
     assert_eq!(second_evidence.task_id, second_task.id);
     assert_eq!(second_evidence.branch, second_tree.branch);
     assert_eq!(second_evidence.checkout_id, second_tree.checkout_id);
@@ -480,6 +511,22 @@ async fn exercise_subtask_delivery(strategy: BranchStrategy) -> Result<()> {
         &receipt.evidence, TaskDeliveryEvidence::VerifiedCommit { completion_sha, unit_evidence_ids, .. }
             if completion_sha == &first_evidence.sha && unit_evidence_ids == std::slice::from_ref(&first_evidence.id)
     )));
+    assert_eq!(
+        reopened
+            .attempt_worktree_evidence(project.clone(), first_evidence.capture_run_id.clone())
+            .await?,
+        Some(first_capture),
+    );
+    assert_eq!(
+        reopened
+            .verified_delivery_patch(
+                project.clone(),
+                first_task.id.clone(),
+                first_evidence.id.clone()
+            )
+            .await?,
+        Some(first_patch),
+    );
     assert_eq!(
         reopened
             .verified_delivery_commit(project.clone(), first_task.id, first_evidence.id.clone())

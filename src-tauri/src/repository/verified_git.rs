@@ -471,6 +471,9 @@ fn settle_commit(
     )?;
     ensure!(!existing, "this SHA was already verified for another unit");
     if update_branch {
+        let _selected_paths = checkout
+            .lock_current_selection(candidate)
+            .context("the approved candidate is stale; review the selected paths again")?;
         checkout.advance(&candidate.base_commit, &sha)?;
     }
     let automatic = state.intent.as_ref().filter(|intent| intent.sha == sha);
