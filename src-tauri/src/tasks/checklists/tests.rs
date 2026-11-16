@@ -12,7 +12,7 @@ use crate::{
         ReleaseBlocker,
     },
     providers::{Provider, SessionMode},
-    repository::{self, ProjectCheckout, provision_task_worktree},
+    repository::{self, BranchStrategy, ProjectCheckout, provision_task_worktree},
     runner::{DirectWindowsRunner, Runner},
     runs::RunStatus,
     store::Store,
@@ -401,23 +401,31 @@ async fn checklist_modes_select_direct_work_and_preserve_item_attempts_across_re
 }
 
 #[tokio::test]
-async fn checklist_write_waits_for_the_current_worktree_release() -> Result<()> {
+async fn checklist_write_uses_its_scoped_branch_and_waits_for_the_current_worktree_release()
+-> Result<()> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("repo");
     let store = Store::open(temp.path().join("store.sqlite3"))?;
     let source = register(&store, &root).await?;
     let project = source.project_id;
-    let task = store
+    let parent = store
         .create_project_task(project.clone(), "Implement API change".into())
+        .await?;
+    let task = store
+        .create_project_subtask(project.clone(), parent.id.clone(), "Update routing".into())
+        .await?;
+    store
+        .set_project_branch_strategy(project.clone(), BranchStrategy::SharedBranchPerTask)
         .await?;
     let tree = provision_task_worktree(
         &store,
         temp.path().join("worktrees"),
         project.clone(),
         task.id.clone(),
-        source.checkout_id,
+        source.checkout_id.clone(),
     )
     .await?;
+    assert_eq!(tree.owner_task_id, parent.id);
     store
         .ensure_project_checklist(project.clone(), task.id.clone())
         .await?;
@@ -446,6 +454,20 @@ async fn checklist_write_waits_for_the_current_worktree_release() -> Result<()> 
         .await?;
 
     let binding = pipeline(&store, &project).await?;
+    let wrong_branch = store
+        .submit_pipeline_checklist_job(
+            binding.clone(),
+            scope(&root, SessionMode::ReadOnly)?,
+            request(&source.checkout_id, &task.id, SessionMode::ReadOnly),
+            input(Some(item.id.clone())),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        wrong_branch
+            .to_string()
+            .contains("work scope's managed worktree")
+    );
     let profile = scope(&tree.root, SessionMode::ApprovedWrite)?;
     let request = request(&tree.checkout_id, &task.id, profile.mode);
     let submit = |binding: PipelineDispatch| {
@@ -480,6 +502,11 @@ async fn checklist_write_waits_for_the_current_worktree_release() -> Result<()> 
         ..binding
     };
     let valid = submit(valid_binding.clone()).await?;
+    assert_eq!(valid.task_id.as_deref(), Some(task.id.as_str()));
+    assert_eq!(
+        valid.worktree_owner_task_id.as_deref(),
+        Some(parent.id.as_str())
+    );
     let admitted = store
         .claim_next_job(environment())
         .await?

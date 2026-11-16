@@ -23,6 +23,13 @@ use super::{
     git_command, git_path, git_query, inspect,
     isolated_git::{IsolatedGit, check},
     persist_checkout,
+    writers::assign_shared_scope,
+};
+
+pub(super) mod strategy;
+
+use strategy::{
+    BranchStrategy, TaskBranchStrategy, branch_strategy_for_scope, pin_branch_strategy,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +82,54 @@ struct Provision {
     root: PathBuf,
     branch: String,
     base_commit: String,
+}
+
+struct ProvisionTarget {
+    owner: String,
+    task: String,
+    strategy: TaskBranchStrategy,
+}
+
+fn provision_target(db: &Connection, project: &str, scope: &str) -> Result<ProvisionTarget> {
+    let (task, strategy) = branch_strategy_for_scope(db, project, scope)?;
+    let assigned_owner: Option<String> = db.query_row(
+        "SELECT owner_task_id FROM shared_worktree_scopes WHERE project_id = ?1 AND scope_task_id = ?2",
+        params![project, scope], |row| row.get(0),
+    ).optional()?;
+    let owner = assigned_owner.unwrap_or_else(|| match strategy.effective_strategy {
+        BranchStrategy::Independent => scope.into(),
+        BranchStrategy::SharedBranchPerTask => task.clone(),
+    });
+    Ok(ProvisionTarget {
+        owner,
+        task,
+        strategy,
+    })
+}
+
+pub(crate) fn validate_task_worktree_checkout(
+    db: &Connection,
+    project: &str,
+    scope: &str,
+    checkout: &str,
+) -> Result<()> {
+    let target = provision_target(db, project, scope)?;
+    let (managed_checkout, provisioning): (Option<String>, bool) = db.query_row(
+        "SELECT (SELECT checkout_id FROM managed_task_worktrees WHERE project_id = ?1 AND task_id = ?2),
+                 EXISTS (SELECT 1 FROM worktree_provisions WHERE project_id = ?1 AND task_id = ?2)",
+        params![project, target.owner], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    ensure!(
+        !provisioning,
+        "finish provisioning the checklist work scope's managed worktree first"
+    );
+    ensure!(
+        managed_checkout
+            .as_deref()
+            .is_none_or(|managed| managed == checkout),
+        "checklist jobs use their work scope's managed worktree"
+    );
+    Ok(())
 }
 
 type RepositoryGates = Mutex<HashMap<String, Weak<AsyncMutex<()>>>>;
@@ -149,7 +204,8 @@ pub async fn provision_task_worktree(
     task_id: String,
     source_checkout_id: String,
 ) -> Result<ManagedWorktree> {
-    let (project, task) = (project_id.clone(), task_id.clone());
+    let scope = task_id;
+    let (project, task) = (project_id.clone(), scope.clone());
     let source = store
         .execute(move |db| {
             db.query_row(
@@ -173,17 +229,33 @@ pub async fn provision_task_worktree(
         })
         .await?;
     let gate = repository_gate(&source.common).lock_owned().await;
-    let (project, task) = (project_id.clone(), task_id.clone());
-    let existing = store
-        .execute(move |db| load_worktree(db, &project, &task))
-        .await?;
-    if let Some((worktree, git_dir, common)) = existing {
-        return tokio::task::spawn_blocking(move || {
-            let _gate = gate;
-            verify_managed(&worktree, &git_dir, &common)?;
-            Ok(worktree)
+    let (project, requested) = (project_id.clone(), scope.clone());
+    let (target, existing) = store
+        .execute(move |db| {
+            let target = provision_target(db, &project, &requested)?;
+            let existing = load_worktree(db, &project, &target.owner)?;
+            Ok((target, existing))
         })
         .await?;
+    let task_id = target.owner;
+    if let Some((worktree, git_dir, common)) = existing {
+        let (_gate, worktree) = tokio::task::spawn_blocking(move || {
+            verify_managed(&worktree, &git_dir, &common)?;
+            Ok::<_, anyhow::Error>((gate, worktree))
+        })
+        .await??;
+        if scope != task_id {
+            let checkout = worktree.checkout_id.clone();
+            store
+                .execute(move |db| {
+                    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    assign_shared_scope(&tx, &project_id, &scope, &task_id, &checkout)?;
+                    tx.commit()?;
+                    Ok(())
+                })
+                .await?;
+        }
+        return Ok(worktree);
     }
 
     let (project, task) = (project_id.clone(), task_id.clone());
@@ -207,10 +279,19 @@ pub async fn provision_task_worktree(
     })
     .await??;
     if new_intent {
-        let (project, task, saved) = (project_id.clone(), task_id.clone(), provision.clone());
+        let (project, task, requested, saved) = (
+            project_id.clone(),
+            task_id.clone(),
+            scope.clone(),
+            provision.clone(),
+        );
         store
             .execute(move |db| {
-                let recorded = db.execute(
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let current = provision_target(&tx, &project, &requested)?;
+                ensure!(current.owner == task,
+                    "branch strategy changed while preparing the worktree; retry provisioning");
+                let recorded = tx.execute(
                     "INSERT INTO worktree_provisions SELECT ?1, ?2, ?3, ?4, ?5
                      WHERE NOT EXISTS (SELECT 1 FROM shared_worktree_scopes WHERE project_id = ?1 AND scope_task_id = ?2)",
                     params![
@@ -225,6 +306,8 @@ pub async fn provision_task_worktree(
                     ],
                 )?;
                 ensure!(recorded == 1, "the scope already shares a managed worktree");
+                pin_branch_strategy(&tx, &project, &current.task, current.strategy)?;
+                tx.commit()?;
                 Ok(())
             })
             .await?;
@@ -262,6 +345,9 @@ pub async fn provision_task_worktree(
                 "DELETE FROM worktree_provisions WHERE project_id = ?1 AND task_id = ?2",
                 params![project_id, task_id],
             )?;
+            if scope != task_id {
+                assign_shared_scope(&tx, &project_id, &scope, &task_id, &checkout.checkout_id)?;
+            }
             tx.commit()?;
             Ok(ManagedWorktree {
                 project_id,

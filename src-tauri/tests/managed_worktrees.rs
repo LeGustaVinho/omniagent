@@ -27,8 +27,8 @@ use omniagent::{
         runtime::start_managed_turn,
     },
     repository::{
-        self, AttemptWorktreeEvidence, ManagedWorktree, ProjectCheckout, provision_task_worktree,
-        with_managed_worktree_writer,
+        self, AttemptWorktreeEvidence, BranchStrategy, ManagedWorktree, ProjectCheckout,
+        provision_task_worktree, with_managed_worktree_writer,
     },
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
     runs::RunStatus,
@@ -74,6 +74,215 @@ async fn repository(store: &Store, path: &Path) -> Result<ProjectCheckout> {
         ],
     )?;
     repository::register(store, path.into()).await
+}
+
+#[tokio::test]
+async fn branch_strategy_pins_the_task_hierarchy_at_first_provision() -> Result<()> {
+    use BranchStrategy::{Independent, SharedBranchPerTask};
+
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("store.sqlite");
+    let store = Store::open(database.clone())?;
+    let project = repository(&store, &temp.path().join("source")).await?;
+    let project_id = project.project_id;
+    let strategy = |task: &str| store.task_branch_strategy(project_id.clone(), task.to_string());
+    let set = |task: &str, mode| {
+        store.set_task_branch_strategy(project_id.clone(), task.to_string(), mode)
+    };
+    let provision = |store, task: String| {
+        provision_task_worktree(
+            store,
+            temp.path().join("worktrees"),
+            project_id.clone(),
+            task,
+            project.checkout_id.clone(),
+        )
+    };
+    assert_eq!(
+        store.project_branch_strategy(project_id.clone()).await?,
+        Independent
+    );
+    let parent = store
+        .create_project_task(project_id.clone(), "Parent".into())
+        .await?;
+    let first = store
+        .create_project_subtask(project_id.clone(), parent.id.clone(), "One".into())
+        .await?;
+    let second = store
+        .create_project_subtask(project_id.clone(), parent.id.clone(), "Two".into())
+        .await?;
+    assert_eq!(strategy(&first.id).await?.effective_strategy, Independent);
+    assert!(!strategy(&parent.id).await?.locked);
+
+    store
+        .set_project_branch_strategy(project_id.clone(), SharedBranchPerTask)
+        .await?;
+    assert_eq!(
+        set(&parent.id, Some(Independent)).await?.effective_strategy,
+        Independent
+    );
+    let inherited = set(&parent.id, None).await?;
+    assert_eq!(inherited.override_strategy, None);
+    assert_eq!(inherited.effective_strategy, SharedBranchPerTask);
+    assert!(set(&first.id, Some(Independent)).await.is_err());
+
+    let observer = Store::open(database.clone())?;
+    let (first_tree, second_tree) =
+        tokio::try_join!(provision(&store, first.id), provision(&observer, second.id),)?;
+    assert_eq!(first_tree, second_tree);
+    assert_eq!(first_tree.owner_task_id, parent.id);
+    assert_eq!(
+        git(&first_tree.root, &["branch", "--show-current"])?,
+        first_tree.branch
+    );
+    assert!(strategy(&parent.id).await?.locked);
+    assert!(set(&parent.id, Some(Independent)).await.is_err());
+
+    store
+        .set_project_branch_strategy(project_id.clone(), Independent)
+        .await?;
+    let reopened = Store::open(database)?;
+    assert_eq!(provision(&reopened, parent.id.clone()).await?, first_tree);
+    let third = store
+        .create_project_subtask(project_id.clone(), parent.id, "Three".into())
+        .await?;
+    assert_eq!(provision(&reopened, third.id).await?, first_tree);
+
+    let independent = store
+        .create_project_task(project_id.clone(), "Independent".into())
+        .await?;
+    let child = store
+        .create_project_subtask(
+            project_id.clone(),
+            independent.id.clone(),
+            "Separate".into(),
+        )
+        .await?;
+    let child_tree = provision(&store, child.id.clone()).await?;
+    assert_eq!(child_tree.owner_task_id, child.id);
+    store
+        .set_project_branch_strategy(project_id.clone(), SharedBranchPerTask)
+        .await?;
+    let parent_tree = provision(&store, independent.id.clone()).await?;
+    assert_eq!(parent_tree.owner_task_id, independent.id);
+    assert_ne!(child_tree.checkout_id, parent_tree.checkout_id);
+    assert_ne!(child_tree.branch, parent_tree.branch);
+    assert_ne!(child_tree.root, parent_tree.root);
+    Ok(())
+}
+
+#[tokio::test]
+async fn shared_worktree_discard_releases_only_a_restored_producing_scope() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("store.sqlite");
+    let store = Store::open(database.clone())?;
+    let project = repository(&store, &temp.path().join("source")).await?;
+    let project_id = project.project_id;
+    let owner = store
+        .create_project_task(project_id.clone(), "Owner".into())
+        .await?;
+    let scope = store
+        .create_project_subtask(project_id.clone(), owner.id.clone(), "Writer".into())
+        .await?;
+    store
+        .set_task_branch_strategy(
+            project_id.clone(),
+            owner.id.clone(),
+            Some(BranchStrategy::SharedBranchPerTask),
+        )
+        .await?;
+    let tree = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project_id.clone(),
+        scope.id.clone(),
+        project.checkout_id,
+    )
+    .await?;
+    let can_write = |store, task: &str| {
+        with_managed_worktree_writer(
+            store,
+            project_id.clone(),
+            tree.checkout_id.clone(),
+            task.to_owned(),
+            |_| Ok(()),
+        )
+    };
+    let discard = |task: &str| {
+        store.discard_pending_worktree_changes(
+            project_id.clone(),
+            tree.checkout_id.clone(),
+            task.to_owned(),
+        )
+    };
+    with_managed_worktree_writer(
+        &store,
+        project_id.clone(),
+        tree.checkout_id.clone(),
+        scope.id.clone(),
+        |worktree| {
+            fs::write(worktree.root.join("pending.txt"), "discard fixture")?;
+            Ok(())
+        },
+    )
+    .await?;
+    assert!(
+        discard(&owner.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("do not belong")
+    );
+    assert!(
+        discard(&scope.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("restore")
+    );
+    assert!(
+        can_write(&store, &owner.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains(&scope.id)
+    );
+    assert_eq!(
+        fs::read_to_string(tree.root.join("pending.txt"))?,
+        "discard fixture"
+    );
+
+    git(&tree.root, &["add", "--", "pending.txt"])?;
+    git(
+        &tree.root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=NUL",
+            "commit",
+            "-m",
+            "Unverified",
+        ],
+    )?;
+    assert!(git(&tree.root, &["status", "--porcelain"])?.is_empty());
+    assert!(
+        discard(&scope.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("restore")
+    );
+    git(&tree.root, &["reset", "--hard", &tree.base_commit])?;
+    let observer = Store::open(database)?;
+    assert!(can_write(&observer, &owner.id).await.is_err());
+    discard(&scope.id).await?;
+    can_write(&observer, &owner.id).await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -3411,23 +3620,27 @@ async fn app_and_cli_writers_share_reservations_and_keep_uncertain_writes_after_
         .create_project_task(project.project_id.clone(), "Owner".into())
         .await?;
     let scope = store
-        .create_project_task(project.project_id.clone(), "Shared".into())
+        .create_project_subtask(
+            project.project_id.clone(),
+            owner.id.clone(),
+            "Shared".into(),
+        )
+        .await?;
+    store
+        .set_project_branch_strategy(
+            project.project_id.clone(),
+            BranchStrategy::SharedBranchPerTask,
+        )
         .await?;
     let tree = provision_task_worktree(
         &store,
         temp.path().join("worktrees"),
         project.project_id.clone(),
-        owner.id.clone(),
+        scope.id.clone(),
         project.checkout_id.clone(),
     )
     .await?;
-    store
-        .assign_shared_worktree(
-            project.project_id.clone(),
-            scope.id.clone(),
-            tree.checkout_id.clone(),
-        )
-        .await?;
+    assert_eq!(tree.owner_task_id, owner.id);
     let runner = Arc::new(CandidateWriter);
     let parent = candidate_parent(&store, &project, &runner).await?;
     let bridge = std::path::PathBuf::from(env!("CARGO_BIN_EXE_omniagent"));

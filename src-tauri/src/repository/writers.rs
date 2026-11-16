@@ -5,7 +5,12 @@ use uuid::Uuid;
 use crate::{protection, store::Store};
 
 use super::{
-    AttemptWorktreeEvidence, ManagedWorktree, candidates::capture_git, worktrees::load_worktree,
+    AttemptWorktreeEvidence, BranchStrategy, ManagedWorktree, WorktreeStart,
+    candidates::capture_git,
+    worktrees::{
+        load_worktree,
+        strategy::{branch_strategy_for_scope, pin_branch_strategy},
+    },
 };
 
 pub(crate) enum WriterConflict {
@@ -17,7 +22,10 @@ pub(crate) enum WriterConflict {
 #[derive(Clone, Copy)]
 pub(super) enum WriterSource<'a> {
     Run(&'a str),
-    App(&'a str),
+    App {
+        operation: &'a str,
+        starting_head: &'a str,
+    },
 }
 
 pub(crate) fn writer_owner(
@@ -94,10 +102,12 @@ pub(super) fn retain_pending_changes(
 ) -> Result<()> {
     let (run, operation) = match source {
         WriterSource::Run(run) => (Some(run), None),
-        WriterSource::App(operation) => (None, Some(operation)),
+        WriterSource::App { operation, .. } => (None, Some(operation)),
     };
     let changed = db.execute(
-        "INSERT INTO pending_worktree_changes VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO pending_worktree_changes
+            (checkout_id, project_id, scope_task_id, producing_run_id, producing_operation_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(checkout_id) DO UPDATE SET scope_task_id = excluded.scope_task_id
          WHERE pending_worktree_changes.scope_task_id = excluded.scope_task_id",
         params![checkout, project, scope, run, operation],
@@ -105,6 +115,36 @@ pub(super) fn retain_pending_changes(
     ensure!(
         changed == 1,
         "pending changes belong to a different work scope"
+    );
+    if let WriterSource::App {
+        operation,
+        starting_head,
+    } = source
+    {
+        db.execute(
+            "UPDATE pending_worktree_changes SET discard_starting_head = ?3
+             WHERE checkout_id = ?1 AND producing_operation_id = ?2",
+            params![checkout, operation, starting_head],
+        )?;
+    }
+    Ok(())
+}
+
+/// Release attribution after the calling service has verified the disposition under a writer reservation.
+pub(crate) fn clear_pending_changes(
+    db: &Connection,
+    project: &str,
+    checkout: &str,
+    scope: &str,
+) -> Result<()> {
+    let removed = db.execute(
+        "DELETE FROM pending_worktree_changes
+         WHERE project_id = ?1 AND checkout_id = ?2 AND scope_task_id = ?3",
+        params![project, checkout, scope],
+    )?;
+    ensure!(
+        removed == 1,
+        "pending changes do not belong to this work scope"
     );
     Ok(())
 }
@@ -123,23 +163,136 @@ impl Store {
                 "SELECT task_id FROM managed_task_worktrees WHERE project_id = ?1 AND checkout_id = ?2",
                 params![project, checkout], |row| row.get(0),
             ).optional()?.context("shared worktree is outside the project")?;
-            let has_own: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM worktree_provisions WHERE project_id = ?1 AND task_id = ?2)
-                     OR EXISTS (SELECT 1 FROM managed_task_worktrees WHERE project_id = ?1 AND task_id = ?2)",
-                params![project, scope], |row| row.get(0),
-            )?;
-            ensure!(!has_own, "the scope already owns or is provisioning a worktree");
-            let inserted = tx.execute(
-                "INSERT INTO shared_worktree_scopes VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(project_id, scope_task_id) DO NOTHING",
-                params![project, scope, owner, checkout],
-            )?;
-            ensure!(inserted == 1 || writer_owner(&tx, &project, &scope, &checkout)?.is_some(),
-                "the scope already uses a different shared worktree");
+            let (task, strategy) = branch_strategy_for_scope(&tx, &project, &scope)?;
+            ensure!(strategy.effective_strategy != BranchStrategy::SharedBranchPerTask || task == owner,
+                "the branch strategy shares the parent task's worktree");
+            assign_shared_scope(&tx, &project, &scope, &owner, &checkout)?;
+            pin_branch_strategy(&tx, &project, &task, strategy)?;
             tx.commit()?;
             Ok(())
         }).await
     }
+
+    /// Confirm an explicit discard after the operator restored the producing scope's worktree.
+    pub async fn discard_pending_worktree_changes(
+        &self,
+        project: String,
+        checkout: String,
+        scope: String,
+    ) -> Result<()> {
+        let store = self.clone();
+        tokio::spawn(async move {
+            let operation = Uuid::new_v4().to_string();
+            let ((worktree, git_dir, common), starting_head) = store.execute({
+                let (project, checkout, scope, operation) = (
+                    project.clone(), checkout.clone(), scope.clone(), operation.clone(),
+                );
+                move |db| {
+                    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    let (head, start): (Option<String>, Option<Vec<u8>>) = tx.query_row(
+                        "SELECT p.discard_starting_head, s.state FROM pending_worktree_changes p
+                         LEFT JOIN job_worktree_starts s ON s.run_id = p.producing_run_id AND s.checkout_id = p.checkout_id
+                         WHERE p.project_id = ?1 AND p.checkout_id = ?2 AND p.scope_task_id = ?3",
+                        params![project, checkout, scope],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    ).optional()?.context("pending changes do not belong to this work scope")?;
+                    let identity = reserve_app_writer(&tx, &project, &checkout, &scope, &operation)?;
+                    let start: Option<WorktreeStart> = start.map(|saved| -> Result<_> {
+                        Ok(serde_json::from_slice(&protection::unprotect(&saved)?)?)
+                    }).transpose()?;
+                    let head = head.or_else(|| start.map(|start| start.starting.head))
+                        .context("the producing write has no saved starting commit")?;
+                    tx.commit()?;
+                    Ok((identity, head))
+                }
+            }).await?;
+            let verified = tokio::task::spawn_blocking(move || {
+                let actual = capture_git(&worktree, &git_dir, &common, None)?.state;
+                ensure!(actual.head == starting_head && actual.status.is_empty(),
+                    "restore the worktree's starting commit and discard pending changes before confirming");
+                Ok::<_, anyhow::Error>(())
+            }).await.context("inspect the restored worktree").and_then(std::convert::identity);
+            let discard = verified.is_ok();
+            store.execute(move |db| {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                release_app_writer(&tx, &checkout, &operation)?;
+                if discard {
+                    clear_pending_changes(&tx, &project, &checkout, &scope)?;
+                }
+                tx.commit()?;
+                Ok(())
+            }).await?;
+            store.job_signal.send_replace(());
+            verified
+        }).await?
+    }
+}
+
+pub(super) fn assign_shared_scope(
+    db: &Connection,
+    project: &str,
+    scope: &str,
+    owner: &str,
+    checkout: &str,
+) -> Result<()> {
+    let has_own: bool = db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM worktree_provisions WHERE project_id = ?1 AND task_id = ?2)
+             OR EXISTS (SELECT 1 FROM managed_task_worktrees WHERE project_id = ?1 AND task_id = ?2)",
+        params![project, scope],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        !has_own,
+        "the scope already owns or is provisioning a worktree"
+    );
+    let inserted = db.execute(
+        "INSERT INTO shared_worktree_scopes VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(project_id, scope_task_id) DO NOTHING",
+        params![project, scope, owner, checkout],
+    )?;
+    ensure!(
+        inserted == 1 || writer_owner(db, project, scope, checkout)?.is_some(),
+        "the scope already uses a different shared worktree"
+    );
+    Ok(())
+}
+
+fn reserve_app_writer(
+    db: &Connection,
+    project: &str,
+    checkout: &str,
+    scope: &str,
+    operation: &str,
+) -> Result<(ManagedWorktree, String, String)> {
+    let owner = writer_owner(db, project, scope, checkout)?
+        .context("this work scope is not assigned to the checkout")?;
+    let identity =
+        load_worktree(db, project, &owner)?.context("managed worktree is unavailable")?;
+    match writer_conflict(db, checkout, scope)? {
+        Some(WriterConflict::Run { id, .. }) => anyhow::bail!("worktree reserved by run {id}"),
+        Some(WriterConflict::App(id)) => anyhow::bail!("worktree reserved by app operation {id}"),
+        Some(WriterConflict::Pending { scope, .. }) => {
+            anyhow::bail!("worktree has pending changes for scope {scope}")
+        }
+        None => {}
+    }
+    db.execute(
+        "INSERT INTO app_worktree_writers VALUES (?1, ?2, ?3, ?4)",
+        params![checkout, operation, project, scope],
+    )?;
+    Ok(identity)
+}
+
+fn release_app_writer(db: &Connection, checkout: &str, operation: &str) -> Result<()> {
+    let removed = db.execute(
+        "DELETE FROM app_worktree_writers WHERE checkout_id = ?1 AND operation_id = ?2",
+        params![checkout, operation],
+    )?;
+    ensure!(
+        removed == 1,
+        "the app worktree reservation ended before the write settled"
+    );
+    Ok(())
 }
 
 /// Run an app-owned edit against a managed checkout under the scheduler's writer admission.
@@ -164,26 +317,8 @@ pub async fn with_managed_worktree_writer<T: Send + 'static>(
                 );
                 move |db| {
                     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                    let owner = writer_owner(&tx, &project, &scope, &checkout)?
-                        .context("this work scope is not assigned to the checkout")?;
-                    let identity = load_worktree(&tx, &project, &owner)?
-                        .context("managed worktree is unavailable")?;
-                    match writer_conflict(&tx, &checkout, &scope)? {
-                        Some(WriterConflict::Run { id, .. }) => {
-                            anyhow::bail!("worktree reserved by run {id}")
-                        }
-                        Some(WriterConflict::App(id)) => {
-                            anyhow::bail!("worktree reserved by app operation {id}")
-                        }
-                        Some(WriterConflict::Pending { scope, .. }) => {
-                            anyhow::bail!("worktree has pending changes for scope {scope}")
-                        }
-                        None => {}
-                    }
-                    tx.execute(
-                        "INSERT INTO app_worktree_writers VALUES (?1, ?2, ?3, ?4)",
-                        params![checkout, operation, project, scope],
-                    )?;
+                    let identity =
+                        reserve_app_writer(&tx, &project, &checkout, &scope, &operation)?;
                     tx.commit()?;
                     Ok(identity)
                 }
@@ -193,32 +328,32 @@ pub async fn with_managed_worktree_writer<T: Send + 'static>(
         let observation = tokio::task::spawn_blocking(move || {
             let before = match capture_git(&worktree, &git_dir, &common, None) {
                 Ok(before) => before,
-                Err(error) => return Ok((Err(error), false)),
+                Err(error) => return Ok((Err(error), None)),
             };
             let result = write(&worktree);
             let after = capture_git(&worktree, &git_dir, &common, None)?;
-            Ok::<_, anyhow::Error>((result, after.state.holds_scope_since(&before.state)))
+            let pending_head = after
+                .state
+                .holds_scope_since(&before.state)
+                .then_some(before.state.head);
+            Ok::<_, anyhow::Error>((result, pending_head))
         })
         .await??;
-        let (result, pending) = observation;
+        let (result, pending_head) = observation;
         store
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let removed = tx.execute(
-                    "DELETE FROM app_worktree_writers WHERE checkout_id = ?1 AND operation_id = ?2",
-                    params![checkout, operation],
-                )?;
-                ensure!(
-                    removed == 1,
-                    "the app worktree reservation ended before the write settled"
-                );
-                if pending {
+                release_app_writer(&tx, &checkout, &operation)?;
+                if let Some(starting_head) = pending_head {
                     retain_pending_changes(
                         &tx,
                         &project,
                         &checkout,
                         &scope,
-                        WriterSource::App(&operation),
+                        WriterSource::App {
+                            operation: &operation,
+                            starting_head: &starting_head,
+                        },
                     )?;
                 }
                 tx.commit()?;

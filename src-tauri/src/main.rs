@@ -14,8 +14,8 @@ use std::{path::PathBuf, sync::Arc};
 use omniagent::{
     jobs::JobScheduler,
     repository::{
-        self, AttemptWorktreeEvidence, LiveWorktree, ManagedWorktree, ProjectCheckout,
-        WorktreeStart,
+        self, AttemptWorktreeEvidence, BranchStrategy, LiveWorktree, ManagedWorktree,
+        ProjectCheckout, TaskBranchStrategy, WorktreeStart,
     },
     runner::DirectWindowsRunner,
     store::Store,
@@ -68,6 +68,54 @@ async fn set_project_worktree_root(
 }
 
 #[tauri::command]
+async fn project_branch_strategy(
+    store: tauri::State<'_, Store>,
+    project_id: String,
+) -> Result<BranchStrategy, String> {
+    store
+        .project_branch_strategy(project_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_project_branch_strategy(
+    store: tauri::State<'_, Store>,
+    project_id: String,
+    strategy: BranchStrategy,
+) -> Result<BranchStrategy, String> {
+    store
+        .set_project_branch_strategy(project_id, strategy)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn task_branch_strategy(
+    store: tauri::State<'_, Store>,
+    project_id: String,
+    task_id: String,
+) -> Result<TaskBranchStrategy, String> {
+    store
+        .task_branch_strategy(project_id, task_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn set_task_branch_strategy(
+    store: tauri::State<'_, Store>,
+    project_id: String,
+    task_id: String,
+    strategy: Option<BranchStrategy>,
+) -> Result<TaskBranchStrategy, String> {
+    store
+        .set_task_branch_strategy(project_id, task_id, strategy)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn managed_worktree_start(
     store: tauri::State<'_, Store>,
     project_id: String,
@@ -99,6 +147,19 @@ async fn live_managed_worktree(
 ) -> Result<Option<LiveWorktree>, String> {
     store
         .live_managed_worktree(project_id, owner_task_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+async fn discard_pending_worktree_changes(
+    store: tauri::State<'_, Store>,
+    project_id: String,
+    checkout_id: String,
+    scope_task_id: String,
+) -> Result<(), String> {
+    store
+        .discard_pending_worktree_changes(project_id, checkout_id, scope_task_id)
         .await
         .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
@@ -158,9 +219,14 @@ fn main() {
             register_project,
             provision_task_worktree,
             set_project_worktree_root,
+            project_branch_strategy,
+            set_project_branch_strategy,
+            task_branch_strategy,
+            set_task_branch_strategy,
             managed_worktree_start,
             attempt_worktree_evidence,
             live_managed_worktree,
+            discard_pending_worktree_changes,
             desktop::choose_repository,
             desktop::choose_repository_markdown,
             desktop::list_repository_markdown_revisions,

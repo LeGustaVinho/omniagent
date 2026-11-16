@@ -9,7 +9,7 @@ use crate::{
     conversations::SessionScope,
     protection,
     providers::{SessionMode, questions::QuestionRoute},
-    repository::{bind_job_markdown, writers::writer_owner},
+    repository::{bind_job_markdown, validate_task_worktree_checkout, writers::writer_owner},
     store::Store,
     tasks::{TaskRunScope, bind_checklist_job_mode, bind_task_run_scope},
 };
@@ -513,6 +513,14 @@ impl Store {
                         .task_id
                         .as_deref()
                         .context("a task run requires an actionable work scope")?;
+                    if checklist_execution || target.checklist_item_id.is_some() {
+                        validate_task_worktree_checkout(
+                            &tx,
+                            &job.project_id,
+                            task,
+                            &job.checkout_id,
+                        )?;
+                    }
                     bind_task_run_scope(&tx, &job.project_id, &job.id, Some(task), target)?;
                     if checklist_execution {
                         bind_checklist_job_mode(

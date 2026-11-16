@@ -26,9 +26,11 @@ pub(crate) use candidates::{
 };
 pub(crate) use markdown::bind_job_markdown;
 pub use markdown::{RepositoryMarkdown, RepositoryMarkdownRevision};
+pub use worktrees::strategy::{BranchStrategy, TaskBranchStrategy};
 pub use worktrees::{GitStartingState, ManagedWorktree, WorktreeStart, provision_task_worktree};
 pub(crate) use worktrees::{
-    capture_worktree_start, verify_managed_recovery_candidate, verify_managed_recovery_checkout,
+    capture_worktree_start, validate_task_worktree_checkout, verify_managed_recovery_candidate,
+    verify_managed_recovery_checkout,
 };
 pub use writers::with_managed_worktree_writer;
 
