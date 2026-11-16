@@ -586,6 +586,9 @@ mod tests {
             .join("SKILL.md");
         fs::create_dir_all(local_skill.parent().unwrap())?;
         fs::write(&local_skill, "Local shared skill")?;
+        let discovery_only = checkout.join(".agents/skills/inventory-discovery-only/SKILL.md");
+        fs::create_dir_all(discovery_only.parent().unwrap())?;
+        fs::write(&discovery_only, "Discovered before dispatch")?;
         let install = checkout.join("plugins/workflow");
         let plugin_path = install.join(skill_name).join("SKILL.md");
         let plugin_skill = SkillEntry {
@@ -622,6 +625,13 @@ mod tests {
             index: instruction.0,
         };
         let guide_revision = instruction.1.revision.clone();
+        let discovered = initial
+            .inventory
+            .filesystem_skills
+            .iter()
+            .find(|entry| entry.path == discovery_only)
+            .context("discovery-only skill missing from the original inventory")?;
+        assert!(discovered.revision.is_some());
 
         let session = ProviderLocation {
             session_id: Some("native-session".into()),
@@ -766,6 +776,7 @@ mod tests {
             .await?;
 
         fs::write(&guide, "Edited guide")?;
+        fs::remove_file(&discovery_only)?;
         write_registry(&checkout, &install, "2.0.0", false)?;
         drop(store);
         let store = Store::open(db)?;
@@ -796,6 +807,10 @@ mod tests {
             (Some("1.2.0"), Some(true))
         );
         let recorded = &historical.observations;
+        assert!(historical.inventory.filesystem_skills.contains(discovered));
+        assert!(recorded.iter().all(|entry| !entry.targets.contains(&InventoryTarget::Skill {
+            id: discovered.id.clone(),
+        })));
         let local_skill_id = SkillEntry::identity(Provider::Codex, &local_skill)?;
         let expected_links = [
             vec![],
@@ -858,6 +873,7 @@ mod tests {
             (next_plugins[0].version.as_deref(), next_plugins[0].enabled),
             (Some("2.0.0"), Some(false))
         );
+        assert!(!next.inventory.filesystem_skills.contains(discovered));
         assert!(next.observations.is_empty());
         Ok(())
     }

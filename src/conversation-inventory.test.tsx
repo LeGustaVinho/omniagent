@@ -18,7 +18,10 @@ it("loads saved inventory on demand and separates discovery from reported use", 
   const pluginSkill = {
     ...localSkill, id: "plugin", source: "provider", path: "C:/fixture/plugin/shared/SKILL.md", pluginId: "workflow",
   };
-  vi.mocked(invoke).mockResolvedValue({
+  const discoveredOnly = {
+    ...localSkill, id: "discovery-only", name: "discovered-only", path: "C:/fixture/.agents/skills/discovered-only/SKILL.md",
+  };
+  const saved = {
     dispatchId: "recorded-dispatch",
     checkout: {
       runId: "run-a", checkoutId: "managed-checkout",
@@ -33,12 +36,12 @@ it("loads saved inventory on demand and separates discovery from reported use", 
     historyReports: [{ eventSequence: "4", turns: 1, itemKind: null }],
     inventory: {
       instructions: { sources: [{ path: guide, scope: "checkout", revision: "guide-r1", selection: "expected", importedFrom: null, includedBytes: null }], unresolved: [] },
-      filesystemSkills: [localSkill],
+      filesystemSkills: [localSkill, discoveredOnly],
       reportedSkills: { reported: true, entries: [pluginSkill] },
       requestedSkill: { name: "shared", matchingIds: ["local", "plugin"] },
       plugins: {
         id: "initial-inventory", checkedAt: "saved",
-        report: { status: "reported", plugins: [{ id: "workflow", name: "Workflow", version: "1.2.0", enabled: false, scope: "project", installPath: "C:/fixture/plugin", sourceLocation: null }] },
+        report: { status: "reported", plugins: [{ id: "workflow", name: "Workflow", version: "1.2.0", enabled: true, scope: "project", installPath: "C:/fixture/plugin", sourceLocation: null }] },
       },
     },
     observations: [
@@ -46,10 +49,33 @@ it("loads saved inventory on demand and separates discovery from reported use", 
       { eventSequence: "8", report: { kind: "skill_use", name: "shared" }, targets: [] },
       { eventSequence: "9", report: { kind: "skill_use", name: "workflow:shared" }, targets: [{ kind: "skill", id: "plugin" }] },
     ],
+  };
+  const fresh = {
+    ...saved,
+    dispatchId: "new-dispatch",
+    inventory: {
+      ...saved.inventory,
+      instructions: { ...saved.inventory.instructions, sources: saved.inventory.instructions.sources.map((source) => ({ ...source, revision: "guide-r2" })) },
+      filesystemSkills: [localSkill],
+      plugins: {
+        ...saved.inventory.plugins,
+        report: {
+          ...saved.inventory.plugins.report,
+          plugins: saved.inventory.plugins.report.plugins.map((plugin) => ({ ...plugin, version: "2.0.0", enabled: false })),
+        },
+      },
+    },
+    observations: [],
+  };
+  vi.mocked(invoke).mockImplementation(async (_command, args) => {
+    return args && "runId" in args && args.runId === "run-b" ? fresh : saved;
   });
   const client = new QueryClient();
   const user = userEvent.setup();
-  render(<QueryClientProvider client={client}><ConversationInventory conversationId="chat-a" runId="run-a" /></QueryClientProvider>);
+  const attempt = (runId: string) => <QueryClientProvider client={client}>
+    <ConversationInventory key={runId} conversationId="chat-a" runId={runId} />
+  </QueryClientProvider>;
+  const view = render(attempt("run-a"));
 
   expect(invoke).not.toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Dispatch inventory" }));
@@ -70,4 +96,17 @@ it("loads saved inventory on demand and separates discovery from reported use", 
   const linkedGuide = reports.getByRole<HTMLAnchorElement>("link", { name: guide });
   expect(document.getElementById(linkedGuide.getAttribute("href")?.slice(1) ?? "")?.textContent).toContain("guide-r1");
   expect(reports.getByText("Saved identity unresolved")).toBeTruthy();
+
+  view.rerender(attempt("run-b"));
+  await user.click(screen.getByRole("button", { name: "Dispatch inventory" }));
+  expect(await screen.findByText("Recorded revision guide-r2")).toBeTruthy();
+  expect(screen.getByText("workflow · Version 2.0.0")).toBeTruthy();
+  expect(screen.getByText("project · Disabled")).toBeTruthy();
+
+  view.rerender(attempt("run-a"));
+  await user.click(screen.getByRole("button", { name: "Dispatch inventory" }));
+  expect(await screen.findByText("Recorded revision guide-r1")).toBeTruthy();
+  expect(screen.getByText("workflow · Version 1.2.0")).toBeTruthy();
+  expect(screen.getByText("project · Enabled")).toBeTruthy();
+  expect(screen.getByText("discovered-only · Use unconfirmed")).toBeTruthy();
 });
