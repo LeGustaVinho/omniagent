@@ -45,7 +45,7 @@ pub use instruction_evidence::{
 };
 pub use inventory::DispatchInventory;
 pub(crate) use lineage::{
-    enqueue_summary, load_conversation_artifact, reconcile_summary, record_conversation_excerpt,
+    enqueue_summary, load_conversation_artifact, read_background_dispatch_result, reconcile_summary, record_conversation_excerpt,
     record_message_copy,
 };
 pub use lineage::{

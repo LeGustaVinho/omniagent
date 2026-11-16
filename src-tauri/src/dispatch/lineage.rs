@@ -20,7 +20,7 @@ use super::{ContextSnapshot, NativeHistory};
 mod conversation_artifacts;
 pub(super) use conversation_artifacts::pending_summary_sources;
 pub(crate) use conversation_artifacts::{load_conversation_artifact, record_conversation_excerpt};
-pub(crate) use conversation_artifacts::{enqueue_summary, reconcile_summary};
+pub(crate) use conversation_artifacts::{enqueue_summary, read_background_dispatch_result, reconcile_summary};
 pub use conversation_artifacts::{
     ArtifactSource, ByteRange, ConversationArtifactRevision, ConversationSelection, ExcerptSource,
     QueuedSummary, SelectedMessageSpan, SummaryRun,

@@ -477,7 +477,7 @@ pub(super) fn load_pinned_node(
     ))
 }
 
-fn load_definition(
+pub(super) fn load_definition(
     db: &Connection,
     project: &str,
     version: &WorkflowRevision,

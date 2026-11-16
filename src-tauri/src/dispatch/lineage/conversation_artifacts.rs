@@ -364,6 +364,22 @@ fn summary_result(
     job_id: &str,
     request: &SummaryRequest,
 ) -> Result<(SummaryRun, String)> {
+    read_background_dispatch_result(
+        db,
+        run_id,
+        job_id,
+        &request.covered[0].origin.checkout_id,
+        &request.instructions,
+    )
+}
+
+pub(crate) fn read_background_dispatch_result(
+    db: &Connection,
+    run_id: &str,
+    job_id: &str,
+    expected_checkout: &str,
+    instructions: &str,
+) -> Result<(SummaryRun, String)> {
     let row = db.query_row(
         "SELECT r.checkout_id, a.conversation_id, a.context_id, a.result_context_id, a.reported_model, snap.payload
          FROM agent_attempts a JOIN runs r ON r.id = a.run_id
@@ -377,13 +393,13 @@ fn summary_result(
         params![run_id, job_id],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
             row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Vec<u8>>(5)?)),
-    ).optional()?.context("summary requires a completed read-only background dispatch")?;
+    ).optional()?.context("A completed read-only background dispatch is required")?;
     let (checkout, conversation, input_context, result_context, observed_model, snapshot) = row;
     let snapshot: ContextSnapshot = decode(&snapshot)?;
-    validate_summary_snapshot(&snapshot, request)?;
+    validate_background_snapshot(&snapshot, instructions)?;
     ensure!(
-        checkout == request.covered[0].origin.checkout_id,
-        "summary run used the wrong checkout"
+        checkout == expected_checkout,
+        "The background run used the wrong checkout"
     );
     let SessionScope {
         provider,
@@ -395,13 +411,13 @@ fn summary_result(
     let output = result
         .strip_prefix(input.as_slice())
         .filter(|revisions| revisions.len() == 1)
-        .context("summary attempt must produce one final revision")?;
+        .context("The background attempt must produce one final revision")?;
     let summary = load_messages(db, &conversation, output)?
         .pop()
-        .context("summary output is absent")?;
+        .context("The background result is absent")?;
     ensure!(
         summary.role == MessageRole::Assistant && !summary.text.trim().is_empty(),
-        "summary output is empty or unavailable"
+        "The background result is empty or unavailable"
     );
     Ok((
         SummaryRun {
@@ -416,12 +432,16 @@ fn summary_result(
 }
 
 fn validate_summary_snapshot(snapshot: &ContextSnapshot, request: &SummaryRequest) -> Result<()> {
+    validate_background_snapshot(snapshot, &request.instructions)
+}
+
+fn validate_background_snapshot(snapshot: &ContextSnapshot, instructions: &str) -> Result<()> {
     ensure!(
         snapshot.scope.mode == SessionMode::ReadOnly
             && matches!(snapshot.native_history, NativeHistory::Fresh)
             && matches!(snapshot.submitted_messages.as_slice(), [message]
-            if message.role == MessageRole::User && message.text == request.instructions),
-        "background dispatch does not match the frozen summary request"
+            if message.role == MessageRole::User && message.text == instructions),
+        "The background dispatch does not match the frozen request"
     );
     Ok(())
 }

@@ -45,6 +45,7 @@ import { WorktreeEvidence } from "@/worktree-evidence";
 import { openConversation } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
+import { ConversationAuthoring, workflowAuthoringTarget } from "@/workflow-authoring";
 import "./conversation.css";
 
 const draftWrites = new Map<string, Promise<void>>();
@@ -624,6 +625,9 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
               title="Rename conversation" onClick={() => setRenamingTitle(true)}><Pencil aria-hidden /></button>}
           </>}
         <div className="ml-auto flex items-center gap-1">
+        {library && inspector?.openWorkspace && <ConversationAuthoring projectId={library.projectId} conversationId={conversationId}
+          selectedModel={selected?.option.selectable ? selection : null} effort={sideEffort}
+          onOpenDraft={(draftId) => inspector.openWorkspace?.("pipelines", workflowAuthoringTarget(draftId))} />}
         <ConversationContinuationSettings conversationId={conversationId} targetCheckoutId={continuationCheckoutId}
           onCheckout={library ? setContinuationCheckoutId : undefined} />
         <button type="button" className="conv-quiet-button" onClick={() => { startGoal.reset(); setGoalSettings({ objective: "" }); }}>

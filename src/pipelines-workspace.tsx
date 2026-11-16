@@ -12,6 +12,7 @@ import { RepositoryDeliveryWorkspace } from "@/repository-delivery";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { useGitSimulation } from "@/git-simulation";
 import { PipelineCatalog } from "@/pipeline-catalog";
+import { PipelineAuthoringEditor } from "@/workflow-authoring";
 import { deliveryBranch, deliveryCommitSha, deliveryMergeSha, deliveryRunId } from "@/tasks-demo-data";
 import {
   advancePipelineRun, beginPipelineRun, createDeliveryWorkflow, createStage, declineStage, interruptStage, resolveStage,
@@ -178,8 +179,11 @@ function StageRunDetails({ run, activeId, actions, links }: {
 }
 
 export default function PipelinesWorkspace(props: WorkspaceProps) {
-  return props.simulation ? <PreviewPipelinesWorkspace {...props} /> :
-    <div className="pipelines-workspace"><RepositoryDeliveryWorkspace {...props} /></div>;
+  if (props.simulation) return <PreviewPipelinesWorkspace {...props} />;
+  const draftId = props.target?.startsWith("authoring:") ? props.target.slice("authoring:".length) : undefined;
+  return <div className="pipelines-workspace">
+    {draftId ? <PipelineAuthoringEditor {...props} draftId={draftId} /> : <RepositoryDeliveryWorkspace {...props} />}
+  </div>;
 }
 
 function PreviewPipelinesWorkspace(props: WorkspaceProps) {
