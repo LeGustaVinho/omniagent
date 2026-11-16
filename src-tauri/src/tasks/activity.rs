@@ -63,6 +63,26 @@ pub struct TaskDetails {
     pub planned_assignments: Vec<PlannedAssignment>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskWorkFields {
+    pub title: String,
+    pub priority: i32,
+    pub prerequisites: Vec<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub blockers: Vec<String>,
+}
+
+fn task_work_fields(title: String, details: &TaskDetails) -> TaskWorkFields {
+    TaskWorkFields {
+        title,
+        priority: details.priority,
+        prerequisites: details.prerequisites.clone(),
+        acceptance_criteria: details.acceptance_criteria.clone(),
+        blockers: details.blockers.clone(),
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct ProtectedTaskDetails {
     acceptance_criteria: Vec<String>,
@@ -176,27 +196,24 @@ impl Store {
         &self,
         project: String,
         task: String,
-        mut details: TaskDetails,
+        details: TaskDetails,
     ) -> Result<()> {
-        details.prerequisites.sort_unstable();
-        details.prerequisites.dedup();
         ensure!(
             details.planned_assignments.iter().all(|assignment| {
                 !assignment.role.trim().is_empty() && !assignment.profile_id.trim().is_empty()
             }),
             "a planned assignment requires a role and profile"
         );
-        let details_payload = ProtectedTaskDetails {
-            acceptance_criteria: details.acceptance_criteria,
-            blockers: details.blockers,
-            planned_assignments: details.planned_assignments,
-        };
-        let encrypted = protection::protect(&serde_json::to_vec(&details_payload)?)?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let states = WorkStateChanges::capture(&tx, &project, &task)?;
             let effective = load_delivery_state(&tx, &project, &task)?.state;
-            let terminal = |state| matches!(state, TaskWorkflowState::Completed | TaskWorkflowState::Cancelled);
+            let terminal = |state| {
+                matches!(
+                    state,
+                    TaskWorkflowState::Completed | TaskWorkflowState::Cancelled
+                )
+            };
             let workflow_state = if terminal(effective) || terminal(details.workflow_state) {
                 ensure!(
                     details.workflow_state == effective,
@@ -206,39 +223,80 @@ impl Store {
             } else {
                 details.workflow_state
             };
-            tx.execute(
-                "INSERT INTO project_task_details(project_id, task_id, priority, workflow_state, payload)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(project_id, task_id) DO UPDATE SET priority = excluded.priority,
-                     workflow_state = excluded.workflow_state, payload = excluded.payload",
-                params![project, task, details.priority, workflow_state.key(), encrypted],
-            ).context("task details require an actionable record in this project")?;
-            tx.execute(
-                "DELETE FROM project_task_prerequisites WHERE project_id = ?1 AND task_id = ?2",
-                params![project, task],
+            write_task_details(
+                &tx,
+                &project,
+                &task,
+                TaskDetails {
+                    workflow_state,
+                    ..details
+                },
             )?;
-            for prerequisite in details.prerequisites {
-                tx.execute(
-                    "INSERT INTO project_task_prerequisites VALUES (?1, ?2, ?3)",
-                    params![project, task, prerequisite],
-                ).context("prerequisites must be other tasks in the same project")?;
-            }
-            let cycle: bool = tx.query_row(
-                "WITH RECURSIVE dependencies(id) AS (
-                     SELECT prerequisite_id FROM project_task_prerequisites
-                     WHERE project_id = ?1 AND task_id = ?2
-                     UNION
-                     SELECT p.prerequisite_id FROM project_task_prerequisites p
-                     JOIN dependencies d ON d.id = p.task_id WHERE p.project_id = ?1
-                 ) SELECT EXISTS (SELECT 1 FROM dependencies WHERE id = ?2)",
-                params![project, task],
-                |row| row.get(0),
-            )?;
-            ensure!(!cycle, "the prerequisites contain a cycle");
             states.publish(&tx, &project, &AgileEventOrigin::Operator)?;
             tx.commit()?;
             Ok(())
-        }).await
+        })
+        .await
+    }
+
+    pub async fn project_work_fields(
+        &self,
+        project: String,
+        task: String,
+    ) -> Result<TaskWorkFields> {
+        self.execute(move |db| {
+            let work = load_project_task(db, &project, &task)?
+                .context("work is outside the selected project")?;
+            Ok(task_work_fields(
+                work.title,
+                &load_task_details(db, &project, &task)?,
+            ))
+        })
+        .await
+    }
+
+    pub async fn update_project_work_fields(
+        &self,
+        project: String,
+        task: String,
+        expected: TaskWorkFields,
+        mut next: TaskWorkFields,
+    ) -> Result<TaskWorkFields> {
+        next.title = next.title.trim().to_owned();
+        ensure!(!next.title.is_empty(), "task title is empty");
+        next.prerequisites.sort_unstable();
+        next.prerequisites.dedup();
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let work = load_project_task(&tx, &project, &task)?
+                .context("work is outside the selected project")?;
+            let current = load_task_details(&tx, &project, &task)?;
+            ensure!(
+                task_work_fields(work.title, &current) == expected,
+                "work fields changed; reload them before saving"
+            );
+            let states = WorkStateChanges::capture(&tx, &project, &task)?;
+            tx.execute(
+                "UPDATE project_tasks SET title = ?3 WHERE project_id = ?1 AND id = ?2",
+                params![project, task, next.title],
+            )?;
+            write_task_details(
+                &tx,
+                &project,
+                &task,
+                TaskDetails {
+                    priority: next.priority,
+                    prerequisites: next.prerequisites.clone(),
+                    acceptance_criteria: next.acceptance_criteria.clone(),
+                    blockers: next.blockers.clone(),
+                    ..current
+                },
+            )?;
+            states.publish(&tx, &project, &AgileEventOrigin::Operator)?;
+            tx.commit()?;
+            Ok(next)
+        })
+        .await
     }
 
     pub async fn project_task_runs(&self, project: String, task: String) -> Result<Vec<TaskRun>> {
@@ -341,6 +399,58 @@ pub(super) fn load_task_details(db: &Connection, project: &str, task: &str) -> R
         blockers: protected.blockers,
         planned_assignments: protected.planned_assignments,
     })
+}
+
+fn write_task_details(
+    db: &Connection,
+    project: &str,
+    task: &str,
+    mut details: TaskDetails,
+) -> Result<()> {
+    details.prerequisites.sort_unstable();
+    details.prerequisites.dedup();
+    let payload = ProtectedTaskDetails {
+        acceptance_criteria: details.acceptance_criteria,
+        blockers: details.blockers,
+        planned_assignments: details.planned_assignments,
+    };
+    let encrypted = protection::protect(&serde_json::to_vec(&payload)?)?;
+    db.execute(
+        "INSERT INTO project_task_details(project_id, task_id, priority, workflow_state, payload)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(project_id, task_id) DO UPDATE SET priority = excluded.priority,
+             workflow_state = excluded.workflow_state, payload = excluded.payload",
+        params![
+            project,
+            task,
+            details.priority,
+            details.workflow_state.key(),
+            encrypted
+        ],
+    )
+    .context("task details require an actionable record in this project")?;
+    db.execute(
+        "DELETE FROM project_task_prerequisites WHERE project_id = ?1 AND task_id = ?2",
+        params![project, task],
+    )?;
+    for prerequisite in details.prerequisites {
+        db.execute(
+            "INSERT INTO project_task_prerequisites VALUES (?1, ?2, ?3)",
+            params![project, task, prerequisite],
+        )
+        .context("prerequisites must be other tasks in the same project")?;
+    }
+    let cycle: bool = db.query_row(
+        "WITH RECURSIVE dependencies(id) AS (
+             SELECT prerequisite_id FROM project_task_prerequisites WHERE project_id = ?1 AND task_id = ?2
+             UNION
+             SELECT p.prerequisite_id FROM project_task_prerequisites p
+             JOIN dependencies d ON d.id = p.task_id WHERE p.project_id = ?1
+         ) SELECT EXISTS (SELECT 1 FROM dependencies WHERE id = ?2)",
+        params![project, task], |row| row.get(0),
+    )?;
+    ensure!(!cycle, "the prerequisites contain a cycle");
+    Ok(())
 }
 
 pub(super) fn store_requested_workflow_state(

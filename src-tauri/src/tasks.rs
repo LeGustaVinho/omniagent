@@ -13,7 +13,8 @@ mod delivery;
 mod descriptions;
 pub(crate) use activity::bind_task_run_scope;
 pub use activity::{
-    PlannedAssignment, TaskDetails, TaskRun, TaskRunRole, TaskRunScope, TaskWorkflowState,
+    PlannedAssignment, TaskDetails, TaskRun, TaskRunRole, TaskRunScope, TaskWorkFields,
+    TaskWorkflowState,
 };
 pub use agile_events::{
     AgileEventData, AgileEventOrigin, AgilePipelineLink, AgilePipelineOrigin, ProjectWorkEvent,
@@ -25,7 +26,10 @@ pub use checklists::progress::{
     ChecklistProgressAccess, ChecklistProgressActor, ChecklistProgressAvailability,
     ChecklistProgressError, ChecklistProgressReceipt, ChecklistProgressRecord,
 };
-pub use checklists::{ChecklistExecutionMode, ChecklistItem, TaskChecklist};
+pub use checklists::{
+    ChecklistDispatchTarget, ChecklistExecutionMode, ChecklistItem, TaskChecklist,
+    TaskChecklistModeSettings,
+};
 pub use delivery::milestone::{
     DeliveryCompletionMilestone, DeliveryMilestonePolicy, PendingTaskDeliveryMerge,
 };

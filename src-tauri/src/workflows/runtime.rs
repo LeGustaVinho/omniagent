@@ -167,6 +167,20 @@ impl Store {
         submission: WorkflowAgentSubmission,
         plan_revision_request: Option<super::WorkflowPlanRevisionRequest>,
     ) -> Result<Job> {
+        self.submit_workflow_agent_inner(submission, plan_revision_request, false).await
+    }
+
+    pub(crate) async fn submit_workflow_checklist_agent(&self, submission: WorkflowAgentSubmission) -> Result<Job> {
+        ensure!(submission.input.target.is_some(), "checklist execution requires a task run target");
+        self.submit_workflow_agent_inner(submission, None, true).await
+    }
+
+    async fn submit_workflow_agent_inner(
+        &self,
+        submission: WorkflowAgentSubmission,
+        plan_revision_request: Option<super::WorkflowPlanRevisionRequest>,
+        checklist_execution: bool,
+    ) -> Result<Job> {
         let WorkflowAgentSubmission {
             project_id,
             dispatch,
@@ -343,6 +357,7 @@ impl Store {
             scope,
             request,
             input,
+            checklist_execution,
             WorkflowJobInput {
                 unit_id,
                 artifacts,

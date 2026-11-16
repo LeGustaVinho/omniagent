@@ -4,7 +4,14 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{AgileEventData, AgileEventOrigin, WorkStateChanges, agile_events::publish_event};
-use crate::{protection, store::Store};
+use crate::{
+    conversations::SessionScope,
+    jobs::{Job, JobRequest, PipelineAgentInput, PipelineDispatch},
+    protection,
+    providers::SessionMode,
+    store::Store,
+    workflows::{NodeInputs, WorkflowAgentSubmission},
+};
 
 pub(super) mod progress;
 #[cfg(test)]
@@ -53,6 +60,25 @@ pub struct TaskChecklist {
     pub items: Vec<ChecklistItem>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskChecklistModeSettings {
+    pub override_mode: Option<ChecklistExecutionMode>,
+    pub effective_mode: ChecklistExecutionMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecklistDispatchTarget {
+    pub workflow_run_id: String,
+    pub plan_revision: String,
+    pub release_id: String,
+    pub checkout_id: String,
+    pub unit_id: String,
+    worktree_artifact_id: String,
+    release_artifact_id: String,
+}
+
 impl Store {
     pub async fn project_checklist_mode(&self, project: String) -> Result<ChecklistExecutionMode> {
         self.execute(move |db| {
@@ -94,6 +120,102 @@ impl Store {
     ) -> Result<ChecklistExecutionMode> {
         self.execute(move |db| effective_mode(db, &project, &task))
             .await
+    }
+
+    pub async fn task_checklist_mode_settings(
+        &self,
+        project: String,
+        task: String,
+    ) -> Result<TaskChecklistModeSettings> {
+        self.execute(move |db| {
+            let effective_mode = effective_mode(db, &project, &task)?;
+            let own: Option<String> = db
+                .query_row(
+                    "SELECT mode FROM task_checklist_modes WHERE project_id = ?1 AND task_id = ?2",
+                    params![project, task],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(TaskChecklistModeSettings {
+                override_mode: own
+                    .as_deref()
+                    .map(ChecklistExecutionMode::from_sql)
+                    .transpose()?,
+                effective_mode,
+            })
+        })
+        .await
+    }
+
+    pub async fn project_checklist_dispatch(
+        &self,
+        project: String,
+        task: String,
+    ) -> Result<Option<ChecklistDispatchTarget>> {
+        self.execute(move |db| {
+            effective_mode(db, &project, &task)?;
+            Ok(db.query_row(
+                "SELECT run.id, run.plan_revision, release.id, release.checkout_id, unit.unit_id,
+                        worktree.artifact_id, binding.release_artifact_id
+                 FROM workflow_delivery_heads head
+                 JOIN job_pipeline_runs run ON run.id = head.pipeline_run_id AND run.plan_revision = head.plan_revision
+                 JOIN workflow_release_bindings binding ON binding.decision_artifact_id = head.decision_artifact_id
+                 JOIN job_pipeline_releases release ON release.id = binding.release_id AND release.revoked = 0
+                    AND release.pipeline_run_id = run.id AND release.plan_revision = run.plan_revision
+                    AND release.project_id = head.project_id AND release.task_id = head.task_id
+                 JOIN job_pipeline_nodes node ON node.pipeline_run_id = run.id AND node.instance_id = 'implement' AND node.kind = 'execution'
+                 JOIN workflow_host_completions worktree ON worktree.pipeline_run_id = run.id
+                    AND worktree.node_instance_id = 'prepare' AND worktree.execution_key = run.plan_revision
+                 JOIN workflow_delivery_units unit ON unit.pipeline_run_id = run.id AND unit.plan_revision = run.plan_revision
+                    AND unit.task_id = head.task_id AND unit.commit_evidence_id IS NULL
+                 WHERE head.project_id = ?1 AND head.task_id = ?2 ORDER BY unit.ordinal LIMIT 1",
+                params![project, task], |row| Ok(ChecklistDispatchTarget {
+                    workflow_run_id: row.get(0)?, plan_revision: row.get(1)?, release_id: row.get(2)?, checkout_id: row.get(3)?,
+                    unit_id: row.get(4)?, worktree_artifact_id: row.get(5)?, release_artifact_id: row.get(6)?,
+                }),
+            ).optional()?)
+        }).await
+    }
+
+    pub async fn queue_project_checklist_work(
+        &self,
+        project: String,
+        task: String,
+        expected_release_id: String,
+        expected_unit_id: String,
+        item: Option<String>,
+        scope: SessionScope,
+    ) -> Result<Job> {
+        let target = self
+            .project_checklist_dispatch(project.clone(), task.clone())
+            .await?
+            .context("Approve and prepare repository delivery before queuing checklist work")?;
+        ensure!(
+            target.release_id == expected_release_id && target.unit_id == expected_unit_id,
+            "The delivery release or logical unit changed. Review the current work before queuing."
+        );
+        ensure!(
+            scope.mode == SessionMode::ApprovedWrite,
+            "Checklist work requires the approved write profile"
+        );
+        let artifacts = NodeInputs::from([
+            ("plan".into(), target.plan_revision.clone()),
+            ("worktree".into(), target.worktree_artifact_id),
+            ("release".into(), target.release_artifact_id),
+        ]);
+        self.submit_workflow_checklist_agent(WorkflowAgentSubmission {
+            project_id: project,
+            dispatch: PipelineDispatch { pipeline_run_id: target.workflow_run_id, node_instance_id: "implement".into(),
+                plan_revision: Some(target.plan_revision), release_id: Some(target.release_id) },
+            scope,
+            request: JobRequest { checkout_id: Some(target.checkout_id), task_id: Some(task), mode: SessionMode::ApprovedWrite,
+                instructions: "Follow the checklist scope recorded for this attempt. Keep unrelated changes out of the worktree and leave the result for review.".into(),
+                dependencies: Vec::new(), requires_bridge: false },
+            input: PipelineAgentInput { target: Some(super::TaskRunScope { role: "implementer".into(), checklist_item_id: item }),
+                ..PipelineAgentInput::default() },
+            artifacts,
+            unit_id: Some(target.unit_id),
+        }).await
     }
 
     pub async fn set_task_checklist_mode(

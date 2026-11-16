@@ -9,6 +9,7 @@ import { TaskAssignment } from "@/task-assignment";
 import { ProjectDescription } from "@/project-description";
 import { AgileParticipantFilters, hasParticipantFilter, matchesParticipant, type ParticipantFilter } from "@/project-agile-filters";
 import { ProjectAgileTable, ProjectKanban, TaskJobLinks } from "@/project-agile-views";
+import { ProjectWorkModes, TaskWorkSettings } from "@/project-agile-settings";
 import { projectQueueQuery } from "@/queue-model";
 import { SavedDeliveryMerge, VerifiedDeliveryHistory } from "@/repository-delivery-history";
 import {
@@ -23,11 +24,12 @@ type Change = (operation: () => Promise<unknown>) => void;
 type DeliveryLink = { taskId: string; title: string; deliveryId: string };
 
 function LiveTaskDetails({
-  projectId, task, change, busy, links, selectedEvidence, selectedDeliveryId, contributors, openDelivery, openWork, move, check,
+  projectId, task, change, busy, links, selectedEvidence, selectedDeliveryId, contributors, openDelivery, openWork, move, check, relatedWork,
 }: {
   projectId: string; task: AgileRow; change: Change; busy: boolean; links: WorkspaceProps; contributors: DeliveryLink[];
   selectedEvidence?: EvidenceTarget; selectedDeliveryId?: string; openDelivery: (link: DeliveryLink) => void; openWork: (id: string) => void;
   move: (row: AgileRow, state: WorkflowStatus) => void; check: (id: string, item: Item, checked: boolean) => void;
+  relatedWork: Work[];
 }) {
   const args = { projectId, taskId: task.id };
   const [itemText, setItemText] = useState("");
@@ -93,6 +95,8 @@ function LiveTaskDetails({
         <Button type="submit" variant="outline" disabled={busy || !itemText.trim()}>Add checklist item</Button>
       </form>
     </section>
+    {task.kind !== "epic" && <TaskWorkSettings scope={args} workKind={task.kind} candidates={relatedWork}
+      items={checklist.data?.items ?? []} openQueueJob={links.openQueueJob} />}
     {saved?.pendingRepositoryChanges && <p>Additional repository changes are assigned to this work item.</p>}
     <div className="pipeline-actions">
       {mayCompleteManually && <Button disabled={busy} onClick={() => change(() =>
@@ -280,6 +284,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
     </header>
     <div className="delivery-body">
       <div className="delivery-main">
+        <ProjectWorkModes projectId={projectId} />
         <details className="pipeline-form m-4"><summary className="cursor-pointer font-medium">New work</summary>
         <form className="pipeline-stack mt-3" onSubmit={add}>
           <label>Work type <select value={kind} onChange={(event) => {
@@ -308,7 +313,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
           <button type="button" className="justify-self-end text-xs text-muted-foreground hover:underline"
             onClick={() => { setSelected(undefined); setSelectedEvidence(undefined); setSelectedDelivery(undefined); }}>Close detail</button>
           {current.kind === "epic" ? <EpicState key={current.id} projectId={projectId} epic={current} links={props} /> :
-            <LiveTaskDetails key={current.id} projectId={projectId} task={current} busy={mutation.isPending}
+            <LiveTaskDetails key={current.id} projectId={projectId} task={current} busy={mutation.isPending} relatedWork={all.map(({ task }) => task)}
               change={(operation) => mutation.mutate(operation)} links={props} openWork={openWork} move={move} check={check}
               contributors={contributors} selectedDeliveryId={selectedDelivery?.taskId === current.id ? selectedDelivery.deliveryId : undefined}
               openDelivery={(link) => { openWork(link.taskId); setSelectedDelivery(link); }}

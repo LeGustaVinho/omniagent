@@ -39,6 +39,7 @@ use super::{
 };
 
 mod attached_merge;
+mod agile_checklists;
 mod commit_intent;
 mod destination_drift;
 mod history_integration;

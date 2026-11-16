@@ -503,6 +503,7 @@ impl Store {
         scope: SessionScope,
         request: JobRequest,
         input: PipelineAgentInput,
+        checklist_execution: bool,
         workflow: WorkflowJobInput,
     ) -> Result<Job> {
         self.submit_pipeline_agent_job_with_target(
@@ -510,7 +511,7 @@ impl Store {
             scope,
             request,
             input,
-            false,
+            checklist_execution,
             Some(workflow),
         )
         .await
