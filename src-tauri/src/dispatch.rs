@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result, ensure};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -25,13 +27,20 @@ use crate::{
 mod attachment_evidence;
 mod instruction_evidence;
 mod inventory;
+mod lineage;
 mod profile;
-pub use attachment_evidence::{AttachmentEvidence, AttachmentTransport};
+pub use attachment_evidence::{AttachmentEvidence, AttachmentRead, AttachmentTransport};
 pub use instruction_evidence::{
     InstructionDispatch, InstructionDispatchMode, InstructionDispatchStatus, InstructionReceipt,
     InstructionReview,
 };
 pub use inventory::DispatchInventory;
+pub(crate) use lineage::record_message_copy;
+pub use lineage::{
+    ArtifactSource, ByteRange, ConversationArtifactRevision, ConversationSelection,
+    DispatchIdentity, DispatchLineage, DispatchSourceRevision, DispatchUse, ExcerptSource,
+    MessageRevisionOrigin, QueuedSummary, SelectedMessageSpan, SummaryRun,
+};
 pub use profile::DispatchProfileEvidence;
 
 #[derive(Deserialize, Serialize)]
@@ -73,6 +82,15 @@ pub struct ContextSnapshot {
     pub question_route: QuestionRoute,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_question: Option<QuestionOrigin>,
+}
+
+impl ContextSnapshot {
+    fn working_directory(&self) -> &Path {
+        self.instructions.as_ref().map_or(
+            self.scope.checkout.as_path(),
+            |inventory| &inventory.working_directory,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -119,6 +137,7 @@ pub struct DispatchEvidence {
     pub snapshot: ContextSnapshot,
     pub frames: Vec<Vec<u8>>,
     pub delivery: Delivery,
+    pub attachments: Vec<AttachmentEvidence>,
     pub instructions: Vec<InstructionDispatch>,
 }
 
@@ -188,6 +207,7 @@ impl Store {
                 params![snapshot_id, run_id, context, snapshot_cipher])?;
             tx.execute("INSERT INTO dispatches(id, turn_id, snapshot_id, ordinal, frames, delivery)
                         VALUES (?1, ?2, ?3, 1, ?4, 'prepared')", params![dispatch_id, turn, snapshot_id, frame_cipher])?;
+            lineage::record(&tx, &dispatch_id, &run_id, &snapshot)?;
             tx.execute("UPDATE agent_sessions SET cursor_context_id = NULL WHERE id = ?1", [&session])?;
             if let Some(assessment) = snapshot.capabilities.as_ref() {
                 crate::runtime_inspection::save_capability_summary(&tx, &run_id, assessment)?;
@@ -248,6 +268,8 @@ impl Store {
                     let snapshot: ContextSnapshot =
                         serde_json::from_slice(&protection::unprotect(&snapshot)?)?;
                     let delivery = serde_json::from_value(serde_json::Value::String(delivery))?;
+                    let attachments =
+                        attachment_evidence::load(&tx, &run_id, &id, &snapshot, delivery)?;
                     let instructions = instruction_evidence::load(
                         &tx,
                         &run_id,
@@ -260,6 +282,7 @@ impl Store {
                         snapshot,
                         frames: serde_json::from_slice(&protection::unprotect(&frames)?)?,
                         delivery,
+                        attachments,
                         instructions,
                     })
                 })

@@ -2,6 +2,7 @@ use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::SessionScope,
     diagnostics,
+    dispatch::{ConversationArtifactRevision, ConversationSelection, QueuedSummary},
     jobs::{
         ComposerSuggestionMode, GoalControlState, GoalStopAction, Job, JobContext, JobInspection,
         JobScheduler, PendingInstruction, ProjectQueue, QueueState, RecoveryAction,
@@ -140,6 +141,52 @@ pub async fn enqueue_managed_agent_job(
     }
     .await
     .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn capture_conversation_excerpt(
+    store: State<'_, Store>,
+    selection: ConversationSelection,
+) -> Result<ConversationArtifactRevision, String> {
+    store
+        .capture_conversation_excerpt(selection)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn enqueue_conversation_summary(
+    store: State<'_, Store>,
+    source: ConversationSelection,
+    selection: ModelSelection,
+    effort: Option<String>,
+) -> Result<QueuedSummary, String> {
+    async {
+        let conversation = store.conversation(source.conversation_id.clone()).await?;
+        let scope = selected_scope(
+            &store,
+            conversation.checkout_id,
+            selection,
+            effort,
+            SessionMode::ReadOnly,
+        )
+        .await?;
+        store.enqueue_conversation_summary(source, scope).await
+    }
+    .await
+    .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn conversation_artifact_revision(
+    store: State<'_, Store>,
+    conversation_id: String,
+    artifact_id: String,
+) -> Result<Option<ConversationArtifactRevision>, String> {
+    store
+        .conversation_artifact_revision(conversation_id, artifact_id)
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]
@@ -583,12 +630,7 @@ pub async fn conversation_input(
                 delivery: dispatch.delivery,
                 turn_id: dispatch.turn_id,
                 frames,
-                attachments: dispatch
-                    .snapshot
-                    .attachments
-                    .iter()
-                    .map(Into::into)
-                    .collect(),
+                attachments: dispatch.attachments,
                 instructions: dispatch.instructions,
             })
         })

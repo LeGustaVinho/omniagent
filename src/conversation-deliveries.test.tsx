@@ -45,7 +45,7 @@ it("shows the frozen excerpt and original runner path and requests native bytes 
   const client = new QueryClient();
   const metadata = {
     name: "notes.txt", mimeType: "text/plain", source: { kind: "checkout" as const, relativePath: "docs/notes.txt" },
-    sourceSha256: "f".repeat(64), sourceSize: 128, messageRevisionId: "revision-before-edit",
+    sourceSha256: "f".repeat(64), sourceSize: 128, messageRevisionId: "revision-before-edit", reportedReads: [],
   };
   vi.mocked(invoke).mockResolvedValue(null);
   const user = userEvent.setup();
@@ -53,7 +53,8 @@ it("shows the frozen excerpt and original runner path and requests native bytes 
     <ConversationDeliveries input={{
       delivery: "submitted", turnId: "turn-id", frames: [], instructions: [], attachments: [
         { ...metadata, transport: { method: "excerpt", start: 11, end: 20, text: "café ☕" } },
-        { ...metadata, transport: { method: "reference", runnerPath: "C:\\checkout\\before-rename.txt", uri: null } },
+        { ...metadata, transport: { method: "reference", runnerPath: "C:\\checkout\\before-rename.txt", uri: null },
+          reportedReads: [{ eventSequence: "42", path: "before-rename.txt", tool: "Read" }] },
         { ...metadata, transport: { method: "native", encoding: "acp_resource", runnerPath: null, resourceUri: "file:///original" } },
       ],
     }} conversationId="chat-id" runId="run-id" live={false} />
@@ -63,6 +64,9 @@ it("shows the frozen excerpt and original runner path and requests native bytes 
   expect(list.getByText("UTF-8 bytes 11–20")).toBeTruthy();
   expect(list.getByText("café ☕")).toBeTruthy();
   expect(list.getByText("Runner path C:\\checkout\\before-rename.txt")).toBeTruthy();
+  expect(within(list.getByRole("list", { name: "CLI-reported reads" })).getByText(
+    "CLI reported read via Read · before-rename.txt · Event 42",
+  )).toBeTruthy();
   await user.click(list.getByRole("button", { name: "Download saved bytes" }));
   expect(invoke).toHaveBeenCalledWith("conversation_attachment_content", { conversationId: "chat-id", runId: "run-id", index: 2 });
 });

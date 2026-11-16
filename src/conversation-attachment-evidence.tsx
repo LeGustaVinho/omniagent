@@ -9,6 +9,7 @@ export type AttachmentEvidence = {
   sourceSha256: string;
   sourceSize: number;
   messageRevisionId: string;
+  reportedReads: { eventSequence: string; path: string; tool: string }[];
   transport: { method: "native"; encoding: string; runnerPath: string | null; resourceUri: string | null }
     | { method: "excerpt"; start: number; end: number; text: string }
     | { method: "reference"; runnerPath: string; uri: string | null };
@@ -51,6 +52,11 @@ function SavedAttachment({ attachment, index, conversationId, runId }: {
         <Button type="button" variant="outline" disabled={save.isPending} onClick={() => save.mutate()}>Download saved bytes</Button>
       </>}
     </>}
+    {attachment.reportedReads.length > 0 && <ol aria-label="CLI-reported reads" className="grid gap-1">
+      {attachment.reportedReads.map(({ eventSequence, path, tool }) => <li key={eventSequence} className="break-all text-muted-foreground">
+        CLI reported read via {tool} · {path} · Event {eventSequence}
+      </li>)}
+    </ol>}
     {save.error && <p role="alert">{String(save.error)}</p>}
   </li>;
 }

@@ -345,6 +345,7 @@ impl Store {
                 )?;
                 let role = if role == "user" { MessageRole::User } else { MessageRole::Assistant };
                 let copy = insert_message(&tx, &fork.id, role, payload)?;
+                crate::dispatch::record_message_copy(&tx, revision, &copy)?;
                 tx.execute(
                     "INSERT INTO message_attachments (message_revision_id, payload)
                      SELECT ?1, payload FROM message_attachments WHERE message_revision_id = ?2",

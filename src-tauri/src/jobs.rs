@@ -124,7 +124,7 @@ pub struct JobRequest {
 }
 
 impl JobRequest {
-    fn normalize(&mut self, origin_checkout: &str) -> Result<()> {
+    pub(crate) fn normalize(&mut self, origin_checkout: &str) -> Result<()> {
         ensure!(
             !self.instructions.trim().is_empty(),
             "job instructions are empty"
@@ -380,20 +380,14 @@ impl Store {
                 )
                 .await;
         }
-        let job = self.execute(move |db| {
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            validate_operator_scope(&tx, &project, &checkout, &scope)?;
-            if scope.mode == SessionMode::ApprovedWrite {
-                request.task_id = tx.query_row(
-                    "SELECT task_id FROM managed_task_worktrees WHERE project_id = ?1 AND checkout_id = ?2",
-                    params![project, checkout], |row| row.get(0),
-                ).optional()?;
-            }
-            let job = insert_job(&tx, project, None, JobOrigin::Operator, request, 0, None)?;
-            tx.execute("UPDATE jobs SET operator_scope = ?2 WHERE id = ?1", params![job.id, protection::protect(&serde_json::to_vec(&scope)?)?])?;
-            tx.commit()?;
-            Ok(job)
-        }).await?;
+        let job = self
+            .execute(move |db| {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let job = insert_selected_operator_job(&tx, project, scope, request)?;
+                tx.commit()?;
+                Ok(job)
+            })
+            .await?;
         self.job_signal.send_replace(());
         Ok(job)
     }
@@ -475,6 +469,28 @@ fn change_pending_job_state(
         goals::deactivate_cancelled_job(db, job_id)?;
         downstream::observe_cancelled_job(db, &job)?;
     }
+    Ok(job)
+}
+
+pub(crate) fn insert_selected_operator_job(
+    db: &Connection,
+    project: String,
+    scope: SessionScope,
+    mut request: JobRequest,
+) -> Result<Job> {
+    let checkout = request.checkout_id.as_deref().context("job checkout was not selected")?;
+    validate_operator_scope(db, &project, checkout, &scope)?;
+    if scope.mode == SessionMode::ApprovedWrite {
+        request.task_id = db.query_row(
+            "SELECT task_id FROM managed_task_worktrees WHERE project_id = ?1 AND checkout_id = ?2",
+            params![project, checkout], |row| row.get(0),
+        ).optional()?;
+    }
+    let job = insert_job(db, project, None, JobOrigin::Operator, request, 0, None)?;
+    db.execute(
+        "UPDATE jobs SET operator_scope = ?2 WHERE id = ?1",
+        params![job.id, protection::protect(&serde_json::to_vec(&scope)?)?],
+    )?;
     Ok(job)
 }
 

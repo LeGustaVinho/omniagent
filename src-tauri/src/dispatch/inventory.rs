@@ -375,7 +375,7 @@ impl SavedInventory {
     }
 }
 
-fn belongs_to_dispatch(
+pub(super) fn belongs_to_dispatch(
     location: &ProviderLocation,
     session: Option<&str>,
     turn: Option<&str>,
@@ -421,13 +421,16 @@ fn exact_path(path: &Path) -> Option<&Path> {
     .then_some(path)
 }
 
-fn same_path(left: &Path, right: &Path) -> bool {
+pub(super) fn same_path(left: &Path, right: &Path) -> bool {
     exact_path(left)
         .zip(exact_path(right))
         .is_some_and(|(left, right)| left == right)
 }
 
-fn resolve_reported_path<'a>(path: &'a Path, cwd: Option<&Path>) -> Option<Cow<'a, Path>> {
+pub(super) fn resolve_reported_path<'a>(
+    path: &'a Path,
+    cwd: Option<&Path>,
+) -> Option<Cow<'a, Path>> {
     if let Some(path) = exact_path(path) {
         return Some(Cow::Borrowed(path));
     }
