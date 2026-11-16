@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Job } from "@/bindings/Job";
@@ -115,8 +115,9 @@ it("reopens a completed task and navigates its original note, selected diff, acc
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><ReopenedWorkbench /></QueryClientProvider>);
   const user = userEvent.setup();
-  await screen.findByText("Completed");
-  await user.click(await screen.findByText(/^Verified delivery ·/));
+  const detail = within(await screen.findByRole("region", { name: task.title }));
+  await detail.findByText("Completed", { selector: '[role="status"]' });
+  await user.click(await detail.findByText(/^Verified delivery ·/));
   expect(await screen.findByText("Publish the unit · codex/historical")).toBeTruthy();
   expect(screen.getAllByText(sha).length).toBeGreaterThan(0);
   await user.click(screen.getByRole("button", { name: "Open delivery workflow" }));

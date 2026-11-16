@@ -72,6 +72,13 @@ async fn dependency_and_checklist_guards_preserve_parent_rollups_and_delivery_hi
     let child = store
         .create_project_subtask(project.clone(), parent.id.clone(), "Publish".into())
         .await?;
+    let sibling = store
+        .create_project_subtask(
+            project.clone(),
+            parent.id.clone(),
+            "Cross-check links".into(),
+        )
+        .await?;
     let dependency = store
         .create_project_task(project.clone(), "Approve".into())
         .await?;
@@ -148,6 +155,28 @@ async fn dependency_and_checklist_guards_preserve_parent_rollups_and_delivery_hi
         store
             .project_task_delivery_state(project.clone(), parent.id.clone())
             .await?
+            .context("parent should still exist")?
+            .state,
+        Backlog
+    );
+    assert_eq!(
+        store
+            .project_epic_delivery_state(project.clone(), epic.id.clone())
+            .await?,
+        Some(Backlog)
+    );
+
+    let sibling_done = store
+        .transition_project_work(project.clone(), sibling.id.clone(), Backlog, Completed)
+        .await?;
+    let sibling_receipt = sibling_done
+        .completion
+        .context("completed sibling should have a receipt")?;
+    assert_ne!(receipt.id, sibling_receipt.id);
+    assert_eq!(
+        store
+            .project_task_delivery_state(project.clone(), parent.id.clone())
+            .await?
             .unwrap()
             .state,
         Completed
@@ -171,9 +200,11 @@ async fn dependency_and_checklist_guards_preserve_parent_rollups_and_delivery_hi
             .await
             .is_err()
     );
-    store
+    let reopened = store
         .transition_project_work(project.clone(), child.id.clone(), Completed, Ready)
         .await?;
+    assert_eq!(reopened.state, Ready);
+    assert!(reopened.completion.is_none());
     assert_eq!(
         store
             .project_task_delivery_state(project.clone(), parent.id)
@@ -189,8 +220,20 @@ async fn dependency_and_checklist_guards_preserve_parent_rollups_and_delivery_hi
         Some(Backlog)
     );
     assert_eq!(
-        store.project_task_deliveries(project, child.id).await?,
+        store
+            .project_task_deliveries(project.clone(), child.id)
+            .await?,
         [receipt]
+    );
+    let unchanged = store
+        .project_task_delivery_state(project.clone(), sibling.id.clone())
+        .await?
+        .context("the other child should still exist")?;
+    assert_eq!(unchanged.state, Completed);
+    assert_eq!(unchanged.completion.as_ref(), Some(&sibling_receipt));
+    assert_eq!(
+        store.project_task_deliveries(project, sibling.id).await?,
+        [sibling_receipt]
     );
     Ok(())
 }
