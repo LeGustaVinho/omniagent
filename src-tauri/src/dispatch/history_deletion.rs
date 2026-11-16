@@ -11,6 +11,8 @@ use crate::{
 
 mod apply;
 mod plan;
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(
