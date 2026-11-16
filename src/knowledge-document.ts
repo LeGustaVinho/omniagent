@@ -1,3 +1,5 @@
+import { markdownLanguage } from "@codemirror/lang-markdown";
+import { Text } from "@codemirror/state";
 import { fileName, normalizeRepositoryPath, type ExampleFile } from "@/ide-knowledge-data";
 
 export interface NoteTarget {
@@ -186,23 +188,33 @@ export function resolveWiki(link: NoteTarget, from: string, files: readonly Exam
   });
 }
 
-export function headings(content: string): NoteHeading[] {
-  const body = withoutProperties(content);
-  const skippedLines = content.slice(0, content.length - body.length).split(/\r?\n/).length - 1;
-  const lines = byText(body, (line) => line, true).split(/\r?\n/);
+function readableDocument(source: string) {
+  const body = withoutProperties(source);
+  const text = byText(body, (line) => line, true);
+  const firstLine = source.slice(0, source.length - body.length).split("\n").length;
+  const tree = markdownLanguage.parser.parse(text);
+  const lines = Text.of(text.split("\n"));
+  const lineAt = (offset: number) => firstLine + lines.lineAt(offset).number - 1;
+  return { text, tree, firstLine, lineAt };
+}
+
+function documentHeadings({ text, tree, lineAt }: ReturnType<typeof readableDocument>): NoteHeading[] {
   const result: NoteHeading[] = [];
-  let fence: string | undefined;
-  for (const [index, line] of lines.entries()) {
-    const boundary = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
-    if (boundary && (!fence || fence[0] === boundary[0] && boundary.length >= fence.length)) {
-      fence = fence ? undefined : boundary;
-      continue;
-    }
-    if (fence) continue;
-    const heading = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
-    if (heading?.[1] && heading[2]) result.push({ label: heading[2], anchor: heading[2], line: skippedLines + index + 1, level: heading[1].length });
-  }
+  tree.iterate({ enter({ name, node, from, to }) {
+    const heading = /^(ATX|Setext)Heading([1-6])$/.exec(name);
+    if (!heading) return;
+    const markers = node.getChildren("HeaderMark");
+    const start = heading[1] === "ATX" ? markers[0]?.to ?? from : from;
+    const end = heading[1] === "Setext" || markers.length > 1 ? markers.at(-1)?.from ?? to : to;
+    const label = text.slice(start, end).replace(/\s+/g, " ").trim();
+    if (label) result.push({ label, anchor: label, line: lineAt(from), level: Number(heading[2]) });
+    return false;
+  } });
   return result;
+}
+
+export function headings(content: string): NoteHeading[] {
+  return documentHeadings(readableDocument(content));
 }
 
 export function anchorKey(label: string) {
@@ -210,23 +222,49 @@ export function anchorKey(label: string) {
 }
 
 export function anchorLine(source: string, target: string): number | undefined {
-  if (target.startsWith("^")) {
-    const line = source.split(/\r?\n/).findIndex((entry) => entry.endsWith(" " + target) || entry.trim() === target);
-    return line >= 0 ? line + 1 : undefined;
-  }
+  if (target.startsWith("^")) return findBlock(source, target)?.line;
   return headings(source).find(({ anchor }) => anchorKey(anchor) === anchorKey(target))?.line;
+}
+
+function findBlock(source: string, target: string) {
+  if (!/^\^[\w-]+$/.test(target)) return;
+  const { text, tree, lineAt } = readableDocument(source);
+  const markerPattern = new RegExp(`(^|[ \\t])\\${target}[ \\t]*$`, "m");
+  let result: { line: number; content: string } | undefined;
+  tree.iterate({ enter({ name, node, from, to }) {
+    if (result) return false;
+    if (name !== "Paragraph") return;
+    const paragraph = text.slice(from, to);
+    const marker = markerPattern.exec(paragraph);
+    if (!marker) return false;
+    const offset = from + marker.index + marker[1]!.length;
+    const syntax = tree.resolveInner(offset + 1);
+    if (["InlineCode", "Link", "Image"].includes(syntax.name)) return false;
+    if (paragraph.trim() === target) {
+      const block = node.prevSibling;
+      if (block) result = { line: lineAt(block.from), content: text.slice(block.from, block.to) };
+    } else {
+      const start = node.parent?.name === "ListItem" ? node.parent.from : from;
+      const lineEnd = offset + target.length;
+      const content = (text.slice(start, from + marker.index).trimEnd() + text.slice(lineEnd, to)).trimEnd();
+      if (content) result = { line: lineAt(start), content };
+    }
+    return false;
+  } });
+  return result;
 }
 
 function excerpt(source: string, target?: string) {
   if (!target) return withoutProperties(source);
-  const line = anchorLine(source, target);
-  if (!line) return;
-  const lines = source.split(/\r?\n/);
-  if (target.startsWith("^")) return lines[line - 1]?.replace(/\s+\^[\w-]+$/, "");
-  const entries = headings(source);
-  const level = entries.find((heading) => heading.line === line)?.level ?? 6;
-  const next = entries.find((heading) => heading.line > line && heading.level <= level)?.line;
-  return lines.slice(line - 1, next && next - 1).join("\n");
+  if (target.startsWith("^")) return findBlock(source, target)?.content;
+  const document = readableDocument(source);
+  const entries = documentHeadings(document);
+  const heading = entries.find(({ anchor }) => anchorKey(anchor) === anchorKey(target));
+  if (!heading) return;
+  const { text, firstLine } = document;
+  const lines = text.split(/\r?\n/);
+  const next = entries.find(({ line, level }) => line > heading.line && level <= heading.level)?.line;
+  return lines.slice(heading.line - firstLine, next === undefined ? undefined : next - firstLine).join("\n");
 }
 
 function replaceWikiAddress(content: string, replace: (link: NoteTarget) => string | undefined) {
@@ -313,11 +351,13 @@ export function prepareReading(source: string, path: string, files: readonly Exa
       const target = matches.length === 1 ? matches[0] : undefined;
       const note = files.find((file) => file.path === target?.path);
       if (target && note) {
-        if (lineage.includes(target.path)) return "> This transclusion points to a note already in the current embed chain.";
+        const anchor = target.anchor?.startsWith("^") ? target.anchor : target.anchor && anchorKey(target.anchor);
+        const scope = anchor ? `${target.path}\0${anchor}` : target.path;
+        if (lineage.includes(scope)) return "> This transclusion points to a note already in the current embed chain.";
         if (lineage.length >= 4) return "> This transclusion reached the maximum embed depth.";
         const excerptSource = excerpt(note.content, target.anchor);
-        if (excerptSource) {
-          const embedded = prepareReading(excerptSource, target.path, files, [...lineage, target.path]);
+        if (excerptSource !== undefined) {
+          const embedded = prepareReading(excerptSource, target.path, files, [...lineage, scope]);
           return `> **Embedded · ${fileName(target.path)}**\n>\n` + embedded.split("\n").map((row) => `> ${row}`).join("\n");
         }
       }

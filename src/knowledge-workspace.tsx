@@ -143,15 +143,15 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
 
   useEffect(() => {
     if (simulated || !active || !note) return;
-    const seen = new Set([active]);
+    const visitedDepth = new Map<string, number>();
     const inspect = (path: string, content: string, depth: number) => {
-      if (depth >= 3) return;
+      if (depth >= 3 || (visitedDepth.get(path) ?? Infinity) <= depth) return;
+      visitedDepth.set(path, depth);
       for (const embed of wikiLinks(content)) {
         if (!embed.embed) continue;
         const targets = resolveWiki(embed, path, catalog);
         const target = targets.length === 1 ? targets[0] : undefined;
-        if (!target || seen.has(target.path)) continue;
-        seen.add(target.path);
+        if (!target || (visitedDepth.get(target.path) ?? Infinity) <= depth + 1) continue;
         const buffer = notes[target.path];
         if (buffer) inspect(target.path, buffer.content, depth + 1);
         else if (!repository.failures[target.path]) void loadNote(target.path);
