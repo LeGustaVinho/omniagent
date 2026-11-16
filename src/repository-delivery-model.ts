@@ -29,7 +29,14 @@ export type DeliveryArtifact = {
 
 export type DeliveryRun = { id: string; planRevision: string | null };
 export type DeliveryJob = { nodeId: DeliveryNode; unitId: string | null; inputs: DeliveryInputs; job: Job };
-export type DeliverySnapshot = { run: DeliveryRun; artifacts: DeliveryArtifact[]; jobs: DeliveryJob[]; hostOutputs?: DeliveryInputs };
+export type DeliveryWorkflowDefinition = {
+  nodes: { instance: { id: string; kind: string }; definition: { title: string } }[];
+  wires: { from: { node: string; port: string }; to: { node: string; port: string } }[];
+};
+export type DeliverySnapshot = {
+  run: DeliveryRun; artifacts: DeliveryArtifact[]; jobs: DeliveryJob[];
+  definition?: DeliveryWorkflowDefinition; hostOutputs?: DeliveryInputs;
+};
 export type DeliveryUnit = {
   checkoutId: string;
   taskId: string;
@@ -42,6 +49,10 @@ export type DeliveryActions = { execute: DeliveryAction; busy: boolean };
 export type DeliveryModelChoice = ModelSelection | null;
 
 export const deliveryProviders: Provider[] = ["codex", "claude", "antigravity"];
+
+export function deliveryGitControlId(runId: string, nodeId: string, unitId: string) {
+  return `delivery-${runId}-${nodeId}-${unitId}`;
+}
 
 export function matchingJob(delivery: DeliverySnapshot, nodeId: DeliveryNode, inputs: DeliveryInputs, unitId: string | null = null) {
   return delivery.jobs.findLast((entry) =>

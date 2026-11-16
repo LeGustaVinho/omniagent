@@ -3,15 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import type { DeliveryGitPolicy } from "@/delivery-git-policy";
-import type { AcceptedDestinationUpdate, DeliveryMergePreview, DestinationDriftOutcome, MergeOutcome, VerifiedMerge } from "@/delivery-merge-model";
-import type { DeliveryActions, DeliveryTarget, DeliveryUnit } from "@/repository-delivery-model";
+import { deliveryMergeReceiptQuery, type AcceptedDestinationUpdate, type DeliveryMergePreview, type DestinationDriftOutcome, type MergeAttempt, type MergeOutcome } from "@/delivery-merge-model";
+import { deliveryGitControlId, type DeliveryActions, type DeliveryTarget, type DeliveryUnit } from "@/repository-delivery-model";
 
-export function RepositoryDeliveryMerge({ scope, unit, gitArtifactId, actions, automaticOutcome }: {
+export function RepositoryDeliveryMerge({ scope, unit, gitArtifactId, actions, automaticOutcome, mergeNodeId = "merge", onOutcome }: {
   scope: DeliveryTarget;
   unit: DeliveryUnit;
   gitArtifactId: string;
   actions: DeliveryActions;
   automaticOutcome: MergeOutcome | undefined;
+  mergeNodeId?: string;
+  onOutcome?: MergeAttempt;
 }) {
   const { projectId, runId: workflowRunId } = scope;
   const { taskId, commitEvidenceId } = unit;
@@ -19,12 +21,7 @@ export function RepositoryDeliveryMerge({ scope, unit, gitArtifactId, actions, a
   const [externalSha, setExternalSha] = useState("");
   const [outcome, setOutcome] = useState<MergeOutcome>();
   const [acceptedUpdate, setAcceptedUpdate] = useState<AcceptedDestinationUpdate>();
-  const recorded = useQuery({
-    queryKey: ["delivery-merge", projectId, taskId, commitEvidenceId, "receipt"],
-    queryFn: () => invoke<VerifiedMerge | null>("verified_delivery_merge_for_commit", { projectId, taskId, commitEvidenceId }),
-    enabled: Boolean(commitEvidenceId),
-    retry: false,
-  });
+  const recorded = useQuery(deliveryMergeReceiptQuery(projectId, taskId, commitEvidenceId));
   const preview = useQuery({
     queryKey: ["delivery-merge", projectId, taskId, commitEvidenceId, "preview"],
     queryFn: () => invoke<DeliveryMergePreview>("delivery_merge_preview", { projectId, taskId, workflowRunId, unitId, commitEvidenceId }),
@@ -49,7 +46,7 @@ export function RepositoryDeliveryMerge({ scope, unit, gitArtifactId, actions, a
     if (!destination || actions.busy) return;
     actions.execute(async () => {
       const next = await invoke<MergeOutcome>("execute_repository_delivery_unit", { input: {
-        ...scope, taskId, unitId, nodeId: "merge", inputs: { git: gitArtifactId },
+        ...scope, taskId, unitId, nodeId: mergeNodeId, inputs: { git: gitArtifactId },
         request: {
           action: "verify_merge", expectedSourceBranch: destination.sourceBranch,
           expectedSourceSha: destination.sourceSha, destinationBranch: destination.destinationBranch,
@@ -58,6 +55,7 @@ export function RepositoryDeliveryMerge({ scope, unit, gitArtifactId, actions, a
       } });
       if (next.status === "destination_drift") setAcceptedUpdate(next.recovery.status === "accepted" ? next.recovery : undefined);
       setOutcome(next);
+      onOutcome?.(next);
       return next;
     });
   }
@@ -68,12 +66,15 @@ export function RepositoryDeliveryMerge({ scope, unit, gitArtifactId, actions, a
         projectId, taskId, workflowRunId, previewId, verificationId,
       });
       setAcceptedUpdate(updated.status === "accepted" ? updated : undefined);
-      setOutcome({ status: "destination_drift", recovery: updated });
+      const next = { status: "destination_drift", recovery: updated } as const;
+      setOutcome(next);
+      onOutcome?.(next);
       return updated;
     });
   }
 
-  return <section className="pipeline-form pipeline-stack" aria-label="Delivery integration">
+  return <section id={deliveryGitControlId(workflowRunId, mergeNodeId, unitId)} tabIndex={-1}
+    className="pipeline-form pipeline-stack" aria-label="Delivery integration">
     <h3 className="font-medium">Delivery integration</h3>
     {receipt ? <>
       <p role="status">Verified merge</p>

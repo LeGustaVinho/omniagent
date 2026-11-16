@@ -7,7 +7,7 @@ import type { MergeAttempt, MergeOutcome } from "@/delivery-merge-model";
 import { DeliveryAgent } from "@/repository-delivery-agent";
 import { VerifiedDeliveryHistory } from "@/repository-delivery-history";
 import {
-  matchingJob, matchingReview, type DeliveryActions, type DeliveryInputs,
+  deliveryGitControlId, matchingJob, matchingReview, type DeliveryActions, type DeliveryInputs,
   type DeliverySnapshot, type DeliveryTarget, type DeliveryUnit,
 } from "@/repository-delivery-model";
 import { WorktreeEvidence } from "@/worktree-evidence";
@@ -23,10 +23,13 @@ type Verification = {
   gates: { gate: { name: string; required: boolean }; outcome: { status: string; reason?: string } | null }[];
 };
 type Acceptance = { candidate: { id: string }; verification: { id: string } };
-type UnitOutcome = { status: "waiting_for_commit" } | { status: "artifact"; artifact: { id: string } }
+type CommitOutcome = { status: "waiting_for_commit" } | { status: "artifact"; artifact: { id: string } }
+  | { status: "commit_blocked"; reason: string }
   | { status: "commit_with_merge"; artifact: { id: string }; merge: MergeOutcome };
+type UnitOutcome = CommitOutcome | { status: "acceptance_with_commit"; artifact: { id: string }; commit: CommitOutcome };
 
-export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationInputs, actions, openActivity, active, onAutomaticMerge }: {
+export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationInputs, actions, openActivity, active, onAutomaticMerge,
+  onCommitBlocked, commitNodeId = "commit" }: {
   scope: DeliveryTarget;
   unit: DeliveryUnit;
   delivery: DeliverySnapshot;
@@ -35,6 +38,8 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
   openActivity: WorkspaceProps["openActivity"];
   active: boolean;
   onAutomaticMerge?: MergeAttempt;
+  onCommitBlocked?: (reason: string) => void;
+  commitNodeId?: string;
 }) {
   const { taskId, unit: planned, commitEvidenceId } = unit;
   const { id: unitId } = planned;
@@ -43,6 +48,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
   const [criteria, setCriteria] = useState<number[]>([]);
   const [sha, setSha] = useState("");
   const [manualWait, setManualWait] = useState(false);
+  const [commitBlock, setCommitBlock] = useState("");
   const artifacts = delivery.artifacts.filter((artifact) => artifact.unitId === unitId);
   const implementation = matchingJob(delivery, "implement", implementationInputs, unitId);
   const attemptId = implementation?.latestAttempt?.runId;
@@ -102,9 +108,16 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
     input: { ...scope, taskId, unitId, nodeId, inputs, request },
   });
   const validSha = /^([0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha.trim());
-  const manual = manualWait || policy.data === "user_commits_and_merges";
+  const manual = policy.data ? policy.data === "user_commits_and_merges" : manualWait;
+  function showCommit(outcome: CommitOutcome) {
+    setManualWait(outcome.status === "waiting_for_commit");
+    setCommitBlock(outcome.status === "commit_blocked" ? outcome.reason : "");
+    onCommitBlocked?.(outcome.status === "commit_blocked" ? outcome.reason : "");
+    if (outcome.status === "commit_with_merge") onAutomaticMerge?.(outcome.merge);
+  }
 
-  return <section className="pipeline-form pipeline-stack" aria-label={planned.purpose}>
+  return <section id={deliveryGitControlId(scope.runId, commitNodeId, unitId)} tabIndex={-1}
+    className="pipeline-form pipeline-stack" aria-label={planned.purpose}>
     <h3 className="font-medium">{planned.ordinal}. {planned.purpose}</h3>
     {commitEvidenceId && <VerifiedDeliveryHistory projectId={scope.projectId} taskId={taskId} evidenceId={commitEvidenceId}
       unitId={unitId} delivery={delivery} openActivity={openActivity} />}
@@ -167,29 +180,24 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
           <Button disabled={actions.busy || !readyToAccept || criteria.length !== planned.completionCriteria.length}
             onClick={() => actions.execute(async () => {
               const acceptance = await requestUnit("accept", { candidate: candidate.id, checks: newestCheck.artifact.id, review: review.id }, {
-                action: "accept_candidate", completionCriteria: planned.completionCriteria,
+                action: "accept_diff", completionCriteria: planned.completionCriteria,
               });
-              if (acceptance.status !== "artifact") return acceptance;
-              const outcome = await requestUnit("commit", { candidate: candidate.id, acceptance: acceptance.artifact.id }, {
-                action: "verify_commit", externalSha: null,
-              });
-              setManualWait(outcome.status === "waiting_for_commit");
-              if (outcome.status === "commit_with_merge") onAutomaticMerge?.(outcome.merge);
-              return outcome;
+              if (acceptance.status === "acceptance_with_commit") showCommit(acceptance.commit);
+              return acceptance;
             })}>Accept diff</Button>
         </>}
         {accepted && <>
           <p role="status">In review · Waiting for commit</p>
+          {commitBlock && <p role="alert">{commitBlock}</p>}
           <label className="pipeline-stack">{manual ? "Full commit SHA" : "External commit SHA (optional)"}
             <input value={sha} onChange={(event) => setSha(event.currentTarget.value)} />
           </label>
           <Button disabled={actions.busy || !policy.data || ((manual || Boolean(sha.trim())) && !validSha)}
             onClick={() => actions.execute(async () => {
-              const outcome = await requestUnit("commit", { candidate: candidate.id, acceptance: accepted.id }, {
+              const outcome = await requestUnit(commitNodeId, { candidate: candidate.id, acceptance: accepted.id }, {
                 action: "verify_commit", externalSha: sha.trim() || null,
               });
-              setManualWait(outcome.status === "waiting_for_commit");
-              if (outcome.status === "commit_with_merge") onAutomaticMerge?.(outcome.merge);
+              if (outcome.status !== "acceptance_with_commit") showCommit(outcome);
               return outcome;
             })}>{manual || sha.trim() ? "Verify commit" : "Create verified commit"}</Button>
         </>}

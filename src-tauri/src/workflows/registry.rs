@@ -261,7 +261,7 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
         ),
         (
             VerifyCommit,
-            "Verify commit",
+            "Commit",
             Executor::VerifyGitCommit,
             ConfigurationKind::None,
             Effect::VerifyRepositoryCommit,
@@ -274,7 +274,7 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
         ),
         (
             VerifyMerge,
-            "Verify merge",
+            "Merge",
             Executor::VerifyGitMerge,
             ConfigurationKind::None,
             Effect::VerifyRepositoryMerge,

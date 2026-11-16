@@ -83,7 +83,7 @@ it("checks for a commit after accepting the diff and verifies the full SHA under
         const input = (args as { input: { nodeId: string; request: { externalSha?: string | null } } }).input;
         if (input.nodeId === "accept") {
           savedArtifacts = [...delivery.artifacts, acceptance];
-          return { status: "artifact", artifact: acceptance };
+          return { status: "acceptance_with_commit", artifact: acceptance, commit: { status: "waiting_for_commit" } };
         }
         if (input.nodeId !== "commit") throw new Error(`Unexpected node ${input.nodeId}`);
         if (input.request.externalSha === null) return { status: "waiting_for_commit" };
@@ -139,8 +139,7 @@ it("checks for a commit after accepting the diff and verifies the full SHA under
   const commit = { ...target, nodeId: "commit", inputs: { candidate: candidate.id, acceptance: acceptance.id } };
   expect(executions.map(([, args]) => args)).toEqual([
     { input: { ...target, nodeId: "accept", inputs: { candidate: candidate.id, checks: checks.id, review: review.id },
-      request: { action: "accept_candidate", completionCriteria: criteria } } },
-    { input: { ...commit, request: { action: "verify_commit", externalSha: null } } },
+      request: { action: "accept_diff", completionCriteria: criteria } } },
     { input: { ...commit, request: { action: "verify_commit", externalSha: sha } } },
   ]);
 });

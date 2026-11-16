@@ -1,3 +1,6 @@
+import { queryOptions } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
+
 export type VerifiedMerge = {
   id: string;
   projectId: string;
@@ -22,6 +25,15 @@ export type DeliveryMergePreview = {
   destinationBranch: string;
   expectedDestinationSha: string;
 };
+
+export function deliveryMergeReceiptQuery(projectId: string, taskId: string, commitEvidenceId: string | null) {
+  return queryOptions({
+    queryKey: ["delivery-merge", projectId, taskId, commitEvidenceId, "receipt"],
+    queryFn: () => invoke<VerifiedMerge | null>("verified_delivery_merge_for_commit", { projectId, taskId, commitEvidenceId }),
+    enabled: Boolean(commitEvidenceId),
+    retry: false,
+  });
+}
 
 export type MergeOutcome =
   | { status: "waiting_for_merge" }

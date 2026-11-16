@@ -29,6 +29,9 @@ pub enum WorkflowUnitRequest {
     AcceptCandidate {
         completion_criteria: Vec<String>,
     },
+    AcceptDiff {
+        completion_criteria: Vec<String>,
+    },
     VerifyCommit {
         external_sha: Option<String>,
     },
@@ -66,6 +69,13 @@ pub struct WorkflowUnitSubmission {
 pub enum WorkflowUnitOutcome {
     WaitingForCommit,
     WaitingForMerge,
+    CommitBlocked {
+        reason: String,
+    },
+    AcceptanceWithCommit {
+        artifact: WorkflowArtifact,
+        commit: Box<WorkflowUnitOutcome>,
+    },
     DestinationMoved {
         actual_sha: String,
     },
@@ -98,6 +108,94 @@ pub enum WorkflowUnitOutcome {
 
 impl Store {
     pub async fn execute_workflow_unit(
+        &self,
+        mut submission: WorkflowUnitSubmission,
+    ) -> Result<WorkflowUnitOutcome> {
+        let WorkflowUnitRequest::AcceptDiff {
+            completion_criteria,
+        } = &mut submission.request
+        else {
+            return self.execute_workflow_unit_action(submission).await;
+        };
+        submission.request = WorkflowUnitRequest::AcceptCandidate {
+            completion_criteria: std::mem::take(completion_criteria),
+        };
+        let (project, run, unit, task) = (
+            submission.project_id.clone(),
+            submission.run_id.clone(),
+            submission.unit_id.clone(),
+            submission.task_id.clone(),
+        );
+        let candidate = submission.inputs.get("candidate").cloned();
+        let WorkflowUnitOutcome::Artifact { artifact } =
+            self.execute_workflow_unit_action(submission).await?
+        else {
+            anyhow::bail!("diff acceptance did not publish its artifact");
+        };
+        let commit = self
+            .commit_after_acceptance(project, run, unit, task, candidate, &artifact)
+            .await
+            .unwrap_or_else(|error| WorkflowUnitOutcome::CommitBlocked {
+                reason: crate::diagnostics::preview(&format!("{error:#}")),
+            });
+        Ok(WorkflowUnitOutcome::AcceptanceWithCommit {
+            artifact,
+            commit: Box::new(commit),
+        })
+    }
+
+    async fn commit_after_acceptance(
+        &self,
+        project_id: String,
+        run_id: String,
+        unit_id: String,
+        task_id: String,
+        candidate: Option<String>,
+        acceptance: &WorkflowArtifact,
+    ) -> Result<WorkflowUnitOutcome> {
+        let run = self
+            .workflow_run(project_id.clone(), run_id.clone())
+            .await?
+            .context("delivery workflow is unavailable")?;
+        let definition = self
+            .workflow_definition(project_id.clone(), run.version)
+            .await?
+            .context("the pinned delivery definition is unavailable")?;
+        let mut commits = definition.wires.iter().filter(|wire| {
+            wire.from.node == acceptance.node_instance_id
+                && wire.from.port == acceptance.port
+                && wire.to.port == "acceptance"
+                && definition.nodes.iter().any(|node| {
+                    node.instance.id == wire.to.node
+                        && node.definition.executor == Executor::VerifyGitCommit
+                })
+        });
+        let commit_node = &commits
+            .next()
+            .context("the accepted diff has no wired Commit node")?
+            .to
+            .node;
+        ensure!(
+            commits.next().is_none(),
+            "the accepted diff has more than one wired Commit node"
+        );
+        let candidate = candidate.context("the accepted diff did not identify a candidate")?;
+        self.execute_workflow_unit_action(WorkflowUnitSubmission {
+            project_id,
+            run_id,
+            node_id: commit_node.clone(),
+            unit_id,
+            task_id,
+            inputs: NodeInputs::from([
+                ("acceptance".into(), acceptance.id.clone()),
+                ("candidate".into(), candidate),
+            ]),
+            request: WorkflowUnitRequest::VerifyCommit { external_sha: None },
+        })
+        .await
+    }
+
+    async fn execute_workflow_unit_action(
         &self,
         submission: WorkflowUnitSubmission,
     ) -> Result<WorkflowUnitOutcome> {

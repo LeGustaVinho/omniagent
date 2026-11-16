@@ -11,22 +11,25 @@ import {
 } from "@/repository-delivery-model";
 import { RepositoryDeliveryUnit } from "@/repository-delivery-unit";
 import { RepositoryDeliveryMerge } from "@/repository-delivery-merge";
+import { pinnedDeliveryGitNodes, RepositoryDeliveryGitGraph } from "@/repository-delivery-git-graph";
 import { SavedDeliveryMerge, SavedDeliverySource } from "@/repository-delivery-history";
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type Proposal = { sequence: string; text: string };
 type TaskOption = { id: string; title: string };
-function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
+function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorkspace }: {
   delivery: DeliverySnapshot;
   projectId: string;
   actions: DeliveryActions;
   openActivity: WorkspaceProps["openActivity"];
+  openWorkspace: WorkspaceProps["openWorkspace"];
 }) {
   const [chosenTask, setChosenTask] = useState("");
   const [title, setTitle] = useState("");
   const [proposal, setProposal] = useState("");
-  const [automaticMerge, setAutomaticMerge] = useState<MergeOutcome>();
+  const [mergeState, setMergeState] = useState<{ unitId: string; outcome: MergeOutcome }>();
+  const [commitState, setCommitState] = useState<{ unitId: string; reason: string }>();
   const scope: DeliveryTarget = { projectId, runId: delivery.run.id };
   const context = delivery.artifacts.find(({ nodeInstanceId, port }) => nodeInstanceId === "context" && port === "context");
   const plan = delivery.artifacts.find(({ id }) => id === delivery.run.planRevision);
@@ -63,6 +66,8 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
   const host = (inputs: DeliveryInputs, action: object) => invoke("execute_repository_delivery_host", { ...scope, inputs, action });
   const awaitingUnit = units.data?.find(({ commitEvidenceId }) => !commitEvidenceId)?.unit.id;
   const last = units.data?.at(-1);
+  const lastUnitId = last?.unit.id;
+  const mergeOutcome = mergeState?.unitId === lastUnitId ? mergeState?.outcome : undefined;
   const currentTask = state.data?.activeWorkflowRunId === scope.runId ? state.data : null;
   const history = useQuery({
     ...deliveryQuery(projectId, taskId ?? ""),
@@ -73,13 +78,19 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
   const completion = currentTask?.completion?.evidence ?? archived?.evidence;
   const completionSha = completion?.kind === "verified_commit" && completion.workflowRunId === scope.runId
     ? completion.completionSha : undefined;
-  const finalGit = delivery.artifacts.find(({ unitId, nodeInstanceId, port }) =>
-    unitId === last?.unit.id && nodeInstanceId === "commit" && port === "git",
+  const gitNodes = pinnedDeliveryGitNodes(delivery.definition);
+  const finalGit = delivery.artifacts.find(({ unitId, nodeInstanceId, port, value }) =>
+    unitId === last?.unit.id && nodeInstanceId === (gitNodes.commit ?? "commit") && port === "git" &&
+      value.kind === "git" && value.evidence.id === last?.commitEvidenceId,
   );
   const result = delivery.artifacts.some(({ nodeInstanceId }) => nodeInstanceId === "result");
   const error = proposals.error ?? tasks.error ?? units.error ?? state.error ?? history.error;
 
   return <div className="pipeline-stack">
+    {gitNodes.commit && <RepositoryDeliveryGitGraph scope={scope} delivery={delivery} units={units.data ?? []}
+      taskId={taskId} active={Boolean(currentTask)} waitingForCommit={Boolean(currentTask?.waitingForCommit)}
+      commitBlock={commitState?.unitId === awaitingUnit ? commitState?.reason : undefined}
+      mergeOutcome={mergeOutcome} savedMerge={archived?.merge} openWorkspace={openWorkspace} />}
     {context?.value.kind === "markdown" && <SavedDeliverySource document={context.value.evidence} />}
     {context && <DeliveryAgent scope={scope} nodeId="plan" inputs={{ context: context.id }} job={planner}
       planRevision={currentProposal && planAttempt?.status === "succeeded" ? {
@@ -157,10 +168,13 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
     {plan && release && worktree && units.data?.map((unit) => <RepositoryDeliveryUnit
       key={unit.unit.id} scope={scope} delivery={delivery} unit={unit}
       implementationInputs={{ plan: plan.id, worktree: worktree.id, release: release.id }}
-      actions={actions} openActivity={openActivity} onAutomaticMerge={setAutomaticMerge}
+      actions={actions} openActivity={openActivity} commitNodeId={gitNodes.commit}
+      onCommitBlocked={(reason) => setCommitState({ unitId: unit.unit.id, reason })}
+      onAutomaticMerge={(outcome) => setMergeState({ unitId: unit.unit.id, outcome })}
       active={Boolean(currentTask) && unit.unit.id === awaitingUnit} />)}
     {currentTask && last?.commitEvidenceId && finalGit && !awaitingUnit && <RepositoryDeliveryMerge key={last.commitEvidenceId}
-      scope={scope} unit={last} gitArtifactId={finalGit.id} actions={actions} automaticOutcome={automaticMerge} />}
+      scope={scope} unit={last} gitArtifactId={finalGit.id} actions={actions} automaticOutcome={mergeOutcome}
+      mergeNodeId={gitNodes.merge} onOutcome={(outcome) => setMergeState({ unitId: last.unit.id, outcome })} />}
     {archived?.merge && taskId && <SavedDeliveryMerge projectId={projectId} taskId={taskId} workflowRunId={scope.runId} receipt={archived.merge} />}
     {currentTask && linked && last && finalGit && !awaitingUnit && !result && <Button variant="outline" disabled={actions.busy || currentTask.waitingForMerge}
       onClick={() => actions.execute(() => invoke("execute_repository_delivery_unit", {
@@ -171,7 +185,7 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
   </div>;
 }
 
-export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation, openActivity }: WorkspaceProps) {
+export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation, openActivity, openWorkspace }: WorkspaceProps) {
   const client = useQueryClient();
   const { projectId, checkoutId } = checkout;
   const [selected, setSelected] = useState(target ?? "");
@@ -218,7 +232,7 @@ export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation,
       </select>
     </label> : null}
     {delivery.data && <DeliveryRunView key={delivery.data.run.id} delivery={delivery.data} projectId={projectId}
-      openActivity={openActivity} actions={{ busy, execute: (operation) => action.mutate(operation) }} />}
+      openActivity={openActivity} openWorkspace={openWorkspace} actions={{ busy, execute: (operation) => action.mutate(operation) }} />}
     {error && <p role="alert" className="pipeline-note">{String(error)}</p>}
   </div>;
 }

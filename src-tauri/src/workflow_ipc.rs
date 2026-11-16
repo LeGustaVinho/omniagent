@@ -6,7 +6,7 @@ use omniagent::{
     store::Store,
     workflows::{
         ArtifactValue, DeliveryRoles, NodeInputs, WorkflowAgentSubmission, WorkflowArtifact,
-        WorkflowDeliveryUnit, WorkflowHostRequest, WorkflowHostSubmission, WorkflowOperatorJob,
+        WorkflowDefinition, WorkflowDeliveryUnit, WorkflowHostRequest, WorkflowHostSubmission, WorkflowOperatorJob,
         WorkflowPlanHistory, WorkflowPlanProposal, WorkflowPlanRevisionRequest, WorkflowRun,
         WorkflowUnitOutcome, WorkflowUnitRequest, WorkflowUnitSubmission,
     },
@@ -26,6 +26,7 @@ fn report(error: anyhow::Error) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryDelivery {
     run: WorkflowRun,
+    definition: WorkflowDefinition,
     artifacts: Vec<WorkflowArtifact>,
     jobs: Vec<WorkflowOperatorJob>,
     host_outputs: NodeInputs,
@@ -109,6 +110,10 @@ pub async fn inspect_repository_delivery(
         else {
             return Ok(None);
         };
+        let definition = store
+            .workflow_definition(project_id.clone(), run.version.clone())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("The pinned delivery definition is unavailable"))?;
         let artifacts = store
             .workflow_run_artifacts(project_id.clone(), run_id.clone())
             .await?;
@@ -118,6 +123,7 @@ pub async fn inspect_repository_delivery(
         let jobs = store.workflow_operator_jobs(project_id, run_id).await?;
         Ok(Some(RepositoryDelivery {
             run,
+            definition,
             artifacts,
             jobs,
             host_outputs,
