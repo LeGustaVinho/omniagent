@@ -14,6 +14,7 @@ mod command;
 mod downstream;
 mod failures;
 mod goal_control;
+mod goal_inspection;
 mod goals;
 mod history;
 mod inspection;
@@ -69,6 +70,7 @@ pub(crate) use native_goal_evidence::{
 };
 pub(crate) use native_goal_qualification::{NativeGoalSeed, effective_qualification_matches};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
+pub use goal_inspection::InspectedGoal;
 pub use orchestration::RunOrchestration;
 pub use question_answers::ConversationQuestionTimelineEntry;
 pub use pipeline::{

@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::{
-    GoalContinuationOwner, GoalDefinition, JobKind, JobOrigin, PipelineJobOrigin,
-    goals::orchestrator_goal, pipeline::load_attempt_job, policy::EffectivePolicy,
+    InspectedGoal, JobKind, JobOrigin, PipelineJobOrigin, goal_inspection::inspect_run_goal,
+    pipeline::load_attempt_job, policy::EffectivePolicy,
 };
 
 #[derive(Debug, Serialize)]
@@ -26,7 +26,7 @@ pub struct RunOrchestration {
     stage_pin: Option<WorkflowStagePin>,
     context: Option<ContextBudget>,
     document: Option<DocumentSource>,
-    goal: Option<OrchestrationGoal>,
+    goal: Option<InspectedGoal>,
     unit: Option<WorkflowPlanUnit>,
 }
 
@@ -83,14 +83,6 @@ struct DocumentSource {
     path: String,
     sha256: String,
     base_commit: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OrchestrationGoal {
-    revision_id: String,
-    definition: GoalDefinition,
-    continuation_owner: GoalContinuationOwner,
 }
 
 impl Store {
@@ -181,11 +173,7 @@ impl Store {
                 }
                 (source, _) => source,
             }.map(DocumentSource::from);
-            let goal = orchestrator_goal(&tx, &run)?.map(|goal| OrchestrationGoal {
-                revision_id: goal.id,
-                definition: goal.definition,
-                continuation_owner: goal.continuation_owner,
-            });
+            let goal = inspect_run_goal(&tx, &run)?;
             let unit = tx.query_row(
                 "SELECT u.unit FROM job_attempts a
                  JOIN workflow_job_inputs i ON i.job_id = a.job_id

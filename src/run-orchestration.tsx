@@ -6,6 +6,7 @@ import type { JobRequirements } from "@/bindings/JobRequirements";
 import type { JobWorkspace } from "@/bindings/JobWorkspace";
 import type { PipelineJobOrigin } from "@/bindings/PipelineJobOrigin";
 import { Button } from "@/components/ui/button";
+import { GoalEvidence, type InspectedGoal } from "@/goal-evidence";
 import { WorktreeEvidence } from "@/worktree-evidence";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -31,10 +32,7 @@ type Orchestration = {
     decisions: { title: string; reason: string; selectionOrder: number | null; encodedBytes: number }[];
   } | null;
   document: SourceDocument | null;
-  goal: {
-    revisionId: string; continuationOwner: string;
-    definition: { objective: string; maxTurns: number | null; maxSeconds: number | null; tokenBudget: number | null };
-  } | null;
+  goal: InspectedGoal | null;
   unit: { purpose: string; ordinal: number } | null;
 };
 
@@ -78,19 +76,9 @@ function OrchestrationDetails({ data, scope, navigation }: {
   const taskId = job?.taskId;
   const requestingRun = job?.origin.type === "agent" ? job.origin.runId : undefined;
   const source = policy?.evidence?.source;
-  const goalBudgets = goal && [
-    goal.definition.maxTurns !== null && `${goal.definition.maxTurns} turns`,
-    goal.definition.maxSeconds !== null && `${goal.definition.maxSeconds} seconds`,
-    goal.definition.tokenBudget !== null && `${goal.definition.tokenBudget.toLocaleString()} tokens`,
-  ].filter(Boolean);
   return <>
+    {goal && <GoalEvidence goal={goal} runId={scope.runId} openActivity={navigation?.openActivity} />}
     <dl className="grid gap-1">
-      {goal && <>
-        <dt>Goal objective</dt><dd className="whitespace-pre-wrap break-words">{goal.definition.objective}</dd>
-        <dt>Goal revision</dt><dd className="break-all">{goal.revisionId}</dd>
-        <dt>Continuation owner</dt><dd>{words(goal.continuationOwner)}</dd>
-        {!!goalBudgets?.length && <><dt>Goal budget</dt><dd>{goalBudgets.join(" · ")}</dd></>}
-      </>}
       {unit && <><dt>Unit {unit.ordinal} objective</dt><dd className="break-words">{unit.purpose}</dd></>}
       {job && <><dt>Routing source</dt><dd>{originLabel(job)}</dd></>}
       {stage && <>

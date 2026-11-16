@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
+import { TaskGoals } from "@/goal-evidence";
 import { TaskParticipants } from "@/task-participants";
 import { TaskAssignment } from "@/task-assignment";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -126,6 +127,7 @@ function LiveTaskDetails({ projectId, task, hasChildren, change, busy, links }: 
         onClick={() => change(() => invoke("cancel_task_delivery", args))}>Cancel work</Button>}
     </div>
     <TaskAssignment projectId={projectId} taskId={task.id} />
+    <TaskGoals projectId={projectId} taskId={task.id} openActivity={links.openActivity} />
     <TaskParticipants projectId={projectId} taskId={task.id} openActivity={links.openActivity} />
     {Boolean(deliveries.data?.length) && <section className="pipeline-stack" aria-label="Delivery history">
       <h4 className="font-medium">Delivery history</h4>

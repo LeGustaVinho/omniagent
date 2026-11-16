@@ -289,6 +289,7 @@ fn main() {
             ipc::run_snapshot,
             ipc::inspect_conversation_run,
             ipc::run_orchestration,
+            ipc::project_task_goals,
             ipc::list_conversations,
             ipc::checkout_conversation,
             ipc::create_conversation,

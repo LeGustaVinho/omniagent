@@ -4349,7 +4349,8 @@ mod tests {
                 GoalStopAction, JobContext, PipelineDispatch, PipelineNodeKind,
             },
             providers::goal::{
-                NativeGoalAction, NativeGoalControlOutcome, NativeGoalObservation, NativeGoalState,
+                NativeGoalAction, NativeGoalControlOutcome, NativeGoalEvaluation,
+                NativeGoalObservation, NativeGoalState,
             },
         };
 
@@ -4463,10 +4464,14 @@ mod tests {
                     provider_turn_id: None,
                     state: NativeGoalState::Active,
                     reported_state: Some("active".into()),
-                    tokens_used: None,
+                    tokens_used: Some(120),
                     token_budget: None,
                     elapsed_seconds: None,
-                    evaluation: None,
+                    evaluation: Some(NativeGoalEvaluation {
+                        verdict: Some("more_evidence".into()),
+                        reason: Some("The required check is outstanding".into()),
+                        evaluator: Some("fixture evaluator".into()),
+                    }),
                 },
             },
         };
@@ -4496,6 +4501,20 @@ mod tests {
                 observed("native-session"),
             )
             .await?;
+        let goal_frame =
+            r#"{"id":16,"method":"thread/goal/set","params":{"threadId":"native-session","objective":"Verify the accepted plan"}}"#;
+        let prepared_start = ProviderEvent {
+            location: ProviderLocation {
+                session_id: Some("native-session".into()),
+                ..Default::default()
+            },
+            data: ProviderEventData::NativeGoalControlPrepared {
+                request_id: RequestId::Number(16),
+                action: NativeGoalAction::Start,
+                frame: goal_frame.as_bytes().to_vec(),
+            },
+        };
+        store.record_agent_observation(run.run.id.clone(), EventSource::Application, prepared_start).await?;
         let turn = |id: &str, data: ProviderEventData| {
             store.record_agent_observation(
                 run.run.id.clone(),
@@ -4540,6 +4559,9 @@ mod tests {
             },
         )
         .await?;
+        turn("provider-2", ProviderEventData::Usage {
+            input: Some(70), output: Some(50), cached_input: None,
+        }).await?;
         turn("provider-2", completed()).await?;
         let control = |source, data| {
             store.record_agent_observation(
@@ -4695,6 +4717,18 @@ mod tests {
                 ("provider-2".into(), "completed".into(), "provider-2".into()),
             ]
         );
+        let goals = store.project_task_goals(project.clone(), task.id.clone()).await?;
+        assert_eq!(goals.len(), 1);
+        let evidence = serde_json::to_value(&goals[0])?;
+        assert_eq!(evidence["revisionId"], goal.id);
+        assert_eq!(evidence["continuationOwner"], "native");
+        assert_eq!(evidence["definition"]["criteria"][0], "Collect fixture evidence");
+        assert_eq!(evidence["attempt"]["runId"], run.run.id);
+        assert_eq!(evidence["evidence"]["nativeStart"]["frame"], goal_frame);
+        assert_eq!(evidence["evidence"]["nativeTurns"].as_array().unwrap().len(), 2);
+        assert_eq!(evidence["evidence"]["nativeObservation"]["observation"]["evaluation"]["evaluator"], "fixture evaluator");
+        assert_eq!(evidence["evidence"]["usage"]["outputTokens"], 50);
+        assert!(store.project_task_goals("foreign".into(), task.id.clone()).await?.is_empty());
         let revision = store
             .active_pipeline_goal(project, stage.pipeline_run_id, stage.node_instance_id)
             .await?

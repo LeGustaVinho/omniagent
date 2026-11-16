@@ -40,6 +40,18 @@ pub async fn run_orchestration(
 }
 
 #[tauri::command]
+pub async fn project_task_goals(
+    store: State<'_, Store>,
+    project_id: String,
+    task_id: String,
+) -> Result<Vec<omniagent::jobs::InspectedGoal>, String> {
+    store
+        .project_task_goals(project_id, task_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
 pub async fn conversation_question_timeline(
     store: State<'_, Store>,
     conversation_id: String,

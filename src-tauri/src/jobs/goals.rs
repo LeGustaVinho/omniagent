@@ -382,7 +382,7 @@ impl Store {
     }
 }
 
-fn load_revision(db: &Connection, id: String) -> Result<GoalRevision> {
+pub(super) fn load_revision(db: &Connection, id: String) -> Result<GoalRevision> {
     let (goal_id, project, contents, owner, profile): (String, String, Vec<u8>, String, Vec<u8>) =
         db.query_row(
             "SELECT g.id, g.project_id, r.definition, r.continuation_owner, j.operator_scope
