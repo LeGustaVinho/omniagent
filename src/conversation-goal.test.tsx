@@ -95,3 +95,33 @@ it("submits a slash goal through the selected profile and displays native usage"
   });
   expect((screen.getByRole("textbox", { name: "Message draft" }) as HTMLTextAreaElement).value).toBe("");
 });
+
+it("opens bare goal controls, persists configured limits, and restores stopped goal evidence on reopen", async () => {
+  const fixture = openPanel("/goal", false);
+  const initial = fixture.mount();
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Open Goal Mode" }));
+  const modal = within(screen.getByRole("dialog", { name: "Goal Mode" }));
+  await user.type(modal.getByRole("textbox", { name: "Objective" }), "Prepare the release");
+  await user.type(modal.getByRole("textbox", { name: /Criteria/ }), "Check the Windows package\nReview changelog");
+  await user.type(modal.getByRole("spinbutton", { name: "Turn limit" }), "3");
+  await user.click(modal.getByRole("button", { name: "Selected model" }));
+  await waitFor(() => expect((modal.getByRole("button", { name: "Start goal" }) as HTMLButtonElement).disabled).toBe(false));
+  await user.click(modal.getByRole("button", { name: "Start goal" }));
+  const goal = within(await screen.findByRole("region", { name: "Conversation goal" }));
+  expect(goal.getByText("Check the Windows package")).toBeTruthy();
+  expect(goal.getByText("OmniAgent enforces the requested turn limit.")).toBeTruthy();
+  await user.click(goal.getByRole("button", { name: "Pause goal" }));
+  expect(await goal.findByText("Paused")).toBeTruthy();
+  await user.click(goal.getByRole("button", { name: "Resume goal" }));
+  expect(await goal.findByText("Active")).toBeTruthy();
+  await user.click(goal.getByRole("button", { name: "Cancel goal" }));
+  expect(await goal.findByText("Cancelled")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("request_goal_stop", { projectId: fixture.projectId, revisionId: "goal-revision", action: "cancel" });
+  initial.unmount();
+  fixture.mount();
+  const reopened = within(await screen.findByRole("region", { name: "Conversation goal" }));
+  expect(reopened.getByText("Cancelled")).toBeTruthy();
+  await user.click(reopened.getByRole("button", { name: "Open goal activity" }));
+  expect(fixture.active).toHaveBeenCalledWith(fixture.runId, fixture.conversationId);
+});
