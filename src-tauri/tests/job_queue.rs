@@ -2056,6 +2056,43 @@ async fn history_switch_archives_old_questions_and_keeps_the_pinned_stage_wait()
             .into_iter()
             .collect(),
     };
+    let archived_boundary = recorded
+        .messages
+        .first()
+        .context("missing retained question prompt")?;
+    let fork = store
+        .fork_retained_conversation(
+            chat.clone(),
+            clear_again.clone(),
+            recorded.context_id.clone(),
+            archived_boundary.revision_id.clone(),
+            "Fork from the archived question".into(),
+        )
+        .await?;
+    let fork_history = store.conversation_history(fork.id.clone()).await?;
+    assert_eq!(fork_history.messages.len(), 1);
+    assert_eq!(fork_history.messages[0].text, archived_boundary.text);
+    assert!(
+        store
+            .prepare_structured_planning_reply(
+                fork.id,
+                fork.context_id,
+                scope.clone(),
+                old_question.clone(),
+                reply.clone(),
+            )
+            .await
+            .is_err()
+    );
+    let inspected = serde_json::to_value(store.inspect_conversation_history(chat.clone()).await?)?;
+    assert_eq!(
+        inspected["retainedQuestions"],
+        serde_json::json!([
+            { "runId": pinned_question.run_id, "requestId": pinned_question.request_id },
+            { "runId": pinned_question.run_id, "requestId": 42 },
+            { "runId": pinned_question.run_id, "requestId": 43 },
+        ])
+    );
     assert!(
         store
             .prepare_structured_planning_reply(

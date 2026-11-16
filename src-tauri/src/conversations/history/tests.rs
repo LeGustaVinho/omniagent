@@ -46,7 +46,12 @@ async fn rewind_clear_and_fork_preserve_archives_and_choose_independent_session_
         texts(&full),
         ["First question", "answer", "Second question", "answer"]
     );
-    assert!(store.conversation_history_revision(chat.id.clone(), second.context_id).await.is_err());
+    assert!(
+        store
+            .conversation_history_revision(chat.id.clone(), second.context_id)
+            .await
+            .is_err()
+    );
 
     let head_fork = store
         .fork_conversation(
