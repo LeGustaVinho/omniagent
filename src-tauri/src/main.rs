@@ -9,6 +9,7 @@ mod fixture_runtime;
 mod ipc;
 mod queue_runtime;
 mod task_delivery_ipc;
+mod task_participants_ipc;
 mod workflow_ipc;
 
 use std::{path::PathBuf, sync::Arc};
@@ -250,6 +251,7 @@ fn main() {
             task_delivery_ipc::project_task_checklist,
             task_delivery_ipc::append_project_checklist_item,
             task_delivery_ipc::revise_project_checklist_item,
+            task_participants_ipc::project_task_runs,
             workflow_ipc::start_repository_delivery,
             workflow_ipc::list_repository_deliveries,
             workflow_ipc::inspect_repository_delivery,

@@ -72,17 +72,20 @@ pub struct TaskRunScope {
     pub checklist_item_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum TaskRunRole {
     Workflow(String),
     Session(SessionMode),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskRun {
     pub job_id: String,
     pub ordinal: u32,
     pub run_id: String,
+    pub conversation_id: String,
     pub turn_id: String,
     pub context_snapshot_id: Option<String>,
     pub role: TaskRunRole,
@@ -204,16 +207,18 @@ impl Store {
     ) -> Result<Vec<TaskRun>> {
         self.execute(move |db| {
             let mut query = db.prepare(
-                "SELECT t.job_id, ordinal, run_id, turn_id, snapshot_id, role, checklist_item_id,
-                        scope, reported_model, status, created_at, closed_at,
+                "SELECT t.job_id, t.ordinal, t.run_id, t.turn_id, t.snapshot_id, t.role, t.checklist_item_id,
+                        t.scope, t.reported_model, t.status, t.created_at, t.closed_at,
                         (SELECT min(recorded_at) FROM run_events e WHERE e.turn_id = t.turn_id
                          AND json_extract(e.payload, '$.type') = 'status'
-                         AND json_extract(e.payload, '$.status') = 'running'), execution.mode
+                         AND json_extract(e.payload, '$.status') = 'running'), execution.mode,
+                        attempt.conversation_id
                  FROM task_runs t
+                 JOIN agent_attempts attempt ON attempt.run_id = t.run_id
                  LEFT JOIN job_checklist_modes execution ON execution.job_id = t.job_id
                  WHERE t.project_id = ?1 AND t.task_id = ?2
-                 AND (?3 IS NULL OR checklist_item_id = ?3)
-                 ORDER BY created_at, t.job_id, ordinal",
+                 AND (?3 IS NULL OR t.checklist_item_id = ?3)
+                 ORDER BY t.created_at, t.job_id, t.ordinal",
             )?;
             let mut rows = query.query(params![project, task, item])?;
             let mut runs = Vec::new();
@@ -226,6 +231,7 @@ impl Store {
                     job_id: row.get(0)?,
                     ordinal: row.get(1)?,
                     run_id: row.get(2)?,
+                    conversation_id: row.get(14)?,
                     turn_id: row.get(3)?,
                     context_snapshot_id: row.get(4)?,
                     role,

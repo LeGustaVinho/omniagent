@@ -49,6 +49,9 @@ it("records manual completion after resolving the checklist and preserves histor
       case "project_task_deliveries":
         expect(args).toEqual(taskArgs);
         return deliveries;
+      case "project_task_runs":
+        expect(args).toEqual(taskArgs);
+        return [];
       case "revise_project_checklist_item":
         expect(args).toEqual({ ...taskArgs, next: revisedItem });
         item = { ...revisedItem, revision: revisedItem.revision + 1 };
