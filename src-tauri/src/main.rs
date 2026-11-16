@@ -2,6 +2,7 @@
 
 mod conversation_runtime;
 mod desktop;
+mod manual_terminal;
 #[cfg(debug_assertions)]
 mod desktop_provider_fixture;
 mod fixture;
@@ -221,6 +222,7 @@ fn main() {
             app.manage(ipc::EventSubscriptions::default());
             app.manage(note_runtime::NoteWatches::default());
             app.manage(note_index_runtime::NoteIndexWatches::default());
+            app.manage(manual_terminal::ManualTerminals::default());
             app.manage(fixture_runtime::FixtureRuns::default());
             desktop::create_tray(app)?;
             desktop::notify_job_activity(app.handle().clone(), notices)?;
@@ -286,6 +288,10 @@ fn main() {
             desktop::list_repository_markdown_revisions,
             desktop::read_repository_markdown,
             desktop::repository_note_catalog,
+            manual_terminal::start_manual_terminal,
+            manual_terminal::write_manual_terminal,
+            manual_terminal::resize_manual_terminal,
+            manual_terminal::close_manual_terminal,
             note_index_runtime::rebuild_repository_note_index,
             note_index_runtime::reconcile_repository_note_index,
             note_index_runtime::watch_repository_note_index,

@@ -13,6 +13,7 @@ import type { WorkspaceProps } from "@/workbench-contract";
 
 const Editor = lazy(() => import("@/ide-code-editor").then(({ CodeEditor }) => ({ default: CodeEditor })));
 const Terminal = lazy(() => import("@/ide-terminal").then(({ ExampleTerminal }) => ({ default: ExampleTerminal })));
+const WorktreeTerminal = lazy(() => import("@/ide-terminal").then(({ ManualTerminal }) => ({ default: ManualTerminal })));
 
 interface Buffer {
   body: string;
@@ -208,9 +209,12 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
               {simulated && <button type="button" className="fw-icon" title="Clear terminal" aria-label="Clear terminal" onClick={() => setClearRevision((value) => value + 1)}><Trash2 size={14} /></button>}
             </div>
           </div>
-          {simulated ? <div className="ide-bottom-body">
+          <div className="ide-bottom-body">
             <div className="ide-terminal-container" hidden={bottom !== "terminal"}>
-              <Suspense fallback={<p className="file-help">Loading terminal…</p>}><Terminal clearRevision={clearRevision} /></Suspense>
+              <Suspense fallback={<p className="file-help">Loading terminal…</p>}>
+                {simulated ? <Terminal clearRevision={clearRevision} />
+                  : <WorktreeTerminal checkoutId={checkout.checkoutId} active={bottom === "terminal"} />}
+              </Suspense>
             </div>
             {bottom === "problems" && <ul className="ide-problems">
               {markerEntries.length ? markerEntries.map(({ path, label, message, line, column }, index) => (
@@ -222,7 +226,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
               )) : <li className="file-help">No editor diagnostics in this workspace.</li>}
               <li className="file-help">ripgrep missing · Configure its executable in Settings to enable live repository search.</li>
             </ul>}
-          </div> : <p className="file-sidebar-note">{bottom === "terminal" ? "PowerShell terminal integration is pending." : "Diagnostics appear when a connected editor is open."}</p>}
+          </div>
         </div>}
         {simulated && active && buffer && <footer className="ide-statusbar">
           <span>{buffer.body === buffer.saved ? "Saved" : "Unsaved changes"} · UTF-8</span>

@@ -219,7 +219,7 @@ pub fn launch(executable: &Path, cwd: &Path, args: &[&OsStr]) -> io::Result<Wind
     })
 }
 
-fn create_job() -> io::Result<OwnedHandle> {
+pub fn create_job() -> io::Result<OwnedHandle> {
     // Null security attributes create a non-inheritable handle.
     let raw = unsafe { CreateJobObjectW(null(), null()) };
     if raw.is_null() {
