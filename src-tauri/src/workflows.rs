@@ -8,6 +8,8 @@ mod approval;
 mod artifacts;
 mod builtin;
 mod execution;
+#[cfg(test)]
+mod git_integration;
 mod job_inputs;
 mod operator;
 mod registry;

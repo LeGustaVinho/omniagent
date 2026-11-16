@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AppearanceSettings } from "@/bindings/AppearanceSettings";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { CandidateGateSettings } from "@/candidate-gate-settings";
+import { DeliveryGitSettings } from "@/delivery-git-settings";
 import { Button } from "@/components/ui/button";
 import { ProjectQueueHistoryPolicy } from "@/conversation-history-controls";
 import { CustomizationsSettings } from "@/customizations-panel";
@@ -265,7 +266,9 @@ function SettingsSession({
       case "git":
         return simulation || !checkout ? policy("git") : <>
           <CandidateGateSettings key={checkout.projectId} projectId={checkout.projectId} />
-          {policy("git")}
+          <DeliveryGitSettings key={`delivery-${checkout.projectId}`} projectId={checkout.projectId} />
+          <PolicyForm fields={policyFields.git.filter(({ id }) => id !== "after-acceptance")}
+            stored={undefined} simulate={simulate} />
         </>;
       default:
         return policy(currentPage.id);
