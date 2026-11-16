@@ -78,6 +78,7 @@ pub enum ArtifactValue {
     Acceptance(WorkflowAcceptanceReference),
     Git(ScopedEvidence),
     Merge(WorkflowMergeReference),
+    CommandResult(super::WorkflowCommandResult),
 }
 
 impl ArtifactValue {
@@ -95,6 +96,7 @@ impl ArtifactValue {
             Self::Acceptance(_) => ArtifactKind::Acceptance,
             Self::Git(_) => ArtifactKind::Git,
             Self::Merge(_) => ArtifactKind::Merge,
+            Self::CommandResult(_) => ArtifactKind::CommandResult,
         }
     }
 }
@@ -424,6 +426,12 @@ impl Store {
                     "integration evidence is unavailable in the owning task and workflow"
                 );
             }
+            ArtifactValue::CommandResult(result) => {
+                let saved = self.workflow_command_result(project.into(), result.run_id.clone()).await?
+                    .context("Command result is unavailable in the owning project")?;
+                ensure!(saved.workflow_run_id == run && saved.node_instance_id == node && &saved.value == value,
+                    "Command result differs from its verified scope");
+            }
         }
         Ok(())
     }
@@ -510,6 +518,9 @@ pub(super) fn load_artifact(
     id: &str,
     kind: ArtifactKind,
 ) -> Result<Option<WorkflowArtifact>> {
+    if kind == ArtifactKind::CommandResult {
+        return super::command::load_command_artifact(db, project, run, id);
+    }
     let evidence: Option<Vec<u8>> = db.query_row(
         "SELECT a.payload FROM workflow_artifacts a JOIN workflow_run_pins w ON w.pipeline_run_id = a.pipeline_run_id
          WHERE a.id = ?1 AND a.kind = ?2 AND w.project_id = ?3 AND w.pipeline_run_id = ?4",

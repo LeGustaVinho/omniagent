@@ -3,6 +3,7 @@ import { Background, Controls, Handle, MarkerType, Position, ReactFlow, useUpdat
   type Connection, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { CommandNodeConfiguration } from "@/workflow-command";
 import {
   changedPorts, configurationProblem, connectionProblem, defaultConfiguration, incompatibility,
   initialNodePositions, outputPort, portType, wireKey,
@@ -60,7 +61,8 @@ function connectionWire(connection: Connection): WorkflowWire | undefined {
 
 const readTheme = (): "light" | "dark" => document.documentElement.dataset.appTheme === "light" ? "light" : "dark";
 
-export function WorkflowGraphEditor({ state, setState, definitions, catalog, problems, disabled }: {
+export function WorkflowGraphEditor({ projectId, state, setState, definitions, catalog, problems, disabled }: {
+  projectId: string;
   state: WorkflowEditorState;
   setState: Dispatch<SetStateAction<WorkflowEditorState>>;
   definitions: WorkflowDefinitions;
@@ -206,7 +208,7 @@ export function WorkflowGraphEditor({ state, setState, definitions, catalog, pro
         </select></label>
         {node && definition && <>
           <p className="text-sm text-muted-foreground">Version {definition.revision} · {definition.effect.replaceAll("_", " ")}</p>
-          <NodeFields key={node.id} node={node} definition={definition} disabled={disabled} onChange={(configuration) => configure(node.id, configuration)} />
+          <NodeFields key={node.id} projectId={projectId} node={node} definition={definition} disabled={disabled} onChange={(configuration) => configure(node.id, configuration)} />
           {available && <VersionReview node={node} previous={definition} next={available} wires={graph.wires}
             disabled={disabled} apply={() => updateVersion(node, available)} />}
           {definition.inputs.length > 0 && <ConnectInput key={`${node.id}:${definition.revision}`} graph={graph} node={node}
@@ -220,8 +222,8 @@ export function WorkflowGraphEditor({ state, setState, definitions, catalog, pro
   </section>;
 }
 
-function NodeFields({ node, definition, disabled, onChange }: {
-  node: WorkflowGraphNode; definition: WorkflowDefinition; disabled: boolean; onChange: (configuration: WorkflowNodeConfiguration) => void;
+function NodeFields({ projectId, node, definition, disabled, onChange }: {
+  projectId: string; node: WorkflowGraphNode; definition: WorkflowDefinition; disabled: boolean; onChange: (configuration: WorkflowNodeConfiguration) => void;
 }) {
   const { configuration } = node;
   switch (definition.configuration) {
@@ -233,6 +235,7 @@ function NodeFields({ node, definition, disabled, onChange }: {
       onChange={(event) => onChange({ kind: "required_checks", names: event.currentTarget.value ? event.currentTarget.value.split("\n") : [] })} />
       <small>Enter one check name per line.</small>
     </label>;
+    case "command": return <CommandNodeConfiguration projectId={projectId} configuration={configuration} onChange={onChange} disabled={disabled} />;
     default: return <JsonConfiguration key={`${node.id}:${definition.revision}`} configuration={configuration}
       kind={definition.configuration} disabled={disabled} onChange={onChange} />;
   }

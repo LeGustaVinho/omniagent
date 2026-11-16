@@ -17,6 +17,7 @@ use tauri::{Manager, State};
 use crate::conversation_runtime::selected_scope;
 
 pub mod authoring;
+pub mod command;
 pub mod comparison;
 pub mod graph_editor;
 pub mod role_templates;

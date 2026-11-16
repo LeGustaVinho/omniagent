@@ -204,7 +204,7 @@ function AuthoringRevisionEditor({ projectId, draft, revision }: { projectId: st
   return <div className="pipeline-stack">
     {registry.isPending && <p role="status">Loading node registry…</p>}
     {registry.error && <p role="alert">{String(registry.error)}</p>}
-    {registry.data && <WorkflowGraphEditor state={editor} setState={setEditor} definitions={definitions}
+    {registry.data && <WorkflowGraphEditor projectId={projectId} state={editor} setState={setEditor} definitions={definitions}
       catalog={catalog} problems={problems} disabled={editingDisabled} />}
     <div className="flex flex-wrap items-center justify-between gap-2">
       <p className="break-all text-xs text-muted-foreground">Draft revision <code>{revision.id}</code></p>

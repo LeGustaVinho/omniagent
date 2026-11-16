@@ -25,6 +25,7 @@ export function defaultConfiguration(kind: string): WorkflowNodeConfiguration {
   switch (kind) {
     case "agent_role": return { kind, role: "" };
     case "required_checks": return { kind, names: [] };
+    case "command": return { kind, registrationId: "", registrationRevision: "", arguments: [], input: {}, output: "text" };
     default: return { kind };
   }
 }
@@ -82,6 +83,10 @@ export function configurationProblem(configuration: WorkflowNodeConfiguration, d
     case "agent_role": return typeof configuration.role === "string" && configuration.role.trim() ? null : "Agent role is required.";
     case "required_checks": return Array.isArray(configuration.names) && configuration.names.every((name) => typeof name === "string" && name.trim())
       ? null : "Check names must contain text.";
+    case "command":
+      if (!configuration.registrationId || !configuration.registrationRevision) return "A registered command revision is required.";
+      return configuration.input && typeof configuration.input === "object" && !Array.isArray(configuration.input)
+        ? null : "Enter a JSON object for input.";
     default: return null;
   }
 }

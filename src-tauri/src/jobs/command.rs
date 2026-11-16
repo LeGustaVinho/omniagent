@@ -1,5 +1,9 @@
 use std::{
     ffi::OsStr,
+    fs::{File, OpenOptions},
+    io,
+    os::windows::fs::OpenOptionsExt,
+    path::Path,
     path::PathBuf,
     sync::{Arc, mpsc},
     thread,
@@ -11,6 +15,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 use ts_rs::TS;
+use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
 use crate::{
     process::TerminalOutcome,
@@ -21,6 +26,10 @@ use crate::{
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
     runs::{self, RunRecord, RunStatus},
     store::Store,
+    workflows::{
+        CommandData, CommandOutputFormat, WorkflowJobInput, bind_job_input, publish_command_result,
+        stage_job_input,
+    },
 };
 
 use super::{
@@ -40,12 +49,36 @@ pub struct PipelineCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct PinnedCommandScript {
+    pub path: PathBuf,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct CommandExchange {
+    pub input: Vec<u8>,
+    pub format: CommandOutputFormat,
+}
+
+pub(crate) struct PreparedCommand {
+    pub executable: PathBuf,
+    pub arguments: Vec<String>,
+    pub revision: String,
+    pub script: Option<PinnedCommandScript>,
+    pub exchange: Option<CommandExchange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub(super) struct CommandInvocation {
     pub executable: PathBuf,
     pub arguments: Vec<String>,
     pub checkout: PathBuf,
     pub runner: String,
     revision: String,
+    #[serde(default)]
+    script: Option<PinnedCommandScript>,
+    #[serde(default)]
+    exchange: Option<CommandExchange>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Deserialize, Serialize, TS)]
@@ -121,47 +154,25 @@ impl Store {
             Ok::<_, anyhow::Error>((executable, revision))
         })
         .await??;
-        let arguments = command.arguments;
         let job = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let (project, cwd) = resolve_node_checkout(&tx, &binding, &checkout)?;
-                let mut request = JobRequest {
-                    checkout_id: Some(checkout.clone()),
-                    task_id: Some(task),
-                    mode: SessionMode::ApprovedWrite,
-                    instructions: serde_json::to_string_pretty(&serde_json::json!({
-                        "executable": executable, "arguments": arguments, "revision": revision,
-                    }))?,
-                    dependencies,
-                    requires_bridge: false,
-                };
-                request.normalize(&checkout)?;
-                let job = insert_job(
-                    &tx,
-                    project.clone(),
-                    None,
-                    JobOrigin::Pipeline,
-                    request,
-                    0,
-                    Some(&binding),
-                )?;
-                let invocation = CommandInvocation {
+                let prepared = PreparedCommand {
                     executable,
-                    arguments,
-                    checkout: cwd.into(),
-                    runner: DirectWindowsRunner.identity().into(),
+                    arguments: command.arguments,
                     revision,
+                    script: None,
+                    exchange: None,
                 };
-                tx.execute(
-                    "INSERT INTO job_commands (job_id, invocation) VALUES (?1, ?2)",
-                    params![
-                        job.id,
-                        protection::protect(&serde_json::to_vec(&invocation)?)?,
-                    ],
+                let job = queue_pipeline_command(
+                    &tx,
+                    &binding,
+                    checkout,
+                    task,
+                    dependencies,
+                    prepared,
+                    None,
                 )?;
-                let job =
-                    load_job(&tx, &project, &job.id)?.context("The command job disappeared")?;
                 tx.commit()?;
                 Ok(job)
             })
@@ -186,6 +197,78 @@ impl Store {
     }
 }
 
+pub(crate) fn queue_pipeline_command(
+    db: &Connection,
+    binding: &PipelineDispatch,
+    checkout: String,
+    task: String,
+    dependencies: Vec<String>,
+    prepared: PreparedCommand,
+    workflow_input: Option<&WorkflowJobInput>,
+) -> Result<Job> {
+    let (project, cwd) = resolve_node_checkout(db, binding, &checkout)?;
+    if workflow_input.is_some() {
+        let previous: Option<(String, String)> = db.query_row(
+            "SELECT p.job_id, p.release_id FROM job_pipeline_origins p JOIN job_commands c ON c.job_id = p.job_id
+             WHERE p.pipeline_run_id = ?1 AND p.node_instance_id = ?2 AND p.plan_revision IS ?3",
+            params![binding.pipeline_run_id, binding.node_instance_id, binding.plan_revision],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        if let Some((id, release)) = previous {
+            ensure!(
+                binding.release_id.as_ref() == Some(&release),
+                "The Command was already scheduled under a different release"
+            );
+            return load_job(db, &project, &id)?.context("The existing command job disappeared");
+        }
+    }
+    let mut request = JobRequest {
+        checkout_id: Some(checkout.clone()),
+        task_id: Some(task),
+        mode: SessionMode::ApprovedWrite,
+        instructions: serde_json::to_string_pretty(&serde_json::json!({
+            "executable": prepared.executable,
+            "arguments": prepared.arguments,
+            "revision": prepared.revision,
+        }))?,
+        dependencies,
+        requires_bridge: false,
+    };
+    request.normalize(&checkout)?;
+    if let Some(input) = workflow_input {
+        stage_job_input(db, &project, binding, &request, input)?;
+    }
+    let job = insert_job(
+        db,
+        project.clone(),
+        None,
+        JobOrigin::Pipeline,
+        request,
+        0,
+        Some(binding),
+    )?;
+    let invocation = CommandInvocation {
+        executable: prepared.executable,
+        arguments: prepared.arguments,
+        checkout: cwd.into(),
+        runner: DirectWindowsRunner.identity().into(),
+        revision: prepared.revision,
+        script: prepared.script,
+        exchange: prepared.exchange,
+    };
+    db.execute(
+        "INSERT INTO job_commands (job_id, invocation) VALUES (?1, ?2)",
+        params![
+            job.id,
+            protection::protect(&serde_json::to_vec(&invocation)?)?
+        ],
+    )?;
+    if let Some(input) = workflow_input {
+        bind_job_input(db, &job.id, binding, input)?;
+    }
+    load_job(db, &project, &job.id)?.context("The command job disappeared")
+}
+
 pub(super) fn start_command(
     store: Store,
     runner: Arc<dyn Runner>,
@@ -200,6 +283,7 @@ pub(super) fn start_command(
             ..Default::default()
         };
         let mut output = None;
+        let mut result = None;
         let outcome = run_command(
             &app,
             &store,
@@ -209,6 +293,7 @@ pub(super) fn start_command(
             &stopping,
             &mut failure,
             &mut output,
+            &mut result,
         );
         let status = match &outcome {
             Ok(status) => *status,
@@ -225,9 +310,19 @@ pub(super) fn start_command(
             Ok(output) => (output, None),
             Err(error) => (None, Some(error)),
         };
+        let (status, result) = if output_error.is_some() && attempt.invocation.exchange.is_some() {
+            failure.phase = FailurePhase::ResultValidation;
+            failure.cause = Some(FailureCause::EvidenceUnavailable);
+            (RunStatus::Failed, None)
+        } else {
+            (status, result)
+        };
         app.block_on(store.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             settle_command(&tx, &run_id, status, failure, output)?;
+            if let Some(result) = result {
+                publish_command_result(&tx, &run_id, result)?;
+            }
             tx.commit()?;
             Ok(())
         }))?;
@@ -250,6 +345,7 @@ fn run_command(
     stopping: &watch::Receiver<bool>,
     failure: &mut FailureObservation,
     output: &mut Option<CommandJobOutput>,
+    result: &mut Option<CommandData>,
 ) -> Result<RunStatus> {
     let run = &attempt.run;
     let invocation = &attempt.invocation;
@@ -267,17 +363,27 @@ fn run_command(
         ))?;
         anyhow::bail!("The command cannot verify the rule's CLI requirements");
     }
+    let pinned = if invocation.exchange.is_some() {
+        Some(pinned_files(invocation))
+    } else {
+        None
+    };
     if runner.identity() != invocation.runner
         || runner
             .executable_revision(&invocation.executable)
             .as_deref()
             != Some(&invocation.revision)
+        || pinned.as_ref().is_some_and(Result::is_err)
+        || invocation.script.as_ref().is_some_and(|script| {
+            runner.executable_revision(&script.path).as_deref() != Some(&script.revision)
+        })
     {
         app.block_on(
             store.record_dispatch_rejection(run.id.clone(), DispatchRejection::ProfileUnavailable),
         )?;
-        anyhow::bail!("The registered command executable changed or could not be verified");
+        anyhow::bail!("The registered executable or script changed or could not be verified");
     }
+    let _pinned = pinned.transpose()?;
     app.block_on(repository::verify_checkout(
         store,
         run.checkout_id.clone(),
@@ -331,7 +437,15 @@ fn run_command(
 
     failure.phase = FailurePhase::Execution;
     let control = process.control.clone();
-    let (ended, logs) = collect_output(process, stopping, admission);
+    let (ended, logs, input) = collect_output(
+        process,
+        invocation
+            .exchange
+            .as_ref()
+            .map(|exchange| exchange.input.as_slice()),
+        stopping,
+        admission,
+    );
     *output = Some(logs);
     failure.phase = FailurePhase::ProcessStop;
     let ended = ended.inspect_err(|_| failure.cause = Some(FailureCause::StopUnconfirmed))?;
@@ -344,6 +458,22 @@ fn run_command(
     app.block_on(repository::save_worktree_candidate(store, run.id.clone()))
         .inspect_err(|_| failure.cause = Some(FailureCause::EvidenceUnavailable))?;
     failure.phase = FailurePhase::Execution;
+    if matches!(ended, TerminalOutcome::Exited(0))
+        && let Some(exchange) = &invocation.exchange
+    {
+        input.inspect_err(|_| failure.cause = Some(FailureCause::TransportClosed))?;
+        failure.phase = FailurePhase::ResultValidation;
+        let parsed = (|| {
+            let logs = output.as_ref().context("Command stdout is unavailable")?;
+            ensure!(
+                !logs.truncated,
+                "Command output exceeded its capture limit or was not valid UTF-8"
+            );
+            CommandData::parse(exchange.format, &logs.stdout)
+        })()
+        .inspect_err(|_| failure.cause = Some(FailureCause::InvalidResult))?;
+        *result = Some(parsed);
+    }
     Ok(match ended {
         TerminalOutcome::Exited(0) => RunStatus::Succeeded,
         TerminalOutcome::Exited(_) => {
@@ -358,20 +488,44 @@ fn run_command(
     })
 }
 
+fn pinned_files(invocation: &CommandInvocation) -> Result<Vec<File>> {
+    let open = |path: &Path| -> Result<File> {
+        ensure!(
+            dunce::canonicalize(path)? == path,
+            "The registered command path changed"
+        );
+        // Keep the executable and script read-only for the duration of the supervised tree.
+        Ok(OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path)?)
+    };
+    let mut files = vec![open(&invocation.executable)?];
+    if let Some(script) = &invocation.script {
+        files.push(open(&script.path)?);
+    }
+    Ok(files)
+}
+
 fn collect_output(
     process: CapturedProcess,
+    stdin: Option<&[u8]>,
     stopping: &watch::Receiver<bool>,
     admission: &LaunchGate,
-) -> (std::io::Result<TerminalOutcome>, CommandJobOutput) {
+) -> (
+    io::Result<TerminalOutcome>,
+    CommandJobOutput,
+    io::Result<()>,
+) {
     let CapturedProcess {
         control,
-        input,
+        mut input,
         output,
     } = process;
-    drop(input);
     let mut logs = CommandJobOutput::default();
     let (send, receive) = mpsc::channel();
     thread::scope(|scope| {
+        let writer = stdin.map(|data| scope.spawn(move || input.send(data)));
         let wait = control.clone();
         scope.spawn(move || {
             let _ = send.send(wait.wait());
@@ -410,7 +564,16 @@ fn collect_output(
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
-        (ended.expect("command supervisor reported an outcome"), logs)
+        let input_result = writer.map_or(Ok(()), |writer| {
+            writer
+                .join()
+                .unwrap_or_else(|_| Err(io::Error::other("The command stdin worker stopped")))
+        });
+        (
+            ended.expect("command supervisor reported an outcome"),
+            logs,
+            input_result,
+        )
     })
 }
 

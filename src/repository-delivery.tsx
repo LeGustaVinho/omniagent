@@ -15,6 +15,7 @@ import { pinnedDeliveryGitNodes, RepositoryDeliveryGitGraph } from "@/repository
 import { SavedDeliveryMerge, SavedDeliverySource } from "@/repository-delivery-history";
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { WorkflowCommandRun } from "@/workflow-command";
 
 type Proposal = { sequence: string; text: string };
 type TaskOption = { id: string; title: string };
@@ -25,6 +26,7 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
   openActivity: WorkspaceProps["openActivity"];
   openWorkspace: WorkspaceProps["openWorkspace"];
 }) {
+  const commandClient = useQueryClient();
   const [chosenTask, setChosenTask] = useState("");
   const [title, setTitle] = useState("");
   const [proposal, setProposal] = useState("");
@@ -149,6 +151,20 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
       onClick={() => actions.execute(() => host({ decision: approval.id, task: linked.id }, { action: "prepare_worktree" }))}>
       Prepare managed worktree
     </Button>}
+    {delivery.definition?.nodes.filter(({ instance }) => instance.kind === "command").map(({ instance }) => {
+      const bound = (port: string, available: typeof release) => {
+        const source = delivery.definition?.wires.find(({ to }) => to.node === instance.id && to.port === port)?.from;
+        return available && source?.node === available.nodeInstanceId && source.port === available.port
+          ? available.id : undefined;
+      };
+      const releaseId = bound("release", release);
+      const worktreeId = bound("worktree", worktree);
+      const commandJob = delivery.jobs.findLast((entry) => entry.nodeId === instance.id
+        && entry.inputs.release === releaseId && entry.inputs.worktree === worktreeId)?.job;
+      return <WorkflowCommandRun key={`${instance.id}:${releaseId ?? ""}`}
+        {...scope} nodeId={instance.id} releaseId={releaseId} worktreeId={worktreeId} job={commandJob}
+        onQueued={() => { void commandClient.invalidateQueries({ queryKey: ["repository-delivery", projectId] }); }} />;
+    })}
     {(currentTask || archived) && <section className="pipeline-stack" aria-label="Delivery summary">
       <p role="status">{currentTask ?
         `Task · ${currentTask.waitingForCommit ? "In review · Waiting for commit" : currentTask.waitingForMerge ? "In review · Waiting for merge" : currentTask.state.replaceAll("_", " ")}`

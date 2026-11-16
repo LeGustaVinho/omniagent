@@ -322,11 +322,18 @@ impl Store {
                         source.from.node.clone(),
                         producer_unit.map(str::to_owned),
                     );
+                    let plan_revision = workflow.plan_revision.clone();
                     let complete: bool = self.execute(move |db| Ok(db.query_row(
                         "SELECT EXISTS (
                              SELECT 1 FROM workflow_artifacts a
                              WHERE a.pipeline_run_id = ?1 AND a.node_instance_id = ?2 AND a.unit_id IS ?3
-                         )", params![run, node, unit], |row| row.get(0),
+                             UNION ALL
+                             SELECT 1 FROM workflow_command_results c
+                             JOIN job_attempts a ON a.run_id = c.run_id
+                             JOIN job_pipeline_origins p ON p.job_id = a.job_id
+                             WHERE c.pipeline_run_id = ?1 AND c.node_instance_id = ?2 AND ?3 IS NULL
+                               AND p.plan_revision IS ?4
+                         )", params![run, node, unit, plan_revision], |row| row.get(0),
                     )?)).await?;
                     ensure!(
                         complete,

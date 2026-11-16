@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::command::CommandConfiguration;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuiltinNode {
@@ -16,6 +18,7 @@ pub enum BuiltinNode {
     AcceptCandidate,
     VerifyCommit,
     VerifyMerge,
+    Command,
     Result,
 }
 
@@ -49,6 +52,7 @@ pub enum ArtifactKind {
     Acceptance,
     Git,
     Merge,
+    CommandResult,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +75,7 @@ pub enum ConfigurationKind {
     None,
     AgentRole,
     RequiredChecks,
+    Command,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +84,7 @@ pub enum NodeConfiguration {
     None,
     AgentRole { role: String },
     RequiredChecks { names: Vec<String> },
+    Command(CommandConfiguration),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +102,7 @@ pub enum Executor {
     RecordCandidateAcceptance,
     VerifyGitCommit,
     VerifyGitMerge,
+    ExecuteCommand,
     PublishResult,
 }
 
@@ -282,6 +289,15 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             &[("verified", Control), ("integration", Data(Merge))],
         ),
         (
+            Command,
+            "Command",
+            Executor::ExecuteCommand,
+            ConfigurationKind::Command,
+            Effect::WriteRepository,
+            &[("ready", Control), ("release", Data(Release)), ("worktree", Data(Worktree))],
+            &[("completed", Control), ("result", Data(CommandResult))],
+        ),
+        (
             Result,
             "Result",
             Executor::PublishResult,
@@ -333,6 +349,7 @@ impl ArtifactKind {
             // Existing databases classify both receipts as repository Git evidence.
             // Protected payloads and pinned ports distinguish the two receipts.
             Self::Git | Self::Merge => "git",
+            Self::CommandResult => "command_result",
         }
     }
 }
@@ -345,6 +362,7 @@ impl NodeConfiguration {
             (Self::RequiredChecks { names }, ConfigurationKind::RequiredChecks) => {
                 names.iter().all(|name| !name.trim().is_empty())
             }
+            (Self::Command(config), ConfigurationKind::Command) => config.is_valid(),
             _ => false,
         }
     }
@@ -355,7 +373,7 @@ impl Executor {
         match self {
             Self::PlanAgent => Some("planning"),
             Self::ReadOnlyAgent => Some("read_only"),
-            Self::WriteAgent => Some("approved_write"),
+            Self::WriteAgent | Self::ExecuteCommand => Some("approved_write"),
             _ => None,
         }
     }

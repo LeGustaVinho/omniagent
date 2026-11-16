@@ -9,6 +9,7 @@ mod artifacts;
 pub mod authoring;
 pub mod comparison;
 mod builtin;
+mod command;
 mod execution;
 #[cfg(test)]
 mod git_integration;
@@ -35,6 +36,11 @@ pub use artifacts::{
     WorkflowAcceptanceReference, WorkflowArtifact, WorkflowMergeReference,
 };
 pub use builtin::{DeliveryRoles, builtin_delivery_graph};
+pub use command::{
+    CommandConfiguration, CommandData, CommandOutputFormat, CommandRegistration,
+    CommandRegistrationRequest, CommandTarget, WorkflowCommandResult, WorkflowCommandSubmission,
+};
+pub(crate) use command::publish_command_result;
 pub use execution::{NodeInputs, WorkflowHostRequest, WorkflowHostSubmission};
 pub(crate) use job_inputs::{WorkflowJobInput, bind_job_input, stage_job_input};
 pub(crate) use operator::waiting_for_delivery_commit;
