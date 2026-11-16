@@ -89,6 +89,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const { load: loadNote, watch: watchNote, getNote } = repository;
   const active = dock.path;
   const note = active ? notes[active] : undefined;
+  const conflictRecovery = dialog?.kind === "conflict" ? repository.notes[dialog.path]?.recovery : undefined;
   const source = note?.content ?? "";
   const activeMode = active ? modes[active] ?? "live" : "live";
   const catalog = useMemo(() => {
@@ -459,6 +460,11 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           <div><h3>Local buffer</h3><pre>{notes[dialog.path]?.content}</pre></div>
           <div><h3>External version</h3><pre>{dialog.external}</pre></div>
         </div>
+        {conflictRecovery && <div className="grid gap-1" aria-label="Recovery files">
+          <p>{conflictRecovery.message}</p>
+          {conflictRecovery.editedPath && <p>Edited buffer <code className="break-all">{conflictRecovery.editedPath}</code></p>}
+          {conflictRecovery.displacedPath && <p>Displaced file <code className="break-all">{conflictRecovery.displacedPath}</code></p>}
+        </div>}
         <div className="file-dialog-footer">
           <button type="button" className="fw-btn" onClick={closeDialog}>Review later</button>
           <button type="button" className="fw-btn fw-outlined" onClick={() => {

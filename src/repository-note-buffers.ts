@@ -28,6 +28,7 @@ type RepositoryBuffer = NoteBuffer & {
   draftRevision: string | null;
   incoming?: RepositoryDocument;
   sourceProblem?: string;
+  recovery?: Recovery;
 };
 type NoteState = { notes: Record<string, RepositoryBuffer>; failures: Record<string, string> };
 export type NoteCatalogEntry = { path: string; frontmatter: string | null };
@@ -229,6 +230,7 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
       checkoutId, path, expectedRevision: note.base.id, markdown: note.content,
     });
     if (result.status !== "saved") {
+      change(path, (current) => ({ ...current, recovery: result.recovery }));
       if (result.status === "conflict") {
         const observed = await invoke<DocumentOpen>("open_repository_document", { checkoutId, path });
         change(path, (current) => {
@@ -263,7 +265,10 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
       return;
     }
     change(path, (note) => {
-      if (note.incoming) return { ...loaded(note.incoming, note.draftRevision), content: keepLocal ? note.content : note.incoming.markdown };
+      if (note.incoming) return {
+        ...loaded(note.incoming, note.draftRevision), recovery: note.recovery,
+        content: keepLocal ? note.content : note.incoming.markdown,
+      };
       return keepLocal ? note : { ...note, content: note.saved, external: undefined };
     });
     await persist(path);

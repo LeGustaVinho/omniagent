@@ -56,6 +56,13 @@ const documentAt = (relativePath: string, id: string, markdown: string) => ({
   fileIdentity: relativePath,
 });
 
+type NoteChange = { checkoutId: string; relativePath: string };
+type DocumentFixture = ReturnType<typeof documentAt>;
+type SaveRace = {
+  document: DocumentFixture;
+  recovery: { message: string; editedPath: string; displacedPath: string };
+};
+
 function mockRepository() {
   const onDisk = new Map([
     [release, documentAt(release, "release-1", releaseSource)],
@@ -63,12 +70,16 @@ function mockRepository() {
   ]);
   type Draft = { revision: string; base: NoteRevision; markdown: string };
   const drafts = new Map<string, Draft>();
+  const watchers = new Map<string, (event: NoteChange) => void>();
+  const recovered = new Map<string, string>();
+  let nextSaveRace: SaveRace | undefined;
   let draftNumber = 0;
   const writes = vi.fn();
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     const input = (args ?? {}) as {
       path: string; baseRevision: string; expectedRevision: string;
       expectedDraftRevision: string | null; markdown: string; bufferRevision: string;
+      channel: { onmessage: (event: NoteChange) => void };
     };
     switch (command) {
       case "workbench_layout": return null;
@@ -84,7 +95,12 @@ function mockRepository() {
         return { status: "document", document };
       }
       case "read_repository_markdown_draft": return drafts.get(input.path) ?? null;
-      case "watch_repository_note": return `watch-${input.baseRevision}`;
+      case "watch_repository_note": {
+        const watching = Array.from(onDisk.values()).find(({ revision }) => revision.id === input.baseRevision);
+        if (!watching) throw new Error("Missing watch base revision");
+        watchers.set(watching.revision.relativePath, input.channel.onmessage);
+        return `watch-${input.baseRevision}`;
+      }
       case "unwatch_repository_note": return;
       case "analyze_note_markdown": return { bufferRevision: input.bufferRevision, nodes: [] };
       case "save_repository_markdown_draft": {
@@ -101,6 +117,15 @@ function mockRepository() {
       case "save_repository_document": {
         if (onDisk.get(input.path)?.revision.id !== input.expectedRevision) throw new Error("Stale note save");
         writes(args);
+        if (nextSaveRace) {
+          const { document, recovery } = nextSaveRace;
+          nextSaveRace = undefined;
+          expect(document.revision.relativePath).toBe(input.path);
+          onDisk.set(input.path, document);
+          recovered.set(recovery.editedPath, input.markdown);
+          recovered.set(recovery.displacedPath, document.markdown);
+          return { status: "conflict", recovery };
+        }
         const document = documentAt(input.path, `${input.expectedRevision}-saved`, input.markdown);
         onDisk.set(input.path, document);
         return { status: "saved", document };
@@ -108,7 +133,16 @@ function mockRepository() {
       default: throw new Error(`Unexpected IPC command ${command}`);
     }
   });
-  return { drafts, writes };
+  return {
+    drafts, writes, recovered,
+    isWatched: (path: string) => watchers.has(path),
+    externalChange: (document: DocumentFixture) => {
+      const relativePath = document.revision.relativePath;
+      onDisk.set(relativePath, document);
+      watchers.get(relativePath)?.({ checkoutId, relativePath });
+    },
+    raceNextSave: (race: SaveRace) => { nextSaveRace = race; },
+  };
 }
 
 async function editor(path: string) {
@@ -201,4 +235,63 @@ it("reuses canonical tabs, shares edits with Reading, and offers Cancel, Save an
   await user.click(navigation.getByRole("button", { name: "Checklist.md" }));
   expect((await editor(checklist)).state.doc.toString()).toBe(checklistSource);
   expect(tab("Checklist.md").queryByLabelText("Unsaved changes")).toBeNull();
+});
+
+it("keeps a dirty note recoverable across a watched external edit and a save-time race", async () => {
+  const repository = mockRepository();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(release);
+  await waitFor(() => expect(repository.isWatched(release)).toBe(true));
+  const local = "# Local release draft\n\nThese unsaved edits must survive.\n";
+  act(() => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: local } }));
+  await waitFor(() => expect(repository.drafts.get(release)?.markdown).toBe(local));
+
+  await user.click(screen.getByRole("button", { name: "Split Reading view" }));
+  const reading = await screen.findByLabelText(`Reading view for ${release}`);
+  expect(within(reading).getByRole("heading", { name: "Local release draft" })).toBeTruthy();
+
+  const external = "# External change from the watcher\n\nKeep the saved revision.\n";
+  act(() => repository.externalChange(documentAt(release, "release-2", external)));
+  const reviews = await screen.findAllByRole("button", { name: "Review external change" });
+  expect(view.state.doc.toString()).toBe(local);
+  expect(within(reading).getByRole("heading", { name: "Local release draft" })).toBeTruthy();
+  await user.click(reviews[0]!);
+  let conflict = await screen.findByRole("dialog", { name: "Note revision conflict" });
+  expect(conflict.querySelectorAll("pre")[0]?.textContent).toBe(local);
+  expect(conflict.querySelectorAll("pre")[1]?.textContent).toBe(external);
+  expect(repository.writes).not.toHaveBeenCalled();
+
+  await user.click(within(conflict).getByRole("button", { name: "Keep local edits" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(repository.drafts.get(release)).toMatchObject({ base: { id: "release-2" }, markdown: local });
+  expect(within(reading).getByRole("heading", { name: "Local release draft" })).toBeTruthy();
+
+  const raced = "# External change during save\n\nThe final check must preserve these bytes.\n";
+  const recovery = {
+    message: "The document changed while saving. Both versions were retained.",
+    editedPath: "C:\\repo\\notes\\Release.edited.md",
+    displacedPath: "C:\\repo\\notes\\Release.displaced.md",
+  };
+  repository.raceNextSave({ document: documentAt(release, "release-3", raced), recovery });
+  await user.click(screen.getByRole("button", { name: "Save note" }));
+  conflict = await screen.findByRole("dialog", { name: "Note revision conflict" });
+  expect(repository.writes).toHaveBeenCalledExactlyOnceWith({ checkoutId, path: release, expectedRevision: "release-2", markdown: local });
+  expect(conflict.querySelectorAll("pre")[0]?.textContent).toBe(local);
+  expect(conflict.querySelectorAll("pre")[1]?.textContent).toBe(raced);
+  expect(repository.drafts.get(release)?.markdown).toBe(local);
+  const displayedRecovery = conflict.textContent;
+
+  await user.click(within(conflict).getByRole("button", { name: "Load external version" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(view.state.doc.toString()).toBe(raced);
+  expect(within(reading).getByRole("heading", { name: "External change during save" })).toBeTruthy();
+  expect(within(reading).queryByRole("heading", { name: "Local release draft" })).toBeNull();
+  expect(tab("Release.md").queryByLabelText("Unsaved changes")).toBeNull();
+  expect(repository.drafts.has(release)).toBe(false);
+  expect(repository.recovered.get(recovery.editedPath)).toBe(local);
+  expect(repository.recovered.get(recovery.displacedPath)).toBe(raced);
+  expect(displayedRecovery).toContain(recovery.editedPath);
+  expect(displayedRecovery).toContain(recovery.displacedPath);
 });
