@@ -303,6 +303,7 @@ fn main() {
             note_runtime::read_repository_attachment,
             markdown_analysis_ipc::analyze_note_markdown,
             markdown_analysis_ipc::replace_note_property,
+            markdown_analysis_ipc::repair_note_wikilink,
             note_runtime::read_repository_markdown_draft,
             note_runtime::list_repository_markdown_drafts,
             note_runtime::save_repository_markdown_draft,

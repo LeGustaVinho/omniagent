@@ -51,7 +51,7 @@ type KnowledgeDialog =
   | { kind: "rename"; path: string }
   | { kind: "repositoryRename"; path: string; revision: string }
   | { kind: "rewrite"; path: string; destination: string; edits: RewrittenNote[] }
-  | { kind: "link"; from: string; link: NoteTarget; matches: NoteLocation[] }
+  | { kind: "link"; from: string; link: NoteTarget; matches: NoteLocation[]; sourceLine?: number }
   | { kind: "repositoryAttachment"; paths: string[]; label: string }
   | { kind: "attachment"; attachment: NoteAttachment };
 
@@ -235,6 +235,25 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const navigateLocation = ({ path, anchor }: NoteLocation) => {
     const targetSource = notes[path]?.content ?? "";
     open(path, anchor ? anchorLine(targetSource, anchor) : undefined, anchor);
+  };
+  const repairReference = async (proposal: Extract<KnowledgeDialog, { kind: "link" }>) => {
+    const current = simulated ? examples[proposal.from] : getNote(proposal.from);
+    if (!current) return;
+    const anchor = selectedAnchor.trim() || undefined;
+    try {
+      const markdown = simulated ? repairWikiAddress(current.content, proposal.link.raw, selection, anchor)
+        : await invoke<string>("repair_note_wikilink", {
+          markdown: current.content, reference: proposal.link.raw, sourceLine: proposal.sourceLine ?? null,
+          destination: selection, anchor: anchor ?? null,
+        });
+      if (!simulated && getNote(proposal.from)?.content !== current.content) {
+        setProblem("The note changed. Open the link again to review the current source.");
+        return;
+      }
+      update(proposal.from, markdown);
+      setStatus(`Updated reference in ${proposal.from}`);
+      closeDialog();
+    } catch (failure) { setProblem(String(failure)); }
   };
   const navigateLink = (from: string, link: NoteTarget) => {
     from = link.sourcePath ?? from;
@@ -558,15 +577,11 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         {selection && <label>Heading or block<input value={selectedAnchor} placeholder="Open note without a specific location"
           onChange={(event) => setSelectedAnchor(event.target.value)} /></label>}
         {selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()) && <p role="alert">The heading or block is unavailable in this note.</p>}
+        {problem && <p role="alert">{problem}</p>}
         <div className="file-dialog-footer">
           <button type="button" className="fw-btn fw-outlined" disabled={!selection || Boolean(selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()))}
             onClick={() => { navigateLocation({ path: selection, anchor: selectedAnchor.trim() || undefined }); closeDialog(); }}>Open note</button>
-          <button type="button" className="fw-btn fw-primary" disabled={!selection || Boolean(selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()))} onClick={() => {
-            const current = notes[dialog.from];
-            if (current) update(dialog.from, repairWikiAddress(current.content, dialog.link.raw, selection, selectedAnchor.trim() || undefined));
-            setStatus(`Updated reference in ${dialog.from}`);
-            closeDialog();
-          }}>Update link</button>
+          <button type="button" className="fw-btn fw-primary" disabled={!selection || Boolean(selectedAnchor && !anchorLine(notes[selection]?.content ?? "", selectedAnchor.trim()))} onClick={() => { void repairReference(dialog); }}>Update link</button>
         </div>
       </FileDialog>}
       {dialog?.kind === "repositoryRename" && <RepositoryNoteRename key={dialog.path} checkoutId={checkout.checkoutId}

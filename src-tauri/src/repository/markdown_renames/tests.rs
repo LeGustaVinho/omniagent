@@ -2,6 +2,40 @@ use std::process::Command;
 
 use super::*;
 
+#[test]
+fn repairs_only_the_reviewed_wikilink_and_retains_plugin_source() -> Result<()> {
+    let source = concat!(
+        "\u{feff}---\r\nkanban-plugin: board # comment\r\nsettings: '[[Old#Plan|Review]]'\r\n---\r\n\r\n",
+        "```dataview\r\nLIST FROM [[Old#Plan|Review]]\r\n```\r\n\r\n",
+        "%% kanban:settings\r\n{\"note\": \"[[Old#Plan|Review]]\"}\r\n%%\r\n\r\n",
+        "| Check |\r\n| --- |\r\n| [[Old#Plan\\|Review]] |\r\n\r\n- [/] [[Old#Plan|Review]] 📅 2026-11-25\r\n",
+    );
+    let line = source
+        .lines()
+        .position(|line| line.starts_with("| [["))
+        .unwrap() as u32
+        + 1;
+    let output = replace_wiki_note_reference(
+        source,
+        "Old#Plan|Review",
+        Some(line),
+        "docs/Café.md",
+        Some("Handoff"),
+    )?;
+    assert_eq!(
+        output,
+        source.replacen(
+            "[[Old#Plan\\|Review]]",
+            "[[/docs/Café.md#Handoff\\|Review]]",
+            1
+        )
+    );
+    assert!(
+        replace_wiki_note_reference(source, "Old#Plan|Review", None, "docs/Café.md", None).is_err()
+    );
+    Ok(())
+}
+
 const ORIGINAL: &str = "\u{feff}# Heading\r\n\r\nTarget paragraph ^anchor\r\n\r\n[Sibling](./Sibling.md)\r\n![[./cover.png]]\r\n[[#Heading]]\r\n";
 const INCOMING: &str = "---\r\nprivate-plugin-setting: '[[chapters/Old]]'\r\n---\r\n\r\n## 📚 Links\r\n\r\n[[chapters/Old#Heading|Label]]\r\n[Text](<chapters/Old.md#Heading> \"preserve title\")\r\n![[chapters/Old#^anchor]]\r\n\r\n| Reference |\r\n| --- |\r\n| [[chapters/Old\\|Cell label]] |\r\n\r\n`[[chapters/Old]]`\r\n\r\n%% [[chapters/Old]] %%\r\n\r\n```dataview\r\nLIST FROM [[chapters/Old]]\r\n```\r\n";
 
