@@ -308,6 +308,7 @@ fn start_turn(
             plugin_inventory: None,
             scoped_launch: None,
             candidate_review: None,
+            comparison: None,
             capability_scope: None,
             executable_revision: None,
             platform: None,
@@ -422,6 +423,7 @@ struct TurnExecution {
     plugin_inventory: Option<PluginInventory>,
     scoped_launch: Option<ScopedLaunchEvidence>,
     candidate_review: Option<MaterializedCandidate>,
+    comparison: Option<crate::workflows::comparison::ComparisonPin>,
     capability_scope: Option<(CapabilityScope, CheckoutLayout)>,
     executable_revision: Option<String>,
     platform: Option<ExecutionPlatform>,
@@ -597,11 +599,18 @@ impl TurnExecution {
             self.reject_dispatch(DispatchRejection::ProfileUnavailable)?;
             return Err(error);
         }
-        let registered = match self.app.block_on(repository::verify_checkout(
-            &self.store,
-            self.plan.run.checkout_id.clone(),
-            scope.checkout.clone(),
-        )) {
+        self.comparison = self.app.block_on(self.store.model_comparison_pin_for_run(self.plan.run.id.clone()))?;
+        let is_comparison = self.comparison.is_some();
+        let registered = if let Some(pin) = &self.comparison {
+            pin.verify_attempt(&self.plan).and_then(|()| pin.checkout())
+        } else {
+            self.app.block_on(repository::verify_checkout(
+                &self.store,
+                self.plan.run.checkout_id.clone(),
+                scope.checkout.clone(),
+            ))
+        };
+        let registered = match registered {
             Ok(checkout) => checkout,
             Err(error) => {
                 self.reject_dispatch(DispatchRejection::WorktreeUnavailable)?;
@@ -611,6 +620,7 @@ impl TurnExecution {
         };
         let (checkout, candidate_checkout) = self.isolate_candidate_review(registered)?;
         let is_candidate_review = candidate_checkout.is_some();
+        let is_isolated_read = is_comparison || is_candidate_review;
         scope.checkout.clone_from(&checkout.cwd);
         self.executable_revision = runner.executable_revision(&scope.executable);
         self.platform = runner.execution_platform();
@@ -639,7 +649,7 @@ impl TurnExecution {
         if self.plan.native_fork.is_some() {
             session.allow_native_fork_fallback();
         }
-        if self.native_suggestions && !adapter_route_unavailable(&self.plan.scope) {
+        if self.native_suggestions && !is_comparison && !adapter_route_unavailable(&self.plan.scope) {
             session.enable_native_suggestions();
         }
         session.set_checkout_root(&checkout.root);
@@ -649,13 +659,13 @@ impl TurnExecution {
             &checkout,
             scope.provider,
         ))?;
-        let omitted = if is_candidate_review {
+        let omitted = if is_isolated_read {
             std::mem::take(&mut review.approved)
         } else {
             Vec::new()
         };
         let bridge = bridge_executable
-            .filter(|_| !is_candidate_review)
+            .filter(|_| !is_isolated_read)
             .map(|executable| -> Result<_> {
                 let bridge = self.app.block_on(RunBridge::start_for_run(
                     &self.store,
@@ -673,8 +683,8 @@ impl TurnExecution {
             }
             Ok(None) => {
                 self.record_bridge_registration(Registration::Unavailable {
-                    reason: if is_candidate_review {
-                        "The OmniAgent MCP helper is disabled for isolated candidate review".into()
+                    reason: if is_isolated_read {
+                        "The OmniAgent MCP helper is disabled for the isolated read-only checkout".into()
                     } else {
                         "The selected runner has no MCP helper".into()
                     },
@@ -707,10 +717,16 @@ impl TurnExecution {
         for (entry, _) in omitted {
             launch.evidence.excluded.insert(
                 entry.id,
-                "Executable customizations are disabled for isolated candidate review".into(),
+                "Executable customizations are disabled for the isolated read-only checkout".into(),
             );
         }
         launch.evidence.candidate_checkout = candidate_checkout;
+        if let Some(pin) = &self.comparison {
+            launch.evidence.inputs.push(super::launch_scope::LaunchInput {
+                name: "Comparison context".into(),
+                contents: serde_json::json!({ "groupId": pin.group_id, "commit": pin.commit, "tree": pin.tree }).to_string(),
+            });
+        }
         if self.plan.native_goal_seed.is_some() {
             ensure!(
                 matches!(self.plan.intent, SessionIntent::Start),
@@ -877,7 +893,7 @@ impl TurnExecution {
             .app
             .block_on(self.store.has_yielding_wait(self.plan.run.id.clone()))?;
         if managed_writer
-            || is_candidate_review
+            || is_isolated_read
             || self.goal.is_some()
             || self.exiting()
             || self.downstream_requested
@@ -889,6 +905,9 @@ impl TurnExecution {
                 .confirm_quiescence()
                 .inspect_err(|_| self.failure.cause = Some(FailureCause::StopUnconfirmed))?;
             self.quiescence_confirmed = true;
+        }
+        if let Some(pin) = &self.comparison {
+            pin.checkout()?;
         }
         if managed_writer {
             self.failure.phase = FailurePhase::EvidenceCapture;
@@ -1404,6 +1423,9 @@ impl TurnExecution {
         checkout: &CheckoutLayout,
         runner: &dyn Runner,
     ) -> Result<bool> {
+        if let Some(pin) = &self.comparison {
+            pin.checkout()?;
+        }
         if let Some(allowance) = self.plan.native_subagent_limit {
             let matches = match &self.reported.delegation_controls {
                 Some(DelegationControls::CodexSessionTree {

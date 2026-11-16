@@ -2246,6 +2246,7 @@ mod tests {
     mod phase07_side_privacy;
 
     mod attachment_composer_acceptance;
+    mod comparison;
 
     use super::*;
     use crate::{

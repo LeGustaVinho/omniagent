@@ -185,8 +185,22 @@ pub(in crate::repository) struct ScratchGit {
 
 impl ScratchGit {
     pub(in crate::repository) fn new(common: &Path, base: &str) -> Result<Self> {
+        Self::initialize(common, base, tempfile::tempdir()?)
+    }
+
+    pub(in crate::repository) fn new_in(common: &Path, base: &str, storage: &Path) -> Result<Self> {
+        Self::initialize(
+            common,
+            base,
+            tempfile::Builder::new()
+                .prefix("comparison-")
+                .tempdir_in(storage)?,
+        )
+    }
+
+    fn initialize(common: &Path, base: &str, scratch: tempfile::TempDir) -> Result<Self> {
         let git = Self {
-            scratch: tempfile::tempdir()?,
+            scratch,
             executable: git_path()?,
         };
         let object_format = if base.len() == 64 { "sha256" } else { "sha1" };
@@ -227,6 +241,24 @@ impl ScratchGit {
             args.extend(["-p", parent]);
         }
         let commit = self.object_with_input(&args, Some(message))?;
+        self.checkout_commit(&commit, tree)
+    }
+
+    pub(in crate::repository) fn materialize_commit(
+        self,
+        commit: &str,
+    ) -> Result<(MaterializedCandidate, String)> {
+        validate_oid(commit)?;
+        ensure!(
+            self.object(&["rev-parse", "--verify", &format!("{commit}^{{commit}}")])? == commit,
+            "The comparison context must be an exact Git commit"
+        );
+        let tree = self.object(&["rev-parse", "--verify", &format!("{commit}^{{tree}}")])?;
+        let checkout = self.checkout_commit(commit, &tree)?;
+        Ok((checkout, tree))
+    }
+
+    fn checkout_commit(self, commit: &str, tree: &str) -> Result<MaterializedCandidate> {
         let roots = format!("{commit}\n");
         let pack = self.root().join(".git/objects/pack/candidate");
         self.run(
@@ -239,8 +271,8 @@ impl ScratchGit {
             Some(roots.as_bytes()),
         )?;
         fs::remove_file(self.root().join(".git/objects/info/alternates"))?;
-        self.run(&["update-ref", "--no-deref", "HEAD", &commit], None)?;
-        // The candidate test sees canonical Git blob bytes with no checkout filters.
+        self.run(&["update-ref", "--no-deref", "HEAD", commit], None)?;
+        // Isolated checkouts expose canonical Git blob bytes without checkout filters.
         let info = self.root().join(".git/info");
         fs::create_dir_all(&info)?;
         fs::write(

@@ -13,6 +13,7 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import { useGitSimulation } from "@/git-simulation";
 import { PipelineCatalog } from "@/pipeline-catalog";
 import { PipelineAuthoringEditor } from "@/workflow-authoring";
+import { WorkflowComparisons } from "@/workflow-comparison";
 import { deliveryBranch, deliveryCommitSha, deliveryMergeSha, deliveryRunId } from "@/tasks-demo-data";
 import {
   advancePipelineRun, beginPipelineRun, createDeliveryWorkflow, createStage, declineStage, interruptStage, resolveStage,
@@ -182,7 +183,13 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
   if (props.simulation) return <PreviewPipelinesWorkspace {...props} />;
   const draftId = props.target?.startsWith("authoring:") ? props.target.slice("authoring:".length) : undefined;
   return <div className="pipelines-workspace">
-    {draftId ? <PipelineAuthoringEditor {...props} draftId={draftId} /> : <RepositoryDeliveryWorkspace {...props} />}
+    {props.target === "compare" ? <>
+      <Button type="button" variant="ghost" className="self-start" onClick={() => props.openWorkspace("pipelines", "delivery")}>Back to pipelines</Button>
+      <WorkflowComparisons key={props.checkout.checkoutId} {...props} />
+    </> : draftId ? <PipelineAuthoringEditor {...props} draftId={draftId} /> : <>
+      <Button type="button" variant="outline" className="self-start" onClick={() => props.openWorkspace("pipelines", "compare")}>Compare models</Button>
+      <RepositoryDeliveryWorkspace {...props} />
+    </>}
   </div>;
 }
 

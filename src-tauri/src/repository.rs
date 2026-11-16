@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::{customizations, store::Store};
 
 mod candidates;
+pub(crate) mod comparison;
 pub mod delivery_history;
 pub mod destination_drift;
 pub mod documents;
@@ -141,6 +142,11 @@ fn persist_checkout(
     repository: CheckoutPaths,
     inventory: &customizations::CustomizationInventory,
 ) -> Result<ProjectCheckout> {
+    ensure!(
+        !db.query_row("SELECT EXISTS(SELECT 1 FROM model_comparison_groups WHERE comparison_checkout = ?1 COLLATE NOCASE)",
+            [&repository.checkout_root], |row| row.get::<_, bool>(0))?,
+        "Comparison checkouts are reserved for read-only model runs"
+    );
     let project_id = db.query_row(
         "INSERT INTO projects(id, git_common_dir, root) VALUES (?1, ?2, ?3)
              ON CONFLICT(git_common_dir) DO UPDATE SET root = excluded.root RETURNING id",

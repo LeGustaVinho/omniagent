@@ -104,6 +104,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/087-history-payload-deletion.sql"),
     include_str!("../migrations/088-workflow-authoring.sql"),
     include_str!("../migrations/089-native-conversation-compaction.sql"),
+    include_str!("../migrations/090-model-comparisons.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

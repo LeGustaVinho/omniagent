@@ -1,0 +1,64 @@
+use anyhow::Result;
+use omniagent::{
+    model_catalog::ModelSelection, providers::SessionMode, store::Store,
+    workflows::comparison::ModelComparison,
+};
+use tauri::{AppHandle, Manager, State};
+
+use super::{report, selected_scope};
+
+#[tauri::command]
+pub async fn comparison_source_commit(
+    store: State<'_, Store>,
+    project_id: String,
+    checkout_id: String,
+) -> Result<Option<String>, String> {
+    store
+        .comparison_source_commit(project_id, checkout_id)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn model_comparisons(
+    store: State<'_, Store>,
+    project_id: String,
+) -> Result<Vec<ModelComparison>, String> {
+    store.model_comparisons(project_id).await.map_err(report)
+}
+
+#[tauri::command]
+pub async fn start_model_comparison(
+    app: AppHandle,
+    store: State<'_, Store>,
+    project_id: String,
+    checkout_id: String,
+    commit: String,
+    prompt: String,
+    selections: Vec<ModelSelection>,
+) -> Result<ModelComparison, String> {
+    async {
+        let mut scopes = Vec::with_capacity(selections.len());
+        for selected in selections {
+            scopes.push(
+                selected_scope(
+                    &store,
+                    checkout_id.clone(),
+                    selected,
+                    None,
+                    SessionMode::ReadOnly,
+                )
+                .await?,
+            );
+        }
+        let storage = app
+            .path()
+            .app_local_data_dir()?
+            .join("comparison-checkouts");
+        store
+            .start_model_comparison(project_id, checkout_id, commit, prompt, scopes, storage)
+            .await
+    }
+    .await
+    .map_err(report)
+}

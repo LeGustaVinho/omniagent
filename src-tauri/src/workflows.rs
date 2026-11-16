@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 mod approval;
 mod artifacts;
 pub mod authoring;
+pub mod comparison;
 mod builtin;
 mod execution;
 #[cfg(test)]

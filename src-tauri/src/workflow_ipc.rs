@@ -17,6 +17,7 @@ use tauri::{Manager, State};
 use crate::conversation_runtime::selected_scope;
 
 pub mod authoring;
+pub mod comparison;
 
 fn report(error: anyhow::Error) -> String {
     diagnostics::preview(&error.to_string())
