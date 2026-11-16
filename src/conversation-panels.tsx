@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { IDockviewPanelProps } from "dockview-react";
 import { Activity, ArrowDown, ArrowUp, MessageSquare, Plus, RotateCcw, Search, Target } from "lucide-react";
 import { Dialog } from "radix-ui";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { AdmissionBlocker } from "@/bindings/AdmissionBlocker";
 import type { Job } from "@/bindings/Job";
@@ -28,6 +28,7 @@ import { ConversationRow } from "@/conversation-menu";
 import { WorktreeEvidence } from "@/worktree-evidence";
 import { openConversation } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
+import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import "./conversation.css";
 
 const draftWrites = new Map<string, Promise<void>>();
@@ -312,6 +313,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
   const busy = queued || live || isLiveRun(attempt) || activity.savedQuestions.length > 0;
   const [inspectedRun, setInspectedRun] = useState<string>();
   const activityButton = useRef<HTMLButtonElement>(null);
+  const inspector = useContext(RunInspectorNavigation);
   const showingActivity = visible && run && inspectedRun === run.id;
   useEffect(() => {
     if (!visible) setInspectedRun(undefined);
@@ -440,8 +442,13 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
         <div className="ml-auto flex items-center gap-1">
         <button type="button" className="conv-quiet-button" aria-expanded={showSideQuestions}
           onClick={() => setShowSideQuestions(!showSideQuestions)}>Side questions</button>
-        {run && <button ref={activityButton} type="button" className="conv-quiet-button" aria-expanded={Boolean(showingActivity)}
-          onClick={() => showingActivity ? closeActivity() : setInspectedRun(run.id)}>
+        {run && <button ref={activityButton} type="button" className="conv-quiet-button"
+          aria-expanded={inspector ? inspector.activeRunId === run.id : Boolean(showingActivity)}
+          onClick={() => {
+            if (inspector) inspector.openActivity(run.id, conversationId);
+            else if (showingActivity) closeActivity();
+            else setInspectedRun(run.id);
+          }}>
           <Activity aria-hidden /> Activity
         </button>}
         <ConversationHistoryControls conversationId={conversationId} history={history.data}

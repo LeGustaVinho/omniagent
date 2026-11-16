@@ -103,6 +103,7 @@ struct Turn {
     interrupted: bool,
     saw_final_message: bool,
     last_parent_text: Option<String>,
+    last_parent_item_id: Option<String>,
     plan_review: Option<ProviderLocation>,
     message_ids: HashMap<Option<String>, String>,
     tool_evidence: HashMap<(Option<String>, String), ProviderEventData>,
@@ -362,6 +363,8 @@ impl ClaudeSession {
         if !text.is_empty() && parent.is_none() {
             turn.saw_final_message = true;
             turn.last_parent_text = Some(text.clone());
+            turn.last_parent_item_id =
+                string(&frame["message"], "id").or_else(|| string(frame, "uuid"));
         }
         for block in content.iter().filter(|block| block["type"] == "tool_use") {
             let evidence = match block["name"].as_str() {
@@ -583,6 +586,17 @@ impl ClaudeSession {
                     frame,
                     ProviderEventData::AssistantMessage { text: text.clone() },
                 ));
+            }
+            if let Some(text) = &final_text {
+                let mut event = self.event(
+                    frame,
+                    ProviderEventData::AssistantFinal { text: text.clone() },
+                );
+                if turn.last_parent_text.as_ref() == Some(text) {
+                    event.location.item_id =
+                        turn.last_parent_item_id.clone().or(event.location.item_id);
+                }
+                reported.push(event);
             }
             if let Some(location) = turn.plan_review
                 && let Some(text) = final_text
@@ -1068,6 +1082,38 @@ mod tests {
             }),
         )?;
         Ok(adapter)
+    }
+
+    #[test]
+    fn completed_result_identifies_the_observed_final_response() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut adapter = session(temp.path())?;
+        for (id, text) in [("working", "Checking"), ("answer", "Done")] {
+            let update = receive(
+                &mut *adapter,
+                json!({
+                    "type":"assistant", "session_id":"session", "message":{
+                        "id":id, "content":[{"type":"text","text":text}]
+                    }
+                }),
+            )?;
+            assert!(
+                update
+                    .events
+                    .iter()
+                    .all(|event| !matches!(event.data, ProviderEventData::AssistantFinal { .. }))
+            );
+        }
+        let update = receive(
+            &mut *adapter,
+            json!({
+                "type":"result", "subtype":"success", "is_error":false, "session_id":"session",
+                "uuid":"result", "result":"Done"
+            }),
+        )?;
+        assert!(update.events.iter().any(|event| event.location.item_id.as_deref() == Some("answer") &&
+            matches!(&event.data, ProviderEventData::AssistantFinal { text } if text == "Done")));
+        Ok(())
     }
 
     #[test]

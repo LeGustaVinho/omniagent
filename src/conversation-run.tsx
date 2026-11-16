@@ -12,19 +12,25 @@ import { ConversationInventory } from "@/conversation-inventory";
 import { ConversationProfile } from "@/conversation-profile";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
 import { ConversationQuestionTimeline } from "@/conversation-question-timeline";
+import {
+  ConversationResponseEvidence, cloneTurnResponseEvidence, newTurnResponseEvidence, recordResponseEvidence,
+  type ResponseObservation, type TurnResponseEvidence,
+} from "@/conversation-response-evidence";
 import { ConversationSubagentQuotaPanel } from "@/subagent-quota";
 import { AttemptSubagentAudit } from "@/subagent-audit-controls";
 
 type EventData =
   | { type: "dispatch_submitted"; dispatch_id: string }
   | { type: "context_read"; path: string; tool: string }
-  | { type: "assistant_delta" | "assistant_message" | "plan_proposed"; text: string }
+  | ResponseObservation
+  | { type: "plan_proposed"; text: string }
   | { type: "error"; message: string }
   | { type: "tool"; name: string; phase: string }
   | { type: "runtime_inspected" }
   | { type: "downstream_wait_requested"; wait_id: string }
   | { type: "downstream_continuation"; wait_id: string; parent_run_id: string }
   | { type: "reasoning"; text: string; summary: boolean }
+  | { type: "reasoning_usage"; tokens: number }
   | { type: "usage"; input: number | null; output: number | null; cached_input: number | null }
   | { type: "context_window_usage"; used: number; size: number }
   | { type: "subagent_audit_gap"; report: SubagentAuditGap }
@@ -57,6 +63,8 @@ type Projection = {
   delegation: Delegation;
   auditGaps: SubagentAuditGap[];
   reasoning: Extract<EventData, { type: "reasoning" }>[];
+  reasoningTokens?: number;
+  responses: TurnResponseEvidence;
   tools: Extract<EventData, { type: "tool" }>[];
   promptSubmitted: boolean;
   fileReads: Extract<EventData, { type: "context_read" }>[];
@@ -65,6 +73,7 @@ type Projection = {
 };
 const emptyProjection: Projection = {
   cursor: "0", streamed: "", final: "", plan: "", error: "", reasoning: [], tools: [],
+  responses: newTurnResponseEvidence(),
   delegation: { children: {}, parentActivity: {} }, auditGaps: [],
   promptSubmitted: false, fileReads: [],
 };
@@ -97,6 +106,7 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
       const current = {
         ...prior,
         reasoning: [...prior.reasoning],
+        responses: cloneTurnResponseEvidence(prior.responses),
         tools: [...prior.tools],
         fileReads: [...prior.fileReads],
         delegation: { children: { ...prior.delegation.children }, parentActivity: { ...prior.delegation.parentActivity } },
@@ -115,9 +125,13 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
           if (data.type === "context_read" && current.promptSubmitted) current.fileReads.push(data);
           if (data.type === "assistant_delta") current.streamed += data.text;
           if (data.type === "assistant_message") current.final += data.text;
+          if (data.type === "assistant_delta" || data.type === "assistant_message" || data.type === "assistant_final") {
+            recordResponseEvidence(current.responses, data, event.location);
+          }
           if (data.type === "plan_proposed") current.plan = data.text;
           if (data.type === "error") current.error = data.message;
           if (data.type === "reasoning") current.reasoning.push(data);
+          if (data.type === "reasoning_usage") current.reasoningTokens = data.tokens;
           if (data.type === "tool") current.tools.push(data);
           if (data.type === "runtime_inspected") current.tools.push({ type: "tool", name: "inspect_omniagent", phase: "Scope inspected" });
           if (data.type === "downstream_wait_requested") current.tools.push({ type: "tool", name: "wait_for_jobs", phase: `Wait ${data.wait_id} recorded` });
@@ -163,6 +177,7 @@ export function useConversationRun(conversationId: string, run: RunRecord | null
       if (live) void inputs.refetch();
       void saved.refetch();
       void queryClient.invalidateQueries({ queryKey: ["conversation-run", runId, "question-timeline"] });
+      void queryClient.invalidateQueries({ queryKey: ["conversation-run", runId, "approval-evidence"] });
       void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-job"] });
       void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-run"] });
       void queryClient.invalidateQueries({ queryKey: ["project-job-queue"] });
@@ -232,7 +247,6 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
     refetchInterval: showInput && live ? 400 : false,
     queryFn: () => invoke<ConversationInput | null>("conversation_input", { conversationId, runId: run.id }),
   });
-  const usage = projection?.usage;
   return (
     <aside className={embedded ? "conv-activity conv-activity-embedded" : "conv-activity"} aria-label="Conversation activity" onKeyDown={(event) => {
       if (event.key !== "Escape") return;
@@ -249,15 +263,6 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
       <dl>
         <dt>Execution</dt><dd role="status">{labels[run.status]}</dd>
         <dt>Run ID</dt><dd className="break-all font-mono">{run.id}</dd>
-        {usage && <>
-          <dt>Input tokens</dt><dd>{usage.input?.toLocaleString() ?? "Unavailable"}</dd>
-          <dt>Output tokens</dt><dd>{usage.output?.toLocaleString() ?? "Unavailable"}</dd>
-          <dt>Cached input</dt><dd>{usage.cached_input?.toLocaleString() ?? "Unavailable"}</dd>
-        </>}
-        {projection?.contextWindow && <>
-          <dt>Context tokens</dt>
-          <dd>{projection.contextWindow.used.toLocaleString()} / {projection.contextWindow.size.toLocaleString()}</dd>
-        </>}
       </dl>
       {projection && <ConversationChildren delegation={projection.delegation} />}
       <ConversationSubagentQuotaPanel conversationId={conversationId} runId={run.id} live={live} />
@@ -272,11 +277,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
         <summary>Reported file reads after input</summary>
         <ol>{projection?.fileReads.map((read, index) => <li key={index} className="break-all text-xs">{read.path} · {read.tool}</li>)}</ol>
       </details>}
-      {Boolean(projection?.reasoning.length) && <details>
-        <summary>Reported reasoning</summary>
-        <ol>{projection?.reasoning.map((entry, index) =>
-          <li key={index}><small>{entry.summary ? "Summary" : "Provider reasoning"}</small><p>{entry.text}</p></li>)}</ol>
-      </details>}
+      <ConversationResponseEvidence conversationId={conversationId} runId={run.id} live={live} evidence={projection} />
       <ConversationInventory conversationId={conversationId} runId={run.id} />
       <ConversationProfile projectId={run.projectId} conversationId={conversationId} runId={run.id} live={live} />
       <Button type="button" variant="outline" aria-expanded={showInput} onClick={() => setShowInput((visible) => !visible)}>Exact input</Button>

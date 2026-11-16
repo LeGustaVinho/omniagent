@@ -24,6 +24,9 @@ use crate::{
     store::{DraftKey, Store},
 };
 
+mod approval_evidence;
+pub use approval_evidence::{ApprovalDelivery, ConversationApprovalEvidence};
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -2533,6 +2536,11 @@ mod tests {
                 )
                 .await?;
         }
+        let pending = store.conversation_approvals(chat.id.clone(), first.id.clone()).await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].delivery, ApprovalDelivery::Pending);
+        assert_eq!(pending[0].operation, "shell");
+        assert!(store.conversation_approvals(chat.id.clone(), second.id.clone()).await?.is_empty());
         assert!(
             store
                 .prepare_permission_decision(
@@ -2591,6 +2599,12 @@ mod tests {
             )
             .await?;
         store.recover_agent_attempts_after_restart().await?;
+        let denied = store.conversation_approvals(chat.id.clone(), first.id.clone()).await?;
+        assert_eq!(denied[0].decision, Some(ApprovalDecision::Deny));
+        assert_eq!(denied[0].delivery, ApprovalDelivery::Submitted);
+        let unconfirmed = store.conversation_approvals(other.id, second.id.clone()).await?;
+        assert_eq!(unconfirmed[0].decision, Some(ApprovalDecision::Cancel));
+        assert_eq!(unconfirmed[0].delivery, ApprovalDelivery::Unconfirmed);
         assert!(
             store
                 .prepare_permission_decision(

@@ -446,9 +446,15 @@ pub enum ProviderEventData {
     AssistantMessage {
         text: String,
     },
+    AssistantFinal {
+        text: String,
+    },
     Reasoning {
         text: String,
         summary: bool,
+    },
+    ReasoningUsage {
+        tokens: u64,
     },
     Usage {
         input: Option<u64>,

@@ -220,6 +220,8 @@ impl Configuration {
 
 struct Turn {
     text: String,
+    response_item_id: Option<String>,
+    mixed_response: bool,
     cancel_requested: bool,
     tools: HashMap<String, ReportedTool>,
     asked_for_plan: bool,
@@ -578,7 +580,20 @@ impl AcpSession {
                     source: super::planning::PlanSource::AntigravityPlanCommand,
                 }));
             }
-            result.push(self.event(ProviderEventData::AssistantMessage { text: turn.text }));
+            let final_response =
+                (outcome == TurnOutcome::Completed && !turn.mixed_response).then(|| {
+                    let mut event = self.event(ProviderEventData::AssistantFinal {
+                        text: turn.text.clone(),
+                    });
+                    event.location.item_id = turn.response_item_id.clone();
+                    event
+                });
+            let mut message = self.event(ProviderEventData::AssistantMessage { text: turn.text });
+            if !turn.mixed_response {
+                message.location.item_id = turn.response_item_id;
+            }
+            result.push(message);
+            result.extend(final_response);
         }
         result.push(self.event(ProviderEventData::TurnFinished { outcome }));
         events(result)
@@ -671,6 +686,7 @@ impl AcpSession {
                     self.update_diagnostic(update, "ACP tool update omitted its tool call ID")
                 );
             };
+            turn.mixed_response |= !turn.text.is_empty();
             let tool = turn.tools.entry(id.clone()).or_default();
             if let Some(kind) = string(update, "kind") {
                 tool.kind = Some(kind);
@@ -724,6 +740,12 @@ impl AcpSession {
                         self.update_diagnostic(update, "ACP message update omitted its text")
                     );
                 };
+                let item_id = string(update, "messageId");
+                if turn.text.is_empty() {
+                    turn.response_item_id = item_id;
+                } else if turn.response_item_id != item_id {
+                    turn.mixed_response = true;
+                }
                 turn.text.push_str(&text);
                 ProviderEventData::AssistantDelta { text }
             }
@@ -944,6 +966,8 @@ impl CliSession for AcpSession {
         )?;
         self.turn = Some(Turn {
             text: String::new(),
+            response_item_id: None,
+            mixed_response: false,
             cancel_requested: false,
             tools: HashMap::new(),
             asked_for_plan,
@@ -1305,10 +1329,38 @@ mod tests {
         );
         assert_eq!(
             done.events[1].data,
+            ProviderEventData::AssistantFinal {
+                text: "success".into()
+            }
+        );
+        assert_eq!(
+            done.events[2].data,
             ProviderEventData::TurnFinished {
                 outcome: TurnOutcome::Completed
             }
         );
+        let prompt = session.send(TurnInput {
+            text: "Mixed stream".into(),
+            message_id: "mixed".into(),
+            attachments: Vec::new(),
+        })?;
+        let prompt: Value = serde_json::from_slice(prompt.outbound[0].as_bytes())?;
+        for (id, text) in [("progress", "Checking "), ("answer", "ready")] {
+            receive(
+                &mut *session,
+                json!({"method":"session/update","params":{
+                    "sessionId":"acp-session","update":{"sessionUpdate":"agent_message_chunk",
+                        "messageId":id,"content":{"type":"text","text":text}}
+                }}),
+            )?;
+        }
+        let mixed = receive(
+            &mut *session,
+            json!({"id":prompt["id"],"result":{"stopReason":"end_turn"}}),
+        )?;
+        assert!(matches!(mixed.events.as_slice(), [message, terminal]
+            if matches!(&message.data, ProviderEventData::AssistantMessage { text } if text == "Checking ready")
+                && matches!(terminal.data, ProviderEventData::TurnFinished { outcome: TurnOutcome::Completed })));
         Ok(())
     }
 

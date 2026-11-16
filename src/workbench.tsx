@@ -14,6 +14,7 @@ import { GitSimulationProvider } from "@/git-simulation";
 import { RunInspector, SimulationDiagnostics } from "@/inspection-panel";
 import { InspectorTabs } from "@/inspector-tabs";
 import { useRunSubscription } from "@/run-projection";
+import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import {
   exampleCheckout, nextDeliveryStep, scenarios,
   type DeliveryAction, type DeliveryStep, type ScenarioId, type SimulationSession, type WorkspaceId, type WorkspaceProps,
@@ -155,6 +156,11 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
     function showSide(next: SidePane) {
       const active = document.activeElement;
       if (active instanceof HTMLElement && !active.closest(".work-inspector")) sideTrigger.current = active;
+      const existing = simulation ? previewSide : realSide;
+      if (next.type === "activity" && existing?.type === "activity" && next.runId === existing.runId) {
+        requestAnimationFrame(() => document.querySelector<HTMLElement>('.work-inspector [aria-label="Close activity"]')?.focus());
+        return;
+      }
       setSide(next);
     }
     return {
@@ -240,7 +246,9 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
         </aside>
         <div className="work-decks">
           <div className="work-deck" hidden={Boolean(preview)}>
-            <WorkspaceViews nav={realNavigation} context={real} sidebar={!preview && sidebar} onSidebarChange={changeSidebar} compact={compact} />
+            <RunInspectorNavigation.Provider value={{ openActivity: real.openActivity, activeRunId: realSide?.type === "activity" ? realSide.runId : undefined }}>
+              <WorkspaceViews nav={realNavigation} context={real} sidebar={!preview && sidebar} onSidebarChange={changeSidebar} compact={compact} />
+            </RunInspectorNavigation.Provider>
           </div>
           {preview && simulated && <div className="work-deck" key={"simulation-workspaces:" + preview.epoch}>
             <WorkspaceViews nav={preview.navigation} context={simulated} sidebar={sidebar} onSidebarChange={changeSidebar}

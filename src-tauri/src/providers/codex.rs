@@ -1209,7 +1209,14 @@ impl CodexSession {
         let mut event = self.event(data);
         event.location.turn_id = string(params, "turnId").or(event.location.turn_id);
         event.location.item_id = string(params, "itemId");
-        Ok(self.events(vec![event]))
+        let usage = (method == "thread/tokenUsage/updated")
+            .then(|| params["tokenUsage"]["last"]["reasoningOutputTokens"].as_u64())
+            .flatten()
+            .map(|tokens| ProviderEvent {
+                location: event.location.clone(),
+                data: ProviderEventData::ReasoningUsage { tokens },
+            });
+        Ok(self.events(std::iter::once(event).chain(usage).collect()))
     }
 
     fn goal_notification(&self, method: &str, params: &Value) -> Result<AdapterUpdate> {
@@ -1344,6 +1351,13 @@ impl CodexSession {
             _ => return Ok(AdapterUpdate::default()),
         };
         let mut events = vec![event(data)];
+        if let ProviderEventData::AssistantMessage { text } = &events[0].data
+            && item["phase"].as_str() == Some("final_answer")
+        {
+            events.push(event(ProviderEventData::AssistantFinal {
+                text: text.clone(),
+            }));
+        }
         if kind == "commandExecution"
             && completed
             && item["status"] == "completed"
@@ -2895,6 +2909,48 @@ mod tests {
             reasoning.events[0].data,
             ProviderEventData::Reasoning { summary: true, .. }
         ));
+        let commentary = inbound(
+            &mut *session,
+            json!({"method":"item/completed","params":{
+                "threadId":"session","turnId":"turn","item":{
+                    "id":"progress","type":"agentMessage","phase":"commentary","text":"Checking"
+                }
+            }}),
+        )?;
+        assert!(matches!(commentary.events.as_slice(), [event] if
+            matches!(event.data, ProviderEventData::AssistantMessage { .. })));
+        let final_response = inbound(
+            &mut *session,
+            json!({"method":"item/completed","params":{
+                "threadId":"session","turnId":"turn","item":{
+                    "id":"response","type":"agentMessage","phase":"final_answer","text":"Final answer"
+                }
+            }}),
+        )?;
+        assert_eq!(
+            final_response.events[1].location.item_id.as_deref(),
+            Some("response")
+        );
+        assert_eq!(
+            final_response.events[1].data,
+            ProviderEventData::AssistantFinal {
+                text: "Final answer".into()
+            }
+        );
+        let usage = inbound(
+            &mut *session,
+            json!({"method":"thread/tokenUsage/updated","params":{
+                "threadId":"session","turnId":"turn","tokenUsage":{
+                    "last":{"inputTokens":13,"outputTokens":8,"reasoningOutputTokens":6},
+                    "total":{"reasoningOutputTokens":90}
+                }
+            }}),
+        )?;
+        assert_eq!(usage.events[1].location.turn_id.as_deref(), Some("turn"));
+        assert_eq!(
+            usage.events[1].data,
+            ProviderEventData::ReasoningUsage { tokens: 6 }
+        );
         let children = inbound(
             &mut *session,
             json!({"method":"item/completed","params":{

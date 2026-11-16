@@ -548,6 +548,15 @@ pub struct ConversationPage {
 }
 
 #[tauri::command]
+pub async fn conversation_approvals(
+    store: State<'_, Store>,
+    conversation_id: String,
+    run_id: String,
+) -> Result<Vec<omniagent::conversations::ConversationApprovalEvidence>, String> {
+    store.conversation_approvals(conversation_id, run_id).await.map_err(ui_error)
+}
+
+#[tauri::command]
 pub async fn conversation_events(
     store: State<'_, Store>,
     conversation_id: String,
@@ -566,7 +575,12 @@ pub async fn conversation_events(
     let events = rows
         .into_iter()
         .filter(|row| {
-            !matches!(row.event.data, ProviderEventData::ContextRead { .. })
+            !matches!(
+                row.event.data,
+                ProviderEventData::ContextRead { .. }
+                    | ProviderEventData::AssistantFinal { .. }
+                    | ProviderEventData::ReasoningUsage { .. }
+            )
                 || row.source == omniagent::dispatch::EventSource::Provider
         })
         .map(|row| row.event)
@@ -577,10 +591,12 @@ pub async fn conversation_events(
                     | ProviderEventData::DispatchSubmitted { .. }
                     | ProviderEventData::ContextRead { .. }
                     | ProviderEventData::AssistantMessage { .. }
+                    | ProviderEventData::AssistantFinal { .. }
                     | ProviderEventData::PlanProposed { .. }
                     | ProviderEventData::Error { .. }
                     | ProviderEventData::Tool { .. }
                     | ProviderEventData::Reasoning { .. }
+                    | ProviderEventData::ReasoningUsage { .. }
                     | ProviderEventData::Usage { .. }
                     | ProviderEventData::ContextWindowUsage { .. }
                     | ProviderEventData::RuntimeInspected { .. }
