@@ -23,6 +23,8 @@ pub(crate) struct WorkflowJobInput {
     pub artifacts: NodeInputs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_revision_request: Option<super::WorkflowPlanRevisionRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<super::comparison::ComparisonSelection>,
 }
 
 pub(crate) fn stage_job_input(

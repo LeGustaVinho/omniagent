@@ -199,6 +199,7 @@ pub struct DeliveryAgentInput {
     inputs: NodeInputs,
     selection: ModelSelection,
     effort: Option<String>,
+    comparison: Option<omniagent::workflows::comparison::ComparisonSelection>,
 }
 
 #[tauri::command]
@@ -214,8 +215,9 @@ pub async fn submit_repository_delivery_agent(
             "review-candidate" => "Review the selected candidate tree for correctness and evaluate the pinned unit criteria.",
             _ => anyhow::bail!("select an agent stage of the built-in delivery"),
         };
+        let comparison = input.comparison.clone();
         let submission = delivery_agent_submission(&store, input, instructions.into()).await?;
-        store.submit_workflow_agent(submission).await
+        store.submit_workflow_agent_with_comparison(submission, comparison).await
     }.await.map_err(report)
 }
 
@@ -310,6 +312,7 @@ pub async fn request_repository_plan_revision(
                 inputs: NodeInputs::from([("context".into(), input.context_id)]),
                 selection: input.selection,
                 effort: input.effort,
+                comparison: None,
             },
             String::new(),
         )

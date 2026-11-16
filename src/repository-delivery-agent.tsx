@@ -11,6 +11,7 @@ import {
 } from "@/repository-delivery-model";
 import { useTaskAssignments } from "@/task-assignment";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { ReviewComparisonInputs, SavedComparisonInputs, type ComparisonSelection } from "@/workflow-comparison-selection";
 
 type PlanRevisionSource = { sourceAttemptId: string; proposalSequence: string; expectedPlanRevision: string | null };
 
@@ -29,6 +30,7 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
   const [selection, setSelection] = useState<DeliveryModelChoice>(null);
   const [revisionSource, setRevisionSource] = useState<PlanRevisionSource>();
   const [feedback, setFeedback] = useState("");
+  const [comparison, setComparison] = useState<ComparisonSelection>();
   const attempt = job?.latestAttempt;
   const active = Boolean(job && (
     (!attempt && job.queueState === "queued") ||
@@ -58,6 +60,7 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
         Open {label.toLowerCase()} attempt
       </Button>}
     </div>}
+    {job && nodeId === "review-plan" && <SavedComparisonInputs key={job.id} projectId={scope.projectId} jobId={job.id} openActivity={openActivity} />}
     {planRevision && !active && attempt?.status === "succeeded" && !revising &&
       <Button type="button" variant="outline" disabled={actions.busy}
         onClick={() => setRevisionSource(planRevision)}>Request plan revision</Button>}
@@ -72,6 +75,7 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
         {ready ? "Model from project defaults" : `Project model · ${projectDefault.modelId} · ${loadingOptions ? "Checking availability" : "Unavailable in current profiles"}`}
       </p>}
       {assignments.error && <p role="alert">{String(assignments.error)}</p>}
+      {nodeId === "review-plan" && <ReviewComparisonInputs projectId={scope.projectId} selection={comparison} onChange={setComparison} />}
       {revising && revisionSource ? <div className="pipeline-form pipeline-stack">
         <label className="pipeline-stack">
           Feedback for proposal {revisionSource.proposalSequence}
@@ -93,7 +97,9 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
         </div>
       </div> : <Button type="button" disabled={!ready || actions.busy}
         onClick={() => actions.execute(() => invoke("submit_repository_delivery_agent", {
-          input: { ...scope, nodeId, unitId, inputs, selection: effectiveSelection, effort: null },
+          input: { ...scope, nodeId, unitId, inputs, selection: effectiveSelection, effort: null,
+            ...(nodeId === "review-plan" && comparison ? { comparison } : {}),
+          },
         }))}>
         {job ? "Queue another attempt" : `Queue ${label.toLowerCase()}`}
       </Button>}

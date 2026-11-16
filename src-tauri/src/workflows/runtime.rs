@@ -165,17 +165,25 @@ impl Store {
             .await
     }
 
+    pub async fn submit_workflow_agent_with_comparison(
+        &self,
+        submission: WorkflowAgentSubmission,
+        comparison: Option<super::comparison::ComparisonSelection>,
+    ) -> Result<Job> {
+        self.submit_workflow_agent_inner(submission, None, false, comparison).await
+    }
+
     pub(super) async fn submit_workflow_agent_with_revision(
         &self,
         submission: WorkflowAgentSubmission,
         plan_revision_request: Option<super::WorkflowPlanRevisionRequest>,
     ) -> Result<Job> {
-        self.submit_workflow_agent_inner(submission, plan_revision_request, false).await
+        self.submit_workflow_agent_inner(submission, plan_revision_request, false, None).await
     }
 
     pub(crate) async fn submit_workflow_checklist_agent(&self, submission: WorkflowAgentSubmission) -> Result<Job> {
         ensure!(submission.input.target.is_some(), "checklist execution requires a task run target");
-        self.submit_workflow_agent_inner(submission, None, true).await
+        self.submit_workflow_agent_inner(submission, None, true, None).await
     }
 
     async fn submit_workflow_agent_inner(
@@ -183,6 +191,7 @@ impl Store {
         submission: WorkflowAgentSubmission,
         plan_revision_request: Option<super::WorkflowPlanRevisionRequest>,
         checklist_execution: bool,
+        comparison: Option<super::comparison::ComparisonSelection>,
     ) -> Result<Job> {
         let WorkflowAgentSubmission {
             project_id,
@@ -203,6 +212,8 @@ impl Store {
             )
             .await?;
         let planning_route = input.pinned.as_ref().map(|(_, route)| *route);
+        ensure!(comparison.is_none() || (node.definition.kind == super::BuiltinNode::ReviewPlan && scope.mode == SessionMode::ReadOnly),
+            "Comparison responses require a read-only plan review stage");
         let qualified = match (node.definition.executor, scope.mode) {
             (Executor::PlanAgent, SessionMode::Plan) => true,
             (Executor::PlanAgent, SessionMode::ReadOnly) => {
@@ -365,6 +376,7 @@ impl Store {
                 unit_id,
                 artifacts,
                 plan_revision_request,
+                comparison,
             },
         )
         .await

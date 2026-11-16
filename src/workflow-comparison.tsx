@@ -7,17 +7,9 @@ import { Button } from "@/components/ui/button";
 import { sameModelSelection, useLiveModelOptions } from "@/live-models";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { ComparisonCandidateOutcome, comparisonOutcome, type CandidateOutcome } from "@/workflow-comparison-outcomes";
+import type { ComparisonGroup as Comparison } from "@/workflow-comparison-selection";
+import { ComparisonSyntheses } from "@/workflow-comparison-synthesis";
 
-type Candidate = {
-  selection: ModelSelection;
-  jobId: string;
-  runId: string | null;
-  conversationId: string | null;
-  dispatchId: string | null;
-  state: string;
-};
-
-type Comparison = { id: string; commit: string; tree: string; prompt: string; candidates: Candidate[] };
 type Environment = {
   jobId: string;
   dispatchId: string;
@@ -114,6 +106,8 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
           {!candidate.runId && openQueueJob && <Button type="button" variant="outline" onClick={() => openQueueJob(candidate.jobId)}>Open queued job</Button>}
         </li>)}
       </ol>
+      <ComparisonSyntheses key={result.id} projectId={projectId} group={result} outcomes={outcomes.data} options={modelsQuery.options}
+        openActivity={openActivity} openQueueJob={openQueueJob} />
     </section>}
   </section>;
 }

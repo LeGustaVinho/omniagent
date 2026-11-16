@@ -229,6 +229,7 @@ impl Store {
                     unit_id: None,
                     artifacts: inputs,
                     plan_revision_request: None,
+                    comparison: None,
                 };
                 let job = queue_pipeline_command(
                     &tx,

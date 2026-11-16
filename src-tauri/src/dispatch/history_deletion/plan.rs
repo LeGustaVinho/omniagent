@@ -58,6 +58,7 @@ fn message(db: &Connection, plan: &mut DeletionPlan, owner: &str, revision: &str
             derivatives.synthetic_input_runs.len(),
         );
         expand_sources(db, &mut derivatives)?;
+        expand_comparison_runs(db, &mut derivatives)?;
         expand_summary_runs(db, &mut derivatives, cascade)?;
         if previous
             == (
@@ -186,6 +187,21 @@ fn expand_sources(db: &Connection, plan: &mut DeletionPlan) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn expand_comparison_runs(db: &Connection, plan: &mut DeletionPlan) -> Result<()> {
+    let jobs = ids(db,
+        "SELECT DISTINCT input.job_id FROM model_comparison_inputs input
+         WHERE input.response_revision_id IN (SELECT value FROM json_each(?1)) OR EXISTS (
+             SELECT 1 FROM dispatch_lineage_messages source WHERE source.dispatch_id = input.source_dispatch_id
+                AND source.revision_id IN (SELECT value FROM json_each(?1))
+         )",
+        [serde_json::to_string(&plan.revisions)?])?;
+    plan.synthetic_input_runs.extend(ids(db,
+        "SELECT run_id FROM job_attempts WHERE job_id IN (SELECT value FROM json_each(?1))",
+        [serde_json::to_string(&jobs)?])?);
+    plan.jobs.extend(jobs);
     Ok(())
 }
 

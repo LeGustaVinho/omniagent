@@ -236,9 +236,14 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
     Ok(())
 }
 
+// Behavioral cases adapted from MCO tests/test_invocation_runtime.py at
+// https://github.com/mco-org/mco/blob/7ce642193a127f3fac9c68fb10c5d0198d4e837e/tests/test_invocation_runtime.py#L348-L395
+// MCO's MIT notice is retained in tests/fixtures/LICENSE-MCO.
 #[tokio::test]
 async fn comparison_preserves_output_order_and_success_after_another_candidate_times_out()
 -> Result<()> {
+    use crate::dispatch::{HistoryDeletionMode, HistoryDeletionTarget};
+    use crate::workflows::comparison::ComparisonSelection;
     let (_directory, store, repo, scope, commit) = comparison_repository().await?;
     let storage = tempfile::tempdir()?;
     store
@@ -257,7 +262,7 @@ async fn comparison_preserves_output_order_and_success_after_another_candidate_t
     let group = store
         .start_model_comparison(
             repo.project_id.clone(),
-            repo.checkout_id,
+            repo.checkout_id.clone(),
             commit,
             "Review the pinned input".into(),
             profiles,
@@ -308,7 +313,7 @@ async fn comparison_preserves_output_order_and_success_after_another_candidate_t
             true,
         )
         .await?;
-    let third = store.claim_next_job(environment).await?.unwrap();
+    let third = store.claim_next_job(environment.clone()).await?.unwrap();
     let third_run = third.run.id.clone();
     assert_eq!(execute(third).wait().await?, RunStatus::Succeeded);
     let result = store
@@ -325,11 +330,14 @@ async fn comparison_preserves_output_order_and_success_after_another_candidate_t
     );
     let outcomes = serde_json::to_value(
         store
-            .model_comparison_outcomes(repo.project_id, group.id)
+            .model_comparison_outcomes(repo.project_id.clone(), group.id.clone())
             .await?,
     )?;
-    for (index, run) in [first_run, second_run, third_run].into_iter().enumerate() {
-        assert_eq!(outcomes[index]["runId"], run);
+    for (index, run) in [&first_run, &second_run, &third_run]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(outcomes[index]["runId"], run.as_str());
         assert_eq!(outcomes[index]["jobId"], result.candidates[index].job_id);
     }
     assert_eq!(outcomes[0]["failure"]["cause"], "startup_timeout");
@@ -340,5 +348,288 @@ async fn comparison_preserves_output_order_and_success_after_another_candidate_t
         assert_eq!(outcome["outputTokens"], 3);
         assert!(outcome["durationSeconds"].is_i64());
     }
+
+    let selection = |run_ids| ComparisonSelection {
+        group_id: group.id.clone(),
+        run_ids,
+    };
+    for invalid in [
+        vec![second_run.clone(), second_run.clone()],
+        vec![first_run.clone()],
+        vec!["unrelated-run".into()],
+    ] {
+        assert!(
+            store
+                .start_model_comparison_synthesis(
+                    repo.project_id.clone(),
+                    selection(invalid),
+                    scope.clone()
+                )
+                .await
+                .is_err()
+        );
+    }
+    let chosen = selection(vec![third_run.clone(), second_run.clone()]);
+    let synthesis = store
+        .start_model_comparison_synthesis(repo.project_id.clone(), chosen.clone(), scope.clone())
+        .await?;
+    assert_eq!(
+        synthesis
+            .inputs
+            .iter()
+            .map(|source| source.run_id.clone())
+            .collect::<Vec<_>>(),
+        [second_run.clone(), third_run.clone()]
+    );
+    assert!(synthesis.run_id.is_none());
+    let attempt = store
+        .claim_next_job(environment.clone())
+        .await?
+        .context("Separate synthesis was not admitted")?;
+    let synthesis_run = attempt.run.id.clone();
+    let pin = store
+        .model_comparison_pin_for_run(synthesis_run.clone())
+        .await?
+        .context("Missing synthesis checkout pin")?;
+    assert_eq!(pin.group_id, group.id);
+    assert_ne!(pin.checkout()?.root, scope.checkout);
+    pin.verify_attempt(&attempt)?;
+    let context: serde_json::Value =
+        serde_json::from_str(attempt.input[0].text.split_once("\n\n").unwrap().1)?;
+    assert_eq!(context["responses"][0]["run"]["runId"], second_run);
+    assert_eq!(context["responses"][1]["run"]["runId"], third_run);
+    assert_eq!(context["responses"].as_array().unwrap().len(), 2);
+    assert!(![&first_run, &second_run, &third_run].contains(&&synthesis_run));
+    assert_eq!(execute(attempt).wait().await?, RunStatus::Succeeded);
+    let reopened = Store::open(scope.checkout.join("store.sqlite"))?;
+    let results = reopened
+        .model_comparison_syntheses(repo.project_id.clone(), group.id.clone())
+        .await?;
+    let saved = &results[0];
+    assert_eq!(saved.inputs, synthesis.inputs);
+    assert_eq!(saved.run_id.as_deref(), Some(synthesis_run.as_str()));
+    assert_eq!(saved.response.as_deref(), Some("Fixture answer"));
+    assert!(
+        reopened
+            .model_comparison_syntheses("other project".into(), group.id.clone())
+            .await?
+            .is_empty()
+    );
+
+    let (review, review_job) =
+        queue_plan_review_using_comparison(&store, &repo, &scope, chosen, &environment).await?;
+    assert_eq!(
+        reopened
+            .model_comparison_job_inputs(repo.project_id.clone(), review_job.clone())
+            .await?,
+        saved.inputs
+    );
+    assert!(
+        reopened
+            .model_comparison_job_inputs("other project".into(), review_job)
+            .await
+            .is_err()
+    );
+    assert!(
+        review.input[0].text.contains(&second_run) && review.input[0].text.contains(&third_run)
+    );
+    assert!(!review.input[0].text.contains(&first_run));
+    finish_comparison_review(&store, &review).await?;
+
+    let target = HistoryDeletionTarget::Message {
+        conversation_id: result.candidates[1].conversation_id.clone().unwrap(),
+        message_revision_id: saved.inputs[0].response_revision_id.clone(),
+    };
+    let preview = store
+        .preview_conversation_history_deletion(
+            target.clone(),
+            HistoryDeletionMode::WithDerivedCopies,
+        )
+        .await?;
+    assert!(
+        preview
+            .dispatch_ids
+            .contains(saved.dispatch_id.as_ref().unwrap())
+    );
+    store
+        .confirm_conversation_history_deletion(
+            target,
+            HistoryDeletionMode::WithDerivedCopies,
+            preview.revision,
+        )
+        .await?;
+    let after = store
+        .model_comparison_syntheses(repo.project_id.clone(), group.id.clone())
+        .await?;
+    assert_eq!(after[0].inputs, synthesis.inputs);
+    assert!(after[0].response.is_none());
+    assert!(
+        store
+            .start_model_comparison_synthesis(repo.project_id, selection(vec![second_run]), scope)
+            .await
+            .is_err()
+    );
     Ok(())
+}
+
+async fn queue_plan_review_using_comparison(
+    store: &Store,
+    repo: &ProjectCheckout,
+    scope: &SessionScope,
+    comparison: crate::workflows::comparison::ComparisonSelection,
+    environment: &AdmissionEnvironment,
+) -> Result<(AttemptPlan, String)> {
+    use crate::jobs::{JobRequest, PipelineDispatch};
+    use crate::providers::planning::PlanSource;
+    use crate::workflows::{
+        ArtifactValue, DeliveryRoles, NodeInputs, WorkflowAgentSubmission, WorkflowHostRequest,
+        WorkflowHostSubmission,
+    };
+
+    let project = &repo.project_id;
+    let run = store
+        .start_builtin_delivery(project.clone(), DeliveryRoles::default())
+        .await?;
+    let markdown = store
+        .capture_repository_markdown(repo.checkout_id.clone(), scope.checkout.join("AGENTS.md"))
+        .await?;
+    let host = |node: &str, inputs, request| WorkflowHostSubmission {
+        project_id: project.clone(),
+        run_id: run.id.clone(),
+        node_id: node.into(),
+        inputs,
+        request,
+    };
+    let start = store
+        .execute_workflow_host(host(
+            "start",
+            NodeInputs::new(),
+            WorkflowHostRequest::Start {
+                document: markdown.revision,
+            },
+        ))
+        .await?;
+    let context = store
+        .execute_workflow_host(host(
+            "context",
+            NodeInputs::from([("document".into(), start.id)]),
+            WorkflowHostRequest::LoadContext,
+        ))
+        .await?;
+    let submission =
+        |node: &str, mode: SessionMode, plan_revision, artifacts| WorkflowAgentSubmission {
+            project_id: project.clone(),
+            dispatch: PipelineDispatch {
+                pipeline_run_id: run.id.clone(),
+                node_instance_id: node.into(),
+                plan_revision,
+                release_id: None,
+            },
+            scope: SessionScope {
+                mode,
+                profile_id: node.into(),
+                ..scope.clone()
+            },
+            request: JobRequest {
+                checkout_id: Some(repo.checkout_id.clone()),
+                task_id: None,
+                mode,
+                instructions: "Review the scope".into(),
+                dependencies: Vec::new(),
+                requires_bridge: false,
+            },
+            input: Default::default(),
+            artifacts,
+            unit_id: None,
+        };
+    store
+        .submit_workflow_agent(submission(
+            "plan",
+            SessionMode::Plan,
+            None,
+            NodeInputs::from([("context".into(), context.id)]),
+        ))
+        .await?;
+    let planner = store
+        .claim_next_job(environment.clone())
+        .await?
+        .context("Missing planner")?;
+    store.mark_agent_running(planner.run.id.clone()).await?;
+    store
+        .record_agent_observation(
+            planner.run.id.clone(),
+            EventSource::Provider,
+            ProviderEvent {
+                data: ProviderEventData::PlanProposed {
+                    text: "Review the defined change".into(),
+                    source: PlanSource::CodexPlanItem,
+                },
+                location: ProviderLocation::default(),
+            },
+        )
+        .await?;
+    store
+        .finish_agent_attempt(
+            planner.run.id.clone(),
+            RunStatus::Succeeded,
+            Some("Plan ready".into()),
+        )
+        .await?;
+    let event_sequence = store
+        .agent_observations(planner.conversation_id, planner.run.id.clone(), 0)
+        .await?
+        .into_iter()
+        .find(|event| matches!(event.event.data, ProviderEventData::PlanProposed { .. }))
+        .context("Missing plan proposal")?
+        .seq;
+    let plan = store
+        .publish_workflow_artifact(
+            project.clone(),
+            run.id.clone(),
+            "plan".into(),
+            "plan".into(),
+            ArtifactValue::Plan {
+                run_id: planner.run.id,
+                event_sequence,
+            },
+        )
+        .await?;
+    store
+        .set_job_pipeline_plan(project.clone(), run.id.clone(), None, plan.id.clone())
+        .await?;
+    let review = store
+        .submit_workflow_agent_with_comparison(
+            submission(
+                "review-plan",
+                SessionMode::ReadOnly,
+                Some(plan.id.clone()),
+                NodeInputs::from([("plan".into(), plan.id)]),
+            ),
+            Some(comparison),
+        )
+        .await?;
+    let admitted = store
+        .claim_next_job(environment.clone())
+        .await?
+        .context("Missing selected plan review")?;
+    let linked = store
+        .workflow_attempt(project.clone(), admitted.run.id.clone())
+        .await?
+        .context("Missing workflow linkage")?;
+    assert_eq!(linked.job_id, review.id);
+    Ok((admitted, review.id))
+}
+
+async fn finish_comparison_review(store: &Store, review: &AttemptPlan) -> Result<()> {
+    let run_id = review.run.id.clone();
+    store.mark_agent_running(run_id.clone()).await?;
+    let dispatch = prepare_fixture_dispatch(store, review).await?;
+    store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+    store
+        .finish_agent_attempt(
+            run_id,
+            RunStatus::Succeeded,
+            Some("Reviewed selected comparison sources".into()),
+        )
+        .await
 }

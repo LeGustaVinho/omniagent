@@ -3,7 +3,10 @@ use omniagent::{
     model_catalog::ModelSelection,
     providers::SessionMode,
     store::Store,
-    workflows::comparison::{ComparisonEnvironment, ComparisonOutcome, ModelComparison},
+    workflows::comparison::{
+        ComparisonEnvironment, ComparisonInput, ComparisonOutcome, ComparisonSelection,
+        ComparisonSynthesis, ModelComparison,
+    },
 };
 use tauri::{AppHandle, Manager, State};
 
@@ -51,6 +54,51 @@ pub async fn model_comparison_outcomes(
         .model_comparison_outcomes(project_id, group_id)
         .await
         .map_err(report)
+}
+
+#[tauri::command]
+pub async fn model_comparison_job_inputs(
+    store: State<'_, Store>,
+    project_id: String,
+    job_id: String,
+) -> Result<Vec<ComparisonInput>, String> {
+    store
+        .model_comparison_job_inputs(project_id, job_id)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn model_comparison_syntheses(
+    store: State<'_, Store>,
+    project_id: String,
+    group_id: String,
+) -> Result<Vec<ComparisonSynthesis>, String> {
+    store
+        .model_comparison_syntheses(project_id, group_id)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn start_model_comparison_synthesis(
+    store: State<'_, Store>,
+    project_id: String,
+    sources: ComparisonSelection,
+    selection: ModelSelection,
+) -> Result<ComparisonSynthesis, String> {
+    async {
+        let checkout = store
+            .model_comparison_checkout(project_id.clone(), sources.group_id.clone())
+            .await?;
+        let scope =
+            selected_scope(&store, checkout, selection, None, SessionMode::ReadOnly).await?;
+        store
+            .start_model_comparison_synthesis(project_id, sources, scope)
+            .await
+    }
+    .await
+    .map_err(report)
 }
 
 #[tauri::command]

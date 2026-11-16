@@ -20,8 +20,12 @@ use crate::{
 
 mod evidence;
 mod outcomes;
+pub(crate) mod selection;
+mod synthesis;
 pub use evidence::ComparisonEnvironment;
 pub use outcomes::ComparisonOutcome;
+pub use selection::{ComparisonInput, ComparisonSelection};
+pub use synthesis::ComparisonSynthesis;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,9 +191,12 @@ impl Store {
     ) -> Result<Option<ComparisonPin>> {
         self.execute(move |db| {
             let saved = db.query_row(
-                "SELECT g.id, g.commit_oid, g.tree_oid, g.comparison_checkout, g.prompt, c.selection
-                 FROM model_comparison_candidates c JOIN model_comparison_groups g ON g.id = c.group_id
-                 JOIN job_attempts a ON a.job_id = c.job_id JOIN runs r ON r.id = a.run_id AND r.checkout_id = g.source_checkout_id
+                "WITH executions AS (
+                    SELECT c.group_id, c.job_id, c.selection, g.prompt FROM model_comparison_candidates c JOIN model_comparison_groups g ON g.id = c.group_id
+                    UNION ALL SELECT group_id, job_id, selection, prompt FROM model_comparison_syntheses
+                 ) SELECT g.id, g.commit_oid, g.tree_oid, g.comparison_checkout, e.prompt, e.selection
+                 FROM executions e JOIN model_comparison_groups g ON g.id = e.group_id
+                 JOIN job_attempts a ON a.job_id = e.job_id JOIN runs r ON r.id = a.run_id AND r.checkout_id = g.source_checkout_id
                  WHERE r.id = ?1", [run],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get::<_, String>(3)?, row.get::<_, Vec<u8>>(4)?, row.get::<_, String>(5)?)),
             ).optional()?;

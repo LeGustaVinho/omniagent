@@ -166,6 +166,8 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
         "DROP TABLE workflow_trigger_activations;
          DROP TABLE workflow_trigger_revisions;
          DROP TABLE workflow_trigger_rules;
+         DROP TABLE model_comparison_inputs;
+         DROP TABLE model_comparison_syntheses;
          DROP TABLE workflow_authoring_publications;
          DROP TABLE workflow_published_heads;
          DROP TABLE workflow_launches;
