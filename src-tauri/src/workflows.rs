@@ -45,6 +45,7 @@ pub use registry::{
     NodeDefinition, Port, PortType, builtin_registry,
 };
 pub use runtime::{NodeAttempt, NodePin, WorkflowAgentSubmission, WorkflowRun};
+pub(crate) use runtime::{load_definition as load_workflow_definition, load_node_attempt};
 pub(crate) use unit_execution::validate_unit_acceptance;
 pub use unit_execution::{WorkflowUnitOutcome, WorkflowUnitRequest, WorkflowUnitSubmission};
 pub use units::{WorkflowDeliveryUnit, WorkflowPlanUnit};

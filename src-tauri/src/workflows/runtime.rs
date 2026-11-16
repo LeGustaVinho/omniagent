@@ -398,46 +398,52 @@ impl Store {
         project: String,
         attempt: String,
     ) -> Result<Option<NodeAttempt>> {
-        self.execute(move |db| {
-            let mut statement = db.prepare(
-                "SELECT o.pipeline_run_id, w.workflow_id, w.workflow_revision, o.node_instance_id,
-                        n.instance_revision, n.definition_revision, o.plan_revision, o.release_id,
-                        a.job_id, a.previous_run_id, a.ordinal, r.status, i.unit_id
-                 FROM job_attempts a JOIN runs r ON r.id = a.run_id
-                 JOIN job_pipeline_origins o ON o.job_id = a.job_id
-                 JOIN workflow_run_pins w ON w.pipeline_run_id = o.pipeline_run_id
-                 JOIN workflow_node_pins n ON n.pipeline_run_id = o.pipeline_run_id
-                    AND n.node_instance_id = o.node_instance_id
-                 LEFT JOIN workflow_job_inputs i ON i.job_id = a.job_id
-                 WHERE w.project_id = ?1 AND a.run_id = ?2",
-            )?;
-            let mut rows = statement.query(params![project, attempt])?;
-            let Some(row) = rows.next()? else {
-                return Ok(None);
-            };
-            Ok(Some(NodeAttempt {
-                pin: NodePin {
-                    workflow_run_id: row.get(0)?,
-                    workflow: WorkflowRevision {
-                        id: row.get(1)?,
-                        revision: row.get(2)?,
-                    },
-                    node_instance_id: row.get(3)?,
-                    instance_revision: row.get(4)?,
-                    definition_revision: row.get(5)?,
-                    plan_revision: row.get(6)?,
-                    release_id: row.get(7)?,
-                    unit_id: row.get(12)?,
-                },
-                job_id: row.get(8)?,
-                run_id: attempt,
-                previous_run_id: row.get(9)?,
-                ordinal: row.get(10)?,
-                status: RunStatus::from_sql(&row.get::<_, String>(11)?)?,
-            }))
-        })
-        .await
+        self.execute(move |db| load_node_attempt(db, &project, &attempt)).await
     }
+}
+
+pub(crate) fn load_node_attempt(
+    db: &Connection,
+    project: &str,
+    attempt: &str,
+) -> Result<Option<NodeAttempt>> {
+    let mut statement = db.prepare(
+        "SELECT o.pipeline_run_id, w.workflow_id, w.workflow_revision, o.node_instance_id,
+                n.instance_revision, n.definition_revision, o.plan_revision, o.release_id,
+                a.job_id, a.previous_run_id, a.ordinal, r.status, i.unit_id
+         FROM job_attempts a JOIN runs r ON r.id = a.run_id
+         JOIN checkouts c ON c.id = r.checkout_id
+         JOIN job_pipeline_origins o ON o.job_id = a.job_id
+         JOIN workflow_run_pins w ON w.pipeline_run_id = o.pipeline_run_id
+         JOIN workflow_node_pins n ON n.pipeline_run_id = o.pipeline_run_id
+            AND n.node_instance_id = o.node_instance_id
+         LEFT JOIN workflow_job_inputs i ON i.job_id = a.job_id
+         WHERE w.project_id = ?1 AND c.project_id = ?1 AND a.run_id = ?2",
+    )?;
+    let mut rows = statement.query(params![project, attempt])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(NodeAttempt {
+        pin: NodePin {
+            workflow_run_id: row.get(0)?,
+            workflow: WorkflowRevision {
+                id: row.get(1)?,
+                revision: row.get(2)?,
+            },
+            node_instance_id: row.get(3)?,
+            instance_revision: row.get(4)?,
+            definition_revision: row.get(5)?,
+            plan_revision: row.get(6)?,
+            release_id: row.get(7)?,
+            unit_id: row.get(12)?,
+        },
+        job_id: row.get(8)?,
+        run_id: attempt.into(),
+        previous_run_id: row.get(9)?,
+        ordinal: row.get(10)?,
+        status: RunStatus::from_sql(&row.get::<_, String>(11)?)?,
+    }))
 }
 
 pub(super) fn load_pinned_node(
@@ -477,7 +483,7 @@ pub(super) fn load_pinned_node(
     ))
 }
 
-pub(super) fn load_definition(
+pub(crate) fn load_definition(
     db: &Connection,
     project: &str,
     version: &WorkflowRevision,

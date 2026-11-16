@@ -15,9 +15,11 @@ use crate::{
         Capability, Provider, ProviderEvent, ProviderEventData, SessionMode,
         capabilities::{CapabilityAssessment, CapabilityStatus, CapabilitySubject, revision},
     },
-    runs::{RunRecord, load_run},
+    repository::verified_git::{DeliveryGitPolicy, load_policy as load_delivery_git_policy},
+    runs::{RunRecord, RunStatus, load_run},
     store::Store,
-    tasks::load_project_task,
+    tasks::{DeliveryCompletionMilestone, load_delivery_milestone_policy, load_project_task},
+    workflows::{BuiltinNode, Effect, Executor, load_node_attempt, load_workflow_definition},
 };
 
 const DIAGNOSTIC_LIMIT: usize = 4;
@@ -33,6 +35,8 @@ pub(crate) struct RuntimeInspection {
     settings_revision: String,
     capabilities: Option<CapabilitySummary>,
     task: Option<TaskSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workflow: Option<WorkflowSummary>,
     queue: InspectionQueue,
     diagnostics: Vec<DiagnosticSummary>,
     more_diagnostics: bool,
@@ -78,6 +82,39 @@ struct ProfileSummary {
 struct TaskSummary {
     id: String,
     title: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowSummary {
+    run_id: String,
+    id: String,
+    revision: String,
+    name: String,
+    node: WorkflowNodeSummary,
+    ordinal: u32,
+    status: RunStatus,
+    job_id: String,
+    previous_run_id: Option<String>,
+    plan_revision: Option<String>,
+    plan_current: Option<bool>,
+    release_id: Option<String>,
+    release_revoked: Option<bool>,
+    unit_id: Option<String>,
+    git_policy: DeliveryGitPolicy,
+    completion_milestone: DeliveryCompletionMilestone,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowNodeSummary {
+    id: String,
+    instance_revision: String,
+    definition_revision: u32,
+    title: String,
+    kind: BuiltinNode,
+    executor: Executor,
+    effect: Effect,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -182,6 +219,63 @@ fn load_diagnostics(db: &Connection, run: &str) -> Result<(Vec<DiagnosticSummary
     Ok((diagnoses, false))
 }
 
+fn load_workflow_summary(db: &Connection, run: &RunRecord) -> Result<Option<WorkflowSummary>> {
+    let Some(attempt) = load_node_attempt(db, &run.project_id, &run.id)? else {
+        return Ok(None);
+    };
+    let pin = attempt.pin;
+    let definition = load_workflow_definition(db, &run.project_id, &pin.workflow)?
+        .context("The admitted workflow revision is unavailable")?;
+    let node = definition
+        .nodes
+        .iter()
+        .find(|node| {
+            node.instance.id == pin.node_instance_id
+                && node.revision == pin.instance_revision
+                && node.definition.revision == pin.definition_revision
+        })
+        .context("The admitted stage revision is unavailable")?;
+    let (current_plan, release_revoked): (Option<String>, Option<bool>) = db.query_row(
+        "SELECT run.plan_revision, release.revoked FROM job_pipeline_runs run
+         LEFT JOIN job_pipeline_releases release ON release.id = ?3
+           AND release.pipeline_run_id = run.id AND release.project_id = run.project_id
+         WHERE run.project_id = ?1 AND run.id = ?2",
+        params![run.project_id, pin.workflow_run_id, pin.release_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let plan_current = pin
+        .plan_revision
+        .as_ref()
+        .map(|admitted| current_plan.as_ref() == Some(admitted));
+    let safe_id = |id: Option<String>| id.map(|id| bounded_preview(&id, 96));
+    Ok(Some(WorkflowSummary {
+        run_id: bounded_preview(&pin.workflow_run_id, 96),
+        id: bounded_preview(&pin.workflow.id, 96),
+        revision: bounded_preview(&pin.workflow.revision, 96),
+        name: bounded_preview(&definition.name, 120),
+        node: WorkflowNodeSummary {
+            id: bounded_preview(&pin.node_instance_id, 96),
+            instance_revision: bounded_preview(&pin.instance_revision, 96),
+            definition_revision: pin.definition_revision,
+            title: bounded_preview(&node.definition.title, 80),
+            kind: node.instance.kind,
+            executor: node.definition.executor,
+            effect: node.definition.effect,
+        },
+        ordinal: attempt.ordinal,
+        status: attempt.status,
+        job_id: bounded_preview(&attempt.job_id, 96),
+        previous_run_id: safe_id(attempt.previous_run_id),
+        plan_revision: safe_id(pin.plan_revision),
+        plan_current,
+        release_id: safe_id(pin.release_id),
+        release_revoked,
+        unit_id: safe_id(pin.unit_id),
+        git_policy: load_delivery_git_policy(db, &run.project_id)?,
+        completion_milestone: load_delivery_milestone_policy(db, &run.project_id)?.milestone,
+    }))
+}
+
 impl Store {
     pub(crate) async fn inspect_omniagent(
         &self,
@@ -221,10 +315,14 @@ impl Store {
                 });
             let (diagnostics, more_diagnostics) = load_diagnostics(&tx, &run.id)?;
             let capabilities = load_capability_summary(&tx, &run.id)?;
+            let workflow = load_workflow_summary(&tx, &run)?;
             let settings_revision = revision(&(
                 &queue.settings,
                 &queue.project_policy_revision,
                 &scope.permission_revision,
+                workflow
+                    .as_ref()
+                    .map(|workflow| (workflow.git_policy, workflow.completion_milestone)),
             ))?;
             let snapshot = RuntimeInspection {
                 version: 1,
@@ -248,6 +346,7 @@ impl Store {
                 settings_revision,
                 capabilities,
                 task,
+                workflow,
                 queue,
                 diagnostics,
                 more_diagnostics,
