@@ -358,3 +358,6 @@ mod protected_review;
 mod usage_acceptance;
 
 pub mod exchange;
+
+#[cfg(test)]
+mod from_chat_acceptance;
