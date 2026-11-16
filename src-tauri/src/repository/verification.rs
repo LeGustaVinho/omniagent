@@ -329,7 +329,9 @@ impl Store {
         id: String,
     ) -> Result<Option<SelectedCandidate>> {
         self.execute(move |db| {
-            let payload: Option<Vec<u8>> = db.query_row("SELECT payload FROM selected_candidate_revisions WHERE project_id = ?1 AND task_id = ?2 AND id = ?3",
+            let payload: Option<Vec<u8>> = db.query_row("SELECT payload FROM selected_candidate_revisions
+                WHERE project_id = ?1 AND task_id = ?2 AND id = ?3
+                  AND NOT EXISTS (SELECT 1 FROM history_deleted_candidate_diffs WHERE candidate_id = ?3)",
                 params![project, task, id], |row| row.get(0)).optional()?;
             payload.as_deref().map(decode).transpose()
         }).await
@@ -530,8 +532,10 @@ pub(crate) fn load_selected_candidate(
     task: &str,
     id: &str,
 ) -> Result<SelectedCandidate> {
-    let payload: Vec<u8> = db.query_row("SELECT payload FROM selected_candidate_revisions WHERE project_id = ?1 AND task_id = ?2 AND id = ?3",
-        params![project, task, id], |row| row.get(0)).optional()?.context("selected candidate is outside the requested work scope")?;
+    let payload: Vec<u8> = db.query_row("SELECT payload FROM selected_candidate_revisions
+        WHERE project_id = ?1 AND task_id = ?2 AND id = ?3
+          AND NOT EXISTS (SELECT 1 FROM history_deleted_candidate_diffs WHERE candidate_id = ?3)",
+        params![project, task, id], |row| row.get(0)).optional()?.context("selected candidate is unavailable in the requested work scope")?;
     decode(&payload)
 }
 

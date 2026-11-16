@@ -24,6 +24,7 @@ export type ConversationInput = {
   frames: string[];
   attachments: AttachmentEvidence[];
   removedAttachmentCount: number;
+  historyPayloadDeleted?: boolean;
   instructions: InstructionDispatch[];
   conversationReferences?: { messageRevisionId: string; reference: ConversationReferencePreview }[];
 };
@@ -94,7 +95,9 @@ export function ConversationDeliveries({ input, conversationId, runId, live }: {
   return <>
     <p className="break-all text-xs text-muted-foreground">Turn {input.turnId}</p>
     <p className="text-xs text-muted-foreground">Delivery {input.delivery}</p>
-    {input.removedAttachmentCount > 0 ? <p className="mt-2 text-xs text-muted-foreground">
+    {input.historyPayloadDeleted ? <p className="mt-2 text-xs text-muted-foreground">
+      Exact input is unavailable after a history deletion.
+    </p> : input.removedAttachmentCount > 0 ? <p className="mt-2 text-xs text-muted-foreground">
       Exact input is unavailable after attachment history was deleted.
     </p> : <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{input.frames.join("")}</pre>}
     <SavedAttachments attachments={input.attachments} conversationId={conversationId} runId={runId} />

@@ -18,6 +18,7 @@ use crate::{
 use super::{ContextSnapshot, NativeHistory};
 
 mod conversation_artifacts;
+pub(super) use conversation_artifacts::pending_summary_sources;
 pub(crate) use conversation_artifacts::{load_conversation_artifact, record_conversation_excerpt};
 pub(crate) use conversation_artifacts::{enqueue_summary, reconcile_summary};
 pub use conversation_artifacts::{
@@ -150,6 +151,11 @@ pub(crate) fn record_message_copy(db: &Connection, source: &str, copied: &str) -
         inserted == 1,
         "copy lineage requires the exact saved source revision"
     );
+    db.execute(
+        "INSERT INTO history_deleted_revisions
+         SELECT ?2 FROM history_deleted_revisions WHERE revision_id = ?1",
+        params![source, copied],
+    )?;
     Ok(())
 }
 

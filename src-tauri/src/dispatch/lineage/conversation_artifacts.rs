@@ -126,7 +126,8 @@ pub(super) fn summary_input_at_dispatch(
     let row: Option<(String, Vec<u8>)> = db
         .query_row(
             "SELECT request.id, request.payload FROM conversation_summary_requests request
-         JOIN job_attempts attempt ON attempt.job_id = request.job_id WHERE attempt.run_id = ?1",
+         JOIN job_attempts attempt ON attempt.job_id = request.job_id
+         WHERE attempt.run_id = ?1 AND length(request.payload) > 0",
             [run_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -137,6 +138,13 @@ pub(super) fn summary_input_at_dispatch(
         Ok((id, request))
     })
     .transpose()
+}
+
+pub(in crate::dispatch) fn pending_summary_sources(
+    payload: &[u8],
+) -> Result<Vec<String>> {
+    let request: SummaryRequest = decode(payload)?;
+    Ok(request.covered.into_iter().map(|source| source.origin.revision_id).collect())
 }
 
 impl Store {
@@ -444,7 +452,9 @@ pub(crate) fn load_conversation_artifact(
     artifact_id: &str,
 ) -> Result<Option<ConversationArtifactRevision>> {
     let payload: Option<Vec<u8>> = db.query_row(
-        "SELECT payload FROM conversation_artifact_revisions WHERE source_conversation_id = ?1 AND id = ?2",
+        "SELECT payload FROM conversation_artifact_revisions
+         WHERE source_conversation_id = ?1 AND id = ?2
+           AND NOT EXISTS (SELECT 1 FROM history_deleted_artifacts WHERE artifact_id = ?2)",
         params![source_conversation_id, artifact_id], |row| row.get(0),
     ).optional()?;
     payload.as_deref().map(decode).transpose()

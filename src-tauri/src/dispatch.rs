@@ -27,6 +27,7 @@ use crate::{
 mod attachment_evidence;
 mod attachment_retention;
 mod generated_image_evidence;
+mod history_deletion;
 mod instruction_evidence;
 mod inventory;
 mod lineage;
@@ -36,6 +37,8 @@ pub(crate) use attachment_retention::revoked_history_run;
 pub use attachment_retention::{
     AttachmentHistoryRemoval, AttachmentHistoryTarget, AttachmentRemovalPreview,
 };
+pub use history_deletion::{HistoryDeletionDiff, HistoryDeletionMode, HistoryDeletionPreview, HistoryDeletionTarget};
+pub(crate) use history_deletion::omit_deleted_dispatch_messages;
 pub use instruction_evidence::{
     InstructionDispatch, InstructionDispatchMode, InstructionDispatchStatus, InstructionReceipt,
     InstructionReview,
@@ -150,6 +153,7 @@ pub struct DispatchEvidence {
     pub delivery: Delivery,
     pub attachments: Vec<AttachmentEvidence>,
     pub removed_attachment_count: usize,
+    pub history_payload_deleted: bool,
     pub instructions: Vec<InstructionDispatch>,
 }
 
@@ -293,6 +297,11 @@ impl Store {
                         &snapshot.submitted_messages,
                         delivery,
                     )?;
+                    let history_payload_deleted = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM history_deleted_dispatch_payloads WHERE dispatch_id = ?1)",
+                        [&id],
+                        |row| row.get(0),
+                    )?;
                     Ok(DispatchEvidence {
                         id,
                         turn_id,
@@ -301,6 +310,7 @@ impl Store {
                         delivery,
                         attachments,
                         removed_attachment_count: removed_ordinals.len(),
+                        history_payload_deleted,
                         instructions,
                     })
                 })

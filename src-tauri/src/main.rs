@@ -8,6 +8,7 @@ mod conversation_fork_runtime;
 mod conversation_attachment_ipc;
 mod composer_suggestion_ipc;
 mod conversation_compaction_ipc;
+mod history_deletion_ipc;
 mod conversation_steering_ipc;
 mod agile_runtime;
 mod delivery_merge_ipc;
@@ -418,6 +419,9 @@ fn main() {
             conversation_compaction_ipc::conversation_compaction_state,
             conversation_compaction_ipc::set_conversation_compaction_settings,
             conversation_compaction_ipc::request_conversation_compaction,
+            history_deletion_ipc::conversation_history_deletion_diffs,
+            history_deletion_ipc::preview_conversation_history_deletion,
+            history_deletion_ipc::confirm_conversation_history_deletion,
             composer_customization_ipc::composer_customizations,
             ipc::checkout_conversation,
             ipc::create_conversation,

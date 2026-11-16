@@ -87,6 +87,8 @@ pub struct SavedGitAttempt {
     pub run_id: String,
     pub checkout_id: String,
     pub label: String,
+    pub conversation_id: String,
+    pub history_deleted: bool,
 }
 
 struct RegisteredWorktree {
@@ -266,13 +268,19 @@ impl Store {
     pub async fn git_saved_attempts(&self, project: String) -> Result<Vec<SavedGitAttempt>> {
         self.execute(move |db| {
             let mut query = db.prepare(
-                "SELECT r.id, r.checkout_id, coalesce(t.title, 'Repository attempt') FROM job_worktree_candidates candidate
+                "SELECT r.id, r.checkout_id, coalesce(t.title, 'Repository attempt'), agent.conversation_id,
+                   EXISTS(SELECT 1 FROM history_deleted_attempt_diffs WHERE run_id = r.id)
+                 FROM job_worktree_candidates candidate
                  JOIN runs r ON r.id = candidate.run_id JOIN job_attempts a ON a.run_id = r.id
+                 JOIN agent_attempts agent ON agent.run_id = r.id
                  JOIN jobs j ON j.id = a.job_id LEFT JOIN project_tasks t ON t.project_id = j.project_id AND t.id = j.task_id
                  WHERE j.project_id = ?1 AND candidate.capture_confirmed = 1
                  ORDER BY r.created_at DESC, r.id LIMIT 100",
             )?;
-            Ok(query.query_map(params![project], |row| Ok(SavedGitAttempt { run_id: row.get(0)?,checkout_id: row.get(1)?,label: row.get(2)? }))?
+            Ok(query.query_map(params![project], |row| Ok(SavedGitAttempt {
+                run_id: row.get(0)?, checkout_id: row.get(1)?, label: row.get(2)?,
+                conversation_id: row.get(3)?, history_deleted: row.get(4)?,
+            }))?
                 .collect::<rusqlite::Result<Vec<_>>>()?)
         }).await
     }

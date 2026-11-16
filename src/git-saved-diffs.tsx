@@ -2,10 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ConversationHistoryDeletion } from "@/conversation-history-deletion";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
 import type { WorkspaceProps } from "@/workbench-contract";
 
-type SavedAttempt = { runId: string; checkoutId: string; label: string };
+type SavedAttempt = { runId: string; checkoutId: string; label: string; conversationId?: string; historyDeleted?: boolean };
 type Untracked = { path: string; sha256: string; contentBase64?: string };
 type ChangeArtifact = {
   revision: string;
@@ -27,6 +28,7 @@ export function SavedGitDiffs({ projectId, target, openActivity }: { projectId: 
     queryFn: () => invoke<Evidence | null>("attempt_worktree_evidence", { projectId, runId }), enabled: !!runId, retry: false,
   });
   const attemptOptions = attempts.data ?? [];
+  const attempt = attemptOptions.find((item) => item.runId === runId);
   return <div className="delivery-main flex min-w-0 flex-col gap-3 p-4">
     <div className="flex flex-wrap items-end gap-2">
       <label className="delivery-field flex-1">Recorded attempt
@@ -42,7 +44,12 @@ export function SavedGitDiffs({ projectId, target, openActivity }: { projectId: 
     {(attempts.isPending || (runId && evidence.isPending)) && <p role="status">Loading recorded Git evidence…</p>}
     {evidence.data === null && <p>Saved Git evidence is unavailable for this attempt.</p>}
     {evidence.data?.kind === "unavailable" && <p>{evidence.data.reason}</p>}
-    {evidence.data?.kind === "saved" && <RecordedArtifact key={runId} artifact={evidence.data.artifact} />}
+    {evidence.data?.kind === "saved" && <RecordedArtifact key={`evidence:${runId}`} artifact={evidence.data.artifact} />}
+    {attempt?.conversationId && (evidence.data?.kind === "saved" || attempt.historyDeleted) && <details key={`delete:${runId}`}>
+      <summary className="cursor-pointer text-sm">Delete recorded diff</summary>
+      <ConversationHistoryDeletion conversationId={attempt.conversationId}
+        attemptDiffs={[{ runId, label: attempt.label, deleted: attempt.historyDeleted }]} />
+    </details>}
   </div>;
 }
 

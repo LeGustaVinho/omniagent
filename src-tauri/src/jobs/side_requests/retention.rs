@@ -40,14 +40,12 @@ impl Store {
 }
 
 pub(super) fn settle_deleted_question(db: &Connection, run: &RunRecord) -> Result<bool> {
-    let deleted = db.query_row(
-        "SELECT EXISTS (
-             SELECT 1 FROM job_attempts a JOIN job_side_requests s ON s.job_id = a.job_id
-             WHERE a.run_id = ?1 AND discarded AND purpose = 'question' AND NOT validation
-         )",
+    let job: String = db.query_row(
+        "SELECT job_id FROM job_attempts WHERE run_id = ?1",
         [&run.id],
-        |row| row.get::<_, bool>(0),
+        |row| row.get(0),
     )?;
+    let deleted = super::is_deleted_question(db, &job)?;
     if deleted && !run.status.is_terminal() {
         runs::advance_run(db, run, RunStatus::Cancelled)?;
     }

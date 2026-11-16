@@ -89,7 +89,8 @@ impl Store {
                 "the selected context is outside the retained source conversation"
             );
             let entries = context_entries(&tx, &source_conversation_id, &context_id)?;
-            let messages = load_messages(&tx, &source_conversation_id, &entries)?;
+            let mut messages = load_messages(&tx, &source_conversation_id, &entries)?;
+            messages.retain(|message| !message.text.is_empty());
             let summaries = retained_summaries(&tx, &scope)?;
             Ok(ConversationReferenceSource {
                 source: scope.source,
@@ -152,7 +153,8 @@ pub(crate) fn load_conversation_reference(
 ) -> Result<ConversationReferenceSnapshot> {
     let (source, artifact, sealed): (String, String, Vec<u8>) = db.query_row(
         "SELECT source_conversation_id, artifact_id, payload FROM conversation_reference_previews
-         WHERE id = ?1 AND destination_conversation_id = ?2 AND project_id = ?3",
+         WHERE id = ?1 AND destination_conversation_id = ?2 AND project_id = ?3
+           AND NOT EXISTS (SELECT 1 FROM history_deleted_artifacts WHERE artifact_id = conversation_reference_previews.artifact_id)",
         params![preview_id, destination_conversation_id, project_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional()?.context("the conversation reference preview is unavailable for this destination")?;
     let snapshot: ConversationReferenceSnapshot =
@@ -247,7 +249,10 @@ fn retained_summaries(
     scope: &ReferenceScope,
 ) -> Result<Vec<ConversationReferenceSummary>> {
     let mut statement = db.prepare(
-        "SELECT id FROM conversation_artifact_revisions WHERE source_conversation_id = ?1 AND summary_run_id IS NOT NULL ORDER BY id",
+        "SELECT id FROM conversation_artifact_revisions
+         WHERE source_conversation_id = ?1 AND summary_run_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM history_deleted_artifacts WHERE artifact_id = conversation_artifact_revisions.id)
+         ORDER BY id",
     )?;
     let mut summaries = Vec::new();
     for id in statement.query_map([&scope.source.id], |row| row.get::<_, String>(0))? {

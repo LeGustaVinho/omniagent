@@ -33,7 +33,7 @@ mod question_answers;
 mod question_waits;
 mod recovery;
 mod scheduler;
-mod side_requests;
+pub(crate) mod side_requests;
 mod steering_delivery;
 pub use steering_delivery::InstructionDeliveryEvidence;
 mod subagent_audit;

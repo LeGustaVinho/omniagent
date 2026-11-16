@@ -1648,6 +1648,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         (0, Some(overlay)) => compaction::apply_projection(input, &overlay),
         _ => input,
     };
+    let input = crate::dispatch::omit_deleted_dispatch_messages(db, input)?;
     let mut attachments = Vec::new();
     for message in &input {
         attachments.extend(

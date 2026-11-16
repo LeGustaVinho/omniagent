@@ -179,7 +179,10 @@ pub(crate) fn submitted_references(
          JOIN conversation_reference_previews preview ON preview.id = link.preview_id
          JOIN message_revisions revision ON revision.id = link.message_revision_id
          JOIN messages message ON message.id = revision.message_id
-         WHERE link.message_revision_id = ?1 AND message.conversation_id = ?2 ORDER BY link.ordinal",
+         WHERE link.message_revision_id = ?1 AND message.conversation_id = ?2
+           AND NOT EXISTS (SELECT 1 FROM history_deleted_revisions WHERE revision_id = link.message_revision_id)
+           AND NOT EXISTS (SELECT 1 FROM history_deleted_artifacts WHERE artifact_id = preview.artifact_id)
+         ORDER BY link.ordinal",
     )?;
     let mut result = Vec::new();
     for revision in revisions {

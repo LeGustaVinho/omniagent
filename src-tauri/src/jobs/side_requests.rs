@@ -103,6 +103,7 @@ pub struct SavedSideRequest {
     pub mode: SessionMode,
     pub question: String,
     pub response: Option<SideResponse>,
+    pub history_payload_deleted: bool,
     pub evidence_id: Option<String>,
     pub evidence_checked_at: Option<String>,
     pub output_fixture: Option<OutputFixture>,
@@ -336,7 +337,9 @@ impl Store {
                     uuid::Uuid::new_v4().to_string()
                 } else if route != SideRoute::CodexSample || purpose == SidePurpose::Suggestion {
                     let revisions = context_entries(&tx, &conversation, &source.context_id)?;
-                    let messages = load_messages(&tx, &conversation, &revisions)?;
+                    let messages = crate::dispatch::omit_deleted_dispatch_messages(
+                        &tx, load_messages(&tx, &conversation, &revisions)?,
+                    )?;
                     let context = serde_json::to_string(&messages)?;
                     if context.len() > 64 * 1024 {
                         return Ok(unavailable(SideUnavailable::InvalidInput));
@@ -410,7 +413,8 @@ impl Store {
     pub async fn saved_side_requests(&self, conversation: String) -> Result<Vec<SavedSideRequest>> {
         self.execute(move |db| {
             let mut query = db.prepare(
-                "SELECT j.project_id, s.job_id, s.context_id, s.source_run_id, s.payload, response.payload, validation.evidence_id, e.checked_at
+                "SELECT j.project_id, s.job_id, s.context_id, s.source_run_id, s.payload, response.payload, validation.evidence_id, e.checked_at,
+                        EXISTS(SELECT 1 FROM history_deleted_side_payloads WHERE job_id = s.job_id)
                  FROM job_side_requests s JOIN jobs j ON j.id = s.job_id
                  LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (SELECT max(ordinal) FROM job_attempts WHERE job_id = j.id)
                  LEFT JOIN job_side_responses response ON response.run_id = a.run_id
@@ -431,7 +435,8 @@ impl Store {
                 };
                 saved.push(SavedSideRequest {
                     job, conversation_id: conversation.clone(), context_id: row.get(2)?, source_run_id: row.get(3)?,
-                    purpose: payload.purpose, question: payload.question, response, evidence_id: row.get(6)?,
+                    purpose: payload.purpose, question: payload.question, response,
+                    history_payload_deleted: row.get(8)?, evidence_id: row.get(6)?,
                     evidence_checked_at,
                     output_fixture: payload.output_fixture,
                     provider: payload.scope.provider, profile_id: payload.scope.profile_id,
@@ -555,8 +560,14 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 pub(super) fn is_deleted_question(db: &Connection, job: &str) -> Result<bool> {
     Ok(db.query_row(
         "SELECT EXISTS (
-             SELECT 1 FROM job_side_requests
-             WHERE job_id = ?1 AND discarded AND purpose = 'question' AND NOT validation
+             SELECT 1 FROM job_side_requests side
+             WHERE side.job_id = ?1
+               AND ((side.discarded AND side.purpose = 'question' AND NOT side.validation)
+                    OR EXISTS (SELECT 1 FROM history_deleted_side_payloads WHERE job_id = side.job_id)
+                    OR EXISTS (
+                 SELECT 1 FROM agent_attempts source JOIN history_revoked_sessions h ON h.session_id = source.agent_session_id
+                 WHERE source.run_id = side.source_run_id
+               ))
          )",
         [job],
         |row| row.get(0),
@@ -564,16 +575,36 @@ pub(super) fn is_deleted_question(db: &Connection, job: &str) -> Result<bool> {
 }
 
 pub(super) fn load(db: &Connection, job: &str) -> Result<Option<SidePayload>> {
+    if is_deleted_question(db, job)? {
+        return Ok(None);
+    }
     let payload: Option<Vec<u8>> = db
         .query_row(
-            "SELECT payload FROM job_side_requests WHERE job_id = ?1 AND NOT (
-                 discarded AND purpose = 'question' AND NOT validation
-             )",
+            "SELECT payload FROM job_side_requests WHERE job_id = ?1",
             [job],
             |row| row.get(0),
         )
         .optional()?;
     payload.as_deref().map(decode).transpose()
+}
+
+pub(crate) fn redact_retained_side_context(db: &Connection, job: &str) -> Result<()> {
+    let stored: Vec<u8> = db.query_row("SELECT payload FROM job_side_requests WHERE job_id = ?1", [job], |row| row.get(0))?;
+    let mut payload: SidePayload = decode(&stored)?;
+    payload.context.clear();
+    payload.pin.provider_source = None;
+    db.execute("INSERT INTO history_deleted_side_payloads VALUES (?1)", [job])?;
+    db.execute(
+        "UPDATE job_side_requests SET payload = ?2 WHERE job_id = ?1",
+        params![job, protection::protect(&serde_json::to_vec(&payload)?)?],
+    )?;
+    db.execute(
+        "DELETE FROM job_side_responses WHERE run_id IN (SELECT run_id FROM job_attempts WHERE job_id = ?1)",
+        [job],
+    )?;
+    db.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [job])?;
+    db.execute("UPDATE jobs SET queue_state = 'cancelled' WHERE id = ?1", [job])?;
+    Ok(())
 }
 
 pub(super) fn suggestion_still_current(

@@ -37,6 +37,7 @@ export interface SideRequest {
   purpose: "question" | "suggestion" | "validation";
   question: string;
   response: { outcome: SideOutcome; outputFixture?: OutputFixtureReceipt } | null;
+  historyPayloadDeleted?: boolean;
   outputFixture?: OutputFixture | null;
   evidenceId: string | null;
   evidenceCheckedAt: string | null;
@@ -148,7 +149,7 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
     </div>}
     {!requests.length && saved.isSuccess && submission?.status !== "unavailable" && <p className="p-3 text-sm text-muted-foreground">Start a side question with /btw followed by your question.</p>}
     <ul className="grid gap-3 p-3">
-      {requests.map(({ job, question, response, purpose, provider, model, contextId, sourceRunId, evidenceId }) => {
+      {requests.map(({ job, question, response, purpose, provider, model, contextId, sourceRunId, evidenceId, historyPayloadDeleted }) => {
         const outcome = response?.outcome;
         const fixture = purpose === "validation";
         const active = isLiveRun(job.latestAttempt);
@@ -168,7 +169,8 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
               void Promise.resolve().then(() => navigator.clipboard.writeText(outcome.text)).catch(() => setCopyError("Could not copy the side answer."));
             }}>Copy answer</Button>
           </> : <p className="text-muted-foreground" role="status">
-            {pending ? (job.latestAttempt?.cancelRequested ? "Stopping…" : job.latestAttempt?.status === "starting" ? "Starting…" : active ? "Running…" : job.queueState === "paused" ? "Paused in the queue" : "Waiting for the queue…")
+            {historyPayloadDeleted ? "Saved answer and source context deleted"
+              : pending ? (job.latestAttempt?.cancelRequested ? "Stopping…" : job.latestAttempt?.status === "starting" ? "Starting…" : active ? "Running…" : job.queueState === "paused" ? "Paused in the queue" : "Waiting for the queue…")
               : outcome?.kind === "unavailable" ? sideUnavailableReason(outcome.reason)
                 : job.queueState === "cancelled" || job.latestAttempt?.status === "cancelled" || outcome?.kind === "cancelled" ? "Cancelled"
                   : job.latestAttempt?.status === "interrupted" || outcome?.kind === "interrupted" ? "Interrupted"

@@ -199,7 +199,8 @@ async fn capture_worktree_candidate(store: &Store, run_id: String, reconcile: bo
                 "INSERT INTO job_worktree_candidates (run_id, evidence, capture_confirmed)
                  SELECT ?1, ?2, ?3 FROM job_writer_reservations WHERE run_id = ?1
                  ON CONFLICT(run_id) DO UPDATE SET evidence = excluded.evidence, capture_confirmed = 1
-                 WHERE ?4 AND excluded.capture_confirmed AND NOT job_worktree_candidates.capture_confirmed",
+                 WHERE ?4 AND excluded.capture_confirmed AND NOT job_worktree_candidates.capture_confirmed
+                   AND NOT EXISTS (SELECT 1 FROM history_deleted_attempt_diffs WHERE run_id = ?1)",
                 params![run_id, payload, confirmed, reconcile],
             )?;
             ensure!(

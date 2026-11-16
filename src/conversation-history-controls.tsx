@@ -1,5 +1,6 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { ConversationHistoryDeletion } from "@/conversation-history-deletion";
 import { GitFork, History, Pencil, RotateCcw } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useContext, useState } from "react";
@@ -83,7 +84,7 @@ function useHistoryInspection(conversationId: string) {
 function HistoryMessages({ messages, forkMessage }: { messages: readonly MessageRevision[]; forkMessage?: (revisionId: string) => void }) {
   return <ol className="space-y-2">{messages.map((message) => <li key={message.revisionId}>
     <strong>{message.role === "user" ? "You" : "Assistant"}</strong>
-    <p className="whitespace-pre-wrap break-words">{message.text}</p>
+    <p className="whitespace-pre-wrap break-words">{message.text || "History content unavailable"}</p>
     {forkMessage && <button type="button" className="conv-quiet-button" onClick={() => forkMessage(message.revisionId)}>
       <GitFork aria-hidden /> Fork from saved message
     </button>}
@@ -98,14 +99,28 @@ function snapshotQuery(conversationId: string, contextId?: string) {
     enabled: Boolean(contextId), staleTime: Infinity };
 }
 
-function HistoricalSnapshot({ conversationId, contextId, throughRevision, forkMessage }: SnapshotTarget & { forkMessage?: (revisionId: string) => void }) {
+function HistoricalSnapshot({ conversationId, contextId, throughRevision, forkMessage, archived }: SnapshotTarget & { forkMessage?: (revisionId: string) => void }) {
   const history = useQuery(snapshotQuery(conversationId, contextId));
   if (history.error) return <p role="alert">{String(history.error)}</p>;
   if (!history.data) return <p role="status">Loading saved dialogue…</p>;
   const { messages } = history.data;
   const end = throughRevision ? messages.findIndex(({ revisionId }) => revisionId === throughRevision) + 1 : messages.length;
   if (throughRevision && end === 0) return <p>The selected source message is unavailable.</p>;
-  return end > 0 ? <HistoryMessages messages={messages.slice(0, end)} forkMessage={forkMessage} /> : <p>This revision has no dialogue.</p>;
+  const retained = messages.slice(0, end);
+  return end > 0 ? <>
+    <HistoryMessages messages={retained} forkMessage={forkMessage} />
+    {archived && <HistoryDeletionGate conversationId={conversationId} history={{ messages: retained }} />}
+  </> : <p>This revision has no dialogue.</p>;
+}
+
+function HistoryDeletionGate({ conversationId, history, disabled }: {
+  conversationId: string; history: Pick<ConversationHistory, "messages">; disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return <details className="mt-2" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary className="conv-quiet-button cursor-pointer">Delete a revision or diff</summary>
+    {open && <ConversationHistoryDeletion conversationId={conversationId} history={history} disabled={disabled} />}
+  </details>;
 }
 
 export function ConversationPreviousRevisions({ conversationId, openConversation, onArchivedAction }: {
@@ -215,6 +230,7 @@ export function ConversationHistoryControls(props: HistoryProps) {
         <Dialog.Description>Choose a history boundary and review the resulting dialogue.</Dialog.Description>
         <HistoryActionForm key={action ? `${action.kind}:${action.revisionId}:${action.sourceContextId ?? "active"}` : "head"}
           {...props} history={props.history} close={close} requestedAction={action} onArchivedAction={setArchivedAction} />
+        {!action && <HistoryDeletionGate conversationId={props.conversationId} history={props.history} disabled={props.disabled || pending} />}
       </Dialog.Content>
     </Dialog.Portal>}
   </Dialog.Root>;

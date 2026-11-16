@@ -749,6 +749,7 @@ pub struct ConversationInput {
     frames: Vec<String>,
     attachments: Vec<omniagent::dispatch::AttachmentEvidence>,
     removed_attachment_count: usize,
+    history_payload_deleted: bool,
     instructions: Vec<omniagent::dispatch::InstructionDispatch>,
     conversation_references: Vec<omniagent::conversations::SubmittedConversationReference>,
 }
@@ -777,6 +778,7 @@ pub async fn conversation_input(
                 frames,
                 attachments: dispatch.attachments,
                 removed_attachment_count: dispatch.removed_attachment_count,
+                history_payload_deleted: dispatch.history_payload_deleted,
                 instructions: dispatch.instructions,
                 conversation_references: dispatch.snapshot.conversation_references,
             })

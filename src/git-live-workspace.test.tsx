@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import GitWorkspace from "@/git-workspace";
@@ -123,6 +123,41 @@ it("opens the requested attempt's saved diff without loading live checkout conte
   expect(vi.mocked(invoke).mock.calls.map(([command]) => command).sort()).toEqual(["attempt_worktree_evidence", "git_saved_attempts"]);
   await user.click(screen.getByRole("button", { name: "View attempt" }));
   expect(openActivity).toHaveBeenCalledWith("recorded-run");
+});
+
+it("deletes a workflow attempt's recorded diff using the owning chat and the preview revision", async () => {
+  let deleted = false;
+  const target = { kind: "attempt_diff", conversationId: "workflow-chat", runId: "recorded-run" };
+  const preview = {
+    revision: "reviewed-diff", messageRevisionIds: [], artifactIds: [], dispatchIds: [], referenceIds: [],
+    attemptDiffIds: ["recorded-run"], candidateIds: [], sideRequestIds: [],
+    nativeSessions: 0, retainedRuns: 1, affectedJobs: 0, unsettledRunIds: [],
+  };
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "git_saved_attempts") return [{
+      runId: "recorded-run", checkoutId: "linked-task", label: "Workflow attempt",
+      conversationId: "workflow-chat", historyDeleted: deleted,
+    }];
+    if (command === "attempt_worktree_evidence") return deleted
+      ? { kind: "unavailable", reason: "The recorded diff was removed from history." }
+      : { kind: "saved", artifact: {
+        revision: "immutable-evidence", start: { worktree: { branch: "feature" }, starting: { head: "start-head" } },
+        candidate: { head: "captured-head" }, committedPatchBase64: btoa("private captured patch"),
+      } };
+    if (command === "preview_conversation_history_deletion") return preview;
+    if (command === "confirm_conversation_history_deletion") { deleted = true; return preview; }
+    throw new Error(`Unexpected ${command}`);
+  });
+  openGit({ target: "attempt:recorded-run" });
+  fireEvent.click(await screen.findByText("Delete recorded diff"));
+  fireEvent.click(screen.getByRole("button", { name: "Review deletion impact" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Confirm deletion" }));
+  expect(await screen.findByText("The recorded diff was removed from history.")).toBeTruthy();
+  expect(screen.queryByText("private captured patch")).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("confirm_conversation_history_deletion", {
+    target, mode: "selected", expectedRevision: "reviewed-diff",
+  });
+  expect(screen.getByRole("button", { name: "View attempt" })).toBeTruthy();
 });
 
 it("requires explicit review when the staged revision changes with a commit message entered", async () => {
