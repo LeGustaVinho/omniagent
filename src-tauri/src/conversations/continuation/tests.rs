@@ -1,6 +1,13 @@
 use super::*;
 use crate::{
-    conversations::tests::{confirm, prepare, setup},
+    conversations::{
+        references::ConversationReferenceSelection,
+        tests::{confirm, prepare, setup},
+    },
+    dispatch::{
+        ByteRange, ContextSnapshot, ConversationArtifactRevision, Delivery, DispatchSourceRevision,
+        SelectedMessageSpan,
+    },
     jobs::{AdmissionBlocker, AdmissionEnvironment},
     providers::SessionIntent,
 };
@@ -111,7 +118,8 @@ async fn a_pinned_native_send_cannot_seed_history_if_its_verified_cursor_changes
 }
 
 #[tokio::test]
-async fn verifies_native_cursor_and_distinguishes_the_three_reviewed_continuations() -> Result<()> {
+async fn verifies_native_cursor_and_pins_reference_delivery_for_all_three_continuations()
+-> Result<()> {
     for choice in [
         ContinuationChoice::SameTab,
         ContinuationChoice::ForkWithContext,
@@ -144,16 +152,68 @@ async fn verifies_native_cursor_and_distinguishes_the_three_reviewed_continuatio
             .await?;
         let mut changed = scope;
         changed.model = Some("replacement-model".into());
+        let source = store
+            .create_conversation(current.checkout_id.clone(), "Reference source".into())
+            .await?;
+        let source_text = "Unselected opening. café 🦀\nPinned answer. Unselected ending.";
+        let quoted = "café 🦀\nPinned answer.";
+        let start = source_text.find(quoted).context("missing test excerpt")?;
+        let source_turn = prepare(&store, &source.id, changed.clone(), source_text).await?;
+        confirm(&store, &source_turn).await?;
+        let available = store
+            .conversation_reference_source(current.id.clone(), source.id.clone(), None)
+            .await?;
+        let source_context = available.context_id;
+        let source_revision = available.messages[0].revision_id.clone();
+        let reference = store
+            .preview_conversation_reference(
+                current.id.clone(),
+                source.id.clone(),
+                ConversationReferenceSelection::Messages {
+                    context_id: source_context.clone(),
+                    spans: vec![SelectedMessageSpan {
+                        revision_id: source_revision.clone(),
+                        byte_range: Some(ByteRange {
+                            start,
+                            end: start + quoted.len(),
+                        }),
+                    }],
+                },
+            )
+            .await?;
+        assert_eq!(reference.destination_conversation_id, current.id);
+        assert_eq!(reference.source_conversation_id, source.id);
+        assert_eq!(reference.source_title, source.title);
+        assert_eq!(reference.project_id, attempt.run.project_id);
+        assert_eq!(reference.project_name, available.project_name);
+        let ConversationArtifactRevision::Excerpt {
+            source_context_id,
+            excerpts,
+            ..
+        } = &reference.artifact
+        else {
+            bail!("The selected messages did not produce an excerpt");
+        };
+        assert_eq!(source_context_id, &source_context);
+        assert!(matches!(excerpts.as_slice(), [excerpt]
+            if excerpt.text == quoted && excerpt.source.origin.revision_id == source_revision));
+        assert_eq!(
+            store
+                .edit_conversation_reference_draft(current.id.clone(), reference.id.clone(), true)
+                .await?,
+            [reference.clone()]
+        );
         let prompt = "Next user message".to_owned();
         store
             .save_conversation_draft(current.id.clone(), prompt.clone())
             .await?;
         let inspected = store
-            .submit_conversation_continuation(
+            .submit_conversation_with_references(
                 current.id.clone(),
                 current.context_id.clone(),
                 changed.clone(),
                 prompt.clone(),
+                vec![reference.id.clone()],
             )
             .await?;
         let ContinuationInspection::ReviewRequired {
@@ -187,6 +247,28 @@ async fn verifies_native_cursor_and_distinguishes_the_three_reviewed_continuatio
 
         assert_eq!(store.conversation_draft(current.id.clone()).await?, prompt);
         assert!(store.claim_next_job(environment(&changed)).await?.is_none());
+        store
+            .rewind_conversation_history(source.id.clone(), source_context.clone(), None)
+            .await?;
+        store
+            .edit_conversation_reference_draft(current.id.clone(), reference.id.clone(), false)
+            .await?;
+        assert!(
+            store
+                .confirm_conversation_continuation(
+                    current.id.clone(),
+                    preview_id.clone(),
+                    choice,
+                    changed.clone(),
+                    prompt.clone(),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(store.conversation_draft(current.id.clone()).await?, prompt);
+        store
+            .edit_conversation_reference_draft(current.id.clone(), reference.id.clone(), true)
+            .await?;
         let result = store
             .confirm_conversation_continuation(
                 current.id.clone(),
@@ -201,6 +283,15 @@ async fn verifies_native_cursor_and_distinguishes_the_three_reviewed_continuatio
             choice == ContinuationChoice::SameTab
         );
         assert_eq!(result.conversation.checkout_id, current.checkout_id);
+        let queued_context = result.job.context.as_ref().context("No queued context")?;
+        assert_eq!(queued_context.conversation_id, result.conversation.id);
+        assert_eq!(queued_context.context_id, result.conversation.context_id);
+        assert!(
+            store
+                .conversation_reference_draft(current.id.clone())
+                .await?
+                .is_empty()
+        );
         assert!(
             store
                 .conversation_draft(current.id.clone())
@@ -220,6 +311,8 @@ async fn verifies_native_cursor_and_distinguishes_the_three_reviewed_continuatio
                 .is_err()
         );
 
+        drop(store);
+        let store = Store::open(changed.checkout.join("store.sqlite"))?;
         let plan = store
             .claim_next_job(environment(&changed))
             .await?
@@ -241,11 +334,82 @@ async fn verifies_native_cursor_and_distinguishes_the_three_reviewed_continuatio
         }
         if choice == ContinuationChoice::ForkWithContext {
             assert_ne!(seed[0].revision_id, plan.input[0].revision_id);
+        }
+        if choice != ContinuationChoice::SameTab {
             assert_eq!(
-                store.conversation(current.id).await?.context_id,
+                store.conversation(current.id.clone()).await?.context_id,
                 current.context_id
             );
         }
+        if choice == ContinuationChoice::SameTab {
+            assert_eq!(seed[0].revision_id, plan.input[0].revision_id);
+        }
+        let submitted = store
+            .conversation_dispatch_references(
+                plan.run.id.clone(),
+                plan.input
+                    .iter()
+                    .map(|message| message.revision_id.clone())
+                    .collect(),
+            )
+            .await?;
+        let [link] = submitted.as_slice() else {
+            bail!("The reviewed reference did not follow the queued turn");
+        };
+        let new_revision = &plan
+            .input
+            .last()
+            .context("Missing queued message")?
+            .revision_id;
+        assert_eq!(&link.message_revision_id, new_revision);
+        assert_ne!(new_revision, &source_revision);
+        assert_eq!(link.reference, reference);
+        store.mark_agent_running(plan.run.id.clone()).await?;
+        let snapshot: ContextSnapshot = serde_json::from_value(serde_json::json!({
+            "version": 14, "contextId": plan.context_id, "scope": plan.scope, "baseCommit": null,
+            "submittedMessages": plan.input, "conversationReferences": submitted,
+            "nativeHistory": { "mode": "fresh" },
+        }))?;
+        let dispatch = store
+            .prepare_dispatch(
+                plan.run.id.clone(),
+                snapshot,
+                vec![b"{\"fixture\":true}".to_vec()],
+            )
+            .await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        let recorded = store
+            .agent_dispatch(result.conversation.id.clone(), plan.run.id.clone())
+            .await?
+            .context("The destination has no recorded dispatch")?;
+        assert_eq!(recorded.snapshot.conversation_references, submitted);
+        assert_eq!(recorded.snapshot.scope.checkout, changed.checkout);
+        let lineage = store
+            .dispatch_lineage(result.conversation.id.clone(), plan.run.id.clone())
+            .await?
+            .context("No saved dispatch lineage")?;
+        assert!(lineage.sources.iter().any(|entry| matches!(entry,
+            DispatchSourceRevision::ConversationReference {
+                message_revision_id, project_id, source_conversation_id, artifact_revision_id,
+            } if message_revision_id == new_revision && project_id == &reference.project_id
+                && source_conversation_id == &source.id && artifact_revision_id == reference.artifact.id()
+        )));
+        assert!(
+            store
+                .dispatches_using_message(source.id.clone(), source_revision.clone())
+                .await?
+                .iter()
+                .any(|entry| entry.run_id == plan.run.id
+                    && entry.conversation_id == result.conversation.id)
+        );
+        let origin = store
+            .conversation_reference_source(result.conversation.id, source.id, Some(source_context))
+            .await?;
+        assert!(
+            origin.messages.iter().any(
+                |message| message.revision_id == source_revision && message.text == source_text
+            )
+        );
     }
     Ok(())
 }
