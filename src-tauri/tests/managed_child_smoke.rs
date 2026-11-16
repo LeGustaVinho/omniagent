@@ -8,7 +8,7 @@ use omniagent::{
         SubagentLimitMode,
     },
     providers::{
-        Provider, SessionMode,
+        Provider, ProviderEventData, SessionMode,
         profiles::{ConfiguredExecutable, DESKTOP_PERMISSION_REVISION, desktop_profile},
         runtime::start_managed_turn,
     },
@@ -227,7 +227,9 @@ async fn managed_children(provider: Provider) -> Result<()> {
             .any(|message| message.role == MessageRole::Assistant
                 && message.text.contains("DELEGATED_OK"))
     );
-    let quota = store.conversation_subagent_quota(conversation.id).await?;
+    let quota = store
+        .conversation_subagent_quota(conversation.id.clone())
+        .await?;
     assert_eq!(
         (
             quota.managed.active,
@@ -236,6 +238,28 @@ async fn managed_children(provider: Provider) -> Result<()> {
         ),
         (0, 0, 2)
     );
+    let tree = store
+        .conversation_agent_tree(conversation.id.clone(), parent.run.id.clone())
+        .await?;
+    for (id, status) in [
+        (active.run_id, RunStatus::Cancelled),
+        (completed.run_id, RunStatus::Succeeded),
+    ] {
+        let (job, attempt) = tree
+            .managed
+            .iter()
+            .find_map(|job| {
+                job.attempts
+                    .iter()
+                    .find(|attempt| attempt.link.run_id == id)
+                    .map(|attempt| (job, attempt))
+            })
+            .context("the managed history omitted the captured child")?;
+        assert_eq!(job.parent.run_id, parent.run.id);
+        assert_eq!(attempt.status, status);
+        assert_eq!(attempt.prompt_delivery.as_deref(), Some("submitted"));
+        assert!(attempt.context_recorded);
+    }
     store
         .finish_agent_attempt(parent.run.id, RunStatus::Succeeded, None)
         .await?;
@@ -359,5 +383,119 @@ async fn codex_applies_strict_total_and_the_independent_audit_modes() -> Result<
                 .is_empty()
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a signed-in Codex CLI with verified native delegation controls"]
+async fn codex_reports_native_child_history_under_verified_controls() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (store, conversation, scope) = fixture(temp.path(), Provider::Codex).await?;
+    store
+        .set_conversation_subagent_quota(
+            conversation.id.clone(),
+            Some(SubagentLimitMode::Strict),
+            1,
+            Some(1),
+        )
+        .await?;
+    store
+        .set_conversation_subagent_audit(
+            conversation.id.clone(),
+            Some(SubagentAuditPolicy::Available),
+        )
+        .await?;
+    let plan = store.prepare_agent_attempt(
+        conversation.id.clone(), conversation.context_id, scope,
+        "Use your native spawn_agent tool exactly once. Give the read-only child the task of replying with NATIVE_CHILD_REPORTED. Wait for the child's reply and confirm it in your final answer. Do not edit files.".into(),
+    ).await?;
+    let run_id = plan.run.id.clone();
+    let task = start_managed_turn(store.clone(), Arc::new(DirectWindowsRunner), plan, None);
+    let observed = tokio::time::timeout(DEADLINE, async {
+        let mut verified_control = false;
+        loop {
+            let tree = store.conversation_agent_tree(conversation.id.clone(), run_id.clone()).await?;
+            let quota = store.conversation_subagent_quota(conversation.id.clone()).await?;
+            verified_control |= quota.native_scope.as_ref().is_some_and(|scope| {
+                scope.run_id == run_id && scope.allowance == Some(1)
+            }) && quota.native_sessions.iter().any(|session| {
+                session.provider == Provider::Codex && session.verified
+                    && session.strict_total && session.allowance == 1
+            });
+            if verified_control && tree.native_observations.iter().any(|observation| {
+                observation.run_id == run_id && observation.event.location.session_id.is_some()
+                    && matches!(&observation.event.data, ProviderEventData::ChildActivity {
+                        child_id: Some(child_id), ..
+                    } if !child_id.is_empty())
+            }) {
+                return Ok::<_, anyhow::Error>(());
+            }
+            if tree.attempts.last().is_some_and(|attempt| attempt.status.is_terminal()) {
+                let history = store.agent_observations(conversation.id.clone(), run_id.clone(), 0).await?;
+                let responses: Vec<_> = history.into_iter().filter_map(|event| match event.event.data {
+                    ProviderEventData::AssistantFinal { text } | ProviderEventData::Error { message: text } =>
+                        Some(omniagent::diagnostics::preview(&text)),
+                    _ => None,
+                }).collect();
+                anyhow::bail!(
+                    "Codex ended without an identified child: verified allocation {verified_control}, native events {:?}, response {:?}",
+                    tree.native_observations, responses,
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await;
+    if let Err(error) = observed
+        .context("native delegation observation timed out")
+        .and_then(|result| result)
+    {
+        let _ = task.control().interrupt();
+        let _ = tokio::time::timeout(DEADLINE, task.wait()).await;
+        return Err(error);
+    }
+    assert_eq!(
+        tokio::time::timeout(DEADLINE, task.wait()).await??,
+        RunStatus::Succeeded
+    );
+    drop(store);
+    let saved = Store::open(temp.path().join("queue.sqlite"))?;
+    let history = saved
+        .conversation_agent_tree(conversation.id.clone(), run_id.clone())
+        .await?;
+    assert!(history.managed.is_empty());
+    let identified = history
+        .native_observations
+        .iter()
+        .filter_map(|observation| match &observation.event.data {
+            ProviderEventData::ChildActivity {
+                child_id: Some(id), ..
+            } => Some(id),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(identified.len(), 1);
+    let reported_statuses = history
+        .native_observations
+        .iter()
+        .filter_map(|observation| match &observation.event.data {
+            ProviderEventData::ChildActivity {
+                child_id: Some(_),
+                status,
+                ..
+            } => status.as_deref(),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(reported_statuses.contains("started"));
+    assert!(reported_statuses.contains("completed"));
+    let finalized = saved.conversation_subagent_quota(conversation.id).await?;
+    assert!(finalized.native_sessions.is_empty());
+    let reported = finalized
+        .native
+        .iter()
+        .find(|item| item.provider == Provider::Codex)
+        .context("the Codex child history is missing from the native counters")?;
+    assert_eq!(reported.reported.historical, 1);
+    assert_eq!(reported.reported.active, 0);
     Ok(())
 }
