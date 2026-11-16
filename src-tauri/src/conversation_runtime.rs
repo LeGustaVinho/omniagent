@@ -619,3 +619,16 @@ pub async fn conversation_dispatch_inventory(
         .await
         .map_err(ui_error)
 }
+
+#[tauri::command]
+pub async fn conversation_profile_evidence(
+    store: State<'_, Store>,
+    project_id: String,
+    conversation_id: String,
+    run_id: String,
+) -> Result<Option<omniagent::dispatch::DispatchProfileEvidence>, String> {
+    store
+        .dispatch_profile_evidence(project_id, conversation_id, run_id)
+        .await
+        .map_err(ui_error)
+}

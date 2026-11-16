@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { ConversationChildren, recordChildActivity, type ChildActivity, type ChildLocation, type Delegation } from "@/conversation-children";
 import { ConversationDeliveries, type ConversationInput } from "@/conversation-deliveries";
 import { ConversationInventory } from "@/conversation-inventory";
+import { ConversationProfile } from "@/conversation-profile";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
 
 type EventData =
@@ -278,6 +279,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
           <li key={index}><small>{entry.summary ? "Summary" : "Provider reasoning"}</small><p>{entry.text}</p></li>)}</ol>
       </details>}
       <ConversationInventory conversationId={conversationId} runId={run.id} />
+      <ConversationProfile projectId={run.projectId} conversationId={conversationId} runId={run.id} live={live} />
       <Button type="button" variant="outline" aria-expanded={showInput} onClick={() => setShowInput((visible) => !visible)}>Exact input</Button>
       {showInput && (
         <section className="min-w-0 rounded-md border border-border bg-card p-3" aria-label="Exact provider input">

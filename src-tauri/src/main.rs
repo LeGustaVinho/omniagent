@@ -250,6 +250,7 @@ fn main() {
             conversation_runtime::conversation_input,
             conversation_runtime::conversation_attachment_content,
             conversation_runtime::conversation_dispatch_inventory,
+            conversation_runtime::conversation_profile_evidence,
             ipc::fixture_input_evidence,
             ipc::subscribe_events,
             ipc::unsubscribe_events,
