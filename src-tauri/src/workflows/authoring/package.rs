@@ -346,3 +346,6 @@ fn pipeline_reference(version: &WorkflowRevision) -> PackageArtifactVersion {
         revision: version.revision.clone(),
     }
 }
+
+#[cfg(test)]
+mod protected_review;
