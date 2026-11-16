@@ -11,6 +11,7 @@ mod queue_runtime;
 
 use std::{path::PathBuf, sync::Arc};
 
+use omniagent::repository::verification::ipc as candidate;
 use omniagent::{
     jobs::JobScheduler,
     repository::{
@@ -227,6 +228,12 @@ fn main() {
             attempt_worktree_evidence,
             live_managed_worktree,
             discard_pending_worktree_changes,
+            candidate::candidate_gate_policy,
+            candidate::set_candidate_gate_policy,
+            candidate::select_worktree_candidate,
+            candidate::current_selected_candidate,
+            candidate::inspect_candidate_verification,
+            candidate::inspect_candidate_acceptance,
             desktop::choose_repository,
             desktop::choose_repository_markdown,
             desktop::list_repository_markdown_revisions,

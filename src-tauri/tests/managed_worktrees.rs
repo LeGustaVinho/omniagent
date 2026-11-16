@@ -36,6 +36,9 @@ use omniagent::{
 };
 use serde_json::{Value, json};
 
+#[path = "../src/repository/verification/git_fixture.rs"]
+mod candidate_verification;
+
 fn git(directory: &Path, args: &[impl AsRef<OsStr>]) -> Result<String> {
     let output = Command::new("git.exe")
         .current_dir(directory)

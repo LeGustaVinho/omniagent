@@ -453,6 +453,7 @@ mod tests {
             excluded: Default::default(),
             instruction_sources: Vec::new(),
             inputs: Vec::new(),
+            candidate_checkout: None,
             mcp_sources: [(mcp_identity("reader"), "installed executable digest".into())].into(),
             non_mcp_approvals: Default::default(),
         };

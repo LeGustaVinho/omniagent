@@ -18,6 +18,7 @@ use crate::{customizations, store::Store};
 mod candidates;
 mod isolated_git;
 mod markdown;
+pub mod verification;
 mod worktrees;
 pub(crate) mod writers;
 pub use candidates::{AttemptWorktreeEvidence, CandidateRevision, GitChanges, LiveWorktree};

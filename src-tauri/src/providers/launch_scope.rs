@@ -33,10 +33,22 @@ pub struct ScopedLaunchEvidence {
     pub excluded: BTreeMap<String, String>,
     pub instruction_sources: Vec<InstructionSource>,
     pub inputs: Vec<LaunchInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_checkout: Option<CandidateReviewCheckout>,
     #[serde(default)]
     pub(crate) mcp_sources: BTreeMap<String, String>,
     #[serde(default)]
     pub(crate) non_mcp_approvals: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateReviewCheckout {
+    pub candidate_id: String,
+    pub source_run_id: String,
+    pub base_commit: String,
+    pub tree: String,
+    pub working_directory: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -122,6 +134,7 @@ impl ScopedLaunch {
                 excluded: BTreeMap::new(),
                 instruction_sources: Vec::new(),
                 inputs: Vec::new(),
+                candidate_checkout: None,
                 mcp_sources: BTreeMap::new(),
                 non_mcp_approvals: BTreeMap::new(),
             },
