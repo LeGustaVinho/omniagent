@@ -21,6 +21,7 @@ import { noteAttachmentCandidates, RepositoryNoteMedia } from "@/repository-note
 import { NotePropertyEditor } from "@/note-property-editor";
 import { KnowledgeSearch } from "@/knowledge-navigation";
 import { useRepositoryNoteIndex } from "@/repository-note-index";
+import { RepositoryNoteRename } from "@/repository-note-rename";
 import type { NoteGraphProjection } from "@/knowledge-graph";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -48,6 +49,7 @@ type KnowledgeDialog =
   | { kind: "close"; path: string; api: FilePanelApi }
   | { kind: "conflict"; path: string; external: string }
   | { kind: "rename"; path: string }
+  | { kind: "repositoryRename"; path: string; revision: string }
   | { kind: "rewrite"; path: string; destination: string; edits: RewrittenNote[] }
   | { kind: "link"; from: string; link: NoteTarget; matches: NoteLocation[] }
   | { kind: "repositoryAttachment"; paths: string[]; label: string }
@@ -342,8 +344,18 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
               onClick={() => { if (active) save(active); }}><Save size={15} /></button>
             <button type="button" className="fw-icon" title="Split Reading view" aria-label="Split Reading view" disabled={!note}
               onClick={() => { if (active) { setModes((before) => before[active] === "reading" ? { ...before, [active]: "live" } : before); dock.split(active, "reading"); } }}><SplitSquareHorizontal size={15} /></button>
-            {simulated && <button type="button" className="fw-icon" title="Rename note" aria-label="Rename note" disabled={!note}
-              onClick={() => { if (active) { setDestination(active); setDialog({ kind: "rename", path: active }); } }}><FilePenLine size={15} /></button>}
+            <button type="button" className="fw-icon" title="Rename note" aria-label="Rename note"
+              disabled={!note || (!simulated && (isDirty(note) || Boolean(active && repository.notes[active]?.sourceProblem)))}
+              onClick={() => {
+                if (!active) return;
+                if (simulated) {
+                  setDestination(active);
+                  setDialog({ kind: "rename", path: active });
+                } else {
+                  const revision = getNote(active)?.base.id;
+                  if (revision) setDialog({ kind: "repositoryRename", path: active, revision });
+                }
+              }}><FilePenLine size={15} /></button>
           </div>
         </div>}
         <div className="note-body">
@@ -557,6 +569,18 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           }}>Update link</button>
         </div>
       </FileDialog>}
+      {dialog?.kind === "repositoryRename" && <RepositoryNoteRename key={dialog.path} checkoutId={checkout.checkoutId}
+        path={dialog.path} sourceRevisionId={dialog.revision}
+        canApply={!isDirty(notes[dialog.path]) && getNote(dialog.path)?.base.id === dialog.revision && !getNote(dialog.path)?.sourceProblem}
+        onClose={closeDialog} onSettled={(moved) => {
+          void noteIndex.index.refetch();
+          if (!moved) return;
+          for (const panel of [...dock.api?.panels ?? []]) {
+            if ((panel.params as { path?: string } | undefined)?.path === dialog.path) closePanel(dialog.path, panel.api);
+          }
+          repository.forget(dialog.path);
+          open(moved);
+        }} />}
       {dialog?.kind === "attachment" && <FileDialog title={dialog.attachment.name} description={dialog.attachment.detail} onClose={closeDialog}>
         <AttachmentPreview attachment={dialog.attachment} />
       </FileDialog>}

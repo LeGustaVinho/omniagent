@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
 use omniagent::{
     diagnostics,
@@ -9,6 +9,7 @@ use omniagent::{
         },
         markdown_index_watch::{IndexInvalidation, RepositoryNoteIndexWatch},
         markdown_links::{MarkdownLinkQuery, MarkdownLinkResolution, MarkdownLinkSuggestion},
+        markdown_renames::{MarkdownRenamePreview, MarkdownRenameReport},
     },
     store::Store,
 };
@@ -20,6 +21,32 @@ pub struct NoteIndexWatches(Mutex<HashMap<String, RepositoryNoteIndexWatch>>);
 
 fn index_error(error: impl std::fmt::Display) -> String {
     diagnostics::preview(&error.to_string())
+}
+
+#[tauri::command]
+pub async fn preview_markdown_rename(
+    store: State<'_, Store>,
+    checkout_id: String,
+    source: PathBuf,
+    destination: PathBuf,
+    expected_source_revision: String,
+) -> Result<MarkdownRenamePreview, String> {
+    store
+        .preview_markdown_rename(checkout_id, source, destination, expected_source_revision)
+        .await
+        .map_err(index_error)
+}
+
+#[tauri::command]
+pub async fn apply_markdown_rename(
+    store: State<'_, Store>,
+    checkout_id: String,
+    preview_id: String,
+) -> Result<MarkdownRenameReport, String> {
+    store
+        .apply_markdown_rename(checkout_id, preview_id)
+        .await
+        .map_err(index_error)
 }
 
 #[tauri::command]

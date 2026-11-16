@@ -18,9 +18,12 @@ use super::{
 };
 
 mod format;
+mod movement;
 mod replacement;
 
 use format::{EditorFormat, encode};
+pub use movement::RepositoryDocumentMove;
+pub(super) use movement::proposed_move_paths;
 use replacement::{FileSave, file_identity, replace};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,7 +77,7 @@ pub enum RepositoryDocumentSave {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryDocumentRecovery {
     pub destination_path: PathBuf,

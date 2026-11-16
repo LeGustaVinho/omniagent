@@ -23,6 +23,7 @@ mod markdown_catalog;
 pub mod markdown_index;
 pub mod markdown_index_watch;
 pub mod markdown_links;
+pub mod markdown_renames;
 pub mod verification;
 pub mod verified_git;
 mod worktrees;

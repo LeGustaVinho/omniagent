@@ -296,6 +296,8 @@ fn main() {
             note_index_runtime::repository_note_relationships,
             note_index_runtime::resolve_repository_note_links,
             note_index_runtime::suggest_repository_note_links,
+            note_index_runtime::preview_markdown_rename,
+            note_index_runtime::apply_markdown_rename,
             note_runtime::open_repository_document,
             note_runtime::save_repository_document,
             note_runtime::read_repository_attachment,

@@ -25,6 +25,9 @@ use windows_sys::Win32::{
 
 use super::{OpenedFile, RepositoryDocumentRecovery, hash, read_file, read_open_file};
 
+mod movement;
+pub(super) use movement::{FileMove, move_exact};
+
 pub(super) enum FileSave {
     Verified {
         file: OpenedFile,

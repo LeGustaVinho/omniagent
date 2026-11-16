@@ -275,5 +275,13 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
   }), [change, checkoutId, persist, serialize]);
 
   const getNote = useCallback((path: string) => current.current.notes[path], []);
-  return { ...state, catalog, draftPaths, error, load, save, update, resolve, watch, stopWatching, getNote };
+  const forget = useCallback((path: string) => {
+    stopWatching(path);
+    const notes = { ...current.current.notes };
+    const failures = { ...current.current.failures };
+    delete notes[path];
+    delete failures[path];
+    publish({ notes, failures });
+  }, [publish, stopWatching]);
+  return { ...state, catalog, draftPaths, error, load, save, update, resolve, watch, stopWatching, getNote, forget };
 }
