@@ -35,6 +35,7 @@ pub struct IndexedNote {
     pub title: String,
     pub frontmatter: Option<String>,
     pub tags: BTreeSet<String>,
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,18 +143,41 @@ impl Store {
     ) -> Result<Option<IndexedNoteDetails>> {
         self.execute(move |db| {
             db.query_row(
-                "SELECT id, path, title, metadata FROM repository_note_index WHERE checkout_id = ?1 AND path = ?2",
+                "SELECT id, path, title, metadata, substr(search_text, 1, 8192)
+                 FROM repository_note_index WHERE checkout_id = ?1 AND path = ?2",
                 params![checkout, path],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
-            ).optional()?.map(|(id, path, title, payload)| {
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(id, path, title, payload, start)| {
                 let metadata: NoteMetadata = serde_json::from_str(&payload)?;
                 Ok(IndexedNoteDetails {
-                    note: IndexedNote { id, path, title, frontmatter: metadata.frontmatter, tags: metadata.tags },
-                    aliases: metadata.aliases, properties: metadata.properties, headings: metadata.headings,
-                    blocks: metadata.blocks, links: metadata.links,
+                    note: IndexedNote {
+                        id,
+                        path,
+                        title,
+                        preview: note_preview(&start, metadata.frontmatter.is_some()),
+                        frontmatter: metadata.frontmatter,
+                        tags: metadata.tags,
+                    },
+                    aliases: metadata.aliases,
+                    properties: metadata.properties,
+                    headings: metadata.headings,
+                    blocks: metadata.blocks,
+                    links: metadata.links,
                 })
-            }).transpose()
-        }).await
+            })
+            .transpose()
+        })
+        .await
     }
 
     pub async fn search_repository_note_index(
@@ -282,22 +306,50 @@ fn replace_index(db: &Connection, checkout: &str, scan: NoteScan) -> Result<bool
 
 fn list_indexed_notes(db: &Connection, checkout: &str) -> Result<Vec<IndexedNote>> {
     let mut statement = db.prepare(
-        "SELECT id, path, title, json_extract(metadata, '$.frontmatter'), json_extract(metadata, '$.tags')
+        "SELECT id, path, title, json_extract(metadata, '$.frontmatter'), json_extract(metadata, '$.tags'), substr(search_text, 1, 8192)
          FROM repository_note_index WHERE checkout_id = ?1 ORDER BY path",
     )?;
     let mut rows = statement.query([checkout])?;
     let mut notes = Vec::new();
     while let Some(row) = rows.next()? {
         let tags: String = row.get(4)?;
+        let frontmatter: Option<String> = row.get(3)?;
+        let start: String = row.get(5)?;
         notes.push(IndexedNote {
             id: row.get(0)?,
             path: row.get(1)?,
             title: row.get(2)?,
-            frontmatter: row.get(3)?,
+            preview: note_preview(&start, frontmatter.is_some()),
+            frontmatter,
             tags: serde_json::from_str(&tags).context("read indexed note tags")?,
         });
     }
     Ok(notes)
+}
+
+fn note_preview(start: &str, has_frontmatter: bool) -> Option<String> {
+    let mut lines = start.lines();
+    if has_frontmatter {
+        lines.next();
+        lines.find(|line| line.trim_end() == "---")?;
+    }
+    let mut comment = false;
+    for line in lines {
+        let mut visible = String::new();
+        for (index, fragment) in line.split("%%").enumerate() {
+            if index > 0 {
+                comment = !comment;
+            }
+            if !comment {
+                visible.push_str(fragment);
+            }
+        }
+        let visible = visible.trim();
+        if !visible.is_empty() && !visible.starts_with(['#', '`', '~']) {
+            return Some(visible.chars().take(180).collect());
+        }
+    }
+    None
 }
 
 fn search_query(input: &str) -> String {

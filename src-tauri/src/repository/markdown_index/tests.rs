@@ -6,6 +6,16 @@ use crate::repository::{git_path, register};
 
 use super::*;
 
+#[test]
+fn note_previews_skip_frontmatter_and_the_body_of_obsidian_comments() {
+    let source = "\u{feff}---\r\ntitle: Preview\r\n---\r\n\r\n# Heading\r\n%%\r\nInternal source comment\r\n%%\r\nUser-visible summary. %% Omitted %%";
+    assert_eq!(
+        note_preview(source, true).as_deref(),
+        Some("User-visible summary.")
+    );
+    assert!(note_preview("%%\nunfinished comment", false).is_none());
+}
+
 const SOURCE: &str = "\u{feff}---\r\ntitle: Revisão de lançamento\r\naliases: [\"Runbook, release\", Manual]\r\ntags: [release, checklist]\r\nkanban-plugin: board # keep\r\n---\r\n\r\n# Janela aprovada\r\n\r\n🚀 The deployment window covers Pacífico. #ops/windows ^readiness\r\n\r\n[[Manual#^done|follow]] and [notes](./Notes.md#details).\r\n\r\n```dataview\r\nLIST FROM [[Ignore-query]]\r\n```\r\n\r\n%% [[Ignore-hidden]] %%\r\n";
 
 fn git(root: &Path, args: &[&str]) -> Result<()> {
