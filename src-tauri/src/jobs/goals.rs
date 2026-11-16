@@ -17,7 +17,9 @@ use crate::{
 };
 
 use super::{
-    GoalControlState, Job, JobContext, JobOrigin, JobRequest, PipelineDispatch,
+    GoalControlState, GoalVerification, GoalVerificationStatus, Job, JobContext, JobOrigin,
+    JobRequest, PipelineDispatch,
+    goal_verification::load_goal_verification,
     history::{bind_pipeline_context, load_binding},
     insert_job, now_ms,
     pipeline::resolve_node_checkout,
@@ -123,6 +125,7 @@ pub struct GoalRevision {
     pub model: Option<String>,
     pub job: Job,
     pub checkpoint: Option<GoalCheckpoint>,
+    pub verification: Option<GoalVerification>,
     pub provider_session_id: Option<String>,
     pub provider_goal_id: Option<String>,
 }
@@ -192,10 +195,14 @@ impl Store {
                 )?,
                 "Wait until the conversation reaches a turn boundary before starting a goal"
             );
-            ensure!(
-                active_revision(&tx, &conversation.id, stage.as_ref())?.is_none(),
-                "This conversation or stage already has an active goal"
-            );
+            if let Some(active) = active_revision(&tx, &conversation.id, stage.as_ref())? {
+                let active_goal = load_revision(&tx, active)?;
+                ensure!(
+                    active_goal.verification.is_some_and(|verification| verification.status == GoalVerificationStatus::Completed),
+                    "This conversation or stage already has an active goal"
+                );
+                tx.execute("DELETE FROM active_goals WHERE revision_id = ?1", [&active_goal.id])?;
+            }
             ensure!(
                 super::instructions::parked_owner(&tx, &conversation.id, &conversation.context_id)?.is_none(),
                 "This context already has an owning continuation"
@@ -263,7 +270,7 @@ impl Store {
                 goal_id, id, definition, continuation_owner: GoalContinuationOwner::Managed,
                 control_state: GoalControlState::Active,
                 provider: scope.provider, model: scope.model,
-                job, checkpoint: None, provider_session_id: None, provider_goal_id: None,
+                job, checkpoint: None, verification: None, provider_session_id: None, provider_goal_id: None,
             })
         }).await?;
         self.job_signal.send_replace(());
@@ -426,11 +433,17 @@ pub(super) fn load_revision(db: &Connection, id: String) -> Result<GoalRevision>
         [&id],
         |row| row.get(0),
     )?;
+    let verification = checkpoint
+        .as_ref()
+        .map(|checkpoint| load_goal_verification(db, &project, &checkpoint.run_id))
+        .transpose()?
+        .flatten();
     Ok(GoalRevision {
         goal_id,
         id,
         job,
         checkpoint,
+        verification,
         provider_session_id,
         provider_goal_id,
         provider: profile.provider,

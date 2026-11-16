@@ -56,6 +56,8 @@ it("opens actual routing, context decisions, and saved sources in the same inspe
         };
       case "read_repository_markdown":
         return { markdown: "Original Markdown saved for the run" };
+      case "goal_verification":
+        return null;
       case "attempt_worktree_evidence":
         return {
           kind: "saved",

@@ -21,7 +21,8 @@ use omniagent::{
 
 fn remove_recent_schema(db: &rusqlite::Connection) -> Result<()> {
     db.execute_batch(
-        "ALTER TABLE job_attempt_policies DROP COLUMN evidence;
+        "DROP TABLE goal_criterion_evidence;
+         ALTER TABLE job_attempt_policies DROP COLUMN evidence;
          DROP TABLE attempt_subagent_audit_routing;
          DROP TABLE task_delivery_events;
          DROP TABLE verified_delivery_commits;

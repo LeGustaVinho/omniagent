@@ -15,6 +15,7 @@ mod downstream;
 mod failures;
 mod goal_control;
 mod goal_inspection;
+mod goal_verification;
 mod goals;
 mod history;
 mod inspection;
@@ -46,6 +47,11 @@ pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
 pub use goal_control::{GoalControlState, GoalStopAction};
+pub use goal_inspection::InspectedGoal;
+pub use goal_verification::{
+    GoalCriterionEvidence, GoalCriterionStatus, GoalCriterionVerification, GoalEvidenceChoice,
+    GoalVerification, GoalVerificationStatus,
+};
 pub(crate) use goal_control::{
     pause_revoked_goal, recover_managed_goal_stops, settle_goal_stop,
     settle_owned_goal_cancellations,
@@ -70,7 +76,6 @@ pub(crate) use native_goal_evidence::{
 };
 pub(crate) use native_goal_qualification::{NativeGoalSeed, effective_qualification_matches};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
-pub use goal_inspection::InspectedGoal;
 pub use orchestration::RunOrchestration;
 pub use question_answers::ConversationQuestionTimelineEntry;
 pub use pipeline::{

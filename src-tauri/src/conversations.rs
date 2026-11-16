@@ -4333,6 +4333,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn goal_verification_checks_each_sealed_criterion_without_completing_the_task() -> Result<()> {
+        use crate::jobs::{
+            AdmissionEnvironment, GoalCriterionEvidence, GoalCriterionStatus, GoalDefinition,
+            GoalTurnAction, GoalTurnReport, GoalVerificationStatus, JobContext,
+        };
+
+        let (_directory, store, conversation, mut scope) = setup().await?;
+        scope.executable = std::env::current_exe()?;
+        let database = scope.checkout.join("store.sqlite");
+        let before = store.conversation(conversation.id.clone()).await?;
+        let project = crate::repository::register(&store, scope.checkout.clone()).await?.project_id;
+        let task = store.create_project_task(project, "Goal result".into()).await?;
+        let definition = GoalDefinition {
+            objective: "Deliver the goal result for review".into(),
+            criteria: vec!["Check output".into(), "Review the exact result".into()],
+            max_turns: Some(1),
+            max_seconds: None,
+            token_budget: None,
+        };
+        let goal = store.start_conversation_goal(
+            JobContext { conversation_id: before.id.clone(), context_id: before.context_id },
+            scope.clone(), Some(task.id.clone()), definition.clone(), None,
+        ).await?;
+        let attempt = store.claim_next_job(AdmissionEnvironment {
+            runner: scope.runner.clone(), bridge_available: true,
+        }).await?.context("the goal was not admitted")?;
+        let run = attempt.run.id.clone();
+        let project = attempt.run.project_id.clone();
+        assert!(store.goal_verification(project.clone(), run.clone()).await?.is_none());
+        store.mark_agent_running(run.clone()).await?;
+        let dispatch = prepare_fixture_dispatch(&store, &attempt).await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        let report = GoalTurnReport { action: GoalTurnAction::Review, evidence: "Agent reported all criteria done.".into() };
+        store.record_goal_turn_report(run.clone(), report.clone()).await?;
+        store.record_agent_observation(run.clone(), EventSource::Provider, ProviderEvent {
+            location: ProviderLocation::default(),
+            data: ProviderEventData::TurnFinished { outcome: TurnOutcome::Completed },
+        }).await?;
+        store.finish_observed_agent_attempt(
+            run.clone(), RunStatus::Succeeded, Some("Recorded output".into()), None, true
+        ).await?;
+        let pending = store.goal_verification(project.clone(), run.clone()).await?.unwrap();
+        assert_eq!(pending.revision_id, goal.id);
+        assert_eq!(pending.status, GoalVerificationStatus::Verifying);
+        assert!(pending.criteria.iter().all(|criterion| criterion.status == GoalCriterionStatus::Pending));
+        assert!(store.list_goal_criterion_evidence(project.clone(), run.clone()).await?.is_empty());
+        let approval = |approved| GoalCriterionEvidence::OperatorReview { approved, note: Some("Inspected the recorded result".into()) };
+        assert!(store.record_goal_criterion_evidence("foreign".into(), run.clone(), 1, approval(true)).await.is_err());
+        assert!(store.record_goal_criterion_evidence(project.clone(), run.clone(), 0, approval(true)).await.is_err());
+        assert!(store.record_goal_criterion_evidence(project.clone(), run.clone(), 1,
+            GoalCriterionEvidence::CandidateGate { verification_id: "foreign".into(), gate_index: 0 }
+        ).await.is_err());
+        let failed = store.record_goal_criterion_evidence(project.clone(), run.clone(), 1, approval(false)).await?;
+        assert_eq!(failed.status, GoalVerificationStatus::Failed);
+        let pending = store.record_goal_criterion_evidence(project.clone(), run.clone(), 1, approval(true)).await?;
+        assert_eq!(pending.status, GoalVerificationStatus::Verifying);
+        let completed = store.record_goal_criterion_evidence(project.clone(), run.clone(), 2, approval(true)).await?;
+        assert_eq!(completed.status, GoalVerificationStatus::Completed);
+        assert_eq!(store.record_goal_criterion_evidence(project.clone(), run.clone(), 2, approval(true)).await?, completed);
+        assert!(store.record_goal_criterion_evidence(project.clone(), run.clone(), 2, approval(false)).await.is_err());
+        drop(store);
+
+        let store = Store::open(database)?;
+        assert_eq!(store.goal_verification(project.clone(), run.clone()).await?, Some(completed.clone()));
+        let saved = store.active_conversation_goal(conversation.id.clone()).await?.unwrap();
+        assert_eq!(saved.checkpoint.unwrap().report, Some(report));
+        assert_eq!(saved.verification, Some(completed.clone()));
+        assert!(store.agent_observations(conversation.id.clone(), run.clone(), 0).await?.iter().any(|event| matches!(
+            event.event.data, ProviderEventData::TurnFinished { outcome: TurnOutcome::Completed }
+        )));
+        assert!(store.project_task_delivery_state(project.clone(), task.id).await?.unwrap().completion.is_none());
+        let current = store.conversation(conversation.id.clone()).await?;
+        let replacement = store.start_conversation_goal(
+            JobContext { conversation_id: conversation.id, context_id: current.context_id },
+            scope, None, definition, None,
+        ).await?;
+        assert_ne!(replacement.id, goal.id);
+        assert_eq!(store.goal_verification(project, run).await?, Some(completed));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stage_goal_keeps_its_task_and_matches_native_evidence_to_its_session() -> Result<()> {
         exercise_native_goal_evidence(false, true).await?;
         exercise_native_goal_evidence(true, false).await?;

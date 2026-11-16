@@ -6,6 +6,7 @@ mod desktop;
 mod desktop_provider_fixture;
 mod fixture;
 mod fixture_runtime;
+mod goal_verification_ipc;
 mod ipc;
 mod queue_runtime;
 mod task_delivery_ipc;
@@ -290,6 +291,9 @@ fn main() {
             ipc::inspect_conversation_run,
             ipc::run_orchestration,
             ipc::project_task_goals,
+            goal_verification_ipc::goal_verification,
+            goal_verification_ipc::list_goal_criterion_evidence,
+            goal_verification_ipc::record_goal_criterion_evidence,
             ipc::list_conversations,
             ipc::checkout_conversation,
             ipc::create_conversation,

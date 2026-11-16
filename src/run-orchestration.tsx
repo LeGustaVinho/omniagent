@@ -7,6 +7,7 @@ import type { JobWorkspace } from "@/bindings/JobWorkspace";
 import type { PipelineJobOrigin } from "@/bindings/PipelineJobOrigin";
 import { Button } from "@/components/ui/button";
 import { GoalEvidence, type InspectedGoal } from "@/goal-evidence";
+import { GoalVerificationPanel } from "@/goal-verification-panel";
 import { WorktreeEvidence } from "@/worktree-evidence";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -67,8 +68,8 @@ function SavedDocument({ document }: { document: SourceDocument }) {
   </details>;
 }
 
-function OrchestrationDetails({ data, scope, navigation }: {
-  data: Orchestration; scope: Scope;
+function OrchestrationDetails({ data, scope, live, navigation }: {
+  data: Orchestration; scope: Scope; live: boolean;
   navigation?: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
 }) {
   const { context, document, goal, job, policy, route, stagePin, unit } = data;
@@ -77,7 +78,10 @@ function OrchestrationDetails({ data, scope, navigation }: {
   const requestingRun = job?.origin.type === "agent" ? job.origin.runId : undefined;
   const source = policy?.evidence?.source;
   return <>
-    {goal && <GoalEvidence goal={goal} runId={scope.runId} openActivity={navigation?.openActivity} />}
+    {goal && <>
+      <GoalEvidence goal={goal} runId={scope.runId} openActivity={navigation?.openActivity} />
+      <GoalVerificationPanel projectId={scope.projectId} runId={scope.runId} live={live} />
+    </>}
     <dl className="grid gap-1">
       {unit && <><dt>Unit {unit.ordinal} objective</dt><dd className="break-words">{unit.purpose}</dd></>}
       {job && <><dt>Routing source</dt><dd>{originLabel(job)}</dd></>}
@@ -153,7 +157,7 @@ export function RunOrchestrationPanel({ scope, live, navigation }: {
       {record.isPending && <p role="status">Loading routing and policy…</p>}
       {record.error && <p role="alert">{String(record.error)}</p>}
       {record.data === null && <p>Orchestration evidence is unavailable.</p>}
-      {record.data && <OrchestrationDetails data={record.data} scope={scope} navigation={navigation} />}
+      {record.data && <OrchestrationDetails data={record.data} scope={scope} live={live} navigation={navigation} />}
     </div>}
   </details>;
 }
