@@ -361,7 +361,7 @@ fn publish_member(
                         &mut blockers,
                         Some(interface),
                     )?
-                    .0
+                    .definition
             } else {
                 compile_graph(
                     db,
@@ -577,7 +577,7 @@ pub(super) fn compile_graph_with_loader(
             blockers,
             None,
         )?
-        .0)
+        .definition)
 }
 
 pub(super) fn compile_simulation_graph(
@@ -590,20 +590,25 @@ pub(super) fn compile_simulation_graph(
     blockers: &mut Vec<String>,
     interface: Option<&Interface>,
     loader: &ArtifactLoader<'_>,
-) -> Result<WorkflowDefinition> {
+) -> Result<(WorkflowDefinition, BTreeMap<String, NodeDefinition>)> {
     let mut compiler = GraphCompiler::new(db, project, loader);
     compiler.validate_bindings = false;
-    Ok(compiler
-        .compile(
-            id,
-            graph,
-            pins,
-            dependencies,
-            BTreeSet::new(),
-            blockers,
-            interface,
-        )?
-        .0)
+    let compiled = compiler.compile(
+        id,
+        graph,
+        pins,
+        dependencies,
+        BTreeSet::new(),
+        blockers,
+        interface,
+    )?;
+    Ok((compiled.definition, compiled.authoring_definitions))
+}
+
+struct CompiledGraph {
+    definition: WorkflowDefinition,
+    outputs: BTreeMap<String, Endpoint>,
+    authoring_definitions: BTreeMap<String, NodeDefinition>,
 }
 
 struct GraphCompiler<'a> {
@@ -634,7 +639,7 @@ impl<'a> GraphCompiler<'a> {
         mut unbound_commands: BTreeSet<String>,
         blockers: &mut Vec<String>,
         interface: Option<&Interface>,
-    ) -> Result<(WorkflowDefinition, BTreeMap<String, Endpoint>)> {
+    ) -> Result<CompiledGraph> {
         let mut graph = graph.clone();
         let mut effective_pins = pins.clone();
         let mut calls = BTreeMap::new();
@@ -697,7 +702,10 @@ impl<'a> GraphCompiler<'a> {
                         anyhow::bail!("Repeat node {slot} needs a stopping condition and bound");
                     };
                     let body = self.child(artifact, blockers)?;
-                    calls.insert(slot.clone(), crate::workflows::repetition::expand_repeat(body, configuration)?);
+                    calls.insert(
+                        slot.clone(),
+                        crate::workflows::repetition::expand_repeat(body, configuration)?,
+                    );
                 }
                 PackageArtifactBody::Subflow { .. } | PackageArtifactBody::McpTool { .. } => {
                     blockers.push(format!(
@@ -750,6 +758,35 @@ impl<'a> GraphCompiler<'a> {
                     })?;
             }
         }
+        let mut authoring_definitions = BTreeMap::new();
+        if !self.validate_bindings {
+            authoring_definitions.clone_from(&effective_pins);
+            for (slot, call) in &calls {
+                let definition = authoring_definitions
+                    .get_mut(slot)
+                    .context("A subflow lost its authored node")?;
+                definition.inputs = call
+                    .inputs
+                    .iter()
+                    .map(|(name, endpoint)| {
+                        Ok(crate::workflows::Port {
+                            name: name.clone(),
+                            value: subflow::output(&call.workflow, endpoint)?,
+                        })
+                    })
+                    .collect::<Result<_>>()?;
+                definition.outputs = call
+                    .outputs
+                    .iter()
+                    .map(|(name, endpoint)| {
+                        Ok(crate::workflows::Port {
+                            name: name.clone(),
+                            value: subflow::output(&call.workflow, endpoint)?,
+                        })
+                    })
+                    .collect::<Result<_>>()?;
+            }
+        }
         let empty = BTreeMap::new();
         let expanded = subflow::expand(
             graph,
@@ -772,7 +809,11 @@ impl<'a> GraphCompiler<'a> {
             }
         }
         definition.subflows = expanded.subflows;
-        Ok((definition, expanded.outputs))
+        Ok(CompiledGraph {
+            definition,
+            outputs: expanded.outputs,
+            authoring_definitions,
+        })
     }
 
     fn child(
@@ -814,7 +855,7 @@ impl<'a> GraphCompiler<'a> {
             }
         }
         let interface = (inputs.clone(), outputs.clone());
-        let (workflow, outputs) = self.compile(
+        let compiled = self.compile(
             &artifact.version.id,
             graph,
             &artifact.definitions,
@@ -823,14 +864,14 @@ impl<'a> GraphCompiler<'a> {
             blockers,
             Some(&interface),
         )?;
-        subflow::validate_interface(&workflow, inputs, &outputs)?;
+        subflow::validate_interface(&compiled.definition, inputs, &compiled.outputs)?;
         self.stack.remove(&artifact.version);
         Ok(BoundSubflow {
             name: artifact.name.clone(),
             version: artifact.version.clone(),
-            workflow,
+            workflow: compiled.definition,
             inputs: inputs.clone(),
-            outputs,
+            outputs: compiled.outputs,
         })
     }
 }

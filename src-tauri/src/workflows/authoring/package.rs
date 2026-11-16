@@ -13,8 +13,10 @@ use super::{new_id, open, seal};
 
 pub(crate) mod mcp;
 mod model;
+mod preview;
 mod publish;
 mod request;
+mod simulation;
 #[cfg(test)]
 mod authoring_acceptance;
 #[cfg(test)]
@@ -22,7 +24,9 @@ mod subflow_tests;
 #[cfg(test)]
 mod tests;
 pub use model::*;
+pub use preview::WorkflowPackagePreview;
 pub(crate) use publish::ensure_package_runnable;
+pub use simulation::{WorkflowSimulation, WorkflowSimulationScenario};
 
 const MAX_MEMBERS: usize = 32;
 const MAX_PACKAGE_BYTES: usize = 192 * 1024;

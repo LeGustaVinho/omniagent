@@ -353,6 +353,8 @@ fn main() {
             workflow_ipc::authoring::publish_reviewed_workflow,
             workflow_ipc::authoring::list_workflow_packages,
             workflow_ipc::authoring::inspect_workflow_package,
+            workflow_ipc::authoring::preview_workflow_package_revision,
+            workflow_ipc::authoring::simulate_workflow_package_revision,
             workflow_ipc::authoring::create_workflow_package,
             workflow_ipc::authoring::save_workflow_package,
             workflow_ipc::authoring::request_workflow_package_changes,

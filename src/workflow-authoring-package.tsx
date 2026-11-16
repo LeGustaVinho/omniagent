@@ -7,9 +7,11 @@ import { ModelPicker } from "@/components/model-picker";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { availableModelSelection, useLiveModelOptions } from "@/live-models";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { WorkflowPackageGraphEditing, WorkflowPackageReview } from "@/workflow-package-review";
+import type { WorkflowGraph } from "@/workflow-graph-model";
 
 type Version = { kind: string; id: string; revision: string; destination: "project" | "library" };
-type Member = { key: string; name: string; body: { kind: string }; destination?: string; base?: Version | null };
+type Member = { key: string; name: string; body: { kind: string; graph?: WorkflowGraph }; destination?: string; base?: Version | null };
 type Package = { name: string; members: Member[] };
 type Artifact = { version: Version; name: string; blockers: string[]; body: Member["body"]; references: Record<string, unknown> };
 type CatalogArtifact = Pick<Artifact, "version" | "name" | "blockers">;
@@ -35,6 +37,23 @@ const packageKey = (projectId: string, draftId: string) => [...packagesKey(proje
 const pending = (draft?: PackageDraft) => !!draft?.request
   && ["queued", "starting", "running", "waiting_for_input", "paused"].includes(draft.request.state);
 export const packageDraftTarget = (draftId: string) => `authoring:package:${draftId}`;
+
+function packageGraphs(text: string) {
+  try {
+    const parsed = JSON.parse(text) as Package;
+    if (!Array.isArray(parsed.members)) return [];
+    return parsed.members.flatMap((member) => {
+      const graph = member?.body?.graph;
+      if (!graph || typeof member.key !== "string" || typeof member.name !== "string" || typeof graph.name !== "string" || !Array.isArray(graph.nodes) || !Array.isArray(graph.wires)
+        || !graph.nodes.every((node) => typeof node?.id === "string" && typeof node.kind === "string" && typeof node.configuration?.kind === "string")
+        || !graph.wires.every((wire) => typeof wire?.from?.node === "string" && typeof wire.from.port === "string"
+          && typeof wire?.to?.node === "string" && typeof wire.to.port === "string")) return [];
+      return [{ key: member.key, name: member.name, graph }];
+    });
+  } catch {
+    return [];
+  }
+}
 
 export function WorkflowPackageList({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
   const { projectId } = checkout;
@@ -137,6 +156,7 @@ function PackageRevision({ draft, projectId, checkoutId, update }: {
     return <section aria-label="Package publication receipt" className="pipeline-stack">
       <p role="status">Published package revision <code>{draft.publication.reviewedRevision}</code></p>
       <p>Publication receipt <code>{draft.publication.id}</code></p>
+      <WorkflowPackageReview projectId={projectId} draftId={draft.id} savedRevision={draft.publication.reviewedRevision} />
       {draft.publication.originatingRunId && <p>Originating run <code>{draft.publication.originatingRunId}</code></p>}
       <ul className="pipeline-stack">
         {draft.publication.members.map(({ key, artifact }) => <li key={key} className="pipeline-evidence">
@@ -152,6 +172,7 @@ function PackageRevision({ draft, projectId, checkoutId, update }: {
   }
   return <div className="pipeline-stack">
     <p className="break-all">Saved package revision <code>{draft.revision}</code></p>
+    <WorkflowPackageReview projectId={projectId} draftId={draft.id} savedRevision={draft.revision} />
     {draft.request && <p role="status">Authoring {draft.request.state.replaceAll("_", " ")}{draft.request.diagnostic && ` · ${draft.request.diagnostic}`}</p>}
     <ul className="pipeline-stack" aria-label="Saved package members">
       {draft.package.members.map((member) => <li key={member.key}>
@@ -161,6 +182,12 @@ function PackageRevision({ draft, projectId, checkoutId, update }: {
     </ul>
     <details className="pipeline-evidence">
       <summary>Edit package</summary>
+      <WorkflowPackageGraphEditing projectId={projectId} checkoutId={checkoutId} draftId={draft.id} savedRevision={draft.revision}
+        graphs={packageGraphs(text)} disabled={busy} edit={(key, graph) => {
+          const current = JSON.parse(currentText.current) as Package;
+          setText(JSON.stringify({ ...current, members: current.members.map((member) => member.key === key
+            ? { ...member, body: { ...member.body, graph } } : member) }, null, 2));
+        }} />
       <PublishedArtifactPicker projectId={projectId} disabled={busy} add={(artifact) => {
         const parsed = JSON.parse(currentText.current) as Package;
         if (!Array.isArray(parsed.members)) throw new Error("The package needs a members array.");

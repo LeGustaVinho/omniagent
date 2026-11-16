@@ -63,7 +63,7 @@ function connectionWire(connection: Connection): WorkflowWire | undefined {
 
 const readTheme = (): "light" | "dark" => document.documentElement.dataset.appTheme === "light" ? "light" : "dark";
 
-export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled }: {
+export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled, allowDefinitionUpdates = true }: {
   projectId: string;
   checkoutId?: string;
   state: WorkflowEditorState;
@@ -72,6 +72,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   catalog: WorkflowDefinition[];
   problems: string[];
   disabled: boolean;
+  allowDefinitionUpdates?: boolean;
 }) {
   const { graph, layout } = state;
   const [theme, setTheme] = useState(readTheme);
@@ -82,7 +83,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const node = graph.nodes.find(({ id }) => id === selected);
   const definition = node && definitions[node.id];
-  const available = definition && catalog.find(({ kind, revision }) => kind === definition.kind && revision > definition.revision);
+  const available = allowDefinitionUpdates && definition && catalog.find(({ kind, revision }) => kind === definition.kind && revision > definition.revision);
   const positions = useMemo(() => initialNodePositions(graph), [graph]);
   const canvasNodes = useMemo<CanvasNode[]>(() => graph.nodes.map((item) => ({
     id: item.id, type: "workflow", position: layout[item.id] ?? positions[item.id]!, selected: item.id === selected,

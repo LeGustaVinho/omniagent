@@ -1,7 +1,8 @@
 use anyhow::Result;
 use omniagent::workflows::authoring::package::{
     PackageArtifactVersion, PublishedPackageArtifact, WorkflowPackage, WorkflowPackageCatalogEntry,
-    WorkflowPackageDraft, WorkflowPackagePublishOutcome, WorkflowPackageSummary,
+    WorkflowPackageDraft, WorkflowPackagePreview, WorkflowPackagePublishOutcome, WorkflowPackageSummary,
+    WorkflowSimulation, WorkflowSimulationScenario,
 };
 use omniagent::{
     model_catalog::ModelSelection,
@@ -64,6 +65,21 @@ pub async fn inspect_workflow_package(
         .workflow_package(project_id, draft_id)
         .await
         .map_err(report)
+}
+
+#[tauri::command]
+pub async fn preview_workflow_package_revision(
+    store: State<'_, Store>, project_id: String, draft_id: String, revision: String,
+) -> Result<WorkflowPackagePreview, String> {
+    store.preview_workflow_package_revision(project_id, draft_id, revision).await.map_err(report)
+}
+
+#[tauri::command]
+pub async fn simulate_workflow_package_revision(
+    store: State<'_, Store>, project_id: String, draft_id: String, revision: String, member_key: String,
+    scenario: WorkflowSimulationScenario,
+) -> Result<WorkflowSimulation, String> {
+    store.simulate_workflow_package_revision(project_id, draft_id, revision, member_key, scenario).await.map_err(report)
 }
 
 #[tauri::command]
