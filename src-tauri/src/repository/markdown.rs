@@ -60,13 +60,10 @@ impl Store {
                 .await??;
         self.execute(move |db| {
             let revision = &document.revision;
-            db.execute(
-                "INSERT INTO repository_markdown_revisions (checkout_id, id, path, sha256, base_commit, body)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![revision.checkout_id, revision.id, revision.relative_path, revision.sha256, revision.base_commit, body],
-            )?;
+            insert_revision(db, revision, &body)?;
             Ok(document)
-        }).await
+        })
+        .await
     }
 
     pub async fn repository_markdown_revisions(
@@ -88,6 +85,42 @@ impl Store {
     ) -> Result<Option<RepositoryMarkdown>> {
         self.execute(move |db| load_markdown(db, &checkout, &revision))
             .await
+    }
+
+    pub(super) async fn remember_editor_markdown(
+        &self,
+        checkout_id: String,
+        path: String,
+        sha256: String,
+        base_commit: Option<String>,
+        markdown: String,
+    ) -> Result<RepositoryMarkdownRevision> {
+        self.execute(move |db| {
+            let identity = serde_json::to_vec(&(&checkout_id, &path, &sha256, &base_commit))?;
+            let id = format!("editor-{:x}", Sha256::digest(identity));
+            let existing = db
+                .query_row(
+                    "SELECT id, checkout_id, path, sha256, base_commit
+                 FROM repository_markdown_revisions
+                 WHERE checkout_id = ?1 AND id = ?2",
+                    params![checkout_id, id],
+                    decode_revision,
+                )
+                .optional()?;
+            if let Some(revision) = existing {
+                return Ok(revision);
+            }
+            let revision = RepositoryMarkdownRevision {
+                id,
+                checkout_id,
+                relative_path: path,
+                sha256,
+                base_commit,
+            };
+            insert_revision(db, &revision, &protection::protect(markdown.as_bytes())?)?;
+            Ok(revision)
+        })
+        .await
     }
 
     pub(crate) async fn dispatch_repository_markdown(
@@ -167,6 +200,19 @@ fn decode_revision(row: &Row<'_>) -> rusqlite::Result<RepositoryMarkdownRevision
         sha256: row.get(3)?,
         base_commit: row.get(4)?,
     })
+}
+
+fn insert_revision(
+    db: &Connection,
+    revision: &RepositoryMarkdownRevision,
+    body: &[u8],
+) -> Result<()> {
+    db.execute(
+        "INSERT INTO repository_markdown_revisions (checkout_id, id, path, sha256, base_commit, body)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![revision.checkout_id, revision.id, revision.relative_path, revision.sha256, revision.base_commit, body],
+    )?;
+    Ok(())
 }
 
 fn load_markdown(

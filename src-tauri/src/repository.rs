@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::{customizations, store::Store};
 
 mod candidates;
+pub mod documents;
 mod isolated_git;
 mod markdown;
 pub mod verification;
