@@ -37,10 +37,36 @@ type Watch = { id?: string };
 
 export const normalizeEditorText = (markdown: string) => markdown.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
 
-function sourceProblem(result: DocumentOpen) {
+const noteCommands = {
+  catalog: "repository_note_catalog",
+  open: "open_repository_document",
+  save: "save_repository_document",
+  readRevision: "read_repository_markdown",
+  drafts: "list_repository_markdown_drafts",
+  readDraft: "read_repository_markdown_draft",
+  saveDraft: "save_repository_markdown_draft",
+  discardDraft: "discard_repository_markdown_draft",
+  watch: "watch_repository_note",
+  unwatch: "unwatch_repository_note",
+};
+
+const sourceCommands: typeof noteCommands = {
+  catalog: "list_repository_source_files",
+  open: "open_repository_source_file",
+  save: "save_repository_source_file",
+  readRevision: "read_repository_source_revision",
+  drafts: "list_repository_source_drafts",
+  readDraft: "read_repository_source_draft",
+  saveDraft: "save_repository_source_draft",
+  discardDraft: "discard_repository_source_draft",
+  watch: "watch_repository_source",
+  unwatch: "unwatch_repository_source",
+};
+
+function sourceProblem(result: DocumentOpen, noun: "note" | "file") {
   return result.status === "unsupported_encoding"
-    ? "This note uses an unsupported text encoding."
-    : "The note is missing from this checkout.";
+    ? `This ${noun} uses an unsupported text encoding.`
+    : `The ${noun} is missing from this checkout.`;
 }
 
 function loaded(document: RepositoryDocument, draftRevision: string | null): RepositoryBuffer {
@@ -51,8 +77,20 @@ function loaded(document: RepositoryDocument, draftRevision: string | null): Rep
 }
 
 export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
+  return useRepositoryFileBuffers<NoteCatalogEntry>(checkoutId, enabled, noteCommands, "note");
+}
+
+export function useRepositorySourceBuffers(checkoutId: string, enabled: boolean) {
+  const { notes: files, getNote: getFile, ...buffers } =
+    useRepositoryFileBuffers<string>(checkoutId, enabled, sourceCommands, "file");
+  return { ...buffers, files, getFile };
+}
+
+function useRepositoryFileBuffers<CatalogEntry>(
+  checkoutId: string, enabled: boolean, commands: typeof noteCommands, noun: "note" | "file",
+) {
   const [state, setState] = useState<NoteState>({ notes: {}, failures: {} });
-  const [catalog, setCatalog] = useState<NoteCatalogEntry[]>([]);
+  const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [draftPaths, setDraftPaths] = useState<string[]>([]);
   const [error, setError] = useState("");
   const current = useRef(state);
@@ -83,41 +121,41 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
   const stopWatching = useCallback((path: string) => {
     const record = watches.get(path);
     watches.delete(path);
-    if (record?.id) void invoke("unwatch_repository_note", { watchId: record.id }).catch(report);
-  }, [report, watches]);
+    if (record?.id) void invoke(commands.unwatch, { watchId: record.id }).catch(report);
+  }, [commands, report, watches]);
 
   useEffect(() => {
     mounted.current = true;
     if (enabled) {
-      void invoke<NoteCatalogEntry[]>("repository_note_catalog", { checkoutId })
+      void invoke<CatalogEntry[]>(commands.catalog, { checkoutId })
         .then((entries) => { if (mounted.current) setCatalog(entries); }, report);
-      void invoke<string[]>("list_repository_markdown_drafts", { checkoutId })
+      void invoke<string[]>(commands.drafts, { checkoutId })
         .then((paths) => { if (mounted.current) setDraftPaths(paths); }, report);
     }
     return () => {
       mounted.current = false;
       for (const path of watches.keys()) stopWatching(path);
     };
-  }, [checkoutId, enabled, report, stopWatching, watches]);
+  }, [checkoutId, commands, enabled, report, stopWatching, watches]);
 
   const load = useCallback((path: string): Promise<string | undefined> => {
     if (current.current.notes[path]) return Promise.resolve(path);
     const pending = requests.get(path);
     if (pending) return pending;
     const request = (async () => {
-      const result = await invoke<DocumentOpen>("open_repository_document", { checkoutId, path });
+      const result = await invoke<DocumentOpen>(commands.open, { checkoutId, path });
       const canonical = result.status === "document" ? result.document.revision.relativePath : result.relativePath ?? path;
       const requestedDraft = canonical !== path
-        ? await invoke<SavedDraft | null>("read_repository_markdown_draft", { checkoutId, path })
+        ? await invoke<SavedDraft | null>(commands.readDraft, { checkoutId, path })
         : null;
       const owner = requestedDraft ? path : canonical;
-      const draft = requestedDraft ?? await invoke<SavedDraft | null>("read_repository_markdown_draft", { checkoutId, path: owner });
+      const draft = requestedDraft ?? await invoke<SavedDraft | null>(commands.readDraft, { checkoutId, path: owner });
       if (current.current.notes[owner]) return owner;
       let buffer: RepositoryBuffer;
       if (draft) {
         const disk = !requestedDraft && result.status === "document" ? result.document : undefined;
         if (disk && disk.markdown === draft.markdown) {
-          const discarded = await invoke<boolean>("discard_repository_markdown_draft", {
+          const discarded = await invoke<boolean>(commands.discardDraft, {
             checkoutId, path: owner, expectedDraftRevision: draft.revision,
           });
           if (discarded) {
@@ -127,21 +165,21 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
         }
         const sameVersion = disk?.revision.sha256 === draft.base.sha256;
         const base = sameVersion ? { markdown: disk!.markdown } : await invoke<{ markdown: string } | null>(
-          "read_repository_markdown", { checkoutId, revisionId: draft.base.id },
+          commands.readRevision, { checkoutId, revisionId: draft.base.id },
         );
-        if (!base) throw new Error("The saved base of the recovered note is unavailable.");
+        if (!base) throw new Error(`The saved base of the recovered ${noun} is unavailable.`);
         buffer = {
           base: draft.base, fileIdentity: sameVersion ? disk?.fileIdentity : undefined,
           saved: normalizeEditorText(base.markdown), content: draft.markdown, revision: draft.base.sha256.slice(0, 12),
           draftRevision: draft.revision,
           ...(!sameVersion && disk ? { external: disk.markdown, incoming: disk } : {}),
-          ...(requestedDraft ? { sourceProblem: "The path now refers to a different note." }
-            : result.status !== "document" ? { sourceProblem: sourceProblem(result) } : {}),
+          ...(requestedDraft ? { sourceProblem: `The path now refers to a different ${noun}.` }
+            : result.status !== "document" ? { sourceProblem: sourceProblem(result, noun) } : {}),
         };
       } else if (result.status === "document") {
         buffer = loaded(result.document, null);
       } else {
-        publish({ ...current.current, failures: { ...current.current.failures, [path]: sourceProblem(result) } });
+        publish({ ...current.current, failures: { ...current.current.failures, [path]: sourceProblem(result, noun) } });
         return canonical;
       }
       publish({ ...current.current, notes: { ...current.current.notes, [owner]: buffer } });
@@ -153,15 +191,15 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
     requests.set(path, request);
     void request.then(() => requests.delete(path));
     return request;
-  }, [checkoutId, publish, requests]);
+  }, [checkoutId, commands, noun, publish, requests]);
 
   const readExternal = useCallback((path: string) => serialize(path, async () => {
-    const result = await invoke<DocumentOpen>("open_repository_document", { checkoutId, path });
+    const result = await invoke<DocumentOpen>(commands.open, { checkoutId, path });
     change(path, (note) => {
-      if (result.status !== "document") return { ...note, sourceProblem: sourceProblem(result), external: undefined, incoming: undefined };
+      if (result.status !== "document") return { ...note, sourceProblem: sourceProblem(result, noun), external: undefined, incoming: undefined };
       const disk = result.document;
       if (disk.revision.relativePath !== path) {
-        return { ...note, sourceProblem: "The path now refers to a different note.", external: undefined, incoming: undefined };
+        return { ...note, sourceProblem: `The path now refers to a different ${noun}.`, external: undefined, incoming: undefined };
       }
       if (disk.revision.sha256 === note.base.sha256 && (!note.fileIdentity || disk.fileIdentity === note.fileIdentity)) {
         return { ...note, external: undefined, incoming: undefined, sourceProblem: undefined };
@@ -169,7 +207,7 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
       if (note.content === note.saved && note.draftRevision === null) return loaded(disk, null);
       return { ...note, external: disk.markdown, incoming: disk, sourceProblem: undefined };
     });
-  }), [change, checkoutId, serialize]);
+  }), [change, checkoutId, commands, noun, serialize]);
 
   const watch = useCallback((path: string) => {
     const note = current.current.notes[path];
@@ -182,9 +220,9 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
       }
     };
     watches.set(path, record);
-    void invoke<string>("watch_repository_note", { checkoutId, baseRevision: note.base.id, channel })
+    void invoke<string>(commands.watch, { checkoutId, baseRevision: note.base.id, channel })
       .then((id) => {
-        if (watches.get(path) !== record) return invoke("unwatch_repository_note", { watchId: id });
+        if (watches.get(path) !== record) return invoke(commands.unwatch, { watchId: id });
         record.id = id;
         return readExternal(path);
       })
@@ -194,26 +232,26 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
           report(failure);
         }
       });
-  }, [checkoutId, readExternal, report, stopWatching, watches]);
+  }, [checkoutId, commands, readExternal, report, stopWatching, watches]);
 
   const persist = useCallback(async (path: string) => {
     const note = current.current.notes[path];
     if (!note) return;
     if (note.content === note.saved && !note.incoming && !note.sourceProblem) {
       if (note.draftRevision) {
-        const discarded = await invoke<boolean>("discard_repository_markdown_draft", {
+        const discarded = await invoke<boolean>(commands.discardDraft, {
           checkoutId, path, expectedDraftRevision: note.draftRevision,
         });
-        if (!discarded) throw new Error("The recovered draft changed. Reopen the note before replacing it.");
+        if (!discarded) throw new Error(`The recovered draft changed. Reopen the ${noun} before replacing it.`);
         change(path, (current) => ({ ...current, draftRevision: null }));
       }
       return;
     }
-    const draft = await invoke<SavedDraft>("save_repository_markdown_draft", {
+    const draft = await invoke<SavedDraft>(commands.saveDraft, {
       checkoutId, baseRevision: note.base.id, expectedDraftRevision: note.draftRevision, markdown: note.content,
     });
     change(path, (current) => ({ ...current, draftRevision: draft.revision }));
-  }, [change, checkoutId]);
+  }, [change, checkoutId, commands, noun]);
 
   const update = useCallback((path: string, content: string) => {
     change(path, (note) => ({ ...note, content }));
@@ -226,17 +264,17 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
     if (note.incoming || note.sourceProblem) return false;
     if (note.content === note.saved) return true;
     await persist(path);
-    const result = await invoke<DocumentSave>("save_repository_document", {
+    const result = await invoke<DocumentSave>(commands.save, {
       checkoutId, path, expectedRevision: note.base.id, markdown: note.content,
     });
     if (result.status !== "saved") {
       change(path, (current) => ({ ...current, recovery: result.recovery }));
       if (result.status === "conflict") {
-        const observed = await invoke<DocumentOpen>("open_repository_document", { checkoutId, path });
+        const observed = await invoke<DocumentOpen>(commands.open, { checkoutId, path });
         change(path, (current) => {
-          if (observed.status !== "document") return { ...current, sourceProblem: sourceProblem(observed) };
+          if (observed.status !== "document") return { ...current, sourceProblem: sourceProblem(observed, noun) };
           if (observed.document.revision.relativePath !== path) {
-            return { ...current, sourceProblem: "The path now refers to a different note." };
+            return { ...current, sourceProblem: `The path now refers to a different ${noun}.` };
           }
           return { ...current, incoming: observed.document, external: observed.document.markdown };
         });
@@ -247,17 +285,17 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
     change(path, (current) => ({ ...loaded(result.document, current.draftRevision), content: current.content }));
     await persist(path);
     return current.current.notes[path]?.content === current.current.notes[path]?.saved;
-  }).catch((failure: unknown) => { report(failure); return false; }), [change, checkoutId, persist, report, serialize]);
+  }).catch((failure: unknown) => { report(failure); return false; }), [change, checkoutId, commands, noun, persist, report, serialize]);
 
   const resolve = useCallback((path: string, keepLocal: boolean) => serialize(path, async () => {
     const note = current.current.notes[path];
     if (!note || (keepLocal && note.sourceProblem)) return;
     if (!keepLocal && note.sourceProblem) {
       if (note.draftRevision) {
-        const discarded = await invoke<boolean>("discard_repository_markdown_draft", {
+        const discarded = await invoke<boolean>(commands.discardDraft, {
           checkoutId, path, expectedDraftRevision: note.draftRevision,
         });
-        if (!discarded) throw new Error("The recovered draft changed. Reopen the note before replacing it.");
+        if (!discarded) throw new Error(`The recovered draft changed. Reopen the ${noun} before replacing it.`);
       }
       change(path, (current) => ({
         ...current, content: current.content === note.content ? current.saved : current.content, draftRevision: null,
@@ -272,7 +310,7 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
       return keepLocal ? note : { ...note, content: note.saved, external: undefined };
     });
     await persist(path);
-  }), [change, checkoutId, persist, serialize]);
+  }), [change, checkoutId, commands, noun, persist, serialize]);
 
   const getNote = useCallback((path: string) => current.current.notes[path], []);
   const forget = useCallback((path: string) => {
@@ -283,5 +321,5 @@ export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
     delete failures[path];
     publish({ notes, failures });
   }, [publish, stopWatching]);
-  return { ...state, catalog, draftPaths, error, load, save, update, resolve, watch, stopWatching, getNote, forget };
+  return { ...state, catalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget };
 }

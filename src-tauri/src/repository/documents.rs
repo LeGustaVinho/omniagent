@@ -26,6 +26,46 @@ pub use movement::RepositoryDocumentMove;
 pub(super) use movement::proposed_move_paths;
 use replacement::{FileSave, file_identity, replace};
 
+#[derive(Clone, Copy)]
+pub(crate) enum DocumentKind {
+    Markdown,
+    Source,
+}
+
+impl DocumentKind {
+    pub(crate) fn contains_path(self, path: &Path) -> bool {
+        let markdown = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+            });
+        markdown == matches!(self, Self::Markdown)
+    }
+
+    pub(crate) fn contains_revision(self, id: &str) -> bool {
+        id.starts_with("source-") == matches!(self, Self::Source)
+    }
+
+    pub(super) fn editor_prefix(self) -> &'static str {
+        match self {
+            Self::Markdown => "editor",
+            Self::Source => "source",
+        }
+    }
+
+    fn require_path(self, path: &Path) -> Result<()> {
+        ensure!(
+            self.contains_path(path),
+            match self {
+                Self::Markdown => "select a Markdown document",
+                Self::Source => "select a source file in the checkout",
+            }
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LineEndings {
@@ -102,12 +142,22 @@ impl Store {
         checkout: String,
         selected: PathBuf,
     ) -> Result<RepositoryDocumentOpen> {
+        self.open_checkout_document(checkout, selected, DocumentKind::Markdown)
+            .await
+    }
+
+    pub(super) async fn open_checkout_document(
+        &self,
+        checkout: String,
+        selected: PathBuf,
+        kind: DocumentKind,
+    ) -> Result<RepositoryDocumentOpen> {
         let (root, max) = editor_checkout(self, &checkout).await?;
         let opened = tokio::task::spawn_blocking(move || {
             let Some(path) = canonical_file(&root, &selected)? else {
                 return Ok::<_, anyhow::Error>(None);
             };
-            require_markdown(&path)?;
+            kind.require_path(&path)?;
             let Some(file) = read_file(&path, max)? else {
                 return Ok(None);
             };
@@ -126,6 +176,7 @@ impl Store {
         }
         let document = remember_document(
             self,
+            kind,
             checkout,
             path,
             relative,
@@ -170,6 +221,24 @@ impl Store {
         expected_revision: String,
         markdown: String,
     ) -> Result<RepositoryDocumentSave> {
+        self.save_checkout_document(
+            checkout,
+            canonical_relative,
+            expected_revision,
+            markdown,
+            DocumentKind::Markdown,
+        )
+        .await
+    }
+
+    pub(super) async fn save_checkout_document(
+        &self,
+        checkout: String,
+        canonical_relative: PathBuf,
+        expected_revision: String,
+        markdown: String,
+        kind: DocumentKind,
+    ) -> Result<RepositoryDocumentSave> {
         let (root, max) = editor_checkout(self, &checkout).await?;
         ensure!(
             !canonical_relative.has_root(),
@@ -177,12 +246,12 @@ impl Store {
         );
         let relative = relative_name(&root, &root.join(&canonical_relative))?;
         let expected = self
-            .repository_markdown(checkout.clone(), expected_revision)
+            .checkout_document_revision(checkout.clone(), expected_revision, kind)
             .await?
-            .context("the expected Markdown revision is not in this checkout")?;
+            .context("the expected file revision is not in this checkout")?;
         ensure!(
             expected.revision.relative_path == relative,
-            "the expected revision belongs to another Markdown document"
+            "the expected revision belongs to another document"
         );
         ensure!(
             !markdown.contains(['\r', '\0']),
@@ -190,10 +259,10 @@ impl Store {
         );
         ensure!(
             markdown.len() as u64 <= max,
-            "the Markdown buffer exceeds the project file limit of {max} bytes"
+            "the editor buffer exceeds the project file limit of {max} bytes"
         );
         let destination = root.join(canonical_relative);
-        require_markdown(&destination)?;
+        kind.require_path(&destination)?;
         let managed = self
             .execute({
                 let checkout = checkout.clone();
@@ -211,7 +280,7 @@ impl Store {
             let edited = encode(&expected.markdown, &markdown);
             ensure!(
                 edited.len() as u64 <= max,
-                "the encoded Markdown buffer exceeds the project file limit of {max} bytes"
+                "the encoded editor buffer exceeds the project file limit of {max} bytes"
             );
             let result = replace(
                 &root,
@@ -223,7 +292,7 @@ impl Store {
             )?;
             Ok::<_, anyhow::Error>((head, destination, result))
         };
-        // Settlement includes Markdown revision persistence even if the caller closes the editor.
+        // Settle and record the revision even if the caller closes the editor.
         let store = self.clone();
         tokio::spawn(async move {
             let (head, destination, result) = if let Some((project, owner)) = managed {
@@ -246,6 +315,7 @@ impl Store {
             let result = async {
                 remember_document(
                     &store,
+                    kind,
                     checkout,
                     destination,
                     relative,
@@ -286,6 +356,7 @@ async fn editor_checkout(store: &Store, checkout: &str) -> Result<(PathBuf, u64)
 
 async fn remember_document(
     store: &Store,
+    kind: DocumentKind,
     checkout: String,
     canonical_path: PathBuf,
     relative: String,
@@ -295,7 +366,8 @@ async fn remember_document(
 ) -> Result<RepositoryDocument> {
     let format = EditorFormat::from_raw(&raw_markdown);
     let revision = store
-        .remember_editor_markdown(
+        .remember_editor_document(
+            kind,
             checkout,
             relative,
             hash(raw_markdown.as_bytes()),
@@ -332,7 +404,7 @@ fn canonical_file(root: &Path, selected: &Path) -> Result<Option<PathBuf>> {
     }
 }
 
-fn relative_name(root: &Path, path: &Path) -> Result<String> {
+pub(super) fn relative_name(root: &Path, path: &Path) -> Result<String> {
     let relative = path
         .strip_prefix(root)
         .context("select a file inside the current checkout")?;
@@ -348,18 +420,6 @@ fn relative_name(root: &Path, path: &Path) -> Result<String> {
         "select a file inside the current checkout"
     );
     Ok(name.replace('\\', "/"))
-}
-
-fn require_markdown(path: &Path) -> Result<()> {
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    ensure!(
-        extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown"),
-        "select a Markdown document"
-    );
-    Ok(())
 }
 
 struct OpenedFile {

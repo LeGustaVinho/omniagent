@@ -20,6 +20,7 @@ pub mod documents;
 mod isolated_git;
 mod markdown;
 mod markdown_catalog;
+pub mod source_documents;
 pub mod markdown_index;
 pub mod markdown_index_watch;
 pub mod markdown_links;

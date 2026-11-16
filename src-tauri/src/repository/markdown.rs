@@ -15,7 +15,7 @@ use crate::{
     store::Store,
 };
 
-use super::{base_commit, checkout_root, verify_checkout};
+use super::{base_commit, checkout_root, documents::DocumentKind, verify_checkout};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,7 +73,7 @@ impl Store {
         self.execute(move |db| {
             Ok(db.prepare(
                 "SELECT id, checkout_id, path, sha256, base_commit FROM repository_markdown_revisions
-                 WHERE checkout_id = ?1 ORDER BY captured_at DESC, path, id",
+                 WHERE checkout_id = ?1 AND substr(id, 1, 7) != 'source-' ORDER BY captured_at DESC, path, id",
             )?.query_map([checkout], decode_revision)?.collect::<rusqlite::Result<_>>()?)
         }).await
     }
@@ -83,12 +83,26 @@ impl Store {
         checkout: String,
         revision: String,
     ) -> Result<Option<RepositoryMarkdown>> {
+        self.checkout_document_revision(checkout, revision, DocumentKind::Markdown)
+            .await
+    }
+
+    pub(super) async fn checkout_document_revision(
+        &self,
+        checkout: String,
+        revision: String,
+        kind: DocumentKind,
+    ) -> Result<Option<RepositoryMarkdown>> {
+        if !kind.contains_revision(&revision) {
+            return Ok(None);
+        }
         self.execute(move |db| load_markdown(db, &checkout, &revision))
             .await
     }
 
-    pub(super) async fn remember_editor_markdown(
+    pub(super) async fn remember_editor_document(
         &self,
+        kind: DocumentKind,
         checkout_id: String,
         path: String,
         sha256: String,
@@ -97,7 +111,7 @@ impl Store {
     ) -> Result<RepositoryMarkdownRevision> {
         self.execute(move |db| {
             let identity = serde_json::to_vec(&(&checkout_id, &path, &sha256, &base_commit))?;
-            let id = format!("editor-{:x}", Sha256::digest(identity));
+            let id = format!("{}-{:x}", kind.editor_prefix(), Sha256::digest(identity));
             let existing = db
                 .query_row(
                     "SELECT id, checkout_id, path, sha256, base_commit
@@ -233,6 +247,10 @@ fn load_markdown(
 }
 
 pub(crate) fn bind_job_markdown(db: &Connection, job: &str, revision: &str) -> Result<()> {
+    ensure!(
+        DocumentKind::Markdown.contains_revision(revision),
+        "jobs require a Markdown revision"
+    );
     let changed = db
         .execute(
             "INSERT INTO job_repository_markdown (job_id, checkout_id, revision_id)

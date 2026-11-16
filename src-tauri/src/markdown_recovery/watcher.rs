@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 
-use crate::{repository, store::Store};
+use crate::{
+    repository::{self, documents::DocumentKind},
+    store::Store,
+};
 
 use super::stored_revision;
 
@@ -30,10 +33,26 @@ impl Store {
         base_revision: String,
         invalidate: impl Fn(RepositoryMarkdownInvalidation) + Send + 'static,
     ) -> Result<RepositoryMarkdownWatch> {
+        self.watch_checkout_file(
+            checkout_id,
+            base_revision,
+            DocumentKind::Markdown,
+            invalidate,
+        )
+        .await
+    }
+
+    pub(crate) async fn watch_checkout_file(
+        &self,
+        checkout_id: String,
+        base_revision: String,
+        kind: DocumentKind,
+        invalidate: impl Fn(RepositoryMarkdownInvalidation) + Send + 'static,
+    ) -> Result<RepositoryMarkdownWatch> {
         let revision = self
             .execute({
                 let checkout_id = checkout_id.clone();
-                move |db| stored_revision(db, &checkout_id, &base_revision)
+                move |db| stored_revision(db, &checkout_id, &base_revision, kind)
             })
             .await?;
         let root = repository::checkout_root(self, checkout_id.clone()).await?;
@@ -69,11 +88,11 @@ impl RepositoryMarkdownWatch {
                 invalidate(invalidation.clone());
             }
         })
-        .context("Start watching the repository Markdown document")?;
+        .context("Start watching the repository file")?;
         // A checkout watch also covers deletion and recreation of an ancestor of the note.
         watcher
             .watch(&root, RecursiveMode::Recursive)
-            .context("Watch the Markdown document's checkout")?;
+            .context("Watch the file's checkout")?;
         Ok(Self { _watcher: watcher })
     }
 }
@@ -88,5 +107,8 @@ fn affects_document(event: &Event, watched_paths: &HashSet<String>) -> bool {
 }
 
 fn event_path_key(path: &Path) -> String {
-    dunce::simplified(path).to_string_lossy().to_lowercase()
+    dunce::simplified(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase()
 }

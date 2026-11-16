@@ -5,10 +5,10 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 
 use super::{
-    RepositoryDocument, RepositoryDocumentRecovery, Store, base_commit, editor_checkout,
-    relative_name, remember_document,
+    DocumentKind, RepositoryDocument, RepositoryDocumentRecovery, Store, base_commit,
+    editor_checkout, relative_name, remember_document,
     replacement::{FileMove, move_exact},
-    require_markdown, with_managed_worktree_writer,
+    with_managed_worktree_writer,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -47,7 +47,7 @@ fn move_path(root: &Path, relative: &Path) -> Result<String> {
     ensure!(!relative.has_root(), "rename by checkout-relative paths");
     let path = root.join(relative);
     relative_name(root, &path)?;
-    require_markdown(&path)?;
+    DocumentKind::Markdown.require_path(&path)?;
     let parent = path
         .parent()
         .context("the Markdown move path has no parent directory")?;
@@ -139,6 +139,7 @@ impl Store {
             };
             match remember_document(
                 &store,
+                DocumentKind::Markdown,
                 checkout,
                 destination_path.clone(),
                 destination,

@@ -3,6 +3,7 @@
 mod conversation_runtime;
 mod conversation_goal_runtime;
 mod desktop;
+mod ide_source_runtime;
 mod manual_terminal;
 #[cfg(debug_assertions)]
 mod desktop_provider_fixture;
@@ -223,6 +224,7 @@ fn main() {
             app.manage(ipc::EventSubscriptions::default());
             app.manage(note_runtime::NoteWatches::default());
             app.manage(note_index_runtime::NoteIndexWatches::default());
+            app.manage(ide_source_runtime::SourceWatches::default());
             app.manage(manual_terminal::ManualTerminals::default());
             app.manage(fixture_runtime::FixtureRuns::default());
             desktop::create_tray(app)?;
@@ -289,6 +291,16 @@ fn main() {
             desktop::list_repository_markdown_revisions,
             desktop::read_repository_markdown,
             desktop::repository_note_catalog,
+            ide_source_runtime::list_repository_source_files,
+            ide_source_runtime::open_repository_source_file,
+            ide_source_runtime::save_repository_source_file,
+            ide_source_runtime::read_repository_source_revision,
+            ide_source_runtime::list_repository_source_drafts,
+            ide_source_runtime::read_repository_source_draft,
+            ide_source_runtime::save_repository_source_draft,
+            ide_source_runtime::discard_repository_source_draft,
+            ide_source_runtime::watch_repository_source,
+            ide_source_runtime::unwatch_repository_source,
             manual_terminal::start_manual_terminal,
             manual_terminal::write_manual_terminal,
             manual_terminal::resize_manual_terminal,
