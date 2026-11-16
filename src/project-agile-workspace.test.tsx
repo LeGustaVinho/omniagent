@@ -199,6 +199,57 @@ it("shares hierarchy, checklist rows, filters, and saved Git evidence between bo
   expect(within(screen.getByRole("region", { name: "Ready" })).queryByRole("button", { name: parent.title })).toBeNull();
 });
 
+it("opens exact active attempts and task job approvals and keeps observed subagents with interrupted work", async () => {
+  const active: TaskParticipantAttempt = {
+    runId: "running-attempt", conversationId: "active-chat", ordinal: 2, role: { kind: "workflow", value: "implementer" },
+    provider: "codex", profileId: "active-profile", requestedModel: "requested", reportedModel: "running-model", status: "running",
+  };
+  const interrupted: TaskParticipantAttempt = { ...active, runId: "interrupted-attempt", conversationId: "old-chat",
+    ordinal: 1, status: "interrupted", reportedModel: "previous-model" };
+  const waitingJob: JobInspection = {
+    job: { id: "approved-job-target", projectId, checkoutId: exampleCheckout.checkoutId, taskId: parent.id,
+      worktreeOwnerTaskId: parent.id, origin: { type: "operator" }, context: null, mode: "read_only", priority: 0,
+      queueState: "queued", latestAttempt: null, queuedRecovery: null, downstreamWait: null, pipeline: null, kind: "agent" },
+    blockers: [{ type: "approval", approvalId: "exact-approval" }], recoveryActions: [],
+  };
+  const foreignJob: JobInspection = { ...waitingJob, job: { ...waitingJob.job, id: "foreign-job", projectId: "foreign" },
+    blockers: [{ type: "policy", reason: "Other project's policy" }] };
+  const otherTask: JobInspection = { ...waitingJob, job: { ...waitingJob.job, id: "other-task-job", taskId: gitWaiting.id },
+    blockers: [{ type: "policy", reason: "This task needs a verified profile." }] };
+  const { user, openActivity, openQueueJob } = testWorkspace(true, undefined, {
+    attempts: { [parent.id]: [interrupted, active] }, jobs: [waitingJob, foreignJob, otherTask],
+    tree: { parent: null, attempts: [], managed: [], nativeObservations: [{ runId: interrupted.runId, event: {
+      location: { sessionId: "provider-session", parentItemId: null, turnId: "previous-turn", itemId: "delegation" },
+      data: { type: "child_activity", child_id: "recorded-worker", status: "completed",
+        details: { parentId: null, prompt: "Review the samples", requestedModel: null, reportedModel: "child-model" } },
+    } }] },
+  });
+  const card = within(await screen.findByRole("region", { name: `Working now for ${parent.title}` }));
+  await user.click(card.getByRole("button", { name: "Codex · active-profile · running-model" }));
+  expect(openActivity).toHaveBeenCalledWith(active.runId, active.conversationId);
+  const ready = within(screen.getByRole("region", { name: "Ready" }));
+  await user.click(await ready.findByRole("button", { name: "Review job approval" }));
+  expect(openQueueJob).toHaveBeenLastCalledWith(waitingJob.job.id);
+  expect(ready.queryByRole("button", { name: "Open job blocker" })).toBeNull();
+  const inReview = within(screen.getByRole("region", { name: "In Review" }));
+  await user.click(inReview.getByRole("button", { name: "Open job blocker" }));
+  expect(openQueueJob).toHaveBeenLastCalledWith(otherTask.job.id);
+  expect(screen.queryByText("Other project's policy")).toBeNull();
+
+  await user.click(ready.getByRole("button", { name: `Work history for ${parent.title}` }));
+  const detail = within(screen.getByRole("complementary", { name: "Work detail" }));
+  await user.click(within(detail.getByRole("region", { name: "Task job blockers" })).getByRole("button", { name: "Review job approval" }));
+  expect(openQueueJob).toHaveBeenLastCalledWith(waitingJob.job.id);
+  const history = within(detail.getByRole("region", { name: "Work history" }));
+  expect(history.getByText("Interrupted")).toBeTruthy();
+  await user.click(history.getByText("Observed subagents"));
+  await user.click(await history.findByText("Native child recorded-worker · completed"));
+  expect(history.getByText("child-model")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("conversation_agent_tree", {
+    runId: interrupted.runId, conversationId: interrupted.conversationId,
+  });
+});
+
 it("reopens the source and integration evidence from the persisted delivery in a fresh workspace", async () => {
   const first = testWorkspace(true, merge);
   await first.user.click(screen.getByRole("button", { name: "Table" }));

@@ -7,7 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobInspection } from "@/bindings/JobInspection";
 import QueuePanel from "@/queue-panel";
-import type { WorkspaceProps } from "@/workbench-contract";
+import type { QueueJobFocus, WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -39,7 +39,7 @@ const runningJob: JobInspection = {
   recoveryActions: [],
 };
 
-function renderQueue(overrides: Partial<WorkspaceProps> & { active?: boolean } = {}) {
+function renderQueue(overrides: Partial<WorkspaceProps> & { active?: boolean; focusJob?: QueueJobFocus } = {}) {
   const openActivity = vi.fn();
   const openWorkspace = vi.fn();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
@@ -107,6 +107,25 @@ describe("project queue", () => {
     expect(openActivity).toHaveBeenCalledWith("run-1", "attempt-conversation");
     await user.click(screen.getByRole("button", { name: "Open conversation" }));
     expect(openWorkspace).toHaveBeenCalledWith("conversations", "attempt-conversation");
+  });
+
+  it("opens the requested job and its approval only in the matching project", async () => {
+    const approval = { ...queuedJob, blockers: [{ type: "approval", approvalId: "exact-approval" }] } satisfies JobInspection;
+    vi.mocked(invoke).mockImplementation(async (command) => command === "pending_job_approval_request"
+      ? { instructions: "Review only this queued job." }
+      : { settings: { paused: false, capacity: 2 }, active: 1, jobs: [runningJob, approval] });
+
+    renderQueue({ focusJob: { projectId: "foreign-project", jobId: approval.job.id } });
+    await screen.findByRole("button", { name: "Conversation turn" });
+    expect(screen.queryByRole("complementary", { name: "Selected job" })).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith("pending_job_approval_request", expect.anything());
+    cleanup();
+
+    renderQueue({ focusJob: { projectId, jobId: approval.job.id } });
+    const selected = within(await screen.findByRole("complementary", { name: "Selected job" }));
+    expect(selected.getByText("Waiting for approval exact-approval.")).toBeTruthy();
+    expect(await selected.findByText("Review only this queued job.")).toBeTruthy();
+    expect(invoke).toHaveBeenCalledWith("pending_job_approval_request", { projectId, approvalId: "exact-approval" });
   });
 
   it("does not request real queue data when the pane is hidden or in simulation", async () => {
