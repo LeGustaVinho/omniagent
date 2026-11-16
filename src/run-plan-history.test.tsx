@@ -38,6 +38,7 @@ it("queues a read-only revision from the exact completed planning proposal", asy
   };
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     if (command === "conversation_models") return (args as { provider: string }).provider === "codex" ? [{ option }] : [];
+    if (command === "project_model_defaults") return { conversation: null, planning: null, implementation: null };
     if (command === "request_repository_plan_revision") return job;
     throw new Error(`Unexpected command ${command}`);
   });
@@ -63,7 +64,7 @@ it("queues a read-only revision from the exact completed planning proposal", asy
   await user.click(submit);
 
   await screen.findByRole("button", { name: "Request plan revision" });
-  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command !== "conversation_models")).toEqual([
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command !== "conversation_models" && command !== "project_model_defaults")).toEqual([
     ["request_repository_plan_revision", { input: {
       ...scope, contextId: "pinned-document", ...source, selection: option.selection, effort: null, feedback,
     } }],
