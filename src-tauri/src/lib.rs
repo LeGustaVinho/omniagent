@@ -1,3 +1,4 @@
+pub mod agent_tree;
 pub mod appearance;
 pub mod attachments;
 pub mod context_records;

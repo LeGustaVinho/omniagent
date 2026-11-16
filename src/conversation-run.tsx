@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import type { RunRecord } from "@/bindings/RunRecord";
 import type { SubagentAuditGap } from "@/bindings/SubagentAuditGap";
 import { Button } from "@/components/ui/button";
-import { ConversationChildren, recordChildActivity, type ChildActivity, type ChildLocation, type Delegation } from "@/conversation-children";
+import { ConversationAgentTree, recordChildActivity, type ChildActivity, type ChildLocation, type Delegation } from "@/conversation-children";
 import { ConversationChecklistProgress } from "@/conversation-checklist-progress";
 import { ConversationDeliveries, type ConversationInput } from "@/conversation-deliveries";
 import { ConversationInventory } from "@/conversation-inventory";
@@ -268,7 +268,8 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
         <dt>Run ID</dt><dd className="break-all font-mono">{run.id}</dd>
       </dl>
       <RunOrchestrationPanel scope={{ projectId: run.projectId, conversationId, runId: run.id }} live={live} navigation={navigation} />
-      {projection && <ConversationChildren delegation={projection.delegation} />}
+      <ConversationAgentTree conversationId={conversationId} runId={run.id} live={live}
+        delegation={projection?.delegation ?? emptyProjection.delegation} openActivity={navigation?.openActivity} />
       <ConversationSubagentQuotaPanel conversationId={conversationId} runId={run.id} live={live} />
       <ConversationChecklistProgress projectId={run.projectId} runId={run.id} live={live} />
       <AttemptSubagentAudit conversationId={conversationId} runId={run.id} live={live} gaps={projection?.auditGaps ?? []} />

@@ -357,6 +357,7 @@ fn main() {
             conversation_runtime::conversation_events,
             conversation_runtime::conversation_approvals,
             ipc::conversation_question_timeline,
+            ipc::conversation_agent_tree,
             conversation_runtime::conversation_input,
             conversation_runtime::conversation_attachment_content,
             conversation_runtime::capture_conversation_excerpt,

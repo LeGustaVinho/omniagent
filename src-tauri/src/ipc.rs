@@ -55,6 +55,18 @@ pub async fn conversation_question_timeline(
 pub struct EventSubscriptions(Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>);
 
 #[tauri::command]
+pub async fn conversation_agent_tree(
+    store: State<'_, Store>,
+    conversation_id: String,
+    run_id: String,
+) -> Result<omniagent::agent_tree::ConversationAgentTree, String> {
+    store
+        .conversation_agent_tree(conversation_id, run_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
 pub async fn list_conversations(
     store: State<'_, Store>,
     checkout_id: String,
