@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use omniagent::workflows::authoring::package::{
     PackageArtifactVersion, PublishedPackageArtifact, WorkflowPackage, WorkflowPackageCatalogEntry,
     WorkflowPackageDraft, WorkflowPackagePreview, WorkflowPackagePublishOutcome, WorkflowPackageSummary,
     WorkflowSimulation, WorkflowSimulationScenario,
+    exchange::{ExchangeBinding, WorkflowExchange, WorkflowExchangePreview},
 };
 use omniagent::{
     model_catalog::ModelSelection,
@@ -19,6 +22,45 @@ use tauri::State;
 
 use super::report;
 use crate::conversation_runtime::selected_scope;
+
+#[tauri::command]
+pub async fn export_workflow_exchange(
+    store: State<'_, Store>,
+    project_id: String,
+    selected: Vec<PackageArtifactVersion>,
+) -> Result<WorkflowExchange, String> {
+    store
+        .export_workflow_exchange(project_id, selected)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn preview_workflow_exchange(
+    store: State<'_, Store>,
+    project_id: String,
+    document: String,
+    bindings: BTreeMap<String, ExchangeBinding>,
+) -> Result<WorkflowExchangePreview, String> {
+    store
+        .preview_workflow_exchange(project_id, document, bindings)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn import_reviewed_workflow_exchange(
+    store: State<'_, Store>,
+    project_id: String,
+    document: String,
+    bindings: BTreeMap<String, ExchangeBinding>,
+    reviewed_digest: String,
+) -> Result<WorkflowPackageDraft, String> {
+    store
+        .import_reviewed_workflow_exchange(project_id, document, bindings, reviewed_digest)
+        .await
+        .map_err(report)
+}
 
 #[tauri::command]
 pub async fn list_workflow_packages(

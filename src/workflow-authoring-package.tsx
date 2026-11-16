@@ -9,6 +9,7 @@ import { availableModelSelection, useLiveModelOptions } from "@/live-models";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowPackageGraphEditing, WorkflowPackageReview } from "@/workflow-package-review";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
+import { WorkflowExchangeDownload, WorkflowExchangePanel } from "@/workflow-exchange";
 import type { WorkflowGraph } from "@/workflow-graph-model";
 
 type Version = { kind: string; id: string; revision: string; destination: "project" | "library" };
@@ -79,6 +80,7 @@ export function WorkflowPackageList({ checkout, openWorkspace }: Pick<WorkspaceP
       <Button type="button" variant="outline" disabled={create.isPending} onClick={() => create.mutate()}>New workflow package</Button>
     </div>
     {(packages.error ?? create.error) && <p role="alert">{String(packages.error ?? create.error)}</p>}
+    <WorkflowExchangePanel key={projectId} projectId={projectId} openWorkspace={openWorkspace} />
     {!!packages.data?.length && <ul className="workflow-draft-list">
       {packages.data.map((draft) => <li key={draft.id}>
         <div><strong>{draft.name}</strong><p>{draft.memberCount} artifacts · {draft.published ? "Published" : "Draft"}</p></div>
@@ -163,6 +165,7 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
     return <section aria-label="Package publication receipt" className="pipeline-stack">
       <p role="status">Published package revision <code>{draft.publication.reviewedRevision}</code></p>
       <p>Publication receipt <code>{draft.publication.id}</code></p>
+      <WorkflowExchangeDownload projectId={projectId} versions={draft.publication.members.map(({ artifact }) => artifact.version)} />
       <WorkflowPackageReview projectId={projectId} draftId={draft.id} savedRevision={draft.publication.reviewedRevision} />
       {draft.publication.originatingRunId && <p>Originating run <code>{draft.publication.originatingRunId}</code></p>}
       <ul className="pipeline-stack">
