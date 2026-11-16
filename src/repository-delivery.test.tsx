@@ -9,6 +9,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { Job } from "@/bindings/Job";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelPicker } from "@/components/model-picker";
+import type { Delivery, WorkflowState } from "@/project-agile-model";
 import { RepositoryDeliveryWorkspace } from "@/repository-delivery";
 import type { DeliveryJob, DeliverySnapshot } from "@/repository-delivery-model";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -118,4 +119,67 @@ it("starts delivery from a saved Markdown revision and queues planning after reo
   } });
   expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "start_repository_delivery")).toHaveLength(1);
   expect(props.openActivity).toHaveBeenCalledWith("planning-attempt", "planning-conversation");
+});
+
+it.each([true, false])("keeps the saved workflow's completion after reopening the work (second delivery: %s)", async (secondDelivered) => {
+  const checkout = {
+    projectId: "project", checkoutId: "checkout", checkoutRoot: "C:/fixture/repo", repositoryRoot: "C:/fixture/repo",
+  };
+  const task = { projectId: checkout.projectId, taskId: "one-task" };
+  const first = { id: "older-workflow", planRevision: "first-plan" };
+  const second = { id: "later-workflow", planRevision: "second-plan" };
+  const firstSha = "1".repeat(40);
+  const secondSha = "2".repeat(40);
+  const snapshot = (run: typeof first): DeliverySnapshot => ({
+    run, jobs: [], hostOutputs: { work: "linked-task" }, artifacts: [
+      { id: "linked-task", nodeInstanceId: "work", port: "task", unitId: null, value: { kind: "task", evidence: task } },
+    ],
+  });
+  const receipt = (runId: string, sha: string): Delivery => ({
+    id: `receipt-${runId}`, recordedAt: "2026-11-16T10:00:00Z",
+    evidence: { kind: "verified_commit", workflowRunId: runId, completionSha: sha, unitEvidenceIds: [`unit-${runId}`] },
+  });
+  const firstReceipt = receipt(first.id, firstSha);
+  const secondReceipt = receipt(second.id, secondSha);
+  const taskState: WorkflowState = {
+    state: secondDelivered ? "completed" : "ready", activeWorkflowRunId: secondDelivered ? second.id : null,
+    completion: secondDelivered ? secondReceipt : null, hasDirectWork: true,
+    waitingForCommit: false, checklistResolved: true, pendingRepositoryChanges: false, questionBlocker: null,
+  };
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    switch (command) {
+      case "list_repository_markdown_revisions": return [];
+      case "list_repository_deliveries": return secondDelivered ? [second, first] : [first];
+      case "inspect_repository_delivery":
+        return snapshot(args && "runId" in args && args.runId === second.id ? second : first);
+      case "project_task_delivery_state":
+        expect(args).toEqual(task);
+        return taskState;
+      case "project_task_deliveries":
+        expect(args).toEqual(task);
+        return secondDelivered ? [firstReceipt, secondReceipt] : [firstReceipt];
+      default: throw new Error(`Unexpected command ${command}`);
+    }
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}>
+    <RepositoryDeliveryWorkspace checkout={checkout} target={first.id} simulation={null}
+      startSimulation={vi.fn()} openWorkspace={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
+  </QueryClientProvider>);
+  const archived = within(await screen.findByRole("region", { name: "Delivery summary" }));
+  expect(archived.getByRole("status").textContent).toBe("Saved delivery · Verified commit");
+  expect(archived.getByText(firstSha)).toBeTruthy();
+  expect(archived.queryByText(secondSha)).toBeNull();
+  expect(archived.queryByRole("button", { name: "Reopen work" })).toBeNull();
+  expect(archived.queryByRole("button", { name: "Confirm restored worktree" })).toBeNull();
+
+  if (secondDelivered) {
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Saved delivery" }), second.id);
+    expect(await screen.findByText(secondSha)).toBeTruthy();
+    const live = within(screen.getByRole("region", { name: "Delivery summary" }));
+    expect(live.getByRole("status").textContent).toBe("Task · completed");
+    expect(live.getByRole("button", { name: "Reopen work" })).toBeTruthy();
+    expect(live.queryByText(firstSha)).toBeNull();
+  }
 });
