@@ -22,6 +22,7 @@ export type ConversationInput = {
   turnId: string;
   frames: string[];
   attachments: AttachmentEvidence[];
+  removedAttachmentCount: number;
   instructions: InstructionDispatch[];
 };
 
@@ -91,7 +92,9 @@ export function ConversationDeliveries({ input, conversationId, runId, live }: {
   return <>
     <p className="break-all text-xs text-muted-foreground">Turn {input.turnId}</p>
     <p className="text-xs text-muted-foreground">Delivery {input.delivery}</p>
-    <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{input.frames.join("")}</pre>
+    {input.removedAttachmentCount > 0 ? <p className="mt-2 text-xs text-muted-foreground">
+      Exact input is unavailable after attachment history was deleted.
+    </p> : <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{input.frames.join("")}</pre>}
     <SavedAttachments attachments={input.attachments} conversationId={conversationId} runId={runId} />
     {input.instructions.length > 0 && <ol aria-label="Instruction deliveries" className="mt-2 grid gap-2">
       {input.instructions.map((item) => <DeliveryRow key={item.instructionId} item={item}

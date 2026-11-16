@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -15,6 +18,7 @@ use crate::{
 
 use super::{
     ContextSnapshot, Delivery,
+    attachment_retention::{dispatch_removed_ordinals, present_ordinals},
     inventory::{belongs_to_dispatch, resolve_reported_path, same_path},
 };
 
@@ -44,6 +48,7 @@ pub enum AttachmentTransport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentEvidence {
+    pub ordinal: usize,
     pub name: String,
     pub mime_type: &'static str,
     pub source: AttachmentSource,
@@ -81,6 +86,7 @@ impl From<&AttachmentDispatch> for AttachmentEvidence {
             },
         };
         Self {
+            ordinal: 0,
             name: attachment
                 .metadata
                 .source
@@ -104,11 +110,14 @@ pub(super) fn load(
     dispatch_id: &str,
     snapshot: &ContextSnapshot,
     delivery: Delivery,
+    removed_ordinals: &BTreeSet<usize>,
 ) -> Result<Vec<AttachmentEvidence>> {
-    let mut evidence: Vec<_> = snapshot
-        .attachments
-        .iter()
-        .map(AttachmentEvidence::from)
+    let mut evidence: Vec<_> = present_ordinals(removed_ordinals)
+        .zip(&snapshot.attachments)
+        .map(|(ordinal, attachment)| AttachmentEvidence {
+            ordinal,
+            ..AttachmentEvidence::from(attachment)
+        })
         .collect();
     if delivery != Delivery::Submitted
         || !snapshot
@@ -179,25 +188,25 @@ impl Store {
         index: usize,
     ) -> Result<Option<String>> {
         self.execute(move |db| {
-            let protected: Option<Vec<u8>> = db
+            let record: Option<(String, Vec<u8>)> = db
                 .query_row(
-                    "SELECT s.payload FROM context_snapshots s
+                    "SELECT d.id, s.payload FROM context_snapshots s
                  JOIN agent_attempts a ON a.run_id = s.run_id
                  JOIN dispatches d ON d.snapshot_id = s.id AND d.ordinal = 1
                  WHERE s.run_id = ?1 AND a.conversation_id = ?2",
                     params![run_id, conversation_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            let Some(protected) = protected else {
+            let Some((dispatch_id, protected)) = record else {
                 return Ok(None);
             };
             let snapshot: ContextSnapshot =
                 serde_json::from_slice(&protection::unprotect(&protected)?)?;
-            Ok(snapshot
-                .attachments
-                .into_iter()
-                .nth(index)
+            let removed = dispatch_removed_ordinals(db, &dispatch_id)?;
+            Ok(present_ordinals(&removed)
+                .zip(snapshot.attachments)
+                .find_map(|(ordinal, attachment)| (ordinal == index).then_some(attachment))
                 .and_then(|attachment| match attachment.input {
                     AttachmentInput::Native(native) => Some(native.content),
                     _ => None,

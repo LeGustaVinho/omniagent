@@ -17,7 +17,7 @@ it("reviews the exact uncertain revision in the receiving run and keeps earlier 
     receipt: { kind: "turn_started", eventSequence: "17" }, steeringFrame: null, review: null,
   } as const;
   const input: ConversationInput = {
-    delivery: "submitted", turnId: "turn-id", frames: ["original wire"], attachments: [],
+    delivery: "submitted", turnId: "turn-id", frames: ["original wire"], attachments: [], removedAttachmentCount: 0,
     instructions: [initial, {
       ...initial, instructionId: "uncertain", revisionId: "revision-2", text: "Uncertain follow-up",
       mode: "steering", status: "unconfirmed", receipt: null, steeringFrame: "follow-up wire",
@@ -41,7 +41,7 @@ it("reviews the exact uncertain revision in the receiving run and keeps earlier 
   }));
 });
 
-it("shows the frozen excerpt and original runner path and requests native bytes from the selected dispatch", async () => {
+it("shows the retained attachments and requests native bytes by original ordinal after a deletion", async () => {
   const client = new QueryClient();
   const metadata = {
     name: "notes.txt", mimeType: "text/plain", source: { kind: "checkout" as const, relativePath: "docs/notes.txt" },
@@ -51,14 +51,15 @@ it("shows the frozen excerpt and original runner path and requests native bytes 
   const user = userEvent.setup();
   render(<QueryClientProvider client={client}>
     <ConversationDeliveries input={{
-      delivery: "submitted", turnId: "turn-id", frames: [], instructions: [], attachments: [
-        { ...metadata, transport: { method: "excerpt", start: 11, end: 20, text: "café ☕" } },
-        { ...metadata, transport: { method: "reference", runnerPath: "C:\\checkout\\before-rename.txt", uri: null },
+      delivery: "submitted", turnId: "turn-id", frames: [], instructions: [], removedAttachmentCount: 1, attachments: [
+        { ...metadata, ordinal: 0, transport: { method: "excerpt", start: 11, end: 20, text: "café ☕" } },
+        { ...metadata, ordinal: 2, transport: { method: "reference", runnerPath: "C:\\checkout\\before-rename.txt", uri: null },
           reportedReads: [{ eventSequence: "42", path: "before-rename.txt", tool: "Read" }] },
-        { ...metadata, transport: { method: "native", encoding: "acp_resource", runnerPath: null, resourceUri: "file:///original" } },
+        { ...metadata, ordinal: 3, transport: { method: "native", encoding: "acp_resource", runnerPath: null, resourceUri: "file:///original" } },
       ],
     }} conversationId="chat-id" runId="run-id" live={false} />
   </QueryClientProvider>);
+  expect(screen.getByText("Exact input is unavailable after attachment history was deleted.")).toBeTruthy();
   await user.click(screen.getByText("Saved attachments", { selector: "summary" }));
   const list = within(screen.getByRole("list", { name: "Saved attachments" }));
   expect(list.getByText("UTF-8 bytes 11–20")).toBeTruthy();
@@ -68,5 +69,5 @@ it("shows the frozen excerpt and original runner path and requests native bytes 
     "CLI reported read via Read · before-rename.txt · Event 42",
   )).toBeTruthy();
   await user.click(list.getByRole("button", { name: "Download saved bytes" }));
-  expect(invoke).toHaveBeenCalledWith("conversation_attachment_content", { conversationId: "chat-id", runId: "run-id", index: 2 });
+  expect(invoke).toHaveBeenCalledWith("conversation_attachment_content", { conversationId: "chat-id", runId: "run-id", index: 3 });
 });

@@ -279,6 +279,7 @@ impl RecoverySource {
     ) -> Result<Option<NativeJobRecovery>> {
         if self.status != RunStatus::Cancelled
             || self.provider_terminal.as_deref() != Some("interrupted")
+            || crate::dispatch::revoked_history_run(db, &self.source_run_id)?
             || scope
                 .account_binding
                 .as_ref()

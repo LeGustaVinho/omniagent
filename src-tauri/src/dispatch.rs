@@ -25,12 +25,17 @@ use crate::{
 };
 
 mod attachment_evidence;
+mod attachment_retention;
 mod generated_image_evidence;
 mod instruction_evidence;
 mod inventory;
 mod lineage;
 mod profile;
 pub use attachment_evidence::{AttachmentEvidence, AttachmentRead, AttachmentTransport};
+pub(crate) use attachment_retention::revoked_history_run;
+pub use attachment_retention::{
+    AttachmentHistoryRemoval, AttachmentHistoryTarget, AttachmentRemovalPreview,
+};
 pub use instruction_evidence::{
     InstructionDispatch, InstructionDispatchMode, InstructionDispatchStatus, InstructionReceipt,
     InstructionReview,
@@ -139,6 +144,7 @@ pub struct DispatchEvidence {
     pub frames: Vec<Vec<u8>>,
     pub delivery: Delivery,
     pub attachments: Vec<AttachmentEvidence>,
+    pub removed_attachment_count: usize,
     pub instructions: Vec<InstructionDispatch>,
 }
 
@@ -269,8 +275,10 @@ impl Store {
                     let snapshot: ContextSnapshot =
                         serde_json::from_slice(&protection::unprotect(&snapshot)?)?;
                     let delivery = serde_json::from_value(serde_json::Value::String(delivery))?;
-                    let attachments =
-                        attachment_evidence::load(&tx, &run_id, &id, &snapshot, delivery)?;
+                    let removed_ordinals = attachment_retention::dispatch_removed_ordinals(&tx, &id)?;
+                    let attachments = attachment_evidence::load(
+                        &tx, &run_id, &id, &snapshot, delivery, &removed_ordinals,
+                    )?;
                     let instructions = instruction_evidence::load(
                         &tx,
                         &run_id,
@@ -284,6 +292,7 @@ impl Store {
                         frames: serde_json::from_slice(&protection::unprotect(&frames)?)?,
                         delivery,
                         attachments,
+                        removed_attachment_count: removed_ordinals.len(),
                         instructions,
                     })
                 })

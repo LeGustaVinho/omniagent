@@ -148,7 +148,34 @@ pub(crate) fn record(
     run_id: &str,
     snapshot: &ContextSnapshot,
 ) -> Result<()> {
-    let (lineage, messages) = collect(db, run_id, snapshot, true)?;
+    save(db, dispatch_id, run_id, snapshot, true)
+}
+
+pub(super) fn preserve_legacy_attachment_lineage(
+    db: &Connection,
+    dispatch_id: &str,
+    run_id: &str,
+    snapshot: &ContextSnapshot,
+) -> Result<()> {
+    let exists = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM dispatch_lineage WHERE dispatch_id = ?1)",
+        [dispatch_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !exists {
+        save(db, dispatch_id, run_id, snapshot, false)?;
+    }
+    Ok(())
+}
+
+fn save(
+    db: &Connection,
+    dispatch_id: &str,
+    run_id: &str,
+    snapshot: &ContextSnapshot,
+    capture_registration: bool,
+) -> Result<()> {
+    let (lineage, messages) = collect(db, run_id, snapshot, capture_registration)?;
     let payload = protection::protect(&serde_json::to_vec(&lineage)?)?;
     db.execute(
         "INSERT INTO dispatch_lineage (dispatch_id, payload) VALUES (?1, ?2)",

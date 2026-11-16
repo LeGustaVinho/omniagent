@@ -333,6 +333,7 @@ impl Store {
                  JOIN agent_sessions s ON s.id = a.agent_session_id
                  JOIN conversation_contexts c ON c.id = a.result_context_id
                  WHERE a.conversation_id = ?1 AND c.entries = ?2 AND s.provider_session_id IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM history_revoked_sessions WHERE session_id = s.id)
                  ORDER BY a.ordinal DESC LIMIT 1",
                 params![source.id, serde_json::to_string(&entries)?], |row| row.get(0),
             ).optional()?;
@@ -736,6 +737,7 @@ impl Store {
         let payload = protection::protect(&serde_json::to_vec(&event)?)?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            ensure!(!crate::dispatch::revoked_history_run(&tx, &run_id)?, "This provider session was revoked by history deletion");
             let active = match active_attempt(&tx, &run_id) {
                 Ok(active) => active,
                 Err(error) if matches!(error.downcast_ref::<rusqlite::Error>(), Some(rusqlite::Error::QueryReturnedNoRows))
@@ -2081,11 +2083,14 @@ struct PreviousAttempt {
 fn previous_attempt(db: &Connection, conversation: &str) -> Result<Option<PreviousAttempt>> {
     Ok(db
         .query_row(
-            "SELECT a.run_id, s.id, s.scope, s.provider_session_id, s.cursor_context_id, s.native_subagent_limit,
+            "SELECT a.run_id, s.id, s.scope,
+                CASE WHEN retired.session_id IS NULL THEN s.provider_session_id END,
+                s.cursor_context_id, s.native_subagent_limit,
                 (EXISTS (SELECT 1 FROM native_subagent_reservations WHERE session_id = s.id AND state <> 'released')
                  OR EXISTS (SELECT 1 FROM native_goal_executors WHERE run_id = a.run_id)),
                 audit.route, audit.native_evidence_id
          FROM agent_attempts a JOIN agent_sessions s ON s.id = a.agent_session_id
+         LEFT JOIN history_revoked_sessions retired ON retired.session_id = s.id
          LEFT JOIN attempt_subagent_audit audit ON audit.run_id = a.run_id
          WHERE a.conversation_id = ?1 AND a.detached_context = 0 ORDER BY a.ordinal DESC LIMIT 1",
             [conversation],

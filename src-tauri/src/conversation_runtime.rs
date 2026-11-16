@@ -634,6 +634,7 @@ pub struct ConversationInput {
     turn_id: String,
     frames: Vec<String>,
     attachments: Vec<omniagent::dispatch::AttachmentEvidence>,
+    removed_attachment_count: usize,
     instructions: Vec<omniagent::dispatch::InstructionDispatch>,
 }
 
@@ -660,6 +661,7 @@ pub async fn conversation_input(
                 turn_id: dispatch.turn_id,
                 frames,
                 attachments: dispatch.attachments,
+                removed_attachment_count: dispatch.removed_attachment_count,
                 instructions: dispatch.instructions,
             })
         })

@@ -163,7 +163,13 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
     let legacy = rusqlite::Connection::open(&database)?;
     schema::restore_question_view_before_structured_planning(&legacy)?;
     legacy.execute_batch(
-        "DROP TABLE side_output_fixture_payloads;
+        "DROP TABLE history_revoked_sessions;
+         DROP TABLE removed_dispatch_attachments;
+         DROP TABLE removed_history_attachments;
+         DROP TRIGGER remember_attachment_revision_copy;
+         DROP VIEW attachment_revision_copy_candidates;
+         DROP TABLE attachment_revision_copy_sources;
+         DROP TABLE side_output_fixture_payloads;
          DROP TABLE generated_image_evidence_payloads;
          DROP TABLE goal_criterion_evidence;
          ALTER TABLE job_attempt_policies DROP COLUMN evidence;

@@ -523,6 +523,7 @@ fn source_run(db: &Connection, conversation: &str, active: &str) -> Result<Optio
          JOIN context_snapshots snapshot ON snapshot.run_id = a.run_id
          JOIN dispatches d ON d.snapshot_id = snapshot.id AND d.ordinal = 1 AND d.delivery = 'submitted'
          WHERE a.conversation_id = ?1 AND NOT a.detached_context AND a.provider_terminal = 'completed'
+           AND NOT EXISTS (SELECT 1 FROM history_revoked_sessions WHERE session_id = session.id)
            AND r.status = 'succeeded' AND a.result_context_id IS NOT NULL ORDER BY a.ordinal DESC",
     )?;
     let mut rows = query.query([conversation])?;

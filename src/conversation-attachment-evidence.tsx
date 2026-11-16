@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 
 export type AttachmentEvidence = {
+  ordinal: number;
   name: string;
   mimeType: string;
   source: { kind: "checkout"; relativePath: string } | { kind: "selected_file"; path: string };
@@ -15,15 +16,14 @@ export type AttachmentEvidence = {
     | { method: "reference"; runnerPath: string; uri: string | null };
 };
 
-function SavedAttachment({ attachment, index, conversationId, runId }: {
+function SavedAttachment({ attachment, conversationId, runId }: {
   attachment: AttachmentEvidence;
-  index: number;
   conversationId: string;
   runId: string;
 }) {
   const save = useMutation({
     mutationFn: async () => {
-      const encoded = await invoke<string | null>("conversation_attachment_content", { conversationId, runId, index });
+      const encoded = await invoke<string | null>("conversation_attachment_content", { conversationId, runId, index: attachment.ordinal });
       if (encoded === null) throw new Error("Saved attachment bytes are unavailable.");
       const bytes = Uint8Array.from(atob(encoded), (byte) => byte.charCodeAt(0));
       const url = URL.createObjectURL(new Blob([bytes], { type: attachment.mimeType }));
@@ -70,7 +70,7 @@ export function SavedAttachments({ attachments, conversationId, runId }: {
   return <details className="mt-2">
     <summary>Saved attachments</summary>
     <ol className="mt-2 grid gap-2" aria-label="Saved attachments">
-      {attachments.map((attachment, index) => <SavedAttachment key={index} attachment={attachment} index={index}
+      {attachments.map((attachment) => <SavedAttachment key={attachment.ordinal} attachment={attachment}
         conversationId={conversationId} runId={runId} />)}
     </ol>
   </details>;
