@@ -211,13 +211,22 @@ fn create_draft(
             "Open a conversation in this project to link the package"
         );
     }
-    let id = new_id();
     let document = PackageDocument::capture(db, project, package, None)?;
+    create_draft_document(db, project, conversation, &document)
+}
+
+fn create_draft_document(
+    db: &Connection,
+    project: &str,
+    conversation: Option<String>,
+    document: &PackageDocument,
+) -> Result<WorkflowPackageDraft> {
+    let id = new_id();
     db.execute(
         "INSERT INTO workflow_package_drafts(id, project_id, conversation_id) VALUES (?1, ?2, ?3)",
         params![id, project, conversation],
     )?;
-    persist_revision(db, &id, None, None, &document)?;
+    persist_revision(db, &id, None, None, document)?;
     load_draft(db, project, &id)
 }
 
@@ -358,6 +367,7 @@ mod protected_review;
 mod usage_acceptance;
 
 pub mod exchange;
+pub mod derive_reusable;
 
 #[cfg(test)]
 mod from_chat_acceptance;

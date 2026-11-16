@@ -10,12 +10,13 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowPackageGraphEditing, WorkflowPackageReview } from "@/workflow-package-review";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
 import { WorkflowExchangeDownload, WorkflowExchangePanel } from "@/workflow-exchange";
+import { WorkflowReusableDerivation, type ReusableBody, type ReusableReference } from "@/workflow-reusable";
 import type { WorkflowGraph } from "@/workflow-graph-model";
 
 type Version = { kind: string; id: string; revision: string; destination: "project" | "library" };
-type Member = { key: string; name: string; body: { kind: string; graph?: WorkflowGraph }; destination?: string; base?: Version | null };
+type Member = { key: string; name: string; body: ReusableBody; destination?: string; base?: Version | null; references?: Record<string, ReusableReference> };
 type Package = { name: string; members: Member[] };
-type Artifact = { version: Version; name: string; blockers: string[]; body: Member["body"]; references: Record<string, unknown> };
+type Artifact = { version: Version; name: string; blockers: string[]; body: Member["body"]; references: Record<string, ReusableReference> };
 type CatalogArtifact = Pick<Artifact, "version" | "name" | "blockers">;
 type Publication = {
   id: string;
@@ -50,7 +51,7 @@ function packageGraphs(text: string) {
         || !graph.nodes.every((node) => typeof node?.id === "string" && typeof node.kind === "string" && typeof node.configuration?.kind === "string")
         || !graph.wires.every((wire) => typeof wire?.from?.node === "string" && typeof wire.from.port === "string"
           && typeof wire?.to?.node === "string" && typeof wire.to.port === "string")) return [];
-      return [{ key: member.key, name: member.name, graph }];
+      return [{ key: member.key, name: member.name, graph, kind: member.body.kind, references: member.references ?? {} }];
     });
   } catch {
     return [];
@@ -128,6 +129,7 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
   draft: PackageDraft; projectId: string; checkoutId: string; update: (draft: PackageDraft) => void;
   openWorkspace: WorkspaceProps["openWorkspace"];
 }) {
+  const client = useQueryClient();
   const [text, setText] = useState(() => JSON.stringify(draft.package, null, 2));
   const currentText = useRef(text);
   currentText.current = text;
@@ -161,6 +163,14 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
   const dirty = text !== JSON.stringify(draft.package, null, 2);
   const busy = pending(draft) || save.isPending || publish.isPending || request.isPending;
   const stale = publish.data?.status === "stale_base" ? publish.data : null;
+  const savedGraphs = packageGraphs(JSON.stringify(draft.package));
+  const draftPresets = Object.fromEntries(draft.package.members.filter(({ body }) => body.kind === "preset")
+    .map(({ key, body }) => [key, body]));
+  function openDerived(next: PackageDraft) {
+    client.setQueryData(packageKey(projectId, next.id), next);
+    void client.invalidateQueries({ queryKey: packagesKey(projectId), exact: true });
+    openWorkspace("pipelines", packageDraftTarget(next.id));
+  }
   if (draft.publication) {
     return <section aria-label="Package publication receipt" className="pipeline-stack">
       <p role="status">Published package revision <code>{draft.publication.reviewedRevision}</code></p>
@@ -173,6 +183,8 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
           <strong>{artifact.name}</strong> · {artifact.version.kind.replaceAll("_", " ")} · {artifact.version.destination}
           <p className="break-all"><code>{artifact.version.id}</code> · <code>{artifact.version.revision}</code></p>
           <WorkflowEditorAssistance projectId={projectId} checkoutId={checkoutId} artifact={artifact} openWorkspace={openWorkspace} />
+          {artifact.body.graph && <WorkflowReusableDerivation projectId={projectId} graph={artifact.body.graph}
+            source={{ type: "published", version: artifact.version }} disabled={false} onSaved={openDerived} />}
           {artifact.blockers.map((blocker) => <p key={blocker}>{blocker}</p>)}
           {!!Object.keys(artifact.references).length && <details><summary>Pinned references</summary>
             <pre className="max-h-48 overflow-auto whitespace-pre-wrap text-xs">{JSON.stringify(artifact.references, null, 2)}</pre>
@@ -191,13 +203,19 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
         {member.base && <p className="break-all">Base <code>{member.base.revision}</code></p>}
       </li>)}
     </ul>
+    {savedGraphs.map((member) => <section key={member.key} className="pipeline-stack" aria-label={`Reuse ${member.name}`}>
+      <strong>{member.name}</strong>
+      <WorkflowReusableDerivation projectId={projectId} graph={member.graph}
+        source={{ type: "package_revision", draftId: draft.id, revision: draft.revision, memberKey: member.key }}
+        disabled={busy || dirty} onSaved={update} />
+    </section>)}
     <details className="pipeline-evidence">
       <summary>Edit package</summary>
       <WorkflowPackageGraphEditing projectId={projectId} checkoutId={checkoutId} draftId={draft.id} savedRevision={draft.revision}
-        graphs={packageGraphs(text)} disabled={busy} edit={(key, graph) => {
+        graphs={packageGraphs(text)} draftPresets={draftPresets} disabled={busy} edit={(key, graph, references) => {
           const current = JSON.parse(currentText.current) as Package;
           setText(JSON.stringify({ ...current, members: current.members.map((member) => member.key === key
-            ? { ...member, body: { ...member.body, graph } } : member) }, null, 2));
+            ? { ...member, ...(references && { references }), body: { ...member.body, graph } } : member) }, null, 2));
         }} />
       <PublishedArtifactPicker projectId={projectId} checkoutId={checkoutId} openWorkspace={openWorkspace} disabled={busy} add={(artifact) => {
         const parsed = JSON.parse(currentText.current) as Package;

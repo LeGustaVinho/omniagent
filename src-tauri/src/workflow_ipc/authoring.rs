@@ -5,6 +5,7 @@ use omniagent::workflows::authoring::package::{
     PackageArtifactVersion, PublishedPackageArtifact, WorkflowPackage, WorkflowPackageCatalogEntry,
     WorkflowPackageDraft, WorkflowPackagePreview, WorkflowPackagePublishOutcome, WorkflowPackageSummary,
     WorkflowSimulation, WorkflowSimulationScenario,
+    derive_reusable::{ReusableDerivation, ReusableSource, SubflowBoundary, WorkflowReusableNode},
     exchange::{ExchangeBinding, WorkflowExchange, WorkflowExchangePreview},
 };
 use omniagent::{
@@ -22,6 +23,35 @@ use tauri::State;
 
 use super::report;
 use crate::conversation_runtime::selected_scope;
+
+#[tauri::command]
+pub async fn describe_workflow_reusable_boundary(
+    store: State<'_, Store>,
+    project_id: String,
+    source: ReusableSource,
+    node_ids: Option<Vec<String>>,
+) -> Result<SubflowBoundary, String> {
+    store.describe_workflow_reusable_boundary(project_id, source, node_ids).await.map_err(report)
+}
+
+#[tauri::command]
+pub async fn derive_workflow_reusable(
+    store: State<'_, Store>,
+    project_id: String,
+    source: ReusableSource,
+    request: ReusableDerivation,
+) -> Result<WorkflowPackageDraft, String> {
+    store.derive_workflow_reusable(project_id, source, request).await.map_err(report)
+}
+
+#[tauri::command]
+pub async fn describe_workflow_reusable_node(
+    store: State<'_, Store>,
+    project_id: String,
+    version: PackageArtifactVersion,
+) -> Result<WorkflowReusableNode, String> {
+    store.describe_workflow_reusable_node(project_id, version).await.map_err(report)
+}
 
 #[tauri::command]
 pub async fn export_workflow_exchange(

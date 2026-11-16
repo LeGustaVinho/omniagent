@@ -28,11 +28,12 @@ function parseInput(text: string): Record<string, unknown> | null {
   }
 }
 
-export function CommandNodeConfiguration({ projectId, configuration, onChange, disabled }: {
+export function CommandNodeConfiguration({ projectId, configuration, onChange, disabled, fixedInvocation = false }: {
   projectId: string;
   configuration: CommandNodeConfigurationValue;
   onChange: (next: CommandNodeConfigurationValue) => void;
   disabled: boolean;
+  fixedInvocation?: boolean;
 }) {
   const producer = useId();
   const client = useQueryClient();
@@ -76,7 +77,7 @@ export function CommandNodeConfiguration({ projectId, configuration, onChange, d
   return <div className="grid gap-3">
     <label className="grid gap-1 text-sm">
       Local command registration
-      <select className={field} value={hasRegistration || missing ? selected : ""} disabled={disabled}
+      <select className={field} value={hasRegistration || missing ? selected : ""} disabled={disabled || fixedInvocation}
         onChange={(event) => {
           const entry = available.find((item) => bindingKey(item) === event.currentTarget.value);
           update({ registrationId: entry?.id ?? "", registrationRevision: entry?.revision ?? "" });
@@ -87,8 +88,8 @@ export function CommandNodeConfiguration({ projectId, configuration, onChange, d
       </select>
     </label>
     {registrations.isError && <p role="alert">{String(registrations.error)}</p>}
-    <Button type="button" variant="outline" disabled={disabled} aria-expanded={registering}
-      onClick={() => setRegistering(!registering)}>Register local command</Button>
+    {!fixedInvocation && <Button type="button" variant="outline" disabled={disabled} aria-expanded={registering}
+      onClick={() => setRegistering(!registering)}>Register local command</Button>}
     {registering && <fieldset className="grid gap-2 rounded-md border border-border p-3 text-sm" disabled={disabled || register.isPending}>
       <label>Name<input className={field} value={name} onChange={(event) => setName(event.target.value)} /></label>
       <label>Command type
@@ -111,11 +112,11 @@ export function CommandNodeConfiguration({ projectId, configuration, onChange, d
         onClick={() => register.mutate()}>Save command registration</Button>
     </fieldset>}
     <label className="grid gap-1 text-sm">Arguments, one per line
-      <textarea className={field} disabled={disabled} rows={3} value={Array.isArray(configuration.arguments) ? configuration.arguments.join("\n") : ""}
+      <textarea className={field} disabled={disabled || fixedInvocation} rows={3} value={Array.isArray(configuration.arguments) ? configuration.arguments.join("\n") : ""}
         onChange={(event) => update({ arguments: splitArguments(event.target.value) })} />
     </label>
     <label className="grid gap-1 text-sm">Standard input JSON
-      <textarea className={`${field} font-mono`} disabled={disabled} rows={5} value={inputText}
+      <textarea className={`${field} font-mono`} disabled={disabled || fixedInvocation} rows={5} value={inputText}
         aria-invalid={!validInput} aria-describedby={validInput ? undefined : producer}
         onChange={(event) => {
           const value = event.target.value;

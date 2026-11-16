@@ -815,21 +815,48 @@ impl<'a> GraphCompiler<'a> {
                 PackageArtifactBody::Preset {
                     node_kind,
                     configuration,
-                    ..
+                    editable_fields,
                 } => {
                     ensure!(
                         node.kind == *node_kind,
                         "The preset for {slot} configures a different node type"
                     );
-                    node.configuration.clone_from(configuration);
-                    effective_pins.insert(
-                        slot.clone(),
-                        artifact
-                            .definitions
-                            .get("$preset")
-                            .context("The pinned preset definition is unavailable")?
-                            .clone(),
-                    );
+                    let definition = artifact
+                        .definitions
+                        .get("$preset")
+                        .context("The pinned preset definition is unavailable")?;
+                    node.configuration = derive_reusable::resolve_preset_configuration(
+                        &node.configuration, configuration, editable_fields, definition,
+                    ).with_context(|| format!("The preset configuration for {slot} is invalid"))?;
+                    if let Some(ResolvedPackageReference::Published { version }) =
+                        artifact.references.get("$preset")
+                    {
+                        let dependency = (self.loader)(version)?
+                            .context("The preset's exact dependency is unavailable")?;
+                        match &dependency.body {
+                            PackageArtifactBody::Role { .. } => roles::bind(&mut node.configuration, &dependency)?,
+                            PackageArtifactBody::Command { .. } => {
+                                if let Some(configuration) = configured_command(&dependency.body) {
+                                    if let NodeConfiguration::Command(command) = &mut node.configuration {
+                                        let output = command.output;
+                                        *command = configuration;
+                                        command.output = output;
+                                    }
+                                } else {
+                                    unbound_commands.insert(slot.clone());
+                                }
+                            }
+                            PackageArtifactBody::McpTool { .. } => {
+                                if let NodeConfiguration::McpTool(config) = &node.configuration {
+                                    check_mcp_declaration(self.db, self.project, config, &dependency,
+                                        self.validate_bindings, blockers)?;
+                                    declared_mcp.insert(slot.as_str());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    effective_pins.insert(slot.clone(), definition.clone());
                 }
                 PackageArtifactBody::Command { .. } => {
                     ensure!(
@@ -900,6 +927,8 @@ impl<'a> GraphCompiler<'a> {
         }
         for node in &graph.nodes {
             ensure!(!node.kind.generated_iteration(), "For each generates its internal stages during publication");
+            ensure!(!matches!(node.configuration, NodeConfiguration::PresetOverrides { .. }),
+                "Select the exact preset revision for {}", node.id);
             let pin = effective_pins
                 .get_mut(&node.id)
                 .context("A workflow node lost its reviewed definition")?;

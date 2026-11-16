@@ -130,6 +130,8 @@ pub enum NodeConfiguration {
     RequiredChecks { names: Vec<String> },
     Command(CommandConfiguration),
     McpTool(McpToolConfiguration),
+    // Authoring only. Publication resolves this against the exact referenced preset.
+    PresetOverrides { fields: serde_json::Map<String, serde_json::Value> },
     Condition { predicate: ConditionPredicate },
     SubflowEntry { outputs: Vec<Port> },
     RepeatUntil(super::repetition::RepeatUntilConfiguration),

@@ -1,10 +1,12 @@
 import { useState, type Dispatch, type SetStateAction } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions,
   type WorkflowEndpoint, type WorkflowGraph, type WorkflowPortType } from "@/workflow-graph-model";
+import { PublishedSubflow, ReusableCatalog, reusableEditableFields, reusableNodeQuery,
+  type ReusableBody, type ReusableDescription, type ReusableReference } from "@/workflow-reusable";
 
 type Version = { id: string; revision: string; destination: string; kind: string };
 type Reference = { source: "draft"; key: string } | { source: "published"; version: Version }
@@ -40,11 +42,12 @@ function usePackagePreview(projectId: string, draftId: string, revision: string,
   });
 }
 
-type GraphMember = { key: string; name: string; graph: WorkflowGraph };
+type GraphMember = { key: string; name: string; graph: WorkflowGraph; kind?: string; references?: Record<string, ReusableReference> };
 
-export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, savedRevision, graphs, disabled, edit }: {
+export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, savedRevision, graphs, draftPresets = {}, disabled, edit }: {
   projectId: string; checkoutId: string; draftId: string; savedRevision: string; graphs: GraphMember[]; disabled: boolean;
-  edit: (key: string, graph: WorkflowGraph) => void;
+  draftPresets?: Record<string, ReusableBody>;
+  edit: (key: string, graph: WorkflowGraph, references?: Record<string, ReusableReference>) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [selection, select] = useState("");
@@ -65,26 +68,101 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
         {graphs.map((member) => <option key={member.key} value={member.key}>{member.name}</option>)}
       </select></label>
       {error && <p role="alert">{String(error)}</p>}
-      {registry.data && preview.isSuccess && <PackageMemberGraph key={graph.key} projectId={projectId} checkoutId={checkoutId} graph={graph.graph}
-        pinned={pinned} catalog={registry.data} disabled={disabled} edit={(next) => edit(graph.key, next)} />}
+      {registry.data && preview.isSuccess && <PackageMemberGraph key={graph.key} projectId={projectId} checkoutId={checkoutId}
+        graph={graph.graph} references={graph.references ?? {}} draftPresets={draftPresets}
+        pinned={pinned} catalog={registry.data} disabled={disabled} edit={(next, references) => edit(graph.key, next, references)}
+        openDraftSubflow={(key) => {
+          const child = graphs.find((member) => member.key === key && member.kind === "subflow");
+          return child ? <Button type="button" variant="outline" onClick={() => select(child.key)}>Open draft subflow</Button> : null;
+        }} />}
     </div>}
   </details>;
 }
 
-function PackageMemberGraph({ projectId, checkoutId, graph, pinned, catalog, disabled, edit }: {
+function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPresets, pinned, catalog, disabled, edit, openDraftSubflow }: {
   projectId: string; checkoutId: string; graph: WorkflowGraph; pinned: WorkflowDefinitions; catalog: WorkflowDefinition[]; disabled: boolean;
-  edit: (graph: WorkflowGraph) => void;
+  references: Record<string, ReusableReference>; draftPresets: Record<string, ReusableBody>;
+  edit: (graph: WorkflowGraph, references?: Record<string, ReusableReference>) => void;
+  openDraftSubflow: (key: string) => React.ReactNode;
 }) {
+  const client = useQueryClient();
   const [canvas, setCanvas] = useState<WorkflowCanvasEdit>({ layout: {}, updateDefinitions: {} });
-  const state = { ...canvas, graph };
-  const definitions = editorDefinitions(state, pinned, catalog);
+  const published = graph.nodes.flatMap(({ id }) => {
+    const reference = references[id];
+    return reference?.source === "published" && (reference.version.kind === "preset" || reference.version.kind === "subflow")
+      ? [{ id, version: reference.version }] : [];
+  });
+  const queries = useQueries({ queries: published.map(({ version }) => reusableNodeQuery(projectId, version)) });
+  const reusable = new Map(published.flatMap(({ id }, index) => {
+    const loaded = queries[index]?.data;
+    return loaded ? [[id, loaded] as const] : [];
+  }));
+  const error = queries.find((query) => query.error)?.error;
+  const discovered: WorkflowDefinitions = { ...pinned };
+  const presets = new Map<string, { configuration: NonNullable<ReusableBody["configuration"]>; fields: string[] }>();
+  const nodes = graph.nodes.map((node) => {
+    const known = reusable.get(node.id);
+    if (known) discovered[node.id] = known.definition;
+    const reference = references[node.id];
+    const local = reference?.source === "draft" ? draftPresets[reference.key] : undefined;
+    const base = known?.artifact.body.kind === "preset" ? known.artifact.body : local;
+    if (!base?.configuration) return node;
+    const fields = known?.editableOverrides ?? reusableEditableFields(base.configuration)
+      .filter((field) => base.editableFields?.includes(field));
+    presets.set(node.id, { configuration: base.configuration, fields });
+    const stored = node.configuration.kind === "preset_overrides" && node.configuration.fields &&
+      typeof node.configuration.fields === "object" ? node.configuration.fields as Record<string, unknown> : {};
+    return { ...node, configuration: { ...base.configuration, ...stored } };
+  });
+  const presented = { ...graph, nodes };
+  const state = { ...canvas, graph: presented };
+  const definitions = editorDefinitions(state, discovered, catalog);
   const update: Dispatch<SetStateAction<WorkflowEditorState>> = (change) => {
     const next = typeof change === "function" ? change(state) : change;
     setCanvas({ layout: next.layout, updateDefinitions: next.updateDefinitions });
-    if (next.graph !== state.graph) edit(next.graph);
+    if (next.graph === state.graph) return;
+    const before = new Map(graph.nodes.map((node) => [node.id, node]));
+    const shown = new Map(nodes.map((node) => [node.id, node]));
+    const updated = next.graph.nodes.map((node) => {
+      const preset = presets.get(node.id);
+      if (!preset) return node;
+      if (shown.get(node.id)?.configuration === node.configuration) return before.get(node.id) ?? node;
+      const fields = Object.fromEntries(preset.fields.filter((field) =>
+        JSON.stringify(preset.configuration[field]) !== JSON.stringify(node.configuration[field]))
+        .map((field) => [field, node.configuration[field]]));
+      return { ...node, configuration: { kind: "preset_overrides", fields } };
+    });
+    const after = new Set(updated.map(({ id }) => id));
+    const retained = Object.fromEntries(Object.entries(references).filter(([slot]) => !before.has(slot) || after.has(slot)));
+    edit({ ...next.graph, nodes: updated }, retained);
   };
-  return <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={state} setState={update} definitions={definitions} catalog={catalog}
-    problems={graphProblems(graph, definitions)} disabled={disabled} allowDefinitionUpdates={false} />;
+  function add({ artifact, definition, ...details }: ReusableDescription) {
+    client.setQueryData(reusableNodeQuery(projectId, artifact.version).queryKey, { artifact, definition, ...details });
+    const occupied = new Set(graph.nodes.map(({ id }) => id));
+    const stem = `reusable-${definition.kind.replaceAll("_", "-")}`;
+    let id = stem;
+    for (let ordinal = 2; occupied.has(id); ordinal += 1) id = `${stem}-${ordinal}`;
+    const configuration = artifact.version.kind === "preset" ? { kind: "preset_overrides", fields: {} } : { kind: "none" };
+    edit({ ...graph, nodes: [...graph.nodes, { id, kind: definition.kind, configuration }] },
+      { ...references, [id]: { source: "published", version: artifact.version } });
+  }
+  return <>
+    <ReusableCatalog projectId={projectId} disabled={disabled} onAdd={add} />
+    {error && <p role="alert">{String(error)}</p>}
+    <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={state} setState={update} definitions={definitions} catalog={catalog}
+      problems={graphProblems(presented, definitions)} disabled={disabled} allowDefinitionUpdates={false}
+      editablePresetFields={Object.fromEntries([...presets.entries()].map(([id, preset]) => [id, preset.fields]))}
+      inspectReference={(id) => {
+        const reference = references[id];
+        if (reference?.source === "draft") return openDraftSubflow(reference.key);
+        if (reference?.source !== "published") return null;
+        if (reference.version.kind === "subflow") return <PublishedSubflow key={JSON.stringify(reference.version)}
+          projectId={projectId} checkoutId={checkoutId} version={reference.version} />;
+        if (reference.version.kind === "preset") return <p className="break-all">
+          Pinned preset revision <code>{reference.version.revision}</code></p>;
+        return null;
+      }} />
+  </>;
 }
 
 function JsonValue({ value }: { value: unknown }) {

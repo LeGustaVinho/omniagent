@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Background, Controls, Handle, MarkerType, Position, ReactFlow, useUpdateNodeInternals,
   type Connection, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import { Plus, Trash2 } from "lucide-react";
@@ -64,7 +64,8 @@ function connectionWire(connection: Connection): WorkflowWire | undefined {
 
 const readTheme = (): "light" | "dark" => document.documentElement.dataset.appTheme === "light" ? "light" : "dark";
 
-export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled, allowDefinitionUpdates = true }: {
+export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
+  allowDefinitionUpdates = true, inspectReference, editablePresetFields }: {
   projectId: string;
   checkoutId?: string;
   state: WorkflowEditorState;
@@ -74,6 +75,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   problems: string[];
   disabled: boolean;
   allowDefinitionUpdates?: boolean;
+  inspectReference?: (nodeId: string) => ReactNode;
+  editablePresetFields?: Record<string, string[]>;
 }) {
   const { graph, layout } = state;
   const [theme, setTheme] = useState(readTheme);
@@ -215,7 +218,9 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         </select></label>
         {node && definition && <>
           <p className="text-sm text-muted-foreground">Version {definition.revision} · {definition.effect.replaceAll("_", " ")}</p>
-          <NodeFields key={node.id} projectId={projectId} checkoutId={checkoutId} node={node} definition={definition} disabled={disabled} onChange={(configuration) => configure(node.id, configuration)} />
+          {inspectReference?.(node.id)}
+          <NodeFields key={node.id} projectId={projectId} checkoutId={checkoutId} node={node} definition={definition}
+            presetFields={editablePresetFields?.[node.id]} disabled={disabled} onChange={(configuration) => configure(node.id, configuration)} />
           {available && <VersionReview node={node} previous={definition} next={available} wires={graph.wires}
             disabled={disabled} apply={() => updateVersion(node, available)} />}
           {definition.inputs.length > 0 && <ConnectInput key={`${node.id}:${definition.revision}`} graph={graph} node={node}
@@ -229,23 +234,28 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   </section>;
 }
 
-function NodeFields({ projectId, checkoutId, node, definition, disabled, onChange }: {
+function NodeFields({ projectId, checkoutId, node, definition, disabled, presetFields, onChange }: {
   projectId: string; checkoutId?: string; node: WorkflowGraphNode; definition: WorkflowDefinition; disabled: boolean; onChange: (configuration: WorkflowNodeConfiguration) => void;
+  presetFields?: string[];
 }) {
   const { configuration } = node;
+  const allow = (field: string) => !presetFields || presetFields.includes(field);
+  const locked = disabled || presetFields?.length === 0;
   switch (definition.configuration) {
     case "none": return null;
     case "agent_role": return <AgentRoleFields projectId={projectId} checkoutId={checkoutId}
       mode={definition.kind === "plan" ? "plan" : definition.effect === "write_repository" ? "approved_write" : "read_only"}
-      configuration={configuration} onChange={onChange} disabled={disabled} />;
-    case "required_checks": return <label>Required checks<textarea rows={3} disabled={disabled}
+      configuration={configuration} onChange={onChange} disabled={locked || !allow("role")} fixedModel={Boolean(presetFields)} />;
+    case "required_checks": return <label>Required checks<textarea rows={3} disabled={locked || !allow("names")}
       value={Array.isArray(configuration.names) ? configuration.names.join("\n") : ""}
       onChange={(event) => onChange({ kind: "required_checks", names: event.currentTarget.value ? event.currentTarget.value.split("\n") : [] })} />
       <small>Enter one check name per line.</small>
     </label>;
-    case "command": return <CommandNodeConfiguration projectId={projectId} configuration={configuration} onChange={onChange} disabled={disabled} />;
-    case "mcp_tool": return <WorkflowMcpNodeConfiguration projectId={projectId} configuration={configuration} onChange={onChange} disabled={disabled} />;
-    case "build_list": return <BuildListFields configuration={configuration} disabled={disabled} onChange={onChange} />;
+    case "command": return <CommandNodeConfiguration projectId={projectId} configuration={configuration}
+      onChange={onChange} disabled={locked || !allow("output")} fixedInvocation={Boolean(presetFields)} />;
+    case "mcp_tool": return <WorkflowMcpNodeConfiguration projectId={projectId} configuration={configuration} onChange={onChange} disabled={locked} />;
+    case "build_list": return <BuildListFields configuration={configuration} disabled={locked}
+      fixedSource={Boolean(presetFields)} onChange={onChange} />;
     case "for_each": return <>
       <p className="pipeline-meta">Select a pinned subflow in the package references and map its public ports.</p>
       <label>Maximum items<input type="number" min={1} max={MAX_ITERATION_ITEMS} step={1} disabled={disabled}
@@ -257,19 +267,19 @@ function NodeFields({ projectId, checkoutId, node, definition, disabled, onChang
     </>;
     case "condition": return <>
       <p className="pipeline-meta">Use a JSON Pointer into the source artifact, such as <code>/evidence/relativePath</code>. Equality compares JSON values by type.</p>
-      <JsonConfiguration configuration={configuration} kind="condition" disabled={disabled} onChange={onChange} />
+      <JsonConfiguration configuration={configuration} kind="condition" disabled={locked || !allow("predicate")} onChange={onChange} />
     </>;
     default: return <JsonConfiguration key={`${node.id}:${definition.revision}`} configuration={configuration}
-      kind={definition.configuration} disabled={disabled} onChange={onChange} />;
+      kind={definition.configuration} disabled={locked} onChange={onChange} />;
   }
 }
 
-function BuildListFields({ configuration, disabled, onChange }: {
-  configuration: WorkflowNodeConfiguration; disabled: boolean; onChange: (configuration: WorkflowNodeConfiguration) => void;
+function BuildListFields({ configuration, disabled, fixedSource, onChange }: {
+  configuration: WorkflowNodeConfiguration; disabled: boolean; fixedSource: boolean; onChange: (configuration: WorkflowNodeConfiguration) => void;
 }) {
   const external = configuration.source === "evidence";
   return <>
-    <label>List source<select disabled={disabled} value={external ? "evidence" : "values"}
+    <label>List source<select disabled={disabled || fixedSource} value={external ? "evidence" : "values"}
       onChange={(event) => onChange(event.currentTarget.value === "evidence"
         ? { kind: "build_list", source: "evidence", pointer: "/evidence" }
         : defaultConfiguration("build_list"))}>
