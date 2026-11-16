@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, Seek, Write},
     mem::size_of,
@@ -187,17 +187,40 @@ impl DeliveryCheckout {
             &candidate.base_commit,
             &candidate.tree,
         ])?;
+        let changes = tree_changes(&diff)?;
         let view = IsolatedGit::open(&self.paths, &self.root, &candidate.base_commit)?;
+        let is_untracked = |path: &[u8]| {
+            candidate
+                .selection
+                .untracked_paths
+                .iter()
+                .any(|name| name.as_bytes() == path)
+        };
+        let check_index_modes = changes
+            .iter()
+            .any(|change| change.has_regular_mode_change() && !is_untracked(change.path))
+            && view
+                .read(&["config", "--type=bool", "--get", "core.filemode"])?
+                .trim_ascii_end()
+                == b"false";
+        let mut locks = Vec::new();
+        if check_index_modes {
+            // With filemode disabled Git derives the worktree mode from the
+            // index. Pin the real index through ref publication so a concurrent
+            // writer cannot replace the mode after its staged value is checked.
+            locks.push(open_locked_local_file(
+                &Path::new(&self.paths.git_dir).join("index"),
+            )?);
+        }
         view.copy_index(&self.paths)?;
-        let index = String::from_utf8(view.read(&["ls-files", "-z"])?)?;
-        let tracked: HashSet<_> = index.split_terminator('\0').collect();
+        let index = String::from_utf8(view.read(&["ls-files", "--stage", "-z"])?)?;
+        let tracked = indexed_modes(&index)?;
         fs::remove_file(view.index_path())?;
         view.read(&["read-tree", &candidate.tree])?;
-        let mut locks = Vec::new();
         let mut parents = HashSet::new();
         let mut paths = Vec::new();
         let mut deleted = Vec::new();
-        for change in tree_changes(&diff)? {
+        for change in changes {
             let name = std::str::from_utf8(change.path)?;
             let path = self.root.join(name);
             ensure!(
@@ -205,18 +228,20 @@ impl DeliveryCheckout {
                 "invalid approved path: {name}"
             );
             // A staged removal may deliberately leave a local untracked file.
-            if change.mode == "000000" && !tracked.contains(name) {
+            if change.mode == "000000" && !tracked.contains_key(name) {
                 continue;
             }
-            let addition = candidate
-                .selection
-                .untracked_paths
-                .iter()
-                .any(|path| path == name);
+            let addition = is_untracked(change.path);
             ensure!(
-                addition || tracked.contains(name),
+                addition || tracked.contains_key(name),
                 "selected path is no longer tracked: {name}"
             );
+            if check_index_modes && !addition && change.has_regular_mode_change() {
+                ensure!(
+                    tracked.get(name).copied().flatten() == Some(change.mode),
+                    "selected file mode changed in the index: {name}"
+                );
+            }
             let parent = approved_parent(&path)?;
             if parents.insert(parent.to_owned()) {
                 locks.extend(lock_directories(parent)?);
@@ -470,6 +495,28 @@ struct TreeChange<'a> {
     oid: &'a str,
 }
 
+impl TreeChange<'_> {
+    fn has_regular_mode_change(&self) -> bool {
+        matches!(self.mode, "100644" | "100755") && self.mode != self.before
+    }
+}
+
+fn indexed_modes(index: &str) -> Result<HashMap<&str, Option<&str>>> {
+    let mut tracked = HashMap::new();
+    for line in index.split_terminator('\0') {
+        let (entry, path) = line.split_once('\t').context("missing Git index path")?;
+        let mut fields = entry.split_ascii_whitespace();
+        let mode = fields.next().context("missing Git index mode")?;
+        let _oid = fields.next().context("missing Git index object")?;
+        let stage = fields.next().context("missing Git index stage")?;
+        let current = tracked.entry(path).or_insert(None);
+        if stage == "0" {
+            *current = Some(mode);
+        }
+    }
+    Ok(tracked)
+}
+
 fn tree_changes(diff: &[u8]) -> Result<Vec<TreeChange<'_>>> {
     let mut changes = Vec::new();
     let fields = diff.split(|byte| *byte == 0);
@@ -552,6 +599,7 @@ mod tests {
         fs::create_dir(&live)?;
         git_query(&git, &live, &["init", "--quiet", "--initial-branch=work"])?;
         git_query(&git, &live, &["config", "core.autocrlf", "false"])?;
+        git_query(&git, &live, &["config", "core.filemode", "false"])?;
         fs::write(live.join("selected.txt"), "base\n")?;
         fs::write(live.join("staged.txt"), "unselected base\n")?;
         fs::write(
@@ -587,6 +635,11 @@ mod tests {
             &isolated,
             &["add", "--", "selected.txt", "accepted.bin"],
         )?;
+        git_query(
+            &git,
+            &isolated,
+            &["update-index", "--chmod=+x", "--", "selected.txt"],
+        )?;
         git_query(&git, &isolated, &["rm", "--", "removed.txt"])?;
         let tree = git_query(&git, &isolated, &["write-tree"])?
             .trim()
@@ -597,6 +650,11 @@ mod tests {
         fs::write(live.join("staged.txt"), "unrelated stage\n")?;
         fs::write(live.join("other.txt"), "other working copy change\n")?;
         git_query(&git, &live, &["add", "--", "staged.txt"])?;
+        git_query(
+            &git,
+            &live,
+            &["update-index", "--chmod=+x", "--", "selected.txt"],
+        )?;
         git_query(&git, &live, &["rm", "--cached", "--", "removed.txt"])?;
         let index = Path::new(&paths.git_dir).join("index");
         let index_digest = format!("{:x}", Sha256::digest(fs::read(index)?));
@@ -661,6 +719,20 @@ mod tests {
             ],
         )?;
         let selected = checkout.lock_current_selection(&acceptance.candidate)?;
+        let selected_blob = git_query(&git, &live, &["rev-parse", ":selected.txt"])?;
+        let staged_mode_change = format!("100644,{},selected.txt", selected_blob.trim());
+        assert!(
+            git_query(
+                &git,
+                &live,
+                &["update-index", "--cacheinfo", &staged_mode_change]
+            )
+            .is_err()
+        );
+        assert!(
+            git_query(&git, &live, &["ls-files", "--stage", "--", "selected.txt"])?
+                .starts_with("100755 ")
+        );
         checkout.advance(&base, &intent.sha)?;
         assert!(!live.join("filter-ran").exists());
         drop(selected);

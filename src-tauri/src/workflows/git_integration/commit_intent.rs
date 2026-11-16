@@ -4,8 +4,8 @@ use serde::Deserialize;
 use super::*;
 
 #[derive(Debug, Deserialize)]
-struct PreparedIntent {
-    sha: String,
+pub(super) struct PreparedIntent {
+    pub(super) sha: String,
     acceptance_artifact_id: Option<String>,
 }
 
@@ -124,7 +124,10 @@ async fn exercise_restart(ref_already_published: bool) -> Result<()> {
     Ok(())
 }
 
-async fn load_intent(store: &Store, unit: &WorkflowDeliveryUnit) -> Result<Option<PreparedIntent>> {
+pub(super) async fn load_intent(
+    store: &Store,
+    unit: &WorkflowDeliveryUnit,
+) -> Result<Option<PreparedIntent>> {
     let (project, task, unit) = (
         unit.project_id.clone(),
         unit.task_id.clone(),

@@ -45,6 +45,7 @@ mod history_integration;
 mod merge_policy;
 mod milestones;
 mod live_cli_acceptance;
+mod mode_selection;
 
 #[tokio::test]
 async fn verified_commit_publishes_ordered_units_and_accepts_only_the_manual_working_branch()
