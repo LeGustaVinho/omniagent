@@ -325,6 +325,12 @@ async fn completed_task_preserves_accepted_patch_and_dispatch_sources_after_rest
         )
         .await?;
 
+    git(&worktree.root, &["checkout", "--detach"])?;
+    let working_ref = format!("refs/heads/{}", worktree.branch);
+    git(
+        &worktree.root,
+        &["update-ref", "-d", &working_ref, &receipt.sha],
+    )?;
     drop(store);
 
     let store = Store::open(db)?;
@@ -459,6 +465,43 @@ async fn completed_task_preserves_accepted_patch_and_dispatch_sources_after_rest
     let ArtifactValue::Review { run_id } = review.value else {
         anyhow::bail!("review has wrong evidence type");
     };
+    let history = serde_json::to_value(
+        store
+            .verified_work_delivery_units(project.clone(), task.clone())
+            .await?,
+    )?;
+    let [unit_history] = history
+        .as_array()
+        .context("unit history was not a list")?
+        .as_slice()
+    else {
+        anyhow::bail!("expected the one verified unit after removing its working branch");
+    };
+    assert_eq!(unit_history["commit"]["branch"], worktree.branch);
+    assert_eq!(unit_history["commit"]["sha"], receipt.sha);
+    assert_eq!(unit_history["workflowRunId"], fixture.run.id);
+    assert_eq!(unit_history["approvalArtifactId"], fixture.decision.id);
+    assert_eq!(
+        unit_history["implementation"]["runId"],
+        receipt.capture_run_id
+    );
+    assert_eq!(unit_history["review"]["runId"], run_id);
+    for attempt in [&receipt.capture_run_id, &run_id] {
+        assert_eq!(
+            serde_json::to_value(
+                store
+                    .verified_attempt_deliveries(project.clone(), attempt.clone())
+                    .await?
+            )?,
+            history,
+        );
+    }
+    assert!(
+        store
+            .verified_attempt_deliveries("different-project".into(), run_id.clone())
+            .await?
+            .is_empty()
+    );
     let review_run = store
         .project_task_runs(project, task)
         .await?
