@@ -7,7 +7,8 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { Hierarchy, Item, WorkflowStatus } from "@/project-agile-model";
+import type { VerifiedMerge } from "@/delivery-merge-model";
+import type { Delivery, Hierarchy, Item, WorkflowStatus } from "@/project-agile-model";
 import { ProjectTasksWorkspace } from "@/project-tasks";
 import { exampleCheckout } from "@/workbench-contract";
 
@@ -29,11 +30,20 @@ const child = { id: "review", title: "Proofread samples" };
 const standalone = { id: "logging", title: "Improve logging" };
 const blocked = { id: "waiting", title: "Publish guide" };
 const gitWaiting = { id: "git-waiting", title: "Verify generated manifest" };
-const commit = { branch: "codex/old-logging-branch", sha: "e".repeat(40), captureRunId: "history-attempt", purpose: "Record useful logs" };
+const commit = {
+  id: "unit-commit", projectId, taskId: standalone.id,
+  branch: "codex/old-logging-branch", sha: "e".repeat(40), captureRunId: "history-attempt", purpose: "Record useful logs",
+};
+const merge: VerifiedMerge = {
+  id: "recorded-merge", projectId, taskId: standalone.id, workflowRunId: "workflow", unitId: "logging-unit",
+  commitEvidenceId: commit.id, commitEvidenceIds: [commit.id], sourceBranch: commit.branch, sourceSha: commit.sha,
+  destinationBranch: "refs/heads/former-release", previousDestinationSha: "a".repeat(40), integrationSha: "f".repeat(40),
+  verifiedAt: "2026-11-16T12:30:00Z", source: "external",
+};
 const question = { runId: "subtask-question-run", conversationId: "subtask-chat", requestId: 17, state: "live", answerRecorded: false };
 const acceptedDiff = "diff --git a/logger.rs b/logger.rs\n+Log the request context";
 
-function testWorkspace(seed = true) {
+function testWorkspace(seed = true, savedMerge?: VerifiedMerge) {
   const states: Record<string, WorkflowStatus> = { [parent.id]: "ready", [child.id]: "blocked", [standalone.id]: "completed",
     [blocked.id]: "blocked", [gitWaiting.id]: "in_review" };
   const hierarchy: Hierarchy = seed ? { epics: [epic], work: [
@@ -46,8 +56,8 @@ function testWorkspace(seed = true) {
   const checklists: Record<string, Item[]> = seed ? { [parent.id]: [
     { id: "editorial-review", revision: 5, position: 0, body: "Editorial review", checked: false },
   ] } : {};
-  const evidence = { id: "delivery", recordedAt: "2026-11-16T12:00:00Z", evidence: {
-    kind: "verified_commit", completionSha: commit.sha, workflowRunId: "workflow", unitEvidenceIds: ["unit-commit"],
+  const evidence: Delivery = { id: "delivery", recordedAt: "2026-11-16T12:00:00Z", evidence: {
+    kind: "verified_commit", completionSha: commit.sha, workflowRunId: "workflow", unitEvidenceIds: [commit.id],
   } };
   vi.mocked(invoke).mockImplementation(async (name, args) => {
     const scope = args as { projectId: string; taskId: string; evidenceId?: string; expectedState?: WorkflowStatus;
@@ -72,7 +82,7 @@ function testWorkspace(seed = true) {
         completion: scope.taskId === standalone.id ? evidence : null,
       };
       case "project_task_checklist": return { items: checklist };
-      case "project_task_deliveries": return scope.taskId === standalone.id ? [evidence] : [];
+      case "project_task_deliveries": return scope.taskId === standalone.id ? [{ ...evidence, merge: savedMerge }] : [];
       case "verified_work_delivery_units": return [];
       case "verified_delivery_merge": return null;
       case "project_task_runs": case "project_task_goals": case "project_task_assignments": case "conversation_models": return [];
@@ -103,10 +113,10 @@ function testWorkspace(seed = true) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const openActivity = vi.fn();
   const openWorkspace = vi.fn();
-  render(<QueryClientProvider client={client}><ProjectTasksWorkspace checkout={exampleCheckout} simulation={null}
+  const app = render(<QueryClientProvider client={client}><ProjectTasksWorkspace checkout={exampleCheckout} simulation={null}
     startSimulation={vi.fn()} openWorkspace={openWorkspace} openActivity={openActivity} openChanges={vi.fn()} /></QueryClientProvider>);
   const user = userEvent.setup();
-  return { states, openActivity, openWorkspace, user };
+  return { ...app, states, openActivity, openWorkspace, user };
 }
 
 function dropWork(taskId: string, next: WorkflowStatus) {
@@ -158,6 +168,49 @@ it("shares hierarchy, checklist rows, filters, and saved Git evidence between bo
   await user.selectOptions(screen.getByRole("combobox", { name: "Kanban level" }), "task");
   expect(within(screen.getByRole("region", { name: "Completed" })).getByRole("button", { name: standalone.title })).toBeTruthy();
   expect(within(screen.getByRole("region", { name: "Ready" })).queryByRole("button", { name: parent.title })).toBeNull();
+});
+
+it("reopens the source and integration evidence from the persisted delivery in a fresh workspace", async () => {
+  const first = testWorkspace(true, merge);
+  await first.user.click(screen.getByRole("button", { name: "Table" }));
+  const table = within(screen.getByRole("table", { name: "Agile table" }));
+  expect(await table.findByRole("button", { name: `Open saved branch ${commit.branch}` })).toBeTruthy();
+  const source = table.getByRole("button", { name: `Open verified commit ${commit.sha}` });
+  expect(source.title).toBe(commit.sha);
+  const destination = await table.findByRole("button", { name: `Open destination branch ${merge.destinationBranch}` });
+  expect(destination.textContent).toContain(merge.destinationBranch);
+  const integration = table.getByRole("button", { name: `Open integration SHA ${merge.integrationSha}` });
+  expect(integration.textContent).toContain(merge.integrationSha);
+  await first.user.click(destination);
+
+  const selected = within(await screen.findByRole("region", { name: "Recorded Git evidence" }));
+  expect(selected.getByText(commit.sha)).toBeTruthy();
+  expect(selected.getByText(merge.integrationSha)).toBeTruthy();
+  expect((await selected.findByLabelText("Accepted diff")).textContent).toContain(acceptedDiff);
+  first.unmount();
+  vi.mocked(invoke).mockClear();
+
+  const reopened = testWorkspace(true, merge);
+  await reopened.user.click(screen.getByRole("button", { name: "Table" }));
+  const reopenedTable = within(screen.getByRole("table", { name: "Agile table" }));
+  await reopened.user.click(await reopenedTable.findByRole("button", { name: `Open integration SHA ${merge.integrationSha}` }));
+  const reopenedEvidence = within(await screen.findByRole("region", { name: "Recorded Git evidence" }));
+  expect(reopenedEvidence.getByText(commit.sha)).toBeTruthy();
+  expect(reopenedEvidence.getByText(merge.destinationBranch)).toBeTruthy();
+  expect(reopenedEvidence.getByText(merge.integrationSha)).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("project_task_deliveries", { projectId, taskId: standalone.id });
+  expect(invoke).toHaveBeenCalledWith("verified_delivery_commit", { projectId, taskId: standalone.id, evidenceId: commit.id });
+  const commands = vi.mocked(invoke).mock.calls.map(([name]) => name);
+  expect(commands.filter((name) => name.startsWith("git_") || name === "live_managed_worktree")).toEqual([]);
+});
+
+it("leaves the source available when a merge receipt belongs to a different commit", async () => {
+  const { user } = testWorkspace(true, { ...merge, commitEvidenceId: "another-unit", sourceSha: "b".repeat(40) });
+  await user.click(screen.getByRole("button", { name: "Table" }));
+  const table = within(screen.getByRole("table", { name: "Agile table" }));
+  expect(await table.findByRole("button", { name: `Open verified commit ${commit.sha}` })).toBeTruthy();
+  expect(table.queryByRole("button", { name: /Open destination branch/ })).toBeNull();
+  expect(table.queryByRole("button", { name: /Open integration SHA/ })).toBeNull();
 });
 
 it("routes board moves and the detail control through the same guarded transition", async () => {

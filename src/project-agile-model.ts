@@ -127,3 +127,11 @@ export function latestEvidence(taskId: string, deliveries: readonly Delivery[], 
   const evidenceId = delivery.evidence.unitEvidenceIds.at(-1);
   return evidenceId ? { taskId, evidenceId } : undefined;
 }
+
+export function recordedMergeForCommit(commit: VerifiedCommit, deliveries: readonly Delivery[], completion?: Delivery | null) {
+  const saved = completion ? [completion, ...deliveries] : deliveries;
+  return saved.find(({ evidence, merge }) => evidence.kind === "verified_commit" && merge &&
+    evidence.unitEvidenceIds.at(-1) === commit.id && evidence.completionSha === commit.sha &&
+    merge.projectId === commit.projectId && merge.taskId === commit.taskId && merge.workflowRunId === evidence.workflowRunId &&
+    merge.commitEvidenceId === commit.id && merge.commitEvidenceIds.includes(commit.id) && merge.sourceSha === commit.sha)?.merge ?? undefined;
+}

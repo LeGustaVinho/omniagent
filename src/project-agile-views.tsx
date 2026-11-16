@@ -2,7 +2,8 @@ import { DndContext, KeyboardSensor, PointerSensor, useDraggable, useDroppable, 
 import { ChevronDown, ChevronRight, GitBranch, GitCommitHorizontal, GripVertical } from "lucide-react";
 import { Fragment, useState } from "react";
 import { DeliveryStatus } from "@/tasks-git-ui";
-import { canMove, questionBlockerLabel, statusLabel, workLabel, workflowStates, type AgileRow, type EvidenceTarget, type Item, type TaskQuestionBlocker, type WorkflowStatus } from "@/project-agile-model";
+import type { VerifiedMerge } from "@/delivery-merge-model";
+import { canMove, questionBlockerLabel, recordedMergeForCommit, statusLabel, workLabel, workflowStates, type AgileRow, type EvidenceTarget, type Item, type TaskQuestionBlocker, type WorkflowStatus } from "@/project-agile-model";
 
 type Views = {
   rows: AgileRow[];
@@ -30,16 +31,27 @@ export function WorkBlockers({ row, openQuestion, openWork }: Pick<Views, "openQ
     {work?.pendingRepositoryChanges && !work.waitingForCommit && !work.waitingForMerge && <p>Unreviewed repository changes</p>}</>;
 }
 
-function EvidenceLink({ row, reference, openEvidence }: { row: AgileRow; reference: "branch" | "commit"; openEvidence: Views["openEvidence"] }) {
+const evidenceLabels = {
+  branch: "Open saved branch", commit: "Open verified commit", destination: "Open destination branch", integration: "Open integration SHA",
+};
+
+function EvidenceLink({ row, reference, merge, openEvidence }: {
+  row: AgileRow; reference: keyof typeof evidenceLabels; merge?: VerifiedMerge; openEvidence: Views["openEvidence"];
+}) {
   const evidence = row.evidence;
   const commit = row.commit;
   if (!evidence || !commit) return null;
-  const branch = reference === "branch";
-  return <button type="button" className="inline-flex min-w-0 items-center gap-1 font-mono text-xs text-primary hover:underline"
-    title={branch ? commit.branch : commit.sha} onClick={() => openEvidence(evidence)}
-    aria-label={branch ? `Open saved branch ${commit.branch}` : `Open verified commit ${commit.sha}`}>
-    {branch ? <GitBranch className="shrink-0" size={13} aria-hidden /> : <GitCommitHorizontal size={13} aria-hidden />}
-    <span className="break-all">{branch ? commit.branch : commit.sha.slice(0, 12)}</span>
+  const value = { branch: commit.branch, commit: commit.sha, destination: merge?.destinationBranch, integration: merge?.integrationSha }[reference];
+  if (!value) return null;
+  const Icon = reference === "branch" || reference === "destination" ? GitBranch : GitCommitHorizontal;
+  const description = reference === "destination" ? "Destination" : reference === "integration" ? "Integration" : undefined;
+  return <button type="button" className="inline-flex min-w-0 items-start gap-1 text-left font-mono text-xs text-primary hover:underline"
+    title={value} onClick={() => openEvidence(evidence)} aria-label={`${evidenceLabels[reference]} ${value}`}>
+    <Icon className="shrink-0" size={13} aria-hidden />
+    <span className="break-all">
+      {description && <small className="block font-sans text-muted-foreground">{description}</small>}
+      {reference === "commit" ? value.slice(0, 12) : value}
+    </span>
   </button>;
 }
 
@@ -110,6 +122,8 @@ export function ProjectAgileTable({ rows, matches, selected, busy, openWork, ope
       const nested = children.get(row.id)?.filter(containsMatch) ?? [];
       const items = matches.has(row.id) ? row.checklist : [];
       const open = expanded.has(row.id);
+      const merge = row.commit && row.evidence?.evidenceId === row.commit.id
+        ? recordedMergeForCommit(row.commit, row.deliveries ?? [], row.workflow?.completion) : undefined;
       return <Fragment key={row.id}>
         <tr data-selected={row.id === selected}>
           <td style={{ paddingInlineStart: `${0.7 + depth * 1.25}rem` }}>
@@ -126,8 +140,14 @@ export function ProjectAgileTable({ rows, matches, selected, busy, openWork, ope
           <td>{row.status ? <DeliveryStatus>{statusLabel(row.status)}</DeliveryStatus> : <span>Loading state…</span>}
             <div className="mt-1 grid gap-1 text-xs text-muted-foreground"><WorkBlockers row={row} openWork={openWork} openQuestion={openQuestion} /></div></td>
           <td><ChecklistProgress items={items} /></td>
-          <td><EvidenceLink row={row} reference="branch" openEvidence={openEvidence} /></td>
-          <td><EvidenceLink row={row} reference="commit" openEvidence={openEvidence} /></td>
+          <td><div className="grid gap-1">
+            <EvidenceLink row={row} reference="branch" openEvidence={openEvidence} />
+            <EvidenceLink row={row} reference="destination" merge={merge} openEvidence={openEvidence} />
+          </div></td>
+          <td><div className="grid gap-1">
+            <EvidenceLink row={row} reference="commit" openEvidence={openEvidence} />
+            <EvidenceLink row={row} reference="integration" merge={merge} openEvidence={openEvidence} />
+          </div></td>
         </tr>
         {open && items.map((item) => <tr key={item.id} className="agile-checklist-row">
           <td style={{ paddingInlineStart: `${1 + (depth + 1) * 1.25}rem` }}>

@@ -9,7 +9,7 @@ import { ProjectDescription } from "@/project-description";
 import { ProjectAgileTable, ProjectKanban } from "@/project-agile-views";
 import { SavedDeliveryMerge, VerifiedDeliveryHistory } from "@/repository-delivery-history";
 import {
-  canComplete, canMove, checklistQuery, commitQuery, deliveryQuery, epicStateQuery, latestEvidence, questionBlockerLabel, statusLabel,
+  canComplete, canMove, checklistQuery, commitQuery, deliveryQuery, epicStateQuery, latestEvidence, questionBlockerLabel, recordedMergeForCommit, statusLabel,
   taskStateQuery, terminalStatus, workflowStates, workDeliveryUnitsQuery, workLevels,
   type AgileRow, type EvidenceTarget, type Hierarchy, type Item, type TaskQuestionBlocker, type Work, type WorkKind,
   type WorkflowState, type WorkflowStatus,
@@ -41,6 +41,9 @@ function LiveTaskDetails({
   const recordedUnits = new Set(deliveries.data?.flatMap(({ evidence }) => evidence.kind === "verified_commit" ? evidence.unitEvidenceIds : []));
   const unitHistory = new Map(units.data?.map((entry) => [entry.commit.id, entry]));
   const independentUnits = units.data?.filter(({ commit }) => !recordedUnits.has(commit.id));
+  const selectedCommit = selectedEvidence ? unitHistory.get(selectedEvidence.evidenceId)?.commit ??
+    (task.commit?.id === selectedEvidence.evidenceId ? task.commit : undefined) : undefined;
+  const selectedMerge = selectedCommit && recordedMergeForCommit(selectedCommit, deliveries.data ?? task.deliveries ?? [], saved?.completion);
   const waiting = saved?.waitingForMerge ? "Waiting for merge" : saved?.waitingForCommit ? "Waiting for commit" : undefined;
   return <section className="pipeline-stack" aria-label={task.title}>
     <h3 className="font-medium break-words">{task.title}</h3>
@@ -52,6 +55,7 @@ function LiveTaskDetails({
     {selectedEvidence && <section className="pipeline-form pipeline-stack" aria-label="Recorded Git evidence">
       <h4>Recorded Git evidence</h4><VerifiedDeliveryHistory {...args} evidenceId={selectedEvidence.evidenceId}
         history={unitHistory.get(selectedEvidence.evidenceId)} openActivity={links.openActivity} openWorkspace={links.openWorkspace} showPatch />
+      {selectedMerge && <SavedDeliveryMerge {...args} workflowRunId={selectedMerge.workflowRunId} receipt={selectedMerge} />}
     </section>}
     <ProjectDescription kind="work" id={task.id} links={links} />
     {question && <section className="pipeline-form pipeline-stack" aria-label="Task question blocker">
