@@ -1,7 +1,12 @@
 use std::{fs, process::Command, time::Duration};
 
 use anyhow::bail;
-use omniagent::repository;
+use omniagent::repository::{
+    self,
+    documents::{RepositoryDocumentOpen, RepositoryDocumentSave},
+    git_review::{GitDiffSource, GitFileSide, GitPathStatus},
+    project_search::{ProjectSearch, ProjectSearchMatch},
+};
 use tokio::sync::mpsc;
 use windows_sys::Win32::{
     Foundation::WAIT_OBJECT_0,
@@ -273,5 +278,199 @@ async fn closing_a_manual_terminal_terminates_its_power_shell_descendant() -> Re
             .is_none()
     );
     terminals.close(&info.checkout_id, &info.terminal_id)?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires real ripgrep.exe on PATH"]
+async fn ide_edit_search_terminal_and_git_review_share_the_managed_worktree() -> Result<()> {
+    const PATH: &str = "src/build settings.txt";
+    const INITIAL: &str = "build configuration\noriginal value\n";
+    const MATCH: &str = "ide .* linked smoke";
+    let edited = format!("build configuration\n{MATCH}\n");
+    let fixture = tempfile::tempdir()?;
+    let root = fixture.path().join("repository");
+    fs::create_dir_all(root.join("src"))?;
+    git(&root, &["init", "--quiet"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    fs::write(root.join(PATH), INITIAL)?;
+    git(&root, &["add", "--", PATH])?;
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "--no-gpg-sign",
+            "-m",
+            "Initialize IDE fixture",
+        ],
+    )?;
+    let store = Store::open(fixture.path().join("profile.sqlite"))?;
+    let primary = repository::register(&store, root.clone()).await?;
+    let task = store
+        .create_project_task(primary.project_id.clone(), "IDE smoke".into())
+        .await?;
+    let linked = repository::provision_task_worktree(
+        &store,
+        fixture.path().join("managed worktrees"),
+        primary.project_id.clone(),
+        task.id.clone(),
+        primary.checkout_id.clone(),
+    )
+    .await?;
+    let checkout = linked.checkout_id.clone();
+    assert_eq!(linked.project_id, primary.project_id);
+    assert_ne!(checkout, primary.checkout_id);
+    let RepositoryDocumentOpen::Document { document } = store
+        .open_repository_source_file(checkout.clone(), PATH.into())
+        .await?
+    else {
+        bail!("IDE did not open the source document");
+    };
+    assert_eq!(document.revision.checkout_id, checkout);
+    assert_eq!(
+        document.canonical_path,
+        dunce::canonicalize(linked.root.join(PATH))?
+    );
+    assert_eq!(document.markdown, INITIAL);
+
+    let (held, entered) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let writer = tokio::spawn({
+        let store = store.clone();
+        let checkout = checkout.clone();
+        async move {
+            repository::with_managed_worktree_writer(
+                &store,
+                primary.project_id,
+                checkout,
+                task.id,
+                move |_| {
+                    held.send(())
+                        .map_err(|()| anyhow::anyhow!("writer fixture observer closed"))?;
+                    released.recv_timeout(Duration::from_secs(20))?;
+                    Ok(())
+                },
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(20), entered).await??;
+    let blocked = store
+        .save_repository_source_file(
+            checkout.clone(),
+            PATH.into(),
+            document.revision.id.clone(),
+            edited.clone(),
+        )
+        .await;
+    release.send(())?;
+    writer.await??;
+    let error = blocked.expect_err("IDE save bypassed the active managed writer");
+    assert!(
+        error
+            .to_string()
+            .contains("worktree reserved by app operation"),
+        "{error:#}"
+    );
+    assert_eq!(fs::read_to_string(linked.root.join(PATH))?, INITIAL);
+    let saved = store
+        .save_repository_source_file(
+            checkout.clone(),
+            PATH.into(),
+            document.revision.id,
+            edited.clone(),
+        )
+        .await?;
+    let RepositoryDocumentSave::Saved { document } = saved else {
+        bail!("IDE save failed after writer release: {saved:?}");
+    };
+    assert_eq!(document.markdown, edited);
+
+    let search = store
+        .search_repository_files(checkout.clone(), MATCH.into())
+        .await?;
+    let ProjectSearch::Results {
+        matches,
+        truncated: false,
+    } = search
+    else {
+        bail!("real ripgrep did not return complete results: {search:?}");
+    };
+    assert_eq!(
+        matches,
+        [ProjectSearchMatch {
+            path: PATH.into(),
+            line: 2,
+            excerpt: MATCH.into()
+        }]
+    );
+    let primary_search = store
+        .search_repository_files(primary.checkout_id.clone(), MATCH.into())
+        .await?;
+    assert!(
+        matches!(primary_search, ProjectSearch::Results { matches, truncated: false } if matches.is_empty())
+    );
+
+    let terminals = ManualTerminals::default();
+    let (info, session, mut output) = open_terminal(&terminals, &store, checkout.clone()).await?;
+    assert_eq!(info.checkout_id, checkout);
+    let expected_root = linked
+        .root
+        .to_str()
+        .context("linked root is not UTF-8")?
+        .replace('\'', "''");
+    session.write(format!(
+        "Write-Output ('OMNI'+'_IDE_CWD='+[string]($PWD.Path -ieq '{expected_root}'))\r"
+    ))?;
+    output
+        .wait_for(&session, |bytes| contains(bytes, "OMNI_IDE_CWD=True"))
+        .await?;
+    session.write(format!(
+        "Write-Output ('OMNI'+'_IDE_EDIT='+(Get-Content -LiteralPath '{PATH}' -Tail 1))\r"
+    ))?;
+    output
+        .wait_for(&session, |bytes| {
+            contains(bytes, &format!("OMNI_IDE_EDIT={MATCH}"))
+        })
+        .await?;
+    session.write("exit 0\r".into())?;
+    assert_eq!(output.exited().await?, 0);
+
+    let review = store.git_checkout_review(checkout.clone()).await?;
+    assert!(review.managed);
+    assert_eq!(review.checkout_id, checkout);
+    assert_eq!(PathBuf::from(&review.root), linked.root);
+    assert_eq!(
+        review.changes,
+        [GitPathStatus {
+            path: PATH.into(),
+            staged: None,
+            working: Some('M')
+        }]
+    );
+    let diff = store
+        .git_checkout_diff(checkout, PATH.into(), GitDiffSource::Working)
+        .await?;
+    assert_eq!(diff.path, PATH);
+    assert_eq!(
+        diff.original,
+        GitFileSide::Text {
+            content: INITIAL.into()
+        }
+    );
+    assert_eq!(diff.modified, GitFileSide::Text { content: edited });
+    assert!(
+        store
+            .git_checkout_review(primary.checkout_id)
+            .await?
+            .changes
+            .is_empty()
+    );
+    assert_eq!(fs::read_to_string(root.join(PATH))?, INITIAL);
     Ok(())
 }
