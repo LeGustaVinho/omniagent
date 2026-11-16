@@ -199,6 +199,41 @@ it("shares hierarchy, checklist rows, filters, and saved Git evidence between bo
   expect(within(screen.getByRole("region", { name: "Ready" })).queryByRole("button", { name: parent.title })).toBeNull();
 });
 
+it("shares model ratings with planned assignments and scopes recorded model identity", async () => {
+  const original: ModelOption = {
+    selection: { provider: "codex", profileId: "review-profile", modelId: "review-model" },
+    name: "Review model", selectable: true, unavailableReason: null, catalogVersion: 1,
+    rating: { intelligenceTenths: 732, priceScore: 51, apiReferenceCents: 220 },
+  };
+  const replacement: ModelOption = { ...original, name: "Replacement model",
+    selection: { provider: "claude", profileId: "replacement-profile", modelId: "replacement-model" } };
+  const reviewer: TaskParticipantAttempt = {
+    runId: "accepted-review", conversationId: "review-conversation", ordinal: 1,
+    role: { kind: "workflow", value: "candidate reviewer" }, status: "succeeded",
+    provider: original.selection.provider, profileId: original.selection.profileId, requestedModel: "retired-request",
+    reportedModel: original.selection.modelId,
+  };
+  const { user } = testWorkspace(true, undefined, {
+    attempts: { [standalone.id]: [reviewer, {
+      ...reviewer, runId: "different-attempt", profileId: "other-profile", reportedModel: "retired-model",
+    }], [parent.id]: [{ ...reviewer, runId: "same-model-other-profile", profileId: "other-profile" }] },
+    models: [original, replacement], assignment: original.selection,
+  });
+  const board = within(screen.getByLabelText("Agile Kanban"));
+  await user.click(await board.findByRole("button", { name: `Work history for ${standalone.title}` }));
+  const detail = within(screen.getByRole("complementary", { name: "Work detail" }));
+  await user.click(detail.getByText("Planned model assignments"));
+  await user.selectOptions(await detail.findByRole("combobox", { name: "Workflow role" }), "candidate reviewer");
+  expect(within(await detail.findByRole("group", { name: "Reference rating for Review model" })).getByText("73.2/100")).toBeTruthy();
+
+  await user.click(screen.getByRole("button", { name: "Filter by model · All models" }));
+  const filter = within(await screen.findByRole("menu", { name: "Filter by model" }));
+  expect(filter.getByText("73.2/100")).toBeTruthy();
+  expect(filter.getByText("Codex · review-profile · review-model")).toBeTruthy();
+  await user.click(filter.getByRole("menuitemradio", { name: "Review model" }));
+  expect(board.queryByRole("button", { name: parent.title })).toBeNull();
+});
+
 it("opens exact active attempts and task job approvals and keeps observed subagents with interrupted work", async () => {
   const active: TaskParticipantAttempt = {
     runId: "running-attempt", conversationId: "active-chat", ordinal: 2, role: { kind: "workflow", value: "implementer" },
