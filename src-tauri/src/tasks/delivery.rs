@@ -57,6 +57,14 @@ pub struct TaskDeliveryState {
     pub active_workflow_run_id: Option<String>,
     pub question_blocker: Option<TaskQuestionBlocker>,
     pub completion: Option<TaskDelivery>,
+    pub prerequisite_blockers: Vec<TaskPrerequisiteBlocker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskPrerequisiteBlocker {
+    pub task_id: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -133,34 +141,7 @@ impl Store {
     ) -> Result<TaskDelivery> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            validate_repository_delivery_open(&tx, &project, &task)?;
-            ensure!(
-                active_delivery_workflow(&tx, &project, &task)?.is_none(),
-                "repository work requires verified commit evidence"
-            );
-            let pending = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pending_worktree_changes
-                     WHERE project_id = ?1 AND scope_task_id = ?2)
-                 OR EXISTS(SELECT 1 FROM app_worktree_writers
-                     WHERE project_id = ?1 AND scope_task_id = ?2)
-                 OR EXISTS(SELECT 1 FROM job_writer_reservations r
-                     JOIN job_attempts a ON a.run_id = r.run_id
-                     JOIN jobs j ON j.id = a.job_id
-                     LEFT JOIN job_worktree_scopes s ON s.job_id = j.id
-                     WHERE j.project_id = ?1 AND coalesce(s.scope_task_id, j.task_id) = ?2)",
-                params![project, task],
-                |row| row.get::<_, bool>(0),
-            )?;
-            ensure!(
-                !pending,
-                "repository work requires verified commit or explicit discard"
-            );
-            ensure!(
-                checklist_status(&tx, &project, &task)?.1,
-                "resolve the task checklist before completing"
-            );
-            let receipt =
-                insert_delivery(&tx, &project, &task, TaskDeliveryEvidence::Manual { note })?;
+            let receipt = complete_manual_delivery(&tx, &project, &task, note)?;
             tx.commit()?;
             Ok(receipt)
         })
@@ -170,47 +151,100 @@ impl Store {
     pub async fn reopen_task_delivery(&self, project: String, task: String) -> Result<()> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let state = load_delivery_state(&tx, &project, &task)?;
-            ensure!(
-                state.has_direct_work || child_states(&tx, &project, &task, false)?.is_empty(),
-                "reopen a child to reopen a grouping task"
-            );
-            detach_active_delivery_workflow(&tx, &project, &task)?;
-            tx.execute(
-                "UPDATE project_task_details SET workflow_state = 'ready'
-                 WHERE project_id = ?1 AND task_id = ?2 AND workflow_state IN ('completed', 'cancelled')",
-                params![project, task],
-            )?;
-            insert_transition(&tx, &project, &task, "reopened")?;
-            tx.commit()?;
-            Ok(())
-        }).await
-    }
-
-    pub async fn cancel_task_delivery(&self, project: String, task: String) -> Result<()> {
-        self.execute(move |db| {
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let state = load_delivery_state(&tx, &project, &task)?;
-            ensure!(
-                state.state != TaskWorkflowState::Completed,
-                "reopen the task before cancelling it"
-            );
-            if state.state == TaskWorkflowState::Cancelled {
-                return Ok(());
-            }
-            ensure!(
-                child_states(&tx, &project, &task, false)?
-                    .into_iter()
-                    .all(is_terminal),
-                "complete or cancel the child tasks first"
-            );
-            detach_active_delivery_workflow(&tx, &project, &task)?;
-            insert_transition(&tx, &project, &task, "cancelled")?;
+            reopen_delivery(&tx, &project, &task)?;
             tx.commit()?;
             Ok(())
         })
         .await
     }
+
+    pub async fn cancel_task_delivery(&self, project: String, task: String) -> Result<()> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            cancel_delivery(&tx, &project, &task)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+pub(super) fn complete_manual_delivery(
+    db: &Connection,
+    project: &str,
+    task: &str,
+    note: Option<String>,
+) -> Result<TaskDelivery> {
+    validate_repository_delivery_open(db, project, task)?;
+    let state = load_delivery_state(db, project, task)?;
+    ensure!(
+        state.active_workflow_run_id.is_none(),
+        "repository work requires verified commit evidence"
+    );
+    ensure!(
+        state.question_blocker.is_none(),
+        "answer the task's pending question before completing"
+    );
+    ensure!(
+        state.prerequisite_blockers.is_empty(),
+        "complete the task dependencies first"
+    );
+    let pending = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pending_worktree_changes
+             WHERE project_id = ?1 AND scope_task_id = ?2)
+         OR EXISTS(SELECT 1 FROM app_worktree_writers
+             WHERE project_id = ?1 AND scope_task_id = ?2)
+         OR EXISTS(SELECT 1 FROM job_writer_reservations r
+             JOIN job_attempts a ON a.run_id = r.run_id
+             JOIN jobs j ON j.id = a.job_id
+             LEFT JOIN job_worktree_scopes s ON s.job_id = j.id
+             WHERE j.project_id = ?1 AND coalesce(s.scope_task_id, j.task_id) = ?2)",
+        params![project, task],
+        |row| row.get::<_, bool>(0),
+    )?;
+    ensure!(
+        !pending,
+        "repository work requires verified commit or explicit discard"
+    );
+    ensure!(
+        state.checklist_resolved,
+        "resolve the task checklist before completing"
+    );
+    insert_delivery(db, project, task, TaskDeliveryEvidence::Manual { note })
+}
+
+pub(super) fn reopen_delivery(db: &Connection, project: &str, task: &str) -> Result<()> {
+    let state = load_delivery_state(db, project, task)?;
+    ensure!(
+        state.has_direct_work || child_states(db, project, task, false)?.is_empty(),
+        "reopen a child to reopen a grouping task"
+    );
+    detach_active_delivery_workflow(db, project, task)?;
+    db.execute(
+        "UPDATE project_task_details SET workflow_state = 'ready'
+         WHERE project_id = ?1 AND task_id = ?2 AND workflow_state IN ('completed', 'cancelled')",
+        params![project, task],
+    )?;
+    insert_transition(db, project, task, "reopened")
+}
+
+pub(super) fn cancel_delivery(db: &Connection, project: &str, task: &str) -> Result<()> {
+    let state = load_delivery_state(db, project, task)?;
+    ensure!(
+        state.state != TaskWorkflowState::Completed,
+        "reopen the task before cancelling it"
+    );
+    if state.state == TaskWorkflowState::Cancelled {
+        return Ok(());
+    }
+    ensure!(
+        child_states(db, project, task, false)?
+            .into_iter()
+            .all(is_terminal),
+        "complete or cancel the child tasks first"
+    );
+    detach_active_delivery_workflow(db, project, task)?;
+    insert_transition(db, project, task, "cancelled")
 }
 
 pub(crate) fn validate_repository_delivery_open(
@@ -292,6 +326,31 @@ pub(super) fn load_delivery_state(
     project: &str,
     task: &str,
 ) -> Result<TaskDeliveryState> {
+    let mut state = load_delivery_core(db, project, task)?;
+    if !is_terminal(state.state) {
+        let dependencies = db.prepare(
+            "SELECT task.id, task.title FROM project_task_prerequisites prereq
+             JOIN project_tasks task ON task.project_id = prereq.project_id AND task.id = prereq.prerequisite_id
+             WHERE prereq.project_id = ?1 AND prereq.task_id = ?2 ORDER BY task.title, task.id"
+        )?.query_map(params![project, task], |row| Ok(TaskPrerequisiteBlocker { task_id: row.get(0)?, title: row.get(1)? }))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // A prerequisite may be another grouping task. Its completion is calculated without
+        // traversing further prerequisite links, which can intersect the child hierarchy.
+        for dependency in dependencies {
+            if load_delivery_core(db, project, &dependency.task_id)?.state
+                != TaskWorkflowState::Completed
+            {
+                state.prerequisite_blockers.push(dependency);
+            }
+        }
+        if !state.prerequisite_blockers.is_empty() {
+            state.state = TaskWorkflowState::Blocked;
+        }
+    }
+    Ok(state)
+}
+
+fn load_delivery_core(db: &Connection, project: &str, task: &str) -> Result<TaskDeliveryState> {
     ensure!(
         load_project_task(db, project, task)?.is_some(),
         "task must belong to this project"
@@ -367,6 +426,7 @@ pub(super) fn load_delivery_state(
         active_workflow_run_id,
         question_blocker,
         completion,
+        prerequisite_blockers: Vec::new(),
     })
 }
 
@@ -427,7 +487,7 @@ fn latest_event(db: &Connection, project: &str, task: &str) -> Result<Option<Del
         .optional()?)
 }
 
-fn is_terminal(state: TaskWorkflowState) -> bool {
+pub(super) fn is_terminal(state: TaskWorkflowState) -> bool {
     matches!(
         state,
         TaskWorkflowState::Completed | TaskWorkflowState::Cancelled
@@ -468,7 +528,7 @@ fn child_states(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     owners
         .into_iter()
-        .map(|task| Ok(load_delivery_state(db, project, &task)?.state))
+        .map(|task| Ok(load_delivery_core(db, project, &task)?.state))
         .collect()
 }
 

@@ -95,9 +95,11 @@ it("records manual completion after resolving the checklist and preserves histor
   const originalDelivery = await within(await details.findByRole("region", { name: "Delivery history" }))
     .findByText(/^Manual completion ·/);
 
-  await user.click(screen.getByRole("button", { name: epic.title }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Kanban level" }), "epic");
+  await user.click(await screen.findByRole("button", { name: epic.title }));
   await within(screen.getByRole("region", { name: epic.title })).findByText("Completed");
-  await user.click(screen.getByRole("button", { name: task.title }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Kanban level" }), "task");
+  await user.click(await screen.findByRole("button", { name: task.title }));
   details = within(screen.getByRole("region", { name: task.title }));
   await details.findByText(/^Manual completion ·/);
   const readsBeforeReopening = historyReads();
@@ -111,6 +113,7 @@ it("records manual completion after resolving the checklist and preserves histor
     .getByText(/^Manual completion ·/);
   expect(retainedDelivery.textContent).toBe(originalDelivery.textContent);
 
-  await user.click(screen.getByRole("button", { name: epic.title }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Kanban level" }), "epic");
+  await user.click(await screen.findByRole("button", { name: epic.title }));
   await within(screen.getByRole("region", { name: epic.title })).findByText("Backlog");
 });

@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::store::Store;
 
 mod activity;
+mod agile_transition;
 mod checklists;
 mod delivery;
 mod descriptions;
@@ -20,7 +21,9 @@ pub use checklists::progress::{
     ChecklistProgressError, ChecklistProgressReceipt, ChecklistProgressRecord,
 };
 pub use checklists::{ChecklistExecutionMode, ChecklistItem, TaskChecklist};
-pub use delivery::{TaskDelivery, TaskDeliveryEvidence, TaskDeliveryState};
+pub use delivery::{
+    TaskDelivery, TaskDeliveryEvidence, TaskDeliveryState, TaskPrerequisiteBlocker,
+};
 pub(crate) use delivery::{record_verified_task_delivery, validate_repository_delivery_open};
 pub use descriptions::{
     DescriptionDraft, DescriptionEditorConflict, DescriptionEditorSave, DescriptionEditorState,

@@ -1,58 +1,29 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { TaskGoals } from "@/goal-evidence";
 import { TaskParticipants } from "@/task-participants";
 import { TaskAssignment } from "@/task-assignment";
 import { ProjectDescription } from "@/project-description";
+import { ProjectAgileTable, ProjectKanban } from "@/project-agile-views";
+import {
+  canComplete, canMove, checklistQuery, commitQuery, deliveryQuery, epicStateQuery, latestEvidence, questionBlockerLabel, statusLabel,
+  taskStateQuery, terminalStatus, workflowStates, workLevels,
+  type AgileRow, type EvidenceTarget, type Hierarchy, type Item, type TaskQuestionBlocker, type Work, type WorkKind,
+  type WorkflowState, type WorkflowStatus,
+} from "@/project-agile-model";
 import type { WorkspaceProps } from "@/workbench-contract";
 
-type Work = { id: string; title: string };
-type Hierarchy = {
-  epics: Work[];
-  work: {
-    task: Work;
-    placement: { kind: "task"; epicId: string | null } | { kind: "subtask"; parentTaskId: string };
-  }[];
-};
-type Item = { id: string; revision: number; position: number; body: string; checked: boolean };
-type TaskQuestionBlocker = {
-  runId: string;
-  conversationId: string;
-  requestId: string | number;
-  state: "live" | "saving" | "saved" | "needs_review";
-  answerRecorded: boolean;
-};
-type WorkflowState = {
-  state: string;
-  hasDirectWork: boolean;
-  waitingForCommit: boolean;
-  checklistResolved: boolean;
-  pendingRepositoryChanges: boolean;
-  activeWorkflowRunId: string | null;
-  questionBlocker: TaskQuestionBlocker | null;
-};
-type Evidence = { kind: "manual"; note: string | null } |
-  { kind: "verified_commit"; completionSha: string; workflowRunId: string; unitEvidenceIds: string[] };
-type Delivery = { id: string; recordedAt: string; evidence: Evidence };
-type VerifiedCommit = { branch: string; sha: string; captureRunId: string; purpose: string };
 type Change = (operation: () => Promise<unknown>) => void;
 
-const stateLabel = (state: string) => state.charAt(0).toUpperCase() + state.slice(1).replaceAll("_", " ");
-const questionStatus: Record<TaskQuestionBlocker["state"], string> = {
-  live: "Waiting for input",
-  saving: "Saving the turn checkpoint…",
-  saved: "Waiting for input",
-  needs_review: "Question needs review",
-};
-
-function CommitDetails({ projectId, taskId, evidenceId, openActivity }: {
-  projectId: string; taskId: string; evidenceId: string; openActivity: WorkspaceProps["openActivity"];
+function CommitDetails({ projectId, taskId, evidenceId, openActivity, openWorkspace, showPatch = false }: {
+  projectId: string; taskId: string; evidenceId: string;
+  openActivity: WorkspaceProps["openActivity"]; openWorkspace: WorkspaceProps["openWorkspace"]; showPatch?: boolean;
 }) {
-  const commit = useQuery({
-    queryKey: ["delivery-verified-commit", projectId, taskId, evidenceId],
-    queryFn: () => invoke<VerifiedCommit | null>("verified_delivery_commit", { projectId, taskId, evidenceId }),
+  const commit = useQuery(commitQuery(projectId, taskId, evidenceId));
+  const patch = useQuery({ queryKey: ["delivery-verified-patch", projectId, taskId, evidenceId], enabled: showPatch,
+    queryFn: () => invoke<{ patchBase64: string } | null>("verified_delivery_patch", { projectId, taskId, evidenceId }), staleTime: Infinity,
   });
   if (commit.error) return <p role="alert">{String(commit.error)}</p>;
   if (!commit.data) return null;
@@ -60,52 +31,61 @@ function CommitDetails({ projectId, taskId, evidenceId, openActivity }: {
   return <li className="grid gap-1 break-words">
     <span>{evidence.purpose} · {evidence.branch}</span><code className="break-all">{evidence.sha}</code>
     <Button type="button" variant="outline" onClick={() => openActivity(evidence.captureRunId)}>Open implementation attempt</Button>
+    <Button type="button" variant="outline" onClick={() => openWorkspace("git", `attempt:${evidence.captureRunId}`)}>Open saved Git diff</Button>
+    {showPatch && <>
+      {patch.isPending && <p role="status">Loading accepted diff…</p>}
+      {patch.error && <p role="alert">{String(patch.error)}</p>}
+      {patch.data === null && <p>Accepted diff unavailable.</p>}
+      {patch.data && <pre aria-label="Accepted diff" className="max-h-72 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-xs">
+        {new TextDecoder().decode(Uint8Array.from(atob(patch.data.patchBase64), (byte) => byte.charCodeAt(0)))}
+      </pre>}
+    </>}
   </li>;
 }
 
-function LiveTaskDetails({ projectId, task, hasChildren, change, busy, links }: {
-  projectId: string; task: Work; hasChildren: boolean; change: Change; busy: boolean; links: WorkspaceProps;
+function LiveTaskDetails({ projectId, task, change, busy, links, selectedEvidence, openWork, move, check }: {
+  projectId: string; task: AgileRow; change: Change; busy: boolean; links: WorkspaceProps;
+  selectedEvidence?: EvidenceTarget; openWork: (id: string) => void;
+  move: (row: AgileRow, state: WorkflowStatus) => void; check: (id: string, item: Item, checked: boolean) => void;
 }) {
   const args = { projectId, taskId: task.id };
   const [itemText, setItemText] = useState("");
-  const state = useQuery({
-    queryKey: ["project-tasks", projectId, task.id, "state"],
-    queryFn: () => invoke<WorkflowState | null>("project_task_delivery_state", args),
-    refetchInterval: ({ state }) => state.data && !["completed", "cancelled"].includes(state.data.state) ? 2000 : false,
-  });
-  const checklist = useQuery({
-    queryKey: ["project-tasks", projectId, task.id, "checklist"],
-    queryFn: () => invoke<{ items: Item[] } | null>("project_task_checklist", args),
-  });
-  const deliveries = useQuery({
-    queryKey: ["project-tasks", projectId, task.id, "deliveries"],
-    queryFn: () => invoke<Delivery[]>("project_task_deliveries", args),
-  });
+  const state = useQuery(taskStateQuery(projectId, task.id));
+  const checklist = useQuery(checklistQuery(projectId, task.id));
+  const deliveries = useQuery(deliveryQuery(projectId, task.id));
   const saved = state.data;
   const question = saved?.questionBlocker;
-  const closed = saved?.state === "completed" || saved?.state === "cancelled";
-  const mayCompleteManually = saved && !closed && !saved.activeWorkflowRunId &&
-    !saved.pendingRepositoryChanges && saved.checklistResolved && (!hasChildren || saved.hasDirectWork);
+  const closed = saved && terminalStatus(saved.state);
+  const mayCompleteManually = saved && canComplete(saved, task.hasChildren);
+  const feasible = workflowStates.filter(({ value }) => canMove({ ...task, workflow: saved }, value));
   const error = state.error ?? checklist.error ?? deliveries.error;
   return <section className="pipeline-stack" aria-label={task.title}>
     <h3 className="font-medium break-words">{task.title}</h3>
-    {saved && <p role="status">{saved.waitingForCommit && !question ? "In review · Waiting for commit" : stateLabel(saved.state)}</p>}
+    {saved && <p role="status">{saved.waitingForCommit && !question ? `${statusLabel(saved.state)} · Waiting for commit` : statusLabel(saved.state)}</p>}
+    {feasible.length > 0 && <label className="delivery-field">Move work to <select className="delivery-filter" value="" disabled={busy} onChange={(event) => {
+      const next = feasible.find(({ value }) => value === event.currentTarget.value)?.value;
+      if (next) move({ ...task, workflow: saved }, next);
+    }}><option value="">Choose a state</option>{feasible.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}</select></label>}
+    {selectedEvidence && <section className="pipeline-form pipeline-stack" aria-label="Recorded Git evidence">
+      <h4>Recorded Git evidence</h4><ul><CommitDetails {...args} evidenceId={selectedEvidence.evidenceId}
+        openActivity={links.openActivity} openWorkspace={links.openWorkspace} showPatch /></ul>
+    </section>}
     <ProjectDescription kind="work" id={task.id} links={links} />
     {question && <section className="pipeline-form pipeline-stack" aria-label="Task question blocker">
-      <p role="status">{question.answerRecorded && question.state !== "needs_review"
-        ? "Answer recorded · Waiting to continue" : questionStatus[question.state]}</p>
+      <p role="status">{questionBlockerLabel(question)}</p>
       <Button type="button" variant="outline"
         onClick={() => links.openActivity(question.runId, question.conversationId, question.requestId)}>Open originating question</Button>
+    </section>}
+    {Boolean(saved?.prerequisiteBlockers?.length) && <section className="pipeline-form pipeline-stack" aria-label="Task dependency blockers">
+      <h4>Waiting for dependencies</h4>
+      {saved?.prerequisiteBlockers?.map(({ taskId, title }) => <Button key={taskId} type="button" variant="outline" onClick={() => openWork(taskId)}>{title}</Button>)}
     </section>}
     {saved?.activeWorkflowRunId && <Button variant="outline" onClick={() => links.openWorkspace("pipelines", saved.activeWorkflowRunId ?? undefined)}>Open delivery workflow</Button>}
     <section className="pipeline-form pipeline-stack" aria-label="Task checklist">
       <h4 className="font-medium">Checklist</h4>
       {checklist.data?.items.map((item) => <label key={item.id} className="flex items-center gap-2 break-words">
         <input type="checkbox" checked={item.checked} disabled={busy}
-          onChange={(event) => {
-            const next = { ...item, checked: event.currentTarget.checked };
-            change(() => invoke("revise_project_checklist_item", { ...args, next }));
-          }} /> {item.body}
+          onChange={(event) => check(task.id, item, event.currentTarget.checked)} /> {item.body}
       </label>)}
       <form className="pipeline-actions" onSubmit={(event) => {
         event.preventDefault();
@@ -123,7 +103,7 @@ function LiveTaskDetails({ projectId, task, hasChildren, change, busy, links }: 
     <div className="pipeline-actions">
       {mayCompleteManually && <Button disabled={busy} onClick={() => change(() =>
         invoke("record_manual_task_delivery", { ...args, note: null }))}>Record manual completion</Button>}
-      {closed && (saved?.hasDirectWork || !hasChildren) && <Button variant="outline" disabled={busy}
+      {closed && (saved?.hasDirectWork || !task.hasChildren) && <Button variant="outline" disabled={busy}
         onClick={() => change(() => invoke("reopen_task_delivery", args))}>Reopen work</Button>}
       {saved && !closed && <Button variant="outline" disabled={busy}
         onClick={() => change(() => invoke("cancel_task_delivery", args))}>Cancel work</Button>}
@@ -140,7 +120,7 @@ function LiveTaskDetails({ projectId, task, hasChildren, change, busy, links }: 
           {saved?.activeWorkflowRunId !== evidence.workflowRunId && <Button type="button" variant="outline"
             onClick={() => links.openWorkspace("pipelines", evidence.workflowRunId)}>Open saved workflow</Button>}
           <ul className="pipeline-stack">{evidence.unitEvidenceIds.map((evidenceId) =>
-            <CommitDetails key={evidenceId} {...args} evidenceId={evidenceId} openActivity={links.openActivity} />)}</ul>
+            <CommitDetails key={evidenceId} {...args} evidenceId={evidenceId} openActivity={links.openActivity} openWorkspace={links.openWorkspace} />)}</ul>
         </>}
       </details>)}
     </section>}
@@ -149,13 +129,10 @@ function LiveTaskDetails({ projectId, task, hasChildren, change, busy, links }: 
 }
 
 function EpicState({ projectId, epic, links }: { projectId: string; epic: Work; links: WorkspaceProps }) {
-  const state = useQuery({
-    queryKey: ["project-tasks", projectId, epic.id, "state"],
-    queryFn: () => invoke<string | null>("project_epic_delivery_state", { projectId, epicId: epic.id }),
-  });
+  const state = useQuery(epicStateQuery(projectId, epic.id));
   return <section className="pipeline-stack" aria-label={epic.title}>
     <h3 className="font-medium">{epic.title}</h3>
-    {state.data && <p role="status">{stateLabel(state.data)}</p>}
+    {state.data && <p role="status">{statusLabel(state.data)}</p>}
     <ProjectDescription kind="epic" id={epic.id} links={links} />
     {state.error && <p role="alert">{String(state.error)}</p>}
   </section>;
@@ -165,8 +142,13 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   const { projectId } = props.checkout;
   const client = useQueryClient();
   const [selected, setSelected] = useState(props.target);
-  useEffect(() => setSelected(props.target), [props.target]);
-  const [kind, setKind] = useState<"epic" | "task" | "subtask">("task");
+  const [selectedEvidence, setSelectedEvidence] = useState<EvidenceTarget>();
+  useEffect(() => { setSelected(props.target); setSelectedEvidence(undefined); }, [props.target]);
+  const [view, setView] = useState<"kanban" | "table">("kanban");
+  const [level, setLevel] = useState<WorkKind>("task");
+  const [search, setSearch] = useState("");
+  const [filterStatus, setFilterStatus] = useState("");
+  const [kind, setKind] = useState<WorkKind>("task");
   const [parent, setParent] = useState("");
   const [title, setTitle] = useState("");
   const hierarchy = useQuery({
@@ -183,15 +165,48 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   const epics = hierarchy.data?.epics ?? [];
   const all = hierarchy.data?.work ?? [];
   const tasks = all.filter(({ placement }) => placement.kind === "task");
-  const children = (taskId: string) => all.filter(({ placement }) => placement.kind === "subtask" && placement.parentTaskId === taskId);
-  const selectedId = selected;
-  const currentTask = all.find(({ task }) => task.id === selectedId)?.task;
-  const currentEpic = epics.find((epic) => epic.id === selectedId);
-  const choose = (work: Work) => <button type="button" className="delivery-tab text-left break-words"
-    aria-pressed={selectedId === work.id} onClick={() => setSelected(work.id)}>{work.title}</button>;
-  const taskRow = ({ task }: Hierarchy["work"][number]) => <li key={task.id}>{choose(task)}
-    <ul className="pl-4">{children(task.id).map(({ task: child }) => <li key={child.id}>{choose(child)}</li>)}</ul>
-  </li>;
+  const epicStates = useQueries({ queries: epics.map(({ id }) => epicStateQuery(projectId, id)) });
+  const states = useQueries({ queries: all.map(({ task }) => taskStateQuery(projectId, task.id)) });
+  const checklists = useQueries({ queries: all.map(({ task }) => checklistQuery(projectId, task.id)) });
+  const deliveries = useQueries({ queries: all.map(({ task }) => deliveryQuery(projectId, task.id)) });
+  const evidence = all.map(({ task }, index) => latestEvidence(task.id, deliveries[index]?.data ?? [], states[index]?.data?.completion));
+  const commitReads = useQueries({ queries: evidence.flatMap((target) => target ? [commitQuery(projectId, target.taskId, target.evidenceId)] : []) });
+  const commits = new Map(evidence.filter((target) => target !== undefined).map((target, index) => [target.taskId, commitReads[index]?.data]));
+  const parents = new Set(all.flatMap(({ placement }) => placement.kind === "subtask" ? [placement.parentTaskId] : [placement.epicId]));
+  const rows: AgileRow[] = [...epics.map((epic, index): AgileRow => ({
+    ...epic, kind: "epic", status: epicStates[index]?.data ?? undefined, checklist: [], hasChildren: parents.has(epic.id),
+  })), ...all.map(({ task, placement }, index): AgileRow => ({
+    ...task, kind: placement.kind, parentId: placement.kind === "subtask" ? placement.parentTaskId : placement.epicId ?? undefined,
+    status: states[index]?.data?.state, workflow: states[index]?.data, checklist: checklists[index]?.data?.items ?? [],
+    commit: commits.get(task.id), evidence: evidence[index], hasChildren: parents.has(task.id),
+  }))];
+  const current = rows.find(({ id }) => id === selected);
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const matched = rows.filter(({ title, status }) => (!filterStatus || status === filterStatus) && title.toLocaleLowerCase().includes(normalizedSearch));
+  const kanbanRows = matched.filter(({ kind }) => kind === level);
+  const matchIds = new Set(matched.map(({ id }) => id));
+  const readError = [...states, ...epicStates, ...deliveries, ...checklists, ...commitReads].find(({ error }) => error)?.error;
+  function openWork(id: string) {
+    setSelected(id);
+    setSelectedEvidence(undefined);
+  }
+  const views = {
+    selected, busy: mutation.isPending, openWork,
+    openEvidence: (target: EvidenceTarget) => { setSelected(target.taskId); setSelectedEvidence(target); },
+    openQuestion: ({ runId, conversationId, requestId }: TaskQuestionBlocker) => props.openActivity(runId, conversationId, requestId),
+  };
+  function check(taskId: string, item: Item, checked: boolean) {
+    mutation.mutate(() => invoke("revise_project_checklist_item", { projectId, taskId, next: { ...item, checked } }));
+  }
+  function move(row: AgileRow, nextState: WorkflowStatus) {
+    if (!canMove(row, nextState) || mutation.isPending) return;
+    mutation.mutate(async () => {
+      const state = await invoke<WorkflowState>("transition_project_work", {
+        projectId, taskId: row.id, expectedState: row.workflow?.state, nextState,
+      });
+      client.setQueryData(taskStateQuery(projectId, row.id).queryKey, state);
+    });
+  }
   const add = (event: FormEvent) => {
     event.preventDefault();
     if (!title.trim() || (kind === "subtask" && !parent)) return;
@@ -199,15 +214,30 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
       kind === "subtask" ? { kind, parentTaskId: parent } : { kind };
     mutation.mutate(async () => {
       const id = await invoke<string>("create_workspace_work", { projectId, title: title.trim(), placement });
-      setSelected(id);
+      openWork(id);
+      setLevel(kind);
       setTitle("");
     });
   };
   return <section className="delivery-view" aria-label="Tasks workspace">
-    <header className="delivery-toolbar"><h2>Tasks</h2><Button variant="outline" onClick={() => props.startSimulation("delivery")}>Open task preview</Button></header>
+    <header className="delivery-toolbar flex-wrap">
+      <h2>Tasks</h2>
+      <nav className="flex items-center gap-1" aria-label="Agile view">
+        <button type="button" className="delivery-tab" aria-pressed={view === "kanban"} onClick={() => setView("kanban")}>Kanban</button>
+        <button type="button" className="delivery-tab" aria-pressed={view === "table"} onClick={() => setView("table")}>Table</button>
+      </nav>
+      {view === "kanban" && <select aria-label="Kanban level" className="delivery-filter" value={level} onChange={(event) => setLevel(event.currentTarget.value as WorkKind)}>
+        {workLevels.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
+      </select>}
+      <input aria-label="Search work" placeholder="Search work" className="delivery-filter" value={search} onChange={(event) => setSearch(event.currentTarget.value)} />
+      <select aria-label="Filter by state" className="delivery-filter" value={filterStatus} onChange={(event) => setFilterStatus(event.currentTarget.value)}>
+        <option value="">All states</option>{workflowStates.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
+      </select>
+    </header>
     <div className="delivery-body">
-      <div className="delivery-main grid content-start gap-4 p-4">
-        <form className="pipeline-form pipeline-stack" onSubmit={add}>
+      <div className="delivery-main">
+        <details className="pipeline-form m-4"><summary className="cursor-pointer font-medium">New work</summary>
+        <form className="pipeline-stack mt-3" onSubmit={add}>
           <label>Work type <select value={kind} onChange={(event) => {
             setKind(event.currentTarget.value as typeof kind);
             setParent("");
@@ -219,18 +249,23 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
           <label>Title <input value={title} onChange={(event) => setTitle(event.currentTarget.value)} /></label>
           <Button type="submit" disabled={mutation.isPending || !title.trim() || (kind === "subtask" && !parent)}>Create work</Button>
         </form>
-        <ul aria-label="Project work">
-          {epics.map((epic) => <li key={epic.id}>{choose(epic)}<ul className="pl-4">
-            {tasks.filter(({ placement }) => placement.kind === "task" && placement.epicId === epic.id).map(taskRow)}
-          </ul></li>)}
-          {tasks.filter(({ placement }) => placement.kind === "task" && !placement.epicId).map(taskRow)}
-        </ul>
-        {hierarchy.data && !epics.length && !all.length && <p className="text-muted-foreground">No project work yet.</p>}
-        {currentTask && <LiveTaskDetails key={currentTask.id} projectId={projectId} task={currentTask}
-          hasChildren={children(currentTask.id).length > 0} busy={mutation.isPending} change={(operation) => mutation.mutate(operation)} links={props} />}
-        {currentEpic && <EpicState key={currentEpic.id} projectId={projectId} epic={currentEpic} links={props} />}
-        {(mutation.error || hierarchy.error) && <p role="alert">{String(mutation.error ?? hierarchy.error)}</p>}
+        </details>
+        {(mutation.error || hierarchy.error || readError) && <p className="mx-4" role="alert">{String(mutation.error ?? hierarchy.error ?? readError)}</p>}
+        {hierarchy.data && !rows.length && <p className="mx-4 text-muted-foreground">No project work yet.</p>}
+        {hierarchy.data && rows.length > 0 && !(view === "kanban" ? kanbanRows.length : matched.length) &&
+          <p className="mx-4 text-muted-foreground">No matching work.</p>}
+        {view === "kanban" ? <ProjectKanban {...views} rows={kanbanRows} move={move} /> :
+          <ProjectAgileTable {...views} rows={rows} matches={matchIds} check={check} />}
       </div>
+      {current && <aside className="delivery-detail" aria-label="Work detail">
+        <div className="delivery-detail-content grid gap-3 p-4">
+          <button type="button" className="justify-self-end text-xs text-muted-foreground hover:underline" onClick={() => { setSelected(undefined); setSelectedEvidence(undefined); }}>Close detail</button>
+          {current.kind === "epic" ? <EpicState key={current.id} projectId={projectId} epic={current} links={props} /> :
+            <LiveTaskDetails key={current.id} projectId={projectId} task={current} busy={mutation.isPending}
+              change={(operation) => mutation.mutate(operation)} links={props} openWork={openWork} move={move} check={check}
+              selectedEvidence={selectedEvidence?.taskId === current.id ? selectedEvidence : undefined} />}
+        </div>
+      </aside>}
     </div>
   </section>;
 }

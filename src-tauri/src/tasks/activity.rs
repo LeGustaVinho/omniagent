@@ -338,6 +338,31 @@ pub(super) fn load_task_details(db: &Connection, project: &str, task: &str) -> R
     })
 }
 
+pub(super) fn store_requested_workflow_state(
+    db: &Connection,
+    project: &str,
+    task: &str,
+    state: TaskWorkflowState,
+) -> Result<()> {
+    let changed = db.execute(
+        "UPDATE project_task_details SET workflow_state = ?3 WHERE project_id = ?1 AND task_id = ?2",
+        params![project, task, state.key()],
+    )?;
+    if changed == 0 {
+        let payload = ProtectedTaskDetails {
+            acceptance_criteria: vec![],
+            blockers: vec![],
+            planned_assignments: vec![],
+        };
+        db.execute(
+            "INSERT INTO project_task_details(project_id, task_id, priority, workflow_state, payload)
+             VALUES (?1, ?2, 0, ?3, ?4)",
+            params![project, task, state.key(), protection::protect(&serde_json::to_vec(&payload)?)?],
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn bind_task_run_scope(
     db: &Connection,
     project: &str,

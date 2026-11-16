@@ -103,7 +103,8 @@ function mountWorkspace() {
 
 type User = ReturnType<typeof userEvent.setup>;
 async function openDescription(user: User, item: Work) {
-  await user.click(await within(screen.getByRole("list", { name: "Project work" })).findByRole("button", { name: item.title }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Kanban level" }), item === epic ? "epic" : item === subtask ? "subtask" : "task");
+  await user.click(await screen.findByRole("button", { name: item.title }));
   const details = within(screen.getByRole("region", { name: item.title }));
   await user.click(details.getByRole("button", { name: "Open description" }));
   const panel = within(await details.findByRole("region", { name: "Work description" }));
@@ -152,7 +153,7 @@ it.each([epic, task, subtask])("edits and saves $title through Source, Live Prev
   expect(invoke).not.toHaveBeenCalledWith("revise_project_checklist_item", expect.anything());
 
   await user.click(panel.getByRole("button", { name: "Reading" }));
-  let reading = within(await panel.findByLabelText(readingLabel));
+  let reading = within(await panel.findByLabelText(readingLabel, undefined, { timeout: 5000 }));
   expect(reading.getByText("Source edit for this description.")).toBeTruthy();
   expect(reading.getByRole<HTMLInputElement>("checkbox").checked).toBe(true);
   expect(panel.queryByRole("textbox", { name: editorLabel })).toBeNull();
