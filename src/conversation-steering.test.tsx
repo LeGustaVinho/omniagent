@@ -110,3 +110,23 @@ it("offers an active route beside the queue and links acknowledgement to the rec
   await user.click(screen.getByRole("button", { name: "Open receiving turn" }));
   expect(openActivity).toHaveBeenCalledWith(runId, conversationId);
 });
+
+it("keeps an incompatible selection queued and edits or removes its exact unclaimed revision", async () => {
+  const { user, choose } = mount();
+  await choose("claude");
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("preview_conversation_steering", expect.objectContaining({ selection: models.claude })));
+  expect(screen.queryByRole("button", { name: "Send to active turn" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Queue for next turn" }));
+  const pending = within(await screen.findByRole("list", { name: "Pending instructions" }));
+  expect(pending.getByText(initial)).toBeTruthy();
+  await user.click(pending.getByRole("button", { name: "Edit instruction" }));
+  const edit = pending.getByRole("textbox", { name: "Pending instruction text" });
+  await user.clear(edit);
+  await user.type(edit, "Use the saved test suite");
+  await user.click(pending.getByRole("button", { name: "Save instruction" }));
+  expect(await pending.findByText("Use the saved test suite")).toBeTruthy();
+  await user.click(pending.getByRole("button", { name: "Remove instruction" }));
+  expect(invoke).toHaveBeenCalledWith("remove_pending_instruction", expect.objectContaining({ revisionId: "revised-instruction" }));
+  await waitFor(() => expect(screen.queryByRole("list", { name: "Pending instructions" })).toBeNull());
+  expect(invoke).not.toHaveBeenCalledWith("steer_queued_conversation_instruction", expect.anything());
+});
