@@ -11,6 +11,7 @@ pub mod comparison;
 mod builtin;
 mod command;
 mod execution;
+pub mod inspection;
 #[cfg(test)]
 mod git_integration;
 mod job_inputs;

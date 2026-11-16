@@ -22,6 +22,7 @@ pub mod authoring;
 pub mod command;
 pub mod comparison;
 pub mod graph_editor;
+pub mod inspection;
 pub mod launch;
 pub mod role_templates;
 pub mod triggers;

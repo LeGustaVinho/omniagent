@@ -109,6 +109,7 @@ fn remove_recent_schema(db: &rusqlite::Connection) -> Result<()> {
          DROP TABLE workflow_approval_decisions;
          DROP TABLE workflow_approval_rule_heads;
          DROP TABLE workflow_approval_rule_revisions;
+         DROP TABLE workflow_completion_inputs;
          DROP TABLE workflow_host_completions;
          DROP TABLE workflow_artifacts;
          DROP TABLE workflow_node_pins;

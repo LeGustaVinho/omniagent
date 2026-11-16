@@ -254,6 +254,7 @@ pub(crate) fn launch_workflow_in_tx(
         "",
         &host_request_revision(&BTreeMap::new(), &start_request)?,
     )?;
+    super::inspection::record_workflow_input_ids(db, &start_artifact, "", &Default::default())?;
 
     // Initial context nodes have no executable side effects. Binding their
     // exact input here leaves the first scheduler/manual stage ready at commit.
@@ -283,6 +284,7 @@ pub(crate) fn launch_workflow_in_tx(
                 "",
                 &host_request_revision(&inputs, &WorkflowHostRequest::LoadContext)?,
             )?;
+            super::inspection::record_workflow_completion_inputs(db, &artifact, "", &inputs)?;
         }
     }
     let receipt = WorkflowLaunchReceipt {

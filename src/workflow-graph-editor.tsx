@@ -33,17 +33,17 @@ function WorkflowCard({ id, data, selected }: NodeProps<CanvasNode>) {
   return <article className="workflow-node-card" data-selected={selected || undefined} data-problem={data.problem || undefined}>
     <header><strong>{definition?.title ?? "Unavailable node"}</strong><small>{id}</small></header>
     {definition && <div className="workflow-node-ports">
-      <Ports ports={definition.inputs} side="input" />
-      <Ports ports={definition.outputs} side="output" />
+      <WorkflowPortColumn ports={definition.inputs} side="input" />
+      <WorkflowPortColumn ports={definition.outputs} side="output" />
     </div>}
   </article>;
 }
 
-function Ports({ ports, side }: { ports: WorkflowPort[]; side: "input" | "output" }) {
+export function WorkflowPortColumn({ ports, side, readOnly = false }: { ports: WorkflowPort[]; side: "input" | "output"; readOnly?: boolean }) {
   const input = side === "input";
   return <ul className="workflow-port-column" aria-label={input ? "Input ports" : "Output ports"}>
     {ports.map(({ name, value }) => <li key={name} data-side={side} data-port={value.kind} title={`${name} · ${portType(value)}`}>
-      <Handle id={name} type={input ? "target" : "source"} position={input ? Position.Left : Position.Right}
+      <Handle id={name} type={input ? "target" : "source"} position={input ? Position.Left : Position.Right} isConnectable={!readOnly}
         aria-label={`${side} ${name} · ${portType(value)}`} />
       <span>{name}</span><small>{portType(value)}</small>
     </li>)}

@@ -16,6 +16,7 @@ import { SavedDeliveryMerge, SavedDeliverySource } from "@/repository-delivery-h
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowCommandRun } from "@/workflow-command";
+import { workflowRunTarget } from "@/workflow-execution-model";
 import { WorkflowApproval } from "@/workflow-approval";
 
 type Proposal = { sequence: string; text: string };
@@ -98,6 +99,7 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
   const error = proposals.error ?? tasks.error ?? units.error ?? state.error ?? history.error;
 
   return <div className="pipeline-stack">
+    <Button type="button" variant="outline" className="justify-self-start" onClick={() => openWorkspace("pipelines", workflowRunTarget(scope.runId))}>Open execution graph</Button>
     {gitNodes.commit && <RepositoryDeliveryGitGraph scope={scope} delivery={delivery} units={units.data ?? []}
       taskId={taskId} active={Boolean(currentTask)} waitingForCommit={Boolean(currentTask?.waitingForCommit)}
       commitBlock={commitState?.unitId === awaitingUnit ? commitState?.reason : undefined}

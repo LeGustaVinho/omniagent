@@ -262,7 +262,8 @@ switch ($Mode) {
         ArtifactValue::CommandResult(WorkflowCommandResult { output: CommandData::Text(text), .. }) if text == "text: ação 🚀")
     );
 
-    let invalid = terminal(&store, &submit("invalid").await?).await?;
+    let invalid_job = submit("invalid").await?;
+    let invalid = terminal(&store, &invalid_job).await?;
     assert_eq!(invalid.status, RunStatus::Failed);
     assert!(
         store
@@ -271,11 +272,35 @@ switch ($Mode) {
             .is_none()
     );
     let invalid_logs = store
-        .command_job_output(fixture.project.clone(), invalid.run_id)
+        .command_job_output(fixture.project.clone(), invalid.run_id.clone())
         .await?
         .unwrap();
     assert_eq!(invalid_logs.stdout, "{ unfinished");
     assert_eq!(invalid_logs.process.unwrap().code, 0);
+    let inspected = store
+        .inspect_workflow_execution(fixture.project.clone(), fixture.run.id.clone())
+        .await?
+        .context("Missing workflow inspection after Command failure")?;
+    let invalid_node = inspected
+        .jobs
+        .iter()
+        .find(|entry| entry.job.id == invalid_job.id)
+        .context("Missing failed Command in workflow inspection")?;
+    assert_eq!(invalid_node.node_id, "invalid");
+    assert_eq!(invalid_node.attempts[0].run_id, invalid.run_id);
+    assert_eq!(invalid_node.attempts[0].status, RunStatus::Failed);
+    assert_eq!(
+        invalid_node.inputs.as_ref().unwrap().get("worktree"),
+        Some(&fixture.worktree.id)
+    );
+    assert!(inspected.outputs.iter().any(|entry| entry.artifact == evidence && entry.current));
+    assert!(inspected.outputs.iter().all(|entry| entry.artifact.node_instance_id != "invalid"));
+    let failure = store
+        .job_failure(fixture.project.clone(), invalid.run_id)
+        .await?
+        .context("Missing failure evidence for the inspected Command attempt")?;
+    assert_eq!(failure.observation.cause, Some(crate::jobs::FailureCause::InvalidResult));
+    assert!(failure.logs_available);
 
     std::fs::write(script, "throw 'This changed script must not start'")?;
     let changed = terminal(&store, &submit("changed").await?).await?;

@@ -489,6 +489,12 @@ fn persist(
             artifact.id
         ],
     )?;
+    super::super::inspection::record_workflow_input_ids(
+        db,
+        &artifact,
+        &decision.plan_revision,
+        &context.inputs,
+    )?;
     Ok(artifact)
 }
 

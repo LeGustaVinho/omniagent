@@ -345,6 +345,8 @@ fn main() {
             workflow_ipc::authoring::publish_reviewed_workflow,
             workflow_ipc::graph_editor::workflow_graph_registry,
             workflow_ipc::graph_editor::project_workflow_graph_drafts,
+            workflow_ipc::inspection::inspect_workflow_execution,
+            workflow_ipc::inspection::inspect_workflow_execution_job,
             workflow_ipc::comparison::comparison_source_commit,
             workflow_ipc::comparison::model_comparisons,
             workflow_ipc::comparison::start_model_comparison,

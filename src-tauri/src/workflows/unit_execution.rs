@@ -413,7 +413,8 @@ impl Store {
             _ => anyhow::bail!("the host request does not match the pinned unit executor"),
         };
         let artifact = self
-            .record_workflow_unit_artifact(&unit, node_id, port, value)
+            .record_workflow_unit_artifact(&unit, node_id, port, value,
+                inputs.into_iter().map(|(port, artifact)| (port, artifact.id)).collect())
             .await?;
         if committing {
             let follow_up = match self
@@ -441,11 +442,13 @@ impl Store {
         node: String,
         port: &str,
         value: ArtifactValue,
+        inputs: NodeInputs,
     ) -> Result<WorkflowArtifact> {
         let unit = unit.clone();
         let port = port.to_owned();
         self.execute(move |db| {
-            let active = load_delivery_unit(db, &unit.project_id, &unit.task_id, &unit.unit.id)?
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let active = load_delivery_unit(&tx, &unit.project_id, &unit.task_id, &unit.unit.id)?
                 .context("delivery was superseded before recording evidence")?;
             ensure!(
                 active.workflow_run_id == unit.workflow_run_id
@@ -453,15 +456,18 @@ impl Store {
                     && active.checkout_id == unit.checkout_id,
                 "delivery scope changed before recording evidence"
             );
-            insert_scoped_artifact(
-                db,
+            let artifact = insert_scoped_artifact(
+                &tx,
                 &unit.project_id,
                 unit.workflow_run_id,
                 node,
                 port,
                 Some(unit.unit.id),
                 value,
-            )
+            )?;
+            super::inspection::record_workflow_input_ids(&tx, &artifact, &unit.plan_revision, &inputs)?;
+            tx.commit()?;
+            Ok(artifact)
         })
         .await
     }

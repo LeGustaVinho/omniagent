@@ -92,6 +92,7 @@ impl Store {
         self.execute_workflow_merge(
             unit,
             node,
+            artifact.id,
             DeliveryMergeRequest {
                 project_id: project.clone(),
                 task_id: unit.task_id.clone(),
@@ -116,6 +117,7 @@ impl Store {
         &self,
         unit: &WorkflowDeliveryUnit,
         node: Option<String>,
+        commit_artifact_id: String,
         request: DeliveryMergeRequest,
         automatic: bool,
     ) -> Result<WorkflowUnitOutcome> {
@@ -162,6 +164,7 @@ impl Store {
                             id: evidence.id,
                             commit_evidence_id: evidence.commit_evidence_id,
                         }),
+                        NodeInputs::from([("git".into(), commit_artifact_id)]),
                     )
                     .await?;
                 WorkflowUnitOutcome::Artifact { artifact }
@@ -246,6 +249,7 @@ impl Store {
             .execute_workflow_merge(
                 unit,
                 node,
+                artifact.id.clone(),
                 DeliveryMergeRequest {
                     project_id: project.clone(),
                     task_id: task.clone(),

@@ -247,6 +247,7 @@ impl Store {
                     }
                 };
                 record_host_completion(&tx, &artifact, &execution_key, &request_revision)?;
+                super::inspection::record_workflow_completion_inputs(&tx, &artifact, &execution_key, &inputs)?;
                 tx.commit()?;
                 Ok(artifact)
             })

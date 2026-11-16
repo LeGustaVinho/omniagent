@@ -515,7 +515,7 @@ async fn scheduler_attempts_keep_workflow_node_and_plan_pins_and_validate_eviden
         .create_project_task(project.clone(), "Deliver change".into())
         .await?;
     let counterfeit = store
-        .create_project_task(foreign.project_id, "Foreign task".into())
+        .create_project_task(foreign.project_id.clone(), "Foreign task".into())
         .await?;
     assert!(
         store
@@ -577,7 +577,7 @@ async fn scheduler_attempts_keep_workflow_node_and_plan_pins_and_validate_eviden
     let work = store
         .execute_workflow_host(host(
             "work",
-            work_inputs,
+            work_inputs.clone(),
             WorkflowHostRequest::LinkExistingTask { task_id: task.id },
         ))
         .await?;
@@ -589,6 +589,20 @@ async fn scheduler_attempts_keep_workflow_node_and_plan_pins_and_validate_eviden
     assert_eq!(attempt.pin.workflow, saved);
     assert_eq!(attempt.pin.plan_revision.as_ref(), Some(&plan.id));
     assert_eq!(attempt.pin.node_instance_id, "review");
+    let recorded = store.inspect_workflow_execution(project.clone(), workflow.id.clone()).await?.context("missing run graph")?;
+    assert_eq!(recorded.definition.version, saved);
+    assert_ne!(recorded.definition.version, new);
+    assert_eq!(recorded.definition.nodes.iter().find(|entry| entry.instance.id == "plan"), Some(&node));
+    let start_output = recorded.outputs.iter().find(|entry| entry.artifact.id == start.id).context("start output missing")?;
+    assert!(start_output.input_receipts[0].inputs.is_empty());
+    let work_output = recorded.outputs.iter().find(|entry| entry.artifact.id == work.id).context("linked work missing")?;
+    assert_eq!(work_output.input_receipts[0].inputs, work_inputs);
+    assert_eq!(work_output.input_receipts[0].execution_key, plan.id);
+    let review_job = recorded.jobs.iter().find(|entry| entry.job.id == review.id).context("review job missing")?;
+    assert_eq!(review_job.inputs.as_ref().unwrap()["plan"], plan.id);
+    assert_eq!(review_job.attempts[0].run_id, attempt.run_id);
+    assert_eq!(review_job.attempts[0].status, RunStatus::Succeeded);
+    assert!(store.inspect_workflow_execution(foreign.project_id, workflow.id.clone()).await?.is_none());
     assert_eq!(
         store
             .resolve_workflow_artifact(project, workflow.id, work.id.clone(), ArtifactKind::Task)

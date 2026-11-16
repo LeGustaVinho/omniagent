@@ -634,7 +634,7 @@ fn insert_job(
     Ok(job)
 }
 
-fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> {
+pub(crate) fn load_job(db: &Connection, project_id: &str, id: &str) -> Result<Option<Job>> {
     let mut query = db.prepare(
         "SELECT j.checkout_id, coalesce(scope.scope_task_id, j.task_id),
                 j.conversation_id, j.context_id, j.origin_run_id, j.request_id,
