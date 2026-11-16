@@ -5279,11 +5279,14 @@ mod tests {
             QueueState,
         };
 
-        for policy in [
+        for (policy, retain_message) in [
             QueueHistoryPolicy::Recorded,
             QueueHistoryPolicy::Review,
             QueueHistoryPolicy::Cancel,
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|policy| [(policy, false), (policy, true)])
+        {
             let (_dir, store, conversation, mut scope) = setup().await?;
             scope.executable = std::env::current_exe()?;
             let env = AdmissionEnvironment {
@@ -5351,16 +5354,30 @@ mod tests {
                 .await?
                 .unwrap();
             let checkpoint = before.checkpoint.unwrap();
+            let through_revision = if retain_message {
+                let history = store.conversation_history(conversation.id.clone()).await?;
+                Some(
+                    history.messages.first().context("Missing rewind boundary")?
+                        .revision_id.clone(),
+                )
+            } else {
+                None
+            };
             store
                 .set_conversation_queue_history_policy(conversation.id.clone(), Some(policy))
                 .await?;
-            let cleared = store
+            let replaced = store
                 .rewind_conversation_history(
                     conversation.id.clone(),
                     checkpoint.context_id.clone(),
-                    None,
+                    through_revision.clone(),
                 )
                 .await?;
+            let changed_history = store.conversation_history(conversation.id.clone()).await?;
+            assert_eq!(
+                changed_history.messages.iter().map(|message| &message.revision_id).collect::<Vec<_>>(),
+                through_revision.iter().collect::<Vec<_>>()
+            );
             let pending = store
                 .job(project.clone(), before.job.id.clone())
                 .await?
@@ -5422,7 +5439,7 @@ mod tests {
             );
             assert_eq!(
                 store.conversation(conversation.id).await?.context_id,
-                cleared
+                replaced
             );
         }
         Ok(())
@@ -5480,6 +5497,11 @@ mod tests {
             )
             .await?;
         let before = store.conversation(conversation.id.clone()).await?;
+        let reviewed_before_clear = store
+            .conversation_goal_overview(conversation.id.clone())
+            .await?
+            .and_then(|overview| overview.transition)
+            .context("Missing paused goal review")?;
         store
             .set_conversation_queue_history_policy(
                 conversation.id.clone(),
@@ -5498,7 +5520,21 @@ mod tests {
             GoalControlState::Paused
         );
         assert!(store.claim_next_job(env.clone()).await?.is_none());
-        store.resume_goal(project, goal.id).await?;
+        let stale = store
+            .resume_goal_after_review(project.clone(), goal.id.clone(), reviewed_before_clear.review_token)
+            .await
+            .unwrap_err();
+        assert!(stale.to_string().contains("checkpoint or scope changed"));
+        let retained = store
+            .conversation_goal_overview(conversation.id.clone())
+            .await?
+            .and_then(|overview| overview.transition)
+            .context("Missing retained goal review")?;
+        assert_eq!(retained.checkpoint_run_id.as_deref(), Some(first.run.id.as_str()));
+        assert_eq!(retained.checkpoint_context_id, reviewed_before_clear.checkpoint_context_id);
+        store
+            .resume_goal_after_review(project, goal.id, retained.review_token)
+            .await?;
         let resumed = store
             .claim_next_job(env)
             .await?

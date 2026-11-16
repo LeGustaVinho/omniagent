@@ -8,9 +8,220 @@ use crate::{
         ByteRange, ContextSnapshot, ConversationArtifactRevision, Delivery, DispatchSourceRevision,
         SelectedMessageSpan,
     },
-    jobs::{AdmissionBlocker, AdmissionEnvironment},
+    jobs::{
+        AdmissionBlocker, AdmissionEnvironment, GoalControlState, GoalDefinition, GoalStopAction,
+        JobContext,
+    },
     providers::SessionIntent,
 };
+
+#[tokio::test]
+async fn an_unfinished_goal_keeps_its_checkpoint_and_checkout_when_forking() -> Result<()> {
+    use std::process::Command;
+
+    let (_directory, store, original, scope) = setup().await?;
+    std::fs::write(&scope.executable, b"fixture")?;
+    let parent = tempfile::tempdir()?;
+    let alternate = parent.path().join("goal-fork");
+    let commit = Command::new("git.exe")
+        .current_dir(&scope.checkout)
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "Start fixture",
+        ])
+        .status()?;
+    ensure!(commit.success(), "could not initialize goal checkout");
+    let worktree = Command::new("git.exe")
+        .current_dir(&scope.checkout)
+        .args(["worktree", "add", "--quiet", "--detach"])
+        .arg(&alternate)
+        .status()?;
+    ensure!(worktree.success(), "could not create the linked checkout");
+    let target = crate::repository::register(&store, alternate).await?;
+    let previous = prepare(
+        &store,
+        &original.id,
+        scope.clone(),
+        "Preserve the saved discussion",
+    )
+    .await?;
+    confirm(&store, &previous).await?;
+    let source = store.conversation(original.id.clone()).await?;
+    let definition = GoalDefinition {
+        objective: "Verify the original release".into(),
+        criteria: Vec::new(),
+        max_turns: Some(2),
+        max_seconds: None,
+        token_budget: None,
+    };
+    let goal = store
+        .start_conversation_goal(
+            JobContext {
+                conversation_id: source.id.clone(),
+                context_id: source.context_id.clone(),
+            },
+            scope.clone(),
+            None,
+            definition.clone(),
+            None,
+        )
+        .await?;
+    assert_eq!(goal.job.project_id, target.project_id);
+    let mut replacement = scope.clone();
+    replacement.model = Some("replacement-model".into());
+    replacement.checkout = std::path::PathBuf::from(&target.checkout_root);
+
+    let draft = "Discuss a separate release".to_owned();
+    store
+        .save_conversation_draft(source.id.clone(), draft.clone())
+        .await?;
+    let preview = || {
+        store.submit_conversation_with_files_at_checkout(
+            source.id.clone(),
+            source.context_id.clone(),
+            replacement.clone(),
+            draft.clone(),
+            Vec::new(),
+            None,
+            Some(target.checkout_id.clone()),
+        )
+    };
+    let ContinuationInspection::ReviewRequired {
+        preview_id: stale, ..
+    } = preview().await?
+    else {
+        bail!("The target checkout was not reviewed")
+    };
+    assert_eq!(
+        store
+            .request_goal_stop(
+                target.project_id.clone(),
+                goal.id.clone(),
+                GoalStopAction::Pause
+            )
+            .await?,
+        GoalControlState::Paused
+    );
+    let rejected = store
+        .confirm_conversation_continuation(
+            source.id.clone(),
+            stale,
+            ContinuationChoice::ForkWithContext,
+            replacement.clone(),
+            draft.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert!(rejected.to_string().contains("conversation goal changed"));
+    let ContinuationInspection::ReviewRequired {
+        preview_id,
+        goal_transition: Some(transition),
+        ..
+    } = preview().await?
+    else {
+        bail!("The retained goal and target were not reviewed together")
+    };
+    assert_eq!(transition.recorded_goal.revision_id, goal.id);
+    assert_eq!(
+        transition.recorded_goal.control_state,
+        GoalControlState::Paused
+    );
+    assert_eq!(
+        transition.recorded_goal.checkpoint_context_id.as_deref(),
+        Some(source.context_id.as_str())
+    );
+    assert_eq!(transition.recorded_goal.scope.checkout_root, scope.checkout);
+    assert_eq!(transition.recorded_goal.scope.model, scope.model);
+    assert_eq!(
+        transition.next_turn_scope.checkout_root,
+        replacement.checkout
+    );
+    assert_eq!(transition.next_turn_scope.model, replacement.model);
+    assert!(!transition.same_tab_available);
+    let moved = store
+        .confirm_conversation_continuation(
+            source.id.clone(),
+            preview_id.clone(),
+            ContinuationChoice::SameTab,
+            replacement.clone(),
+            draft.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert!(moved.to_string().contains("pending work in this checkout"));
+    assert_eq!(store.conversation_draft(source.id.clone()).await?, draft);
+    let fork = store
+        .confirm_conversation_continuation(
+            source.id.clone(),
+            preview_id,
+            ContinuationChoice::ForkWithContext,
+            replacement.clone(),
+            draft.clone(),
+        )
+        .await?;
+    assert_ne!(fork.conversation.id, source.id);
+    assert_eq!(fork.conversation.checkout_id, target.checkout_id);
+    assert!(
+        store
+            .active_conversation_goal(fork.conversation.id.clone())
+            .await?
+            .is_none()
+    );
+    let turn = store
+        .claim_next_job(environment(&replacement))
+        .await?
+        .context("Missing fork turn")?;
+    assert_eq!(turn.conversation_id, fork.conversation.id);
+    assert!(matches!(turn.intent, SessionIntent::Start));
+    confirm(&store, &turn).await?;
+    let fork = store.conversation(fork.conversation.id).await?;
+    let separate = store
+        .start_conversation_goal(
+            JobContext {
+                conversation_id: fork.id.clone(),
+                context_id: fork.context_id,
+            },
+            replacement,
+            None,
+            GoalDefinition {
+                objective: "Verify the second release".into(),
+                ..definition
+            },
+            None,
+        )
+        .await?;
+    assert_ne!(separate.goal_id, goal.goal_id);
+    let initial = store
+        .conversation_goal_overview(source.id.clone())
+        .await?
+        .context("Missing original goal")?;
+    assert_eq!(initial.goal.id, goal.id);
+    let recorded = initial.transition.context("Missing retained checkpoint")?;
+    assert_eq!(recorded.scope.checkout_root, scope.checkout);
+    assert_eq!(recorded.scope.model, scope.model);
+    assert_eq!(recorded.control_state, GoalControlState::Paused);
+    store
+        .resume_goal_after_review(target.project_id, goal.id, recorded.review_token)
+        .await?;
+    let resumed = store
+        .claim_next_job(AdmissionEnvironment {
+            bridge_available: true,
+            ..environment(&scope)
+        })
+        .await?
+        .context("Missing retained goal attempt")?;
+    assert_eq!(resumed.conversation_id, source.id);
+    assert_eq!(resumed.run.checkout_id, source.checkout_id);
+    assert!(resumed.scope == scope);
+    Ok(())
+}
 
 fn environment(scope: &SessionScope) -> AdmissionEnvironment {
     AdmissionEnvironment {
