@@ -23,6 +23,7 @@ pub use checklists::{ChecklistExecutionMode, ChecklistItem, TaskChecklist};
 pub use delivery::{TaskDelivery, TaskDeliveryEvidence, TaskDeliveryState};
 pub(crate) use delivery::{record_verified_task_delivery, validate_repository_delivery_open};
 pub use descriptions::{
+    DescriptionDraft, DescriptionEditorConflict, DescriptionEditorSave, DescriptionEditorState,
     DescriptionOwner, DescriptionRevision, TaskDirectWork, TaskDispatchContext, WorkDescriptions,
 };
 

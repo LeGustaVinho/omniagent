@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { TaskGoals } from "@/goal-evidence";
 import { TaskParticipants } from "@/task-participants";
 import { TaskAssignment } from "@/task-assignment";
+import { ProjectDescription } from "@/project-description";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type Work = { id: string; title: string };
@@ -89,6 +90,7 @@ function LiveTaskDetails({ projectId, task, hasChildren, change, busy, links }: 
   return <section className="pipeline-stack" aria-label={task.title}>
     <h3 className="font-medium break-words">{task.title}</h3>
     {saved && <p role="status">{saved.waitingForCommit && !question ? "In review · Waiting for commit" : stateLabel(saved.state)}</p>}
+    <ProjectDescription kind="work" id={task.id} links={links} />
     {question && <section className="pipeline-form pipeline-stack" aria-label="Task question blocker">
       <p role="status">{question.answerRecorded && question.state !== "needs_review"
         ? "Answer recorded · Waiting to continue" : questionStatus[question.state]}</p>
@@ -146,14 +148,15 @@ function LiveTaskDetails({ projectId, task, hasChildren, change, busy, links }: 
   </section>;
 }
 
-function EpicState({ projectId, epic }: { projectId: string; epic: Work }) {
+function EpicState({ projectId, epic, links }: { projectId: string; epic: Work; links: WorkspaceProps }) {
   const state = useQuery({
     queryKey: ["project-tasks", projectId, epic.id, "state"],
     queryFn: () => invoke<string | null>("project_epic_delivery_state", { projectId, epicId: epic.id }),
   });
-  return <section aria-label={epic.title}>
+  return <section className="pipeline-stack" aria-label={epic.title}>
     <h3 className="font-medium">{epic.title}</h3>
     {state.data && <p role="status">{stateLabel(state.data)}</p>}
+    <ProjectDescription kind="epic" id={epic.id} links={links} />
     {state.error && <p role="alert">{String(state.error)}</p>}
   </section>;
 }
@@ -225,7 +228,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
         {hierarchy.data && !epics.length && !all.length && <p className="text-muted-foreground">No project work yet.</p>}
         {currentTask && <LiveTaskDetails key={currentTask.id} projectId={projectId} task={currentTask}
           hasChildren={children(currentTask.id).length > 0} busy={mutation.isPending} change={(operation) => mutation.mutate(operation)} links={props} />}
-        {currentEpic && <EpicState projectId={projectId} epic={currentEpic} />}
+        {currentEpic && <EpicState key={currentEpic.id} projectId={projectId} epic={currentEpic} links={props} />}
         {(mutation.error || hierarchy.error) && <p role="alert">{String(mutation.error ?? hierarchy.error)}</p>}
       </div>
     </div>

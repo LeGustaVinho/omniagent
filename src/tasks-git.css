@@ -221,6 +221,11 @@ button.agile-disclosure:hover { background: var(--muted); color: var(--foregroun
 .agile-description { min-width: 0; border: 1px solid var(--border); border-radius: .5rem; overflow: hidden; background: var(--background); }
 .agile-description-editor { height: 8.5rem; }
 .agile-description-reading { min-height: 8.5rem; max-height: 12rem; overflow: auto; padding: .6rem .8rem; font-size: .8125rem; }
+.agile-description-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.agile-description-split .agile-description-reading { border-inline-start: 1px solid var(--border); }
+.agile-description-editor-expanded { height: 16rem; }
+.agile-description-reading-expanded { padding: 0; max-height: 16rem; }
+.agile-description-reading-expanded .note-reading { min-height: 8.5rem; }
 .agile-ref { display: inline-flex; align-items: center; gap: .35rem; color: var(--primary); text-align: start; font-size: .75rem; }
 .agile-ref:hover { text-decoration: underline; }
 

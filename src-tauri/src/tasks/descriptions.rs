@@ -10,11 +10,25 @@ use super::{
     checklists::load_checklist_items,
 };
 
+mod editor;
+pub use editor::{
+    DescriptionDraft, DescriptionEditorConflict, DescriptionEditorSave, DescriptionEditorState,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DescriptionOwner {
     Epic(String),
     Work(String),
+}
+
+impl DescriptionOwner {
+    fn database_scope(&self) -> (Option<&str>, Option<&str>) {
+        match self {
+            Self::Epic(id) => (Some(id), None),
+            Self::Work(id) => (None, Some(id)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,24 +117,11 @@ impl Store {
                 previous.as_ref().map(|saved| &saved.id) == expected_revision.as_ref(),
                 "the saved description revision changed"
             );
-            if let Some(previous) = previous.as_ref().filter(|saved| saved.markdown == markdown) {
-                return Ok(previous.clone());
-            }
-            let (epic, task) = match &owner {
-                DescriptionOwner::Epic(id) => (Some(id), None),
-                DescriptionOwner::Work(id) => (None, Some(id)),
-            };
-            let id = Uuid::new_v4().to_string();
-            let revision = previous.map_or(1, |saved| saved.revision + 1);
-            let body = markdown.as_ref().map(|value| protection::protect(value.as_bytes())).transpose()?;
-            tx.execute(
-                "INSERT INTO project_description_revisions (project_id, id, epic_id, task_id, revision, body)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![project, id, epic, task, revision, body],
-            ).context("description owner must belong to the project")?;
+            let revision = write_description(&tx, &project, owner, previous, markdown)?;
             tx.commit()?;
-            Ok(DescriptionRevision { id, owner, revision, markdown })
-        }).await
+            Ok(revision)
+        })
+        .await
     }
 
     pub async fn project_description(
@@ -137,16 +138,8 @@ impl Store {
         project: String,
         revision_id: String,
     ) -> Result<Option<DescriptionRevision>> {
-        self.execute(move |db| {
-            read_description(
-                db,
-                "SELECT id, epic_id, task_id, revision, body FROM project_description_revisions
-                 WHERE project_id = ?1 AND id = ?2",
-                &project,
-                &revision_id,
-            )
-        })
-        .await
+        self.execute(move |db| description_revision(db, &project, &revision_id))
+            .await
     }
 
     pub(crate) async fn task_dispatch_context(
@@ -199,6 +192,50 @@ impl Store {
             }))
         }).await
     }
+}
+
+fn write_description(
+    db: &Connection,
+    project: &str,
+    owner: DescriptionOwner,
+    previous: Option<DescriptionRevision>,
+    markdown: Option<String>,
+) -> Result<DescriptionRevision> {
+    if let Some(previous) = previous.as_ref().filter(|saved| saved.markdown == markdown) {
+        return Ok(previous.clone());
+    }
+    let (epic, task) = owner.database_scope();
+    let id = Uuid::new_v4().to_string();
+    let revision = previous.map_or(1, |saved| saved.revision + 1);
+    let body = markdown
+        .as_ref()
+        .map(|value| protection::protect(value.as_bytes()))
+        .transpose()?;
+    db.execute(
+        "INSERT INTO project_description_revisions (project_id, id, epic_id, task_id, revision, body)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![project, id, epic, task, revision, body],
+    ).context("description owner must belong to the project")?;
+    Ok(DescriptionRevision {
+        id,
+        owner,
+        revision,
+        markdown,
+    })
+}
+
+fn description_revision(
+    db: &Connection,
+    project: &str,
+    revision_id: &str,
+) -> Result<Option<DescriptionRevision>> {
+    read_description(
+        db,
+        "SELECT id, epic_id, task_id, revision, body FROM project_description_revisions
+         WHERE project_id = ?1 AND id = ?2",
+        project,
+        revision_id,
+    )
 }
 
 fn active_work_description(

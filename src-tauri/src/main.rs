@@ -14,6 +14,7 @@ mod queue_runtime;
 mod task_delivery_ipc;
 mod task_assignment_ipc;
 mod task_participants_ipc;
+mod project_description_runtime;
 mod workflow_ipc;
 
 use std::{path::PathBuf, sync::Arc};
@@ -253,6 +254,10 @@ fn main() {
             task_delivery_ipc::reopen_task_delivery,
             task_delivery_ipc::cancel_task_delivery,
             task_delivery_ipc::project_work_hierarchy,
+            project_description_runtime::project_description_editor,
+            project_description_runtime::save_project_description_draft,
+            project_description_runtime::discard_project_description_draft,
+            project_description_runtime::save_project_description_editor,
             task_delivery_ipc::create_workspace_work,
             task_delivery_ipc::project_task_checklist,
             task_delivery_ipc::append_project_checklist_item,
