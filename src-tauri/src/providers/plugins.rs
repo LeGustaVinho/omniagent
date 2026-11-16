@@ -22,6 +22,8 @@ use super::{
     profiles::{ConfiguredExecutable, command_probe, command_probe_with_limits, published_version},
 };
 
+pub mod management;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../src/bindings/")]

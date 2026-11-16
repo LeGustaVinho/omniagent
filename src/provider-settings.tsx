@@ -7,6 +7,7 @@ import type { ConfiguredExecutable } from "@/bindings/ConfiguredExecutable";
 import type { PluginInventory } from "@/bindings/PluginInventory";
 import type { PluginInventoryStatus } from "@/bindings/PluginInventoryStatus";
 import type { Provider } from "@/bindings/Provider";
+import { ClaudePluginManagement } from "@/cli-plugin-management";
 import { Button } from "@/components/ui/button";
 import { ExecutionProfileModelSettings } from "@/model-default-settings";
 import { useWorkspace } from "@/workspace-state";
@@ -199,6 +200,7 @@ function ExecutableSettings({ profile }: { profile: ConfiguredExecutable }) {
       )}
       {inventory.isError && <p role="alert" className="mt-3 text-sm text-red-300">{String(inventory.error)}</p>}
       {inventory.data && <PluginList inventory={inventory.data} />}
+      {provider === "claude" && <ClaudePluginManagement key={configured ?? ""} disabled={pending !== null || path.trim() !== (configured ?? "")} />}
       <ExecutionProfileModelSettings provider={provider} />
     </section>
   );

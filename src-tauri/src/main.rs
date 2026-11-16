@@ -443,6 +443,8 @@ fn main() {
             ipc::set_project_attachment_limits,
             ipc::probe_cli_executable,
             ipc::cli_plugin_inventory,
+            ipc::preview_claude_user_plugin_action,
+            ipc::apply_claude_user_plugin_action,
             ipc::review_checkout_customizations,
             ipc::approve_checkout_customization,
             ipc::select_active_checkout,

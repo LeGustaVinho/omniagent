@@ -15,7 +15,10 @@ use omniagent::{
     },
     providers::{
         Provider,
-        plugins::{PluginInventory, probe_plugins},
+        plugins::{
+            PluginInventory, probe_plugins,
+            management::{ClaudeUserPluginOutcome, ClaudeUserPluginPreview, ClaudeUserPluginRequest},
+        },
         profiles::{CliProbe, ConfiguredExecutable, probe_cli},
     },
     repository::ProjectCheckout,
@@ -482,6 +485,28 @@ pub async fn cli_plugin_inventory(
         .await
         .map(Some)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn preview_claude_user_plugin_action(
+    store: State<'_, Store>,
+    request: ClaudeUserPluginRequest,
+) -> Result<ClaudeUserPluginPreview, String> {
+    store
+        .preview_claude_user_plugin_action(request)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn apply_claude_user_plugin_action(
+    store: State<'_, Store>,
+    preview_id: String,
+) -> Result<ClaudeUserPluginOutcome, String> {
+    store
+        .apply_claude_user_plugin_action(preview_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
 
 #[tauri::command]
