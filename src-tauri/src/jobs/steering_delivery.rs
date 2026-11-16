@@ -107,6 +107,7 @@ fn delivery_policy(
         || job.checkout_id != selected.checkout_id
         || job.queue_state != QueueState::Queued
         || load_binding(db, &job.id)?.is_some()
+        || crate::conversations::continuation::pinned_continuation(db, &job.id)?
         || !instructions::preserves_destination(
             db,
             conversation,

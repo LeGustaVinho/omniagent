@@ -19,6 +19,8 @@ import { ModelCapabilityPreview } from "@/model-capability-preview";
 import { EffortSelect, type EffortSet } from "@/components/effort-select";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { ConversationGoalCard, GoalSettingsDialog, goalDefinition, hasCurrentGoal, useConversationGoal, type GoalDefinition } from "@/conversation-goal";
+import { ConversationContinuationDialog, ConversationContinuationSettings, confirmConversationContinuation, submitConversationContinuation,
+  type ConversationContinuationReview } from "@/conversation-continuation";
 import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
 import { ConversationInstructions, useConversationInstructions } from "@/conversation-instructions";
@@ -214,7 +216,7 @@ type PanelParams = { conversationId: string; title: string };
 type DesktopModel = EffortSet & { option: ModelOption };
 const selectorClass = "conv-select";
 
-export function ConversationPanel({ params, api }: IDockviewPanelProps<PanelParams>) {
+export function ConversationPanel({ params, api, containerApi }: IDockviewPanelProps<PanelParams>) {
   const library = useContext(ConversationLibraryNavigation);
   const selectedCheckout = useWorkspace((state) => state.checkout?.checkoutId);
   const checkoutId = library?.checkoutId ?? selectedCheckout;
@@ -234,10 +236,21 @@ export function ConversationPanel({ params, api }: IDockviewPanelProps<PanelPara
     api.updateParameters({ title });
   }, [api, params.title, title]);
   return <ConversationContent key={params.conversationId} conversationId={params.conversationId}
-    title={title} checkoutId={checkoutId} visible={visible} />;
+    title={title} checkoutId={checkoutId} visible={visible}
+    openFork={(conversation) => { if (containerApi) openConversation(containerApi, conversation); }} />;
 }
 
-function ConversationContent({ conversationId, title, checkoutId, visible }: PanelParams & { checkoutId?: string; visible: boolean }) {
+type ReviewedContinuation = {
+  review: ConversationContinuationReview;
+  selection: ModelSelection;
+  effort: string | null;
+  mode: "read_only" | "plan";
+  text: string;
+};
+
+function ConversationContent({ conversationId, title, checkoutId, visible, openFork }: PanelParams & {
+  checkoutId?: string; visible: boolean; openFork: (conversation: Conversation) => void;
+}) {
   const queryClient = useQueryClient();
   const library = useContext(ConversationLibraryNavigation);
   const [renamingTitle, setRenamingTitle] = useState(false);
@@ -282,6 +295,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
   const [selection, setSelection] = useState<ModelSelection | null>(null);
   const [effort, setEffort] = useState("");
   const [mode, setMode] = useState<ConversationMode>("read_only");
+  const [continuation, setContinuation] = useState<ReviewedContinuation>();
   const text = draft.data ?? "";
   const isSideQuestion = /^\/btw(?:\s|$)/u.test(text.trim());
   const [showSideQuestions, setShowSideQuestions] = useState(false);
@@ -348,21 +362,38 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
   useEffect(() => {
     if (run?.status) void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "messages"] });
   }, [run?.id, run?.status, conversationId, queryClient]);
+  function clearSubmittedDraft(submitted: string) {
+    activeEdit.current++;
+    queryClient.setQueryData<string>(draftKey, (current) => current === submitted ? "" : current);
+    setDraftStatus("");
+    setDraftError("");
+  }
   const send = useMutation({
     mutationFn: async (submitted: string) => {
-      if (!selection) throw new Error("Choose a model");
+      const expectedContextId = history.data?.contextId;
+      if (!selection || !expectedContextId || mode === "goal") throw new Error("Choose a model and wait for the conversation context.");
+      const effective = { selection, effort: efforts?.efforts.includes(effort) ? effort : null, mode };
       await saveDraft(conversationId, submitted);
-      return invoke<Job>("start_conversation_turn", {
-        conversationId, selection, effort: efforts?.efforts.includes(effort) ? effort : null, mode, text: submitted,
-        expectedContextId: history.data?.contextId,
-      });
+      const review = await submitConversationContinuation({ conversationId, expectedContextId, ...effective, text: submitted });
+      if (review.status === "review_required") return { review, ...effective, text: submitted } satisfies ReviewedContinuation;
+      return null;
     },
-    onSuccess: (_, submitted) => {
-      activeEdit.current++;
-      queryClient.setQueryData<string>(draftKey, (current) => current === submitted ? "" : current);
-      setDraftStatus("");
-      setDraftError("");
+    onSuccess: (reviewed, submitted) => {
+      if (reviewed) { setContinuation(reviewed); return; }
+      clearSubmittedDraft(submitted);
       void instructions.refresh();
+    },
+  });
+  const continueSend = useMutation({
+    mutationFn: ({ choice, intent }: { choice: Parameters<typeof confirmConversationContinuation>[0]["choice"]; intent: ReviewedContinuation }) =>
+      confirmConversationContinuation({ conversationId, previewId: intent.review.previewId, choice,
+        selection: intent.selection, effort: intent.effort, mode: intent.mode, text: intent.text }),
+    onSuccess: ({ conversation }, { intent }) => {
+      clearSubmittedDraft(intent.text);
+      setContinuation(undefined);
+      void instructions.refresh();
+      void queryClient.invalidateQueries({ queryKey: conversationLibraryKey });
+      if (conversation.id !== conversationId) openFork(conversation);
     },
   });
   const startGoal = useMutation({
@@ -459,7 +490,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
   const canSend = composingGoal ? Boolean(text.trim() && !startGoal.isPending && (goalInput === "" || canStartGoal))
     : Boolean(text.trim() && selected?.option.selectable && (isSideQuestion
     ? text.trim() !== "/btw" && history.data?.contextId && !askSide.isPending
-    : !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending));
+    : history.data?.contextId && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending));
   const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
 
   function submit(event: FormEvent) {
@@ -496,6 +527,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
               title="Rename conversation" onClick={() => setRenamingTitle(true)}><Pencil aria-hidden /></button>}
           </>}
         <div className="ml-auto flex items-center gap-1">
+        <ConversationContinuationSettings conversationId={conversationId} />
         <button type="button" className="conv-quiet-button" onClick={() => { startGoal.reset(); setGoalSettings({ objective: "" }); }}>
           <Target size={14} aria-hidden /> Goal
         </button>
@@ -667,6 +699,9 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
         pending={startGoal.isPending} error={startGoal.error ? String(startGoal.error) : undefined} canStart={canStartGoal}
         onStart={(definition) => startGoal.mutate({ definition, submittedDraft: goalSettings.submittedDraft })}
         onClose={() => { setGoalSettings(undefined); startGoal.reset(); }} />}
+      {visible && continuation && <ConversationContinuationDialog key={continuation.review.previewId} review={continuation.review}
+        pending={continueSend.isPending} error={continueSend.error} onConfirm={(choice) => continueSend.mutate({ choice, intent: continuation })}
+        onClose={() => { setContinuation(undefined); continueSend.reset(); }} />}
     </section>
   );
 }

@@ -8,7 +8,9 @@ use ts_rs::TS;
 use crate::{
     attachments::AttachmentPreview,
     conversations::{
-        AttemptHistory, AttemptPlan, RecordedAttempt, SessionScope, consume_matching_draft,
+        AttemptHistory, AttemptPlan, Conversation, RecordedAttempt, SessionScope,
+        consume_matching_draft,
+        continuation::{continuation_pin, pinned_continuation},
         insert_conversation, insert_downstream_attempt, insert_instruction_attempt,
         insert_job_attempt, insert_job_recovery_attempt, insert_recorded_job_attempt,
         load_conversation, recovery_checkpoint,
@@ -171,6 +173,75 @@ impl ScheduledAttempt {
     }
 }
 
+fn queue_conversation_instruction(
+    db: &Connection,
+    project: String,
+    checkout_id: &str,
+    context: JobContext,
+    scope: &SessionScope,
+    text: &str,
+    attachments: Option<&instructions::FrozenAttachments>,
+) -> Result<Job> {
+    let mut request = JobRequest {
+        checkout_id: Some(checkout_id.into()),
+        task_id: None,
+        mode: scope.mode,
+        instructions: text.into(),
+        dependencies: Vec::new(),
+        requires_bridge: false,
+    };
+    request.normalize(checkout_id)?;
+    let conversation_id = context.conversation_id.clone();
+    let job = insert_job(
+        db,
+        project,
+        Some(context),
+        JobOrigin::Operator,
+        request,
+        0,
+        None,
+    )?;
+    let operator_scope = protection::protect(&serde_json::to_vec(scope)?)?;
+    db.execute(
+        "UPDATE jobs SET operator_scope = ?1 WHERE id = ?2",
+        params![operator_scope, job.id],
+    )?;
+    instructions::record_instruction(db, &job.id, &conversation_id, text, attachments)?;
+    Ok(job)
+}
+
+pub(crate) fn queue_conversation_continuation(
+    db: &Connection,
+    project: String,
+    conversation: &Conversation,
+    expected_context_id: &str,
+    scope: &SessionScope,
+    text: &str,
+) -> Result<Job> {
+    ensure!(
+        instructions::preserves_destination(
+            db,
+            &conversation.id,
+            expected_context_id,
+            &conversation.context_id
+        )?,
+        "conversation context changed"
+    );
+    let context = JobContext {
+        conversation_id: conversation.id.clone(),
+        context_id: expected_context_id.into(),
+    };
+    queue_conversation_instruction(
+        db,
+        project,
+        &conversation.checkout_id,
+        context,
+        scope,
+        text,
+        None,
+    )
+}
+
 impl Store {
     pub async fn enqueue_conversation_turn(
         &self,
@@ -208,7 +279,6 @@ impl Store {
             previews,
         )
         .await?;
-        let operator_scope = protection::protect(&serde_json::to_vec(&scope)?)?;
         let job = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -232,32 +302,12 @@ impl Store {
                     "job checkout differs from the conversation checkout"
                 );
                 consume_matching_draft(&tx, &context.conversation_id, &text)?;
-                let mut request = JobRequest {
-                    checkout_id: Some(conversation.checkout_id.clone()),
-                    task_id: None,
-                    mode: scope.mode,
-                    instructions: text.clone(),
-                    dependencies: Vec::new(),
-                    requires_bridge: false,
-                };
-                request.normalize(&conversation.checkout_id)?;
-                let job = insert_job(
+                let job = queue_conversation_instruction(
                     &tx,
                     project,
-                    Some(context),
-                    JobOrigin::Operator,
-                    request,
-                    0,
-                    None,
-                )?;
-                tx.execute(
-                    "UPDATE jobs SET operator_scope = ?1 WHERE id = ?2",
-                    params![operator_scope, job.id],
-                )?;
-                instructions::record_instruction(
-                    &tx,
-                    &job.id,
-                    &conversation.id,
+                    &conversation.checkout_id,
+                    context,
+                    &scope,
                     &text,
                     attachments.as_ref(),
                 )?;
@@ -768,11 +818,26 @@ fn build_attempt(
                         .as_ref()
                         .context("Instruction has no conversation destination")?;
                     let conversation = load_conversation(db, &context.conversation_id)?;
+                    let pin = continuation_pin(db, &job.id)?;
                     let recorded = load_binding(db, &job.id)?.map(|binding| RecordedAttempt {
                         context_id: binding.context.context_id,
                         previous_run_id: None,
                         question_route: binding.question_route,
                     });
+                    if let Some(pin) = &pin {
+                        ensure!(
+                            recorded.is_none()
+                                && conversation.context_id == context.context_id
+                                && pin.history_is_current(db, &conversation)?
+                                && pin.native_is_available(
+                                    db,
+                                    &conversation,
+                                    &scope,
+                                    &allocation
+                                )?,
+                            "The continuation changed before admission",
+                        );
+                    }
                     insert_instruction_attempt(
                         db,
                         conversation,
@@ -780,6 +845,7 @@ fn build_attempt(
                         instruction.revision_id,
                         recorded,
                         allocation,
+                        pin.is_some_and(|pin| pin.native_session_id.is_none()),
                     )?
                 } else {
                     match (
@@ -1040,6 +1106,9 @@ fn continuation_instruction(
     })? {
         let candidate =
             load_job(db, &owner.project_id, &id?)?.context("Queued instruction disappeared")?;
+        if pinned_continuation(db, &candidate.id)? {
+            return Ok(None);
+        }
         let binding = load_binding(db, &candidate.id)?;
         let destination = binding
             .as_ref()
@@ -1129,6 +1198,7 @@ fn evaluate(
 ) -> Result<(Vec<AdmissionBlocker>, SubagentAllocation)> {
     use AdmissionBlocker::*;
     let mut blockers = Vec::new();
+    let continuation = continuation_pin(db, &job.id)?;
     let settings = queue_settings(db)?;
     if settings.paused {
         blockers.push(QueuePaused);
@@ -1303,16 +1373,22 @@ fn evaluate(
             if let Some(job_id) = instructions::predecessor(db, job)? {
                 blockers.push(InstructionOrder { job_id });
             }
-            instructions::preserves_destination(
-                db,
-                &conversation.id,
-                &context.context_id,
-                &conversation.context_id,
-            )?
+            if let Some(pin) = &continuation {
+                binding.is_none()
+                    && conversation.context_id == context.context_id
+                    && pin.history_is_current(db, &conversation)?
+            } else {
+                instructions::preserves_destination(
+                    db,
+                    &conversation.id,
+                    &context.context_id,
+                    &conversation.context_id,
+                )?
+            }
         } else {
             conversation.context_id == context.context_id
         };
-        if binding.is_none() && !destination_current {
+        if (continuation.is_some() || binding.is_none()) && !destination_current {
             blockers.push(ContextChanged {
                 context_id: context.context_id.clone(),
             });
@@ -1411,6 +1487,18 @@ fn evaluate(
             SubagentAllocation::default()
         }
     };
+    if let (Some(pin), Some(context), Some(scope)) = (&continuation, &job.context, &inputs.scope)
+        && blockers.is_empty()
+        && job.latest_attempt.is_none()
+        && !pin.native_is_available(
+            db,
+            &load_conversation(db, &context.conversation_id)?,
+            scope,
+            &allocation,
+        )?
+    {
+        blockers.push(Policy { reason: "The verified provider session changed. Review the continuation before sending again." });
+    }
     if job.latest_attempt.is_none()
         && matches!(blockers.as_slice(), [] | [ContinuationOwner { .. }])
         && let Some(revision) = &inputs.instruction

@@ -55,7 +55,7 @@ it("submits Plan Mode from the conversation and answers an identified planning f
       case "saved_conversation_questions": return [];
       case "composer_suggestion_mode": return "off";
       case "save_conversation_draft": return;
-      case "start_conversation_turn": started = true; return job;
+      case "submit_conversation_continuation": started = true; return { status: "queued", job };
       case "conversation_events": return { cursor: "0", events: [], more: false };
       case "pending_conversation_inputs": return answered ? [] : [{ data: { type: "question", request_id: 42, normalized: form } }];
       case "conversation_question_timeline": return [{
@@ -81,7 +81,7 @@ it("submits Plan Mode from the conversation and answers an identified planning f
   await user.click(screen.getByRole("button", { name: "Send" }));
 
   const requests = within(await screen.findByRole("region", { name: "Pending requests" }));
-  expect(invoke).toHaveBeenCalledWith("start_conversation_turn", {
+  expect(invoke).toHaveBeenCalledWith("submit_conversation_continuation", {
     conversationId: scope.conversationId, selection, effort: null, mode: "plan", text, expectedContextId: "context",
   });
   expect(requests.getByRole("status").textContent).toBe("Waiting for input");

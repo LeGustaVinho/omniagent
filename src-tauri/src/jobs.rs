@@ -10,6 +10,7 @@ use crate::{
 };
 
 mod admission;
+pub(crate) use admission::queue_conversation_continuation;
 mod command;
 mod downstream;
 mod failures;

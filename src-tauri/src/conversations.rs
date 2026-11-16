@@ -25,8 +25,13 @@ use crate::{
 };
 
 mod approval_evidence;
+pub(crate) mod continuation;
 mod library;
 pub use approval_evidence::{ApprovalDelivery, ConversationApprovalEvidence};
+pub use continuation::{
+    ContinuationChoice, ContinuationInspection, ContinuationLevel, ContinuationSettings,
+    ContinuedConversation,
+};
 pub use library::ConversationLibraryEntry;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]
@@ -325,52 +330,17 @@ impl Store {
             let source = check_idle_base(&tx, &conversation_id, &expected_context_id)?;
             let mut entries = context_entries(&tx, &source.id, &expected_context_id)?;
             if let Some(revision) = &through_revision {
-                let index = entries.iter().position(|entry| entry == revision).context(
-                    "The selected message is outside the current conversation history",
-                )?;
+                let index = entries
+                    .iter()
+                    .position(|entry| entry == revision)
+                    .context("The selected message is outside the current conversation history")?;
                 entries.truncate(index + 1);
             }
-            let source_session: Option<String> = tx.query_row(
-                "SELECT a.agent_session_id FROM agent_attempts a
-                 JOIN agent_sessions s ON s.id = a.agent_session_id
-                 JOIN conversation_contexts c ON c.id = a.result_context_id
-                 WHERE a.conversation_id = ?1 AND c.entries = ?2 AND s.provider_session_id IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM history_revoked_sessions WHERE session_id = s.id)
-                 ORDER BY a.ordinal DESC LIMIT 1",
-                params![source.id, serde_json::to_string(&entries)?], |row| row.get(0),
-            ).optional()?;
-            let mut fork = insert_conversation(&tx, source.checkout_id, title, false)?;
-            let mut copied = Vec::with_capacity(entries.len());
-            let mut read = tx.prepare(
-                "SELECT m.role, r.content FROM messages m JOIN message_revisions r ON r.message_id = m.id
-                 WHERE m.conversation_id = ?1 AND r.id = ?2",
-            )?;
-            for revision in &entries {
-                let (role, payload): (String, Vec<u8>) = read.query_row(
-                    params![source.id, revision], |row| Ok((row.get(0)?, row.get(1)?)),
-                )?;
-                let role = if role == "user" { MessageRole::User } else { MessageRole::Assistant };
-                let copy = insert_message(&tx, &fork.id, role, payload)?;
-                crate::dispatch::record_message_copy(&tx, revision, &copy)?;
-                tx.execute(
-                    "INSERT INTO message_attachments (message_revision_id, payload)
-                     SELECT ?1, payload FROM message_attachments WHERE message_revision_id = ?2",
-                    params![copy, revision],
-                )?;
-                copied.push(copy);
-            }
-            drop(read);
-            if !copied.is_empty() {
-                fork.context_id = activate_context(&tx, &fork.id, &copied)?;
-            }
-            tx.execute(
-                "INSERT INTO conversation_forks (conversation_id, source_conversation_id,
-                    source_context_id, source_revision_id, source_session_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![fork.id, source.id, expected_context_id, entries.last(), source_session],
-            )?;
+            let fork = continuation::fork_history(&tx, &source, &entries, title)?;
             tx.commit()?;
             Ok(fork)
-        }).await
+        })
+        .await
     }
 
     pub async fn select_conversation_context(
@@ -1197,10 +1167,19 @@ pub(crate) struct RecordedAttempt {
 pub(crate) enum AttemptHistory {
     Automatic,
     Fresh,
-    QueuedInstruction { revision_id: String },
-    Retry { input_context_id: String },
-    Resume { native: Option<NativeJobRecovery> },
-    Question { origin_run_id: String },
+    QueuedInstruction {
+        revision_id: String,
+        force_fresh: bool,
+    },
+    Retry {
+        input_context_id: String,
+    },
+    Resume {
+        native: Option<NativeJobRecovery>,
+    },
+    Question {
+        origin_run_id: String,
+    },
     Downstream,
 }
 
@@ -1274,6 +1253,7 @@ pub(crate) fn insert_instruction_attempt(
     revision_id: String,
     recorded: Option<RecordedAttempt>,
     allocation: SubagentAllocation,
+    force_fresh: bool,
 ) -> Result<AttemptPlan> {
     insert_attempt(
         db,
@@ -1285,7 +1265,10 @@ pub(crate) fn insert_instruction_attempt(
             frozen: None,
             question_route: QuestionRoute::Native,
             answer: None,
-            history: AttemptHistory::QueuedInstruction { revision_id },
+            history: AttemptHistory::QueuedInstruction {
+                revision_id,
+                force_fresh,
+            },
             recorded,
             instruction_revision: None,
             allocation,
@@ -1542,23 +1525,19 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
     };
     let mut entries = context_entries(db, &conversation_id, input_context_id)?;
     let previous = previous_attempt(db, &conversation_id)?;
-    let eligible = previous.as_ref().filter(|prior| {
-        !prior.native_scope_reserved && prior.native_subagent_limit == allocation.native_allowance
-    });
-    let eligible = eligible.filter(|prior| allocation.audit == prior.audit);
+    let eligible = previous
+        .as_ref()
+        .filter(|prior| prior.matches_allocation(&allocation));
     let continuity = match (&history, eligible, &recorded) {
         (
-            AttemptHistory::Automatic | AttemptHistory::QueuedInstruction { .. },
+            AttemptHistory::Automatic
+            | AttemptHistory::QueuedInstruction {
+                force_fresh: false,
+                ..
+            },
             Some(prior),
             None,
-        ) if prior.scope == serialized
-            && scope
-                .account_binding
-                .as_ref()
-                .is_some_and(|id| !id.is_empty()) =>
-        {
-            append_only_cursor(db, &conversation_id, &entries, prior)?
-        }
+        ) => automatic_continuity(db, &conversation_id, &entries, prior, &scope, &serialized)?,
         (
             AttemptHistory::Resume {
                 native: Some(recovery),
@@ -1616,7 +1595,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             )?;
         }
         input_context_id.clone()
-    } else if let AttemptHistory::QueuedInstruction { revision_id } = &history {
+    } else if let AttemptHistory::QueuedInstruction { revision_id, .. } = &history {
         entries.push(revision_id.clone());
         write_context(db, &conversation_id, &entries, recorded.is_none())?
     } else {
@@ -2082,6 +2061,28 @@ struct PreviousAttempt {
     audit: SubagentAuditRoute,
 }
 
+impl PreviousAttempt {
+    fn matches_allocation(&self, allocation: &SubagentAllocation) -> bool {
+        !self.native_scope_reserved
+            && self.native_subagent_limit == allocation.native_allowance
+            && self.audit == allocation.audit
+    }
+}
+
+fn automatic_continuity<'a>(
+    db: &Connection,
+    conversation: &str,
+    entries: &[String],
+    prior: &'a PreviousAttempt,
+    scope: &SessionScope,
+    serialized: &str,
+) -> Result<Option<(&'a PreviousAttempt, String, usize)>> {
+    if prior.scope != serialized || scope.account_binding.as_ref().is_none_or(String::is_empty) {
+        return Ok(None);
+    }
+    append_only_cursor(db, conversation, entries, prior)
+}
+
 fn previous_attempt(db: &Connection, conversation: &str) -> Result<Option<PreviousAttempt>> {
     Ok(db
         .query_row(
@@ -2201,7 +2202,7 @@ mod tests {
         time::Duration,
     };
 
-    async fn setup() -> Result<(tempfile::TempDir, Store, Conversation, SessionScope)> {
+    pub(super) async fn setup() -> Result<(tempfile::TempDir, Store, Conversation, SessionScope)> {
         let directory = tempfile::tempdir()?;
         let checkout = dunce::canonicalize(directory.path())?;
         let store = Store::open(checkout.join("store.sqlite"))?;
@@ -2233,7 +2234,7 @@ mod tests {
         Ok((directory, store, conversation, scope))
     }
 
-    async fn prepare(
+    pub(super) async fn prepare(
         store: &Store,
         conversation: &str,
         scope: SessionScope,
@@ -2662,7 +2663,7 @@ mod tests {
         Ok(())
     }
 
-    async fn confirm(store: &Store, attempt: &AttemptPlan) -> Result<()> {
+    pub(super) async fn confirm(store: &Store, attempt: &AttemptPlan) -> Result<()> {
         store.mark_agent_running(attempt.run.id.clone()).await?;
         let dispatch = prepare_fixture_dispatch(store, attempt).await?;
         store.settle_dispatch(dispatch, Delivery::Submitted).await?;

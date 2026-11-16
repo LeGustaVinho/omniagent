@@ -25,7 +25,11 @@ mod schema;
 fn remove_recent_schema(db: &rusqlite::Connection) -> Result<()> {
     schema::restore_question_view_before_structured_planning(db)?;
     db.execute_batch(
-        "DROP TRIGGER conversation_library_create;
+        "DROP TABLE conversation_continuation_jobs;
+         DROP TABLE conversation_continuation_previews;
+         DROP TABLE conversation_continuation_policies;
+         DROP TABLE project_continuation_policies;
+         DROP TRIGGER conversation_library_create;
          DROP TRIGGER conversation_library_edit;
          DROP TRIGGER conversation_library_attempt;
          DROP TRIGGER conversation_library_run_state;

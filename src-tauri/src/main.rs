@@ -2,6 +2,7 @@
 
 mod conversation_runtime;
 mod conversation_goal_runtime;
+mod conversation_continuation_runtime;
 mod agile_runtime;
 mod desktop;
 mod git_review_runtime;
@@ -364,6 +365,10 @@ fn main() {
             conversation_runtime::conversation_library,
             conversation_goal_runtime::conversation_goal_overview,
             conversation_goal_runtime::start_conversation_goal,
+            conversation_continuation_runtime::conversation_continuation_settings,
+            conversation_continuation_runtime::set_conversation_continuation_policy,
+            conversation_continuation_runtime::submit_conversation_continuation,
+            conversation_continuation_runtime::confirm_conversation_continuation,
             ipc::checkout_conversation,
             ipc::create_conversation,
             ipc::fork_conversation,
