@@ -4,6 +4,101 @@ use super::*;
 use crate::repository::{git_path, git_query, register};
 
 const OLD: &str = "\u{feff}first\r\nkeep LF\nlast CR\rфинал";
+const EDIT: &str = "new first\nkeep LF\nnew last\nфинал";
+const RESULT: &str = "\u{feff}new first\r\nkeep LF\nnew last\rфинал";
+
+#[tokio::test]
+async fn opens_and_saves_canonical_utf8_revisions_without_changing_untouched_bytes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("profile.sqlite"))?;
+    let root = init_repository(temp.path())?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let document = open_document(&store, &checkout, "Guide.md").await?;
+    assert_eq!(document.canonical_path, root.join("Guide.md"));
+    assert!(document.utf8_bom);
+    assert_eq!(document.line_endings, LineEndings::Mixed);
+    assert_eq!(document.markdown, "first\nkeep LF\nlast CR\nфинал");
+    let repeated = open_document(&store, &checkout, "Guide.md").await?;
+    assert_eq!(repeated, document);
+
+    let RepositoryDocumentSave::Saved { document: saved } = store
+        .save_repository_document(
+            checkout.clone(),
+            "Guide.md".into(),
+            document.revision.id.clone(),
+            EDIT.into(),
+        )
+        .await?
+    else {
+        anyhow::bail!("replacement failed");
+    };
+    assert_eq!(fs::read(root.join("Guide.md"))?, RESULT.as_bytes());
+    assert_eq!(saved.markdown, EDIT);
+    assert_ne!(saved.revision.id, document.revision.id);
+    assert_ne!(saved.file_identity, document.file_identity);
+    assert_eq!(
+        store
+            .repository_markdown(checkout.clone(), document.revision.id.clone())
+            .await?
+            .unwrap()
+            .markdown,
+        OLD
+    );
+    assert_eq!(open_document(&store, &checkout, "Guide.md").await?, saved);
+    assert!(fs::read_dir(&root)?.all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".omniagent-markdown-")
+    }));
+
+    fs::write(root.join("legacy.md"), b"\xff\xfeh\0i\0")?;
+    assert_eq!(
+        store
+            .open_repository_document(checkout.clone(), "legacy.md".into())
+            .await?,
+        RepositoryDocumentOpen::UnsupportedEncoding
+    );
+    assert_eq!(
+        store
+            .open_repository_document(checkout.clone(), "missing.md".into())
+            .await?,
+        RepositoryDocumentOpen::Missing
+    );
+    assert!(
+        store
+            .save_repository_document(
+                checkout.clone(),
+                "other.md".into(),
+                document.revision.id.clone(),
+                EDIT.into()
+            )
+            .await
+            .is_err()
+    );
+    let blocker = root.join("Guide.md");
+    let stored = open_document(&store, &checkout, "Guide.md").await?;
+    fs::write(&blocker, b"outside edit\n")?;
+    let RepositoryDocumentSave::Conflict { recovery } = store
+        .save_repository_document(
+            checkout,
+            "Guide.md".into(),
+            stored.revision.id,
+            "buffer".into(),
+        )
+        .await?
+    else {
+        anyhow::bail!("stale revision was not reported as a conflict");
+    };
+    assert_eq!(fs::read(blocker)?, b"outside edit\n");
+    assert_eq!(
+        fs::read(recovery.edited_path.unwrap())?,
+        b"\xef\xbb\xbfbuffer"
+    );
+    assert!(recovery.displaced_path.is_none());
+    Ok(())
+}
 
 #[tokio::test]
 async fn resolves_in_checkout_junctions_and_rejects_external_documents_and_attachments()

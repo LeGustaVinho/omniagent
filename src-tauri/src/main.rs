@@ -279,6 +279,7 @@ fn main() {
             desktop::read_repository_markdown,
             markdown_analysis_ipc::analyze_note_markdown,
             note_runtime::open_repository_document,
+            note_runtime::save_repository_document,
             note_runtime::read_repository_attachment,
             ipc::active_checkout,
             ipc::registered_checkouts,

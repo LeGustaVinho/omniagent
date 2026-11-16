@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use omniagent::{
     diagnostics,
-    repository::documents::{RepositoryAttachment, RepositoryDocumentOpen},
+    repository::documents::{RepositoryAttachment, RepositoryDocumentOpen, RepositoryDocumentSave},
     store::Store,
 };
 use tauri::State;
@@ -19,6 +19,20 @@ pub async fn open_repository_document(
 ) -> Result<RepositoryDocumentOpen, String> {
     store
         .open_repository_document(checkout_id, path)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn save_repository_document(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: PathBuf,
+    expected_revision: String,
+    markdown: String,
+) -> Result<RepositoryDocumentSave, String> {
+    store
+        .save_repository_document(checkout_id, path, expected_revision, markdown)
         .await
         .map_err(report)
 }
