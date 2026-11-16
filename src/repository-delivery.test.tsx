@@ -1,0 +1,120 @@
+// @vitest-environment jsdom
+
+import type { ComponentProps } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
+import { cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, expect, it, vi } from "vitest";
+import type { Job } from "@/bindings/Job";
+import type { ModelOption } from "@/bindings/ModelOption";
+import type { ModelPicker } from "@/components/model-picker";
+import { RepositoryDeliveryWorkspace } from "@/repository-delivery";
+import type { DeliveryJob, DeliverySnapshot } from "@/repository-delivery-model";
+import type { WorkspaceProps } from "@/workbench-contract";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@/components/model-picker", () => ({
+  ModelPicker: ({ label, options, selection, disabled }: ComponentProps<typeof ModelPicker>) => (
+    <div aria-label={label}>
+      {options.map((option) => <button key={option.selection.modelId} type="button" disabled={disabled || !option.selectable}
+        onClick={() => { if (selection.mode === "single") selection.onChange(option.selection); }}>
+        {option.name}
+      </button>)}
+    </div>
+  ),
+}));
+
+afterEach(() => {
+  cleanup();
+  vi.resetAllMocks();
+});
+
+it("starts delivery from a saved Markdown revision and queues planning after reopening the run", async () => {
+  const checkout = {
+    projectId: "project", checkoutId: "source-checkout", checkoutRoot: "C:/fixture/repo", repositoryRoot: "C:/fixture/repo",
+  };
+  const props: WorkspaceProps = {
+    checkout, simulation: null, startSimulation: vi.fn(), openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(),
+  };
+  const previous = { id: "previous-delivery", planRevision: null };
+  const run = { id: "new-delivery", planRevision: null };
+  const first = { id: "revision-original", relativePath: "docs/original.md", sha256: "a".repeat(64) };
+  const selected = { id: "revision-selected", relativePath: "docs/release.md", sha256: "b".repeat(64) };
+  const model: ModelOption = {
+    name: "Fixture planning model", selectable: true, unavailableReason: null, rating: null, catalogVersion: 1,
+    selection: { provider: "codex", profileId: "planning-profile", modelId: "planning-model" },
+  };
+  const inputs = { context: "loaded-context" };
+  const queuedJob: Job = {
+    id: "planning-job", projectId: checkout.projectId, checkoutId: checkout.checkoutId, taskId: null,
+    kind: "agent", origin: { type: "pipeline" }, worktreeOwnerTaskId: null, context: null, mode: "plan",
+    pipeline: { pipelineRunId: run.id, nodeInstanceId: "plan", planRevision: null, release: null },
+    priority: 0, queueState: "queued", latestAttempt: null, queuedRecovery: null, downstreamWait: null,
+  };
+  const snapshot: DeliverySnapshot = {
+    run, jobs: [], artifacts: [
+      { id: "start-document", nodeInstanceId: "start", port: "document", unitId: null,
+        value: { kind: "markdown", evidence: { checkoutId: checkout.checkoutId, ...selected } } },
+      { id: inputs.context, nodeInstanceId: "context", port: "context", unitId: null,
+        value: { kind: "markdown", evidence: { checkoutId: checkout.checkoutId, ...selected } } },
+    ],
+  };
+  let started = false;
+  let jobs: DeliveryJob[] = [];
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    switch (command) {
+      case "list_repository_markdown_revisions": return [first, selected];
+      case "read_repository_markdown": return args && "revisionId" in args && args.revisionId === selected.id ?
+        { revision: selected, markdown: "# Deliver the selected release" } : { revision: first, markdown: "# Archived document" };
+      case "list_repository_deliveries": return started ? [previous, run] : [previous];
+      case "start_repository_delivery":
+        expect(args).toEqual({ projectId: checkout.projectId, checkoutId: checkout.checkoutId, revisionId: selected.id });
+        started = true;
+        return run;
+      case "inspect_repository_delivery": return args && "runId" in args && args.runId === run.id ? { ...snapshot, jobs } :
+        { run: previous, jobs: [], artifacts: [] };
+      case "conversation_models": return args && "provider" in args && args.provider === "codex" ? [{ option: model }] : [];
+      case "repository_delivery_tasks": return [];
+      case "submit_repository_delivery_agent":
+        jobs = [{ nodeId: "plan", inputs, unitId: null, job: {
+          ...queuedJob, latestAttempt: { ordinal: 1, runId: "planning-attempt", conversationId: "planning-conversation",
+            status: "running", cancelRequested: false, previousRunId: null, recovery: null },
+        } }];
+        return queuedJob;
+      default: throw new Error(`Unexpected command ${command}`);
+    }
+  });
+
+  const mount = () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return render(<QueryClientProvider client={client}><RepositoryDeliveryWorkspace {...props} /></QueryClientProvider>);
+  };
+  const user = userEvent.setup();
+  const initial = mount();
+  const revisions = await screen.findByRole("combobox", { name: "Saved source revision" });
+  await user.selectOptions(revisions, selected.id);
+  await user.click(await screen.findByText("Read saved Markdown"));
+  expect(await screen.findByText("# Deliver the selected release")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Start repository delivery" }));
+  await screen.findByRole("button", { name: "Queue planning" });
+  initial.unmount();
+
+  mount();
+  const runs = await screen.findByRole("combobox", { name: "Saved delivery" });
+  await user.selectOptions(runs, run.id);
+  const planning = await screen.findByRole("region", { name: "Planning" });
+  const queue = within(planning).getByRole<HTMLButtonElement>("button", { name: "Queue planning" });
+  expect(queue.disabled).toBe(true);
+  await user.click(await within(planning).findByRole("button", { name: model.name }));
+  expect(queue.disabled).toBe(false);
+  await user.click(queue);
+
+  await user.click(await screen.findByRole("button", { name: "Open planning attempt" }));
+  expect(invoke).toHaveBeenCalledWith("submit_repository_delivery_agent", { input: {
+    projectId: checkout.projectId, runId: run.id, nodeId: "plan", unitId: null, inputs,
+    selection: model.selection, effort: null,
+  } });
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "start_repository_delivery")).toHaveLength(1);
+  expect(props.openActivity).toHaveBeenCalledWith("planning-attempt", "planning-conversation");
+});

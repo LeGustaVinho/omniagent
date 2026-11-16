@@ -8,6 +8,7 @@ import { Dialog } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
+import { RepositoryDeliveryWorkspace } from "@/repository-delivery";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { useGitSimulation } from "@/git-simulation";
 import { PipelineCatalog } from "@/pipeline-catalog";
@@ -177,6 +178,11 @@ function StageRunDetails({ run, activeId, actions, links }: {
 }
 
 export default function PipelinesWorkspace(props: WorkspaceProps) {
+  return props.simulation ? <PreviewPipelinesWorkspace {...props} /> :
+    <div className="pipelines-workspace"><RepositoryDeliveryWorkspace {...props} /></div>;
+}
+
+function PreviewPipelinesWorkspace(props: WorkspaceProps) {
   const { simulation, target, startSimulation } = props;
   const git = useGitSimulation();
   const [view, setView] = useState<View>("Builder");
