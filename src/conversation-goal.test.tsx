@@ -50,17 +50,26 @@ function openPanel(initialDraft: string, native: boolean) {
           activity: { blocker: null, attempt: { runId, conversationId }, evidence: native ? {
             nativeObservation: { observation: { state: "active", tokensUsed: 234, tokenBudget: null, elapsedSeconds: 7 } }, usage: null,
           } : null },
-          managedReason: native ? null : "OmniAgent enforces the requested turn limit.", history: [],
+          managedReason: native ? null : "OmniAgent enforces the requested turn limit.", history: [], transition: null,
         };
         return value.goal;
       }
       case "request_goal_stop": {
         const action = (args as { action: string }).action;
-        if (value) value = { ...value, goal: { ...value.goal, controlState: action === "pause" ? "paused" : "cancelled" } };
+        if (value) value = {
+          ...value, goal: { ...value.goal, controlState: action === "pause" ? "paused" : "cancelled" },
+          transition: action === "pause" ? {
+            revisionId: value.goal.id, definition: value.goal.definition, continuationOwner: value.goal.continuationOwner,
+            controlState: "paused", checkpoint: { ordinal: 2, runId, nextAction: "continue" },
+            checkpointContextId: "saved-checkpoint", checkpointRunId: runId, stopReviewRunId: null, reviewToken: "sealed-resume",
+            scope: { projectId, checkoutId: "checkout-original", checkoutRoot: "D:/release", provider: selection.provider,
+              profileId: selection.profileId, model: selection.modelId, effort: null, mode: "read_only" },
+          } : null,
+        };
         return value?.goal.controlState;
       }
       case "resume_goal": {
-        if (value) value = { ...value, goal: { ...value.goal, controlState: "active" } };
+        if (value) value = { ...value, goal: { ...value.goal, controlState: "active" }, transition: null };
         return;
       }
       default: throw new Error(`Unexpected IPC ${command}`);
@@ -114,6 +123,14 @@ it("opens bare goal controls, persists configured limits, and restores stopped g
   await user.click(goal.getByRole("button", { name: "Pause goal" }));
   expect(await goal.findByText("Paused")).toBeTruthy();
   await user.click(goal.getByRole("button", { name: "Resume goal" }));
+  const review = within(goal.getByRole("region", { name: "Review goal resume" }));
+  expect(review.getByText("Prepare the release")).toBeTruthy();
+  expect(review.getByText(/Checkpoint 2/)).toBeTruthy();
+  expect(review.getByText("D:/release")).toBeTruthy();
+  expect(review.getByText(fixture.selection.modelId)).toBeTruthy();
+  expect(vi.mocked(invoke).mock.calls.some(([name]) => name === "resume_goal")).toBe(false);
+  await user.click(review.getByRole("button", { name: "Confirm goal resume" }));
+  expect(invoke).toHaveBeenCalledWith("resume_goal", { projectId: fixture.projectId, revisionId: "goal-revision", reviewToken: "sealed-resume" });
   expect(await goal.findByText("Active")).toBeTruthy();
   await user.click(goal.getByRole("button", { name: "Cancel goal" }));
   expect(await goal.findByText("Cancelled")).toBeTruthy();

@@ -86,17 +86,34 @@ async fn overview_returns_confirmed_controls_and_keeps_replaced_goals_after_reop
             .await?,
         GoalControlState::Paused
     );
+    let paused = store
+        .conversation_goal_overview(chat.id.clone())
+        .await?
+        .unwrap();
+    assert_eq!(paused.goal.control_state, GoalControlState::Paused);
+    let review = paused.transition.unwrap();
+    assert_eq!(review.definition, first);
+    assert_eq!(review.scope.checkout_root, scope.checkout);
+    assert_eq!(review.scope.model, scope.model);
     assert_eq!(
-        store
-            .conversation_goal_overview(chat.id.clone())
-            .await?
-            .unwrap()
-            .goal
-            .control_state,
-        GoalControlState::Paused
+        review.checkpoint_context_id.as_deref(),
+        Some(context.context_id.as_str())
     );
+    let stale = store
+        .resume_goal_after_review(
+            project.project_id.clone(),
+            initial.id.clone(),
+            "a stale checkpoint".into(),
+        )
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().contains("checkpoint or scope changed"));
     store
-        .resume_goal(project.project_id.clone(), initial.id.clone())
+        .resume_goal_after_review(
+            project.project_id.clone(),
+            initial.id.clone(),
+            review.review_token,
+        )
         .await?;
     assert_eq!(
         store

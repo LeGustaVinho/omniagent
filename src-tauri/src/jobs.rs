@@ -16,6 +16,7 @@ mod downstream;
 mod failures;
 mod goal_control;
 mod goal_inspection;
+mod goal_transition;
 mod goal_verification;
 mod goals;
 mod history;
@@ -51,6 +52,8 @@ pub use failures::{
 };
 pub use goal_control::{GoalControlState, GoalStopAction};
 pub use goal_inspection::{ConversationGoalOverview, InspectedGoal};
+pub(crate) use goal_transition::{conversation_goal_transition, native_goal_fork_is_safe};
+pub use goal_transition::{GoalTransitionReview, GoalTransitionScope};
 pub use goal_verification::{
     GoalCriterionEvidence, GoalCriterionStatus, GoalCriterionVerification, GoalEvidenceChoice,
     GoalVerification, GoalVerificationStatus,

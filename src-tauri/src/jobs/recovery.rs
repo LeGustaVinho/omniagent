@@ -529,7 +529,7 @@ impl Store {
         expected_run: String,
         action: RecoveryAction,
     ) -> Result<Job> {
-        self.queue_job_recovery_with_goal(project_id, job_id, expected_run, action, None)
+        self.queue_job_recovery_with_goal(project_id, job_id, expected_run, action, None, None)
             .await
     }
 
@@ -540,6 +540,7 @@ impl Store {
         expected_run: String,
         action: RecoveryAction,
         goal_revision: Option<String>,
+        goal_review_token: Option<String>,
     ) -> Result<Job> {
         let (checkout_id, owner, scope, refresh_desktop, writer_checkpoint) = self
             .execute({
@@ -625,6 +626,9 @@ impl Store {
         let job = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                if let Some((revision, token)) = goal_revision.as_deref().zip(goal_review_token.as_deref()) {
+                    super::goal_transition::validate_goal_resume_review(&tx, &project_id, revision, token)?;
+                }
                 let job = load_job(&tx, &project_id, &job_id)?
                     .context("Job is unavailable in this project")?;
                 ensure!(

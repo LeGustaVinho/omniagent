@@ -16,6 +16,28 @@ export type GoalDefinition = {
 };
 type GoalControlState = "active" | "pausing" | "paused" | "cancelling" | "cancelled" | "needs_review";
 type Verification = "verifying" | "failed" | "completed";
+export type GoalTransitionScope = {
+  projectId: string;
+  checkoutId: string;
+  checkoutRoot: string;
+  provider: string;
+  profileId: string;
+  model: string | null;
+  effort: string | null;
+  mode: string;
+};
+export type GoalTransitionReview = {
+  revisionId: string;
+  definition: GoalDefinition;
+  continuationOwner: "managed" | "native";
+  controlState: GoalControlState;
+  checkpoint: { ordinal: number; runId: string; nextAction: string } | null;
+  checkpointContextId: string | null;
+  checkpointRunId: string | null;
+  stopReviewRunId: string | null;
+  scope: GoalTransitionScope;
+  reviewToken: string;
+};
 type Goal = {
   id: string;
   definition: GoalDefinition;
@@ -39,6 +61,7 @@ export type ConversationGoalOverview = {
   };
   history: { revisionId: string; objective: string; controlState: GoalControlState; verification: Verification | null; runId: string | null }[];
   managedReason: string | null;
+  transition: GoalTransitionReview | null;
 };
 
 const goalKey = (conversationId: string) => ["conversation", conversationId, "goal-overview"];
@@ -69,18 +92,50 @@ export function goalDefinition(objective: string): GoalDefinition {
 
 const label = (state: string) => state.charAt(0).toUpperCase() + state.slice(1).replaceAll("_", " ");
 
+export function GoalExecutionScope({ scope }: { scope: GoalTransitionScope }) {
+  return <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-xs">
+    <dt>Checkout</dt><dd><code className="break-all">{scope.checkoutRoot}</code></dd>
+    <dt>Profile</dt><dd>{scope.provider} · {scope.profileId}</dd>
+    {scope.model && <><dt>Model</dt><dd>{scope.model}</dd></>}
+    {scope.effort && <><dt>Effort</dt><dd>{scope.effort}</dd></>}
+    <dt>Execution mode</dt><dd>{label(scope.mode)}</dd>
+  </dl>;
+}
+
+export function GoalCheckpointSummary({ review }: { review: GoalTransitionReview }) {
+  return <>
+    <p className="whitespace-pre-wrap break-words">{review.definition.objective}</p>
+    <p className="text-xs">{review.continuationOwner === "native" ? "Native" : "OmniAgent"} goal · {label(review.controlState)}</p>
+    {review.checkpoint && <p className="text-xs">Checkpoint {review.checkpoint.ordinal} · {label(review.checkpoint.nextAction)}</p>}
+    {review.checkpointRunId && <p className="break-all text-xs">Checkpoint run <code>{review.checkpointRunId}</code></p>}
+    {!review.checkpointRunId && review.checkpointContextId && <p className="break-all text-xs">Checkpoint context <code>{review.checkpointContextId}</code></p>}
+    <GoalExecutionScope scope={review.scope} />
+  </>;
+}
+
 export function ConversationGoalCard({ value, refresh, openRun }: {
   value: ConversationGoalOverview;
   refresh: () => Promise<unknown>;
   openRun: (id: string) => void;
 }) {
-  const { goal, activity, history, managedReason } = value;
+  const { goal, activity, history, managedReason, transition } = value;
+  const [resumeReview, setResumeReview] = useState<GoalTransitionReview>();
+  const [stopReview, setStopReview] = useState<{ revisionId: string; runId: string }>();
+  const stopRunId = transition?.stopReviewRunId;
+  const ids = { projectId: goal.job.projectId, revisionId: goal.id };
   const action = useMutation({
-    mutationFn: (change: "pause" | "resume" | "cancel") => change === "resume"
-      ? invoke("resume_goal", { projectId: goal.job.projectId, revisionId: goal.id })
-      : invoke("request_goal_stop", { projectId: goal.job.projectId, revisionId: goal.id, action: change }),
+    mutationFn: (change: { type: "pause" | "cancel" } | { type: "resume"; reviewToken: string } | { type: "confirm_stop"; runId: string }) => {
+      if (change.type === "resume") return invoke("resume_goal", { ...ids, reviewToken: change.reviewToken });
+      if (change.type === "confirm_stop") return invoke(goal.continuationOwner === "native" ? "confirm_native_goal_stop" : "confirm_managed_goal_stop", {
+        ...ids, runId: change.runId,
+      });
+      return invoke("request_goal_stop", { ...ids, action: change.type });
+    },
+    onSuccess: () => { setResumeReview(undefined); setStopReview(undefined); },
     onSettled: refresh,
   });
+  const resumeCurrent = resumeReview?.reviewToken === transition?.reviewToken && goal.controlState === "paused";
+  const stopCurrent = stopReview?.revisionId === goal.id && stopReview?.runId === stopRunId && goal.controlState === "needs_review";
   const native = activity.evidence?.nativeObservation?.observation;
   const usage = activity.evidence?.usage;
   const status = goal.verification?.status === "completed" ? "Completed"
@@ -107,13 +162,30 @@ export function ConversationGoalCard({ value, refresh, openRun }: {
     {managedReason && <p className="text-xs text-muted-foreground">{managedReason}</p>}
     <div className="flex flex-wrap gap-2">
       {pendingGoal(goal) && goal.controlState === "active" && <button type="button" className="conv-quiet-button" disabled={action.isPending}
-        onClick={() => action.mutate("pause")}>Pause goal</button>}
-      {goal.controlState === "paused" && <button type="button" className="conv-quiet-button" disabled={action.isPending}
-        onClick={() => action.mutate("resume")}>Resume goal</button>}
-      {pendingGoal(goal) && ["active", "paused", "needs_review"].includes(goal.controlState) &&
-        <button type="button" className="conv-quiet-button" disabled={action.isPending} onClick={() => action.mutate("cancel")}>Cancel goal</button>}
+        onClick={() => action.mutate({ type: "pause" })}>Pause goal</button>}
+      {goal.controlState === "paused" && transition && <button type="button" className="conv-quiet-button" disabled={action.isPending}
+        onClick={() => setResumeReview(transition)}>Resume goal</button>}
+      {pendingGoal(goal) && ["active", "paused"].includes(goal.controlState) &&
+        <button type="button" className="conv-quiet-button" disabled={action.isPending} onClick={() => action.mutate({ type: "cancel" })}>Cancel goal</button>}
+      {goal.controlState === "needs_review" && stopRunId && <button type="button" className="conv-quiet-button" disabled={action.isPending}
+        onClick={() => setStopReview({ revisionId: goal.id, runId: stopRunId })}>Review executor stop</button>}
       {attempt && <button type="button" className="conv-quiet-button" onClick={() => openRun(attempt)}>Open goal activity</button>}
     </div>
+    {resumeReview && <section aria-label="Review goal resume" className="grid gap-2 rounded-md border border-border p-2">
+      <GoalCheckpointSummary review={resumeReview} />
+      {resumeReview.continuationOwner === "native" && <p className="text-xs">Resume from this checkpoint in a fresh provider session.</p>}
+      {!resumeCurrent && <p role="status">The goal checkpoint changed. Open the resume review again.</p>}
+      <button type="button" className="conv-quiet-button" disabled={action.isPending || !resumeCurrent}
+        onClick={() => action.mutate({ type: "resume", reviewToken: resumeReview.reviewToken })}>Confirm goal resume</button>
+    </section>}
+    {stopReview && <section aria-label="Review executor stop" className="grid gap-2 rounded-md border border-border p-2">
+      <p className="break-all text-xs">Executor run <code>{stopReview.runId}</code></p>
+      {goal.continuationOwner === "managed" && <p className="text-xs">Confirm after checking that this executor has stopped.</p>}
+      <button type="button" className="conv-quiet-button" disabled={action.isPending || !stopCurrent}
+        onClick={() => action.mutate({ type: "confirm_stop", runId: stopReview.runId })}>
+        {goal.continuationOwner === "native" ? "Verify saved stop evidence" : "Confirm executor stopped"}
+      </button>
+    </section>}
     {action.error && <p role="alert" className="conv-alert">{String(action.error)}</p>}
     {history.length > 0 && <details><summary>Earlier goals</summary><ul className="mt-1 grid gap-1">
       {history.map((item) => <li key={item.revisionId}>

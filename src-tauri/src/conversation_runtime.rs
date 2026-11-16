@@ -453,9 +453,10 @@ pub async fn resume_goal(
     store: State<'_, Store>,
     project_id: String,
     revision_id: String,
+    review_token: String,
 ) -> Result<(), String> {
     store
-        .resume_goal(project_id, revision_id)
+        .resume_goal_after_review(project_id, revision_id, review_token)
         .await
         .map_err(ui_error)
 }

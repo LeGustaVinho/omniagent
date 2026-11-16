@@ -36,10 +36,11 @@ pub struct InspectedGoal {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationGoalOverview {
-    goal: GoalRevision,
+    pub(crate) goal: GoalRevision,
     activity: InspectedGoal,
     history: Vec<PriorConversationGoal>,
     managed_reason: Option<&'static str>,
+    pub(crate) transition: Option<super::GoalTransitionReview>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,7 +118,7 @@ impl Store {
                  ORDER BY active.revision_id IS NOT NULL DESC, j.sequence DESC",
             )?;
             let mut revisions =
-                statement.query_map([conversation], |row| row.get::<_, String>(0))?;
+                statement.query_map([&conversation], |row| row.get::<_, String>(0))?;
             let Some(current) = revisions.next().transpose()? else {
                 return Ok(None);
             };
@@ -144,6 +145,7 @@ impl Store {
                 activity,
                 history,
                 managed_reason,
+                transition: super::conversation_goal_transition(db, &conversation)?,
             }))
         })
         .await

@@ -6,6 +6,7 @@ import type { Conversation } from "@/bindings/Conversation";
 import type { Job } from "@/bindings/Job";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
+import { GoalCheckpointSummary, GoalExecutionScope, type GoalTransitionReview, type GoalTransitionScope } from "@/conversation-goal";
 
 type Choice = "same_tab" | "fork_with_context" | "fresh";
 type Settings = { projectDefault: Choice; conversationOverride: Choice | null; effective: Choice };
@@ -22,6 +23,11 @@ export type ConversationContinuationReview = {
   contextId: string;
   reason: "profile_changed" | "checkout_changed" | "session_unavailable" | "policy_changed";
   targetCheckout?: ProjectCheckout;
+  goalTransition?: {
+    recordedGoal: GoalTransitionReview;
+    nextTurnScope: GoalTransitionScope;
+    sameTabAvailable: boolean;
+  } | null;
   settings: Settings;
   seed: {
     revisionId: string;
@@ -70,22 +76,38 @@ export function ConversationContinuationDialog({ review, pending, error, onConfi
   onConfirm: (choice: Choice) => void;
   onClose: () => void;
 }) {
-  const [choice, setChoice] = useState(review.settings.effective);
+  const goal = review.goalTransition;
+  const sameTabAvailable = goal?.sameTabAvailable !== false;
+  const [choice, setChoice] = useState(() => !sameTabAvailable && review.settings.effective === "same_tab"
+    ? "fork_with_context" : review.settings.effective);
   return <Dialog.Root open onOpenChange={(open) => { if (!open && !pending) onClose(); }}>
     <Dialog.Portal>
       <Dialog.Overlay className="conv-dialog-scrim" />
-      <Dialog.Content className="conv-dialog">
+      <Dialog.Content className="conv-dialog max-h-[90vh] overflow-auto">
         <Dialog.Title>Choose how to continue</Dialog.Title>
         <Dialog.Description>{reasons[review.reason]}</Dialog.Description>
         <form className="conv-dialog-form" onSubmit={(event) => {
           event.preventDefault();
-          if (!pending) onConfirm(choice);
+          if (!pending && (sameTabAvailable || choice !== "same_tab")) onConfirm(choice);
         }}>
-          {review.targetCheckout && <p className="break-all">Continue in <code>{review.targetCheckout.checkoutRoot}</code></p>}
+          {!goal && review.targetCheckout && <p className="break-all">Continue in <code>{review.targetCheckout.checkoutRoot}</code></p>}
+          {goal && <>
+            <section aria-label="Recorded goal" className="grid gap-1">
+              <h3 className="text-sm font-medium">Goal in this conversation</h3>
+              <GoalCheckpointSummary review={goal.recordedGoal} />
+            </section>
+            <section aria-label="Next turn scope" className="grid gap-1">
+              <h3 className="text-sm font-medium">Next turn scope</h3>
+              <GoalExecutionScope scope={goal.nextTurnScope} />
+            </section>
+            {!sameTabAvailable && <p className="text-xs">The recorded goal owns this conversation's checkout. Choose a new conversation to send to another checkout.</p>}
+            <p className="text-xs">{choice === "same_tab" ? "The goal keeps its recorded checkpoint and scope." : "Start a separate goal in the new conversation."}</p>
+          </>}
           <fieldset className="grid gap-1" disabled={pending}>
             <legend className="text-xs text-muted-foreground">Continuation method</legend>
             {choices.map((entry) => <label className="!flex items-center gap-2" key={entry}>
-              <input type="radio" name="continuation-method" checked={choice === entry} value={entry} onChange={() => setChoice(entry)} />
+              <input type="radio" name="continuation-method" checked={choice === entry} value={entry}
+                disabled={entry === "same_tab" && !sameTabAvailable} onChange={() => setChoice(entry)} />
               {choiceLabels[entry]}
             </label>)}
           </fieldset>
@@ -114,7 +136,7 @@ export function ConversationContinuationDialog({ review, pending, error, onConfi
           {error != null && <p className="conv-alert" role="alert">{String(error)}</p>}
           <footer>
             <Dialog.Close asChild><button type="button" className="conv-quiet-button" disabled={pending}>Cancel</button></Dialog.Close>
-            <button type="submit" className="conv-primary-button" disabled={pending}>{pending ? "Queueing…" : "Continue and send"}</button>
+            <button type="submit" className="conv-primary-button" disabled={pending || (!sameTabAvailable && choice === "same_tab")}>{pending ? "Queueing…" : "Continue and send"}</button>
           </footer>
         </form>
       </Dialog.Content>

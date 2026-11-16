@@ -187,11 +187,33 @@ impl Store {
     }
 
     pub async fn resume_goal(&self, project: String, revision: String) -> Result<()> {
+        self.resume_goal_with_review(project, revision, None).await
+    }
+
+    pub async fn resume_goal_after_review(
+        &self,
+        project: String,
+        revision: String,
+        review_token: String,
+    ) -> Result<()> {
+        self.resume_goal_with_review(project, revision, Some(review_token)).await
+    }
+
+    async fn resume_goal_with_review(
+        &self,
+        project: String,
+        revision: String,
+        review_token: Option<String>,
+    ) -> Result<()> {
         let recovery = self
             .execute({
                 let (project, revision) = (project.clone(), revision.clone());
+                let checked = review_token.clone();
                 move |db| {
                     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    if let Some(token) = checked.as_deref() {
+                        super::goal_transition::validate_goal_resume_review(&tx, &project, &revision, token)?;
+                    }
                     let (job, stopped_run) = paused_job(&tx, &project, &revision)?;
                     let mut recovery = None;
                     if let Some(run) = stopped_run
@@ -221,8 +243,9 @@ impl Store {
             })
             .await?;
         if let Some((job, run, action)) = recovery {
-            self.queue_job_recovery_with_goal(project, job, run, action, Some(revision))
-                .await?;
+            self.queue_job_recovery_with_goal(
+                project, job, run, action, Some(revision), review_token,
+            ).await?;
         }
         self.job_signal.send_replace(());
         Ok(())

@@ -6,7 +6,11 @@ use super::{
 };
 use crate::{
     attachments::{AttachmentDelivery, AttachmentSource, CapturedPayload, captured_for_revision},
-    jobs::{Job, SubagentAllocation, direct_subagent_allocation, queue_conversation_continuation},
+    jobs::{
+        GoalTransitionReview, GoalTransitionScope, Job, SubagentAllocation,
+        conversation_goal_transition, direct_subagent_allocation, native_goal_fork_is_safe,
+        queue_conversation_continuation,
+    },
     protection,
     providers::SessionMode,
     store::Store,
@@ -109,7 +113,17 @@ pub enum ContinuationInspection {
         seed: Vec<SeedMessage>,
         #[serde(skip_serializing_if = "Option::is_none")]
         target_checkout: Option<crate::repository::ProjectCheckout>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        goal_transition: Option<Box<GoalContinuationPreview>>,
     },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalContinuationPreview {
+    pub recorded_goal: GoalTransitionReview,
+    pub next_turn_scope: GoalTransitionScope,
+    pub same_tab_available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -129,6 +143,8 @@ struct SealedReview {
     attachment_preview_id: Option<String>,
     #[serde(default)]
     target_checkout_id: Option<String>,
+    #[serde(default)]
+    goal_review_token: Option<String>,
 }
 
 enum ContinuationRoute {
@@ -353,6 +369,11 @@ impl Store {
             ensure!(!busy(&tx, &source)?, "The conversation has pending work. Review the continuation after it settles.");
             let target = super::fork_checkout::resolve_continuation_checkout(&tx, &source, preview.target_checkout_id.as_deref())?;
             let project = target.project_id;
+            let goal = conversation_goal_transition(&tx, &source.id)?;
+            ensure!(goal.as_ref().map(|goal| &goal.review_token) == preview.goal_review_token.as_ref(),
+                "The conversation goal changed. Review its checkpoint and scope again.");
+            ensure!(goal.is_none() || choice != ContinuationChoice::SameTab || target.checkout_id == source.checkout_id,
+                "The active goal has pending work in this checkout. Fork with context or start a fresh conversation for the selected checkout.");
             validate_scope(&scope, &target.root)?;
             ensure!(preview.scope == scope, "The selected profile changed. Review the continuation again.");
             ensure!(preview.attachment_preview_id.as_deref() == attachments.as_ref().map(|draft| draft.preview_id.as_str()),
@@ -497,12 +518,34 @@ fn seal_review(
         params![target,project], |row| Ok(crate::repository::ProjectCheckout { project_id: row.get(0)?, repository_root: row.get(1)?,
             checkout_id: row.get(2)?, checkout_root: row.get(3)? }),
     )).transpose()?;
+    let goal = conversation_goal_transition(db, &conversation.id)?;
+    let goal_review_token = goal.as_ref().map(|goal| goal.review_token.clone());
+    let goal_transition = goal.map(|recorded_goal| {
+        let checkout_id = target_checkout_id
+            .clone()
+            .unwrap_or_else(|| conversation.checkout_id.clone());
+        Box::new(GoalContinuationPreview {
+            recorded_goal,
+            same_tab_available: checkout_id == conversation.checkout_id,
+            next_turn_scope: GoalTransitionScope {
+                project_id: project.into(),
+                checkout_id,
+                checkout_root: scope.checkout.clone(),
+                provider: scope.provider,
+                profile_id: scope.profile_id.clone(),
+                model: scope.model.clone(),
+                effort: scope.effort.clone(),
+                mode: scope.mode,
+            },
+        })
+    });
     let payload = protection::protect(&serde_json::to_vec(&SealedReview {
         scope,
         seed_digest: protected_history_digest(db, conversation)?,
         reference_ids,
         attachment_preview_id,
         target_checkout_id,
+        goal_review_token,
     })?)?;
     db.execute(
         "INSERT INTO conversation_continuation_previews VALUES (?1, ?2, ?3, ?4)
@@ -516,6 +559,7 @@ fn seal_review(
         settings: settings(db, project, &conversation.id)?,
         seed,
         target_checkout,
+        goal_transition,
     })
 }
 
@@ -775,6 +819,10 @@ pub(super) fn fork_history_at_checkout(
             |row| row.get(0),
         )
         .optional()? } else { None };
+    let source_session = match source_session {
+        Some(session) if native_goal_fork_is_safe(db, &session)? => Some(session),
+        _ => None,
+    };
     let mut fork = insert_conversation(db, checkout_id, title, false)?;
     let mut copied = Vec::with_capacity(entries.len());
     let mut read = db.prepare(

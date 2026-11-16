@@ -3358,7 +3358,24 @@ mod tests {
                 .await?,
             GoalControlState::Paused
         );
-        store.resume_goal(project, goal.id).await?;
+        let review = store
+            .conversation_goal_overview(conversation.id.clone())
+            .await?
+            .and_then(|overview| overview.transition)
+            .context("Missing native recovery review")?;
+        assert_eq!(
+            review.checkpoint_run_id.as_deref(),
+            Some(attempt.run.id.as_str())
+        );
+        let session = attempt.agent_session_id.clone();
+        assert!(
+            !store
+                .execute(move |db| crate::jobs::native_goal_fork_is_safe(db, &session))
+                .await?
+        );
+        store
+            .resume_goal_after_review(project, goal.id, review.review_token)
+            .await?;
         let recovery = store
             .claim_next_job(environment)
             .await?
