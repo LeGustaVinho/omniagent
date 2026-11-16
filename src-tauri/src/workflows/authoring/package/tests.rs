@@ -453,7 +453,7 @@ async fn project_job_count(store: &Store, project: &str) -> Result<i64> {
 }
 
 #[tokio::test]
-async fn workflow_package_authoring_pins_the_qualified_source_run_and_reviewed_revision()
+async fn legacy_workflow_package_authoring_pins_the_qualified_source_run_and_reviewed_revision()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = Store::open(temp.path().join("protected.sqlite"))?;
@@ -490,6 +490,18 @@ async fn workflow_package_authoring_pins_the_qualified_source_run_and_reviewed_r
         )
         .await?;
     let request_id = draft.request.as_ref().unwrap().id.clone();
+    store
+        .execute({
+            let request_id = request_id.clone();
+            move |db| {
+                db.execute(
+                    "UPDATE workflow_package_requests SET structured_mcp = 0 WHERE id = ?1",
+                    [request_id],
+                )?;
+                Ok(())
+            }
+        })
+        .await?;
     assert!(draft.request.as_ref().unwrap().pending());
     assert_eq!(
         store

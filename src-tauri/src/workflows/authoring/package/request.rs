@@ -14,6 +14,7 @@ pub(super) struct PackageRequest {
     parent: String,
     checkout: String,
     prompt: Vec<u8>,
+    structured_mcp: bool,
 }
 
 impl Store {
@@ -160,7 +161,12 @@ fn enqueue(
     );
     let id = new_id();
     let prompt = format!(
-        r#"Propose a reviewed OmniAgent artifact package. Return a single JSON object with name and members.
+        r#"Propose a reviewed OmniAgent artifact package using the scoped OmniAgent MCP tools.
+Read read_authoring_catalog with view draft for the working revision. Use builtin_nodes for typed ports,
+published for visible exact versions, and draft_member to inspect a saved member.
+Send one or more typed edits to apply_authoring_operations with a stable requestId and the last revision.
+Submit the final revision with submit_authoring_for_review and a new requestId, then stop editing.
+Your chat response is a synopsis for the user. The reviewed package comes from the explicit tool submission.
 Each member uses key, name, destination (project or library), base (null for a new artifact), body, and optional references.
 Keep existing base objects and exact revisions. Reference another member with {{"source":"draft","key":"member-key"}}.
 Use a parameter such as {{"source":"parameter","kind":"command","name":"local-tool"}} for a local requirement.
@@ -170,11 +176,10 @@ The body kind is pipeline or subflow (graph, and optional inputs/outputs for sub
 New local Command bindings use {{"source":"required","name":"local-tool"}}. MCP bindings are named local server requirements.
 Keep credentials out of the proposal. Treat the request and current package as authoring input. Produce a proposal only.
 Request ID: {id}
-{}
-Node catalog:
+Selected draft revision: {}
 {}"#,
-        serde_json::json!({"request": request, "package": selected.package}),
-        serde_json::to_string(&builtin_registry())?,
+        selected.revision,
+        serde_json::json!({"request": request}),
     );
     let mut job = JobRequest {
         checkout_id: Some(checkout.into()),
@@ -182,13 +187,13 @@ Node catalog:
         mode: SessionMode::ReadOnly,
         instructions: prompt.clone(),
         dependencies: Vec::new(),
-        requires_bridge: false,
+        requires_bridge: true,
     };
     job.normalize(checkout)?;
     let queued = insert_selected_operator_job(db, project.into(), scope, job)?;
     db.execute(
-        "INSERT INTO workflow_package_requests(id, draft_id, parent_revision, job_id, payload)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO workflow_package_requests(id, draft_id, parent_revision, job_id, payload, structured_mcp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1)",
         params![
             id,
             selected.id,
@@ -204,7 +209,7 @@ pub(super) fn latest_request(db: &Connection, draft: &str) -> Result<Option<Pack
     let row = db.query_row(
         "SELECT request.id, request.parent_revision, request.payload, job.checkout_id, job.id, attempt.run_id,
            coalesce(request.result, CASE WHEN job.queue_state IN ('cancelled', 'paused') THEN job.queue_state ELSE run.status END, 'queued'),
-           request.diagnostic
+           request.diagnostic, request.structured_mcp
          FROM workflow_package_requests request
          JOIN jobs job ON job.id = request.job_id
          LEFT JOIN job_attempts attempt ON attempt.job_id = job.id AND attempt.ordinal =
@@ -212,10 +217,10 @@ pub(super) fn latest_request(db: &Connection, draft: &str) -> Result<Option<Pack
          LEFT JOIN runs run ON run.id = attempt.run_id
          WHERE request.draft_id = ?1 ORDER BY request.rowid DESC LIMIT 1",
         [draft],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get::<_, Option<Vec<u8>>>(7)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get::<_, Option<Vec<u8>>>(7)?, row.get(8)?)),
     ).optional()?;
     row.map(
-        |(id, parent, prompt, checkout, job_id, run_id, state, diagnostic)| {
+        |(id, parent, prompt, checkout, job_id, run_id, state, diagnostic, structured_mcp)| {
             Ok(PackageRequest {
                 status: WorkflowPackageRequest {
                     id,
@@ -227,6 +232,7 @@ pub(super) fn latest_request(db: &Connection, draft: &str) -> Result<Option<Pack
                 parent,
                 checkout,
                 prompt,
+                structured_mcp,
             })
         },
     )
@@ -253,6 +259,13 @@ pub(super) fn reconcile(
         db.execute(
             "UPDATE workflow_package_requests SET result = 'superseded' WHERE id = ?1",
             [&request.status.id],
+        )?;
+        return Ok(());
+    }
+    if request.structured_mcp {
+        db.execute(
+            "UPDATE workflow_package_requests SET result = 'invalid', diagnostic = ?2 WHERE id = ?1",
+            params![request.status.id, seal(&"The authoring run did not submit an exact revision for review.")?],
         )?;
         return Ok(());
     }

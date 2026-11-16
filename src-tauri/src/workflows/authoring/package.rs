@@ -11,6 +11,7 @@ use crate::{
 
 use super::{new_id, open, seal};
 
+pub(crate) mod mcp;
 mod model;
 mod publish;
 mod request;
@@ -266,14 +267,35 @@ fn persist_revision(
     run: Option<&str>,
     document: &PackageDocument,
 ) -> Result<String> {
+    let revision = insert_revision(db, draft, parent, run, document)?;
+    promote_revision(db, draft, parent, &revision)?;
+    Ok(revision)
+}
+
+fn insert_revision(
+    db: &Connection,
+    draft: &str,
+    parent: Option<&str>,
+    run: Option<&str>,
+    document: &PackageDocument,
+) -> Result<String> {
     let revision = new_id();
     db.execute(
         "INSERT INTO workflow_package_revisions VALUES (?1, ?2, ?3, ?4, ?5)",
         params![draft, revision, parent, run, seal(document)?],
     )?;
+    Ok(revision)
+}
+
+fn promote_revision(
+    db: &Connection,
+    draft: &str,
+    parent: Option<&str>,
+    revision: &str,
+) -> Result<()> {
     ensure!(db.execute("UPDATE workflow_package_drafts SET head_revision = ?3 WHERE id = ?1 AND head_revision IS ?2",
         params![draft, parent, revision])? == 1, "The package revision changed");
-    Ok(revision)
+    Ok(())
 }
 
 fn read_document(

@@ -1,3 +1,4 @@
+mod authoring;
 mod security;
 
 use std::{
@@ -41,6 +42,9 @@ use crate::{
     runtime_inspection::RuntimeInspection,
     store::Store,
     tasks::{ChecklistProgressError, ChecklistProgressReceipt, ChecklistProgressRequest},
+    workflows::authoring::package::mcp::{
+        ApplyOperations, AuthoringOutcome, ReadCatalog, SubmitForReview,
+    },
 };
 
 pub const HELPER_FLAG: &str = "--mcp-bridge";
@@ -54,6 +58,7 @@ pub(crate) const WAIT_FOR_JOBS: &str = "wait_for_jobs";
 pub(crate) const REPORT_GOAL_PROGRESS: &str = "report_goal_progress";
 const UPDATE_CHECKLIST_PROGRESS: &str = "update_checklist_progress";
 pub(crate) const REQUEST_PERMISSION: &str = "request_permission";
+pub(crate) use authoring::AUTHORING_TOOLS;
 pub(crate) const PERMISSION_PREFIX: &str = "omniagent-permission:";
 pub(crate) const VERSION: u8 = 1;
 const MAX_FRAME_BYTES: usize = 16 * 1024;
@@ -79,6 +84,8 @@ struct Ticket {
     credential: Credential,
     #[serde(default)]
     permission_prompt: bool,
+    #[serde(default)]
+    package_authoring: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -114,6 +121,9 @@ enum Operation {
     ListTools,
     InspectScope,
     InspectOmniagent,
+    AuthoringCatalog(ReadCatalog),
+    AuthoringApply(ApplyOperations),
+    AuthoringSubmit(SubmitForReview),
     SubmitJob(SubmitJob),
     GetJobStatus(JobStatusRequest),
     WaitForJobs(WaitForJobsRequest),
@@ -136,6 +146,8 @@ struct Request {
 enum Response {
     Scope(RunScope),
     Inspection(Box<RuntimeInspection>),
+    AuthoringCatalog(Value),
+    AuthoringOutcome(AuthoringOutcome),
     JobSubmitted {
         job_id: String,
     },
@@ -167,6 +179,7 @@ pub struct RunBridge {
     ticket_path: PathBuf,
     observed: Arc<AtomicU8>,
     permission_prompt: bool,
+    package_authoring: bool,
     _directory: TempDir,
 }
 
@@ -185,6 +198,8 @@ pub struct BridgeLaunch {
     pub args: [String; 2],
     #[serde(skip)]
     pub(crate) permission_prompt: bool,
+    #[serde(skip)]
+    pub(crate) package_authoring: bool,
 }
 
 impl BridgeLaunch {
@@ -206,11 +221,13 @@ impl RunBridge {
         let scope = active_scope(store, run_id)
             .await?
             .context("cannot bind an MCP bridge to an inactive run")?;
+        let package_authoring = store.authoring_tools_for_run(scope.clone()).await?;
         let ticket = Ticket {
             version: VERSION,
             pipe: format!("{PIPE_PREFIX}{}", Uuid::new_v4()),
             credential: *Uuid::new_v4().as_bytes(),
             permission_prompt,
+            package_authoring,
         };
         let endpoint = security::current_user_pipe(&ticket.pipe)?;
         let directory = tempfile::Builder::new()
@@ -234,6 +251,7 @@ impl RunBridge {
             ticket_path,
             observed,
             permission_prompt,
+            package_authoring,
             _directory: directory,
         })
     }
@@ -260,6 +278,7 @@ impl RunBridge {
                     .into(),
             ],
             permission_prompt: self.permission_prompt,
+            package_authoring: self.package_authoring,
         })
     }
 
@@ -320,6 +339,7 @@ async fn serve_pipe(
             let allowed = request.version == VERSION
                 && bool::from(request.credential.ct_eq(&ticket.credential));
             let (response, decision) = if allowed
+                && !ticket.package_authoring
                 && let Operation::ReportGoalProgress(report) = &request.operation
             {
                 let response = match store.record_goal_turn_report(scope.run_id.clone(), report.clone()).await {
@@ -329,6 +349,9 @@ async fn serve_pipe(
                 };
                 (response, None)
             } else if allowed
+                && (!ticket.package_authoring || matches!(&request.operation,
+                    Operation::ListTools | Operation::InspectScope | Operation::InspectOmniagent
+                    | Operation::AuthoringCatalog(_) | Operation::AuthoringApply(_) | Operation::AuthoringSubmit(_)))
                 && active_scope(&store, scope.run_id.clone()).await? == Some(scope.clone())
             {
                 match request.operation {
@@ -352,6 +375,21 @@ async fn serve_pipe(
                             }
                             Err(_) => (Response::Unavailable, None),
                         }
+                    }
+                    Operation::AuthoringCatalog(input) if ticket.package_authoring => {
+                        let response = store.read_authoring_catalog(scope.clone(), input).await
+                            .map(Response::AuthoringCatalog).unwrap_or(Response::Unavailable);
+                        (response, None)
+                    }
+                    Operation::AuthoringApply(input) if ticket.package_authoring => {
+                        let response = store.apply_authoring_operations(scope.clone(), input).await
+                            .map(Response::AuthoringOutcome).unwrap_or(Response::Unavailable);
+                        (response, None)
+                    }
+                    Operation::AuthoringSubmit(input) if ticket.package_authoring => {
+                        let response = store.submit_authoring_for_review(scope.clone(), input).await
+                            .map(Response::AuthoringOutcome).unwrap_or(Response::Unavailable);
+                        (response, None)
                     }
                     Operation::SubmitJob(input) => {
                         let response = match store
@@ -741,7 +779,10 @@ impl ServerHandler for StdioBridge {
                     }}).as_object().unwrap().clone(),
             ).with_annotations(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
         ];
-        if self.0.permission_prompt {
+        if self.0.package_authoring {
+            tools.truncate(2);
+            tools.extend(authoring::tools());
+        } else if self.0.permission_prompt {
             tools.push(Tool::new(
                 REQUEST_PERMISSION,
                 "Asks OmniAgent's user to decide whether to permit a Claude Code tool call.",
@@ -758,6 +799,9 @@ impl ServerHandler for StdioBridge {
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if AUTHORING_TOOLS.contains(&request.name.as_ref()) {
+            return authoring::call(&self.0, request).await;
+        }
         if request.name == UPDATE_CHECKLIST_PROGRESS {
             let update =
                 serde_json::from_value(Value::Object(request.arguments.unwrap_or_default()))

@@ -46,7 +46,7 @@ pub(super) async fn finish_background_authoring_job(
     let attempt = store
         .claim_next_job(AdmissionEnvironment {
             runner: scope.runner.clone(),
-            bridge_available: false,
+            bridge_available: true,
         })
         .await?
         .context("The authoring request did not reach the scheduler")?;

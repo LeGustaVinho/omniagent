@@ -12,8 +12,8 @@ use serde_json::{Map, Value, json};
 use crate::{
     customizations::{CustomizationKind, LaunchReview, ReviewState},
     mcp_bridge::{
-        BridgeLaunch, GET_JOB_STATUS, INSPECT_OMNIAGENT, INSPECT_SCOPE, REPORT_GOAL_PROGRESS,
-        REQUEST_PERMISSION, SERVER_NAME, SUBMIT_JOB, WAIT_FOR_JOBS,
+        AUTHORING_TOOLS, BridgeLaunch, GET_JOB_STATUS, INSPECT_OMNIAGENT, INSPECT_SCOPE,
+        REPORT_GOAL_PROGRESS, REQUEST_PERMISSION, SERVER_NAME, SUBMIT_JOB, WAIT_FOR_JOBS,
     },
     repository::CheckoutLayout,
     runner::Runner,
@@ -227,19 +227,12 @@ impl ScopedLaunch {
         let mut mcp = Map::new();
         if let Some(bridge) = bridge {
             mcp.insert(SERVER_NAME.into(), serde_json::to_value(bridge)?);
-            self.record_argument(
-                "--allowedTools",
-                [
-                    INSPECT_SCOPE,
-                    INSPECT_OMNIAGENT,
-                    SUBMIT_JOB,
-                    GET_JOB_STATUS,
-                    WAIT_FOR_JOBS,
-                    REPORT_GOAL_PROGRESS,
-                ]
+            let tools = bridge_tool_names(bridge)
+                .into_iter()
                 .map(|tool| format!("mcp__{SERVER_NAME}__{tool}"))
-                .join(","),
-            );
+                .collect::<Vec<_>>()
+                .join(",");
+            self.record_argument("--allowedTools", tools);
             if bridge.permission_prompt {
                 self.record_argument(
                     "--permission-prompt-tool",
@@ -367,19 +360,16 @@ impl ScopedLaunch {
         }
         let mut servers = toml::Table::new();
         if let Some(bridge) = bridge {
+            let tools = bridge_tool_names(bridge)
+                .into_iter()
+                .map(|tool| (tool.into(), json!({"approval_mode": "approve"})))
+                .collect::<Map<String, Value>>();
             servers.insert(
                 SERVER_NAME.into(),
                 toml::Value::try_from(json!({
                     "command": bridge.command,
                     "args": bridge.args,
-                    "tools": {
-                        INSPECT_SCOPE: {"approval_mode": "approve"},
-                        INSPECT_OMNIAGENT: {"approval_mode": "approve"},
-                        SUBMIT_JOB: {"approval_mode": "approve"},
-                        GET_JOB_STATUS: {"approval_mode": "approve"},
-                        WAIT_FOR_JOBS: {"approval_mode": "approve"},
-                        REPORT_GOAL_PROGRESS: {"approval_mode": "approve"},
-                    },
+                    "tools": tools,
                 }))?,
             );
         }
@@ -494,6 +484,21 @@ impl ScopedLaunch {
         });
         Ok(path)
     }
+}
+
+fn bridge_tool_names(bridge: &BridgeLaunch) -> Vec<&'static str> {
+    let mut tools = vec![INSPECT_SCOPE, INSPECT_OMNIAGENT];
+    if bridge.package_authoring {
+        tools.extend(AUTHORING_TOOLS);
+    } else {
+        tools.extend([
+            SUBMIT_JOB,
+            GET_JOB_STATUS,
+            WAIT_FOR_JOBS,
+            REPORT_GOAL_PROGRESS,
+        ]);
+    }
+    tools
 }
 
 fn at_least(version: &str, minimum: (u32, u32, u32)) -> bool {
