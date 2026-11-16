@@ -251,6 +251,8 @@ fn main() {
             conversation_runtime::conversation_attachment_content,
             conversation_runtime::conversation_dispatch_inventory,
             conversation_runtime::conversation_profile_evidence,
+            conversation_runtime::conversation_checklist_progress,
+            conversation_runtime::set_conversation_checklist_item_checked,
             ipc::fixture_input_evidence,
             ipc::subscribe_events,
             ipc::unsubscribe_events,

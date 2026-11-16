@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::{protection, store::Store};
 
+pub(super) mod progress;
 #[cfg(test)]
 mod tests;
 
@@ -186,22 +187,19 @@ impl Store {
         ensure!(!body.trim().is_empty(), "checklist item text is empty");
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let current = load_checklist_items(&tx, &project, &task, Some(&item), None)?
-                .pop().context("checklist item is unavailable in this work scope")?;
-            ensure!(current.revision == expected_revision, "the checklist item revision changed");
-            if current.body == body && current.checked == checked {
-                return Ok(current);
-            }
-            let revision = current.revision.checked_add(1).context("checklist item revisions exhausted")?;
-            let encrypted = protection::protect(body.as_bytes())?;
-            tx.execute(
-                "INSERT INTO project_checklist_item_revisions
-                 (project_id, task_id, item_id, revision, body, checked) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![project, task, item, revision, encrypted, checked],
+            let current = progress::item_at_expected_revision(
+                &tx,
+                &project,
+                &task,
+                &item,
+                expected_revision,
             )?;
+            let revised = revise_checklist_item(&tx, &project, &task, &current, body, checked)?;
+            progress::record_operator_check_change(&tx, &project, &task, &current, &revised)?;
             tx.commit()?;
-            Ok(ChecklistItem { revision, body, checked, ..current })
-        }).await
+            Ok(revised)
+        })
+        .await
     }
 
     pub async fn project_checklist_item_revision(
@@ -216,6 +214,35 @@ impl Store {
         })
         .await
     }
+}
+
+fn revise_checklist_item(
+    db: &Connection,
+    project: &str,
+    task: &str,
+    current: &ChecklistItem,
+    body: String,
+    checked: bool,
+) -> Result<ChecklistItem> {
+    if current.body == body && current.checked == checked {
+        return Ok(current.clone());
+    }
+    let revision = current
+        .revision
+        .checked_add(1)
+        .context("checklist item revisions exhausted")?;
+    let encrypted = protection::protect(body.as_bytes())?;
+    db.execute(
+        "INSERT INTO project_checklist_item_revisions
+         (project_id, task_id, item_id, revision, body, checked) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![project, task, current.id, revision, encrypted, checked],
+    )?;
+    Ok(ChecklistItem {
+        revision,
+        body,
+        checked,
+        ..current.clone()
+    })
 }
 
 fn effective_mode(db: &Connection, project: &str, task: &str) -> Result<ChecklistExecutionMode> {

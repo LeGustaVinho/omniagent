@@ -1,9 +1,11 @@
 use std::{path::Path, process::Command};
 
 use anyhow::{Context, Result, ensure};
+use serde_json::json;
 
 use crate::{
     conversations::SessionScope,
+    dispatch::{ContextSnapshot, Delivery},
     jobs::{
         AdmissionBlocker, AdmissionEnvironment, Job, JobPermission, JobRequest, JobRole, JobRule,
         JobWorkspace, PipelineAgentInput, PipelineDispatch, PipelineNodeKind, RecoveryAction,
@@ -14,7 +16,10 @@ use crate::{
     runner::{DirectWindowsRunner, Runner},
     runs::RunStatus,
     store::Store,
-    tasks::{ChecklistExecutionMode as Mode, DescriptionOwner, TaskDetails, TaskRunScope},
+    tasks::{
+        ChecklistExecutionMode as Mode, ChecklistProgressActor, ChecklistProgressAvailability,
+        ChecklistProgressRequest, DescriptionOwner, TaskDetails, TaskRunScope,
+    },
 };
 
 fn git(root: &Path, args: &[&str]) -> Result<()> {
@@ -513,5 +518,290 @@ async fn checklist_write_waits_for_the_current_worktree_release() -> Result<()> 
             reason: ReleaseBlocker::StalePlan
         }
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn checklist_progress_authenticates_and_preserves_scoped_receipts_in_both_modes() -> Result<()>
+{
+    use crate::{
+        dispatch::EventSource,
+        mcp_bridge::{RunBridge, exchange_test_checklist_progress},
+        providers::{
+            Capability, ProviderEvent, ProviderEventData,
+            capabilities::{
+                Availability, CapabilityAssessment, CapabilityDescriptor, CapabilityScope,
+                CapabilitySubject, DeclaredSource, EvidenceBoundary, ObservedResult,
+                ResolvedCapability,
+            },
+        },
+    };
+
+    for mode in [Mode::TrackProgress, Mode::RunByItem] {
+        let temp = tempfile::tempdir()?;
+        let database = temp.path().join("store.sqlite3");
+        let root = temp.path().join("repo");
+        let store = Store::open(database.clone())?;
+        let checkout = register(&store, &root).await?;
+        let project = checkout.project_id;
+        let task = store
+            .create_project_task(project.clone(), "Review API".into())
+            .await?;
+        store
+            .ensure_project_checklist(project.clone(), task.id.clone())
+            .await?;
+        let item = store
+            .append_project_checklist_item(project.clone(), task.id.clone(), "Inspect query".into())
+            .await?;
+        let sibling = store
+            .append_project_checklist_item(
+                project.clone(),
+                task.id.clone(),
+                "Inspect response".into(),
+            )
+            .await?;
+        store
+            .set_project_checklist_mode(project.clone(), mode)
+            .await?;
+
+        let profile = scope(&root, SessionMode::ReadOnly)?;
+        let binding = pipeline(&store, &project).await?;
+        store
+            .submit_pipeline_checklist_job(
+                binding,
+                profile.clone(),
+                request(&checkout.checkout_id, &task.id, profile.mode),
+                input((mode == Mode::RunByItem).then(|| item.id.clone())),
+            )
+            .await?;
+        let attempt = store
+            .claim_next_job(environment())
+            .await?
+            .context("missing checklist run")?;
+        let run = attempt.run.id;
+        assert_eq!(
+            store
+                .run_checklist_progress(project.clone(), run.clone())
+                .await?
+                .unwrap()
+                .availability,
+            ChecklistProgressAvailability::PendingDispatch,
+        );
+        store.mark_agent_running(run.clone()).await?;
+        let bridge = RunBridge::start(&store, run.clone()).await?;
+        let report =
+            |request: &str, id: &str, revision: i64, checked: bool| ChecklistProgressRequest {
+                request_id: request.into(),
+                item_id: id.into(),
+                expected_revision: revision,
+                checked,
+            };
+        let update = |request| exchange_test_checklist_progress(&bridge, request, true);
+        assert_eq!(
+            update(report("early", &item.id, 1, true)).await?["status"],
+            "checklist_progress_rejected"
+        );
+        let pending = store
+            .run_checklist_progress(project.clone(), run.clone())
+            .await?
+            .unwrap();
+        assert_eq!(
+            pending.availability,
+            ChecklistProgressAvailability::PendingDispatch
+        );
+        assert_eq!(
+            pending.selected_item_id,
+            (mode == Mode::RunByItem).then(|| item.id.clone())
+        );
+
+        let mut assessment = CapabilityAssessment {
+            version: 2,
+            scope: CapabilityScope::from_dispatch(
+                &profile,
+                checkout.checkout_id,
+                None,
+                None,
+                serde_json::from_value(json!({"detected":[],"unresolved":[]}))?,
+                None,
+                None,
+            ),
+            entries: vec![ResolvedCapability {
+                descriptor: CapabilityDescriptor {
+                    subject: CapabilitySubject::Protocol {
+                        capability: Capability::RunScopedMcp,
+                    },
+                    source: DeclaredSource::Adapter,
+                    availability: Availability::Unavailable,
+                    blocker: None,
+                    observed: None,
+                    boundary: EvidenceBoundary::ExactCheckout,
+                },
+                evidence: None,
+            }],
+        };
+        let context = store.task_dispatch_context(run.clone()).await?.unwrap();
+        let snapshot: ContextSnapshot = serde_json::from_value(json!({
+            "version": 1, "contextId": attempt.context_id, "scope": attempt.scope,
+            "baseCommit": null, "submittedMessages": attempt.input, "nativeHistory": {"mode": "fresh"},
+            "taskContext": context, "capabilities": assessment,
+        }))?;
+        let dispatch = store
+            .prepare_dispatch(run.clone(), snapshot, vec![b"fixture".to_vec()])
+            .await?;
+        assert_eq!(
+            update(report("prepared", &item.id, 1, true)).await?["status"],
+            "checklist_progress_rejected"
+        );
+        store
+            .settle_dispatch(dispatch.clone(), Delivery::Submitted)
+            .await?;
+        let advisory = store
+            .run_checklist_progress(project.clone(), run.clone())
+            .await?
+            .unwrap();
+        assert_eq!(
+            advisory.availability,
+            ChecklistProgressAvailability::BridgeUnavailable
+        );
+        assert_eq!(
+            advisory.items.len(),
+            if mode == Mode::RunByItem { 1 } else { 2 }
+        );
+        assert!(
+            store
+                .run_checklist_progress("another-project".into(), run.clone())
+                .await?
+                .is_none()
+        );
+
+        assessment.entries[0].descriptor.availability = Availability::Available;
+        assessment.entries[0].descriptor.observed = Some(ObservedResult::Succeeded);
+        store
+            .record_agent_observation(
+                run.clone(),
+                EventSource::Application,
+                ProviderEvent {
+                    location: Default::default(),
+                    data: ProviderEventData::CapabilityAssessmentUpdated {
+                        assessment: Box::new(assessment),
+                    },
+                },
+            )
+            .await?;
+        assert_eq!(
+            store
+                .run_checklist_progress(project.clone(), run.clone())
+                .await?
+                .unwrap()
+                .availability,
+            ChecklistProgressAvailability::Ready,
+        );
+
+        let invalid =
+            exchange_test_checklist_progress(&bridge, report("bad-key", &item.id, 1, true), false)
+                .await?;
+        assert_eq!(invalid["status"], "unavailable");
+        let later_item = store
+            .append_project_checklist_item(
+                project.clone(),
+                task.id.clone(),
+                "Added after dispatch".into(),
+            )
+            .await?;
+        assert_eq!(
+            update(report("new-item", &later_item.id, 1, true)).await?["status"],
+            "checklist_progress_rejected"
+        );
+        if mode == Mode::RunByItem {
+            assert_eq!(
+                update(report("sibling", &sibling.id, 1, true)).await?["status"],
+                "checklist_progress_rejected"
+            );
+        } else {
+            assert_eq!(
+                update(report("sibling", &sibling.id, 1, true)).await?["status"],
+                "checklist_progress_recorded"
+            );
+        }
+
+        let accepted = update(report("first", &item.id, 1, true)).await?;
+        assert_eq!(
+            accepted,
+            json!({"status":"checklist_progress_recorded", "payload":{"itemId":item.id,"revision":2,"checked":true}})
+        );
+        assert_eq!(update(report("first", &item.id, 1, true)).await?, accepted);
+        assert_eq!(
+            update(report("first", &item.id, 1, false)).await?["status"],
+            "checklist_progress_request_conflict"
+        );
+        let reopened = store
+            .set_project_checklist_item_checked(
+                project.clone(),
+                task.id.clone(),
+                item.id.clone(),
+                2,
+                false,
+            )
+            .await?;
+        assert_eq!(reopened.revision, 3);
+        assert!(!reopened.checked);
+        let stale = update(report("after-operator", &item.id, 2, false)).await?;
+        assert_eq!(
+            stale,
+            json!({"status":"checklist_progress_revision_conflict", "payload":{"current_revision":3}})
+        );
+        assert_eq!(update(report("first", &item.id, 1, true)).await?, accepted);
+        let manually_checked = store
+            .set_project_checklist_item_checked(
+                project.clone(),
+                task.id.clone(),
+                item.id.clone(),
+                3,
+                true,
+            )
+            .await?;
+        assert_eq!(manually_checked.revision, 4);
+        assert!(manually_checked.checked);
+        store
+            .finish_agent_attempt(run.clone(), RunStatus::Succeeded, None)
+            .await?;
+        assert_eq!(
+            update(report("late", &item.id, 4, false)).await?["status"],
+            "unavailable"
+        );
+
+        drop(bridge);
+        drop(store);
+        let store = Store::open(database)?;
+        let history = store
+            .checklist_progress_history(project.clone(), task.id.clone(), item.id.clone())
+            .await?;
+        assert_eq!(history.len(), 3);
+        assert_eq!(
+            history[0].actor,
+            ChecklistProgressActor::Agent {
+                run_id: run.clone(),
+                dispatch_id: dispatch,
+                request_id: "first".into()
+            }
+        );
+        assert_eq!(history[0].before_revision, 1);
+        assert_eq!(history[0].after.revision, 2);
+        assert!(
+            history[1..]
+                .iter()
+                .all(|event| event.actor == ChecklistProgressActor::Operator)
+        );
+        assert!(!history[1].after.checked);
+        let current = store
+            .project_checklist_item_revision(project.clone(), task.id, item.id, 4)
+            .await?
+            .unwrap();
+        assert!(current.checked);
+        assert_eq!(current.body, "Inspect query");
+        let saved = store.run_checklist_progress(project, run).await?.unwrap();
+        assert_eq!(saved.availability, ChecklistProgressAvailability::Inactive);
+        assert_eq!(saved.items[0].revision, 1);
+    }
     Ok(())
 }

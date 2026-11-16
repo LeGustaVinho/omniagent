@@ -40,6 +40,7 @@ use crate::{
     runs,
     runtime_inspection::RuntimeInspection,
     store::Store,
+    tasks::{ChecklistProgressError, ChecklistProgressReceipt, ChecklistProgressRequest},
 };
 
 pub const HELPER_FLAG: &str = "--mcp-bridge";
@@ -51,6 +52,7 @@ pub(crate) const SUBMIT_JOB: &str = "submit_job";
 pub(crate) const GET_JOB_STATUS: &str = "get_job_status";
 pub(crate) const WAIT_FOR_JOBS: &str = "wait_for_jobs";
 pub(crate) const REPORT_GOAL_PROGRESS: &str = "report_goal_progress";
+const UPDATE_CHECKLIST_PROGRESS: &str = "update_checklist_progress";
 pub(crate) const REQUEST_PERMISSION: &str = "request_permission";
 pub(crate) const PERMISSION_PREFIX: &str = "omniagent-permission:";
 pub(crate) const VERSION: u8 = 1;
@@ -116,6 +118,7 @@ enum Operation {
     GetJobStatus(JobStatusRequest),
     WaitForJobs(WaitForJobsRequest),
     ReportGoalProgress(GoalTurnReport),
+    UpdateChecklistProgress(ChecklistProgressRequest),
     RequestPermission(PermissionPrompt),
     PollPermission { id: String },
 }
@@ -146,6 +149,12 @@ enum Response {
     GoalProgressRecorded,
     GoalProgressArchived,
     GoalProgressRejected,
+    ChecklistProgressRecorded(ChecklistProgressReceipt),
+    ChecklistProgressRevisionConflict {
+        current_revision: i64,
+    },
+    ChecklistProgressRequestConflict,
+    ChecklistProgressRejected,
     PermissionRequested(String),
     PermissionPending,
     PermissionDecided(ApprovalDecision),
@@ -386,6 +395,19 @@ async fn serve_pipe(
                         };
                         (response, None)
                     }
+                    Operation::UpdateChecklistProgress(input) => {
+                        let response = match store.record_agent_checklist_progress(scope.run_id.clone(), input).await {
+                            Ok(receipt) => Response::ChecklistProgressRecorded(receipt),
+                            Err(error) => match error.downcast_ref::<ChecklistProgressError>() {
+                                Some(ChecklistProgressError::RevisionConflict { current_revision }) => {
+                                    Response::ChecklistProgressRevisionConflict { current_revision: *current_revision }
+                                }
+                                Some(ChecklistProgressError::RequestConflict) => Response::ChecklistProgressRequestConflict,
+                                _ => Response::ChecklistProgressRejected,
+                            },
+                        };
+                        (response, None)
+                    }
                     Operation::RequestPermission(prompt) if ticket.permission_prompt => {
                         (record_permission(&store, &scope, prompt).await?, None)
                     }
@@ -489,6 +511,21 @@ async fn exchange(ticket: &Ticket, operation: Operation) -> Result<Response> {
         Ok(response)
     })
     .await?
+}
+
+#[cfg(test)]
+pub(crate) async fn exchange_test_checklist_progress(
+    bridge: &RunBridge,
+    request: ChecklistProgressRequest,
+    authenticate: bool,
+) -> Result<Value> {
+    let mut ticket = read_ticket(bridge.ticket_path())?;
+    if !authenticate {
+        ticket.credential[0] ^= 1;
+    }
+    Ok(serde_json::to_value(
+        exchange(&ticket, Operation::UpdateChecklistProgress(request)).await?,
+    )?)
 }
 
 async fn read_frame<T: DeserializeOwned>(io: &mut (impl AsyncRead + Unpin)) -> Result<T> {
@@ -636,6 +673,17 @@ impl ServerHandler for StdioBridge {
                         "action":{"enum":["continue","review","blocked"]}
                     }}).as_object().unwrap().clone(),
             ).with_annotations(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
+            Tool::new(
+                UPDATE_CHECKLIST_PROGRESS,
+                "Checks or reopens a checklist item assigned to this dispatched attempt. Use the item's revision from the supplied checklist or the most recent update receipt. Reuse the same requestId when retrying the same update.",
+                json!({"type":"object", "required":["requestId","itemId","expectedRevision","checked"],
+                    "additionalProperties":false, "properties":{
+                        "requestId":{"type":"string","minLength":1,"maxLength":256},
+                        "itemId":{"type":"string","minLength":1},
+                        "expectedRevision":{"type":"integer","minimum":1},
+                        "checked":{"type":"boolean"}
+                    }}).as_object().unwrap().clone(),
+            ).with_annotations(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
         ];
         if self.0.permission_prompt {
             tools.push(Tool::new(
@@ -654,6 +702,38 @@ impl ServerHandler for StdioBridge {
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if request.name == UPDATE_CHECKLIST_PROGRESS {
+            let update =
+                serde_json::from_value(Value::Object(request.arguments.unwrap_or_default()))
+                    .map_err(|_| {
+                        ErrorData::invalid_params("Invalid checklist progress update", None)
+                    })?;
+            return match exchange(&self.0, Operation::UpdateChecklistProgress(update))
+                .await
+                .map_err(|_| bridge_unavailable())?
+            {
+                Response::ChecklistProgressRecorded(receipt) => {
+                    Ok(CallToolResult::structured(json!(receipt)).into())
+                }
+                Response::ChecklistProgressRevisionConflict { current_revision } => {
+                    Err(ErrorData::invalid_params(
+                        "The checklist item changed",
+                        Some(
+                            json!({"kind":"revision_conflict", "currentRevision":current_revision}),
+                        ),
+                    ))
+                }
+                Response::ChecklistProgressRequestConflict => Err(ErrorData::invalid_params(
+                    "This run already used that request ID for a different checklist update",
+                    Some(json!({"kind":"request_conflict"})),
+                )),
+                Response::ChecklistProgressRejected => Err(ErrorData::invalid_params(
+                    "This active dispatch cannot update that checklist item",
+                    None,
+                )),
+                _ => Err(bridge_unavailable()),
+            };
+        }
         if request.name == REPORT_GOAL_PROGRESS {
             let report =
                 serde_json::from_value(Value::Object(request.arguments.unwrap_or_default()))

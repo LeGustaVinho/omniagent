@@ -632,3 +632,51 @@ pub async fn conversation_profile_evidence(
         .await
         .map_err(ui_error)
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationChecklistProgress {
+    access: omniagent::tasks::ChecklistProgressAccess,
+    checklist: omniagent::tasks::TaskChecklist,
+}
+
+#[tauri::command]
+pub async fn conversation_checklist_progress(
+    store: State<'_, Store>,
+    project_id: String,
+    run_id: String,
+) -> Result<Option<ConversationChecklistProgress>, String> {
+    let Some(access) = store
+        .run_checklist_progress(project_id.clone(), run_id)
+        .await
+        .map_err(ui_error)?
+    else {
+        return Ok(None);
+    };
+    let checklist = store
+        .project_checklist(project_id, access.task_id.clone())
+        .await
+        .map_err(ui_error)?;
+    Ok(checklist.map(|checklist| ConversationChecklistProgress { access, checklist }))
+}
+
+#[tauri::command]
+pub async fn set_conversation_checklist_item_checked(
+    store: State<'_, Store>,
+    project_id: String,
+    task_id: String,
+    item_id: String,
+    expected_revision: i64,
+    checked: bool,
+) -> Result<omniagent::tasks::ChecklistProgressReceipt, String> {
+    store
+        .set_project_checklist_item_checked(
+            project_id,
+            task_id,
+            item_id,
+            expected_revision,
+            checked,
+        )
+        .await
+        .map_err(ui_error)
+}

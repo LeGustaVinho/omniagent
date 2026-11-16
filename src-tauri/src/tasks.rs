@@ -12,6 +12,11 @@ pub use activity::{
     PlannedAssignment, TaskDetails, TaskRun, TaskRunRole, TaskRunScope, TaskWorkflowState,
 };
 pub(crate) use checklists::bind_checklist_job_mode;
+pub(crate) use checklists::progress::ChecklistProgressRequest;
+pub use checklists::progress::{
+    ChecklistProgressAccess, ChecklistProgressActor, ChecklistProgressAvailability,
+    ChecklistProgressError, ChecklistProgressReceipt, ChecklistProgressRecord,
+};
 pub use checklists::{ChecklistExecutionMode, ChecklistItem, TaskChecklist};
 pub use descriptions::{
     DescriptionOwner, DescriptionRevision, TaskDirectWork, TaskDispatchContext, WorkDescriptions,

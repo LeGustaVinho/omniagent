@@ -6,6 +6,7 @@ import type { RunRecord } from "@/bindings/RunRecord";
 import type { SubagentAuditGap } from "@/bindings/SubagentAuditGap";
 import { Button } from "@/components/ui/button";
 import { ConversationChildren, recordChildActivity, type ChildActivity, type ChildLocation, type Delegation } from "@/conversation-children";
+import { ConversationChecklistProgress } from "@/conversation-checklist-progress";
 import { ConversationDeliveries, type ConversationInput } from "@/conversation-deliveries";
 import { ConversationInventory } from "@/conversation-inventory";
 import { ConversationProfile } from "@/conversation-profile";
@@ -255,6 +256,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
         </>}
       </dl>
       {projection && <ConversationChildren delegation={projection.delegation} />}
+      <ConversationChecklistProgress projectId={run.projectId} runId={run.id} live={live} />
       {Boolean(projection?.auditGaps.length) && <section aria-label="Subagent audit gaps" className="grid gap-2">
         <h2 className="text-sm font-medium">Subagent audit gaps</h2>
         {projection?.auditGaps.map((gap) => <div key={gap.source} className="grid gap-1 text-xs text-muted-foreground">
