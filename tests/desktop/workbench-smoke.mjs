@@ -874,7 +874,7 @@ async function verifyJobPolicy(browser, application, scratch) {
   }
 }
 
-test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => {
+async function copyTestApplication(t) {
   assert.equal(process.platform, "win32");
   const root = await realpath(tmpdir());
   const scratch = await mkdtemp(join(root, "omniagent-webdriver-"));
@@ -884,6 +884,34 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
   });
   const application = join(scratch, "omniagent.exe");
   await copyFile(resolve(process.env.OMNIAGENT_TEST_APP ?? "src-tauri/target/debug/omniagent.exe"), application);
+  return { application, scratch };
+}
+
+function startTestDriver() {
+  const args = ["--port", String(port), "--native-port", String(port + 1)];
+  if (process.env.OMNIAGENT_EDGE_DRIVER) args.push("--native-driver", process.env.OMNIAGENT_EDGE_DRIVER);
+  return spawn(process.env.OMNIAGENT_TAURI_DRIVER ?? "tauri-driver", args, {
+    windowsHide: true, stdio: "ignore",
+  });
+}
+
+async function connectTestDriver(driver, application) {
+  await Promise.race([
+    waitForDriver(driver),
+    new Promise((_, reject) => driver.once("error", reject)),
+  ]);
+  const browser = await startSession(application);
+  try {
+    assert.equal(await invoke(browser, "plugin:app|identifier"), identifier);
+  } catch (error) {
+    await browser.deleteSession().catch(() => undefined);
+    throw error;
+  }
+  return browser;
+}
+
+test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Repositório com espaço");
   const linked = join(scratch, "Árvore linked");
   git(scratch, "init", "-q", repo);
@@ -900,19 +928,10 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
   }));
   await writeFile(join(repo, ".mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: "node", args: ["./scripts/mcp.js"] } } }));
 
-  const args = ["--port", String(port), "--native-port", String(port + 1)];
-  if (process.env.OMNIAGENT_EDGE_DRIVER) args.push("--native-driver", process.env.OMNIAGENT_EDGE_DRIVER);
-  const driver = spawn(process.env.OMNIAGENT_TAURI_DRIVER ?? "tauri-driver", args, {
-    windowsHide: true, stdio: "ignore",
-  });
+  const driver = startTestDriver();
   let browser;
   try {
-    await Promise.race([
-      waitForDriver(driver),
-      new Promise((_, reject) => driver.once("error", reject)),
-    ]);
-    browser = await startSession(application);
-    assert.equal(await invoke(browser, "plugin:app|identifier"), identifier);
+    browser = await connectTestDriver(driver, application);
     await browser.$("button=Open repository").waitForDisplayed();
     await assert.rejects(invoke(browser, "register_project", { directory: scratch }), /git repository/i);
     const main = await invoke(browser, "register_project", { directory: repo });
@@ -1329,6 +1348,135 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     }
     throw error;
   } finally {
+    try {
+      await browser?.deleteSession();
+    } finally {
+      driver.kill();
+    }
+  }
+});
+
+test("recovers unsent chat and dirty source after a Windows desktop crash and retains deleted history links", { timeout: 120_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Recovery checkout");
+  const path = "recovery-source.ts";
+  const original = "const original_source = true;";
+  const edited = "const recovered_editor_buffer = true;";
+  git(scratch, "init", "-q", repo);
+  await writeFile(join(repo, path), original);
+  git(repo, "add", path);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-q", "-m", "Source fixture");
+
+  const driver = startTestDriver();
+  let browser;
+  let previousCheckout;
+  let profile;
+  try {
+    browser = await connectTestDriver(driver, application);
+    previousCheckout = await invoke(browser, "active_checkout");
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    profile = (await invoke(browser, "cli_executables")).find(({ provider }) => provider === "codex");
+    assert.ok(profile);
+    await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
+    const fixture = (await invoke(browser, "conversation_models", { provider: "codex" }))
+      .find(({ option }) => option.selectable && option.selection.modelId === "desktop-fixture");
+    assert.ok(fixture);
+    const title = "Desktop recovery acceptance";
+    const conversation = await invoke(browser, "create_conversation", { checkoutId: checkout.checkoutId, title });
+    const scope = { conversationId: conversation.id };
+    const prompt = "Complete desktop slot probe";
+    await invoke(browser, "save_conversation_draft", { ...scope, text: prompt });
+    await invoke(browser, "start_conversation_turn", { ...scope, text: prompt, mode: "read_only", selection: fixture.option.selection });
+    let run;
+    try {
+      await browser.waitUntil(async () => {
+        run = await invoke(browser, "latest_conversation_run", scope);
+        return run?.status === "succeeded";
+      }, { timeout: 10_000 });
+    } catch (error) {
+      const job = await invoke(browser, "latest_conversation_job", scope);
+      throw new Error(`The conversation fixture did not settle (${run?.status ?? "no attempt"}, ${JSON.stringify(job?.blockers)})`, { cause: error });
+    }
+    const recorded = (await invoke(browser, "conversation_history", scope)).messages.find(({ role }) => role === "user");
+    assert.equal(recorded?.text, prompt);
+    const attempt = { ...scope, runId: run.id };
+    const inventory = await invoke(browser, "conversation_dispatch_inventory", attempt);
+    assert.ok(inventory?.dispatchId);
+    assert.ok((await invoke(browser, "conversation_input", attempt)).frames.some((frame) => frame.includes(prompt)));
+
+    const openChat = async () => {
+      await chooseConversations(browser);
+      await click(browser, `button[aria-label="${title}"]`);
+      const panel = browser.$(`section[aria-label="${title}"]`);
+      const draft = panel.$(`textarea[id="draft-${conversation.id}"]`);
+      await draft.waitForEnabled();
+      return { panel, draft };
+    };
+    const unsent = "Keep the next chat message through a Windows crash.";
+    const firstChat = await openChat();
+    await firstChat.draft.setValue(unsent);
+    await firstChat.panel.$("p=Draft saved").waitForDisplayed();
+
+    const openSource = async () => {
+      await click(browser, 'button[aria-label="IDE"]');
+      const ide = browser.$('section[aria-label="IDE workspace"]');
+      const text = ide.$(".code-editor .view-lines");
+      if (!(await text.isDisplayed())) await click(ide, `button=${path}`);
+      await text.waitForDisplayed();
+      return { ide, text };
+    };
+    const { text } = await openSource();
+    await text.click();
+    await browser.keys(["Control", "a"]);
+    await browser.keys(edited);
+    const source = { checkoutId: checkout.checkoutId, path };
+    await browser.waitUntil(async () => (await invoke(browser, "read_repository_source_draft", source))?.markdown === edited,
+      { timeout: 10_000, timeoutMsg: "The source editor did not persist its dirty buffer" });
+    assert.equal(await readFile(join(repo, path), "utf8"), original);
+    const sourceDraft = await invoke(browser, "read_repository_source_draft", source);
+
+    killTestApplication(application);
+    await browser.deleteSession().catch(() => undefined);
+    browser = await startSession(application);
+    assert.equal((await invoke(browser, "active_checkout"))?.checkoutId, checkout.checkoutId);
+    const recovered = await openSource();
+    assert.match(await recovered.text.getText(), /recovered_editor_buffer/);
+    assert.match(await recovered.ide.$(".ide-statusbar").getText(), /Unsaved changes/);
+    assert.deepEqual(await invoke(browser, "read_repository_source_draft", source), sourceDraft);
+    assert.equal(await readFile(join(repo, path), "utf8"), original);
+
+    const chat = await openChat();
+    assert.equal(await chat.draft.getValue(), unsent);
+    assert.deepEqual((await invoke(browser, "conversation_history", scope)).messages.filter(({ role }) => role === "user"), [recorded]);
+    await click(chat.panel, 'button[title="Conversation history controls"]');
+    const history = browser.$('.conv-dialog[role="dialog"]');
+    await click(history, "summary=Delete a revision or diff");
+    await history.$('.//label[contains(., "History item")]/select').selectByAttribute("value", `message:${recorded.revisionId}`);
+    await history.$('.//label[contains(., "Scope")]/select').selectByAttribute("value", "with_derived_copies");
+    await click(history, "button=Review deletion impact");
+    const impact = history.$('[aria-label="Deletion impact"]');
+    await impact.waitForDisplayed();
+    assert.ok((await impact.getText()).includes(inventory.dispatchId));
+    await click(history, "button=Confirm deletion");
+    await history.$("p=History payload deleted.").waitForDisplayed();
+    await browser.keys("Escape");
+    await history.waitForExist({ reverse: true });
+
+    assert.deepEqual((await invoke(browser, "conversation_history", scope)).messages.find(({ revisionId }) => revisionId === recorded.revisionId),
+      { ...recorded, text: "" });
+    assert.equal(await chat.draft.getValue(), unsent);
+    assert.equal((await invoke(browser, "conversation_dispatch_inventory", attempt)).dispatchId, inventory.dispatchId);
+    const input = await invoke(browser, "conversation_input", attempt);
+    assert.equal(input.historyPayloadDeleted, true);
+    assert.equal(input.frames.some((frame) => frame.includes(prompt)), false);
+    await click(chat.panel, "button=Activity");
+    await click(browser, "button=Exact input");
+    await browser.$("p=Exact input is unavailable after a history deletion.").waitForDisplayed();
+  } finally {
+    if (profile) await invoke(browser, "set_cli_executable", { provider: "codex", executable: profile.executable }).catch(() => undefined);
+    if (previousCheckout) await invoke(browser, "select_active_checkout", { checkoutId: previousCheckout.checkoutId }).catch(() => undefined);
     try {
       await browser?.deleteSession();
     } finally {
