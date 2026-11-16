@@ -677,3 +677,6 @@ pub(super) fn apply_projection(
     history.insert(0, overlay.seed());
     history
 }
+
+#[cfg(test)]
+mod tests;
