@@ -5,7 +5,7 @@ use omniagent::{
     store::Store,
     workflows::{
         WorkflowGraph, WorkflowRevision,
-        authoring::{AuthoringBase, AuthoringDraft},
+        authoring::{AuthoringBase, AuthoringDraft, WorkflowCanvasEdit},
     },
 };
 use tauri::State;
@@ -81,9 +81,10 @@ pub async fn save_workflow_authoring_draft(
     draft_id: String,
     selected_revision: String,
     graph: WorkflowGraph,
+    canvas: Option<WorkflowCanvasEdit>,
 ) -> Result<AuthoringDraft, String> {
     store
-        .save_workflow_authoring_draft(project_id, draft_id, selected_revision, graph)
+        .save_workflow_authoring_canvas(project_id, draft_id, selected_revision, graph, canvas)
         .await
         .map_err(report)
 }

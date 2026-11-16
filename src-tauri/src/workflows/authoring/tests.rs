@@ -175,7 +175,7 @@ async fn authoring_seals_chat_base_and_feedback_revisions_without_updating_publi
     .await?;
 
     drop(store);
-    let store = Store::open(database)?;
+    let store = Store::open(database.clone())?;
     assert_eq!(
         store.conversation_draft(conversation.id.clone()).await?,
         "Ordinary unsent chat"
@@ -214,15 +214,57 @@ async fn authoring_seals_chat_base_and_feedback_revisions_without_updating_publi
     );
 
     let revised = store
-        .save_workflow_authoring_draft(
+        .save_workflow_authoring_canvas(
             repo.project_id.clone(),
             draft.id.clone(),
             candidate.id.clone(),
             graph("Direct editor revision"),
+            Some(serde_json::from_value(serde_json::json!({
+                "layout": { "start": { "x": 150, "y": -33 } },
+                "updateDefinitions": {}
+            }))?),
         )
         .await?;
     let editor_revision = revised.head.as_ref().unwrap();
     assert_ne!(editor_revision.id, candidate.id);
+    assert!(
+        store
+            .save_workflow_authoring_draft(
+                repo.project_id.clone(),
+                draft.id.clone(),
+                candidate.id.clone(),
+                graph("Stale revision")
+            )
+            .await
+            .is_err()
+    );
+    drop(store);
+    let store = Store::open(database)?;
+    let restored = store
+        .inspect_workflow_authoring(repo.project_id.clone(), draft.id.clone())
+        .await?;
+    let restored = restored
+        .head
+        .context("missing canvas revision after restart")?;
+    assert_eq!(restored.id, editor_revision.id);
+    assert_eq!(
+        serde_json::to_value(&restored.layout)?,
+        serde_json::json!({ "start": { "x": 150.0, "y": -33.0 } })
+    );
+    assert_eq!(restored.definitions, editor_revision.definitions);
+    let mine = store
+        .project_workflow_graph_drafts(repo.project_id.clone())
+        .await?;
+    assert_eq!(
+        serde_json::to_value(&mine[0])?["name"],
+        "Direct editor revision"
+    );
+    assert!(
+        store
+            .project_workflow_graph_drafts("another-project".into())
+            .await?
+            .is_empty()
+    );
     let next = store
         .request_workflow_authoring_changes(
             repo.project_id.clone(),

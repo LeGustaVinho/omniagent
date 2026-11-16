@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
@@ -13,12 +15,16 @@ use crate::{
 };
 
 use super::{
-    WorkflowDefinition, WorkflowGraph, WorkflowRevision, builtin_registry, compile,
+    NodeDefinition, WorkflowDefinition, WorkflowGraph, WorkflowRevision, builtin_registry, compile,
     runtime::load_definition,
 };
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_GRAPH_BYTES: usize = 48 * 1024;
+
+mod editor;
+use editor::{DraftDocument, ProtectedDraft};
+pub use editor::{ProjectWorkflowDraft, WorkflowCanvasEdit, WorkflowNodePosition};
 
 #[cfg(test)]
 mod tests;
@@ -46,6 +52,18 @@ struct DraftRevision {
     id: String,
     run_id: Option<String>,
     graph: WorkflowGraph,
+    layout: BTreeMap<String, WorkflowNodePosition>,
+    definitions: BTreeMap<String, NodeDefinition>,
+}
+
+impl DraftRevision {
+    fn into_document(self) -> DraftDocument {
+        DraftDocument {
+            graph: self.graph,
+            layout: self.layout,
+            definitions: self.definitions,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -125,11 +143,7 @@ impl Store {
                 params![id, draft_scope.project, draft_scope.checkout, draft_scope.conversation, draft_scope.workflow, draft_scope.base],
             )?;
             if let Some(definition) = pinned {
-                save_revision(&tx, &id, None, None, None, WorkflowGraph {
-                    name: definition.name,
-                    nodes: definition.nodes.into_iter().map(|node| node.instance).collect(),
-                    wires: definition.wires,
-                })?;
+                save_revision(&tx, &id, None, None, None, DraftDocument::from_definition(definition))?;
             }
             let draft_scope = load_scope(&tx, &draft_scope.project, &id)?;
             queue_request(&tx, &id, &draft_scope, scope, brief)?;
@@ -192,6 +206,18 @@ impl Store {
         parent: String,
         graph: WorkflowGraph,
     ) -> Result<AuthoringDraft> {
+        self.save_workflow_authoring_canvas(project, id, parent, graph, None)
+            .await
+    }
+
+    pub async fn save_workflow_authoring_canvas(
+        &self,
+        project: String,
+        id: String,
+        parent: String,
+        graph: WorkflowGraph,
+        canvas: Option<WorkflowCanvasEdit>,
+    ) -> Result<AuthoringDraft> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let stored = load_scope(&tx, &project, &id)?;
@@ -199,8 +225,11 @@ impl Store {
                 stored.head.as_deref() == Some(&parent),
                 "The draft changed. Load its latest revision before saving."
             );
-            validate_graph(&stored.workflow, &graph)?;
-            save_revision(&tx, &id, Some(&parent), None, None, graph)?;
+            let previous =
+                load_head(&tx, &id, Some(&parent))?.context("The draft revision disappeared")?;
+            let document =
+                DraftDocument::update(&stored.workflow, previous.into_document(), graph, canvas)?;
+            save_revision(&tx, &id, Some(&parent), None, None, document)?;
             let draft = load_draft(&tx, &id, load_scope(&tx, &project, &id)?)?;
             tx.commit()?;
             Ok(draft)
@@ -273,7 +302,11 @@ fn load_head(db: &Connection, id: &str, head: Option<&str>) -> Result<Option<Dra
             "SELECT run_id, payload FROM workflow_authoring_revisions WHERE draft_id = ?1 AND id = ?2",
             params![id, head], |row| Ok((row.get(0)?, row.get::<_, Vec<u8>>(1)?)),
         )?;
-        Ok(DraftRevision { id: head.into(), run_id, graph: open(&payload)? })
+        let DraftDocument { graph, layout, definitions } = match open(&payload)? {
+            ProtectedDraft::Document(stored) => stored,
+            ProtectedDraft::Legacy(graph) => DraftDocument::from_graph(graph),
+        };
+        Ok(DraftRevision { id: head.into(), run_id, graph, layout, definitions })
     }).transpose()
 }
 
@@ -381,13 +414,20 @@ fn reconcile(db: &Connection, id: &str, scope: &DraftScope) -> Result<()> {
             .and_then(|(_, text)| parse_graph(&scope.workflow, &text));
     match draft {
         Ok(graph) => {
+            let mut document = DraftDocument::from_graph(graph);
+            if let Some(previous) = load_head(db, id, request.parent.as_deref())? {
+                document.layout = previous.layout;
+                document
+                    .layout
+                    .retain(|id, _| document.definitions.contains_key(id));
+            }
             save_revision(
                 db,
                 id,
                 request.parent.as_deref(),
                 Some(&request.id),
                 Some(run),
-                graph,
+                document,
             )?;
             db.execute(
                 "UPDATE workflow_authoring_requests SET result = 'saved' WHERE id = ?1",
@@ -432,12 +472,12 @@ fn save_revision(
     parent: Option<&str>,
     request: Option<&str>,
     run: Option<&str>,
-    graph: WorkflowGraph,
+    document: DraftDocument,
 ) -> Result<()> {
     let id = new_id();
     db.execute(
         "INSERT INTO workflow_authoring_revisions VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![id, draft, parent, request, run, seal(&graph)?],
+        params![id, draft, parent, request, run, seal(&document)?],
     )?;
     ensure!(db.execute("UPDATE workflow_authoring_drafts SET head_revision = ?3 WHERE id = ?1 AND head_revision IS ?2",
         params![draft, parent, id])? == 1, "The draft revision changed");

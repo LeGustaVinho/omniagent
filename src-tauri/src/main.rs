@@ -329,6 +329,8 @@ fn main() {
             workflow_ipc::authoring::inspect_workflow_authoring,
             workflow_ipc::authoring::save_workflow_authoring_draft,
             workflow_ipc::authoring::request_workflow_authoring_changes,
+            workflow_ipc::graph_editor::workflow_graph_registry,
+            workflow_ipc::graph_editor::project_workflow_graph_drafts,
             workflow_ipc::comparison::comparison_source_commit,
             workflow_ipc::comparison::model_comparisons,
             workflow_ipc::comparison::start_model_comparison,

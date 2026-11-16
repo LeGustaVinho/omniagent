@@ -111,18 +111,26 @@ fn digest(payload: &[u8]) -> String {
 }
 
 fn compile(id: String, graph: WorkflowGraph) -> Result<WorkflowDefinition> {
-    ensure!(
-        !id.trim().is_empty() && !graph.name.trim().is_empty(),
-        "a workflow needs an ID and name"
-    );
     let registry: HashMap<_, _> = builtin_registry()
         .into_iter()
         .map(|node| (node.kind, node))
         .collect();
+    compile_resolved(id, graph, |instance| registry.get(&instance.kind))
+}
+
+fn compile_resolved<'definition>(
+    id: String,
+    graph: WorkflowGraph,
+    definition_for: impl Fn(&NodeInstance) -> Option<&'definition NodeDefinition>,
+) -> Result<WorkflowDefinition> {
+    ensure!(
+        !id.trim().is_empty() && !graph.name.trim().is_empty(),
+        "a workflow needs an ID and name"
+    );
     let mut nodes = Vec::with_capacity(graph.nodes.len());
     for instance in graph.nodes {
-        let definition = registry
-            .get(&instance.kind)
+        let definition = definition_for(&instance)
+            .filter(|definition| definition.kind == instance.kind)
             .context("unregistered built-in node")?;
         ensure!(
             !instance.id.trim().is_empty(),

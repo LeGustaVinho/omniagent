@@ -13,7 +13,7 @@ import { RepositoryDeliveryWorkspace } from "@/repository-delivery";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { useGitSimulation } from "@/git-simulation";
 import { PipelineCatalog } from "@/pipeline-catalog";
-import { PipelineAuthoringEditor } from "@/workflow-authoring";
+import { PipelineAuthoringEditor, ProjectPipelineDrafts } from "@/workflow-authoring";
 import { WorkflowComparisons } from "@/workflow-comparison";
 import { deliveryBranch, deliveryCommitSha, deliveryMergeSha, deliveryRunId } from "@/tasks-demo-data";
 import {
@@ -183,18 +183,18 @@ function StageRunDetails({ run, activeId, actions, links }: {
 export default function PipelinesWorkspace(props: WorkspaceProps) {
   if (props.simulation) return <PreviewPipelinesWorkspace {...props} />;
   const draftId = props.target?.startsWith("authoring:") ? props.target.slice("authoring:".length) : undefined;
+  const view = props.target === "compare" || props.target === "templates" ? props.target : draftId || props.target === "drafts" ? "drafts" : "delivery";
   return <div className="pipelines-workspace">
-    {props.target === "templates" ? <>
-      <Button type="button" variant="ghost" className="self-start" onClick={() => props.openWorkspace("pipelines", "delivery")}>Back to pipelines</Button>
-      <ConversationTemplateEditor key={props.checkout.checkoutId} checkout={props.checkout} />
-    </> : props.target === "compare" ? <>
-      <Button type="button" variant="ghost" className="self-start" onClick={() => props.openWorkspace("pipelines", "delivery")}>Back to pipelines</Button>
-      <WorkflowComparisons key={props.checkout.checkoutId} {...props} />
-    </> : draftId ? <PipelineAuthoringEditor {...props} draftId={draftId} /> : <>
-      <Button type="button" variant="outline" className="self-start" onClick={() => props.openWorkspace("pipelines", "compare")}>Compare models</Button>
-      <Button type="button" variant="outline" className="self-start" onClick={() => props.openWorkspace("pipelines", "templates")}>Roles & templates</Button>
-      <RepositoryDeliveryWorkspace {...props} />
-    </>}
+    <nav className="pipeline-tabs" aria-label="Pipelines views">
+      <button type="button" aria-current={view === "delivery" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "delivery")}>Repository delivery</button>
+      <button type="button" aria-current={view === "drafts" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "drafts")}>Pipeline drafts</button>
+      <button type="button" aria-current={view === "templates" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "templates")}>Roles & templates</button>
+      <button type="button" aria-current={view === "compare" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "compare")}>Compare models</button>
+    </nav>
+    {view === "templates" ? <ConversationTemplateEditor key={props.checkout.checkoutId} checkout={props.checkout} />
+      : view === "compare" ? <WorkflowComparisons key={props.checkout.checkoutId} {...props} />
+        : draftId ? <PipelineAuthoringEditor key={draftId} {...props} draftId={draftId} />
+          : view === "drafts" ? <ProjectPipelineDrafts {...props} /> : <RepositoryDeliveryWorkspace {...props} />}
   </div>;
 }
 

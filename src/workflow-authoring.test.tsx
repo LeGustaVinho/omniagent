@@ -4,13 +4,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ConversationAuthoring, PipelineAuthoringEditor } from "@/workflow-authoring";
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
-afterEach(() => { cleanup(); vi.resetAllMocks(); });
+beforeEach(() => vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} }));
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); });
 
 const selection = { provider: "codex", profileId: "local", modelId: "authoring-model" } as const;
 const version = { id: "base", revision: "published-revision" };
@@ -47,6 +48,7 @@ it("submits an explicit authoring request for the selected protected base and op
 it("routes feedback with the loaded draft revision and links the source conversation", async () => {
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "inspect_workflow_authoring") return draft;
+    if (command === "workflow_graph_registry") return [];
     if (command === "conversation_models") return [{ option: { selection, name: "Authoring model", selectable: true, rating: null }, efforts: [] }];
     if (command === "request_workflow_authoring_changes") return { ...draft, request: { jobId: "job-2", runId: null, state: "queued", diagnostic: null } };
     throw new Error(`Unexpected ${command}`);
