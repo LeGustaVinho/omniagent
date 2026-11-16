@@ -5,6 +5,17 @@ export function goalCommand(text: string): string | undefined {
   return command ? command[1]?.trim() ?? "" : undefined;
 }
 
+export const sideQuestionCommandPrefix = "/btw ";
+
+export function sideQuestionCommand(text: string): string | undefined {
+  const command = /^\/btw(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  return command ? command[1]?.trim() ?? "" : undefined;
+}
+
+export function completesSideQuestion(text: string): boolean {
+  return /^\/(?:b(?:t(?:w)?)?)?$/i.test(text.trimStart());
+}
+
 export function ConversationModeSelect({ mode, onChange }: {
   mode: ConversationMode;
   onChange: (mode: ConversationMode) => void;

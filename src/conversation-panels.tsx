@@ -17,7 +17,8 @@ import type { RunRecord } from "@/bindings/RunRecord";
 import { ModelPicker } from "@/components/model-picker";
 import { ModelCapabilityPreview } from "@/model-capability-preview";
 import { EffortSelect, type EffortSet } from "@/components/effort-select";
-import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
+import { ConversationModeSelect, completesSideQuestion, goalCommand, sideQuestionCommand,
+  sideQuestionCommandPrefix, type ConversationMode } from "@/conversation-mode";
 import { ConversationGoalCard, GoalSettingsDialog, goalDefinition, hasCurrentGoal, useConversationGoal, type GoalDefinition } from "@/conversation-goal";
 import { ConversationContinuationDialog, ConversationContinuationSettings, confirmConversationContinuation, submitConversationContinuation,
   type ConversationContinuationReview } from "@/conversation-continuation";
@@ -297,7 +298,10 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const [mode, setMode] = useState<ConversationMode>("read_only");
   const [continuation, setContinuation] = useState<ReviewedContinuation>();
   const text = draft.data ?? "";
-  const isSideQuestion = /^\/btw(?:\s|$)/u.test(text.trim());
+  const sideQuestion = sideQuestionCommand(text);
+  const isSideQuestion = sideQuestion !== undefined;
+  const sideCompletion = completesSideQuestion(text);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const [showSideQuestions, setShowSideQuestions] = useState(false);
   const goalInput = goalCommand(text);
   const composingGoal = !isSideQuestion && (mode === "goal" || goalInput !== undefined);
@@ -425,7 +429,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
       conversationId, expectedContextId: history.data?.contextId, selection,
       effort: efforts?.efforts.includes(effort) ? effort : null,
       mode: mode === "goal" ? "read_only" : mode,
-      purpose: "question", question: submitted.trim().replace(/^\/btw\s*/u, ""),
+      purpose: "question", question: sideQuestionCommand(submitted) ?? "",
     }),
     onSuccess: (outcome, submitted) => {
       if (outcome.status === "queued") {
@@ -489,7 +493,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     && !goal.isPending && !goal.error && !hasCurrentGoal(goal.data) && !send.isPending && !recover.isPending);
   const canSend = composingGoal ? Boolean(text.trim() && !startGoal.isPending && (goalInput === "" || canStartGoal))
     : Boolean(text.trim() && selected?.option.selectable && (isSideQuestion
-    ? text.trim() !== "/btw" && history.data?.contextId && !askSide.isPending
+    ? Boolean(sideQuestion) && history.data?.contextId && !askSide.isPending
     : history.data?.contextId && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending));
   const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
 
@@ -514,6 +518,11 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     if (historyRegion.current) historyRegion.current.scrollTop = historyRegion.current.scrollHeight;
     setShowJump(false);
     send.mutate(text);
+  }
+
+  function completeSideQuestion() {
+    editDraft(sideQuestionCommandPrefix);
+    composer.current?.focus();
   }
 
   return (
@@ -623,13 +632,21 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           </div>
         </div>}
       <form onSubmit={submit} className="conv-composer">
+          {sideCompletion && <button type="button" className="conv-quiet-button" onClick={completeSideQuestion}>
+            <code>/btw</code> Ask a side question
+          </button>}
           {suggestion && <button type="button" className="conv-quiet-button" onClick={() => editDraft(suggestion)}>
             Use suggested draft · {suggestion}
           </button>}
           <label htmlFor={`draft-${conversationId}`} className="sr-only">Message draft</label>
-          <textarea id={`draft-${conversationId}`} placeholder="Ask about this repository…"
+          <textarea ref={composer} id={`draft-${conversationId}`} placeholder="Ask about this repository…"
             value={text} onChange={(event) => editDraft(event.target.value)} disabled={draft.isPending || Boolean(draft.error) || send.isPending || startGoal.isPending}
             onKeyDown={(event) => {
+              if (sideCompletion && event.key === "Tab" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                completeSideQuestion();
+                return;
+              }
               if (suggestion && event.key === "Tab" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 editDraft(suggestion);

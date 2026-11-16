@@ -20,6 +20,7 @@ mod markdown_analysis_ipc;
 mod note_runtime;
 mod note_index_runtime;
 mod queue_runtime;
+mod side_question_ipc;
 mod task_delivery_ipc;
 mod task_assignment_ipc;
 mod task_participants_ipc;
@@ -414,6 +415,7 @@ fn main() {
             conversation_runtime::enqueue_managed_agent_job,
             conversation_runtime::enqueue_conversation_side_request,
             conversation_runtime::conversation_side_requests,
+            side_question_ipc::delete_conversation_side_question,
             conversation_runtime::composer_suggestion_mode,
             conversation_runtime::set_composer_suggestion_mode,
             conversation_runtime::latest_conversation_run,

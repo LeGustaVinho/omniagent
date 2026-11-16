@@ -1,3 +1,5 @@
+mod retention;
+
 use std::{cell::Cell, io, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
@@ -563,10 +565,23 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     Ok(serde_json::from_slice(&protection::unprotect(bytes)?)?)
 }
 
+pub(super) fn is_deleted_question(db: &Connection, job: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM job_side_requests
+             WHERE job_id = ?1 AND discarded AND purpose = 'question' AND NOT validation
+         )",
+        [job],
+        |row| row.get(0),
+    )?)
+}
+
 pub(super) fn load(db: &Connection, job: &str) -> Result<Option<SidePayload>> {
     let payload: Option<Vec<u8>> = db
         .query_row(
-            "SELECT payload FROM job_side_requests WHERE job_id = ?1",
+            "SELECT payload FROM job_side_requests WHERE job_id = ?1 AND NOT (
+                 discarded AND purpose = 'question' AND NOT validation
+             )",
             [job],
             |row| row.get(0),
         )
@@ -604,6 +619,9 @@ pub(crate) fn recover(db: &Connection) -> Result<()> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for id in runs {
         let run = runs::load_run(db, &id)?;
+        if retention::settle_deleted_question(db, &run)? {
+            continue;
+        }
         let job: String = db.query_row(
             "SELECT job_id FROM job_attempts WHERE run_id = ?1",
             [&run.id],
@@ -622,13 +640,16 @@ pub(super) fn settle(
     run: &RunRecord,
     status: RunStatus,
     response: &SideResponse,
-) -> Result<()> {
+) -> Result<bool> {
+    if retention::settle_deleted_question(db, run)? {
+        return Ok(false);
+    }
     db.execute(
         "INSERT INTO job_side_responses VALUES (?1, ?2)",
         params![run.id, protection::protect(&serde_json::to_vec(response)?)?],
     )?;
     runs::advance_run(db, run, status)?;
-    Ok(())
+    Ok(true)
 }
 
 pub(super) fn start(
@@ -661,7 +682,9 @@ pub(super) fn start(
                     let job = job_id.clone();
                     move |db| {
                         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                        let side = load(&tx, &job)?.context("Missing side request")?;
+                        let Some(side) = load(&tx, &job)? else {
+                            return Ok(false);
+                        };
                         let allowed = side.still_qualified(&tx)?
                             && suggestion_still_current(&tx, &job, &side)?
                             && super::record_launch_intent(&tx, &id)? == Some(true);
@@ -791,7 +814,10 @@ pub(super) fn start(
             } else if let Some(receipt) = &mut response.output_fixture {
                 receipt.checked_at = Some(tx.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |row| row.get(0))?);
             }
-            settle(&tx, &current, status, &response)?;
+            if !settle(&tx, &current, status, &response)? {
+                tx.commit()?;
+                return Ok(());
+            }
             if let Some(audio) = response.output_fixture_audio.take() {
                 tx.execute("INSERT INTO side_output_fixture_payloads VALUES (?1, ?2)",
                     params![run.id, protection::protect(&audio)?])?;

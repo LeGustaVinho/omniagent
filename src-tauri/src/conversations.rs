@@ -6281,8 +6281,9 @@ mod tests {
     #[tokio::test]
     async fn side_requests_share_capacity_without_joining_main_history() -> Result<()> {
         use crate::{
+            dispatch::{ConversationSelection, SelectedMessageSpan},
             jobs::{
-                AdmissionEnvironment, ComposerSuggestionMode, JobContext, JobScheduler,
+                AdmissionEnvironment, ComposerSuggestionMode, JobContext, JobRequest, JobScheduler,
                 RecoveryAction, SidePurpose, SideSubmission,
             },
             providers::{
@@ -6562,7 +6563,7 @@ mod tests {
                     conversation_id: chat.id.clone(),
                     context_id: current.context_id,
                 },
-                scope,
+                scope.clone(),
                 "Main turn after the side pin".into(),
             )
             .await?;
@@ -6658,6 +6659,7 @@ mod tests {
             json!({"type":"result","subtype":"success","is_error":false,"session_id":"side-only","result":"protected-response-canary","modelUsage":{"side-selected":{}}}),
         ).await?;
         let second = wait(1, RunStatus::Succeeded).await?;
+        let saved_job_id = second.job.id.clone();
         assert!(
             matches!(second.response.unwrap().outcome, SideOutcome::Answered { ref text, .. } if text == "protected-response-canary")
         );
@@ -6699,6 +6701,8 @@ mod tests {
                     && !frame.contains("Main turn after"))
         );
         let interrupted = wait(3, RunStatus::Running).await?;
+        let removed_job_id = interrupted.job.id.clone();
+        let removed_run_id = interrupted.job.latest_attempt.as_ref().unwrap().run_id.clone();
         let checkpoint_path = database.with_file_name("side-recovery.sqlite");
         store.execute({
             let path = checkpoint_path.to_string_lossy().into_owned();
@@ -6753,23 +6757,114 @@ mod tests {
                 .outcome,
             SideOutcome::Interrupted
         );
+        assert!(
+            store.delete_conversation_side_question("other-conversation".into(), removed_job_id.clone())
+                .await.is_err()
+        );
+        assert!(
+            store.delete_conversation_side_question(chat.id.clone(), validation_id)
+                .await.is_err()
+        );
+        store.delete_conversation_side_question(chat.id.clone(), removed_job_id.clone()).await?;
+        let _ = send(
+            3,
+            json!({"type":"result","subtype":"success","is_error":false,"session_id":"side-only","result":"late-private-side-answer","modelUsage":{"side-selected":{}}}),
+        ).await;
         scheduler.shutdown().await?;
         store
             .finish_agent_attempt(main.run.id, RunStatus::Succeeded, None)
             .await?;
         drop(store);
+        let reopened = Store::open(database.clone())?;
+        reopened.recover_agent_attempts_after_restart().await?;
+        let saved = reopened.saved_side_requests(chat.id.clone()).await?;
+        assert!(
+            saved.iter().any(|record| record.job.id == saved_job_id &&
+                matches!(record.response.as_ref().map(|response| &response.outcome),
+                    Some(SideOutcome::Answered { text, .. }) if text == "protected-response-canary"))
+        );
+        assert!(!saved.iter().any(|record| record.job.id == removed_job_id));
+        let assert_without_side = |text: &str| {
+            for canary in ["side-private", "protected-response-canary", "late-private-side-answer"] {
+                assert!(!text.contains(canary), "side evidence was included in main context");
+            }
+        };
+        let history = reopened.conversation_history(chat.id.clone()).await?;
+        assert_without_side(&format!("{:?}", history.messages));
+        let selected = ConversationSelection {
+            conversation_id: chat.id.clone(),
+            context_id: history.context_id.clone(),
+            spans: history.messages.iter().map(|message| SelectedMessageSpan {
+                revision_id: message.revision_id.clone(),
+                byte_range: None,
+            }).collect(),
+        };
+        let mut invalid_selection = selected.clone();
+        invalid_selection.spans = vec![SelectedMessageSpan { revision_id: saved_job_id.clone(), byte_range: None }];
+        assert!(reopened.capture_conversation_excerpt(invalid_selection).await.is_err());
+        assert!(reopened.select_conversation_context(
+            chat.id.clone(), history.context_id.clone(), vec![saved_job_id.clone()],
+        ).await.is_err());
+        let excerpt = reopened.capture_conversation_excerpt(selected.clone()).await?;
+        let excerpt = serde_json::to_string(&excerpt)?;
+        assert!(excerpt.contains("Original permitted source"));
+        assert_without_side(&excerpt);
+        let summary = reopened.enqueue_conversation_summary(selected, scope.clone()).await?;
+        let summary_input = reopened.execute(move |db| {
+            let request: Vec<u8> = db.query_row("SELECT request FROM jobs WHERE id = ?1", [summary.job.id], |row| row.get(0))?;
+            let request: JobRequest = serde_json::from_slice(&protection::unprotect(&request)?)?;
+            Ok(request.instructions)
+        }).await?;
+        assert!(summary_input.contains("Original permitted source"));
+        assert_without_side(&summary_input);
+        assert!(reopened.conversation_library(Some("protected-response-canary".into()), None).await?.is_empty());
+        assert!(reopened.agent_dispatch(chat.id.clone(), removed_run_id.clone()).await?.is_none());
+
+        let next = prepare(&reopened, &chat.id, scope, "Next main prompt").await?;
+        reopened.mark_agent_running(next.run.id.clone()).await?;
+        let dispatch = prepare_fixture_dispatch(&reopened, &next).await?;
+        reopened.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        let dispatch = reopened.agent_dispatch(chat.id.clone(), next.run.id.clone()).await?
+            .context("missing next main dispatch")?;
+        let submitted = serde_json::to_string(&dispatch.snapshot.submitted_messages)?;
+        assert!(submitted.contains("Next main prompt"));
+        assert_without_side(&submitted);
+        reopened.finish_agent_attempt(next.run.id, RunStatus::Succeeded, None).await?;
+
+        let history = reopened.conversation_history(chat.id.clone()).await?;
+        let fork = reopened.fork_conversation(
+            chat.id.clone(), history.context_id.clone(), None, "Fork with main context".into(),
+        ).await?;
+        let fork_history = reopened.conversation_history(fork.id.clone()).await?;
+        assert_without_side(&format!("{:?}", fork_history.messages));
+        assert_eq!(fork_history.messages.len(), history.messages.len());
+        assert!(reopened.saved_side_requests(fork.id).await?.is_empty());
+        let through = history.messages.first().context("missing committed prefix")?.revision_id.clone();
+        reopened.rewind_conversation_history(chat.id.clone(), history.context_id, Some(through)).await?;
+        let rewound = reopened.conversation_history(chat.id.clone()).await?;
+        assert_eq!(rewound.messages.len(), 1);
+        assert_without_side(&format!("{:?}", rewound.messages));
+        assert!(reopened.saved_side_requests(chat.id.clone()).await?.iter().any(|record| record.job.id == saved_job_id));
+
+        reopened.delete_conversation_side_question(chat.id.clone(), saved_job_id.clone()).await?;
+        reopened.delete_conversation_side_question(chat.id.clone(), saved_job_id.clone()).await?;
+        drop(reopened);
         let reopened = Store::open(database)?;
         reopened.recover_agent_attempts_after_restart().await?;
-        assert!(
-            matches!(reopened.saved_side_requests(chat.id.clone()).await?.into_iter().filter(|record| record.purpose == SidePurpose::Question).nth(1).unwrap().response.as_ref().unwrap().outcome, SideOutcome::Answered { ref text, .. } if text == "protected-response-canary")
-        );
-        assert!(
-            !format!(
-                "{:?}",
-                reopened.conversation_history(chat.id).await?.messages
-            )
-            .contains("protected-response-canary")
-        );
+        assert!(reopened.saved_side_requests(chat.id).await?.iter().all(|record|
+            record.job.id != saved_job_id && record.job.id != removed_job_id));
+        reopened.execute(move |db| {
+            let count: i64 = db.query_row(
+                "SELECT count(*) FROM job_side_requests s JOIN jobs j ON j.id = s.job_id
+                 WHERE s.job_id IN (?1, ?2) AND discarded AND payload = X'' AND queue_state = 'cancelled'
+                   AND NOT EXISTS (SELECT 1 FROM job_side_responses r JOIN job_attempts a ON a.run_id = r.run_id WHERE a.job_id = s.job_id)
+                   AND NOT EXISTS (SELECT 1 FROM job_recoveries r WHERE r.job_id = s.job_id)",
+                params![saved_job_id, removed_job_id], |row| row.get(0),
+            )?;
+            assert_eq!(count, 2);
+            assert_eq!(runs::load_run(db, &removed_run_id)?.status, RunStatus::Cancelled);
+            Ok(())
+        }).await?;
         Ok(())
     }
 

@@ -119,6 +119,14 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
     },
     onSettled: () => client.invalidateQueries({ queryKey }),
   });
+  const discard = useMutation({
+    mutationFn: (jobId: string) => invoke<void>("delete_conversation_side_question", { conversationId, jobId }),
+    onSuccess: async (_, jobId) => {
+      await client.cancelQueries({ queryKey, exact: true });
+      client.setQueryData<SideRequest[]>(queryKey, (current) => current?.filter(({ job }) => job.id !== jobId));
+      await client.invalidateQueries({ queryKey, exact: true });
+    },
+  });
   const requests = saved.data?.filter(({ purpose }) => purpose !== "suggestion") ?? [];
   return <aside className="conv-activity" aria-label="Side questions">
     <header className="conv-activity-heading"><h2>Side questions</h2>
@@ -129,6 +137,7 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
     </p>}
     {saved.isError && <p role="alert" className="conv-alert">{String(saved.error)}</p>}
     {control.isError && <p role="alert" className="conv-alert">{String(control.error)}</p>}
+    {discard.isError && <p role="alert" className="conv-alert">{String(discard.error)}</p>}
     {validation?.error && <p role="alert" className="conv-alert">{String(validation.error)}</p>}
     {copyError && <p role="alert" className="conv-alert">{copyError}</p>}
     {validation && <div className="px-3 pt-3">
@@ -139,14 +148,19 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
     </div>}
     {!requests.length && saved.isSuccess && submission?.status !== "unavailable" && <p className="p-3 text-sm text-muted-foreground">Start a side question with /btw followed by your question.</p>}
     <ul className="grid gap-3 p-3">
-      {requests.map(({ job, question, response, purpose, provider, model, evidenceId }) => {
+      {requests.map(({ job, question, response, purpose, provider, model, contextId, sourceRunId, evidenceId }) => {
         const outcome = response?.outcome;
         const fixture = purpose === "validation";
-        const pending = job.queueState !== "cancelled" && (!job.latestAttempt || job.queuedRecovery || isLiveRun(job.latestAttempt));
+        const active = isLiveRun(job.latestAttempt);
+        const pending = job.queueState !== "cancelled" && (!job.latestAttempt || job.queuedRecovery || active);
         return <li key={job.id} className="grid gap-2 rounded border border-border p-3 text-sm">
           <p className="whitespace-pre-wrap break-words font-medium">
             {fixture ? ["Side question validation", providers[provider], model].filter(Boolean).join(" · ") : question}
           </p>
+          {!fixture && <dl className="grid gap-1 break-all text-xs text-muted-foreground">
+            <div><dt className="inline">Context revision</dt>{" "}<dd className="inline"><code>{contextId}</code></dd></div>
+            <div><dt className="inline">Source run</dt>{" "}<dd className="inline"><code>{sourceRunId}</code></dd></div>
+          </dl>}
           {outcome?.kind === "answered" && !fixture ? <>
             <ConversationMarkdown>{outcome.text}</ConversationMarkdown>
             <Button type="button" variant="outline" className="justify-self-start" onClick={() => {
@@ -154,7 +168,7 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
               void Promise.resolve().then(() => navigator.clipboard.writeText(outcome.text)).catch(() => setCopyError("Could not copy the side answer."));
             }}>Copy answer</Button>
           </> : <p className="text-muted-foreground" role="status">
-            {pending ? (job.latestAttempt?.cancelRequested ? "Stopping…" : isLiveRun(job.latestAttempt) ? "Running…" : "Waiting for the queue…")
+            {pending ? (job.latestAttempt?.cancelRequested ? "Stopping…" : job.latestAttempt?.status === "starting" ? "Starting…" : active ? "Running…" : job.queueState === "paused" ? "Paused in the queue" : "Waiting for the queue…")
               : outcome?.kind === "unavailable" ? sideUnavailableReason(outcome.reason)
                 : job.queueState === "cancelled" || job.latestAttempt?.status === "cancelled" || outcome?.kind === "cancelled" ? "Cancelled"
                   : job.latestAttempt?.status === "interrupted" || outcome?.kind === "interrupted" ? "Interrupted"
@@ -162,8 +176,12 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
                       : fixture ? (job.latestAttempt?.status === "succeeded" && evidenceId ? "Validation passed" : "Validation failed")
                       : outcome?.kind === "no_text" ? "No answer returned" : "The side request failed"}
           </p>}
-          {pending && <Button type="button" variant="outline" className="justify-self-start" disabled={control.isPending || job.latestAttempt?.cancelRequested}
-            onClick={() => control.mutate(job)}>{fixture ? "Cancel validation" : "Cancel side question"}</Button>}
+          {(pending || !fixture) && <div className="flex flex-wrap gap-2">
+            {pending && <Button type="button" variant="outline" disabled={control.isPending || job.latestAttempt?.cancelRequested}
+              onClick={() => control.mutate(job)}>{fixture ? "Cancel validation" : "Cancel side question"}</Button>}
+            {!fixture && <Button type="button" variant="outline" disabled={discard.isPending}
+              onClick={() => discard.mutate(job.id)}>Delete side question</Button>}
+          </div>}
         </li>;
       })}
     </ul>

@@ -199,6 +199,9 @@ fn load_recovery_source(
         return Ok(None);
     }
     if job.kind == JobKind::Side {
+        if super::side_requests::is_deleted_question(db, &job.id)? {
+            return Ok(None);
+        }
         return Ok(Some(RecoveryCheckpoint::Side {
             run_id: attempt.run_id.clone(),
         }));
