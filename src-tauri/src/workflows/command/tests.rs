@@ -63,6 +63,7 @@ switch ($Mode) {
     [Console]::Write((@{msg = $data.message; nested = $data.nested.key} | ConvertTo-Json -Compress))
   }
   'invalid' { [Console]::Write("{ unfinished") }
+  'nonzero' { [Console]::Write('{"verified":true}'); exit 23 }
   'changed' { [Console]::Write('{"verified":true}') }
 }
 "#,
@@ -115,6 +116,7 @@ switch ($Mode) {
         ("json", CommandOutputFormat::Json),
         ("text", CommandOutputFormat::Text),
         ("invalid", CommandOutputFormat::Json),
+        ("nonzero", CommandOutputFormat::Json),
         ("changed", CommandOutputFormat::Json),
         ("changed-child", CommandOutputFormat::Json),
     ];
@@ -334,6 +336,26 @@ switch ($Mode) {
     let invalid_recovery = job_inspection(&invalid_job).await?.context("Missing invalid Command inspection")?;
     assert!(invalid_recovery.recovery_actions.is_empty());
     assert!(store.queue_job_recovery(fixture.project.clone(), invalid_job.id, invalid.run_id, RecoveryAction::Retry).await.is_err());
+    let failed_exit = terminal(&store, &submit("nonzero").await?).await?;
+    assert_eq!(failed_exit.status, RunStatus::Failed);
+    let failure = store
+        .job_failure(fixture.project.clone(), failed_exit.run_id.clone())
+        .await?
+        .context("Missing evidence for the nonzero Command exit")?;
+    assert_eq!(
+        failure.observation.cause,
+        Some(crate::jobs::FailureCause::ProcessExit)
+    );
+    assert_eq!(
+        failure.observation.process.map(|process| process.code),
+        Some(23)
+    );
+    assert!(
+        store
+            .workflow_command_result(fixture.project.clone(), failed_exit.run_id)
+            .await?
+            .is_none()
+    );
 
     let original = std::fs::read(&script)?;
     std::fs::write(&script, "throw 'This changed script must not start'")?;
