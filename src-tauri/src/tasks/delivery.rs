@@ -1,0 +1,478 @@
+use anyhow::{Context, Result, ensure};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{
+    protection,
+    repository::verified_git::load_verified_delivery_commit,
+    store::Store,
+    workflows::{
+        active_delivery_workflow, detach_active_delivery_workflow, load_delivery_units,
+        waiting_for_delivery_commit,
+    },
+};
+
+use super::{TaskWorkflowState, activity::load_task_details, load_project_task};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum TaskDeliveryEvidence {
+    Manual {
+        note: Option<String>,
+    },
+    VerifiedCommit {
+        workflow_run_id: String,
+        plan_revision: String,
+        unit_evidence_ids: Vec<String>,
+        completion_sha: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDelivery {
+    pub id: String,
+    pub recorded_at: String,
+    pub evidence: TaskDeliveryEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDeliveryState {
+    pub state: TaskWorkflowState,
+    pub waiting_for_commit: bool,
+    pub pending_repository_changes: bool,
+    pub checklist_resolved: bool,
+    pub has_direct_work: bool,
+    pub active_workflow_run_id: Option<String>,
+    pub completion: Option<TaskDelivery>,
+}
+
+impl Store {
+    pub async fn project_task_delivery_state(
+        &self,
+        project: String,
+        task: String,
+    ) -> Result<Option<TaskDeliveryState>> {
+        self.execute(move |db| {
+            let tx = db.transaction()?;
+            load_project_task(&tx, &project, &task)?
+                .map(|_| load_delivery_state(&tx, &project, &task))
+                .transpose()
+        })
+        .await
+    }
+
+    pub async fn project_epic_delivery_state(
+        &self,
+        project: String,
+        epic: String,
+    ) -> Result<Option<TaskWorkflowState>> {
+        self.execute(move |db| {
+            let tx = db.transaction()?;
+            let exists = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM project_epics WHERE project_id = ?1 AND id = ?2)",
+                params![project, epic],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !exists {
+                return Ok(None);
+            }
+            let children = child_states(&tx, &project, &epic, true)?;
+            Ok(Some(
+                group_state(&children, false, false).unwrap_or_default(),
+            ))
+        })
+        .await
+    }
+
+    pub async fn project_task_deliveries(
+        &self,
+        project: String,
+        task: String,
+    ) -> Result<Vec<TaskDelivery>> {
+        self.execute(move |db| {
+            let records = db
+                .prepare(
+                    "SELECT id, recorded_at, payload FROM task_delivery_events
+                 WHERE project_id = ?1 AND task_id = ?2 AND payload IS NOT NULL ORDER BY sequence",
+                )?
+                .query_map(params![project, task], read_delivery)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            records.into_iter().map(decode_delivery).collect()
+        })
+        .await
+    }
+
+    pub async fn record_manual_task_delivery(
+        &self,
+        project: String,
+        task: String,
+        note: Option<String>,
+    ) -> Result<TaskDelivery> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            validate_repository_delivery_open(&tx, &project, &task)?;
+            ensure!(
+                active_delivery_workflow(&tx, &project, &task)?.is_none(),
+                "repository work requires verified commit evidence"
+            );
+            let pending = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pending_worktree_changes
+                     WHERE project_id = ?1 AND scope_task_id = ?2)
+                 OR EXISTS(SELECT 1 FROM app_worktree_writers
+                     WHERE project_id = ?1 AND scope_task_id = ?2)
+                 OR EXISTS(SELECT 1 FROM job_writer_reservations r
+                     JOIN job_attempts a ON a.run_id = r.run_id
+                     JOIN jobs j ON j.id = a.job_id
+                     LEFT JOIN job_worktree_scopes s ON s.job_id = j.id
+                     WHERE j.project_id = ?1 AND coalesce(s.scope_task_id, j.task_id) = ?2)",
+                params![project, task],
+                |row| row.get::<_, bool>(0),
+            )?;
+            ensure!(
+                !pending,
+                "repository work requires verified commit or explicit discard"
+            );
+            ensure!(
+                checklist_status(&tx, &project, &task)?.1,
+                "resolve the task checklist before completing"
+            );
+            let receipt =
+                insert_delivery(&tx, &project, &task, TaskDeliveryEvidence::Manual { note })?;
+            tx.commit()?;
+            Ok(receipt)
+        })
+        .await
+    }
+
+    pub async fn reopen_task_delivery(&self, project: String, task: String) -> Result<()> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let state = load_delivery_state(&tx, &project, &task)?;
+            ensure!(
+                state.has_direct_work || child_states(&tx, &project, &task, false)?.is_empty(),
+                "reopen a child to reopen a grouping task"
+            );
+            detach_active_delivery_workflow(&tx, &project, &task)?;
+            tx.execute(
+                "UPDATE project_task_details SET workflow_state = 'ready'
+                 WHERE project_id = ?1 AND task_id = ?2 AND workflow_state IN ('completed', 'cancelled')",
+                params![project, task],
+            )?;
+            insert_transition(&tx, &project, &task, "reopened")?;
+            tx.commit()?;
+            Ok(())
+        }).await
+    }
+
+    pub async fn cancel_task_delivery(&self, project: String, task: String) -> Result<()> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let state = load_delivery_state(&tx, &project, &task)?;
+            ensure!(
+                state.state != TaskWorkflowState::Completed,
+                "reopen the task before cancelling it"
+            );
+            if state.state == TaskWorkflowState::Cancelled {
+                return Ok(());
+            }
+            ensure!(
+                child_states(&tx, &project, &task, false)?
+                    .into_iter()
+                    .all(is_terminal),
+                "complete or cancel the child tasks first"
+            );
+            detach_active_delivery_workflow(&tx, &project, &task)?;
+            insert_transition(&tx, &project, &task, "cancelled")?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+pub(crate) fn validate_repository_delivery_open(
+    db: &Connection,
+    project: &str,
+    task: &str,
+) -> Result<()> {
+    let state = load_delivery_state(db, project, task)?;
+    let has_receipt =
+        latest_event(db, project, task)?.is_some_and(|(_, _, _, payload)| payload.is_some());
+    ensure!(
+        !has_receipt && !is_terminal(state.state),
+        "reopen the task before starting another delivery"
+    );
+    Ok(())
+}
+
+pub(crate) fn record_verified_task_delivery(
+    db: &Connection,
+    project: &str,
+    task: &str,
+    workflow_run: &str,
+    plan_revision: &str,
+) -> Result<TaskDelivery> {
+    let receipt = db
+        .query_row(
+            "SELECT id, recorded_at, payload FROM task_delivery_events
+         WHERE project_id = ?1 AND task_id = ?2 AND workflow_run_id = ?3
+           AND workflow_plan_revision = ?4",
+            params![project, task, workflow_run, plan_revision],
+            read_delivery,
+        )
+        .optional()?;
+    if let Some(receipt) = receipt {
+        return decode_delivery(receipt);
+    }
+    ensure!(
+        active_delivery_workflow(db, project, task)?.as_deref() == Some(workflow_run),
+        "this workflow is no longer active for this task"
+    );
+    let units = load_delivery_units(db, project, task, workflow_run)?;
+    let mut previous_sha: Option<String> = None;
+    let mut unit_evidence_ids = Vec::with_capacity(units.len());
+    for unit in units {
+        let id = unit
+            .commit_evidence_id
+            .context("a planned unit is still waiting for a verified commit")?;
+        let evidence = load_verified_delivery_commit(db, project, task, &id)?
+            .context("unit commit evidence is missing")?;
+        ensure!(
+            unit.plan_revision == plan_revision
+                && evidence.unit_id == unit.unit.id
+                && evidence.purpose == unit.unit.purpose
+                && evidence.checkout_id == unit.checkout_id
+                && previous_sha
+                    .as_ref()
+                    .is_none_or(|sha| sha == &evidence.base_commit),
+            "unit commit evidence does not match the planned delivery chain"
+        );
+        unit_evidence_ids.push(id);
+        previous_sha = Some(evidence.sha);
+    }
+    let completion_sha = previous_sha.context("delivery requires at least one planned unit")?;
+    insert_delivery(
+        db,
+        project,
+        task,
+        TaskDeliveryEvidence::VerifiedCommit {
+            workflow_run_id: workflow_run.into(),
+            plan_revision: plan_revision.into(),
+            unit_evidence_ids,
+            completion_sha,
+        },
+    )
+}
+
+pub(super) fn load_delivery_state(
+    db: &Connection,
+    project: &str,
+    task: &str,
+) -> Result<TaskDeliveryState> {
+    ensure!(
+        load_project_task(db, project, task)?.is_some(),
+        "task must belong to this project"
+    );
+    let base = load_task_details(db, project, task)?.workflow_state;
+    let (has_checklist, checklist_resolved) = checklist_status(db, project, task)?;
+    let active_workflow_run_id = active_delivery_workflow(db, project, task)?;
+    let waiting_for_commit =
+        active_workflow_run_id.is_some() && waiting_for_delivery_commit(db, project, task)?;
+    let pending_repository_changes: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pending_worktree_changes
+         WHERE project_id = ?1 AND scope_task_id = ?2)",
+        params![project, task],
+        |row| row.get(0),
+    )?;
+    let latest = latest_event(db, project, task)?;
+    let has_delivery_history = latest.is_some();
+    let cancelled = latest
+        .as_ref()
+        .is_some_and(|(kind, ..)| kind == "cancelled")
+        || (!has_delivery_history && base == TaskWorkflowState::Cancelled);
+    let awaiting_completion = latest
+        .as_ref()
+        .is_some_and(|(_, _, _, payload)| payload.is_some())
+        && (!checklist_resolved || pending_repository_changes);
+    let completion = latest
+        .and_then(|(_, id, at, payload)| payload.map(|payload| (id, at, payload)))
+        .map(decode_delivery)
+        .transpose()?
+        .filter(|_| checklist_resolved && !pending_repository_changes);
+    let children = child_states(db, project, task, false)?;
+    let had_direct_delivery = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_delivery_events
+             WHERE project_id = ?1 AND task_id = ?2 AND payload IS NOT NULL)",
+        params![project, task],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let has_direct_work = has_checklist || had_direct_delivery || active_workflow_run_id.is_some();
+    let legacy_completion =
+        !has_delivery_history && checklist_resolved && base == TaskWorkflowState::Completed;
+    let direct_delivered = completion.is_some() || legacy_completion;
+    let state = if cancelled {
+        TaskWorkflowState::Cancelled
+    } else if children.is_empty() && direct_delivered {
+        TaskWorkflowState::Completed
+    } else if waiting_for_commit || awaiting_completion {
+        TaskWorkflowState::InReview
+    } else {
+        group_state(
+            &children,
+            has_direct_work || legacy_completion,
+            direct_delivered,
+        )
+        .unwrap_or_else(|| match base {
+            TaskWorkflowState::Completed | TaskWorkflowState::Cancelled => TaskWorkflowState::Ready,
+            TaskWorkflowState::Backlog if direct_delivered => TaskWorkflowState::InProgress,
+            other => other,
+        })
+    };
+    Ok(TaskDeliveryState {
+        state,
+        waiting_for_commit,
+        pending_repository_changes,
+        checklist_resolved,
+        has_direct_work,
+        active_workflow_run_id,
+        completion,
+    })
+}
+
+type DeliveryEvent = (String, String, String, Option<Vec<u8>>);
+
+fn latest_event(db: &Connection, project: &str, task: &str) -> Result<Option<DeliveryEvent>> {
+    Ok(db
+        .query_row(
+            "SELECT kind, id, recorded_at, payload FROM task_delivery_events
+         WHERE project_id = ?1 AND task_id = ?2 ORDER BY sequence DESC LIMIT 1",
+            params![project, task],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?)
+}
+
+fn is_terminal(state: TaskWorkflowState) -> bool {
+    matches!(
+        state,
+        TaskWorkflowState::Completed | TaskWorkflowState::Cancelled
+    )
+}
+
+fn group_state(
+    children: &[TaskWorkflowState],
+    has_direct_work: bool,
+    direct_delivered: bool,
+) -> Option<TaskWorkflowState> {
+    if children.is_empty()
+        || (has_direct_work && !direct_delivered)
+        || children.iter().any(|&state| !is_terminal(state))
+    {
+        return None;
+    }
+    Some(
+        if direct_delivered || children.contains(&TaskWorkflowState::Completed) {
+            TaskWorkflowState::Completed
+        } else {
+            TaskWorkflowState::Cancelled
+        },
+    )
+}
+
+fn child_states(
+    db: &Connection,
+    project: &str,
+    parent: &str,
+    epic: bool,
+) -> Result<Vec<TaskWorkflowState>> {
+    let owners = db.prepare(if epic {
+        "SELECT task_id FROM project_task_memberships WHERE project_id = ?1 AND epic_id = ?2"
+    } else {
+        "SELECT task_id FROM project_task_memberships WHERE project_id = ?1 AND parent_task_id = ?2"
+    })?.query_map(params![project, parent], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    owners
+        .into_iter()
+        .map(|task| Ok(load_delivery_state(db, project, &task)?.state))
+        .collect()
+}
+
+fn checklist_status(db: &Connection, project: &str, task: &str) -> Result<(bool, bool)> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM project_checklists WHERE project_id = ?1 AND task_id = ?2),
+                NOT EXISTS(
+                    SELECT 1 FROM project_checklist_items i
+                    JOIN project_checklist_item_revisions r
+                      ON r.project_id = i.project_id AND r.task_id = i.task_id AND r.item_id = i.id
+                    WHERE i.project_id = ?1 AND i.task_id = ?2 AND r.checked = 0 AND r.revision = (
+                        SELECT max(v.revision) FROM project_checklist_item_revisions v
+                        WHERE v.project_id = i.project_id AND v.task_id = i.task_id AND v.item_id = i.id
+                    )
+                )",
+        params![project, task],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
+}
+
+fn insert_delivery(
+    db: &Connection,
+    project: &str,
+    task: &str,
+    evidence: TaskDeliveryEvidence,
+) -> Result<TaskDelivery> {
+    let id = Uuid::new_v4().to_string();
+    let (kind, workflow_run, plan_revision) = match &evidence {
+        TaskDeliveryEvidence::Manual { .. } => ("manual", None, None),
+        TaskDeliveryEvidence::VerifiedCommit {
+            workflow_run_id,
+            plan_revision,
+            ..
+        } => (
+            "verified_commit",
+            Some(workflow_run_id),
+            Some(plan_revision),
+        ),
+    };
+    let protected = protection::protect(&serde_json::to_vec(&evidence)?)?;
+    let recorded_at = db.query_row(
+        "INSERT INTO task_delivery_events(id, project_id, task_id, kind, workflow_run_id, workflow_plan_revision, payload)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING recorded_at",
+        params![id, project, task, kind, workflow_run, plan_revision, protected],
+        |row| row.get(0),
+    )?;
+    Ok(TaskDelivery {
+        id,
+        recorded_at,
+        evidence,
+    })
+}
+
+fn insert_transition(db: &Connection, project: &str, task: &str, kind: &str) -> Result<()> {
+    db.execute(
+        "INSERT INTO task_delivery_events(id, project_id, task_id, kind) VALUES (?1, ?2, ?3, ?4)",
+        params![Uuid::new_v4().to_string(), project, task, kind],
+    )?;
+    Ok(())
+}
+
+type ProtectedDelivery = (String, String, Vec<u8>);
+
+fn read_delivery(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProtectedDelivery> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+}
+
+fn decode_delivery((id, recorded_at, protected): ProtectedDelivery) -> Result<TaskDelivery> {
+    let evidence = serde_json::from_slice(&protection::unprotect(&protected)?)?;
+    Ok(TaskDelivery {
+        id,
+        recorded_at,
+        evidence,
+    })
+}

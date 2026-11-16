@@ -8,6 +8,8 @@ mod fixture;
 mod fixture_runtime;
 mod ipc;
 mod queue_runtime;
+mod task_delivery_ipc;
+mod workflow_ipc;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -234,6 +236,26 @@ fn main() {
             candidate::current_selected_candidate,
             candidate::inspect_candidate_verification,
             candidate::inspect_candidate_acceptance,
+            task_delivery_ipc::delivery_git_policy,
+            task_delivery_ipc::set_delivery_git_policy,
+            task_delivery_ipc::verified_delivery_commit,
+            task_delivery_ipc::project_task_delivery_state,
+            task_delivery_ipc::project_epic_delivery_state,
+            task_delivery_ipc::project_task_deliveries,
+            task_delivery_ipc::record_manual_task_delivery,
+            task_delivery_ipc::reopen_task_delivery,
+            task_delivery_ipc::cancel_task_delivery,
+            workflow_ipc::start_repository_delivery,
+            workflow_ipc::list_repository_deliveries,
+            workflow_ipc::inspect_repository_delivery,
+            workflow_ipc::execute_repository_delivery_host,
+            workflow_ipc::submit_repository_delivery_agent,
+            workflow_ipc::repository_delivery_plan_proposals,
+            workflow_ipc::publish_repository_delivery_evidence,
+            workflow_ipc::publish_repository_delivery_candidate,
+            workflow_ipc::execute_repository_delivery_unit,
+            workflow_ipc::repository_delivery_tasks,
+            workflow_ipc::repository_delivery_units,
             desktop::choose_repository,
             desktop::choose_repository_markdown,
             desktop::list_repository_markdown_revisions,
@@ -321,10 +343,10 @@ fn main() {
             conversation_runtime::saved_conversation_questions,
             conversation_runtime::conversation_events,
             conversation_runtime::conversation_input,
+            conversation_runtime::conversation_attachment_content,
             conversation_runtime::capture_conversation_excerpt,
             conversation_runtime::enqueue_conversation_summary,
             conversation_runtime::conversation_artifact_revision,
-            conversation_runtime::conversation_attachment_content,
             conversation_runtime::conversation_dispatch_inventory,
             conversation_runtime::conversation_profile_evidence,
             conversation_runtime::conversation_checklist_progress,

@@ -20,3 +20,4 @@ mod runtime_inspection;
 pub mod store;
 pub mod tasks;
 pub mod workbench;
+pub mod workflows;

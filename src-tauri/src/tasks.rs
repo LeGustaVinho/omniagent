@@ -6,6 +6,7 @@ use crate::store::Store;
 
 mod activity;
 mod checklists;
+mod delivery;
 mod descriptions;
 pub(crate) use activity::bind_task_run_scope;
 pub use activity::{
@@ -18,6 +19,8 @@ pub use checklists::progress::{
     ChecklistProgressError, ChecklistProgressReceipt, ChecklistProgressRecord,
 };
 pub use checklists::{ChecklistExecutionMode, ChecklistItem, TaskChecklist};
+pub use delivery::{TaskDelivery, TaskDeliveryEvidence, TaskDeliveryState};
+pub(crate) use delivery::{record_verified_task_delivery, validate_repository_delivery_open};
 pub use descriptions::{
     DescriptionOwner, DescriptionRevision, TaskDirectWork, TaskDispatchContext, WorkDescriptions,
 };
@@ -224,7 +227,11 @@ impl Store {
     }
 }
 
-fn insert_project_task(db: &Connection, project_id: String, title: String) -> Result<ProjectTask> {
+pub(crate) fn insert_project_task(
+    db: &Connection,
+    project_id: String,
+    title: String,
+) -> Result<ProjectTask> {
     ensure!(!title.trim().is_empty(), "task title is empty");
     let task = ProjectTask {
         id: Uuid::new_v4().to_string(),

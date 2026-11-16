@@ -40,7 +40,7 @@ fn ui_error(error: anyhow::Error) -> String {
     diagnostics::preview(&error.to_string())
 }
 
-async fn selected_scope(
+pub(crate) async fn selected_scope(
     store: &Store,
     checkout_id: String,
     selection: ModelSelection,

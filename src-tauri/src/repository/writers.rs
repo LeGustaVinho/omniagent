@@ -257,7 +257,7 @@ pub(super) fn assign_shared_scope(
     Ok(())
 }
 
-fn reserve_app_writer(
+pub(super) fn reserve_app_writer(
     db: &Connection,
     project: &str,
     checkout: &str,
@@ -283,7 +283,7 @@ fn reserve_app_writer(
     Ok(identity)
 }
 
-fn release_app_writer(db: &Connection, checkout: &str, operation: &str) -> Result<()> {
+pub(super) fn release_app_writer(db: &Connection, checkout: &str, operation: &str) -> Result<()> {
     let removed = db.execute(
         "DELETE FROM app_worktree_writers WHERE checkout_id = ?1 AND operation_id = ?2",
         params![checkout, operation],

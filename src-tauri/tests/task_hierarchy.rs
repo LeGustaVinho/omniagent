@@ -158,7 +158,24 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
 
     let legacy = rusqlite::Connection::open(&database)?;
     legacy.execute_batch(
-        "DROP TABLE candidate_acceptances;
+        "DROP TABLE task_delivery_events;
+         DROP TABLE verified_delivery_commits;
+         DROP TABLE delivery_commit_intents;
+         DROP TABLE project_delivery_git_policies;
+         DROP TRIGGER workflow_job_must_match_pin;
+         DROP TRIGGER workflow_plan_must_be_published;
+         DROP TABLE workflow_job_inputs;
+         DROP TABLE workflow_job_admissions;
+         DROP TABLE workflow_delivery_units;
+         DROP TABLE workflow_release_bindings;
+         DROP TABLE workflow_delivery_heads;
+         DROP TABLE workflow_approval_decisions;
+         DROP TABLE workflow_host_completions;
+         DROP TABLE workflow_artifacts;
+         DROP TABLE workflow_node_pins;
+         DROP TABLE workflow_run_pins;
+         DROP TABLE workflow_revisions;
+         DROP TABLE candidate_acceptances;
          DROP TABLE candidate_gate_results;
          DROP TABLE candidate_verifications;
          DROP TABLE active_unit_candidates;

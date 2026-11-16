@@ -72,6 +72,7 @@ pub use pipeline::{
     PipelineAgentInput, PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease,
     ReleaseBlocker,
 };
+pub(crate) use pipeline::{PipelineReleaseScope, issue_pipeline_release};
 pub(crate) use policy::validate_attempt_dispatch;
 pub use policy::{
     DispatchRejection, JobPermission, JobRequirements, JobRole, JobRule, JobWorkspace,

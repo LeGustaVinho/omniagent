@@ -12,6 +12,7 @@ use crate::{
     repository::{bind_job_markdown, validate_task_worktree_checkout, writers::writer_owner},
     store::Store,
     tasks::{TaskRunScope, bind_checklist_job_mode, bind_task_run_scope},
+    workflows::{WorkflowJobInput, bind_job_input, stage_job_input},
 };
 
 use super::{
@@ -52,6 +53,63 @@ pub struct PipelineRelease {
     pub checkout_id: String,
     pub task_id: String,
     pub revoked: bool,
+}
+
+pub(crate) struct PipelineReleaseScope<'a> {
+    pub project: &'a str,
+    pub pipeline_run: &'a str,
+    pub approval_node: &'a str,
+    pub plan_revision: &'a str,
+    pub checkout: &'a str,
+    pub task: &'a str,
+}
+
+pub(crate) fn issue_pipeline_release(
+    db: &Connection,
+    scope: PipelineReleaseScope<'_>,
+) -> Result<PipelineRelease> {
+    let PipelineReleaseScope {
+        project,
+        pipeline_run,
+        approval_node,
+        plan_revision,
+        checkout,
+        task,
+    } = scope;
+    ensure!(
+        writer_owner(db, project, task, checkout)?.is_some(),
+        "The release needs an assigned task worktree in this project"
+    );
+    let id = Uuid::new_v4().to_string();
+    let changed = db.execute(
+        "INSERT INTO job_pipeline_releases
+         (id, pipeline_run_id, approval_node_id, project_id, checkout_id, task_id, plan_revision)
+         SELECT ?1, p.id, n.instance_id, p.project_id, ?5, ?6, p.plan_revision
+         FROM job_pipeline_runs p JOIN job_pipeline_nodes n ON n.pipeline_run_id = p.id
+         WHERE p.id = ?2 AND p.project_id = ?7 AND n.instance_id = ?3
+           AND n.kind = 'implementation_approval' AND p.plan_revision = ?4",
+        params![
+            id,
+            pipeline_run,
+            approval_node,
+            plan_revision,
+            checkout,
+            task,
+            project
+        ],
+    )?;
+    ensure!(
+        changed == 1,
+        "The decision does not approve the pipeline's current plan"
+    );
+    Ok(PipelineRelease {
+        id,
+        approval_node_id: approval_node.into(),
+        plan_revision: plan_revision.into(),
+        checkout_id: checkout.into(),
+        task_id: task.into(),
+        revoked: false,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
@@ -136,13 +194,22 @@ pub(super) fn load_origin(
 }
 
 pub(super) fn release_blocker(db: &Connection, job: &Job) -> Result<Option<ReleaseBlocker>> {
-    let Some(origin) = job
-        .pipeline
-        .as_ref()
-        .filter(|_| job.mode == SessionMode::ApprovedWrite)
-    else {
+    let Some(origin) = job.pipeline.as_ref() else {
         return Ok(None);
     };
+    if job.mode != SessionMode::ApprovedWrite {
+        if let Some(pinned) = &origin.plan_revision {
+            let stale = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workflow_run_pins w JOIN job_pipeline_runs p ON p.id = w.pipeline_run_id
+                 WHERE w.project_id = ?1 AND w.pipeline_run_id = ?2 AND p.plan_revision IS NOT ?3)",
+                params![job.project_id, origin.pipeline_run_id, pinned], |row| row.get::<_, bool>(0),
+            )?;
+            if stale {
+                return Ok(Some(ReleaseBlocker::StalePlan));
+            }
+        }
+        return Ok(None);
+    }
     let Some(release) = origin.release.as_ref() else {
         return Ok(Some(ReleaseBlocker::Missing));
     };
@@ -302,25 +369,30 @@ impl Store {
     ) -> Result<PipelineRelease> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            ensure!(
-                writer_owner(&tx, &project, &task, &checkout)?.is_some(),
-                "The release needs an assigned task worktree in this project"
-            );
-            let id = Uuid::new_v4().to_string();
-            let changed = tx.execute(
-                "INSERT INTO job_pipeline_releases
-                 (id, pipeline_run_id, approval_node_id, project_id, checkout_id, task_id, plan_revision)
-                 SELECT ?1, p.id, n.instance_id, p.project_id, ?5, ?6, p.plan_revision
-                 FROM job_pipeline_runs p JOIN job_pipeline_nodes n ON n.pipeline_run_id = p.id
-                 WHERE p.id = ?2 AND p.project_id = ?7 AND n.instance_id = ?3
-                   AND n.kind = 'implementation_approval' AND p.plan_revision = ?4",
-                params![id, pipeline_run, approval_node, plan_revision, checkout, task, project],
+            let typed: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workflow_run_pins WHERE pipeline_run_id = ?1)",
+                [&pipeline_run],
+                |row| row.get(0),
             )?;
-            ensure!(changed == 1, "The decision does not approve the pipeline's current plan");
+            ensure!(
+                !typed,
+                "Record the decision through the workflow approval executor"
+            );
+            let release = issue_pipeline_release(
+                &tx,
+                PipelineReleaseScope {
+                    project: &project,
+                    pipeline_run: &pipeline_run,
+                    approval_node: &approval_node,
+                    plan_revision: &plan_revision,
+                    checkout: &checkout,
+                    task: &task,
+                },
+            )?;
             tx.commit()?;
-            Ok(PipelineRelease { id, approval_node_id: approval_node, plan_revision,
-                checkout_id: checkout, task_id: task, revoked: false })
-        }).await
+            Ok(release)
+        })
+        .await
     }
 
     pub async fn revoke_job_pipeline_release(
@@ -421,8 +493,27 @@ impl Store {
         request: JobRequest,
         input: PipelineAgentInput,
     ) -> Result<Job> {
-        self.submit_pipeline_agent_job_with_target(binding, scope, request, input, false)
+        self.submit_pipeline_agent_job_with_target(binding, scope, request, input, false, None)
             .await
+    }
+
+    pub(crate) async fn submit_workflow_pipeline_agent_job(
+        &self,
+        binding: PipelineDispatch,
+        scope: SessionScope,
+        request: JobRequest,
+        input: PipelineAgentInput,
+        workflow: WorkflowJobInput,
+    ) -> Result<Job> {
+        self.submit_pipeline_agent_job_with_target(
+            binding,
+            scope,
+            request,
+            input,
+            false,
+            Some(workflow),
+        )
+        .await
     }
 
     /// Enqueue direct checklist work using the selected task's effective execution mode.
@@ -438,7 +529,7 @@ impl Store {
             input.target.is_some(),
             "checklist execution requires a task run target"
         );
-        self.submit_pipeline_agent_job_with_target(binding, scope, request, input, true)
+        self.submit_pipeline_agent_job_with_target(binding, scope, request, input, true, None)
             .await
     }
 
@@ -449,6 +540,7 @@ impl Store {
         mut request: JobRequest,
         input: PipelineAgentInput,
         checklist_execution: bool,
+        workflow: Option<WorkflowJobInput>,
     ) -> Result<Job> {
         if let Some((_, route)) = &input.pinned {
             ensure!(
@@ -493,6 +585,9 @@ impl Store {
                     )?;
                     ensure!(valid, "The pinned input is outside the pipeline checkout");
                 }
+                if let Some(workflow) = &workflow {
+                    stage_job_input(&tx, &project, &binding, &request, workflow)?;
+                }
                 let job = insert_job(
                     &tx,
                     project,
@@ -502,6 +597,9 @@ impl Store {
                     0,
                     Some(&binding),
                 )?;
+                if let Some(workflow) = &workflow {
+                    bind_job_input(&tx, &job.id, &binding, workflow)?;
+                }
                 if let Some(revision) = &input.markdown_revision {
                     bind_job_markdown(&tx, &job.id, revision)?;
                 }

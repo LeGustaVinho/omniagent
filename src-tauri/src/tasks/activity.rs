@@ -10,7 +10,7 @@ use crate::{
     store::Store,
 };
 
-use super::{ChecklistExecutionMode, load_project_task};
+use super::{ChecklistExecutionMode, delivery::load_delivery_state, load_project_task};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -109,7 +109,9 @@ impl Store {
             if load_project_task(&tx, &project, &task)?.is_none() {
                 return Ok(None);
             }
-            Ok(Some(load_task_details(&tx, &project, &task)?))
+            let mut details = load_task_details(&tx, &project, &task)?;
+            details.workflow_state = load_delivery_state(&tx, &project, &task)?.state;
+            Ok(Some(details))
         })
         .await
     }
@@ -136,12 +138,23 @@ impl Store {
         let encrypted = protection::protect(&serde_json::to_vec(&details_payload)?)?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let effective = load_delivery_state(&tx, &project, &task)?.state;
+            let terminal = |state| matches!(state, TaskWorkflowState::Completed | TaskWorkflowState::Cancelled);
+            let workflow_state = if terminal(effective) || terminal(details.workflow_state) {
+                ensure!(
+                    details.workflow_state == effective,
+                    "use the task delivery actions to complete, cancel, or reopen work"
+                );
+                load_task_details(&tx, &project, &task)?.workflow_state
+            } else {
+                details.workflow_state
+            };
             tx.execute(
                 "INSERT INTO project_task_details(project_id, task_id, priority, workflow_state, payload)
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(project_id, task_id) DO UPDATE SET priority = excluded.priority,
                      workflow_state = excluded.workflow_state, payload = excluded.payload",
-                params![project, task, details.priority, details.workflow_state.key(), encrypted],
+                params![project, task, details.priority, workflow_state.key(), encrypted],
             ).context("task details require an actionable record in this project")?;
             tx.execute(
                 "DELETE FROM project_task_prerequisites WHERE project_id = ?1 AND task_id = ?2",

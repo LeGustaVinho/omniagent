@@ -158,6 +158,24 @@ pub(super) fn effective_policy(db: &Connection, job: &Job) -> Result<EffectivePo
             requirements: rule.requirements,
         });
     }
+    if role == JobRole::Pipeline
+        && job.mode == SessionMode::ApprovedWrite
+        && let Some(origin) = &job.pipeline
+        && let Some(release) = &origin.release
+        && crate::workflows::is_operator_workflow_release(
+            db,
+            &job.project_id,
+            &origin.pipeline_run_id,
+            &release.id,
+        )?
+    {
+        return Ok(EffectivePolicy {
+            role,
+            permission: JobPermission::Allow,
+            key: format!("workflow-approval:{}", release.id),
+            requirements: JobRequirements::default(),
+        });
+    }
     Ok(EffectivePolicy {
         role,
         permission: if role == JobRole::Agent || job.mode == SessionMode::ApprovedWrite {

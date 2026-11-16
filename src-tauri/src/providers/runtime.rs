@@ -27,7 +27,7 @@ use crate::{
     mcp_bridge::{PERMISSION_PREFIX, Registration, RunBridge},
     process::TerminalOutcome,
     process_io::CapturedProcess,
-    repository::{self, CheckoutLayout},
+    repository::{self, CheckoutLayout, verification::MaterializedCandidate},
     runner::{AttachmentRunScope, CONTRACT_VERSION, ExecutionPlatform, LaunchRequest, Runner},
     runs::RunStatus,
     store::Store,
@@ -42,7 +42,7 @@ use super::{
         Verification,
     },
     configuration,
-    launch_scope::{ScopedLaunch, ScopedLaunchEvidence},
+    launch_scope::{CandidateReviewCheckout, ScopedLaunch, ScopedLaunchEvidence},
     planning::{PlanSource, STRUCTURED_PLANNING_PROMPT, StructuredPlan},
     plugins::{PluginInventory, probe_run_plugins},
     skills::{SkillCatalog, explicit_skill_request},
@@ -304,6 +304,7 @@ fn start_turn(
             reported_skills: None,
             plugin_inventory: None,
             scoped_launch: None,
+            candidate_review: None,
             capability_scope: None,
             executable_revision: None,
             platform: None,
@@ -364,6 +365,12 @@ fn start_turn(
                 execution.final_answer
             }
         });
+        if execution.process_launched
+            && !execution.quiescence_confirmed
+            && let Some(review) = execution.candidate_review.take()
+        {
+            review.preserve();
+        }
         let status = execution
             .app
             .block_on(execution.store.finish_observed_agent_attempt(
@@ -410,6 +417,7 @@ struct TurnExecution {
     reported_skills: Option<SkillCatalog>,
     plugin_inventory: Option<PluginInventory>,
     scoped_launch: Option<ScopedLaunchEvidence>,
+    candidate_review: Option<MaterializedCandidate>,
     capability_scope: Option<(CapabilityScope, CheckoutLayout)>,
     executable_revision: Option<String>,
     platform: Option<ExecutionPlatform>,
@@ -560,7 +568,7 @@ impl TurnExecution {
             self.store
                 .job_dispatch_requirements(self.plan.run.id.clone()),
         )?;
-        let scope = self.plan.scope.clone();
+        let mut scope = self.plan.scope.clone();
         if requirements
             .capabilities
             .contains(&super::Capability::OsCommandSandbox)
@@ -583,7 +591,7 @@ impl TurnExecution {
             self.reject_dispatch(DispatchRejection::ProfileUnavailable)?;
             return Err(error);
         }
-        let checkout = match self.app.block_on(repository::verify_checkout(
+        let registered = match self.app.block_on(repository::verify_checkout(
             &self.store,
             self.plan.run.checkout_id.clone(),
             scope.checkout.clone(),
@@ -595,6 +603,9 @@ impl TurnExecution {
                 return Err(error);
             }
         };
+        let (checkout, candidate_checkout) = self.isolate_candidate_review(registered)?;
+        let is_candidate_review = candidate_checkout.is_some();
+        scope.checkout.clone_from(&checkout.cwd);
         let adapter = scope.provider.adapter();
         let mut session = adapter.create_session(SessionRequest {
             checkout: scope.checkout.clone(),
@@ -608,12 +619,18 @@ impl TurnExecution {
         }
         session.set_checkout_root(&checkout.root);
         session.set_question_route(self.plan.question_route);
-        let review = self.app.block_on(self.store.resolve_launch_review(
+        let mut review = self.app.block_on(self.store.resolve_launch_review(
             self.plan.run.checkout_id.clone(),
             &checkout,
             scope.provider,
         ))?;
+        let omitted = if is_candidate_review {
+            std::mem::take(&mut review.approved)
+        } else {
+            Vec::new()
+        };
         let bridge = bridge_executable
+            .filter(|_| !is_candidate_review)
             .map(|executable| -> Result<_> {
                 let bridge = self.app.block_on(RunBridge::start_for_run(
                     &self.store,
@@ -631,7 +648,11 @@ impl TurnExecution {
             }
             Ok(None) => {
                 self.record_bridge_registration(Registration::Unavailable {
-                    reason: "The selected runner has no MCP helper".into(),
+                    reason: if is_candidate_review {
+                        "The OmniAgent MCP helper is disabled for isolated candidate review".into()
+                    } else {
+                        "The selected runner has no MCP helper".into()
+                    },
                 })?;
                 None
             }
@@ -658,6 +679,13 @@ impl TurnExecution {
             session.arguments(),
             registration,
         )?;
+        for (entry, _) in omitted {
+            launch.evidence.excluded.insert(
+                entry.id,
+                "Executable customizations are disabled for isolated candidate review".into(),
+            );
+        }
+        launch.evidence.candidate_checkout = candidate_checkout;
         if self.plan.native_goal_seed.is_some() {
             ensure!(
                 matches!(self.plan.intent, SessionIntent::Start),
@@ -826,6 +854,7 @@ impl TurnExecution {
             .app
             .block_on(self.store.has_yielding_wait(self.plan.run.id.clone()))?;
         if managed_writer
+            || is_candidate_review
             || self.goal.is_some()
             || self.exiting()
             || self.downstream_requested
@@ -868,6 +897,56 @@ impl TurnExecution {
             self.record_bridge_registration(registration)?;
         }
         run
+    }
+
+    fn isolate_candidate_review(
+        &mut self,
+        registered: CheckoutLayout,
+    ) -> Result<(CheckoutLayout, Option<CandidateReviewCheckout>)> {
+        let Some(candidate) = self.app.block_on(
+            self.store
+                .workflow_candidate_for_review_attempt(self.plan.run.id.clone()),
+        )?
+        else {
+            return Ok((registered, None));
+        };
+
+        ensure!(
+            self.plan.scope.mode == SessionMode::ReadOnly
+                && matches!(self.plan.intent, SessionIntent::Start)
+                && !self.plan.requires_bridge
+                && candidate.checkout_id == self.plan.run.checkout_id,
+            "A candidate review requires its registered worktree and a fresh read-only session"
+        );
+        let lease = match self.app.block_on(self.store.materialize_selected_candidate(
+            candidate.target.project_id,
+            candidate.target.task_id,
+            candidate.id.clone(),
+        )) {
+            Ok(lease) => lease,
+            Err(error) => {
+                self.reject_dispatch(DispatchRejection::WorktreeUnavailable)?;
+                self.failure.cause = Some(FailureCause::WorktreeUnavailable);
+                return Err(error);
+            }
+        };
+        let root = dunce::canonicalize(lease.path())?;
+        self.candidate_review = Some(lease);
+        let evidence = CandidateReviewCheckout {
+            candidate_id: candidate.id,
+            source_run_id: candidate.target.run_id,
+            base_commit: candidate.base_commit,
+            tree: candidate.tree,
+            working_directory: root.clone(),
+        };
+        Ok((
+            CheckoutLayout {
+                cwd: root.clone(),
+                primary_root: root.clone(),
+                root,
+            },
+            Some(evidence),
+        ))
     }
 
     fn exiting(&self) -> bool {
@@ -1341,8 +1420,10 @@ impl TurnExecution {
             self.plugin_inventory.as_ref(),
             self.reported_skills.as_ref(),
         )?;
+        let mut effective_scope = self.plan.scope.clone();
+        effective_scope.checkout.clone_from(&checkout.cwd);
         let scope = CapabilityScope::from_dispatch(
-            &self.plan.scope,
+            &effective_scope,
             self.plan.run.checkout_id.clone(),
             self.executable_revision.clone(),
             self.platform.clone(),
@@ -1533,7 +1614,7 @@ impl TurnExecution {
             session_id: None,
             job_policy_revision: None,
             role_context,
-            base_commit: repository::base_commit(&self.plan.scope.checkout)?,
+            base_commit: repository::base_commit(&checkout.cwd)?,
             submitted_messages: self.plan.input.clone(),
             native_history,
             capabilities: Some(capabilities),

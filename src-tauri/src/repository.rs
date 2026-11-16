@@ -19,6 +19,7 @@ mod candidates;
 mod isolated_git;
 mod markdown;
 pub mod verification;
+pub mod verified_git;
 mod worktrees;
 pub(crate) mod writers;
 pub use candidates::{AttemptWorktreeEvidence, CandidateRevision, GitChanges, LiveWorktree};
