@@ -158,7 +158,9 @@ export function PendingInput({ input, conversationId, runId, onResolved, savedRe
   }
 
   return (
-    <div className="rounded-md border border-border bg-card p-3">
+    <div className="rounded-md border border-border bg-card p-3"
+      data-question-request={request.type === "question" ? JSON.stringify(request.request_id) : undefined}
+      tabIndex={request.type === "question" ? -1 : undefined}>
       {request.type === "approval" ? (
         <>
           <p className="text-sm font-medium">Approval requested for {request.operation}</p>

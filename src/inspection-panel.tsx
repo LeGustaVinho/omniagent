@@ -9,7 +9,7 @@ import type { DownstreamWait } from "@/bindings/DownstreamWait";
 import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
 import { deliveryBase, deliveryBranch, deliveryNotePath, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
-import type { DeliveryStep, WorkspaceProps } from "@/workbench-contract";
+import type { DeliveryStep, QuestionFocus, WorkspaceProps } from "@/workbench-contract";
 import { RunOrchestrationPanel } from "@/run-orchestration";
 
 const steps: Record<DeliveryStep, string> = {
@@ -21,12 +21,17 @@ const steps: Record<DeliveryStep, string> = {
 const inspectorPages = ["Overview", "Timeline", "Agents", "Context", "Exact input", "Approvals", "Artifacts"] as const;
 type InspectorPage = (typeof inspectorPages)[number];
 
-type InspectorProps = WorkspaceProps & { runId: string; conversationId?: string; onClose: () => void };
+type InspectorProps = WorkspaceProps & {
+  runId: string; conversationId?: string; focusQuestion?: QuestionFocus; onClose: () => void;
+};
 
-export function RunInspector({ runId, conversationId, onClose, checkout, simulation, openWorkspace, openChanges, openActivity }: InspectorProps) {
+export function RunInspector({
+  runId, conversationId, focusQuestion, onClose, checkout, simulation, openWorkspace, openChanges, openActivity,
+}: InspectorProps) {
   const [page, setPage] = useState<InspectorPage>("Overview");
   if (!simulation) return <RecordedExecutionRun projectId={checkout.projectId} runId={runId}
-    conversationId={conversationId} onClose={onClose} openActivity={openActivity} openWorkspace={openWorkspace} />;
+    conversationId={conversationId} focusQuestion={focusQuestion}
+    onClose={onClose} openActivity={openActivity} openWorkspace={openWorkspace} />;
 
   const step = simulation.delivery;
   const status = steps[step];
@@ -67,7 +72,7 @@ export function RunInspector({ runId, conversationId, onClose, checkout, simulat
   );
 }
 
-type RecordedRunProps = Pick<InspectorProps, "conversationId" | "runId" | "onClose" | "openActivity" | "openWorkspace"> & { projectId: string };
+type RecordedRunProps = Pick<InspectorProps, "conversationId" | "runId" | "focusQuestion" | "onClose" | "openActivity" | "openWorkspace"> & { projectId: string };
 
 function RecordedExecutionRun(props: RecordedRunProps) {
   const { projectId, conversationId, runId } = props;
@@ -124,7 +129,7 @@ function RecordedCommandRun({ run, onClose, navigation }: {
   </section>;
 }
 
-function RecordedConversationRun({ conversationId, projectId, runId, onClose, openActivity, openWorkspace }: RecordedRunProps) {
+function RecordedConversationRun({ conversationId, projectId, runId, focusQuestion, onClose, openActivity, openWorkspace }: RecordedRunProps) {
   const current = useQuery({
     queryKey: ["inspect-conversation-run", projectId, conversationId, runId],
     queryFn: () => invoke<[RunRecord, string]>("inspect_conversation_run", { projectId, conversationId, runId }),
@@ -140,7 +145,7 @@ function RecordedConversationRun({ conversationId, projectId, runId, onClose, op
     <div className="work-inspection-body">
       {!activity.live && <DownstreamHistory projectId={projectId} runId={runId} openActivity={openActivity} />}
       {(run.status === "failed" || run.status === "interrupted") && <JobFailurePanel projectId={projectId} runId={runId} />}
-      <ConversationRequests conversationId={owner} runId={runId} activity={activity} />
+      <ConversationRequests conversationId={owner} runId={runId} activity={activity} focusQuestion={focusQuestion} />
       {activity.live && <StopConversation {...activity} />}
       {activity.error && <p role="alert">{String(activity.error)}</p>}
     </div>

@@ -1,9 +1,11 @@
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
+import type { RequestId } from "@/conversation-inputs";
 
 export type WorkspaceId = "conversations" | "ide" | "tasks" | "pipelines" | "knowledge" | "git" | "diagnostics";
 export type ScenarioId = "delivery" | "recovery" | "pipelines" | "windows";
 export type DeliveryStep = "note" | "question" | "plan" | "queued" | "running" | "review" | "verified" | "accepted" | "merged" | "interrupted" | "failed";
 export type DeliveryAction = "start" | "answer" | "approve" | "dispatch" | "finish" | "verify" | "accept" | "merge" | "interrupt" | "resume" | "fail" | "retry" | "invalidate";
+export type QuestionFocus = { requestId: RequestId };
 
 export interface SimulationSession {
   scenario: ScenarioId;
@@ -18,7 +20,7 @@ export interface WorkspaceProps {
   simulation: SimulationSession | null;
   startSimulation: (scenario?: ScenarioId) => void;
   openWorkspace: (workspace: WorkspaceId, target?: string) => void;
-  openActivity: (runId: string, conversationId?: string) => void;
+  openActivity: (runId: string, conversationId?: string, requestId?: RequestId) => void;
   openChanges: (target: "saved" | "working") => void;
 }
 

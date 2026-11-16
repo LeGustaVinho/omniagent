@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
+    jobs::saved_checkpoint_is_current,
     protection,
+    providers::{ProviderEvent, ProviderEventData, RequestId},
     repository::verified_git::load_verified_delivery_commit,
     store::Store,
     workflows::{
@@ -14,6 +16,9 @@ use crate::{
 };
 
 use super::{TaskWorkflowState, activity::load_task_details, load_project_task};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -50,7 +55,18 @@ pub struct TaskDeliveryState {
     pub checklist_resolved: bool,
     pub has_direct_work: bool,
     pub active_workflow_run_id: Option<String>,
+    pub question_blocker: Option<TaskQuestionBlocker>,
     pub completion: Option<TaskDelivery>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskQuestionBlocker {
+    pub run_id: String,
+    pub conversation_id: String,
+    pub request_id: RequestId,
+    pub state: String,
+    pub answer_recorded: bool,
 }
 
 impl Store {
@@ -317,10 +333,17 @@ pub(super) fn load_delivery_state(
     let legacy_completion =
         !has_delivery_history && checklist_resolved && base == TaskWorkflowState::Completed;
     let direct_delivered = completion.is_some() || legacy_completion;
+    let question_blocker = if cancelled || direct_delivered {
+        None
+    } else {
+        open_task_question(db, project, task)?
+    };
     let state = if cancelled {
         TaskWorkflowState::Cancelled
     } else if children.is_empty() && direct_delivered {
         TaskWorkflowState::Completed
+    } else if question_blocker.is_some() {
+        TaskWorkflowState::Blocked
     } else if waiting_for_commit || awaiting_completion {
         TaskWorkflowState::InReview
     } else {
@@ -342,8 +365,53 @@ pub(super) fn load_delivery_state(
         checklist_resolved,
         has_direct_work,
         active_workflow_run_id,
+        question_blocker,
         completion,
     })
+}
+
+fn open_task_question(
+    db: &Connection,
+    project: &str,
+    task: &str,
+) -> Result<Option<TaskQuestionBlocker>> {
+    let question = db.query_row(
+        "SELECT waiting.run_id, waiting.conversation_id, waiting.request_event_seq, waiting.state,
+                answer.request_event_seq IS NOT NULL, event.payload
+         FROM task_runs work
+         JOIN open_agent_questions waiting ON waiting.run_id = work.run_id
+         JOIN agent_events event ON event.seq = waiting.request_event_seq
+         LEFT JOIN recorded_question_answers answer ON answer.request_event_seq = waiting.request_event_seq
+         WHERE work.project_id = ?1 AND work.task_id = ?2
+           AND work.ordinal = (SELECT max(ordinal) FROM job_attempts WHERE job_id = work.job_id)
+         ORDER BY answer.request_event_seq IS NOT NULL, waiting.request_event_seq LIMIT 1",
+        params![project, task],
+        |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?, row.get::<_, bool>(4)?, row.get::<_, Vec<u8>>(5)?,
+        )),
+    ).optional()?;
+    question
+        .map(
+            |(run_id, conversation_id, sequence, mut state, answer_recorded, payload)| {
+                if state == "saved" && !saved_checkpoint_is_current(db, &run_id, sequence)? {
+                    state = "needs_review".into();
+                }
+                let event: ProviderEvent =
+                    serde_json::from_slice(&protection::unprotect(&payload)?)?;
+                let ProviderEventData::Question { request_id, .. } = event.data else {
+                    anyhow::bail!("The saved task blocker is missing its originating question");
+                };
+                Ok(TaskQuestionBlocker {
+                    run_id,
+                    conversation_id,
+                    request_id,
+                    state,
+                    answer_recorded,
+                })
+            },
+        )
+        .transpose()
 }
 
 type DeliveryEvent = (String, String, String, Option<Vec<u8>>);

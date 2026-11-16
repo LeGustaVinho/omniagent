@@ -17,7 +17,7 @@ import {
   ConversationResponseEvidence, cloneTurnResponseEvidence, newTurnResponseEvidence, recordResponseEvidence,
   type ResponseObservation, type TurnResponseEvidence,
 } from "@/conversation-response-evidence";
-import type { WorkspaceProps } from "@/workbench-contract";
+import type { QuestionFocus, WorkspaceProps } from "@/workbench-contract";
 import { ConversationSubagentQuotaPanel } from "@/subagent-quota";
 import { AttemptSubagentAudit } from "@/subagent-audit-controls";
 
@@ -196,11 +196,23 @@ export function StopConversation({ stop, stopping }: ReturnType<typeof useConver
   </Button>;
 }
 
-export function ConversationRequests({ activity, conversationId, runId }: {
+export function ConversationRequests({ activity, conversationId, runId, focusQuestion }: {
   activity: ReturnType<typeof useConversationRun>;
   conversationId: string;
   runId: string;
+  focusQuestion?: QuestionFocus;
 }) {
+  const requests = useRef<HTMLElement>(null);
+  const focused = useRef<QuestionFocus>(undefined);
+  useEffect(() => {
+    if (!focusQuestion || focused.current === focusQuestion || !requests.current) return;
+    const id = JSON.stringify(focusQuestion.requestId);
+    const target = Array.from(requests.current.querySelectorAll<HTMLElement>("[data-question-request]"))
+      .find((question) => question.dataset.questionRequest === id);
+    if (!target) return;
+    target.focus();
+    focused.current = focusQuestion;
+  }, [focusQuestion, activity.inputs, activity.savedQuestions]);
   if (!activity.inputs.length && !activity.savedQuestions.length) return null;
   const needsReview = !activity.inputs.length &&
     activity.savedQuestions.every((question) => question.state === "needs_review");
@@ -208,7 +220,7 @@ export function ConversationRequests({ activity, conversationId, runId }: {
     activity.savedQuestions.every((question) => question.answerRecorded);
   const savedIds = new Set(activity.savedQuestions.map(({ event }) => event.data.request_id));
   return (
-    <section aria-label="Pending requests" className="conv-requests" tabIndex={-1}>
+    <section ref={requests} aria-label="Pending requests" className="conv-requests" tabIndex={-1}>
       <p className="conv-waiting" role="status">{needsReview ? "Question needs review" : answered ? "Waiting to continue" : "Waiting for input"}</p>
       {activity.inputs.filter(({ data }) => !savedIds.has(data.request_id)).map((request) => <PendingInput key={JSON.stringify(request.data.request_id)}
         input={request} conversationId={conversationId} runId={runId} onResolved={activity.refreshRequests} />)}
@@ -217,7 +229,8 @@ export function ConversationRequests({ activity, conversationId, runId }: {
           ? <PendingInput key={JSON.stringify(event.data.request_id)} input={event} savedReason={saveReasons[reason]}
               conversationId={conversationId} runId={runId} onResolved={activity.refreshRequests} />
           :
-        <div key={JSON.stringify(event.data.request_id)} className="grid gap-2 rounded-md border border-border bg-card p-3">
+        <div key={JSON.stringify(event.data.request_id)} data-question-request={JSON.stringify(event.data.request_id)}
+          tabIndex={-1} className="grid gap-2 rounded-md border border-border bg-card p-3">
           <p className="text-sm font-medium">{event.data.normalized?.message || "Input requested"}</p>
           <p className="text-xs text-muted-foreground">{answerRecorded ? "Answer recorded" : state === "saving" ? "Saving the turn checkpoint…" : saveReasons[reason]}</p>
           {!answerRecorded && event.data.normalized?.fields.map((field) => <div key={field.id} className="grid gap-1 text-sm">

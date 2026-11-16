@@ -17,7 +17,7 @@ import { useRunSubscription } from "@/run-projection";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import {
   exampleCheckout, nextDeliveryStep, scenarios,
-  type DeliveryAction, type DeliveryStep, type ScenarioId, type SimulationSession, type WorkspaceId, type WorkspaceProps,
+  type DeliveryAction, type DeliveryStep, type QuestionFocus, type ScenarioId, type SimulationSession, type WorkspaceId, type WorkspaceProps,
 } from "@/workbench-contract";
 
 const ConversationsPreview = lazy(() => import("@/conversations-preview"));
@@ -42,7 +42,8 @@ const areas = [
 
 type Navigation = { active: WorkspaceId; visited: Partial<Record<WorkspaceId, { target?: string }>> };
 type SimulationState = { scenario: ScenarioId; epoch: number; delivery: DeliveryStep; navigation: Navigation };
-type SidePane = { type: "activity"; runId: string; conversationId?: string } | { type: "changes"; target: "saved" | "working" };
+type SidePane = { type: "activity"; runId: string; conversationId?: string; focusQuestion?: QuestionFocus }
+  | { type: "changes"; target: "saved" | "working" };
 
 function show(workspace: WorkspaceId, target?: string, prior?: Navigation): Navigation {
   return { active: workspace, visited: { ...prior?.visited, [workspace]: target === undefined ? prior?.visited[workspace] ?? {} : { target } } };
@@ -157,7 +158,7 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
       const active = document.activeElement;
       if (active instanceof HTMLElement && !active.closest(".work-inspector")) sideTrigger.current = active;
       const existing = simulation ? previewSide : realSide;
-      if (next.type === "activity" && existing?.type === "activity" && next.runId === existing.runId) {
+      if (next.type === "activity" && !next.focusQuestion && existing?.type === "activity" && next.runId === existing.runId) {
         requestAnimationFrame(() => document.querySelector<HTMLElement>('.work-inspector [aria-label="Close activity"]')?.focus());
         return;
       }
@@ -174,7 +175,9 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
           setRealNavigation((current) => show(workspace, target, current));
         }
       },
-      openActivity: (runId, conversationId) => showSide({ type: "activity", runId, conversationId }),
+      openActivity: (runId, conversationId, requestId) => showSide({
+        type: "activity", runId, conversationId, focusQuestion: requestId === undefined ? undefined : { requestId },
+      }),
       openChanges: (target) => showSide({ type: "changes", target }),
     };
   }
@@ -264,7 +267,8 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
         {side && <SideInspector key={side.type === "activity" ? side.runId : side.target} side={side} compact={compact} close={closeSide}
           plan={simulated && side.type === "changes" && side.target === "saved" && <SavedPlan />}>
           <Suspense fallback={loading}>
-            {side.type === "activity" ? <RunInspector {...current} runId={side.runId} conversationId={side.conversationId} onClose={closeSide} /> : <ChangesPanel {...current} target={side.target} />}
+            {side.type === "activity" ? <RunInspector {...current} runId={side.runId} conversationId={side.conversationId}
+              focusQuestion={side.focusQuestion} onClose={closeSide} /> : <ChangesPanel {...current} target={side.target} />}
           </Suspense>
         </SideInspector>}
       </div>

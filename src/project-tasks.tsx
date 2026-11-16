@@ -15,6 +15,13 @@ type Hierarchy = {
   }[];
 };
 type Item = { id: string; revision: number; position: number; body: string; checked: boolean };
+type TaskQuestionBlocker = {
+  runId: string;
+  conversationId: string;
+  requestId: string | number;
+  state: "live" | "saving" | "saved" | "needs_review";
+  answerRecorded: boolean;
+};
 type WorkflowState = {
   state: string;
   hasDirectWork: boolean;
@@ -22,6 +29,7 @@ type WorkflowState = {
   checklistResolved: boolean;
   pendingRepositoryChanges: boolean;
   activeWorkflowRunId: string | null;
+  questionBlocker: TaskQuestionBlocker | null;
 };
 type Evidence = { kind: "manual"; note: string | null } |
   { kind: "verified_commit"; completionSha: string; workflowRunId: string; unitEvidenceIds: string[] };
@@ -30,6 +38,12 @@ type VerifiedCommit = { branch: string; sha: string; captureRunId: string; purpo
 type Change = (operation: () => Promise<unknown>) => void;
 
 const stateLabel = (state: string) => state.charAt(0).toUpperCase() + state.slice(1).replaceAll("_", " ");
+const questionStatus: Record<TaskQuestionBlocker["state"], string> = {
+  live: "Waiting for input",
+  saving: "Saving the turn checkpoint…",
+  saved: "Waiting for input",
+  needs_review: "Question needs review",
+};
 
 function CommitDetails({ projectId, taskId, evidenceId, openActivity }: {
   projectId: string; taskId: string; evidenceId: string; openActivity: WorkspaceProps["openActivity"];
@@ -55,7 +69,7 @@ function LiveTaskDetails({ projectId, task, hasChildren, change, busy, links }: 
   const state = useQuery({
     queryKey: ["project-tasks", projectId, task.id, "state"],
     queryFn: () => invoke<WorkflowState | null>("project_task_delivery_state", args),
-    refetchInterval: ({ state }) => state.data?.activeWorkflowRunId && !["completed", "cancelled"].includes(state.data.state) ? 2000 : false,
+    refetchInterval: ({ state }) => state.data && !["completed", "cancelled"].includes(state.data.state) ? 2000 : false,
   });
   const checklist = useQuery({
     queryKey: ["project-tasks", projectId, task.id, "checklist"],
@@ -66,13 +80,20 @@ function LiveTaskDetails({ projectId, task, hasChildren, change, busy, links }: 
     queryFn: () => invoke<Delivery[]>("project_task_deliveries", args),
   });
   const saved = state.data;
+  const question = saved?.questionBlocker;
   const closed = saved?.state === "completed" || saved?.state === "cancelled";
   const mayCompleteManually = saved && !closed && !saved.activeWorkflowRunId &&
     !saved.pendingRepositoryChanges && saved.checklistResolved && (!hasChildren || saved.hasDirectWork);
   const error = state.error ?? checklist.error ?? deliveries.error;
   return <section className="pipeline-stack" aria-label={task.title}>
     <h3 className="font-medium break-words">{task.title}</h3>
-    {saved && <p role="status">{saved.waitingForCommit ? "In review · Waiting for commit" : stateLabel(saved.state)}</p>}
+    {saved && <p role="status">{saved.waitingForCommit && !question ? "In review · Waiting for commit" : stateLabel(saved.state)}</p>}
+    {question && <section className="pipeline-form pipeline-stack" aria-label="Task question blocker">
+      <p role="status">{question.answerRecorded && question.state !== "needs_review"
+        ? "Answer recorded · Waiting to continue" : questionStatus[question.state]}</p>
+      <Button type="button" variant="outline"
+        onClick={() => links.openActivity(question.runId, question.conversationId, question.requestId)}>Open originating question</Button>
+    </section>}
     {saved?.activeWorkflowRunId && <Button variant="outline" onClick={() => links.openWorkspace("pipelines", saved.activeWorkflowRunId ?? undefined)}>Open delivery workflow</Button>}
     <section className="pipeline-form pipeline-stack" aria-label="Task checklist">
       <h4 className="font-medium">Checklist</h4>
