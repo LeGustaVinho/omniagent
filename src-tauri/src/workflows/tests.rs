@@ -663,13 +663,12 @@ pub(super) async fn approve_delivery_fixture_for_work(
     approve_delivery_fixture_in_run(store, temp_path, repo, task_id, run).await
 }
 
-pub(super) async fn approve_delivery_fixture_in_run(
+pub(super) async fn link_reviewed_delivery_fixture(
     store: &Store,
-    temp_path: &Path,
-    repo: ProjectCheckout,
+    repo: &ProjectCheckout,
     task_id: Option<String>,
-    run: WorkflowRun,
-) -> Result<ApprovedDeliveryFixture> {
+    run: &WorkflowRun,
+) -> Result<(WorkflowArtifact, WorkflowArtifact, WorkflowArtifact)> {
     let project = repo.project_id.clone();
     let root = Path::new(&repo.checkout_root);
     let planned_text = if task_id.is_some() {
@@ -677,7 +676,6 @@ pub(super) async fn approve_delivery_fixture_in_run(
     } else {
         "Do each change separately.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"First change\",\"completionCriteria\":[\"First file updated\"]},{\"purpose\":\"Second change\",\"completionCriteria\":[\"Second file updated\"]}]}\n```"
     };
-    let unit_count = if task_id.is_some() { 1 } else { 2 };
     let host = |node: &str, inputs, request| WorkflowHostSubmission {
         project_id: project.clone(),
         run_id: run.id.clone(),
@@ -706,7 +704,7 @@ pub(super) async fn approve_delivery_fixture_in_run(
             WorkflowHostRequest::LoadContext,
         ))
         .await?;
-    let mut planner = submission(&repo, &run, "plan", None, SessionMode::Plan);
+    let mut planner = submission(repo, run, "plan", None, SessionMode::Plan);
     planner.artifacts = NodeInputs::from([("context".into(), context.id)]);
     store.submit_workflow_agent(planner).await?;
     let env = || AdmissionEnvironment {
@@ -779,8 +777,8 @@ pub(super) async fn approve_delivery_fixture_in_run(
         .set_job_pipeline_plan(project.clone(), run.id.clone(), None, plan.id.clone())
         .await?;
     let mut reviewer = submission(
-        &repo,
-        &run,
+        repo,
+        run,
         "review-plan",
         Some(plan.id.clone()),
         SessionMode::ReadOnly,
@@ -831,6 +829,26 @@ pub(super) async fn approve_delivery_fixture_in_run(
             .await?,
         task
     );
+    Ok((task, plan, alternate_plan))
+}
+
+pub(super) async fn approve_delivery_fixture_in_run(
+    store: &Store,
+    temp_path: &Path,
+    repo: ProjectCheckout,
+    task_id: Option<String>,
+    run: WorkflowRun,
+) -> Result<ApprovedDeliveryFixture> {
+    let unit_count = if task_id.is_some() { 1 } else { 2 };
+    let (task, plan, alternate_plan) = link_reviewed_delivery_fixture(store, &repo, task_id, &run).await?;
+    let project = repo.project_id.clone();
+    let host = |node: &str, inputs, request| WorkflowHostSubmission {
+        project_id: project.clone(),
+        run_id: run.id.clone(),
+        node_id: node.into(),
+        inputs,
+        request,
+    };
     let decision = store
         .execute_workflow_host(host(
             "approve",

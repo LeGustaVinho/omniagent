@@ -16,6 +16,8 @@ use super::{
 };
 
 mod rules;
+#[cfg(test)]
+mod tests;
 pub use rules::{
     ApprovalFacts, ApprovalRuleEvidence, ApprovalRuleOutcome, ApprovalRuleSettings, UnmetApproval,
     WorkflowApprovalPreview, WorkflowApprovalSubmission,
