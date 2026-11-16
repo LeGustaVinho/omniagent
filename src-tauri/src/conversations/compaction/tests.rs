@@ -255,3 +255,57 @@ async fn compacted_seed_survives_restart_preserves_history_and_requires_its_cove
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn failed_summary_and_concurrent_turn_leave_the_existing_context_active() -> Result<()> {
+    for concurrent in [false, true] {
+        let (_temp, store, chat, scope) = setup().await?;
+        std::fs::write(&scope.executable, b"fixture")?;
+        three_turns(&store, &chat, &scope).await?;
+        let before = store.conversation(chat.id.clone()).await?;
+        store
+            .request_conversation_compaction(
+                chat.id.clone(),
+                before.context_id.clone(),
+                scope.clone(),
+                scope.clone(),
+                String::new(),
+                false,
+            )
+            .await?;
+        let summary = store
+            .claim_next_job(environment(&scope))
+            .await?
+            .context("Missing summary job")?;
+        if concurrent {
+            let main = prepare(
+                &store,
+                &chat.id,
+                scope.clone(),
+                "Edit history during compaction",
+            )
+            .await?;
+            confirm(&store, &main).await?;
+        }
+        let expected = store.conversation(chat.id.clone()).await?.context_id;
+        let answer = if concurrent {
+            "An otherwise valid summary".into()
+        } else {
+            "too large".repeat(500)
+        };
+        finish_turn(&store, summary, &answer, None).await?;
+        let status = store
+            .conversation_compaction(chat.id, None, String::new())
+            .await?;
+        assert_eq!(status.context_id, expected);
+        assert_eq!(
+            status
+                .request
+                .context("Missing failed or stale request")?
+                .status,
+            if concurrent { "stale" } else { "failed" }
+        );
+        assert!(status.active_summary.is_none());
+    }
+    Ok(())
+}
