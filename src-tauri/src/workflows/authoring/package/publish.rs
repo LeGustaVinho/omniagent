@@ -692,6 +692,13 @@ impl<'a> GraphCompiler<'a> {
                     );
                     calls.insert(slot.clone(), self.child(artifact, blockers)?);
                 }
+                PackageArtifactBody::Subflow { .. } if node.kind == BuiltinNode::RepeatUntil => {
+                    let NodeConfiguration::RepeatUntil(configuration) = &node.configuration else {
+                        anyhow::bail!("Repeat node {slot} needs a stopping condition and bound");
+                    };
+                    let body = self.child(artifact, blockers)?;
+                    calls.insert(slot.clone(), crate::workflows::repetition::expand_repeat(body, configuration)?);
+                }
                 PackageArtifactBody::Subflow { .. } | PackageArtifactBody::McpTool { .. } => {
                     blockers.push(format!(
                         "The node {slot} requires the reusable artifact {}.",
@@ -721,7 +728,9 @@ impl<'a> GraphCompiler<'a> {
                 "The pinned definition for {} is unavailable",
                 node.id
             );
-            if node.kind == BuiltinNode::Subflow && !calls.contains_key(&node.id) {
+            if matches!(node.kind, BuiltinNode::Subflow | BuiltinNode::RepeatUntil)
+                && !calls.contains_key(&node.id)
+            {
                 blockers.push(format!("Select a pinned subflow for {}.", node.id));
             }
             if self.validate_bindings

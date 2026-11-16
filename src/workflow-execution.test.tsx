@@ -69,7 +69,11 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   const task = { taskId: "linked-task", projectId };
   const snapshot: WorkflowExecutionSnapshot = {
     run: { id: runId, version, planRevision: "selected-plan", projectId },
-    definition: { version, name: "Recorded pipeline title", nodes: [start, plan, review, approval, commit,
+    definition: { version, name: "Recorded pipeline title",
+      subflows: [{ path: "quality", name: "Pinned quality checks", version: {
+        id: "quality-flow", revision: "quality-revision", destination: "project", kind: "subflow",
+      }, nodes: ["command"], outputs: { report: { node: "command", port: "result" } } }],
+      nodes: [start, plan, review, approval, commit,
       node("queued", "Queued command"), node("running", "Active command"), node("question", "User question"),
       node("command", "Saved command", [], [port("result", "command_result")]),
       node("command-failed", "Invalid command", [], [control("completed"), control("failed"), port("result", "command_result")]),
@@ -159,6 +163,13 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   await user.click(graph.getByRole("button", { name: "Success branch · Skipped" }));
   expect(inspector.getByText("No execution reaches this stage through the selected branches")).toBeTruthy();
   expect(inspector.getByText("ready · command-failed.completed · Skipped input")).toBeTruthy();
+  await user.selectOptions(screen.getByRole("combobox", { name: "Pinned subflow" }), "quality");
+  expect(graph.queryByRole("button", { name: "Pinned source · Completed" })).toBeNull();
+  expect(graph.getByRole("button", { name: "Saved command · Completed" })).toBeTruthy();
+  await user.click(screen.getByText("Pinned subflow outputs"));
+  expect(screen.getByText("quality-revision")).toBeTruthy();
+  await user.click(inspector.getByRole("button", { name: "Open command output and logs" }));
+  expect(props.openActivity).toHaveBeenLastCalledWith("command-saved");
   await user.selectOptions(screen.getByRole("combobox", { name: "Saved workflow run" }), "newer-run");
   expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", "run:newer-run");
 });

@@ -19,6 +19,7 @@ pub struct WorkflowSubflow {
     pub outputs: BTreeMap<String, Endpoint>,
 }
 
+#[derive(Clone)]
 pub(super) struct BoundSubflow {
     pub name: String,
     pub version: PackageArtifactVersion,
@@ -360,7 +361,7 @@ fn start(workflow: &WorkflowDefinition) -> Result<&str> {
         .context("Subflow lost its Start entry")
 }
 
-fn output(workflow: &WorkflowDefinition, endpoint: &Endpoint) -> Result<PortType> {
+pub(super) fn output(workflow: &WorkflowDefinition, endpoint: &Endpoint) -> Result<PortType> {
     workflow
         .nodes
         .iter()

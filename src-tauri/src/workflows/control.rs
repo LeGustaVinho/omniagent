@@ -93,7 +93,7 @@ pub struct ControlDependency {
 fn is_control(kind: BuiltinNode) -> bool {
     matches!(
         kind,
-        BuiltinNode::Condition | BuiltinNode::Parallel | BuiltinNode::Join
+        BuiltinNode::Condition | BuiltinNode::Parallel | BuiltinNode::Join | BuiltinNode::IterationLimit
     )
 }
 
@@ -477,6 +477,7 @@ impl<'a> Evaluation<'a> {
                     }
                     Parallel => (ControlStageState::Completed, Some("branches"), None, None),
                     Join => (ControlStageState::Completed, Some("joined"), None, None),
+                    IterationLimit => (ControlStageState::Failed, Some("failed"), Some("Reached the configured iteration limit"), None),
                     LoadContext => {
                         let document = dependencies
                             .iter()

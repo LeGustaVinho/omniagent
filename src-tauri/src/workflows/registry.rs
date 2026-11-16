@@ -25,6 +25,8 @@ pub enum BuiltinNode {
     Parallel,
     Join,
     Subflow,
+    RepeatUntil,
+    IterationLimit,
     Result,
 }
 
@@ -91,6 +93,7 @@ pub enum ConfigurationKind {
     Command,
     Condition,
     SubflowEntry,
+    RepeatUntil,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +109,7 @@ pub enum NodeConfiguration {
     Command(CommandConfiguration),
     Condition { predicate: ConditionPredicate },
     SubflowEntry { outputs: Vec<Port> },
+    RepeatUntil(super::repetition::RepeatUntilConfiguration),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +132,8 @@ pub enum Executor {
     FanOut,
     JoinBranches,
     ExpandSubflow,
+    RepeatSubflow,
+    StopAtIterationLimit,
     PublishResult,
 }
 
@@ -377,6 +383,24 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             &[][..],
         ),
         (
+            RepeatUntil,
+            "Repeat until",
+            Executor::RepeatSubflow,
+            ConfigurationKind::RepeatUntil,
+            Effect::None,
+            &[][..],
+            &[][..],
+        ),
+        (
+            IterationLimit,
+            "Iteration limit",
+            Executor::StopAtIterationLimit,
+            ConfigurationKind::None,
+            Effect::None,
+            &[("ready", Control)],
+            &[("failed", Control)],
+        ),
+        (
             Result,
             "Result",
             Executor::PublishResult,
@@ -450,6 +474,7 @@ impl NodeConfiguration {
             (Self::SubflowEntry { outputs }, ConfigurationKind::SubflowEntry) => {
                 super::subflow::valid_entry_ports(outputs)
             }
+            (Self::RepeatUntil(configuration), ConfigurationKind::RepeatUntil) => configuration.valid(),
             _ => false,
         }
     }

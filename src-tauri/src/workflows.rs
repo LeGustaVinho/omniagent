@@ -23,6 +23,7 @@ mod plan_revision;
 #[cfg(test)]
 mod planning_integration;
 mod registry;
+mod repetition;
 mod subflow;
 pub mod role_templates;
 pub mod triggers;
@@ -66,6 +67,7 @@ pub use registry::{
     ArtifactKind, BuiltinNode, ConfigurationKind, Effect, Executor, NodeConfiguration,
     NodeDefinition, Port, PortType, builtin_registry,
 };
+pub use repetition::{RepeatFeedback, RepeatUntilConfiguration};
 pub use runtime::{NodeAttempt, NodePin, WorkflowAgentSubmission, WorkflowRun};
 pub use subflow::WorkflowSubflow;
 pub(crate) use runtime::{load_definition as load_workflow_definition, load_node_attempt};
@@ -149,8 +151,8 @@ fn compile_resolved<'definition>(
     graph: WorkflowGraph,
     definition_for: impl Fn(&NodeInstance) -> Option<&'definition NodeDefinition>,
 ) -> Result<WorkflowDefinition> {
-    ensure!(graph.nodes.iter().all(|node| node.kind != BuiltinNode::Subflow),
-        "Select a pinned subflow in an authoring package");
+    ensure!(graph.nodes.iter().all(|node| !matches!(node.kind, BuiltinNode::Subflow | BuiltinNode::RepeatUntil)),
+        "Select a pinned subflow in an authoring package for reusable calls and repeats");
     compile_resolved_graph(id, graph, definition_for, true)
 }
 

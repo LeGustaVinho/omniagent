@@ -18,6 +18,190 @@ use crate::{
     },
 };
 
+#[tokio::test]
+async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_restart() -> Result<()>
+{
+    use crate::workflows::{ConditionPredicate, RepeatFeedback, RepeatUntilConfiguration};
+    let dir = tempfile::tempdir()?;
+    let database = dir.path().join("repeat.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, dir.path()).await?;
+    let project = repo.project_id;
+    let note = store
+        .capture_repository_markdown(
+            repo.checkout_id.clone(),
+            Path::new(&repo.checkout_root).join("brief.md"),
+        )
+        .await?;
+    let body = member(
+        "body",
+        PackageArtifactBody::Subflow {
+            graph: WorkflowGraph {
+                name: "Load iteration context".into(),
+                nodes: vec![
+                    node("start", BuiltinNode::Start, NodeConfiguration::None),
+                    node("load", BuiltinNode::LoadContext, NodeConfiguration::None),
+                ],
+                wires: vec![
+                    Wire {
+                        from: port("start", "start"),
+                        to: port("load", "ready"),
+                    },
+                    Wire {
+                        from: port("start", "document"),
+                        to: port("load", "document"),
+                    },
+                ],
+            },
+            inputs: [
+                ("go".into(), port("start", "start")),
+                ("document".into(), port("start", "document")),
+            ]
+            .into(),
+            outputs: [
+                ("done".into(), port("load", "loaded")),
+                ("context".into(), port("load", "context")),
+            ]
+            .into(),
+        },
+        &[],
+    );
+    let mut requests = Vec::new();
+    for expected in ["brief.md", "missing.md"] {
+        let configuration = RepeatUntilConfiguration {
+            max_iterations: 2,
+            ready_input: "go".into(),
+            completion_output: "done".into(),
+            evidence_output: "context".into(),
+            until: ConditionPredicate::Equals {
+                pointer: "/evidence/relativePath".into(),
+                value: serde_json::Value::String(expected.into()),
+            },
+            feedback: Some(RepeatFeedback {
+                input: "document".into(),
+                output: "context".into(),
+            }),
+        };
+        let root = member(
+            "root",
+            PackageArtifactBody::Pipeline {
+                graph: WorkflowGraph {
+                    name: expected.into(),
+                    nodes: vec![
+                        node("start", BuiltinNode::Start, NodeConfiguration::None),
+                        node(
+                            "repeat",
+                            BuiltinNode::RepeatUntil,
+                            NodeConfiguration::RepeatUntil(configuration),
+                        ),
+                        node("success", BuiltinNode::Parallel, NodeConfiguration::None),
+                        node("failure", BuiltinNode::Parallel, NodeConfiguration::None),
+                    ],
+                    wires: vec![
+                        Wire {
+                            from: port("start", "start"),
+                            to: port("repeat", "go"),
+                        },
+                        Wire {
+                            from: port("start", "document"),
+                            to: port("repeat", "document"),
+                        },
+                        Wire {
+                            from: port("repeat", "completed"),
+                            to: port("success", "ready"),
+                        },
+                        Wire {
+                            from: port("repeat", "failed"),
+                            to: port("failure", "ready"),
+                        },
+                    ],
+                },
+            },
+            &[("repeat", "body")],
+        );
+        let draft = store
+            .create_workflow_package(
+                project.clone(),
+                None,
+                WorkflowPackage {
+                    name: "Bounded iteration".into(),
+                    members: vec![body.clone(), root],
+                },
+            )
+            .await?;
+        let WorkflowPackagePublishOutcome::Published { publication } = store
+            .publish_reviewed_workflow_package(project.clone(), draft.id, draft.revision)
+            .await?
+        else {
+            anyhow::bail!("Expected repeated workflow publication")
+        };
+        let version = &publication
+            .members
+            .iter()
+            .find(|item| item.key == "root")
+            .unwrap()
+            .artifact
+            .version;
+        let launch = ManualWorkflowLaunch {
+            project_id: project.clone(),
+            workflow: WorkflowRevision {
+                id: version.id.clone(),
+                revision: version.revision.clone(),
+            },
+            source: WorkflowLaunchSource {
+                checkout_id: repo.checkout_id.clone(),
+                revision_id: note.revision.id.clone(),
+            },
+            request_id: expected.into(),
+            work_id: None,
+        };
+        let run = store.launch_workflow_manual(launch.clone()).await?;
+        requests.push((launch, run.id));
+    }
+    drop(store);
+    let store = Store::open(database)?;
+    for (index, (launch, id)) in requests.into_iter().enumerate() {
+        assert_eq!(store.launch_workflow_manual(launch).await?.id, id);
+        let graph = store
+            .inspect_workflow_execution(project.clone(), id)
+            .await?
+            .context("Missing repeated workflow")?;
+        let first = graph
+            .outputs
+            .iter()
+            .find(|entry| entry.artifact.node_instance_id == "repeat::iteration-1::load")
+            .context("Iteration one did not produce context")?;
+        let second = graph
+            .outputs
+            .iter()
+            .find(|entry| entry.artifact.node_instance_id == "repeat::iteration-2::load");
+        let selected = if index == 0 { "success" } else { "failure" };
+        assert!(
+            graph.control.iter().any(
+                |receipt| receipt.node_id == selected && receipt.selected_ports == ["branches"]
+            )
+        );
+        if index == 0 {
+            assert!(second.is_none());
+        } else {
+            let second = second.context("Iteration two was not reached")?;
+            assert_eq!(
+                second.input_receipts[0].inputs["document"],
+                first.artifact.id
+            );
+            assert!(
+                graph
+                    .control
+                    .iter()
+                    .any(|receipt| receipt.node_id == "repeat::limit"
+                        && receipt.reason.as_deref()
+                            == Some("Reached the configured iteration limit"))
+            );
+        }
+    }
+    Ok(())
+}
+
 fn port(node: &str, name: &str) -> Endpoint {
     Endpoint {
         node: node.into(),
