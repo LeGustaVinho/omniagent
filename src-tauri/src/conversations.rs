@@ -6286,6 +6286,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn composer_native_suggestion_uses_only_the_exact_recent_completed_result() -> Result<()> {
+        use crate::{jobs::{ComposerSuggestionMode, SidePurpose, SideSubmission}, providers::suggestions::{SuggestionOutcome, SuggestionSource}};
+
+        let (_dir, store, chat, scope) = setup().await?;
+        let attempt = prepare(&store, &chat.id, scope.clone(), "Main prompt").await?;
+        let run = attempt.run.id.clone();
+        store.mark_agent_running(run.clone()).await?;
+        let snapshot = prepare_fixture_dispatch_with_capabilities(&store, &attempt, None).await?;
+        store.settle_dispatch(snapshot, Delivery::Submitted).await?;
+        let location = ProviderLocation {
+            session_id: Some("exact-session".into()), turn_id: Some("exact-turn".into()),
+            item_id: Some("exact-result".into()), ..Default::default()
+        };
+        let source = SuggestionSource {
+            provider_session_id: "exact-session".into(), provider_turn_id: Some("exact-turn".into()),
+            provider_result_id: Some("exact-result".into()), message_id: attempt.input.last().unwrap().message_id.clone(),
+        };
+        let suggest = |source: SuggestionSource, text: &str| source.settlement(SuggestionOutcome::Available { text: text.into() });
+        for (authority, event) in [
+            (EventSource::Provider, ProviderEvent { location: location.clone(), data: ProviderEventData::SessionReady { model: scope.model.clone(), effort: scope.effort.clone() } }),
+            (EventSource::Provider, suggest(source.clone(), "Premature output")),
+            (EventSource::Provider, ProviderEvent { location, data: ProviderEventData::TurnFinished { outcome: TurnOutcome::Completed } }),
+            (EventSource::Application, suggest(source.clone(), "Untrusted application output")),
+            (EventSource::Provider, suggest(SuggestionSource { message_id: "other-message".into(), ..source.clone() }, "Stale output")),
+            (EventSource::Provider, suggest(source, "Review the timeout handling.")),
+        ] {
+            store.record_agent_observation(run.clone(), authority, event).await?;
+        }
+        store.finish_agent_attempt(run.clone(), RunStatus::Succeeded, Some("Main response".into())).await?;
+        let after = store.conversation(chat.id.clone()).await?;
+        let active = || store.composer_native_suggestion(chat.id.clone(), after.context_id.clone(), run.clone(), scope.clone());
+        assert_eq!(active().await?, SuggestionOutcome::Available { text: "Review the timeout handling.".into() });
+        let different_model = SessionScope { model: Some("different-model".into()), ..scope.clone() };
+        assert_eq!(store.composer_native_suggestion(chat.id.clone(), after.context_id.clone(), run.clone(), different_model).await?, SuggestionOutcome::Ineligible);
+        assert_eq!(store.composer_native_suggestion(chat.id.clone(), chat.context_id, run.clone(), scope.clone()).await?, SuggestionOutcome::Ineligible);
+        store.save_conversation_draft(chat.id.clone(), "Typed while the suggestion was pending".into()).await?;
+        assert_eq!(active().await?, SuggestionOutcome::Ineligible);
+        store.save_conversation_draft(chat.id.clone(), String::new()).await?;
+        store.set_composer_suggestion_mode(ComposerSuggestionMode::Omniagent).await?;
+        assert!(matches!(store.enqueue_side_request(chat.id.clone(), Some(after.context_id), Some(run), scope.clone(), SidePurpose::Suggestion, String::new()).await?, SideSubmission::Skipped));
+        assert!(store.conversation_draft(chat.id.clone()).await?.is_empty());
+        assert_eq!(store.conversation_messages(chat.id.clone()).await?.iter().map(|message| message.text.as_str()).collect::<Vec<_>>(), ["Main prompt", "Main response"]);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn side_requests_share_capacity_without_joining_main_history() -> Result<()> {
         use crate::{
             dispatch::{ConversationSelection, SelectedMessageSpan},
@@ -6299,6 +6345,7 @@ mod tests {
                     ConfigurationEvidence,
                 },
                 side::SideOutcome,
+                suggestions::{SuggestionOutcome, SuggestionSource},
             },
         };
 
@@ -6424,6 +6471,14 @@ mod tests {
                 )
                 .await?;
         }
+        let source = SuggestionSource {
+            provider_session_id: "primary-thread".into(),
+            provider_turn_id: Some("primary-turn".into()),
+            provider_result_id: None,
+            message_id: completed.input.last().context("missing source message")?.message_id.clone(),
+        };
+        store.record_agent_observation(completed.run.id.clone(), EventSource::Application,
+            source.settlement(SuggestionOutcome::Unavailable)).await?;
         store
             .finish_agent_attempt(
                 completed.run.id.clone(),
@@ -6515,24 +6570,49 @@ mod tests {
             assert!(!wire.contains("Ignored untrusted text"));
         }
         outputs.lock().unwrap().clear();
+        let request_suggestion = || store.enqueue_side_request(chat.id.clone(), Some(current.context_id.clone()),
+            Some(completed.run.id.clone()), scope.clone(), SidePurpose::Suggestion, String::new());
+        assert_eq!(store.composer_suggestion_mode().await?, ComposerSuggestionMode::Native);
+        assert_eq!(store.composer_native_suggestion(chat.id.clone(), current.context_id.clone(), completed.run.id.clone(), scope.clone()).await?,
+            SuggestionOutcome::Unavailable);
+        assert!(matches!(request_suggestion().await?, SideSubmission::Skipped));
+        store.set_composer_suggestion_mode(ComposerSuggestionMode::Off).await?;
+        assert!(matches!(request_suggestion().await?, SideSubmission::Skipped));
         store
             .set_composer_suggestion_mode(ComposerSuggestionMode::Omniagent)
             .await?;
         let SideSubmission::Queued {
             job_id: suggestion_id,
-        } = store
-            .enqueue_side_request(
-                chat.id.clone(),
-                None,
-                Some(completed.run.id),
-                scope.clone(),
-                SidePurpose::Suggestion,
-                String::new(),
-            )
-            .await?
+        } = request_suggestion().await?
         else {
             anyhow::bail!("The current completed turn should qualify for a suggestion");
         };
+        assert!(matches!(request_suggestion().await?, SideSubmission::Skipped));
+        let before = store.conversation_messages(chat.id.clone()).await?;
+        let worker = JobScheduler::start(store.clone(), runner.clone(), None);
+        let suggestions = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(endpoint) = outputs.lock().unwrap().first().cloned() { return endpoint; }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await?;
+        suggestions.send(Ok(OutputFrame { stream: Stream::Stdout,
+            data: json!({"type":"result","subtype":"success","is_error":false,"session_id":"side-only",
+                "result":r#"{"prompt":"Ask about cancellation handling."}"#,"modelUsage":{"side-selected":{}}}).to_string()
+        }))?;
+        let answer = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let records = store.saved_side_requests(chat.id.clone()).await?;
+                if let Some(response) = records.into_iter().find(|record| record.job.id == suggestion_id)
+                    .and_then(|record| record.response) { return Ok::<_, anyhow::Error>(response.outcome); }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await??;
+        assert!(matches!(answer, SideOutcome::Answered { text, .. } if text == "Ask about cancellation handling."));
+        assert!(store.conversation_draft(chat.id.clone()).await?.is_empty());
+        assert_eq!(store.conversation_messages(chat.id.clone()).await?, before);
+        worker.shutdown().await?;
+        outputs.lock().unwrap().clear();
         for question in [
             "side-private-cancel",
             "side-private-finish",
@@ -6561,7 +6641,7 @@ mod tests {
                 "SELECT s.discarded, j.queue_state FROM job_side_requests s JOIN jobs j ON j.id = s.job_id WHERE j.id = ?1",
                 [&suggestion_id], |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            assert_eq!(state, (true, "cancelled".into()));
+            assert_eq!(state, (true, "queued".into()));
             Ok(())
         }).await?;
         store
@@ -6582,6 +6662,7 @@ mod tests {
             .claim_next_job(env.clone())
             .await?
             .context("Regular work should have priority")?;
+        assert!(store.scheduled_suggestion_enabled(main.run.id.clone()).await?);
         store.mark_agent_running(main.run.id.clone()).await?;
         assert_eq!(
             main.input.last().unwrap().text,

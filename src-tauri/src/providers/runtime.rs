@@ -48,7 +48,7 @@ use super::{
     plugins::{PluginInventory, probe_run_plugins},
     skills::{SkillCatalog, SkillRequest, explicit_skill_request},
     steering::{SteerOutcome, SteerTarget},
-    suggestions::SuggestionOutcome,
+    suggestions::{SuggestionOutcome, SuggestionSource, adapter_route_unavailable},
 };
 
 mod native_goals;
@@ -558,6 +558,9 @@ impl TurnExecution {
         self.goal = self
             .app
             .block_on(self.store.goal_execution_for_run(self.plan.run.id.clone()))?;
+        if self.admission.is_some() && self.goal.is_none() {
+            self.native_suggestions = self.app.block_on(self.store.scheduled_suggestion_enabled(self.plan.run.id.clone())).unwrap_or(false);
+        }
         if self
             .goal
             .as_ref()
@@ -616,7 +619,7 @@ impl TurnExecution {
             model: scope.model.clone(),
             effort: scope.effort.clone(),
         })?;
-        if self.native_suggestions && self.plan.question_route.is_native() {
+        if self.native_suggestions && !adapter_route_unavailable(&self.plan.scope) {
             session.enable_native_suggestions();
         }
         session.set_checkout_root(&checkout.root);
@@ -1280,6 +1283,13 @@ impl TurnExecution {
                 event.location.parent_item_id.is_none()
                     && matches!(event.data, ProviderEventData::Error { .. })
             });
+            let suggestion_boundary = if self.native_suggestions {
+                update.events.iter().find_map(|event| {
+                    (event.location.parent_item_id.is_none()
+                        && matches!(event.data, ProviderEventData::TurnFinished { outcome: TurnOutcome::Completed }))
+                    .then(|| event.location.clone())
+                })
+            } else { None };
             let turn_status = self.record_update(process, update, EventSource::Provider)?;
             if let Some(accepted) = native_seed_receipt {
                 ensure!(
@@ -1333,8 +1343,10 @@ impl TurnExecution {
                     self.store
                         .preserve_questions_after_turn(self.plan.run.id.clone(), false),
                 )?;
-                if status == RunStatus::Succeeded && self.native_suggestions && !awaiting_question {
-                    self.collect_suggestion(process, session, commands)?;
+                if status == RunStatus::Succeeded && !awaiting_question
+                    && let Some(boundary) = suggestion_boundary
+                    && self.suggestion_still_wanted() {
+                    let _ = self.settle_composer_suggestion(process, session, commands, boundary);
                 }
                 return Ok(status);
             }
@@ -1927,6 +1939,30 @@ impl TurnExecution {
         }
     }
 
+    fn suggestion_still_wanted(&self) -> bool {
+        self.admission.is_none() || self.app.block_on(self.store.scheduled_suggestion_still_wanted(self.plan.conversation_id.clone())).unwrap_or(false)
+    }
+
+    fn settle_composer_suggestion(
+        &mut self,
+        process: &mut CapturedProcess,
+        session: &mut dyn CliSession,
+        commands: &mpsc::Receiver<Command>,
+        boundary: ProviderLocation,
+    ) -> Result<()> {
+        if adapter_route_unavailable(&self.plan.scope) {
+            if let (Some(provider_session_id), Some(message)) = (boundary.session_id, self.plan.input.last()) {
+                let source = SuggestionSource {
+                    provider_session_id, provider_turn_id: boundary.turn_id,
+                    provider_result_id: boundary.item_id, message_id: message.message_id.clone(),
+                };
+                self.record(source.settlement(SuggestionOutcome::Unavailable), EventSource::Application)?;
+            }
+            return Ok(());
+        }
+        self.collect_suggestion(process, session, commands)
+    }
+
     fn collect_suggestion(
         &mut self,
         process: &mut CapturedProcess,
@@ -1967,7 +2003,8 @@ impl TurnExecution {
                 _ => return self.finish_suggestion(session, SuggestionOutcome::Failed),
             };
             match update {
-                Ok(update) => self.record_suggestion_events(update.events)?,
+                Ok(update) if self.suggestion_still_wanted() => self.record_suggestion_events(update.events)?,
+                Ok(_) => return self.finish_suggestion(session, SuggestionOutcome::Cancelled),
                 Err(_) => return self.finish_suggestion(session, SuggestionOutcome::Failed),
             }
         }

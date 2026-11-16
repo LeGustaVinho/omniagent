@@ -69,11 +69,11 @@ export function ComposerSuggestionSettings() {
     onSuccess: (mode) => client.setQueryData(["composer-suggestion-mode"], mode),
   });
   return <>
-    <SettingRow id="composer-suggestions" label="Composer suggestions" description="Eligible requests can consume provider account usage.">
+    <SettingRow id="composer-suggestions" label="Composer suggestions" description="Generating a suggestion can consume model usage.">
       <select id="composer-suggestions" value={query.data ?? "native"} disabled={!query.isSuccess || save.isPending}
         onChange={(event) => save.mutate(event.target.value as SuggestionMode)}>
         <option value="off">Off</option><option value="native">Native when available</option>
-        <option value="omniagent">Use OmniAgent when native is unavailable</option>
+        <option value="omniagent">Use OmniAgent when native support is unavailable</option>
       </select>
     </SettingRow>
     {(query.error || save.error) && <p role="alert">{String(query.error || save.error)}</p>}

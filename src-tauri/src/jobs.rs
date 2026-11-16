@@ -102,6 +102,7 @@ pub(crate) use recovery::{requeue_rejected_native_goal, requeue_unlaunched_job};
 pub use scheduler::JobScheduler;
 pub(crate) use scheduler::LaunchGate;
 pub(crate) use side_requests::recover as recover_side_requests;
+pub(crate) use side_requests::read_suggestion_mode;
 pub use side_requests::{ComposerSuggestionMode, SavedSideRequest, SidePurpose, SideSubmission};
 pub(crate) use steering_delivery::{
     SteeringPreparationRejected, accepted_revisions as accepted_steering_revisions,

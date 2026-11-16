@@ -5,6 +5,7 @@ mod composer_customization_ipc;
 mod conversation_goal_runtime;
 mod conversation_continuation_runtime;
 mod conversation_attachment_ipc;
+mod composer_suggestion_ipc;
 mod conversation_steering_ipc;
 mod agile_runtime;
 mod delivery_merge_ipc;
@@ -409,6 +410,7 @@ fn main() {
             conversation_attachment_ipc::accept_conversation_attachment_drop,
             conversation_attachment_ipc::edit_conversation_attachment_draft,
             conversation_attachment_ipc::review_conversation_attachment_draft,
+            composer_suggestion_ipc::composer_native_suggestion,
             composer_customization_ipc::composer_customizations,
             ipc::checkout_conversation,
             ipc::create_conversation,

@@ -23,6 +23,7 @@ use crate::{
             self, OutputFixture, SideInput, SideOutcome, SidePin, SideResponse, SideRoute, SideSource,
             SideUnavailable,
         },
+        suggestions::{SuggestionOutcome, native_suggestion, valid_suggestion},
     },
     runner::{DirectWindowsRunner, LaunchRequest, Runner},
     runs::{self, RunRecord, RunStatus},
@@ -223,6 +224,15 @@ impl Store {
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let chat = load_conversation(&tx, &conversation)?;
+                if purpose == SidePurpose::Suggestion {
+                    let (Some(expected), Some(run)) = (expected_context.as_deref(), expected_source_run.as_deref()) else {
+                        return Ok(SideSubmission::Skipped);
+                    };
+                    if !suggestion_eligible(&tx, &conversation, expected)?
+                        || native_suggestion(&tx, &conversation, expected, run, &scope)? != Some(SuggestionOutcome::Unavailable) {
+                        return Ok(SideSubmission::Skipped);
+                    }
+                }
                 ensure!(
                     expected_context.as_ref().is_none_or(|id| id == &chat.context_id),
                     "The conversation changed before the side request was queued"
@@ -257,11 +267,6 @@ impl Store {
                         return Ok(unavailable(SideUnavailable::ToolFreeFreshRouteUnavailable));
                     }
                 };
-                if purpose == SidePurpose::Suggestion
-                    && !suggestion_eligible(&tx, &conversation, &expected_context)?
-                {
-                    return Ok(SideSubmission::Skipped);
-                }
                 let Some(source) = source_run(&tx, &conversation, &expected_context)? else {
                     return Ok(unavailable(SideUnavailable::SourceBoundaryUnavailable));
                 };
@@ -329,7 +334,7 @@ impl Store {
                 }
                 let context = if purpose == SidePurpose::Validation {
                     uuid::Uuid::new_v4().to_string()
-                } else if route != SideRoute::CodexSample {
+                } else if route != SideRoute::CodexSample || purpose == SidePurpose::Suggestion {
                     let revisions = context_entries(&tx, &conversation, &source.context_id)?;
                     let messages = load_messages(&tx, &conversation, &revisions)?;
                     let context = serde_json::to_string(&messages)?;
@@ -461,16 +466,10 @@ fn suggestion_eligible(db: &Connection, conversation: &str, context: &str) -> Re
     if read_suggestion_mode(db)? != ComposerSuggestionMode::Omniagent {
         return Ok(false);
     }
-    let unavailable: bool = db.query_row(
-        "SELECT EXISTS (SELECT 1 FROM job_side_requests WHERE conversation_id = ?1 AND context_id = ?2 AND purpose = 'suggestion')
-             OR EXISTS (SELECT 1 FROM active_agent_attempts WHERE conversation_id = ?1)
-             OR EXISTS (SELECT 1 FROM open_agent_questions WHERE conversation_id = ?1)",
+    Ok(db.query_row(
+        "SELECT NOT EXISTS (SELECT 1 FROM job_side_requests WHERE conversation_id = ?1 AND context_id = ?2 AND purpose = 'suggestion')",
         params![conversation, context], |row| row.get(0),
-    )?;
-    if unavailable {
-        return Ok(false);
-    }
-    empty_draft(db, conversation)
+    )?)
 }
 
 fn queued_validation(db: &Connection, run_id: &str) -> Result<Option<String>> {
@@ -490,7 +489,7 @@ fn queued_validation(db: &Connection, run_id: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
-fn read_suggestion_mode(db: &Connection) -> Result<ComposerSuggestionMode> {
+pub(crate) fn read_suggestion_mode(db: &Connection) -> Result<ComposerSuggestionMode> {
     let mode: String = db.query_row(
         "SELECT mode FROM composer_suggestions_settings WHERE id = 1",
         [],
@@ -502,18 +501,6 @@ fn read_suggestion_mode(db: &Connection) -> Result<ComposerSuggestionMode> {
         "omniagent" => Ok(ComposerSuggestionMode::Omniagent),
         _ => anyhow::bail!("Unknown composer suggestion mode"),
     }
-}
-
-fn empty_draft(db: &Connection, conversation: &str) -> Result<bool> {
-    let draft: Option<Vec<u8>> = db.query_row(
-        "SELECT payload FROM drafts WHERE kind = 'conversation' AND owner_id = ?1 AND document = ''",
-        [conversation], |row| row.get(0),
-    ).optional()?;
-    Ok(draft
-        .as_deref()
-        .map(protection::unprotect)
-        .transpose()?
-        .is_none_or(|bytes| bytes.iter().all(u8::is_ascii_whitespace)))
 }
 
 fn source_run(db: &Connection, conversation: &str, active: &str) -> Result<Option<SideSourceRun>> {
@@ -600,13 +587,11 @@ pub(super) fn suggestion_still_current(
     if read_suggestion_mode(db)? != ComposerSuggestionMode::Omniagent {
         return Ok(false);
     }
-    let (conversation, active, waiting): (String, String, bool) = db.query_row(
-        "SELECT c.id, c.active_context_id, s.discarded OR EXISTS(SELECT 1 FROM active_agent_attempts WHERE conversation_id = c.id)
-               OR EXISTS(SELECT 1 FROM open_agent_questions WHERE conversation_id = c.id)
-         FROM job_side_requests s JOIN conversations c ON c.id = s.conversation_id WHERE s.job_id = ?1",
+    let (conversation, run, discarded): (String, String, bool) = db.query_row(
+        "SELECT conversation_id, source_run_id, discarded FROM job_side_requests WHERE job_id = ?1",
         [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    Ok(active == payload.pin.context_id && !waiting && empty_draft(db, &conversation)?)
+    Ok(!discarded && native_suggestion(db, &conversation, &payload.pin.context_id, &run, &payload.scope)? == Some(SuggestionOutcome::Unavailable))
 }
 
 pub(crate) fn recover(db: &Connection) -> Result<()> {
@@ -847,8 +832,7 @@ fn normalize_suggestion(outcome: &mut SideOutcome) {
     }
     if let SideOutcome::Answered { text, .. } = outcome {
         match serde_json::from_str::<Suggestion>(text) {
-            Ok(suggestion)
-                if !suggestion.prompt.trim().is_empty() && suggestion.prompt.len() <= 2048 =>
+            Ok(suggestion) if valid_suggestion(suggestion.prompt.trim()) =>
             {
                 *text = suggestion.prompt.trim().into();
             }
