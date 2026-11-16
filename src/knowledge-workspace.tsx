@@ -113,11 +113,13 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const outlineIndex = useQuery({
     queryKey: ["repository-indexed-note", checkout.checkoutId, active, noteIndex.index.dataUpdatedAt],
     enabled: showIndexed && inspector === "outline" && !isDirty(note),
+    placeholderData: (previous, query) => query?.queryKey[1] === checkout.checkoutId && query.queryKey[2] === active ? previous : undefined,
     queryFn: () => invoke<IndexedNoteDetails | null>("repository_indexed_note", { checkoutId: checkout.checkoutId, path: active }),
   });
   const relationships = useQuery({
     queryKey: ["repository-note-relationships", checkout.checkoutId, active, noteIndex.index.dataUpdatedAt],
     enabled: showIndexed && inspector === "links",
+    placeholderData: (previous, query) => query?.queryKey[1] === checkout.checkoutId && query.queryKey[2] === active ? previous : undefined,
     queryFn: () => invoke<IndexedNoteRelationships>("repository_note_relationships", { checkoutId: checkout.checkoutId, path: active }),
   });
   const catalog = useMemo(() => {
