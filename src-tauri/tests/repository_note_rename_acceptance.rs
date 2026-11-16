@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use omniagent::{
     repository::{
         self,
@@ -258,6 +259,108 @@ async fn reconciling_a_partially_applied_rename_indexes_a_later_external_edit() 
         .context("the rename removed the reviewed source revision")?;
     assert_eq!(old.revision.relative_path, SOURCE);
     assert_eq!(old.markdown, SOURCE_TEXT);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keeps_canvas_and_base_ordinary_and_rewrites_only_the_reviewed_plugin_note_target()
+-> Result<()> {
+    const SOURCE: &str = "notes/Guide.md";
+    const MOVED: &str = "archive/Guide archived.md";
+    const BOARD: &str = "notes/Board.md";
+    const CANVAS: &str = "notes/Layout.canvas";
+    const BASE: &str = "notes/Catalog.base";
+    const CANVAS_TEXT: &str = r#"{"nodes":[{"id":"fixture","type":"text","text":"canvasprivatesignal [[/notes/Guide.md]]"}],"edges":[]}"#;
+    const BASE_TEXT: &str =
+        "formulas:\r\n  example: 'baseprivatesignal [[/notes/Guide.md]]'\r\nviews: []\r\n";
+    const BOARD_TEXT: &str = concat!(
+        "\u{feff}---\r\nkanban-plugin: board # preserve this comment\r\n",
+        "unknown-setting: '[[/notes/Guide.md]]'\r\n---\r\n\r\n",
+        "## Waiting 📌\r\n\r\n- [/] Preserve the state 🔁 every week 📅 2026-11-30\r\n\r\n",
+        "Owner:: Ana\r\n\r\nOpen [[/notes/Guide.md#Ready|Approved guide]].\r\n\r\n",
+        "```dataview\r\nTABLE Owner\r\nFROM [[/notes/Guide.md]]\r\n```\r\n\r\n",
+        "%% kanban:settings\r\n```\r\n{\"kanban-plugin\":\"board\",\"fixture\":\"[[/notes/Guide.md]]\"}\r\n```\r\n%%\r\n",
+    );
+
+    let checkout = Checkout::new(&[
+        (SOURCE, "# Ready\n\nMarkdown only\n"),
+        (BOARD, BOARD_TEXT),
+        (CANVAS, CANVAS_TEXT),
+        (BASE, BASE_TEXT),
+        ("archive/.gitkeep", ""),
+    ])
+    .await?;
+    let tracked = git(&checkout.root, &["ls-files", "--", CANVAS, BASE])?;
+    assert_eq!(tracked.lines().collect::<Vec<_>>(), [BASE, CANVAS]);
+    assert_eq!(checkout.reconcile().await?, [BOARD, SOURCE]);
+    assert!(checkout.search("canvasprivatesignal").await?.is_empty());
+    assert!(checkout.search("baseprivatesignal").await?.is_empty());
+    assert_eq!(
+        checkout.edges().await?,
+        [(BOARD.to_owned(), SOURCE.to_owned())]
+    );
+    let indexed = checkout.relationships(BOARD).await?;
+    assert_eq!(indexed.outgoing.len(), 1);
+    assert_eq!(
+        indexed.outgoing[0].link.alias.as_deref(),
+        Some("Approved guide")
+    );
+
+    let source = checkout.open(SOURCE).await?;
+    let board = checkout.open(BOARD).await?;
+    let preview = checkout.preview(&source, MOVED).await?;
+    let [file] = preview.files.as_slice() else {
+        bail!("expected only the board in the rewrite preview");
+    };
+    let [edit] = file.edits.as_slice() else {
+        bail!("expected exactly one reviewed link");
+    };
+    assert_eq!(file.path, BOARD);
+    assert_eq!(file.revision_id, board.revision.id);
+    assert_eq!(edit.before, "/notes/Guide.md");
+    assert_eq!(edit.after, "/archive/Guide archived.md");
+    assert_eq!(&board.markdown[edit.byte_start..edit.byte_end], edit.before);
+    assert_eq!(
+        &board.markdown[edit.byte_end..edit.byte_end + "#Ready|".len()],
+        "#Ready|"
+    );
+
+    let report = checkout
+        .store
+        .apply_markdown_rename(checkout.id.clone(), preview.id)
+        .await?;
+    assert!(matches!(
+        report.outcome,
+        MarkdownRenameOutcome::Moved { .. }
+    ));
+    assert!(!report.partial, "{report:?}");
+    let expected = BOARD_TEXT.replacen(
+        "[[/notes/Guide.md#Ready|Approved guide]]",
+        "[[/archive/Guide archived.md#Ready|Approved guide]]",
+        1,
+    );
+    assert_eq!(fs::read(checkout.root.join(BOARD))?, expected.as_bytes());
+    for (path, text) in [(CANVAS, CANVAS_TEXT), (BASE, BASE_TEXT)] {
+        assert_eq!(fs::read(checkout.root.join(path))?, text.as_bytes());
+        let file = checkout
+            .store
+            .read_repository_attachment(checkout.id.clone(), path.into())
+            .await?
+            .context("ordinary repository file is unavailable")?;
+        assert_eq!(file.relative_path, path);
+        assert_eq!(STANDARD.decode(file.content_base64)?, text.as_bytes());
+    }
+    assert!(git(&checkout.root, &["diff", "--name-only", "--", CANVAS, BASE])?.is_empty());
+    assert_eq!(checkout.reconcile().await?, [MOVED, BOARD]);
+    assert_eq!(
+        checkout.edges().await?,
+        [(BOARD.to_owned(), MOVED.to_owned())]
+    );
+    let outgoing = checkout.relationships(BOARD).await?.outgoing;
+    assert!(
+        matches!(&outgoing[0].resolution, MarkdownLinkResolution::Resolved { location }
+        if location.path == MOVED && location.anchor.as_deref() == Some("Ready"))
+    );
     Ok(())
 }
 
