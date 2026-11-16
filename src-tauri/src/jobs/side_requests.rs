@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 
 use crate::{
-    conversations::{SessionScope, context_entries, load_conversation, load_messages},
+    conversations::{SessionScope, context_entries, load_conversation},
     dispatch::ContextSnapshot,
     protection,
     providers::{
@@ -95,6 +95,7 @@ pub struct SavedSideRequest {
     pub conversation_id: String,
     pub source_run_id: String,
     pub context_id: String,
+    pub compaction_artifact_id: Option<String>,
     pub purpose: SidePurpose,
     pub provider: Provider,
     pub profile_id: String,
@@ -117,6 +118,8 @@ pub(super) struct SidePayload {
     pub purpose: SidePurpose,
     pub route: SideRoute,
     pub pin: SidePin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_artifact_id: Option<String>,
     pub question: String,
     pub context: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,7 +241,7 @@ impl Store {
                     expected_context.as_ref().is_none_or(|id| id == &chat.context_id),
                     "The conversation changed before the side request was queued"
                 );
-                let expected_context = chat.context_id;
+                let expected_context = &chat.context_id;
                 let (project, root): (String, String) = tx.query_row(
                     "SELECT project_id, root FROM checkouts WHERE id = ?1",
                     [&chat.checkout_id],
@@ -268,7 +271,7 @@ impl Store {
                         return Ok(unavailable(SideUnavailable::ToolFreeFreshRouteUnavailable));
                     }
                 };
-                let Some(source) = source_run(&tx, &conversation, &expected_context)? else {
+                let Some(source) = source_run(&tx, &conversation, expected_context)? else {
                     return Ok(unavailable(SideUnavailable::SourceBoundaryUnavailable));
                 };
                 if expected_source_run.as_ref().is_some_and(|id| id != &source.run_id) {
@@ -315,7 +318,17 @@ impl Store {
                     };
                     (route, Some(evidence_id))
                 };
+                let overlay = if purpose == SidePurpose::Validation {
+                    None
+                } else {
+                    crate::conversations::compaction::load_overlay(&tx, expected_context)?
+                };
+                let compaction_artifact_id = overlay.as_ref().map(|overlay| overlay.artifact.id().to_owned());
                 let provider_source = if route == SideRoute::CodexSample {
+                    let observed = crate::conversations::compaction::load_overlay(&tx, &source.context_id)?;
+                    if compaction_artifact_id.as_deref() != observed.as_ref().map(|overlay| overlay.artifact.id()) {
+                        return Ok(unavailable(SideUnavailable::SourceBoundaryUnavailable));
+                    }
                     match (source.session_id, source.turn_id, source.cursor) {
                         (Some(session_id), Some(turn_id), Some(cursor))
                             if cursor == source.context_id =>
@@ -330,16 +343,25 @@ impl Store {
                 } else {
                     None
                 };
-                if purpose == SidePurpose::Suggestion && source.context_id != expected_context {
+                if purpose == SidePurpose::Suggestion && &source.context_id != expected_context {
                     return Ok(SideSubmission::Skipped);
                 }
+                let mut pinned_context_id = source.context_id;
                 let context = if purpose == SidePurpose::Validation {
                     uuid::Uuid::new_v4().to_string()
                 } else if route != SideRoute::CodexSample || purpose == SidePurpose::Suggestion {
-                    let revisions = context_entries(&tx, &conversation, &source.context_id)?;
-                    let messages = crate::dispatch::omit_deleted_dispatch_messages(
-                        &tx, load_messages(&tx, &conversation, &revisions)?,
-                    )?;
+                    let revisions = context_entries(&tx, &conversation, &pinned_context_id)?;
+                    let messages = crate::conversations::compaction::projected_messages(&tx, &chat, &revisions)?;
+                    if compaction_artifact_id.as_ref().is_some_and(|artifact_id|
+                        messages.first().is_none_or(|message| &message.revision_id != artifact_id)) {
+                        return Ok(unavailable(SideUnavailable::SourceBoundaryUnavailable));
+                    }
+                    if compaction_artifact_id.is_some()
+                        && revisions == context_entries(&tx, &conversation, expected_context)?
+                    {
+                        pinned_context_id.clone_from(expected_context);
+                    }
+                    let messages = crate::dispatch::omit_deleted_dispatch_messages(&tx, messages)?;
                     let context = serde_json::to_string(&messages)?;
                     if context.len() > 64 * 1024 {
                         return Ok(unavailable(SideUnavailable::InvalidInput));
@@ -381,9 +403,10 @@ impl Store {
                     route,
                     question,
                     context,
+                    compaction_artifact_id,
                     output_fixture,
                     pin: SidePin {
-                        context_id: source.context_id,
+                        context_id: pinned_context_id,
                         provider_source,
                     },
                 };
@@ -435,6 +458,7 @@ impl Store {
                 };
                 saved.push(SavedSideRequest {
                     job, conversation_id: conversation.clone(), context_id: row.get(2)?, source_run_id: row.get(3)?,
+                    compaction_artifact_id: payload.compaction_artifact_id,
                     purpose: payload.purpose, question: payload.question, response,
                     history_payload_deleted: row.get(8)?, evidence_id: row.get(6)?,
                     evidence_checked_at,

@@ -28,6 +28,7 @@ export type OutputFixtureReceipt = {
 export interface SideRequest {
   job: Job;
   contextId: string;
+  compactionArtifactId?: string | null;
   sourceRunId: string;
   provider: Provider;
   profileId: string;
@@ -149,7 +150,7 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
     </div>}
     {!requests.length && saved.isSuccess && submission?.status !== "unavailable" && <p className="p-3 text-sm text-muted-foreground">Start a side question with /btw followed by your question.</p>}
     <ul className="grid gap-3 p-3">
-      {requests.map(({ job, question, response, purpose, provider, model, contextId, sourceRunId, evidenceId, historyPayloadDeleted }) => {
+      {requests.map(({ job, question, response, purpose, provider, model, contextId, compactionArtifactId, sourceRunId, evidenceId, historyPayloadDeleted }) => {
         const outcome = response?.outcome;
         const fixture = purpose === "validation";
         const active = isLiveRun(job.latestAttempt);
@@ -160,6 +161,8 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
           </p>
           {!fixture && <dl className="grid gap-1 break-all text-xs text-muted-foreground">
             <div><dt className="inline">Context revision</dt>{" "}<dd className="inline"><code>{contextId}</code></dd></div>
+            {compactionArtifactId && <div><dt className="inline">Compaction summary</dt>{" "}
+              <dd className="inline"><code>{compactionArtifactId}</code></dd></div>}
             <div><dt className="inline">Source run</dt>{" "}<dd className="inline"><code>{sourceRunId}</code></dd></div>
           </dl>}
           {outcome?.kind === "answered" && !fixture ? <>
