@@ -47,6 +47,7 @@ mod history_deletion;
 mod merge_policy;
 mod milestones;
 mod live_cli_acceptance;
+mod delivery_acceptance;
 mod mode_selection;
 
 #[tokio::test]
@@ -1218,14 +1219,28 @@ async fn capture_implementation(
     files: &[&str],
     implement: Job,
 ) -> Result<CandidateTarget> {
+    capture_implementation_changes(store, fixture, worktree, unit, implement, |root| {
+        for name in files {
+            fs::write(root.join(name), format!("{name}\n"))?;
+        }
+        Ok(())
+    }).await
+}
+
+async fn capture_implementation_changes(
+    store: &Store,
+    fixture: &ApprovedDeliveryFixture,
+    worktree: &ManagedWorktree,
+    unit: &WorkflowDeliveryUnit,
+    implement: Job,
+    write_files: impl FnOnce(&Path) -> Result<()>,
+) -> Result<CandidateTarget> {
     let env = fixture_admission();
     let writer = claim_fixture_job(store, implement, env).await?;
     let run = writer.run.id;
     store.mark_agent_running(run.clone()).await?;
     ensure!(repository::capture_worktree_start(store, run.clone()).await?);
-    for name in files {
-        fs::write(worktree.root.join(name), format!("{name}\n"))?;
-    }
+    write_files(&worktree.root)?;
     repository::save_worktree_candidate(store, run.clone()).await?;
     store
         .finish_agent_attempt(run.clone(), RunStatus::Succeeded, None)

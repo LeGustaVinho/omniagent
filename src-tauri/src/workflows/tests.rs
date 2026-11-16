@@ -684,13 +684,24 @@ pub(super) async fn link_reviewed_delivery_fixture(
     task_id: Option<String>,
     run: &WorkflowRun,
 ) -> Result<(WorkflowArtifact, WorkflowArtifact, WorkflowArtifact)> {
-    let project = repo.project_id.clone();
-    let root = Path::new(&repo.checkout_root);
     let planned_text = if task_id.is_some() {
         "Deliver the change for this Sub-Task.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"Deliver the scoped change\",\"completionCriteria\":[\"Scoped file updated\"]}]}\n```"
     } else {
         "Do each change separately.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"First change\",\"completionCriteria\":[\"First file updated\"]},{\"purpose\":\"Second change\",\"completionCriteria\":[\"Second file updated\"]}]}\n```"
     };
+    link_reviewed_plan_fixture(store, repo, task_id, run, planned_text, "Two sequential changes").await
+}
+
+pub(super) async fn link_reviewed_plan_fixture(
+    store: &Store,
+    repo: &ProjectCheckout,
+    task_id: Option<String>,
+    run: &WorkflowRun,
+    planned_text: &str,
+    task_title: &str,
+) -> Result<(WorkflowArtifact, WorkflowArtifact, WorkflowArtifact)> {
+    let project = repo.project_id.clone();
+    let root = Path::new(&repo.checkout_root);
     let host = |node: &str, inputs, request| WorkflowHostSubmission {
         project_id: project.clone(),
         run_id: run.id.clone(),
@@ -832,7 +843,7 @@ pub(super) async fn link_reviewed_delivery_fixture(
     let work = match task_id {
         Some(task_id) => WorkflowHostRequest::LinkExistingTask { task_id },
         None => WorkflowHostRequest::CreateTask {
-            title: "Two sequential changes".into(),
+            title: task_title.into(),
         },
     };
     let task = store
@@ -855,7 +866,20 @@ pub(super) async fn approve_delivery_fixture_in_run(
     run: WorkflowRun,
 ) -> Result<ApprovedDeliveryFixture> {
     let unit_count = if task_id.is_some() { 1 } else { 2 };
-    let (task, plan, alternate_plan) = link_reviewed_delivery_fixture(store, &repo, task_id, &run).await?;
+    let linked = link_reviewed_delivery_fixture(store, &repo, task_id, &run).await?;
+    let fixture = approve_reviewed_plan_fixture(store, temp_path, repo, run, linked).await?;
+    assert_eq!(fixture.units.len(), unit_count);
+    Ok(fixture)
+}
+
+pub(super) async fn approve_reviewed_plan_fixture(
+    store: &Store,
+    temp_path: &Path,
+    repo: ProjectCheckout,
+    run: WorkflowRun,
+    linked: (WorkflowArtifact, WorkflowArtifact, WorkflowArtifact),
+) -> Result<ApprovedDeliveryFixture> {
+    let (task, plan, alternate_plan) = linked;
     let project = repo.project_id.clone();
     let host = |node: &str, inputs, request| WorkflowHostSubmission {
         project_id: project.clone(),
@@ -924,7 +948,6 @@ pub(super) async fn approve_delivery_fixture_in_run(
     let units = store
         .workflow_delivery_units(project.clone(), task_ref.task_id.clone(), run.id.clone())
         .await?;
-    assert_eq!(units.len(), unit_count);
     assert!(
         units
             .iter()
