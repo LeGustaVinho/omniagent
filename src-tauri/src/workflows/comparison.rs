@@ -18,6 +18,9 @@ use crate::{
     store::Store,
 };
 
+mod evidence;
+pub use evidence::ComparisonEnvironment;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelComparison {

@@ -8,6 +8,10 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
     std::fs::write(&scope.executable, b"Fixture executable identity")?;
     let original = scope.checkout.join("review.txt");
     std::fs::write(&original, "Committed comparison input")?;
+    std::fs::write(
+        scope.checkout.join("AGENTS.md"),
+        "Review only the pinned repository.",
+    )?;
     let git = |args: &[&str]| -> Result<()> {
         ensure!(
             Command::new("git.exe")
@@ -19,7 +23,7 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
         );
         Ok(())
     };
-    git(&["add", "--", "review.txt"])?;
+    git(&["add", "--", "review.txt", "AGENTS.md"])?;
     git(&[
         "-c",
         "user.name=Fixture",
@@ -139,7 +143,11 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
         assert_eq!(saved.delivery, Delivery::Submitted);
         assert_eq!(saved.snapshot.scope.checkout, scope.checkout);
         assert_eq!(
-            saved.snapshot.instructions.as_ref().map(|inventory| &inventory.working_directory),
+            saved
+                .snapshot
+                .instructions
+                .as_ref()
+                .map(|inventory| &inventory.working_directory),
             Some(&root)
         );
         assert_eq!(
@@ -163,7 +171,10 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
     let database = scope.checkout.join("store.sqlite");
     drop(store);
     let reopened = Store::open(database)?;
-    let recovered = reopened.model_comparisons(repo.project_id).await?.remove(0);
+    let recovered = reopened
+        .model_comparisons(repo.project_id.clone())
+        .await?
+        .remove(0);
     assert_eq!(recovered.commit, commit);
     assert_eq!(
         recovered
@@ -178,6 +189,32 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
             .candidates
             .iter()
             .all(|candidate| candidate.state == "succeeded" && candidate.dispatch_id.is_some())
+    );
+    let environments = reopened
+        .model_comparison_environments(repo.project_id, recovered.id)
+        .await?;
+    let environments = serde_json::to_value(environments)?;
+    assert_eq!(
+        environments[0]["dispatchId"].as_str(),
+        recovered.candidates[0].dispatch_id.as_deref()
+    );
+    assert_eq!(
+        environments[1]["dispatchId"].as_str(),
+        recovered.candidates[1].dispatch_id.as_deref()
+    );
+    assert!(
+        environments[0]["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|instruction| instruction["path"] == "AGENTS.md"
+                && instruction["observedRead"] == false)
+    );
+    assert!(
+        !environments[0]["observedTools"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
     Ok(())
 }

@@ -186,6 +186,9 @@ impl ClaudeSession {
         if let Some(tools) = frame["tools"].as_array()
             && tools.iter().all(Value::is_string)
         {
+            observations.push(self.event(frame, ProviderEventData::SessionToolsReported {
+                tools: tools.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+            }));
             observations.push(
                 self.event(
                     frame,

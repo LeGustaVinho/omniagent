@@ -371,6 +371,9 @@ pub enum ProviderEventData {
         skills: Option<Vec<String>>,
         plugins: Option<Vec<SessionPlugin>>,
     },
+    SessionToolsReported {
+        tools: Vec<String>,
+    },
     SkillUsed {
         name: String,
     },

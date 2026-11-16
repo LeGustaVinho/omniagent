@@ -63,3 +63,28 @@ it("pins the selected Git revision and preserves selection order for same-provid
   expect(within(await screen.findByRole("list", { name: "Comparison results" })).getAllByRole("heading").map((heading) => heading.textContent))
     .toEqual(["second-codex", "first-codex"]);
 });
+
+it("shows each dispatch's observed instruction reads and tool use alongside the shared revision", async () => {
+  vi.mocked(invoke).mockImplementation(async (name) => {
+    if (name === "conversation_models") return [];
+    if (name === "comparison_source_commit") return commit;
+    if (name === "model_comparisons") return [{ id: "comparison", commit, tree: "tree", prompt: "Review", candidates:
+      profiles.map((selection, index) => ({ selection, jobId: `job-${index}`, dispatchId: `dispatch-${index}`, state: "succeeded" })) }];
+    if (name === "model_comparison_environments") return profiles.map((_, index) => ({
+      jobId: `job-${index}`, dispatchId: `dispatch-${index}`, instructions: [{ path: "AGENTS.md", scope: "checkout",
+        revision: "abcdef123456", selection: "expected", observedRead: index === 0 }],
+      reportedTools: [], observedTools: index === 0 ? ["Read"] : ["Search"],
+    }));
+    throw Error(`Unexpected IPC ${name}`);
+  });
+  mount();
+  const user = userEvent.setup();
+  const rows = within(await screen.findByRole("list", { name: "Comparison results" })).getAllByRole("listitem");
+  await user.click(await within(rows[0]!).findByText("Instructions and tools"));
+  await user.click(await within(rows[1]!).findByText("Instructions and tools"));
+  expect(within(rows[0]!).getByText("Observed read")).toBeTruthy();
+  expect(within(rows[0]!).getByText("Tools used · Read")).toBeTruthy();
+  expect(within(rows[1]!).getByText("expected")).toBeTruthy();
+  expect(within(rows[1]!).getByText("Tools used · Search")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("model_comparison_environments", { projectId: exampleCheckout.projectId, groupId: "comparison" });
+});

@@ -386,7 +386,7 @@ impl SavedInventory {
     }
 }
 
-pub(super) fn belongs_to_dispatch(
+pub(crate) fn belongs_to_dispatch(
     location: &ProviderLocation,
     session: Option<&str>,
     turn: Option<&str>,
