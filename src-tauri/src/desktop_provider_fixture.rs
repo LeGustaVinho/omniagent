@@ -16,6 +16,8 @@ const MODEL: &str = "desktop-fixture";
 const SESSION: &str = "desktop-fixture-session";
 const TURN: &str = "desktop-fixture-turn";
 const RELEASE: &str = "release-desktop-jobs";
+const COMPOSER_PROMPT: &str = "Apply the selected local skill and plugin export.";
+const COMPOSER_PLUGIN: &str = "desktop-formatting@fixture-marketplace";
 
 pub fn run_from_args() -> Option<i32> {
     let args = env::args_os().skip(1).collect::<Vec<OsString>>();
@@ -59,7 +61,7 @@ fn run() -> Result<()> {
             Some("config/read") => {
                 json!({"config":{"sandbox_mode":"read-only","approval_policy":"never"}})
             }
-            Some("skills/list") => json!({"data":[]}),
+            Some("skills/list") => composer_catalog(&request),
             Some("turn/start") => {
                 writeln!(
                     stdout,
@@ -104,6 +106,13 @@ fn run() -> Result<()> {
                             &["Yes", "No"],
                         )?;
                     }
+                } else if text.starts_with(COMPOSER_PROMPT) {
+                    verify_composer_input(&root, &request, text)?;
+                    finished(
+                        &mut stdout,
+                        "completed",
+                        Some("Received both native skill inputs and the selected chat excerpts."),
+                    )?;
                 } else {
                     finished(&mut stdout, "completed", Some(complete(&root, text)?))?;
                 }
@@ -136,6 +145,77 @@ fn run() -> Result<()> {
         writeln!(stdout, "{}", json!({"id":request["id"],"result":result}))?;
         stdout.flush()?;
     }
+    Ok(())
+}
+
+fn composer_catalog(request: &Value) -> Value {
+    let data = request["params"]["cwds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|cwd| {
+            let skills = composer_skills(Path::new(cwd));
+            (!skills.is_empty()).then(|| json!({"cwd":cwd,"skills":skills}))
+        })
+        .collect::<Vec<_>>();
+    json!({"data":data})
+}
+
+fn composer_skills(root: &Path) -> Vec<Value> {
+    let installed = root
+        .join("fixture-installed-plugins")
+        .join("desktop-formatting");
+    let mut skills = Vec::new();
+    let local = root
+        .join(".agents")
+        .join("skills")
+        .join("check-format")
+        .join("SKILL.md");
+    if local.is_file() {
+        skills.push(json!({"name":"check-format","path":local,"scope":"repo","enabled":true}));
+    }
+    let export = installed
+        .join("skills")
+        .join("check-format")
+        .join("SKILL.md");
+    if installed.join(".codex-plugin/plugin.json").is_file() && export.is_file() {
+        skills.push(
+            json!({"name":"desktop-formatting:check-format","path":export,
+            "scope":"user","enabled":true,"pluginId":COMPOSER_PLUGIN}),
+        );
+    }
+    skills
+}
+
+fn verify_composer_input(root: &Path, request: &Value, text: &str) -> Result<()> {
+    let input = request["params"]["input"]
+        .as_array()
+        .context("missing customization turn input")?;
+    let skills = composer_skills(root);
+    ensure!(
+        skills.len() == 2,
+        "missing the local and exported fixture skills"
+    );
+    let observed = input
+        .iter()
+        .filter(|item| item["type"] == "skill")
+        .collect::<Vec<_>>();
+    let expected = skills
+        .into_iter()
+        .map(|skill| json!({"type":"skill","name":skill["name"],"path":skill["path"]}))
+        .collect::<Vec<_>>();
+    ensure!(
+        observed == expected.iter().collect::<Vec<_>>(),
+        "the provider did not receive the two exact native skill inputs"
+    );
+    ensure!(
+        text.contains("Quoted conversation references supplied by OmniAgent (JSON data):")
+            && text.contains("Complete desktop slot probe")
+            && text.contains("The freed slot ran the probe.")
+            && !text.contains("@skill:"),
+        "the provider did not receive the selected conversation excerpts separately from skill items"
+    );
     Ok(())
 }
 

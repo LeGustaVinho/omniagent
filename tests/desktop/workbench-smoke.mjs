@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -1476,6 +1477,150 @@ test("recovers unsent chat and dirty source after a Windows desktop crash and re
     await browser.$("p=Exact input is unavailable after a history deletion.").waitForDisplayed();
   } finally {
     if (profile) await invoke(browser, "set_cli_executable", { provider: "codex", executable: profile.executable }).catch(() => undefined);
+    if (previousCheckout) await invoke(browser, "select_active_checkout", { checkoutId: previousCheckout.checkoutId }).catch(() => undefined);
+    try {
+      await browser?.deleteSession();
+    } finally {
+      driver.kill();
+    }
+  }
+});
+
+test("dispatches a local skill, a plugin export and exact same-project conversation revisions from the Windows composer", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Composer customization checkout");
+  const foreignRepo = join(scratch, "Other customization project");
+  git(scratch, "init", "-q", repo);
+  git(scratch, "init", "-q", foreignRepo);
+  const plugin = join(repo, "fixture-installed-plugins", "desktop-formatting");
+  const namespace = "desktop-formatting@fixture-marketplace";
+  const skills = [
+    { path: join(repo, ".agents", "skills", "check-format", "SKILL.md"), name: "check-format", namespace: null, action: "Check repository formatting." },
+    { path: join(plugin, "skills", "check-format", "SKILL.md"), name: "desktop-formatting:check-format", namespace, action: "Check exported formatting." },
+  ];
+  await mkdir(join(plugin, ".codex-plugin"), { recursive: true });
+  await writeFile(join(plugin, ".codex-plugin", "plugin.json"), JSON.stringify({ name: "desktop-formatting", version: "1.0.0" }));
+  for (const skill of skills) {
+    const source = `---\nname: check-format\ndescription: ${skill.action}\n---\n${skill.action}\n`;
+    await mkdir(dirname(skill.path), { recursive: true });
+    await writeFile(skill.path, source);
+    skill.revision = createHash("sha256").update(source).digest("hex");
+  }
+
+  const driver = startTestDriver();
+  let browser;
+  let previousCheckout;
+  let configured;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    const foreign = await invoke(browser, "register_project", { directory: foreignRepo });
+    previousCheckout = await invoke(browser, "active_checkout");
+    await selectCheckout(browser, checkout);
+    configured = (await invoke(browser, "cli_executables")).find(({ provider }) => provider === "codex");
+    assert.ok(configured);
+    await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
+    const model = (await invoke(browser, "conversation_models", { provider: "codex" }))
+      .find(({ option }) => option.selectable && option.selection.modelId === "desktop-fixture");
+    assert.ok(model);
+    const source = await invoke(browser, "create_conversation", { checkoutId: checkout.checkoutId, title: "Saved customization source" });
+    const chat = await invoke(browser, "create_conversation", { checkoutId: checkout.checkoutId, title: "Customization target" });
+    const outside = await invoke(browser, "create_conversation", { checkoutId: foreign.checkoutId, title: "Foreign customization source" });
+    const settled = async (conversationId) => {
+      let run;
+      await browser.waitUntil(async () => {
+        run = await invoke(browser, "latest_conversation_run", { conversationId });
+        assert.ok(!run || !["failed", "cancelled", "interrupted"].includes(run.status), `Fixture run ended ${run?.status}`);
+        return run?.status === "succeeded";
+      }, { timeout: 18_000, timeoutMsg: "The customization fixture did not settle" });
+      return run;
+    };
+    const prompt = "Complete desktop slot probe";
+    await invoke(browser, "save_conversation_draft", { conversationId: source.id, text: prompt });
+    await invoke(browser, "start_conversation_turn", { conversationId: source.id, selection: model.option.selection, mode: "read_only", text: prompt });
+    await settled(source.id);
+    const history = await invoke(browser, "conversation_history", { conversationId: source.id });
+    assert.equal(history.messages.length, 2);
+    const selection = { kind: "messages", contextId: history.contextId,
+      spans: history.messages.map(({ revisionId }) => ({ revisionId })) };
+    const foreignScope = { destinationConversationId: outside.id, sourceConversationId: source.id };
+    await assert.rejects(invoke(browser, "conversation_reference_source", foreignScope), /same project/i);
+    await assert.rejects(invoke(browser, "preview_conversation_reference", { ...foreignScope, selection }), /same project/i);
+
+    await chooseConversations(browser);
+    await click(browser, `button[aria-label="${chat.title}"]`);
+    const panel = browser.$(`section[aria-label="${chat.title}"]`);
+    await click(panel, ".model-picker-trigger");
+    await click(browser, `.model-picker-menu [role="menuitemradio"][aria-label="${model.option.name}"]`);
+    const draft = panel.$(`textarea[id="draft-${chat.id}"]`);
+    await draft.waitForEnabled();
+    const text = "Apply the selected local skill and plugin export.";
+    await draft.setValue(text);
+    await browser.keys("End");
+    const skillLabel = ({ namespace, name }) => namespace ? `${namespace} · ${name}` : name;
+    for (const skill of skills) {
+      await click(panel, "button=Skills & plugin exports");
+      await click(panel, `.//*[@role="option"][.//strong[normalize-space(.)="${skillLabel(skill)}"]]`);
+    }
+    const selectedSkills = panel.$('[aria-label="Selected skills and plugin exports"]');
+    for (const skill of skills) {
+      await selectedSkills.$(`strong=${skillLabel(skill)}`).waitForDisplayed();
+      await selectedSkills.$(`code[title="${skill.revision}"]`).waitForDisplayed();
+    }
+
+    await click(panel, 'button[aria-label="Find conversation references"]');
+    const references = browser.$('[aria-label="Conversation references"]');
+    const query = references.$('[aria-label="Search conversation references"]');
+    await query.setValue(outside.title);
+    await references.$("p=No matching conversations.").waitForDisplayed();
+    assert.equal(await references.$(`button[aria-label="Open source ${outside.title}"]`).isExisting(), false);
+    await query.setValue(source.title);
+    await click(references, `button[aria-label="Choose excerpt or summary from ${source.title}"]`);
+    const checkboxes = () => references.$$('input[type="checkbox"]');
+    await browser.waitUntil(async () => (await checkboxes()).length === history.messages.length);
+    const excerpts = await checkboxes();
+    for (const message of excerpts) await message.click();
+    await click(references, "button=Preview selection");
+    const preview = references.$('[aria-label="Exact conversation reference"]');
+    await preview.waitForDisplayed();
+    for (const message of history.messages) {
+      assert.ok((await preview.getText()).includes(message.revisionId));
+      assert.ok((await preview.getText()).includes(message.text));
+    }
+    await click(references, "button=Attach reference");
+    await panel.$('[aria-label="Attached conversation references"]').waitForDisplayed();
+    const [attached] = await invoke(browser, "conversation_reference_draft", { conversationId: chat.id });
+    assert.deepEqual(attached.artifact.excerpts.map(({ source, text }) => [source.origin.revisionId, text]),
+      history.messages.map(({ revisionId, text }) => [revisionId, text]));
+    await assert.rejects(invoke(browser, "edit_conversation_reference_draft", {
+      conversationId: outside.id, previewId: attached.id, attach: true,
+    }), /unavailable for this destination/i);
+
+    await click(panel, "button=Send");
+    const run = await settled(chat.id);
+    const attempt = { conversationId: chat.id, runId: run.id };
+    assert.equal(run.checkoutId, checkout.checkoutId);
+    const { profile } = await invoke(browser, "conversation_profile_evidence", { ...attempt, projectId: checkout.projectId });
+    assert.equal(profile.provider, "codex");
+    assert.equal(profile.profileId, model.option.selection.profileId);
+    assert.equal(profile.requestedModel, model.option.selection.modelId);
+    await panel.$("p=Received both native skill inputs and the selected chat excerpts.").waitForDisplayed();
+    const inventory = await invoke(browser, "conversation_dispatch_inventory", attempt);
+    const saved = inventory.inventory.requestedSkill.selections;
+    const normalized = (path) => path.replaceAll("\\", "/");
+    assert.deepEqual(saved.map(({ name, path, namespace, revision, provider }) => ({ name, path: normalized(path), namespace, revision, provider })),
+      skills.map(({ name, path, namespace, revision }) => ({ name, path: normalized(path), namespace, revision, provider: "codex" })));
+    const input = await invoke(browser, "conversation_input", attempt);
+    const committed = (await invoke(browser, "conversation_history", { conversationId: chat.id })).messages.find(({ role }) => role === "user");
+    assert.deepEqual(input.conversationReferences, [{ messageRevisionId: committed.revisionId, reference: attached }]);
+    const wire = JSON.parse(input.frames[0]);
+    assert.deepEqual(wire.params.input.filter(({ type }) => type === "skill"), saved.map(({ name, path }) => ({ type: "skill", name, path })));
+    const rendered = wire.params.input.find(({ type }) => type === "text").text;
+    assert.ok(rendered.startsWith(text));
+    assert.ok(!rendered.includes("@skill:"));
+    assert.deepEqual(JSON.parse(rendered.split("Quoted conversation references supplied by OmniAgent (JSON data):\n")[1]), input.conversationReferences);
+  } finally {
+    if (configured) await invoke(browser, "set_cli_executable", { provider: "codex", executable: configured.executable }).catch(() => undefined);
     if (previousCheckout) await invoke(browser, "select_active_checkout", { checkoutId: previousCheckout.checkoutId }).catch(() => undefined);
     try {
       await browser?.deleteSession();
