@@ -10,10 +10,14 @@ use serde_json::json;
 use crate::{
     conversations::AttemptPlan,
     dispatch::{ContextSnapshot, Delivery, EventSource},
-    jobs::{AdmissionBlocker, AdmissionEnvironment, Job},
+    jobs::{
+        AdmissionBlocker, AdmissionEnvironment, Job, JobOrigin, JobPermission, JobRole, JobRule,
+        JobWorkspace, ReleaseBlocker,
+    },
+    mcp_bridge::{RunBridge, invoke_test_mcp_tool},
     providers::{Provider, ProviderEvent, ProviderEventData, SessionMode},
     repository::{
-        self, AttemptWorktreeEvidence, BranchStrategy, ManagedWorktree,
+        self, AttemptWorktreeEvidence, BranchStrategy, ManagedWorktree, ProjectCheckout,
         verification::{
             CandidateGate, CandidateGateAction, CandidateGateOutcome, CandidateSelection,
             CandidateTarget, CandidateVerification, SelectedCandidate,
@@ -26,8 +30,8 @@ use crate::{
 };
 
 use super::{
-    ArtifactValue, NodeInputs, WorkflowArtifact, WorkflowDeliveryUnit, WorkflowUnitOutcome,
-    WorkflowUnitRequest, WorkflowUnitSubmission,
+    ArtifactValue, NodeInputs, WorkflowAgentSubmission, WorkflowArtifact, WorkflowDeliveryUnit,
+    WorkflowUnitOutcome, WorkflowUnitRequest, WorkflowUnitSubmission,
     tests::{
         ApprovedDeliveryFixture, approve_delivery_fixture_for_work, approved_delivery_fixture,
         approved_delivery_repository, submission,
@@ -753,6 +757,301 @@ async fn checked_evidence(
         .context("candidate check receipt is unavailable")
 }
 
+#[tokio::test]
+async fn builtin_mcp_nested_writer_inherits_release_and_blocks_wrong_or_missing_scope() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("delivery.sqlite"))?;
+    let fixture = approved_delivery_fixture(&store, temp.path()).await?;
+    let project = &fixture.project;
+    let unit = &fixture.units[0];
+    let task = &unit.task_id;
+    let worktree = store
+        .live_managed_worktree(project.clone(), task.clone())
+        .await?
+        .context("released worktree is unavailable")?
+        .worktree;
+    let ArtifactValue::Release(reference) = &fixture.release.value else {
+        anyhow::bail!("built-in approval did not issue release evidence");
+    };
+    let other = store
+        .create_project_task(project.clone(), "Other managed scope".into())
+        .await?;
+    let other_worktree = repository::provision_task_worktree(
+        &store,
+        temp.path().join("other-worktrees"),
+        project.clone(),
+        other.id,
+        worktree.checkout_id.clone(),
+    )
+    .await?;
+    // An allowed Agent job still needs the originating workflow release.
+    store
+        .set_project_job_rules(
+            project.clone(),
+            Vec::new(),
+            vec![JobRule {
+                role: JobRole::Agent,
+                operation: SessionMode::ApprovedWrite,
+                workspace: JobWorkspace::Project,
+                permission: JobPermission::Allow,
+                requirements: Default::default(),
+            }],
+        )
+        .await?;
+    let env = AdmissionEnvironment {
+        bridge_available: true,
+        ..fixture_admission()
+    };
+    let mut implementing = implementation_submission(&fixture, &worktree, unit)?;
+    implementing.request.requires_bridge = true;
+    let parent_job = store.submit_workflow_agent(implementing).await?;
+    let parent = claim_fixture_job(&store, parent_job, env.clone()).await?;
+    store.mark_agent_running(parent.run.id.clone()).await?;
+    assert!(repository::capture_worktree_start(&store, parent.run.id.clone()).await?);
+    let origin = store
+        .attempt_pipeline_origin(project.clone(), parent.run.id.clone())
+        .await?
+        .context("built-in parent did not keep pipeline provenance")?;
+    assert_eq!(origin.pipeline_run_id, fixture.run.id);
+    assert_eq!(origin.plan_revision.as_ref(), Some(&unit.plan_revision));
+    assert_eq!(origin.release.as_ref(), Some(&reference.release));
+    let parent_bridge = RunBridge::start(&store, parent.run.id.clone()).await?;
+    let child_id = submit_mcp_writer(&parent_bridge, "first-level", json!({
+        "mode": "approved_write", "instructions": "Delegate the released file change", "requiresBridge": true,
+    })).await?;
+    let wrong_scope = submit_mcp_writer(
+        &parent_bridge,
+        "other-scope",
+        json!({
+            "mode": "approved_write", "instructions": "Try another registered work scope",
+            "checkoutId": other_worktree.checkout_id, "taskId": other_worktree.owner_task_id,
+        }),
+    )
+    .await?;
+    let missing = submit_mcp_writer(
+        &parent_bridge,
+        "missing-release-guard",
+        json!({
+            "mode": "approved_write", "instructions": "Exercise admission with the release removed",
+        }),
+    )
+    .await?;
+    let child_job = store
+        .job(project.clone(), child_id)
+        .await?
+        .context("MCP child job is unavailable")?;
+    assert_eq!(child_job.pipeline.as_ref(), Some(&origin));
+    assert_eq!(child_job.task_id.as_ref(), Some(task));
+    assert_eq!(child_job.checkout_id, worktree.checkout_id);
+    let changed = store
+        .inspect_job(project.clone(), wrong_scope, env.clone())
+        .await?
+        .context("wrong-scope job is unavailable")?;
+    assert_eq!(changed.job.pipeline.as_ref(), Some(&origin));
+    assert!(
+        changed
+            .blockers
+            .contains(&AdmissionBlocker::PipelineRelease {
+                reason: ReleaseBlocker::WrongScope
+            })
+    );
+
+    // Normal typed submissions preserve an inherited release. Simulate a
+    // missing persisted association separately to reach the admission guard.
+    let release = reference.release.id.clone();
+    store.execute({
+        let missing = missing.clone();
+        move |db| {
+            let removed = db.execute(
+                "UPDATE job_pipeline_origins SET release_id = NULL WHERE job_id = ?1 AND release_id = ?2",
+                (&missing, release),
+            )?;
+            ensure!(removed == 1, "fixture job did not have the original release");
+            Ok(())
+        }
+    }).await?;
+    let inspected = store
+        .inspect_job(project.clone(), missing, env.clone())
+        .await?
+        .context("missing-release job is unavailable")?;
+    assert!(
+        inspected
+            .blockers
+            .contains(&AdmissionBlocker::PipelineRelease {
+                reason: ReleaseBlocker::Missing
+            })
+    );
+    assert!(
+        store.claim_next_job(env.clone()).await?.is_none(),
+        "parent still owns the worktree"
+    );
+    repository::save_worktree_candidate(&store, parent.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(parent.run.id.clone(), RunStatus::Succeeded, None)
+        .await?;
+    drop(parent_bridge);
+
+    let child = claim_fixture_job(&store, child_job, env.clone()).await?;
+    assert_eq!(
+        store
+            .attempt_pipeline_origin(project.clone(), child.run.id.clone())
+            .await?,
+        Some(origin.clone())
+    );
+    store.mark_agent_running(child.run.id.clone()).await?;
+    assert!(repository::capture_worktree_start(&store, child.run.id.clone()).await?);
+    let nested_bridge = RunBridge::start(&store, child.run.id.clone()).await?;
+    let nested_id = submit_mcp_writer(
+        &nested_bridge,
+        "second-level",
+        json!({
+            "mode": "approved_write", "instructions": "Write the released worktree",
+        }),
+    )
+    .await?;
+    let nested_job = store
+        .job(project.clone(), nested_id.clone())
+        .await?
+        .context("nested MCP writer is unavailable")?;
+    assert!(
+        matches!(&nested_job.origin, JobOrigin::Agent { run_id, .. } if run_id == &child.run.id)
+    );
+    assert_eq!(nested_job.pipeline.as_ref(), Some(&origin));
+    assert_eq!(nested_job.task_id.as_ref(), Some(task));
+    assert_eq!(nested_job.checkout_id, worktree.checkout_id);
+    assert!(
+        store.claim_next_job(env.clone()).await?.is_none(),
+        "child still owns the worktree"
+    );
+    repository::save_worktree_candidate(&store, child.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(child.run.id, RunStatus::Succeeded, None)
+        .await?;
+    drop(nested_bridge);
+
+    let nested = claim_fixture_job(&store, nested_job, env.clone()).await?;
+    assert_eq!(nested.scope.checkout, worktree.root);
+    assert_eq!(nested.scope.mode, SessionMode::ApprovedWrite);
+    assert_eq!(
+        store
+            .attempt_pipeline_origin(project.clone(), nested.run.id.clone())
+            .await?,
+        Some(origin)
+    );
+    store.mark_agent_running(nested.run.id.clone()).await?;
+    assert!(repository::capture_worktree_start(&store, nested.run.id.clone()).await?);
+    let id = nested.run.id.clone();
+    store
+        .execute(move |db| {
+            ensure!(
+                crate::jobs::record_launch_intent(db, &id)? == Some(true),
+                "nested writer lost its release before launch"
+            );
+            Ok(())
+        })
+        .await?;
+    let changed_name = "nested-writer.txt";
+    fs::write(
+        nested.scope.checkout.join(changed_name),
+        b"written by the released nested attempt\n",
+    )?;
+    repository::save_worktree_candidate(&store, nested.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(nested.run.id.clone(), RunStatus::Succeeded, None)
+        .await?;
+    let Some(AttemptWorktreeEvidence::Saved { artifact }) = store
+        .attempt_worktree_evidence(project.clone(), nested.run.id.clone())
+        .await?
+    else {
+        anyhow::bail!("nested writer did not persist its Git capture");
+    };
+    assert_eq!(artifact.start.worktree.checkout_id, worktree.checkout_id);
+    assert!(artifact.candidate.changes.as_ref().is_some_and(|changes| {
+        changes
+            .untracked
+            .iter()
+            .any(|file| file.path == changed_name)
+    }));
+    assert_eq!(
+        fs::read(worktree.root.join(changed_name))?,
+        b"written by the released nested attempt\n"
+    );
+    let settled = store
+        .job(project.clone(), nested_id)
+        .await?
+        .and_then(|job| job.latest_attempt)
+        .context("nested writer did not settle")?;
+    assert_eq!(settled.run_id, nested.run.id);
+    assert_eq!(settled.status, RunStatus::Succeeded);
+
+    // A real built-in read-only review has no implementation release even
+    // though it shares the same plan. Its tool call cannot create a writer.
+    let ArtifactValue::Approval(decision) = &fixture.decision.value else {
+        anyhow::bail!("workflow approval decision is unavailable");
+    };
+    let source = ProjectCheckout {
+        project_id: project.clone(),
+        checkout_id: decision.source_checkout_id.clone(),
+        checkout_root: fixture.checkout.repository_root.clone(),
+        repository_root: fixture.checkout.repository_root.clone(),
+    };
+    let mut review = submission(
+        &source,
+        &fixture.run,
+        "review-plan",
+        Some(unit.plan_revision.clone()),
+        SessionMode::ReadOnly,
+    );
+    review.scope.provider = Provider::Claude;
+    review.scope.profile_id = "read-only-release-proof".into();
+    review.request.requires_bridge = true;
+    review.artifacts = NodeInputs::from([("plan".into(), fixture.plan.id.clone())]);
+    let review = store.submit_workflow_agent(review).await?;
+    let unreleased = claim_fixture_job(&store, review, env.clone()).await?;
+    store.mark_agent_running(unreleased.run.id.clone()).await?;
+    let read_origin = store
+        .attempt_pipeline_origin(project.clone(), unreleased.run.id.clone())
+        .await?
+        .context("read-only origin lost its workflow")?;
+    assert!(read_origin.release.is_none());
+    let read_bridge = RunBridge::start(&store, unreleased.run.id.clone()).await?;
+    let refused = invoke_test_mcp_tool(&read_bridge, "submit_job", json!({
+        "requestId": "write-without-release",
+        "request": { "mode": "approved_write", "instructions": "Try the prepared worktree without a release",
+            "checkoutId": worktree.checkout_id, "taskId": task },
+    })).await?;
+    assert!(refused["error"].is_object(), "{refused}");
+    let run = unreleased.run.id.clone();
+    let created = store.execute(move |db| Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM jobs WHERE origin_run_id = ?1 AND request_id = 'write-without-release')",
+        [run], |row| row.get::<_, bool>(0),
+    )?)).await?;
+    assert!(!created);
+    store
+        .finish_agent_attempt(unreleased.run.id, RunStatus::Succeeded, None)
+        .await?;
+    assert!(store.claim_next_job(env).await?.is_none());
+    Ok(())
+}
+
+async fn submit_mcp_writer(
+    bridge: &RunBridge,
+    request_id: &str,
+    request: serde_json::Value,
+) -> Result<String> {
+    let reply = invoke_test_mcp_tool(
+        bridge,
+        "submit_job",
+        json!({"requestId": request_id, "request": request}),
+    )
+    .await?;
+    reply["result"]["structuredContent"]["jobId"]
+        .as_str()
+        .map(str::to_owned)
+        .with_context(|| format!("MCP fixture writer request {request_id} was rejected: {reply}"))
+}
+
 async fn review_participants(
     store: &Store,
     project: &str,
@@ -790,6 +1089,16 @@ async fn queue_implementation(
     worktree: &ManagedWorktree,
     unit: &WorkflowDeliveryUnit,
 ) -> Result<Job> {
+    store
+        .submit_workflow_agent(implementation_submission(fixture, worktree, unit)?)
+        .await
+}
+
+fn implementation_submission(
+    fixture: &ApprovedDeliveryFixture,
+    worktree: &ManagedWorktree,
+    unit: &WorkflowDeliveryUnit,
+) -> Result<WorkflowAgentSubmission> {
     let unit_id = &unit.unit.id;
     let ArtifactValue::Release(release) = &fixture.release.value else {
         anyhow::bail!("fixture did not issue an implementation release");
@@ -813,7 +1122,7 @@ async fn queue_implementation(
         ("worktree".into(), fixture.worktree.id.clone()),
         ("release".into(), fixture.release.id.clone()),
     ]);
-    store.submit_workflow_agent(implement).await
+    Ok(implement)
 }
 
 async fn capture_queued_implementation_and_review(

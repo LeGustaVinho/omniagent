@@ -528,6 +528,62 @@ pub(crate) async fn exchange_test_checklist_progress(
     )?)
 }
 
+#[cfg(test)]
+pub(crate) async fn invoke_test_mcp_tool(
+    bridge: &RunBridge,
+    name: &str,
+    arguments: Value,
+) -> Result<Value> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let ticket = read_ticket(bridge.ticket_path())?;
+    let (client, server) = tokio::io::duplex(MAX_FRAME_BYTES);
+    let (client_input, mut output) = tokio::io::split(client);
+    let mut input = BufReader::new(client_input).lines();
+    let server = tokio::spawn(async move {
+        StdioBridge(ticket)
+            .serve(tokio::io::split(server))
+            .await?
+            .waiting()
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    });
+    let result = timeout(DEADLINE, async {
+        let initialize = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "omniagent-fixture", "version": "1"},
+            },
+        });
+        output
+            .write_all(format!("{initialize}\n").as_bytes())
+            .await?;
+        let response: Value =
+            serde_json::from_str(&input.next_line().await?.context("MCP did not initialize")?)?;
+        ensure!(
+            response["id"] == 1 && response["result"]["capabilities"]["tools"].is_object(),
+            "MCP fixture initialization failed"
+        );
+        let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        let tool = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}});
+        output
+            .write_all(format!("{initialized}\n{tool}\n").as_bytes())
+            .await?;
+        while let Some(line) = input.next_line().await? {
+            let response: Value = serde_json::from_str(&line)?;
+            if response["id"] == 2 {
+                return Ok(response);
+            }
+        }
+        anyhow::bail!("MCP fixture did not answer the tool call")
+    })
+    .await;
+    server.abort();
+    result?
+}
+
 async fn read_frame<T: DeserializeOwned>(io: &mut (impl AsyncRead + Unpin)) -> Result<T> {
     let length = io.read_u32().await? as usize;
     ensure!(
