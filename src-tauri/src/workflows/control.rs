@@ -101,7 +101,7 @@ pub(super) fn uses_control(definition: &WorkflowDefinition) -> bool {
     definition
         .nodes
         .iter()
-        .any(|node| is_control(node.instance.kind))
+        .any(|node| is_control(node.instance.kind) || node.instance.kind == BuiltinNode::McpTool)
         || definition
             .wires
             .iter()
@@ -519,6 +519,15 @@ impl<'a> Evaluation<'a> {
                             return Ok(None);
                         }
                     }
+                    McpTool => {
+                        let Some((id, state, _)) = self.mcp_attempt(node_id)? else { return Ok(None) };
+                        match state.as_str() {
+                            "confirmed" => (ControlStageState::Completed, Some("completed"), None, Some(id)),
+                            "rejected" | "not_sent" => (ControlStageState::Failed, Some("failed"),
+                                Some("The local MCP tool did not complete"), Some(id)),
+                            _ => return Ok(None),
+                        }
+                    }
                     _ => return Ok(None),
                 }
             };
@@ -602,6 +611,7 @@ impl<'a> Evaluation<'a> {
         }
         if port.value == PortType::Control
             && (is_control(source.instance.kind)
+                || source.instance.kind == BuiltinNode::McpTool
                 || source.instance.kind == BuiltinNode::Command && receipt.is_some())
         {
             return Ok(match receipt {
@@ -625,6 +635,14 @@ impl<'a> Evaluation<'a> {
             return Ok(artifact.map_or(Arrival::Pending, |artifact| {
                 Arrival::Selected(Some(artifact))
             }));
+        }
+        if source.instance.kind == BuiltinNode::McpTool {
+            if receipt.is_some_and(|record| record.state == ControlStageState::Failed) { return Ok(Arrival::Ignored); }
+            let artifact = match self.mcp_attempt(source_id)? {
+                Some((_, state, Some(id))) if state == "confirmed" => super::mcp_tools::load_mcp_artifact(self.db, &self.run.project_id, &self.run.id, &id)?,
+                _ => None,
+            };
+            return Ok(artifact.map_or(Arrival::Pending, |value| Arrival::Selected(Some(value))));
         }
         let artifact =
             self.source_artifact(&wire.from, source_unit, port.value == PortType::Control)?;
@@ -752,6 +770,17 @@ impl<'a> Evaluation<'a> {
                AND a.ordinal = (SELECT MAX(n.ordinal) FROM job_attempts n WHERE n.job_id = a.job_id))",
             params![attempt, self.run.id, self.run.plan_revision], |row| row.get(0),
         )?)
+    }
+
+    fn mcp_attempt(&self, node: &str) -> Result<Option<(String, String, Option<String>)>> {
+        Ok(self.db.query_row("SELECT a.run_id, a.state, a.artifact_id FROM workflow_mcp_attempts a
+            JOIN runs r ON r.id = a.run_id
+            WHERE a.job_id = (SELECT m.job_id FROM workflow_mcp_jobs m JOIN jobs j ON j.id = m.job_id
+                JOIN job_pipeline_origins o ON o.job_id = j.id
+                WHERE m.pipeline_run_id = ?1 AND m.node_instance_id = ?2 AND o.plan_revision IS ?3
+                ORDER BY j.sequence DESC LIMIT 1)
+              AND r.status IN ('succeeded','failed','interrupted','cancelled')",
+            params![self.run.id, node, self.run.plan_revision], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?)
     }
 
     fn command_attempt(&self, node: &str) -> Result<Option<CommandAttempt>> {

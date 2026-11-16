@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    ApprovalDecision, ArtifactValue, Executor, PinnedNode, PortType,
+    ApprovalDecision, ArtifactValue, Executor, NodeConfiguration, PinnedNode, PortType,
     TaskReference, WorkflowApprovalSubmission, WorkflowArtifact, WorkflowPlanUnit,
     approval::{
         issue_prepared_release, require_active_decision, require_current_plan,
@@ -305,8 +305,13 @@ impl Store {
             let source = definition
                 .wires
                 .iter()
-                .find(|wire| wire.to.node == node && wire.to.port == port.name)
-                .context("pinned workflow input has no source")?;
+                .find(|wire| wire.to.node == node && wire.to.port == port.name);
+            let mcp_arguments = port.name == "arguments"
+                && matches!(&pinned.instance.configuration, NodeConfiguration::McpTool(_));
+            if source.is_none() && mcp_arguments {
+                continue;
+            }
+            let source = source.context("pinned workflow input has no source")?;
             let producer = definition
                 .nodes
                 .iter()
@@ -317,7 +322,14 @@ impl Store {
             } else {
                 None
             };
-            match port.value {
+            let value = if mcp_arguments {
+                producer.definition.outputs.iter().find(|port| port.name == source.from.port)
+                    .map(|port| port.value).filter(|value| matches!(value, PortType::Data(_)))
+                    .context("MCP arguments must come from a typed workflow artifact")?
+            } else {
+                port.value
+            };
+            match value {
                 PortType::Control => {
                     if control_checked {
                         continue;

@@ -207,6 +207,9 @@ fn load_recovery_source(
         }));
     }
     if job.kind == JobKind::Command {
+        if crate::workflows::mcp_tools::is_mcp_job(db, &job.id)? {
+            return Ok(None);
+        }
         let launch_requested = db.query_row(
             "SELECT process_launch_requested FROM job_attempts WHERE run_id = ?1",
             [&attempt.run_id],

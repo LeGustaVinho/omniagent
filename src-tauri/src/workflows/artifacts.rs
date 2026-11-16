@@ -79,6 +79,7 @@ pub enum ArtifactValue {
     Git(ScopedEvidence),
     Merge(WorkflowMergeReference),
     CommandResult(super::WorkflowCommandResult),
+    McpToolResult(super::mcp_tools::WorkflowMcpToolResult),
 }
 
 impl ArtifactValue {
@@ -97,6 +98,7 @@ impl ArtifactValue {
             Self::Git(_) => ArtifactKind::Git,
             Self::Merge(_) => ArtifactKind::Merge,
             Self::CommandResult(_) => ArtifactKind::CommandResult,
+            Self::McpToolResult(_) => ArtifactKind::McpToolResult,
         }
     }
 }
@@ -437,6 +439,12 @@ impl Store {
                 ensure!(saved.workflow_run_id == run && saved.node_instance_id == node && &saved.value == value,
                     "Command result differs from its verified scope");
             }
+            ArtifactValue::McpToolResult(result) => {
+                let saved = self.workflow_mcp_attempt_evidence(project.into(), result.run_id.clone()).await?
+                    .and_then(|evidence| evidence.artifact).context("MCP tool result is unavailable in the owning project")?;
+                ensure!(saved.workflow_run_id == run && saved.node_instance_id == node && &saved.value == value,
+                    "MCP tool result differs from its verified scope");
+            }
         }
         Ok(())
     }
@@ -525,6 +533,9 @@ pub(super) fn load_artifact(
 ) -> Result<Option<WorkflowArtifact>> {
     if kind == ArtifactKind::CommandResult {
         return super::command::load_command_artifact(db, project, run, id);
+    }
+    if kind == ArtifactKind::McpToolResult {
+        return super::mcp_tools::load_mcp_artifact(db, project, run, id);
     }
     let evidence: Option<Vec<u8>> = db.query_row(
         "SELECT a.payload FROM workflow_artifacts a JOIN workflow_run_pins w ON w.pipeline_run_id = a.pipeline_run_id

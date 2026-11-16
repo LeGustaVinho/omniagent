@@ -1218,6 +1218,11 @@ fn evaluate(
     if let Some(reason) = goals::limit_blocker(db, &job.id, inputs.native_seed.is_some())? {
         blockers.push(Policy { reason });
     }
+    if job.kind == JobKind::Command
+        && let Some(reason) = crate::workflows::mcp_tools::mcp_admission_blocker(db, job)?
+    {
+        blockers.push(Policy { reason });
+    }
     for id in &inputs.request.dependencies {
         let dependency =
             load_job(db, &job.project_id, id)?.context("job dependency disappeared")?;

@@ -44,7 +44,7 @@ pub use admission::{
 };
 pub(crate) use command::recover_commands;
 pub use command::{CommandJobOutput, PipelineCommand};
-pub(crate) use command::{CommandExchange, PinnedCommandScript, PreparedCommand, queue_pipeline_command};
+pub(crate) use command::{CommandExchange, PinnedCommandScript, PreparedCommand, queue_pipeline_command, queue_pipeline_mcp};
 pub use downstream::{DownstreamInput, DownstreamWait, DownstreamWaitState};
 pub(crate) use downstream::{observe_child_run, recover_waiting_parent, settle_parent_wait};
 pub(crate) use failures::record_job_failure;

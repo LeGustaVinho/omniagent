@@ -121,6 +121,19 @@ pub trait Runner: Send + Sync {
     ) -> io::Result<CapturedProcess> {
         self.launch(request)
     }
+    /// Launch a local tool without the desktop account's ambient repository or environment access.
+    fn launch_isolated_tool(
+        &self,
+        request: LaunchRequest<'_>,
+        executable_revision: &str,
+        outbound_network: bool,
+    ) -> io::Result<CapturedProcess> {
+        let _ = (request, executable_revision, outbound_network);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the runner has no isolated local tool process",
+        ))
+    }
     fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess>;
 }
 
@@ -219,6 +232,26 @@ impl Runner for DirectWindowsRunner {
             request.checkout,
             request.arguments,
         )?)
+    }
+
+    fn launch_isolated_tool(
+        &self,
+        request: LaunchRequest<'_>,
+        executable_revision: &str,
+        outbound_network: bool,
+    ) -> io::Result<CapturedProcess> {
+        if request.version != CONTRACT_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "unsupported runner contract version",
+            ));
+        }
+        process::app_container::launch(
+            request.executable,
+            request.arguments,
+            executable_revision,
+            outbound_network,
+        )
     }
 }
 

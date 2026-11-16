@@ -264,6 +264,10 @@ fn load_outputs(
         SELECT c.artifact_id, c.node_instance_id, 'result', c.payload
         FROM workflow_command_results c JOIN workflow_run_pins p ON p.pipeline_run_id = c.pipeline_run_id
         WHERE p.project_id = ?1 AND c.pipeline_run_id = ?2
+        UNION ALL
+        SELECT a.artifact_id, m.node_instance_id, 'result', a.payload FROM workflow_mcp_attempts a
+        JOIN workflow_mcp_jobs m ON m.job_id = a.job_id JOIN workflow_run_pins p ON p.pipeline_run_id = m.pipeline_run_id
+        WHERE p.project_id = ?1 AND m.pipeline_run_id = ?2 AND a.artifact_id IS NOT NULL AND a.payload IS NOT NULL
         ) SELECT a.payload,
         EXISTS(SELECT 1 FROM workflow_host_completions h WHERE h.artifact_id = a.id),
         EXISTS(SELECT 1 FROM workflow_host_completions h WHERE h.artifact_id = a.id AND (h.execution_key = '' OR h.execution_key = ?3))
@@ -284,6 +288,7 @@ fn load_outputs(
                     ArtifactValue::Review { run_id } | ArtifactValue::CommandResult(super::WorkflowCommandResult { run_id, .. }) => {
                         attempts.get(run_id.as_str()).is_some_and(|job| job.pipeline.as_ref().and_then(|origin| origin.plan_revision.as_deref()) == selected)
                     }
+                    ArtifactValue::McpToolResult(super::mcp_tools::WorkflowMcpToolResult { run_id, .. }) => attempts.contains_key(run_id.as_str()),
                     _ => true,
                 }
             };

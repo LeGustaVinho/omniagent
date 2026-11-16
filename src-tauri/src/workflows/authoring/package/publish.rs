@@ -741,6 +741,14 @@ impl<'a> GraphCompiler<'a> {
                     format!("The Command registration for {} is unavailable", node.id)
                 })?;
             }
+            if self.validate_bindings
+                && let NodeConfiguration::McpTool(tool) = &node.configuration
+            {
+                crate::workflows::mcp_tools::validate_mcp_binding(self.db, self.project, tool)
+                    .with_context(|| {
+                        format!("The MCP tool binding for {} is unavailable", node.id)
+                    })?;
+            }
         }
         let empty = BTreeMap::new();
         let expanded = subflow::expand(

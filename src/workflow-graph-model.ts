@@ -27,6 +27,7 @@ export function defaultConfiguration(kind: string): WorkflowNodeConfiguration {
     case "required_checks": return { kind, names: [] };
     case "condition": return { kind, predicate: { op: "exists", pointer: "/evidence" } };
     case "command": return { kind, registrationId: "", registrationRevision: "", arguments: [], input: {}, output: "text" };
+    case "mcp_tool": return { kind, serverId: "", serverRevision: "", toolName: "", contractRevision: "", arguments: {}, argumentMappings: {}, destinationPointer: null };
     default: return { kind };
   }
 }
@@ -101,6 +102,10 @@ export function configurationProblem(configuration: WorkflowNodeConfiguration, d
       if (!configuration.registrationId || !configuration.registrationRevision) return "A registered command revision is required.";
       return configuration.input && typeof configuration.input === "object" && !Array.isArray(configuration.input)
         ? null : "Enter a JSON object for input.";
+    case "mcp_tool":
+      if (!configuration.serverId || !configuration.serverRevision || !configuration.toolName || !configuration.contractRevision) return "Select a pinned MCP server and tool.";
+      if (configuration.argumentMappings === null) return "Enter a JSON object of argument names and JSON Pointers.";
+      return configuration.arguments && typeof configuration.arguments === "object" && !Array.isArray(configuration.arguments) ? null : "Enter a JSON object for the mapped arguments.";
     default: return null;
   }
 }
@@ -118,7 +123,13 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
     const configuration = configurationProblem(node.configuration, definition);
     if (configuration) problems.push(`${definition.title} · ${node.id} · ${configuration}`);
     for (const port of definition.inputs) {
-      if (!graph.wires.some(({ to }) => to.node === node.id && to.port === port.name)) {
+      const wired = graph.wires.some(({ to }) => to.node === node.id && to.port === port.name);
+      if (node.configuration.kind === "mcp_tool" && port.name === "arguments") {
+        const mappings = node.configuration.argumentMappings;
+        if (wired !== Boolean(mappings && Object.keys(mappings).length)) {
+          problems.push(`${node.id}.arguments requires a connection and argument mappings together.`);
+        }
+      } else if (!wired) {
         problems.push(`${node.id}.${port.name} (${portType(port.value)}) requires a connection.`);
       }
     }

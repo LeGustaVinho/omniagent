@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model_catalog::ModelSelection;
 
-use super::{ConditionPredicate, command::CommandConfiguration};
+use super::{ConditionPredicate, command::CommandConfiguration, mcp_tools::McpToolConfiguration};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +21,7 @@ pub enum BuiltinNode {
     VerifyCommit,
     VerifyMerge,
     Command,
+    McpTool,
     Condition,
     Parallel,
     Join,
@@ -61,6 +62,7 @@ pub enum ArtifactKind {
     Git,
     Merge,
     CommandResult,
+    McpToolResult,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +93,7 @@ pub enum ConfigurationKind {
     AgentRole,
     RequiredChecks,
     Command,
+    McpTool,
     Condition,
     SubflowEntry,
     RepeatUntil,
@@ -109,6 +112,7 @@ pub enum NodeConfiguration {
     },
     RequiredChecks { names: Vec<String> },
     Command(CommandConfiguration),
+    McpTool(McpToolConfiguration),
     Condition { predicate: ConditionPredicate },
     SubflowEntry { outputs: Vec<Port> },
     RepeatUntil(super::repetition::RepeatUntilConfiguration),
@@ -130,6 +134,7 @@ pub enum Executor {
     VerifyGitCommit,
     VerifyGitMerge,
     ExecuteCommand,
+    ExecuteMcpTool,
     EvaluateCondition,
     FanOut,
     JoinBranches,
@@ -149,6 +154,7 @@ pub enum Effect {
     ReleaseImplementation,
     ProvisionManagedCheckout,
     WriteRepository,
+    InvokeLocalTool,
     VerifyCandidate,
     RecordAcceptance,
     VerifyRepositoryCommit,
@@ -349,6 +355,15 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             &[("completed", Control), ("failed", Control), ("result", Data(CommandResult))],
         ),
         (
+            McpTool,
+            "MCP tool",
+            Executor::ExecuteMcpTool,
+            ConfigurationKind::McpTool,
+            Effect::InvokeLocalTool,
+            &[("ready", Control), ("arguments", Evidence)],
+            &[("completed", Control), ("failed", Control), ("result", Data(McpToolResult))],
+        ),
+        (
             Condition,
             "Condition",
             Executor::EvaluateCondition,
@@ -455,6 +470,7 @@ impl ArtifactKind {
             // Protected payloads and pinned ports distinguish the two receipts.
             Self::Git | Self::Merge => "git",
             Self::CommandResult => "command_result",
+            Self::McpToolResult => "mcp_tool_result",
         }
     }
 }
@@ -472,6 +488,7 @@ impl NodeConfiguration {
                 names.iter().all(|name| !name.trim().is_empty())
             }
             (Self::Command(config), ConfigurationKind::Command) => config.is_valid(),
+            (Self::McpTool(config), ConfigurationKind::McpTool) => config.is_valid(),
             (Self::Condition { predicate }, ConfigurationKind::Condition) => predicate.valid(),
             (Self::SubflowEntry { outputs }, ConfigurationKind::SubflowEntry) => {
                 super::subflow::valid_entry_ports(outputs)
@@ -486,7 +503,7 @@ impl Executor {
     pub(super) fn scheduler_profile(self) -> Option<&'static str> {
         match self {
             Self::PlanAgent => Some("planning"),
-            Self::ReadOnlyAgent => Some("read_only"),
+            Self::ReadOnlyAgent | Self::ExecuteMcpTool => Some("read_only"),
             Self::WriteAgent | Self::ExecuteCommand => Some("approved_write"),
             _ => None,
         }

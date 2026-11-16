@@ -130,6 +130,12 @@ impl Store {
         let workflow = compile(id, graph)?;
         let definition = protection::protect(&serde_json::to_vec(&workflow)?)?;
         self.execute(move |db| {
+            for node in &workflow.nodes {
+                if let NodeConfiguration::McpTool(configuration) = &node.instance.configuration {
+                    super::mcp_tools::validate_mcp_binding(db, &project, configuration)
+                        .with_context(|| format!("MCP tool binding for node {}", node.instance.id))?;
+                }
+            }
             db.execute(
                 "INSERT INTO workflow_revisions VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(project_id, workflow_id, revision) DO NOTHING",

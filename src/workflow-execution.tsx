@@ -37,7 +37,7 @@ const executionNodeTypes = { execution: ExecutionNodeCard };
 
 function WorkflowExecutionCanvas({ snapshot, navigation }: {
   snapshot: WorkflowExecutionSnapshot;
-  navigation: Pick<WorkspaceProps, "openActivity" | "openWorkspace" | "openQueueJob">;
+  navigation: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace" | "openQueueJob">;
 }) {
   const { definition, run } = snapshot;
   const [selected, setSelected] = useState(definition.nodes[0]?.instance.id ?? "");

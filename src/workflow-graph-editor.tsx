@@ -4,6 +4,7 @@ import { Background, Controls, Handle, MarkerType, Position, ReactFlow, useUpdat
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CommandNodeConfiguration } from "@/workflow-command";
+import { WorkflowMcpNodeConfiguration } from "@/workflow-mcp-tools";
 import { AgentRoleFields } from "@/workflow-stage-model";
 import {
   changedPorts, configurationProblem, connectionProblem, defaultConfiguration, incompatibility,
@@ -239,6 +240,7 @@ function NodeFields({ projectId, checkoutId, node, definition, disabled, onChang
       <small>Enter one check name per line.</small>
     </label>;
     case "command": return <CommandNodeConfiguration projectId={projectId} configuration={configuration} onChange={onChange} disabled={disabled} />;
+    case "mcp_tool": return <WorkflowMcpNodeConfiguration projectId={projectId} configuration={configuration} onChange={onChange} disabled={disabled} />;
     case "condition": return <>
       <p className="pipeline-meta">Use a JSON Pointer into the source artifact, such as <code>/evidence/relativePath</code>. Equality compares JSON values by type.</p>
       <JsonConfiguration configuration={configuration} kind="condition" disabled={disabled} onChange={onChange} />

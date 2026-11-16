@@ -24,6 +24,7 @@ pub mod comparison;
 pub mod graph_editor;
 pub mod inspection;
 pub mod launch;
+pub mod mcp_tools;
 pub mod role_templates;
 pub mod stage_requirements;
 pub mod triggers;

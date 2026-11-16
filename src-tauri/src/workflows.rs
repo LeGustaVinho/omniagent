@@ -10,6 +10,7 @@ pub mod authoring;
 pub mod comparison;
 mod builtin;
 mod command;
+pub mod mcp_tools;
 mod control;
 mod execution;
 pub mod inspection;
@@ -241,6 +242,17 @@ fn compile_resolved_graph<'definition>(
     }
     for node in &nodes {
         for port in &node.definition.inputs {
+            if port.name == "arguments"
+                && let NodeConfiguration::McpTool(configuration) = &node.instance.configuration
+            {
+                ensure!(
+                    incoming.contains(&(node.instance.id.as_str(), port.name.as_str()))
+                        != configuration.argument_mappings.is_empty(),
+                    "MCP node {} needs one arguments connection when it maps source fields",
+                    node.instance.id
+                );
+                continue;
+            }
             ensure!(
                 incoming.contains(&(node.instance.id.as_str(), port.name.as_str())),
                 "input {} on {} needs a connection",

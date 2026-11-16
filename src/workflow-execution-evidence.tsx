@@ -8,9 +8,10 @@ import { commitQuery } from "@/project-agile-model";
 import { queueBlockerReason } from "@/queue-model";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { AttemptStageRequirements } from "@/workflow-stage-requirements";
+import { WorkflowMcpToolRun } from "@/workflow-mcp-tools";
 import type { ExecutionArtifact, ExecutionControl, ExecutionJob, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 
-type Navigation = Pick<WorkspaceProps, "openWorkspace" | "openActivity" | "openQueueJob">;
+type Navigation = Pick<WorkspaceProps, "checkout" | "openWorkspace" | "openActivity" | "openQueueJob">;
 type Task = { projectId: string; taskId: string };
 type Git = { id: string; task: Task };
 type Merge = Git & { commitEvidenceId: string };
@@ -159,11 +160,19 @@ export function WorkflowNodeEvidence({ node, snapshot, unitId, control, navigati
   const jobs = snapshot.jobs.filter(({ nodeId, unitId }) => belongs(nodeId, unitId));
   const outputs = snapshot.outputs.filter(({ artifact }) => belongs(artifact.nodeInstanceId, artifact.unitId));
   const pastControl = snapshot.control.filter((receipt) => receipt !== control && belongs(receipt.nodeId, receipt.unitId ?? null));
+  const argumentsWire = node.definition.kind === "mcp_tool" ? snapshot.definition.wires.find(({ to }) => to.node === node.instance.id && to.port === "arguments") : undefined;
+  const argumentsArtifact = argumentsWire && snapshot.outputs.find(({ artifact, current }) => current && artifact.unitId === null &&
+    artifact.nodeInstanceId === argumentsWire.from.node && artifact.port === argumentsWire.from.port)?.artifact.id;
+  const latestMcpJob = jobs.at(-1);
+  const currentMcpJob = latestMcpJob && (latestMcpJob.job.latestAttempt || latestMcpJob.inputs?.arguments === argumentsArtifact) ? latestMcpJob.job : undefined;
   return <div className="pipeline-stack">
     <details><summary>Pinned node configuration</summary>
       <p>Definition version {node.definition.revision} · <code className="break-all">{node.revision}</code></p>
       <pre className="workflow-evidence-json">{JSON.stringify(node.instance.configuration, null, 2)}</pre>
     </details>
+    {node.definition.kind === "mcp_tool" && navigation.checkout.projectId === projectId && <WorkflowMcpToolRun
+      {...scope} checkoutId={navigation.checkout.checkoutId} nodeId={node.instance.id} argumentsArtifact={argumentsArtifact}
+      waitsForArguments={Boolean(argumentsWire && !argumentsArtifact)} job={currentMcpJob} />}
     {control && <ControlEvidence control={control} snapshot={snapshot} jobs={jobs} navigation={navigation} />}
     {pastControl.map((receipt) => <details key={`${receipt.planRevision ?? ""}:${receipt.unitId ?? ""}`}>
       <summary>Earlier control decision · {text(receipt.state)}{receipt.planRevision && ` · Plan ${receipt.planRevision.slice(0, 12)}`}</summary>

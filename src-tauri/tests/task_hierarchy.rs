@@ -249,6 +249,10 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
          DROP TABLE workflow_approval_rule_revisions;
          DROP TABLE workflow_completion_inputs;
          DROP TABLE workflow_package_publications;
+         DROP TABLE workflow_mcp_attempts;
+         DROP TABLE workflow_mcp_jobs;
+         DROP TABLE workflow_mcp_grants;
+         DROP TABLE workflow_mcp_servers;
          DROP TABLE workflow_package_mcp_calls;
          DROP TABLE workflow_package_mcp_sessions;
          DROP TABLE workflow_subflow_pins;

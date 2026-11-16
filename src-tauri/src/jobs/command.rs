@@ -79,6 +79,8 @@ pub(super) struct CommandInvocation {
     script: Option<PinnedCommandScript>,
     #[serde(default)]
     exchange: Option<CommandExchange>,
+    #[serde(default)]
+    isolated_mcp: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Deserialize, Serialize, TS)]
@@ -255,6 +257,7 @@ pub(crate) fn queue_pipeline_command(
         revision: prepared.revision,
         script: prepared.script,
         exchange: prepared.exchange,
+        isolated_mcp: false,
     };
     db.execute(
         "INSERT INTO job_commands (job_id, invocation) VALUES (?1, ?2)",
@@ -267,6 +270,25 @@ pub(crate) fn queue_pipeline_command(
         bind_job_input(db, &job.id, binding, input)?;
     }
     load_job(db, &project, &job.id)?.context("The command job disappeared")
+}
+
+pub(crate) fn queue_pipeline_mcp(
+    db: &Connection, project: &str, binding: &PipelineDispatch, checkout: String,
+    input: &WorkflowJobInput, executable: &Path, revision: &str,
+) -> Result<Job> {
+    let (owner, cwd) = resolve_node_checkout(db, binding, &checkout)?;
+    ensure!(project == owner, "The MCP tool checkout is outside the owning project");
+    let mut request = JobRequest { checkout_id: Some(checkout.clone()), task_id: None, mode: SessionMode::ReadOnly,
+        instructions: "Invoke the pinned local MCP tool".into(), dependencies: Vec::new(), requires_bridge: false };
+    request.normalize(&checkout)?;
+    stage_job_input(db, project, binding, &request, input)?;
+    let job = insert_job(db, owner, None, JobOrigin::Pipeline, request, 0, Some(binding))?;
+    let invocation = CommandInvocation { executable: executable.to_owned(), arguments: Vec::new(), checkout: cwd.into(),
+        runner: DirectWindowsRunner.identity().into(), revision: revision.into(), script: None, exchange: None, isolated_mcp: true };
+    db.execute("INSERT INTO job_commands (job_id,invocation) VALUES (?1,?2)",
+        params![job.id, protection::protect(&serde_json::to_vec(&invocation)?)?])?;
+    bind_job_input(db, &job.id, binding, input)?;
+    Ok(job)
 }
 
 pub(super) fn start_command(
@@ -284,7 +306,12 @@ pub(super) fn start_command(
         };
         let mut output = None;
         let mut result = None;
-        let outcome = run_command(
+        let mut mcp_result = None;
+        let isolated_mcp = attempt.invocation.isolated_mcp;
+        let outcome = if isolated_mcp {
+            failure.phase = FailurePhase::Execution;
+            crate::workflows::mcp_tools::run_isolated_mcp(&app, &store, runner.as_ref(), &attempt.run, &admission, &stopping, &mut mcp_result)
+        } else { run_command(
             &app,
             &store,
             runner.as_ref(),
@@ -294,9 +321,10 @@ pub(super) fn start_command(
             &mut failure,
             &mut output,
             &mut result,
-        );
+        ) };
         let status = match &outcome {
             Ok(status) => *status,
+            Err(_) if isolated_mcp && (admission.is_closed() || *stopping.borrow()) => RunStatus::Interrupted,
             Err(_) => RunStatus::Failed,
         };
         let run_id = attempt.run.id;
@@ -319,6 +347,13 @@ pub(super) fn start_command(
         };
         app.block_on(store.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if isolated_mcp {
+                if let Some(result) = mcp_result {
+                    crate::workflows::mcp_tools::settle_mcp_result(&tx, &run_id, result)?;
+                } else {
+                    crate::workflows::mcp_tools::settle_mcp_restart(&tx, &run_id)?;
+                }
+            }
             settle_command(&tx, &run_id, status, failure, output)?;
             if let Some(result) = result {
                 publish_command_result(&tx, &run_id, result)?;
@@ -611,6 +646,7 @@ pub(crate) fn recover_commands(db: &Connection) -> Result<()> {
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for id in active {
+        crate::workflows::mcp_tools::settle_mcp_restart(db, &id)?;
         settle_command(
             db,
             &id,

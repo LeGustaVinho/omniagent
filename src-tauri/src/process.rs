@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT},
     Security::SECURITY_ATTRIBUTES,
     System::{
         JobObjects::{
@@ -33,6 +33,8 @@ use windows_sys::Win32::{
         },
     },
 };
+
+pub(crate) mod app_container;
 
 const CANCEL_EXIT_CODE: u32 = 0xC000_013A;
 
@@ -144,6 +146,15 @@ impl WindowsProcessControl {
 }
 
 pub fn launch(executable: &Path, cwd: &Path, args: &[&OsStr]) -> io::Result<WindowsProcess> {
+    launch_scoped(executable, cwd, args, None)
+}
+
+fn launch_scoped(
+    executable: &Path,
+    cwd: &Path,
+    args: &[&OsStr],
+    sandbox: Option<&app_container::LaunchSecurity<'_>>,
+) -> io::Result<WindowsProcess> {
     if !executable.is_absolute() || !cwd.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -170,9 +181,12 @@ pub fn launch(executable: &Path, cwd: &Path, args: &[&OsStr]) -> io::Result<Wind
         child_stderr.as_raw_handle(),
     ];
     let jobs = [job.as_raw_handle()];
-    let mut attrs = ProcessAttributes::new(2)?;
+    let mut attrs = ProcessAttributes::new(if sandbox.is_some() { 5 } else { 2 })?;
     attrs.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &inherited)?;
     attrs.set(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs)?;
+    if let Some(sandbox) = sandbox {
+        sandbox.apply(&mut attrs)?;
+    }
 
     let mut info = STARTUPINFOEXW::default();
     info.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
@@ -193,8 +207,9 @@ pub fn launch(executable: &Path, cwd: &Path, args: &[&OsStr]) -> io::Result<Wind
             null(),
             null(),
             1,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
-            null(),
+            EXTENDED_STARTUPINFO_PRESENT
+                | sandbox.map_or(CREATE_NO_WINDOW, |policy| policy.flags()),
+            sandbox.map_or(null(), |policy| policy.environment()),
             cwd.as_ptr(),
             &info.StartupInfo,
             &mut process,
@@ -279,7 +294,7 @@ impl ProcessAttributes {
         self.0.as_mut_ptr().cast()
     }
 
-    fn set(&mut self, key: u32, values: &[HANDLE]) -> io::Result<()> {
+    fn set<T>(&mut self, key: u32, values: &[T]) -> io::Result<()> {
         checked(unsafe {
             UpdateProcThreadAttribute(
                 self.ptr(),
