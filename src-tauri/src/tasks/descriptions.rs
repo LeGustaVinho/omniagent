@@ -5,7 +5,10 @@ use uuid::Uuid;
 
 use crate::{protection, store::Store};
 
-use super::ChecklistItem;
+use super::{
+    ChecklistExecutionMode, ChecklistItem, activity::load_task_details,
+    checklists::load_checklist_items,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +43,10 @@ pub struct TaskDispatchContext {
     pub task_id: String,
     pub descriptions: WorkDescriptions,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub direct_work: Option<TaskDirectWork>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub checklist_mode: Option<ChecklistExecutionMode>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub checklist_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub checklist_item_id: Option<String>,
@@ -47,9 +54,32 @@ pub struct TaskDispatchContext {
     pub checklist: Vec<ChecklistItem>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDirectWork {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent_title: Option<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub prerequisites: Vec<String>,
+    pub blockers: Vec<String>,
+}
+
 impl TaskDispatchContext {
     pub(crate) fn append_to_prompt(&self, prompt: &mut String) -> Result<()> {
-        if self.descriptions != WorkDescriptions::default() || !self.checklist.is_empty() {
+        match self.checklist_mode {
+            Some(ChecklistExecutionMode::TrackProgress) => prompt.push_str(
+                "\n\nCarry out the selected task's direct work and use its checklist to track progress.",
+            ),
+            Some(ChecklistExecutionMode::RunByItem) => prompt.push_str(
+                "\n\nCarry out the selected checklist item. Use the owning task and its ancestors as context.",
+            ),
+            None => {}
+        }
+        if self.direct_work.is_some()
+            || self.descriptions != WorkDescriptions::default()
+            || !self.checklist.is_empty()
+        {
             let serialized = serde_json::to_string(self)?;
             prompt.push_str("\n\nSaved task context\n");
             prompt.push_str(&serialized);
@@ -127,18 +157,22 @@ impl Store {
             let tx = db.transaction()?;
             let scope = tx.query_row(
                 "SELECT r.project_id, r.task_id, m.parent_task_id, coalesce(m.epic_id, parent.epic_id),
-                        c.id, r.checklist_item_id
+                        c.id, r.checklist_item_id, execution.mode, task.title, parent_task.title
                  FROM task_runs r
+                 JOIN project_tasks task ON task.project_id = r.project_id AND task.id = r.task_id
                  LEFT JOIN project_task_memberships m ON m.project_id = r.project_id AND m.task_id = r.task_id
                  LEFT JOIN project_task_memberships parent ON parent.project_id = r.project_id AND parent.task_id = m.parent_task_id
+                 LEFT JOIN project_tasks parent_task ON parent_task.project_id = r.project_id AND parent_task.id = m.parent_task_id
                  LEFT JOIN project_checklists c ON c.project_id = r.project_id AND c.task_id = r.task_id
+                 LEFT JOIN job_checklist_modes execution ON execution.job_id = r.job_id
                  WHERE r.run_id = ?1",
                 [&run],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?)),
+                    row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?, row.get::<_, String>(7)?, row.get::<_, Option<String>>(8)?)),
             ).optional()?;
-            let Some((project, task, parent, epic, checklist_id, checklist_item_id)) = scope else {
+            let Some((project, task, parent, epic, checklist_id, checklist_item_id, mode, title, parent_title)) = scope else {
                 return Ok(None);
             };
             let mut descriptions = WorkDescriptions {
@@ -150,9 +184,18 @@ impl Store {
             if parent.is_some() {
                 descriptions.subtask = active_work_description(&tx, &project, &task)?;
             }
-            let checklist = dispatch_checklist(&tx, &project, &task, checklist_item_id.as_deref())?;
+            let checklist_mode = mode.as_deref().map(ChecklistExecutionMode::from_sql).transpose()?;
+            let direct_work = if checklist_mode.is_some() {
+                let details = load_task_details(&tx, &project, &task)?;
+                Some(TaskDirectWork {
+                    title, parent_title, acceptance_criteria: details.acceptance_criteria,
+                    prerequisites: details.prerequisites, blockers: details.blockers,
+                })
+            } else { None };
+            let checklist = load_checklist_items(&tx, &project, &task, checklist_item_id.as_deref(), None)?;
+            ensure!(checklist_item_id.is_none() || checklist.len() == 1, "the selected checklist item has no saved revision");
             Ok(Some(TaskDispatchContext {
-                task_id: task, descriptions, checklist_id, checklist_item_id, checklist,
+                task_id: task, descriptions, direct_work, checklist_mode, checklist_id, checklist_item_id, checklist,
             }))
         }).await
     }
@@ -225,39 +268,4 @@ fn read_description(
             })
         })
         .transpose()
-}
-
-fn dispatch_checklist(
-    db: &Connection,
-    project: &str,
-    task: &str,
-    item: Option<&str>,
-) -> Result<Vec<ChecklistItem>> {
-    let mut query = db.prepare(
-        "SELECT i.id, i.position, r.revision, r.body, r.checked FROM project_checklist_items i
-         JOIN project_checklist_item_revisions r ON r.project_id = i.project_id AND r.task_id = i.task_id
-         AND r.item_id = i.id AND r.revision = (
-             SELECT max(revision) FROM project_checklist_item_revisions
-             WHERE project_id = i.project_id AND task_id = i.task_id AND item_id = i.id
-         )
-         WHERE i.project_id = ?1 AND i.task_id = ?2 AND (?3 IS NULL OR i.id = ?3)
-         ORDER BY i.position",
-    )?;
-    let mut rows = query.query(params![project, task, item])?;
-    let mut items = Vec::new();
-    while let Some(row) = rows.next()? {
-        let encrypted: Vec<u8> = row.get(3)?;
-        items.push(ChecklistItem {
-            id: row.get(0)?,
-            position: row.get(1)?,
-            revision: row.get(2)?,
-            body: String::from_utf8(protection::unprotect(&encrypted)?)?,
-            checked: row.get(4)?,
-        });
-    }
-    ensure!(
-        item.is_none() || items.len() == 1,
-        "the selected checklist item has no saved revision"
-    );
-    Ok(items)
 }

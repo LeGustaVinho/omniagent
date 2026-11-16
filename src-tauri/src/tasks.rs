@@ -5,14 +5,16 @@ use uuid::Uuid;
 use crate::store::Store;
 
 mod activity;
+mod checklists;
 mod descriptions;
 pub(crate) use activity::bind_task_run_scope;
 pub use activity::{
-    ChecklistItem, PlannedAssignment, TaskDetails, TaskRun, TaskRunRole, TaskRunScope,
-    TaskWorkflowState,
+    PlannedAssignment, TaskDetails, TaskRun, TaskRunRole, TaskRunScope, TaskWorkflowState,
 };
+pub(crate) use checklists::bind_checklist_job_mode;
+pub use checklists::{ChecklistExecutionMode, ChecklistItem, TaskChecklist};
 pub use descriptions::{
-    DescriptionOwner, DescriptionRevision, TaskDispatchContext, WorkDescriptions,
+    DescriptionOwner, DescriptionRevision, TaskDirectWork, TaskDispatchContext, WorkDescriptions,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

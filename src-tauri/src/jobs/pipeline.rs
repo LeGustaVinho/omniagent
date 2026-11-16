@@ -11,7 +11,7 @@ use crate::{
     providers::{SessionMode, questions::QuestionRoute},
     repository::{bind_job_markdown, writers::writer_owner},
     store::Store,
-    tasks::{TaskRunScope, bind_task_run_scope},
+    tasks::{TaskRunScope, bind_checklist_job_mode, bind_task_run_scope},
 };
 
 use super::{
@@ -418,8 +418,37 @@ impl Store {
         &self,
         binding: PipelineDispatch,
         scope: SessionScope,
+        request: JobRequest,
+        input: PipelineAgentInput,
+    ) -> Result<Job> {
+        self.submit_pipeline_agent_job_with_target(binding, scope, request, input, false)
+            .await
+    }
+
+    /// Enqueue direct checklist work using the selected task's effective execution mode.
+    /// The mode and work scope are resolved together in the scheduler submission transaction.
+    pub async fn submit_pipeline_checklist_job(
+        &self,
+        binding: PipelineDispatch,
+        scope: SessionScope,
+        request: JobRequest,
+        input: PipelineAgentInput,
+    ) -> Result<Job> {
+        ensure!(
+            input.target.is_some(),
+            "checklist execution requires a task run target"
+        );
+        self.submit_pipeline_agent_job_with_target(binding, scope, request, input, true)
+            .await
+    }
+
+    async fn submit_pipeline_agent_job_with_target(
+        &self,
+        binding: PipelineDispatch,
+        scope: SessionScope,
         mut request: JobRequest,
         input: PipelineAgentInput,
+        checklist_execution: bool,
     ) -> Result<Job> {
         if let Some((_, route)) = &input.pinned {
             ensure!(
@@ -480,13 +509,20 @@ impl Store {
                     bind_role_context(&tx, &job.id, policy)?;
                 }
                 if let Some(target) = &input.target {
-                    bind_task_run_scope(
-                        &tx,
-                        &job.project_id,
-                        &job.id,
-                        job.task_id.as_deref(),
-                        target,
-                    )?;
+                    let task = job
+                        .task_id
+                        .as_deref()
+                        .context("a task run requires an actionable work scope")?;
+                    bind_task_run_scope(&tx, &job.project_id, &job.id, Some(task), target)?;
+                    if checklist_execution {
+                        bind_checklist_job_mode(
+                            &tx,
+                            &job.project_id,
+                            task,
+                            &job.id,
+                            target.checklist_item_id.as_deref(),
+                        )?;
+                    }
                 }
                 if let Some((context, route)) = &input.pinned {
                     history::bind_pipeline_context(&tx, &job.id, &context.context_id, *route)?;

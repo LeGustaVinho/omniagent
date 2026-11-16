@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::{
     conversations::SessionScope,
@@ -11,7 +10,7 @@ use crate::{
     store::Store,
 };
 
-use super::load_project_task;
+use super::{ChecklistExecutionMode, load_project_task};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,16 +66,6 @@ struct ProtectedTaskDetails {
     planned_assignments: Vec<PlannedAssignment>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChecklistItem {
-    pub id: String,
-    pub position: i64,
-    pub revision: i64,
-    pub body: String,
-    pub checked: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRunScope {
     pub role: String,
@@ -98,6 +87,7 @@ pub struct TaskRun {
     pub context_snapshot_id: Option<String>,
     pub role: TaskRunRole,
     pub checklist_item_id: Option<String>,
+    pub checklist_mode: Option<ChecklistExecutionMode>,
     pub provider: Provider,
     pub profile_id: String,
     pub requested_model: Option<String>,
@@ -119,34 +109,7 @@ impl Store {
             if load_project_task(&tx, &project, &task)?.is_none() {
                 return Ok(None);
             }
-            let saved: Option<(i32, String, Vec<u8>)> = tx
-                .query_row(
-                    "SELECT priority, workflow_state, payload FROM project_task_details
-                     WHERE project_id = ?1 AND task_id = ?2",
-                    params![project, task],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
-            let Some((priority, state, encrypted)) = saved else {
-                return Ok(Some(TaskDetails::default()));
-            };
-            let protected: ProtectedTaskDetails =
-                serde_json::from_slice(&protection::unprotect(&encrypted)?)?;
-            let prerequisites = tx
-                .prepare(
-                    "SELECT prerequisite_id FROM project_task_prerequisites
-                     WHERE project_id = ?1 AND task_id = ?2 ORDER BY prerequisite_id",
-                )?
-                .query_map(params![project, task], |row| row.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            Ok(Some(TaskDetails {
-                priority,
-                workflow_state: serde_json::from_value(serde_json::Value::String(state))?,
-                prerequisites,
-                acceptance_criteria: protected.acceptance_criteria,
-                blockers: protected.blockers,
-                planned_assignments: protected.planned_assignments,
-            }))
+            Ok(Some(load_task_details(&tx, &project, &task)?))
         })
         .await
     }
@@ -207,47 +170,39 @@ impl Store {
         }).await
     }
 
-    pub async fn append_project_checklist_item(
+    pub async fn project_task_runs(&self, project: String, task: String) -> Result<Vec<TaskRun>> {
+        self.task_runs_for(project, task, None).await
+    }
+
+    pub async fn project_checklist_item_runs(
         &self,
         project: String,
         task: String,
-        body: String,
-    ) -> Result<ChecklistItem> {
-        ensure!(!body.trim().is_empty(), "checklist item text is empty");
-        let id = Uuid::new_v4().to_string();
-        let encrypted = protection::protect(body.as_bytes())?;
-        self.execute(move |db| {
-            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let position = tx.query_row(
-                "INSERT INTO project_checklist_items (project_id, task_id, id, position)
-                 SELECT ?1, ?2, ?3, coalesce(max(position) + 1, 0)
-                 FROM project_checklist_items WHERE project_id = ?1 AND task_id = ?2
-                 RETURNING position",
-                params![project, task, id],
-                |row| row.get(0),
-            ).context("checklist item requires a checklist on this task")?;
-            tx.execute(
-                "INSERT INTO project_checklist_item_revisions
-                 (project_id, task_id, item_id, revision, body, checked) VALUES (?1, ?2, ?3, 1, ?4, 0)",
-                params![project, task, id, encrypted],
-            )?;
-            tx.commit()?;
-            Ok(ChecklistItem { id, position, revision: 1, body, checked: false })
-        }).await
+        item: String,
+    ) -> Result<Vec<TaskRun>> {
+        self.task_runs_for(project, task, Some(item)).await
     }
 
-    pub async fn project_task_runs(&self, project: String, task: String) -> Result<Vec<TaskRun>> {
+    async fn task_runs_for(
+        &self,
+        project: String,
+        task: String,
+        item: Option<String>,
+    ) -> Result<Vec<TaskRun>> {
         self.execute(move |db| {
             let mut query = db.prepare(
-                "SELECT job_id, ordinal, run_id, turn_id, snapshot_id, role, checklist_item_id,
+                "SELECT t.job_id, ordinal, run_id, turn_id, snapshot_id, role, checklist_item_id,
                         scope, reported_model, status, created_at, closed_at,
                         (SELECT min(recorded_at) FROM run_events e WHERE e.turn_id = t.turn_id
                          AND json_extract(e.payload, '$.type') = 'status'
-                         AND json_extract(e.payload, '$.status') = 'running')
-                 FROM task_runs t WHERE project_id = ?1 AND task_id = ?2
-                 ORDER BY created_at, job_id, ordinal",
+                         AND json_extract(e.payload, '$.status') = 'running'), execution.mode
+                 FROM task_runs t
+                 LEFT JOIN job_checklist_modes execution ON execution.job_id = t.job_id
+                 WHERE t.project_id = ?1 AND t.task_id = ?2
+                 AND (?3 IS NULL OR checklist_item_id = ?3)
+                 ORDER BY created_at, t.job_id, ordinal",
             )?;
-            let mut rows = query.query(params![project, task])?;
+            let mut rows = query.query(params![project, task, item])?;
             let mut runs = Vec::new();
             while let Some(row) = rows.next()? {
                 let scope: SessionScope = serde_json::from_str(row.get_ref(7)?.as_str()?)?;
@@ -262,6 +217,11 @@ impl Store {
                     context_snapshot_id: row.get(4)?,
                     role,
                     checklist_item_id: row.get(6)?,
+                    checklist_mode: row
+                        .get::<_, Option<String>>(13)?
+                        .as_deref()
+                        .map(ChecklistExecutionMode::from_sql)
+                        .transpose()?,
                     provider: scope.provider,
                     profile_id: scope.profile_id,
                     requested_model: scope.model,
@@ -276,6 +236,37 @@ impl Store {
         })
         .await
     }
+}
+
+pub(super) fn load_task_details(db: &Connection, project: &str, task: &str) -> Result<TaskDetails> {
+    let saved: Option<(i32, String, Vec<u8>)> = db
+        .query_row(
+            "SELECT priority, workflow_state, payload FROM project_task_details
+             WHERE project_id = ?1 AND task_id = ?2",
+            params![project, task],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((priority, state, encrypted)) = saved else {
+        return Ok(TaskDetails::default());
+    };
+    let protected: ProtectedTaskDetails =
+        serde_json::from_slice(&protection::unprotect(&encrypted)?)?;
+    let prerequisites = db
+        .prepare(
+            "SELECT prerequisite_id FROM project_task_prerequisites
+             WHERE project_id = ?1 AND task_id = ?2 ORDER BY prerequisite_id",
+        )?
+        .query_map(params![project, task], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(TaskDetails {
+        priority,
+        workflow_state: serde_json::from_value(serde_json::Value::String(state))?,
+        prerequisites,
+        acceptance_criteria: protected.acceptance_criteria,
+        blockers: protected.blockers,
+        planned_assignments: protected.planned_assignments,
+    })
 }
 
 pub(crate) fn bind_task_run_scope(
