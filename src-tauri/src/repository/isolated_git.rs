@@ -105,7 +105,11 @@ impl IsolatedGit {
         check(self.command().args(args).output()?, args[0])
     }
 
-    fn command(&self) -> Command {
+    pub(super) fn index_path(&self) -> PathBuf {
+        self.scratch.path().join(".git/index")
+    }
+
+    pub(super) fn command(&self) -> Command {
         let mut command = git_command(&self.git, &self.checkout);
         clean_environment(&mut command, self.scratch.path());
         command

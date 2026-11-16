@@ -24,6 +24,7 @@ mod replacement;
 use format::{EditorFormat, encode};
 pub use movement::RepositoryDocumentMove;
 pub(super) use movement::proposed_move_paths;
+pub(super) use replacement::lock_directories;
 use replacement::{FileSave, file_identity, replace};
 
 #[derive(Clone, Copy)]

@@ -31,7 +31,7 @@ function UnifiedPatch({ file }: { file: ChangedFile }) {
 
 type DiffLayout = "auto" | "split" | "unified";
 
-function MonacoComparison({ file, layout, ready }: { file: ChangedFile; layout: DiffLayout; ready: (instance: editor.IStandaloneDiffEditor | null) => void }) {
+export function MonacoComparison({ file, layout, ready }: { file: ChangedFile; layout: DiffLayout; ready: (instance: editor.IStandaloneDiffEditor | null) => void }) {
   const anchor = useRef<HTMLDivElement>(null);
   const instance = useRef<editor.IStandaloneDiffEditor | null>(null);
   const [error, setError] = useState("");
@@ -100,7 +100,7 @@ function MonacoComparison({ file, layout, ready }: { file: ChangedFile; layout: 
     instance.current?.updateOptions({ renderSideBySide: layout !== "unified", useInlineViewWhenSpaceIsLimited: layout === "auto" });
   }, [layout]);
 
-  return error ? <><div className="p-2"><InlineIssue>Diff editor unavailable. Showing the recorded text.</InlineIssue></div><UnifiedPatch file={file} /></>
+  return error ? <><div className="p-2"><InlineIssue>Diff editor unavailable. Showing the text comparison.</InlineIssue></div><UnifiedPatch file={file} /></>
     : <div className="h-full min-h-45 w-full min-w-0 overflow-hidden" ref={anchor} aria-label={`Diff editor for ${file.path}`} />;
 }
 

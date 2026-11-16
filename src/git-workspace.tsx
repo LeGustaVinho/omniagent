@@ -2,6 +2,7 @@ import { ArrowDownToLine, ArrowRight, ChevronDown, FileDiff, GitBranch, GitCommi
 import { Dialog } from "radix-ui";
 import { useEffect, useState, type FormEvent } from "react";
 import ChangesPanel from "@/changes-panel";
+import { LiveGitWorkspace } from "@/git-live-workspace";
 import { Button } from "@/components/ui/button";
 import { releaseCommits, revisionMessage, workingChanges, type ChangesSource } from "@/git-demo-data";
 import { useGitSimulation } from "@/git-simulation";
@@ -206,6 +207,10 @@ function ChangeOperations({ props, source, baseRef }: { props: WorkspaceProps; s
 }
 
 export default function GitWorkspace(props: WorkspaceProps) {
+  return props.simulation ? <SimulatedGitWorkspace {...props} /> : <LiveGitWorkspace {...props} />;
+}
+
+function SimulatedGitWorkspace(props: WorkspaceProps) {
   const { simulation, target } = props;
   const git = useGitSimulation();
   const [view, setView] = useState<GitView>("Changes");

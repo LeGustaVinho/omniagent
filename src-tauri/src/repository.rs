@@ -17,6 +17,7 @@ use crate::{customizations, store::Store};
 
 mod candidates;
 pub mod documents;
+pub mod git_review;
 mod isolated_git;
 mod markdown;
 mod markdown_catalog;

@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { useState } from "react";
+import { useContext, useState } from "react";
+import { RunInspectorNavigation } from "@/run-inspector-navigation";
 
 type FileChange = { path: string; sha256: string; contentBase64?: string };
 type Snapshot = {
@@ -66,6 +67,7 @@ function SnapshotChanges({ snapshot }: { snapshot: Snapshot }) {
 export function WorktreeEvidence({ projectId, runId, ownerTaskId }: {
   projectId: string; runId: string; ownerTaskId: string | null;
 }) {
+  const navigation = useContext(RunInspectorNavigation);
   const [savedOpen, setSavedOpen] = useState(false);
   const [liveOpen, setLiveOpen] = useState(false);
   const saved = useQuery({
@@ -84,6 +86,8 @@ export function WorktreeEvidence({ projectId, runId, ownerTaskId }: {
   });
   return (
     <section className="mx-auto mt-4 grid max-w-3xl gap-2 rounded-md border border-border p-3 text-sm" aria-label="Worktree evidence">
+      {artifact && navigation?.openGitAttempt && <button type="button" className="conv-quiet-button justify-self-start"
+        onClick={() => navigation.openGitAttempt?.(runId)}>Open saved diff in Git</button>}
       <details onToggle={(event) => setSavedOpen(event.currentTarget.open)}>
         <summary>Saved candidate for this attempt</summary>
         {savedOpen && saved.isPending && <p role="status">Loading saved evidence…</p>}

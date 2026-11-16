@@ -78,11 +78,11 @@ pub(super) fn replace(
 ) -> Result<FileSave> {
     ensure!(
         destination.starts_with(root),
-        "the Markdown destination is outside its checkout"
+        "the destination is outside its checkout"
     );
     let parent = destination
         .parent()
-        .context("the Markdown document has no parent")?;
+        .context("the file has no parent directory")?;
     let directories = lock_directories(parent)?;
     let staged = stage(parent, ".pending", edited)?;
     let mut recovery = RecoveryFiles {
@@ -161,7 +161,7 @@ pub(super) fn replace(
             recovery.describe("the document changed during replacement; both versions were kept"),
         ),
         Err(error) => FileSave::RecoveryRequired(recovery.describe(format!(
-            "could not verify the Markdown replacement: {error:#}"
+            "could not verify the file replacement: {error:#}"
         ))),
     })
 }
@@ -178,7 +178,7 @@ fn stage(parent: &Path, suffix: &str, bytes: &[u8]) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn lock_directories(path: &Path) -> Result<Vec<File>> {
+pub(in crate::repository) fn lock_directories(path: &Path) -> Result<Vec<File>> {
     let mut parents = path.ancestors().collect::<Vec<_>>();
     parents.reverse();
     parents
@@ -192,7 +192,7 @@ fn lock_directories(path: &Path) -> Result<Vec<File>> {
             let metadata = directory.metadata()?;
             ensure!(
                 metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
-                "the Markdown parent directory changed or is a reparse point"
+                "the parent directory changed or is a reparse point"
             );
             Ok(directory)
         })
@@ -208,7 +208,7 @@ fn open_for_rename(path: &Path) -> Result<File> {
     let metadata = file.metadata()?;
     ensure!(
         metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
-        "the Markdown document changed into a link or non-file"
+        "the path changed into a link or non-file"
     );
     Ok(file)
 }

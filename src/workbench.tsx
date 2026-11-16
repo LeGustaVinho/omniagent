@@ -253,7 +253,8 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
         </aside>
         <div className="work-decks">
           <div className="work-deck" hidden={Boolean(preview)}>
-            <RunInspectorNavigation.Provider value={{ openActivity: real.openActivity, activeRunId: realSide?.type === "activity" ? realSide.runId : undefined }}>
+            <RunInspectorNavigation.Provider value={{ openActivity: real.openActivity, activeRunId: realSide?.type === "activity" ? realSide.runId : undefined,
+              openGitAttempt: (runId) => real.openWorkspace("git", `attempt:${runId}`) }}>
               <WorkspaceViews nav={realNavigation} context={real} sidebar={!preview && sidebar} onSidebarChange={changeSidebar} compact={compact}
                 onOpenOtherCheckout={onSelectCheckout} />
             </RunInspectorNavigation.Provider>

@@ -4,6 +4,7 @@ mod conversation_runtime;
 mod conversation_goal_runtime;
 mod agile_runtime;
 mod desktop;
+mod git_review_runtime;
 mod ide_source_runtime;
 mod manual_terminal;
 #[cfg(debug_assertions)]
@@ -307,6 +308,12 @@ fn main() {
             manual_terminal::write_manual_terminal,
             manual_terminal::resize_manual_terminal,
             manual_terminal::close_manual_terminal,
+            git_review_runtime::git_checkout_review,
+            git_review_runtime::git_checkout_history,
+            git_review_runtime::git_checkout_diff,
+            git_review_runtime::set_git_path_staged,
+            git_review_runtime::commit_git_index,
+            git_review_runtime::git_saved_attempts,
             note_index_runtime::rebuild_repository_note_index,
             note_index_runtime::reconcile_repository_note_index,
             note_index_runtime::watch_repository_note_index,
