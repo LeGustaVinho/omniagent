@@ -6,7 +6,7 @@ import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
 import { Compartment, EditorSelection, EditorState, StateEffect, StateField, Transaction } from "@codemirror/state";
 import {
   Decoration, drawSelection, EditorView, highlightActiveLine, keymap, lineNumbers, ViewPlugin, WidgetType,
-  type DecorationSet, type ViewUpdate,
+  type Command, type DecorationSet, type ViewUpdate,
 } from "@codemirror/view";
 import { Braces, CheckSquare, List, Redo2, Search, Table2, Undo2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -14,6 +14,7 @@ import { useEffect, useRef } from "react";
 import type { ExampleFile } from "@/ide-knowledge-data";
 import { fileName } from "@/ide-knowledge-data";
 import { parseWiki, type NoteTarget } from "@/knowledge-document";
+import { insertListItem, insertTable, toggleTaskCheckbox } from "@/knowledge-source-commands";
 
 export interface NoteJump {
   anchor?: string;
@@ -318,14 +319,22 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
     view.dispatch({ selection: EditorSelection.cursor(pos), effects: EditorView.scrollIntoView(pos, { y: "center" }) });
   }, [jump, path]);
 
-  const insert = (prefix: string, suffix = "") => {
+  const runEdit = (edit: Command) => {
+    const view = instance.current;
+    if (!view) return;
+    edit(view);
+    view.focus();
+  };
+
+  const insertCode = () => {
     const view = instance.current;
     if (!view) return;
     const selection = view.state.selection.main;
     const value = view.state.sliceDoc(selection.from, selection.to);
+    const fence = "\n```\n";
     view.dispatch({
-      changes: { from: selection.from, to: selection.to, insert: prefix + value + suffix },
-      selection: EditorSelection.cursor(selection.from + prefix.length + value.length),
+      changes: { from: selection.from, to: selection.to, insert: fence + value + fence },
+      selection: EditorSelection.cursor(selection.from + fence.length + value.length),
     });
     view.focus();
   };
@@ -336,10 +345,10 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
         <button type="button" className="fw-icon" title="Undo" aria-label="Undo" onClick={() => { if (instance.current) undo(instance.current); }}><Undo2 size={15} /></button>
         <button type="button" className="fw-icon" title="Redo" aria-label="Redo" onClick={() => { if (instance.current) redo(instance.current); }}><Redo2 size={15} /></button>
         <button type="button" className="fw-icon" title="Find in note" aria-label="Find in note" onClick={() => { if (instance.current) openSearchPanel(instance.current); }}><Search size={15} /></button>
-        <button type="button" className="fw-icon" title="Insert list item" aria-label="Insert list item" onClick={() => insert("\n- ")}><List size={15} /></button>
-        <button type="button" className="fw-icon" title="Insert task" aria-label="Insert task" onClick={() => insert("\n- [ ] ")}><CheckSquare size={15} /></button>
-        <button type="button" className="fw-icon" title="Insert table" aria-label="Insert table" onClick={() => insert("\n| Name | Status |\n| --- | --- |\n|  |  |\n")}><Table2 size={15} /></button>
-        <button type="button" className="fw-icon" title="Insert code block" aria-label="Insert code block" onClick={() => insert("\n```\n", "\n```\n")}><Braces size={15} /></button>
+        <button type="button" className="fw-icon" title="Insert list item" aria-label="Insert list item" onClick={() => runEdit(insertListItem)}><List size={15} /></button>
+        <button type="button" className="fw-icon" title="Toggle task checkbox" aria-label="Toggle task checkbox" onClick={() => runEdit(toggleTaskCheckbox)}><CheckSquare size={15} /></button>
+        <button type="button" className="fw-icon" title="Insert table" aria-label="Insert table" onClick={() => runEdit(insertTable)}><Table2 size={15} /></button>
+        <button type="button" className="fw-icon" title="Insert code block" aria-label="Insert code block" onClick={insertCode}><Braces size={15} /></button>
       </div>
       <div className="note-editor-mount" ref={mount} />
     </div>

@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import { EditorView } from "@codemirror/view";
+import { syntaxTree } from "@codemirror/language";
 import { invoke } from "@tauri-apps/api/core";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { MarkdownEditor } from "@/knowledge-editor";
 
@@ -29,17 +31,102 @@ it("applies only the canonical ranges returned for the exact CodeMirror buffer",
   expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "Toggle note task" }).checked).toBe(true);
 });
 
-it("inserts a Source-mode list, task and GFM table without rewriting neighboring Markdown and supports undo", () => {
-  const source = "---\nkanban-plugin: board\n---\n\nScore:: 5\n- [/] Planned 📅 2026-10-05\n";
-  const { container } = render(<MarkdownEditor {...props} mode="source" source={source} />);
-  const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
-  act(() => view.dispatch({ selection: { anchor: source.length } }));
-  fireEvent.click(screen.getByRole("button", { name: "Insert list item" }));
-  fireEvent.click(screen.getByRole("button", { name: "Insert task" }));
-  fireEvent.click(screen.getByRole("button", { name: "Insert table" }));
-  expect(view.state.doc.toString()).toBe(source + "\n- \n- [ ] \n| Name | Status |\n| --- | --- |\n|  |  |\n");
-  fireEvent.click(screen.getByRole("button", { name: "Undo" }));
-  expect(view.state.doc.toString().startsWith(source)).toBe(true);
-  fireEvent.click(screen.getByRole("button", { name: "Redo" }));
-  expect(view.state.doc.toString()).toContain("| Name | Status |");
+function openSource(source: string) {
+  const onChange = vi.fn();
+  function Controlled() {
+    const [content, setContent] = useState(source);
+    return <MarkdownEditor {...props} mode="source" source={content} onChange={(updated) => { onChange(updated); setContent(updated); }} />;
+  }
+  const { container } = render(<Controlled />);
+  return { view: EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!, onChange };
+}
+
+const command = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+const select = (view: EditorView, anchor: number, head = anchor) => act(() => view.dispatch({ selection: { anchor, head } }));
+
+it("makes and toggles list tasks through separate undo steps while preserving neighboring plugin syntax", () => {
+  const before = "---\nkanban-plugin: board # comment\n---\n\nScore:: 5\n\n";
+  const selected = "Build café\nShip release";
+  const after = "\n\n- [/] Planned 📅 2026-10-05\n\n```dataview\nTABLE foo FROM #release\n```\n";
+  const source = before + selected + after;
+  const listed = before + "- Build café\n- Ship release" + after;
+  const unchecked = before + "- [ ] Build café\n- [ ] Ship release" + after;
+  const checked = before + "- [x] Build café\n- [x] Ship release" + after;
+  const { view, onChange } = openSource(source);
+  select(view, before.length, before.length + selected.length + 1);
+  command("Insert list item");
+  expect(view.state.doc.toString()).toBe(listed);
+  command("Toggle task checkbox");
+  expect(view.state.doc.toString()).toBe(unchecked);
+  command("Toggle task checkbox");
+  expect(view.state.doc.toString()).toBe(checked);
+  expect(onChange.mock.calls.map(([text]) => text)).toEqual([listed, unchecked, checked]);
+
+  for (const expected of [unchecked, listed, source]) {
+    command("Undo");
+    expect(view.state.doc.toString()).toBe(expected);
+  }
+  for (const expected of [listed, unchecked, checked]) {
+    command("Redo");
+    expect(view.state.doc.toString()).toBe(expected);
+  }
+
+  select(view, checked.indexOf("[/]"));
+  command("Toggle task checkbox");
+  select(view, checked.indexOf("TABLE foo"));
+  command("Insert list item");
+  command("Toggle task checkbox");
+  command("Insert table");
+  select(view, checked.indexOf("kanban-plugin"));
+  command("Toggle task checkbox");
+  expect(view.state.doc.toString()).toBe(checked);
+});
+
+it("keeps the original quote, ordered marker and task metadata while supporting list continuation by Enter", () => {
+  const source = "> 3) [X] Release 🚀 📅 2026-10-05 ^ready";
+  const { view } = openSource(source);
+  select(view, source.indexOf("Release"));
+  command("Toggle task checkbox");
+  const unchecked = source.replace("[X]", "[ ]");
+  expect(view.state.doc.toString()).toBe(unchecked);
+  select(view, unchecked.length);
+  fireEvent.keyDown(view.contentDOM, { key: "Enter" });
+  expect(view.state.doc.toString()).toBe(unchecked + "\n> 4) ");
+  command("Toggle task checkbox");
+  expect(view.state.doc.toString()).toBe(unchecked + "\n> 4) [ ] ");
+});
+
+it("adds a row to an aligned GFM table and inserts a valid new table without splitting surrounding text", () => {
+  const table = "| Label | | Notes |\n| :--- | ---: | :---: |\n| café | 1 | pipe \\| literal |";
+  const source = "Title:: value\n\n" + table + "\n\nRead me carefully\nKeep this exact ^footer";
+  const { view } = openSource(source);
+  select(view, source.indexOf("Label"));
+  command("Insert table");
+  const extended = source.replace("| :--- | ---: | :---: |", "| :--- | ---: | :---: |\n|  |  |  |");
+  expect(view.state.doc.toString()).toBe(extended);
+  expect(view.state.doc.lineAt(view.state.selection.main.head).text).toBe("|  |  |  |");
+
+  select(view, extended.indexOf("carefully"));
+  command("Insert table");
+  expect(view.state.doc.toString()).toBe(extended.replace("Read me carefully\n", "Read me carefully\n\n| Name | Status |\n| --- | --- |\n|  |  |\n\n"));
+  expect(syntaxTree(view.state).topNode.getChildren("Table")).toHaveLength(2);
+  command("Undo");
+  expect(view.state.doc.toString()).toBe(extended);
+  command("Undo");
+  expect(view.state.doc.toString()).toBe(source);
+});
+
+it("finds and selects the next matching source text with the CodeMirror search panel", () => {
+  const source = "# Café 🚀\n\nScore:: café\n";
+  const { view, onChange } = openSource(source);
+  command("Find in note");
+  const field = screen.getByRole("textbox", { name: "Find" });
+  fireEvent.change(field, { target: { value: "café" } });
+  command("next");
+  expect(view.state.selection.main.from).toBe(source.indexOf("Café"));
+  command("next");
+  const { from, to } = view.state.selection.main;
+  expect(from).toBe(source.indexOf("café"));
+  expect(view.state.sliceDoc(from, to)).toBe("café");
+  expect(onChange).not.toHaveBeenCalled();
 });
