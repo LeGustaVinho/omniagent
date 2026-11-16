@@ -5,7 +5,11 @@ use crate::{
     jobs::AdmissionEnvironment,
     providers::{
         ProviderEvent, ProviderEventData, ProviderLocation, SessionIntent, TurnOutcome,
-        capabilities::CapabilityAssessment,
+        capabilities::{
+            Availability, CapabilityAssessment, CapabilityDescriptor, CapabilityScope,
+            ConfigurationEvidence, EvidenceOrigin, ObservedResult, ResolvedCapability,
+            Verification,
+        },
     },
     runs::RunStatus,
 };
@@ -307,5 +311,102 @@ async fn failed_summary_and_concurrent_turn_leave_the_existing_context_active() 
         );
         assert!(status.active_summary.is_none());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_compaction_rechecks_the_profile_budget_and_retains_the_draft() -> Result<()> {
+    use crate::attachments::{QualifiedAttachmentContext, QualifiedAttachmentLimits};
+    let (_temp, store, chat, scope) = setup().await?;
+    std::fs::write(&scope.executable, b"fixture")?;
+    three_turns(&store, &chat, &scope).await?;
+    let reported = prepare(&store, &chat.id, scope.clone(), "A newer committed turn").await?;
+    let profile = CapabilityScope::from_dispatch(
+        &scope,
+        reported.run.checkout_id.clone(),
+        None,
+        None,
+        ConfigurationEvidence {
+            detected: Vec::new(),
+            unresolved: Vec::new(),
+            provider_revision: None,
+            effective_revision: None,
+            scoped_launch_revision: None,
+            environment_revision: None,
+            tool_revisions: Default::default(),
+        },
+        scope.model.clone(),
+        scope.effort.clone(),
+    );
+    finish_turn(
+        &store,
+        reported,
+        "A newer answer",
+        Some(CapabilityAssessment {
+            version: 2,
+            scope: profile,
+            entries: vec![ResolvedCapability {
+                descriptor: CapabilityDescriptor {
+                    availability: Availability::Available,
+                    ..CapabilityDescriptor::attachment_limits()
+                },
+                evidence: Some(Verification {
+                    id: "qualified-window".into(),
+                    checked_at: "recorded".into(),
+                    origin: EvidenceOrigin::AuthenticatedFixture,
+                    result: ObservedResult::Succeeded,
+                    artifact_id: "fixture".into(),
+                    attachment_limits: Some(QualifiedAttachmentLimits {
+                        context: Some(QualifiedAttachmentContext {
+                            window_tokens: 5500,
+                            reserved_output_tokens: 500,
+                            fixed_input_tokens: 500,
+                        }),
+                        ..Default::default()
+                    }),
+                }),
+            }],
+        }),
+    )
+    .await?;
+    let current = store.conversation(chat.id.clone()).await?;
+    let pending = "A new draft waiting for compaction";
+    store
+        .save_conversation_draft(chat.id.clone(), pending.into())
+        .await?;
+    let mut different = scope.clone();
+    different.model = Some("unverified-model".into());
+    let unqualified = store
+        .request_conversation_compaction(
+            chat.id.clone(),
+            current.context_id.clone(),
+            different,
+            scope.clone(),
+            pending.into(),
+            true,
+        )
+        .await?;
+    assert!(unqualified.request.is_none());
+    let queued = store
+        .request_conversation_compaction(
+            chat.id.clone(),
+            current.context_id.clone(),
+            scope.clone(),
+            scope,
+            pending.into(),
+            true,
+        )
+        .await?;
+    let estimate = queued.estimate.context("Missing qualified budget")?;
+    assert_eq!(estimate.available_tokens, 4500);
+    assert!(estimate.automatic_needed);
+    assert_eq!(
+        queued
+            .request
+            .context("Automatic compaction did not queue")?
+            .status,
+        "queued"
+    );
+    assert_eq!(store.conversation_draft(chat.id).await?, pending);
     Ok(())
 }
