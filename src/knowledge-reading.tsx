@@ -1,4 +1,4 @@
-import { isValidElement, useEffect, useRef, type ReactNode } from "react";
+import { createContext, isValidElement, useContext, useEffect, useRef, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -33,7 +33,7 @@ function trustedPreviewUrl(url: string, path: string) {
   return readingLocalAddress(path, url);
 }
 
-export function NoteReading({ path, content, files, jump, onLink, onAttachment, sampleAttachments = true, checkoutId, onRepositoryAttachment }: {
+type ReadingProps = {
   path: string;
   content: string;
   files: readonly ExampleFile[];
@@ -43,7 +43,70 @@ export function NoteReading({ path, content, files, jump, onLink, onAttachment, 
   sampleAttachments?: boolean;
   checkoutId?: string;
   onRepositoryAttachment?: (paths: string[], label: string) => void;
-}) {
+};
+const ReadingContext = createContext<ReadingProps>(null!);
+
+const components: Components = {
+  h1: heading("h1"), h2: heading("h2"), h3: heading("h3"), h4: heading("h4"), h5: heading("h5"), h6: heading("h6"),
+  pre: ({ node, children }) => {
+    const code = node?.children.find((entry) => entry.type === "element" && entry.tagName === "code");
+    if (code?.type === "element" && Array.isArray(code.properties.className) && code.properties.className.includes("language-mermaid")) {
+      const source = code.children.map((entry) => entry.type === "text" ? entry.value : "").join("");
+      return <NoteDiagram source={source} />;
+    }
+    return <pre>{children}</pre>;
+  },
+  a: function ReadingLink({ href, children }) {
+    const { path, files, onLink, onAttachment, sampleAttachments = true, checkoutId, onRepositoryAttachment } = useContext(ReadingContext);
+    if (href?.startsWith("omni-mark:")) return <mark>{children}</mark>;
+    if (href?.startsWith("omni-wiki:")) {
+      const link = parseReadingAddress(href);
+      if (!link) return <span>{children}</span>;
+      const attachment = sampleAttachments ? noteAttachments.find(({ name }) => link.target.split("/").at(-1)?.toLowerCase() === name) : undefined;
+      if (attachment) return <button type="button" className="note-inline-link" onClick={() => onAttachment(attachment)}><FileText size={13} />{children}</button>;
+      const paths = noteAttachmentCandidates(link.target, link.sourcePath ?? path, true);
+      if (checkoutId && paths.length > 0) {
+        const label = link.alias ?? link.target;
+        if (link.embed) return <RepositoryNoteMedia checkoutId={checkoutId} paths={paths} title={label} />;
+        if (onRepositoryAttachment) return <button type="button" className="note-inline-link"
+          onClick={() => onRepositoryAttachment(paths, label)}>{children}</button>;
+      }
+      const targets = resolveWiki(link, link.sourcePath ?? path, files);
+      const note = targets.length === 1 ? files.find(({ path: filePath }) => filePath === targets[0]?.path) : undefined;
+      const excerpt = note && withoutProperties(note.content).split("\n").filter((line) => line.trim() && !line.startsWith("#")).slice(0, 2).join(" ");
+      const problem = targets.length > 1 ? "Ambiguous note reference" : "Unresolved note reference";
+      return (
+        <span className="note-preview-anchor">
+          <button type="button" className="note-inline-link" data-invalid={!note} onClick={() => onLink(link)}>{children}<ArrowUpRight size={11} /></button>
+          <span className="note-link-preview" role="tooltip"><strong>{note ? fileName(note.path) : problem}</strong>{excerpt && <span>{excerpt}</span>}</span>
+        </span>
+      );
+    }
+    const asset = href && parseReadingFile(href);
+    if (asset && checkoutId && onRepositoryAttachment) {
+      const paths = noteAttachmentCandidates(asset[1], asset[0], false);
+      if (paths.length > 0) return <button type="button" className="note-inline-link"
+        onClick={() => onRepositoryAttachment(paths, textContent(children) || asset[1])}>{children}</button>;
+    }
+    return href?.startsWith("#") ? <a href={href}>{children}</a> : <span>{children}</span>;
+  },
+  img: function ReadingImage({ alt, src }) {
+    const { checkoutId } = useContext(ReadingContext);
+    const file = src && parseReadingFile(src);
+    if (checkoutId && file) {
+      return <RepositoryNoteMedia checkoutId={checkoutId} paths={noteAttachmentCandidates(file[1], file[0], false)} title={alt || file[1]} />;
+    }
+    return <span className="file-help">Attachment preview unavailable · {alt}</span>;
+  },
+  p: ({ children }) => {
+    const body = textContent(children);
+    const block = /\s+(\^[\w-]+)\s*$/.exec(body)?.[1];
+    return <p data-note-anchor={block && anchorKey(block)}>{children}</p>;
+  },
+};
+
+export function NoteReading(props: ReadingProps) {
+  const { path, content, files, jump } = props;
   const root = useRef<HTMLDivElement>(null);
   const rendered = prepareReading(content, path, files);
   const properties = getProperties(content);
@@ -55,63 +118,6 @@ export function NoteReading({ path, content, files, jump, onLink, onAttachment, 
     target?.scrollIntoView({ block: "start" });
   }, [jump, path]);
 
-  const components: Components = {
-    h1: heading("h1"), h2: heading("h2"), h3: heading("h3"), h4: heading("h4"), h5: heading("h5"), h6: heading("h6"),
-    pre: ({ node, children }) => {
-      const code = node?.children.find((entry) => entry.type === "element" && entry.tagName === "code");
-      if (code?.type === "element" && Array.isArray(code.properties.className) && code.properties.className.includes("language-mermaid")) {
-        const source = code.children.map((entry) => entry.type === "text" ? entry.value : "").join("");
-        return <NoteDiagram source={source} />;
-      }
-      return <pre>{children}</pre>;
-    },
-    a: ({ href, children }) => {
-      if (href?.startsWith("omni-mark:")) return <mark>{children}</mark>;
-      if (href?.startsWith("omni-wiki:")) {
-        const link = parseReadingAddress(href);
-        if (!link) return <span>{children}</span>;
-        const attachment = sampleAttachments ? noteAttachments.find(({ name }) => link.target.split("/").at(-1)?.toLowerCase() === name) : undefined;
-        if (attachment) return <button type="button" className="note-inline-link" onClick={() => onAttachment(attachment)}><FileText size={13} />{children}</button>;
-        const paths = noteAttachmentCandidates(link.target, link.sourcePath ?? path, true);
-        if (checkoutId && paths.length > 0) {
-          const label = link.alias ?? link.target;
-          if (link.embed) return <RepositoryNoteMedia checkoutId={checkoutId} paths={paths} title={label} />;
-          if (onRepositoryAttachment) return <button type="button" className="note-inline-link"
-            onClick={() => onRepositoryAttachment(paths, label)}>{children}</button>;
-        }
-        const targets = resolveWiki(link, link.sourcePath ?? path, files);
-        const note = targets.length === 1 ? files.find(({ path: filePath }) => filePath === targets[0]?.path) : undefined;
-        const excerpt = note && withoutProperties(note.content).split("\n").filter((line) => line.trim() && !line.startsWith("#")).slice(0, 2).join(" ");
-        const problem = targets.length > 1 ? "Ambiguous note reference" : "Unresolved note reference";
-        return (
-          <span className="note-preview-anchor">
-            <button type="button" className="note-inline-link" data-invalid={!note} onClick={() => onLink(link)}>{children}<ArrowUpRight size={11} /></button>
-            <span className="note-link-preview" role="tooltip"><strong>{note ? fileName(note.path) : problem}</strong>{excerpt && <span>{excerpt}</span>}</span>
-          </span>
-        );
-      }
-      const asset = href && parseReadingFile(href);
-      if (asset && checkoutId && onRepositoryAttachment) {
-        const paths = noteAttachmentCandidates(asset[1], asset[0], false);
-        if (paths.length > 0) return <button type="button" className="note-inline-link"
-          onClick={() => onRepositoryAttachment(paths, textContent(children) || asset[1])}>{children}</button>;
-      }
-      return href?.startsWith("#") ? <a href={href}>{children}</a> : <span>{children}</span>;
-    },
-    img: ({ alt, src }) => {
-      const file = src && parseReadingFile(src);
-      if (checkoutId && file) {
-        return <RepositoryNoteMedia checkoutId={checkoutId} paths={noteAttachmentCandidates(file[1], file[0], false)} title={alt || file[1]} />;
-      }
-      return <span className="file-help">Attachment preview unavailable · {alt}</span>;
-    },
-    p: ({ children }) => {
-      const body = textContent(children);
-      const block = /\s+(\^[\w-]+)\s*$/.exec(body)?.[1];
-      return <p data-note-anchor={block && anchorKey(block)}>{children}</p>;
-    },
-  };
-
   return (
     <div className="note-reading" ref={root} aria-label={`Reading view for ${path}`}>
       <article>
@@ -120,10 +126,12 @@ export function NoteReading({ path, content, files, jump, onLink, onAttachment, 
             <dt>{key}</dt><dd>{value}</dd>
           </div>)}
         </dl>}
-        <ReactMarkdown skipHtml urlTransform={(url) => trustedPreviewUrl(url, path)} remarkPlugins={markdownPlugins}
-          rehypePlugins={readingPlugins} components={components}>
-          {rendered}
-        </ReactMarkdown>
+        <ReadingContext.Provider value={props}>
+          <ReactMarkdown skipHtml urlTransform={(url) => trustedPreviewUrl(url, path)} remarkPlugins={markdownPlugins}
+            rehypePlugins={readingPlugins} components={components}>
+            {rendered}
+          </ReactMarkdown>
+        </ReadingContext.Provider>
       </article>
     </div>
   );
