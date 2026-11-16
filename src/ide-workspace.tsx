@@ -7,6 +7,7 @@ import {
   FileDialog, FileDock, FileSearch, FileSidebar, FileTree, FileUnavailable,
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
+import { noteSearchTarget, ProjectFileSearch } from "@/ide-file-search";
 import { exampleNotes, exampleSources, fileName, findFileText, normalizeRepositoryPath } from "@/ide-knowledge-data";
 import type { CodeModel, CodeProblem } from "@/ide-code-editor";
 import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
@@ -93,7 +94,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const openFile = useCallback((path: string, line?: number) => {
     const request = ++openRequest.current;
     if (markdownPath(path)) {
-      openWorkspace("knowledge", path);
+      openWorkspace("knowledge", !simulated && line ? noteSearchTarget(path, line, request) : path);
       return;
     }
     const focus = (file: string) => {
@@ -240,7 +241,9 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
           </div>
         </div>
         <div className="file-sidebar-scroll">
-          {navigator === "search" ? <FileSearch query={query} setQuery={setQuery} results={results} onOpen={openFile} placeholder="Search files and content" unavailable={!simulated} />
+          {navigator === "search" ? (simulated
+            ? <FileSearch query={query} setQuery={setQuery} results={results} onOpen={openFile} placeholder="Search files and content" />
+            : <ProjectFileSearch checkoutId={checkout.checkoutId} onOpen={openFile} />)
             : <><p className="file-sidebar-note" title={simulated ? undefined : checkout.checkoutRoot}>
               {simulated ? "EXAMPLE WORKTREE" : fileName(checkout.checkoutRoot.replaceAll("\\", "/"))}</p>
               <FileTree paths={paths} active={active} onOpen={openFile} /></>}

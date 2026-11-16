@@ -7,6 +7,7 @@ mod agile_runtime;
 mod desktop;
 mod git_review_runtime;
 mod ide_source_runtime;
+mod project_search_runtime;
 mod manual_terminal;
 #[cfg(debug_assertions)]
 mod desktop_provider_fixture;
@@ -305,6 +306,9 @@ fn main() {
             ide_source_runtime::discard_repository_source_draft,
             ide_source_runtime::watch_repository_source,
             ide_source_runtime::unwatch_repository_source,
+            project_search_runtime::ripgrep_status,
+            project_search_runtime::set_ripgrep_executable,
+            project_search_runtime::search_repository_files,
             manual_terminal::start_manual_terminal,
             manual_terminal::write_manual_terminal,
             manual_terminal::resize_manual_terminal,

@@ -1,9 +1,10 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArchiveRestore, HardDrive, RefreshCw, ShieldCheck } from "lucide-react";
 import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import { ripgrepStatusKey, useRipgrepStatus, type RipgrepStatus } from "@/ide-file-search";
 import { IntegrationNotice, SettingRow } from "@/settings-controls";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -156,6 +157,7 @@ export function SystemSettings({
       </IntegrationNotice>
       <SystemGroup icon={<ShieldCheck size={18} />} id="qualification" title="Prerequisites and qualification">
         <p>Windows 10 22H2 or Windows 11 x64, WebView2, Git for Windows, ripgrep and a supported provider CLI.</p>
+        <RipgrepSettings />
         <QualificationMatrix />
       </SystemGroup>
       <SystemGroup icon={<ArchiveRestore size={18} />} id="backup" title="Backup and restore">
@@ -181,6 +183,43 @@ export function SystemSettings({
       </SystemGroup>
     </div>
   );
+}
+
+function RipgrepSettings() {
+  const client = useQueryClient();
+  const status = useRipgrepStatus();
+  const [draft, setDraft] = useState<string>();
+  const current = status.data?.configuredExecutable ?? "";
+  const input = draft ?? current;
+  const path = input.trim().replace(/^"(.*)"$/, "$1");
+  const save = useMutation({
+    mutationFn: (executable: string | null) => invoke<RipgrepStatus>("set_ripgrep_executable", { executable }),
+    onSuccess: (next) => {
+      setDraft(undefined);
+      client.setQueryData(ripgrepStatusKey, next);
+    },
+  });
+
+  return <form aria-label="ripgrep settings" onSubmit={(event) => {
+    event.preventDefault();
+    if (path !== current) save.mutate(path || null);
+  }}>
+    <dl className="settings-facts">
+      <dt>ripgrep</dt>
+      <dd>{status.isPending ? "Checking…" : status.data?.version ?? "Unavailable"}</dd>
+      {status.data?.executable && <><dt>Detected executable</dt><dd><code>{status.data.executable}</code></dd></>}
+    </dl>
+    <SettingRow id="ripgrep-executable" label="ripgrep executable" description="Enter the absolute path to rg.exe. Leave it blank to use PATH.">
+      <input id="ripgrep-executable" type="text" value={input} placeholder="Automatic (PATH)" disabled={status.isPending || save.isPending}
+        onChange={(event) => { save.reset(); setDraft(event.target.value); }} />
+    </SettingRow>
+    <div className="settings-actions">
+      <Button type="submit" variant="outline" disabled={status.isPending || save.isPending || path === current}>Save ripgrep path</Button>
+    </div>
+    {(status.error || status.data?.issue || save.error) && <p className="settings-result settings-result-error" role="alert">
+      {String(save.error ?? status.error ?? status.data?.issue)}
+    </p>}
+  </form>;
 }
 
 function SimulatedSystem({ state, dispatch }: Simulation) {

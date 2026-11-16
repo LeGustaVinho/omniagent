@@ -9,6 +9,7 @@ import {
   FileDialog, FileDock, FileSearch, FileSidebar, FileTree, FileUnavailable,
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
+import { readNoteSearchTarget } from "@/ide-file-search";
 import { deliveryNote, exampleNotes, fileName, findFileText, normalizeRepositoryPath } from "@/ide-knowledge-data";
 import {
   anchorLine, getProperties, headings, parseReadingAddress, readingLocalAddress, repairWikiAddress, resolveWiki, rewriteNoteReferences,
@@ -75,7 +76,8 @@ export default function KnowledgeWorkspace(props: WorkspaceProps) {
 
 function KnowledgeSurface({ checkout, target, simulation, startSimulation, openWorkspace }: WorkspaceProps) {
   const simulated = Boolean(simulation);
-  const initialPath = target ? normalizeRepositoryPath(target) : simulated ? deliveryNote : undefined;
+  const initialTarget = target ? readNoteSearchTarget(target) : undefined;
+  const initialPath = initialTarget ? normalizeRepositoryPath(initialTarget.path) : simulated ? deliveryNote : undefined;
   const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "knowledge", simulated, initialPath: simulated ? initialPath : undefined });
   const [examples, setNotes] = useState(() => initialNotes(simulated, simulation?.scenario === "recovery"));
   const repository = useRepositoryNotes(checkout.checkoutId, !simulated);
@@ -101,7 +103,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const [problem, setProblem] = useState("");
   const [selection, setSelection] = useState("");
   const [selectedAnchor, setSelectedAnchor] = useState("");
-  const lastTarget = useRef(simulated ? initialPath : undefined);
+  const lastTarget = useRef(simulated && !initialTarget?.line ? target : undefined);
   const lastOpen = useRef(0);
   const { load: loadNote, watch: watchNote, getNote } = repository;
   const active = dock.path;
@@ -220,12 +222,13 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   }, [active, loadNote, lookupLink, note, notes, repository.failures, simulated]);
 
   useEffect(() => {
-    if (!target || !dock.ready) return;
-    const next = normalizeRepositoryPath(target);
-    if (next && next !== lastTarget.current) {
-      lastTarget.current = next;
-      open(next);
-    }
+    if (!target || target === lastTarget.current || !dock.ready) return;
+    const location = readNoteSearchTarget(target);
+    const next = location && normalizeRepositoryPath(location.path);
+    if (!next || !location) return;
+    lastTarget.current = target;
+    if (location.line) setModes((before) => before[next] === "reading" ? { ...before, [next]: "live" } : before);
+    open(next, location.line);
   }, [dock.ready, open, target]);
 
   const update = (path: string, content: string) => {

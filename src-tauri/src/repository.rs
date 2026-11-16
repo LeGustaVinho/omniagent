@@ -21,6 +21,7 @@ pub mod git_review;
 mod isolated_git;
 mod markdown;
 mod markdown_catalog;
+pub mod project_search;
 pub mod source_documents;
 pub mod markdown_index;
 pub mod markdown_index_watch;
