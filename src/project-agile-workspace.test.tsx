@@ -199,7 +199,7 @@ it("shares hierarchy, checklist rows, filters, and saved Git evidence between bo
   expect(within(screen.getByRole("region", { name: "Ready" })).queryByRole("button", { name: parent.title })).toBeNull();
 });
 
-it("shares model ratings with planned assignments and scopes recorded model identity", async () => {
+it("filters completed work by the recorded review model after changing the planned assignment", async () => {
   const original: ModelOption = {
     selection: { provider: "codex", profileId: "review-profile", modelId: "review-model" },
     name: "Review model", selectable: true, unavailableReason: null, catalogVersion: 1,
@@ -213,7 +213,7 @@ it("shares model ratings with planned assignments and scopes recorded model iden
     provider: original.selection.provider, profileId: original.selection.profileId, requestedModel: "retired-request",
     reportedModel: original.selection.modelId,
   };
-  const { user } = testWorkspace(true, undefined, {
+  const { user, openActivity } = testWorkspace(true, undefined, {
     attempts: { [standalone.id]: [reviewer, {
       ...reviewer, runId: "different-attempt", profileId: "other-profile", reportedModel: "retired-model",
     }], [parent.id]: [{ ...reviewer, runId: "same-model-other-profile", profileId: "other-profile" }] },
@@ -232,6 +232,42 @@ it("shares model ratings with planned assignments and scopes recorded model iden
   expect(filter.getByText("Codex · review-profile · review-model")).toBeTruthy();
   await user.click(filter.getByRole("menuitemradio", { name: "Review model" }));
   expect(board.queryByRole("button", { name: parent.title })).toBeNull();
+
+  await user.selectOptions(detail.getByRole("combobox", { name: "Agent provider" }), "claude");
+  await user.click(await detail.findByRole("button", { name: "Assignment model · Choose model" }));
+  await user.click(within(await screen.findByRole("menu", { name: "Assignment model" }))
+    .getByRole("menuitemradio", { name: "Replacement model" }));
+  expect(await detail.findByText("Saved assignment · Claude Code · replacement-model · replacement-profile")).toBeTruthy();
+  expect(board.getByRole("button", { name: standalone.title })).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("set_project_task_assignment", {
+    projectId, taskId: standalone.id, role: "candidate reviewer", selection: replacement.selection,
+  });
+
+  const history = within(detail.getByRole("region", { name: "Work history" }));
+  const review = history.getByText("review-model").closest("li");
+  if (!review) throw new Error("Missing recorded reviewer");
+  await user.click(within(review).getByRole("button", { name: "Open attempt 1" }));
+  expect(openActivity).toHaveBeenCalledWith(reviewer.runId, reviewer.conversationId);
+
+  await user.click(screen.getByRole("button", { name: "Table" }));
+  const table = within(screen.getByRole("table", { name: "Agile table" }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Filter by state" }), "completed");
+  await user.selectOptions(screen.getByRole("combobox", { name: "Filter by provider" }), "codex");
+  const workButton = { name: /^Improve logging\s*Task$/ };
+  expect(table.getByRole("button", workButton)).toBeTruthy();
+  await user.selectOptions(screen.getByRole("combobox", { name: "Filter by agent" }), screen.getByRole("option", { name: "Codex · other-profile" }));
+  expect(await screen.findByText("No matching work.")).toBeTruthy();
+  await user.selectOptions(screen.getByRole("combobox", { name: "Filter by agent" }), screen.getByRole("option", { name: "Codex · review-profile" }));
+  expect(table.getByRole("button", workButton)).toBeTruthy();
+  await user.selectOptions(screen.getByRole("combobox", { name: "Filter by agent" }), "");
+  await user.selectOptions(screen.getByRole("combobox", { name: "Filter by provider" }), "");
+
+  await user.click(screen.getByRole("button", { name: "Filter by model · Review model" }));
+  const latestFilter = within(await screen.findByRole("menu", { name: "Filter by model" }));
+  expect(latestFilter.getByRole("menuitemradio", { name: "retired-model (recorded)" })).toBeTruthy();
+  await user.click(latestFilter.getByRole("menuitemradio", { name: "Replacement model" }));
+  expect(table.queryByRole("button", workButton)).toBeNull();
+  expect(await screen.findByText("No matching work.")).toBeTruthy();
 });
 
 it("opens exact active attempts and task job approvals and keeps observed subagents with interrupted work", async () => {
