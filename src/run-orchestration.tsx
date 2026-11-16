@@ -6,6 +6,7 @@ import type { JobRequirements } from "@/bindings/JobRequirements";
 import type { JobWorkspace } from "@/bindings/JobWorkspace";
 import type { PipelineJobOrigin } from "@/bindings/PipelineJobOrigin";
 import { Button } from "@/components/ui/button";
+import { ConversationPreviousRevisions } from "@/conversation-history-controls";
 import { GoalEvidence, type InspectedGoal } from "@/goal-evidence";
 import { GoalVerificationPanel } from "@/goal-verification-panel";
 import { WorktreeEvidence } from "@/worktree-evidence";
@@ -166,6 +167,7 @@ export function RunOrchestrationPanel({ scope, live, navigation }: {
   navigation?: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [showRevisions, setShowRevisions] = useState(false);
   const record = useQuery({
     queryKey: ["run-orchestration", scope.projectId, scope.runId, scope.conversationId],
     queryFn: () => invoke<Orchestration | null>("run_orchestration", scope),
@@ -179,6 +181,10 @@ export function RunOrchestrationPanel({ scope, live, navigation }: {
       {record.error && <p role="alert">{String(record.error)}</p>}
       {record.data === null && <p>Orchestration evidence is unavailable.</p>}
       {record.data && <OrchestrationDetails data={record.data} scope={scope} live={live} navigation={navigation} />}
+      {scope.conversationId && <details onToggle={(event) => setShowRevisions(event.currentTarget.open)}>
+        <summary>Context revisions</summary>
+        {showRevisions && <ConversationPreviousRevisions conversationId={scope.conversationId} />}
+      </details>}
     </div>}
   </details>;
 }

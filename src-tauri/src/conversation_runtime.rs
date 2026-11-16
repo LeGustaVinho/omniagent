@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use omniagent::{
-    conversations::{ConversationLibraryEntry, SessionScope},
+    conversations::{Conversation, ConversationHistory, ConversationHistoryInspection, ConversationLibraryEntry, SessionScope},
     diagnostics,
     dispatch::{ConversationArtifactRevision, ConversationSelection, QueuedSummary},
     jobs::{
@@ -11,6 +11,7 @@ use omniagent::{
     model_catalog::ModelSelection,
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionMode,
+        configuration::InstructionInventory,
         profiles::{DESKTOP_PERMISSION_REVISION, DesktopModel, DesktopProfile, desktop_profile},
         questions::{QuestionOrigin, QuestionReply},
         side::OutputFixture,
@@ -39,6 +40,50 @@ async fn profile(
 
 fn ui_error(error: anyhow::Error) -> String {
     diagnostics::preview(&error.to_string())
+}
+
+#[tauri::command]
+pub async fn conversation_history_inspection(
+    store: State<'_, Store>, conversation_id: String,
+) -> Result<ConversationHistoryInspection, String> {
+    store.inspect_conversation_history(conversation_id).await.map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn conversation_history_revision(
+    store: State<'_, Store>, conversation_id: String, context_id: String,
+) -> Result<ConversationHistory, String> {
+    store.conversation_history_revision(conversation_id, context_id).await.map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn fork_conversation_with_message_edit(
+    store: State<'_, Store>, conversation_id: String, expected_context_id: String,
+    through_revision: String, title: String, text: String,
+) -> Result<Conversation, String> {
+    store.fork_conversation_with_message_edit(conversation_id, expected_context_id, through_revision, title, text)
+        .await.map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn fork_retained_conversation(
+    store: State<'_, Store>, conversation_id: String, expected_context_id: String,
+    source_context_id: String, through_revision: String, title: String,
+) -> Result<Conversation, String> {
+    store.fork_retained_conversation(conversation_id, expected_context_id, source_context_id, through_revision, title)
+        .await.map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn conversation_next_prompt_instructions(
+    store: State<'_, Store>, conversation_id: String, selection: ModelSelection,
+    effort: Option<String>, mode: SessionMode,
+) -> Result<InstructionInventory, String> {
+    async {
+        let conversation = store.conversation(conversation_id.clone()).await?;
+        let scope = selected_scope(&store, conversation.checkout_id, selection, effort, mode).await?;
+        store.conversation_next_prompt_instructions(conversation_id, scope).await
+    }.await.map_err(ui_error)
 }
 
 #[tauri::command]

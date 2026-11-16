@@ -56,6 +56,12 @@ it("opens actual routing, context decisions, and saved sources in the same inspe
         };
       case "read_repository_markdown":
         return { markdown: "Original Markdown saved for the run" };
+      case "conversation_history_inspection":
+        return { previous: [{ contextId: "old-conversation-context", supersededBy: "new-context", messageCount: 1,
+          replacedAt: "2026-11-16T19:00:00.000Z", action: "rewind" }], fork: null, retainedQuestions: [] };
+      case "conversation_history_revision":
+        return { contextId: "old-conversation-context", messages: [{ messageId: "saved", revisionId: "saved-revision", role: "user",
+          text: "Dialogue from the superseded context" }] };
       case "goal_verification":
         return null;
       case "attempt_worktree_evidence":
@@ -101,6 +107,10 @@ it("opens actual routing, context decisions, and saved sources in the same inspe
   expect(patch.isContentEditable).toBeFalsy();
   await user.click(screen.getByRole("button", { name: "Open workflow" }));
   expect(navigation.openWorkspace).toHaveBeenCalledWith("pipelines", "flow");
+  await user.click(screen.getByText("Context revisions"));
+  await user.click(await screen.findByRole("button", { name: /Before rewind/ }));
+  expect(await screen.findByText("Dialogue from the superseded context")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("conversation_history_revision", { conversationId: "chat", contextId: "old-conversation-context" });
 });
 
 it("shows the Epic, Task, and Sub-Task description revisions pinned to the inspected attempt", async () => {

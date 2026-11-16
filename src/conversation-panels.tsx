@@ -25,7 +25,7 @@ import { ConversationContinuationDialog, ConversationContinuationSettings, confi
 import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
 import { ConversationInstructions, useConversationInstructions } from "@/conversation-instructions";
-import { ConversationHistoryControls } from "@/conversation-history-controls";
+import { ConversationHistoryControls, ConversationMessageHistoryActions, type ConversationMessageHistoryAction } from "@/conversation-history-controls";
 import { ConversationSubagentControls } from "@/subagent-quota";
 import { SideQuestionPanel, type SideSubmission, useSideRequests, useSuggestionMode } from "@/conversation-side-requests";
 import { ConversationMarkdown } from "@/conversation-markdown";
@@ -297,6 +297,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const [effort, setEffort] = useState("");
   const [mode, setMode] = useState<ConversationMode>("read_only");
   const [continuation, setContinuation] = useState<ReviewedContinuation>();
+  const [historyAction, setHistoryAction] = useState<ConversationMessageHistoryAction>();
+  const dismissHistoryAction = useCallback(() => setHistoryAction(undefined), []);
   const text = draft.data ?? "";
   const sideQuestion = sideQuestionCommand(text);
   const isSideQuestion = sideQuestion !== undefined;
@@ -496,6 +498,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     ? Boolean(sideQuestion) && history.data?.contextId && !askSide.isPending
     : history.data?.contextId && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending));
   const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
+  const historyBusy = live || isLiveRun(attempt) || send.isPending || continueSend.isPending;
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -551,8 +554,9 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           }}>
           <Activity aria-hidden /> Activity
         </button>}
-        <ConversationHistoryControls conversationId={conversationId} history={history.data}
-          disabled={live || isLiveRun(attempt) || send.isPending} />
+        <ConversationHistoryControls conversationId={conversationId} title={title} history={history.data}
+          disabled={historyBusy} openFork={openFork} mode={mode} selection={selection ?? undefined}
+          effort={sideEffort ?? undefined} requestedAction={historyAction} onRequestedActionClose={dismissHistoryAction} />
         <ConversationSubagentControls conversationId={conversationId} runId={attempt?.runId} />
         </div>
       </header>
@@ -579,6 +583,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
             <li key={message.revisionId} className={message.role === "user" ? "conv-user" : "conv-assistant"}>
               <p className="sr-only">{message.role === "user" ? "You" : "Assistant"}</p>
               {message.role === "user" ? <p>{message.text}</p> : <ConversationMarkdown>{message.text}</ConversationMarkdown>}
+              <ConversationMessageHistoryActions message={message} disabled={historyBusy} onAction={setHistoryAction} />
             </li>
           ))}
         </ol>

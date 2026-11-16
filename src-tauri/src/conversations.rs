@@ -26,12 +26,14 @@ use crate::{
 
 mod approval_evidence;
 pub(crate) mod continuation;
+mod history;
 mod library;
 pub use approval_evidence::{ApprovalDelivery, ConversationApprovalEvidence};
 pub use continuation::{
     ContinuationChoice, ContinuationInspection, ContinuationLevel, ContinuationSettings,
     ContinuedConversation,
 };
+pub use history::ConversationHistoryInspection;
 pub use library::ConversationLibraryEntry;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]
@@ -328,14 +330,12 @@ impl Store {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let source = check_idle_base(&tx, &conversation_id, &expected_context_id)?;
-            let mut entries = context_entries(&tx, &source.id, &expected_context_id)?;
-            if let Some(revision) = &through_revision {
-                let index = entries
-                    .iter()
-                    .position(|entry| entry == revision)
-                    .context("The selected message is outside the current conversation history")?;
-                entries.truncate(index + 1);
-            }
+            let entries = history::retained_prefix(
+                &tx,
+                &source.id,
+                &expected_context_id,
+                through_revision.as_deref(),
+            )?;
             let fork = continuation::fork_history(&tx, &source, &entries, title)?;
             tx.commit()?;
             Ok(fork)
@@ -372,6 +372,7 @@ impl Store {
                 ensure!(!queued_only, "An unclaimed instruction is outside conversation history");
             }
             let context = switch_history(&tx, &conversation_id, &revisions)?;
+            history::record_history_replacement(&tx, &conversation_id, &base_id, &context, "select")?;
             tx.commit()?;
             Ok(context)
         })
@@ -391,15 +392,15 @@ impl Store {
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 check_idle_base(&tx, &conversation_id, &base_id)?;
-                let mut entries = Vec::new();
-                if let Some(revision) = through_revision {
-                    entries = context_entries(&tx, &conversation_id, &base_id)?;
-                    let index = entries.iter().position(|id| *id == revision).context(
-                        "The selected message is outside the current conversation history",
-                    )?;
-                    entries.truncate(index + 1);
-                }
+                let (entries, action) = match through_revision.as_deref() {
+                    Some(revision) => (
+                        history::retained_prefix(&tx, &conversation_id, &base_id, Some(revision))?,
+                        "rewind",
+                    ),
+                    None => (Vec::new(), "clear"),
+                };
                 let context = switch_history(&tx, &conversation_id, &entries)?;
+                history::record_history_replacement(&tx, &conversation_id, &base_id, &context, action)?;
                 tx.commit()?;
                 Ok(context)
             })
