@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import type { AppearanceSettings } from "@/bindings/AppearanceSettings";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { CandidateGateSettings } from "@/candidate-gate-settings";
-import { DeliveryGitSettings } from "@/delivery-git-settings";
+import { deliveryGitSetting } from "@/delivery-git-policy";
+import { DeliveryGitSettings, SimulatedDeliveryGitSettings } from "@/delivery-git-settings";
 import { Button } from "@/components/ui/button";
 import { ProjectQueueHistoryPolicy } from "@/conversation-history-controls";
 import { CustomizationsSettings } from "@/customizations-panel";
@@ -60,6 +61,7 @@ const pages: readonly Page[] = [
   { id: "execution", scope: "project", title: "Execution policies", icon: Shield, entries: policyFields.execution },
   { id: "conversation", scope: "project", title: "Conversation defaults", icon: SlidersHorizontal, entries: policyFields.conversation },
   { id: "git", scope: "project", title: "Git and delivery", icon: GitPullRequest, entries: [
+    deliveryGitSetting,
     ...policyFields.git,
     { id: "candidate-gates", label: "Candidate verification checks", description: "Build commands, test commands and required checks" },
   ] },
@@ -264,11 +266,12 @@ function SettingsSession({
             stored={undefined} simulate={simulate} />
         </>;
       case "git":
-        return simulation || !checkout ? policy("git") : <>
+        if (simulation) return <><SimulatedDeliveryGitSettings />{policy("git")}</>;
+        if (!checkout) return policy("git");
+        return <>
           <CandidateGateSettings key={checkout.projectId} projectId={checkout.projectId} />
           <DeliveryGitSettings key={`delivery-${checkout.projectId}`} projectId={checkout.projectId} />
-          <PolicyForm fields={policyFields.git.filter(({ id }) => id !== "after-acceptance")}
-            stored={undefined} simulate={simulate} />
+          <PolicyForm fields={policyFields.git} stored={undefined} simulate={simulate} />
         </>;
       default:
         return policy(currentPage.id);

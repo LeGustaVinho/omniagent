@@ -112,11 +112,6 @@ export const policyFields = {
   ],
   git: [
     {
-      id: "after-acceptance", label: "After accepting a diff", kind: "choice", initial: "manual",
-      description: "Each operation rechecks that the accepted candidate and verified destination still match.",
-      options: [["manual", "User commits and merges"], ["commit", "Automatic commit and user merge"], ["merge", "Automatic local commit and merge"]],
-    },
-    {
       id: "destination-drift", label: "When the destination moves", kind: "choice", initial: "pause",
       description: "A changed candidate goes through checks and any applicable approval again.",
       options: [["pause", "Pause and review the update"], ["prepare", "Prepare a conflict-free update and rerun checks"]],

@@ -266,13 +266,7 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
         if (verification === "succeeded") simulation.advanceDelivery("verify");
         break;
       case "verified":
-        if (acceptance === "succeeded" && !git.drift) {
-          simulation.advanceDelivery("accept");
-          if (git.gitMode !== "manual") {
-            git.commitCandidate();
-            if (git.gitMode === "merge") simulation.advanceDelivery("merge");
-          }
-        }
+        if (acceptance === "succeeded") git.acceptCandidate(simulation);
         break;
     }
   }, [latestRun, simulation, git]);

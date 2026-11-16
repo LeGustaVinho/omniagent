@@ -140,15 +140,6 @@ export default function ChangesPanel({
     saved: { base: deliveryBase, revised: deliveryCommit },
   }[activeSource];
 
-  function acceptCandidate() {
-    if (simulation?.delivery !== "verified" || git.drift) return;
-    simulation.advanceDelivery("accept");
-    if (git.gitMode !== "manual") {
-      git.commitCandidate();
-      if (git.gitMode === "merge") simulation.advanceDelivery("merge");
-    }
-  }
-
   return (
     <section className="delivery-view" aria-label="Changes">
       <header className="delivery-toolbar diff-toolbar">
@@ -199,7 +190,7 @@ export default function ChangesPanel({
             {simulation && activeSource === "saved" && <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-3 py-2">
               <Button className="px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={() => openActivity(deliveryRunId)}>View attempt</Button>
               {simulation.delivery === "review" && <Button className="px-2.5 py-1.5 text-xs" type="button" disabled={Boolean(git.drift)} onClick={() => simulation.advanceDelivery("verify")}>Run verification</Button>}
-              {simulation.delivery === "verified" && <Button className="px-2.5 py-1.5 text-xs" type="button" disabled={Boolean(git.drift)} onClick={acceptCandidate}>Accept diff</Button>}
+              {simulation.delivery === "verified" && <Button className="px-2.5 py-1.5 text-xs" type="button" disabled={Boolean(git.drift)} onClick={() => git.acceptCandidate(simulation)}>Accept diff</Button>}
               {simulation.delivery === "accepted" && <DeliveryStatus>Accepted</DeliveryStatus>}
               {simulation.delivery === "merged" && <DeliveryStatus>Merged</DeliveryStatus>}
             </footer>}

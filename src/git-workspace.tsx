@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import ChangesPanel from "@/changes-panel";
 import { LiveGitWorkspace } from "@/git-live-workspace";
 import { Button } from "@/components/ui/button";
+import { deliveryGitSetting, deliveryGitWait, simulatedDeliveryGitModes, type SimulatedDeliveryGitPolicy } from "@/delivery-git-policy";
 import { releaseCommits, revisionMessage, workingChanges, type ChangesSource } from "@/git-demo-data";
 import { useGitSimulation } from "@/git-simulation";
 import { deliveryBase, deliveryBranch, deliveryCommit, deliveryCommitSha, deliveryMergeSha, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
@@ -171,11 +172,11 @@ function ChangeOperations({ props, source, baseRef }: { props: WorkspaceProps; s
             <dl className="grid grid-cols-[auto_1fr] gap-2 text-sm">
               <dt className="text-muted-foreground">Base</dt><dd className="font-mono">{deliveryBase}</dd>
               <dt className="text-muted-foreground">Candidate</dt><dd className="font-mono">{deliveryCommit}</dd>
-              <dt className="text-muted-foreground">Commit</dt><dd>{git.candidateCommitted ? <><span>{deliveryBranch}</span><code className="block wrap-anywhere text-xs">{deliveryCommitSha}</code></> : candidateAccepted ? "Waiting for commit" : "Waiting for acceptance"}</dd>
-              <dt className="text-muted-foreground">Merge</dt><dd>{simulation.delivery === "merged" ? <><span>Merged into destination</span><code className="block wrap-anywhere text-xs">main · {deliveryMergeSha}</code></> : git.candidateCommitted && candidateAccepted ? "Waiting for merge" : "Requires a verified commit"}</dd>
+              <dt className="text-muted-foreground">Commit</dt><dd>{git.candidateCommitted ? <><span>{deliveryBranch}</span><code className="block wrap-anywhere text-xs">{deliveryCommitSha}</code></> : candidateAccepted ? deliveryGitWait.commit : "Waiting for acceptance"}</dd>
+              <dt className="text-muted-foreground">Merge</dt><dd>{simulation.delivery === "merged" ? <><span>Merged into destination</span><code className="block wrap-anywhere text-xs">main · {deliveryMergeSha}</code></> : git.candidateCommitted && candidateAccepted ? deliveryGitWait.merge : "Requires a verified commit"}</dd>
             </dl>
-            <label className="delivery-field">After diff acceptance<select className="delivery-filter" value={git.gitMode} onChange={(event) => git.setGitMode(event.target.value as typeof git.gitMode)}>
-              <option value="manual">User commits and merges</option><option value="commit">Automatic commit and user merge</option><option value="merge">Automatic local commit and merge</option>
+            <label className="delivery-field">{deliveryGitSetting.label}<select className="delivery-filter" value={git.gitMode} onChange={(event) => git.setGitMode(event.target.value as SimulatedDeliveryGitPolicy)}>
+              {simulatedDeliveryGitModes.map(([mode, label]) => <option key={mode} value={mode}>{label}</option>)}
             </select></label>
             {simulation.delivery === "accepted" && <>
               <Button className="justify-self-start px-2.5 py-1.5 text-xs" type="button" disabled={Boolean(git.drift) || git.candidateCommitted} onClick={git.commitCandidate}><GitCommitHorizontal size={15} /> Commit accepted candidate</Button>

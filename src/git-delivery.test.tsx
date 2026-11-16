@@ -51,6 +51,7 @@ describe("delivery review UI", () => {
     const user = userEvent.setup();
     render(<GitHarness start="verified" />);
     expect(screen.getByRole("button", { name: "Accept diff" })).toBeDefined();
+    await user.selectOptions(screen.getByLabelText("After accepting a diff"), "user_commits_and_merges");
 
     await user.click(screen.getByRole("button", { name: "Simulate destination change" }));
     expect(screen.queryByRole("button", { name: "Accept diff" })).toBeNull();
@@ -61,11 +62,23 @@ describe("delivery review UI", () => {
     await user.click(screen.getByRole("button", { name: "Accept diff" }));
     const merge = screen.getByRole("button", { name: "Merge into destination" }) as HTMLButtonElement;
     expect(merge.disabled).toBe(true);
+    expect(screen.getByText("Waiting for commit")).toBeDefined();
 
     await user.click(screen.getByRole("button", { name: "Commit accepted candidate" }));
     expect(merge.disabled).toBe(false);
     await user.click(merge);
     expect(screen.getByText("Merged into destination")).toBeDefined();
+  });
+
+  it("automatically records a commit by default and waits for the user to merge", async () => {
+    const user = userEvent.setup();
+    render(<GitHarness start="verified" />);
+    expect((screen.getByLabelText("After accepting a diff") as HTMLSelectElement).value).toBe("automatic_commit_user_merge");
+    await user.click(screen.getByRole("button", { name: "Accept diff" }));
+    expect(screen.queryByText("Waiting for commit")).toBeNull();
+    expect(screen.getByText("Waiting for merge")).toBeDefined();
+    expect(screen.queryByText("Merged into destination")).toBeNull();
+    expect((screen.getByRole("button", { name: "Merge into destination" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("keeps a saved candidate visible when selecting another worktree", async () => {
@@ -83,7 +96,7 @@ describe("delivery review UI", () => {
   it("applies the configured automatic commit and merge policy on approval", async () => {
     const user = userEvent.setup();
     render(<GitHarness start="verified" />);
-    await user.selectOptions(screen.getByLabelText("After diff acceptance"), "merge");
+    await user.selectOptions(screen.getByLabelText("After accepting a diff"), "automatic_local_commit_and_merge");
     await user.click(screen.getByRole("button", { name: "Accept diff" }));
     expect(screen.getByText("Merged into destination")).toBeDefined();
     expect(screen.queryByRole("button", { name: "Commit accepted candidate" })).toBeNull();

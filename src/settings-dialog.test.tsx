@@ -73,6 +73,26 @@ it("shows reported CLI permissions independently of Windows sandbox support", as
   expect(screen.getByText("Windows command sandbox").nextElementSibling?.textContent).toBe("Unsupported for this CLI on the Windows host");
 });
 
+it("shows the effective Git default and saves an explicit manual project policy", async () => {
+  invoke.mockImplementation(async (command: string) => {
+    switch (command) {
+      case "appearance_settings": return defaultAppearance;
+      case "candidate_gate_policy": return { revision: "fixture", gates: [] };
+      case "delivery_git_policy": return "automatic_commit_user_merge";
+      case "set_delivery_git_policy": return "user_commits_and_merges";
+      default: throw new Error(`Unexpected command ${command}`);
+    }
+  });
+  openSettings({ initialPage: "git", simulation: null });
+  const policy = screen.getByLabelText("After accepting a diff") as HTMLSelectElement;
+  await waitFor(() => expect(policy.value).toBe("automatic_commit_user_merge"));
+  await userEvent.setup().selectOptions(policy, "user_commits_and_merges");
+  expect(invoke).toHaveBeenCalledWith("set_delivery_git_policy", {
+    projectId: exampleCheckout.projectId, policy: "user_commits_and_merges",
+  });
+  await waitFor(() => expect(policy.value).toBe("user_commits_and_merges"));
+});
+
 it("checks a backup profile and recovers a failed simulated update without desktop commands", async () => {
   const user = userEvent.setup();
   openSettings({

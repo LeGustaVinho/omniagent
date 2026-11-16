@@ -2,6 +2,7 @@ import type { Edge, Node } from "@xyflow/react";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
+import { deliveryGitWait } from "@/delivery-git-policy";
 import catalog from "../src-tauri/model-catalog/v1.json";
 
 export const sampleModels: ModelOption[] = catalog.models.map((model) => ({
@@ -276,7 +277,7 @@ export function advancePipelineRun(run: PipelineRun): PipelineRun {
       const readiness = readyState(run, node.id);
       if (readiness === "ready") {
         next = node.data.kind === "merge" && !run.workflow.mergeRequired
-          ? updateAttempt(next, node.id, "skipped", "The selected delivery policy requires a verified commit.")
+          ? updateAttempt(next, node.id, "skipped", "The completion milestone is Verified commit.")
           : updateAttempt(next, node.id, "running", "Executing against workflow revision " + run.workflow.revision + ".");
       }
       if (readiness === "skip") next = updateAttempt(next, node.id, "skipped", "Branch was excluded by the planning decision.");
@@ -291,7 +292,7 @@ export function advancePipelineRun(run: PipelineRun): PipelineRun {
     } else if (requiredCapability === "Windows host control" || role?.requirements.includes("Windows host control")) {
       next = updateAttempt(next, node.id, "failed", "Windows host control is unverified for this example profile.");
     } else if (kind === "commit" || kind === "merge") {
-      next = updateAttempt(next, node.id, "waiting", kind === "commit" ? "Waiting for commit" : "Waiting for merge");
+      next = updateAttempt(next, node.id, "waiting", deliveryGitWait[kind]);
     } else if (kind === "plan" || goal) {
       next = updateAttempt(next, node.id, "waiting", kind === "plan" ? "Planning needs an answer about migration scope." : "Confirm that the goal evidence meets its completion criteria.");
     } else if (kind === "approval" || kind === "accept") {

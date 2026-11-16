@@ -38,6 +38,7 @@ use super::{
     },
 };
 
+mod commit_intent;
 mod history_integration;
 mod live_cli_acceptance;
 

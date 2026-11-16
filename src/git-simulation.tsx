@@ -1,5 +1,7 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { revisionMessage, savedCandidate } from "@/git-demo-data";
+import { defaultDeliveryGitPolicy, type SimulatedDeliveryGitPolicy } from "@/delivery-git-policy";
+import type { SimulationSession } from "@/workbench-contract";
 
 export const exampleWorktrees = [
   { id: "release", branch: "agent/release-checklist", path: "worktrees/release-checklist", base: "1ba6dc2" },
@@ -13,8 +15,6 @@ export interface GitWorktree {
   path: string;
   base: string;
 }
-type GitMode = "manual" | "commit" | "merge";
-
 interface WorktreeChanges {
   staged: ReadonlySet<string>;
   committed: ReadonlySet<string>;
@@ -29,13 +29,13 @@ interface GitSession {
   trees: Partial<Record<WorktreeId, WorktreeChanges>>;
   worktrees: readonly GitWorktree[];
   drift: false | "advanced" | "conflict";
-  gitMode: GitMode;
+  gitMode: SimulatedDeliveryGitPolicy;
   mergeRequired: boolean;
   candidateCommitted: boolean;
 }
 
 function initialGitSession(epoch: number | undefined): GitSession {
-  return { epoch, checkout: "release", trees: {}, worktrees: exampleWorktrees, drift: false, gitMode: "manual", mergeRequired: false, candidateCommitted: false };
+  return { epoch, checkout: "release", trees: {}, worktrees: exampleWorktrees, drift: false, gitMode: defaultDeliveryGitPolicy, mergeRequired: false, candidateCommitted: false };
 }
 
 function useGitState(epoch?: number) {
@@ -79,6 +79,18 @@ function useGitState(epoch?: number) {
       : { ...current, checkout: id, worktrees: [...current.worktrees, { id, branch, path, base }] });
   }
 
+  function commitCandidate() {
+    commit(savedCandidate.map(({ path }) => path), revisionMessage, "release", true);
+  }
+
+  function acceptCandidate(simulation: SimulationSession | null) {
+    if (simulation?.delivery !== "verified" || drift) return;
+    simulation.advanceDelivery("accept");
+    if (gitMode === "user_commits_and_merges") return;
+    commitCandidate();
+    if (gitMode === "automatic_local_commit_and_merge") simulation.advanceDelivery("merge");
+  }
+
   return {
     checkout, worktrees, addWorktree,
     staged: trees[checkout]?.staged ?? emptyChanges.staged,
@@ -87,12 +99,12 @@ function useGitState(epoch?: number) {
     candidateCommitted: session.candidateCommitted,
     drift, gitMode, mergeRequired, toggleStage,
     commit: (paths: Iterable<string>, message: string) => commit(paths, message, checkout, false),
-    commitCandidate: () => commit(savedCandidate.map(({ path }) => path), revisionMessage, "release", true),
+    commitCandidate, acceptCandidate,
     setCheckout: (value: WorktreeId) => setSession((current) => ({ ...current, checkout: value })),
     setDrift: (value: GitSession["drift"]) => setSession((current) => ({
       ...current, drift: value, candidateCommitted: value ? false : current.candidateCommitted,
     })),
-    setGitMode: (value: GitMode) => setSession((current) => ({ ...current, gitMode: value })),
+    setGitMode: (value: SimulatedDeliveryGitPolicy) => setSession((current) => ({ ...current, gitMode: value })),
     setMergeRequired: (value: boolean) => setSession((current) => ({ ...current, mergeRequired: value })),
   };
 }
