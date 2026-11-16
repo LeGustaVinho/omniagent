@@ -9,6 +9,9 @@ use crate::{
 
 use super::*;
 
+#[cfg(test)]
+mod assistance_tests;
+
 pub(super) struct PackageRequest {
     pub(super) status: WorkflowPackageRequest,
     parent: String,
@@ -35,51 +38,58 @@ impl Store {
                     chat.checkout_id == checkout,
                     "The conversation changed checkouts. Reopen authoring."
                 );
-                let members =
-                    base.as_ref()
-                        .map(|base| {
-                            let version = pipeline_reference(base);
-                            let artifact = publish::load_published(&tx, &project, &version)?
-                    .context("The selected published artifact is unavailable in this project")?;
-                            let references = artifact
-                                .references
-                                .into_iter()
-                                .map(|(key, reference)| {
-                                    (
-                                        key,
-                                        match reference {
-                                            ResolvedPackageReference::Published { version } => {
-                                                PackageReference::Published { version }
-                                            }
-                                            ResolvedPackageReference::Parameter { name, kind } => {
-                                                PackageReference::Parameter { name, kind }
-                                            }
-                                        },
-                                    )
-                                })
-                                .collect();
-                            Ok::<_, anyhow::Error>(PackageMember {
-                                key: "pipeline".into(),
-                                name: artifact.name,
-                                destination: version.destination,
-                                base: Some(version),
-                                body: artifact.body,
-                                references,
-                            })
-                        })
-                        .transpose()?
-                        .into_iter()
-                        .collect();
+                let base = base.as_ref().map(pipeline_reference);
+                let selected = selected_base_member(&tx, &project, base)?;
                 let selected = create_draft(
                     &tx,
                     &project,
                     Some(conversation),
                     WorkflowPackage {
                         name: "Workflow authoring package".into(),
-                        members,
+                        members: selected.into_iter().collect(),
                     },
                 )?;
                 let queued = enqueue(&tx, &project, &checkout, selected, scope, &brief)?;
+                tx.commit()?;
+                Ok(queued)
+            })
+            .await?;
+        self.job_signal.send_replace(());
+        Ok(draft)
+    }
+
+    pub async fn start_workflow_editor_authoring(
+        &self,
+        project: String,
+        checkout: String,
+        scope: SessionScope,
+        base: Option<PackageArtifactVersion>,
+        brief: String,
+    ) -> Result<WorkflowPackageDraft> {
+        let draft = self
+            .execute(move |db| {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let member = selected_base_member(&tx, &project, base)?;
+                let name = member
+                    .as_ref()
+                    .map(|member| member.name.clone())
+                    .unwrap_or_else(|| "Workflow authoring".into());
+                let conversation = crate::conversations::insert_conversation(
+                    &tx,
+                    checkout.clone(),
+                    name.clone(),
+                    false,
+                )?;
+                let draft = create_draft(
+                    &tx,
+                    &project,
+                    Some(conversation.id),
+                    WorkflowPackage {
+                        name,
+                        members: member.into_iter().collect(),
+                    },
+                )?;
+                let queued = enqueue(&tx, &project, &checkout, draft, scope, &brief)?;
                 tx.commit()?;
                 Ok(queued)
             })
@@ -102,7 +112,7 @@ impl Store {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let selected = load_draft(&tx, &project, &draft)?;
                 reconcile(&tx, &project, &selected)?;
-                let selected = load_draft(&tx, &project, &draft)?;
+                let mut selected = load_draft(&tx, &project, &draft)?;
                 ensure!(
                     selected.publication.is_none(),
                     "Create a new draft to revise a published package"
@@ -120,6 +130,19 @@ impl Store {
                         .is_some_and(WorkflowPackageRequest::pending),
                     "Wait for the current package authoring request"
                 );
+                if selected.conversation_id.is_none() {
+                    let conversation = crate::conversations::insert_conversation(
+                        &tx,
+                        checkout.clone(),
+                        selected.package.name.clone(),
+                        false,
+                    )?;
+                    tx.execute(
+                        "UPDATE workflow_package_drafts SET conversation_id = ?2 WHERE id = ?1",
+                        params![selected.id, conversation.id],
+                    )?;
+                    selected.conversation_id = Some(conversation.id);
+                }
                 let result = enqueue(&tx, &project, &checkout, selected, scope, &request)?;
                 tx.commit()?;
                 Ok(result)
@@ -128,6 +151,41 @@ impl Store {
         self.job_signal.send_replace(());
         Ok(updated)
     }
+}
+
+fn selected_base_member(
+    db: &Connection,
+    project: &str,
+    version: Option<PackageArtifactVersion>,
+) -> Result<Option<PackageMember>> {
+    let Some(version) = version else {
+        return Ok(None);
+    };
+    let artifact = publish::load_published(db, project, &version)?
+        .context("The selected published artifact is unavailable in this project")?;
+    let references = artifact
+        .references
+        .into_iter()
+        .map(|(slot, reference)| {
+            let reference = match reference {
+                ResolvedPackageReference::Published { version } => {
+                    PackageReference::Published { version }
+                }
+                ResolvedPackageReference::Parameter { name, kind } => {
+                    PackageReference::Parameter { name, kind }
+                }
+            };
+            (slot, reference)
+        })
+        .collect();
+    Ok(Some(PackageMember {
+        key: version.kind.sql().into(),
+        name: artifact.name,
+        destination: version.destination,
+        base: Some(version),
+        body: artifact.body,
+        references,
+    }))
 }
 
 fn enqueue(

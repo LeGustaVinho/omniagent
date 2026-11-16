@@ -6,7 +6,7 @@ use omniagent::workflows::authoring::package::{
 };
 use omniagent::{
     model_catalog::ModelSelection,
-    providers::SessionMode,
+    providers::{Provider, SessionMode},
     store::Store,
     workflows::{
         WorkflowGraph, WorkflowRevision,
@@ -180,6 +180,24 @@ pub async fn start_workflow_package_authoring(
     }
     .await
     .map_err(report)
+}
+
+#[tauri::command]
+pub async fn start_workflow_editor_authoring(
+    store: State<'_, Store>,
+    project_id: String,
+    checkout_id: String,
+    selection: ModelSelection,
+    effort: Option<String>,
+    base: Option<PackageArtifactVersion>,
+    brief: String,
+) -> Result<WorkflowPackageDraft, String> {
+    async {
+        anyhow::ensure!(matches!(selection.provider, Provider::Codex | Provider::Claude),
+            "Choose a Codex or Claude authoring profile");
+        let scope = selected_scope(&store, checkout_id.clone(), selection, effort, SessionMode::ReadOnly).await?;
+        store.start_workflow_editor_authoring(project_id, checkout_id, scope, base, brief).await
+    }.await.map_err(report)
 }
 
 #[tauri::command]

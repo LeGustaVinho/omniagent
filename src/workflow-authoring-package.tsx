@@ -8,6 +8,7 @@ import type { ModelSelection } from "@/bindings/ModelSelection";
 import { availableModelSelection, useLiveModelOptions } from "@/live-models";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowPackageGraphEditing, WorkflowPackageReview } from "@/workflow-package-review";
+import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
 import type { WorkflowGraph } from "@/workflow-graph-model";
 
 type Version = { kind: string; id: string; revision: string; destination: "project" | "library" };
@@ -24,7 +25,7 @@ type Publication = {
 export type PackageDraft = {
   id: string; revision: string; conversationId: string | null; package: Package;
   publication: Publication | null;
-  request: { state: string; runId: string | null; diagnostic: string | null } | null;
+  request: { state: string; runId: string | null; jobId?: string; diagnostic: string | null } | null;
 };
 export type PackageSummary = { id: string; revision: string; name: string; memberCount: number; published: boolean };
 type PublicationResult =
@@ -87,7 +88,7 @@ export function WorkflowPackageList({ checkout, openWorkspace }: Pick<WorkspaceP
   </section>;
 }
 
-export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWorkspace }: WorkspaceProps & { draftId: string }) {
+export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWorkspace, openQueueJob }: WorkspaceProps & { draftId: string }) {
   const { projectId, checkoutId } = checkout;
   const client = useQueryClient();
   const query = useQuery({
@@ -99,6 +100,9 @@ export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWor
   function update(next: PackageDraft) {
     client.setQueryData(packageKey(projectId, draftId), next);
     void client.invalidateQueries({ queryKey: packagesKey(projectId), exact: true });
+    if (next.conversationId && next.conversationId !== draft?.conversationId) {
+      void client.invalidateQueries({ queryKey: ["conversations"] });
+    }
     if (next.publication) {
       void client.invalidateQueries({ queryKey: ["workflow-authoring-bases", projectId] });
       void client.invalidateQueries({ queryKey: ["workflow-package-catalog", projectId] });
@@ -109,15 +113,18 @@ export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWor
       <h1 className="text-lg font-semibold">{draft?.package.name ?? "Workflow package"}</h1>
       {draft?.conversationId && <Button variant="outline" onClick={() => openWorkspace("conversations", draft.conversationId!)}>Open source conversation</Button>}
       {draft?.request?.runId && <Button variant="outline" onClick={() => openActivity(draft.request!.runId!)}>Open authoring run</Button>}
+      {openQueueJob && draft?.request?.jobId && !draft.request.runId &&
+        <Button variant="outline" onClick={() => openQueueJob(draft.request!.jobId!)}>Open queued authoring job</Button>}
     </header>
     {query.isPending && <p role="status">Loading package revision…</p>}
     {query.error && <p role="alert">{String(query.error)}</p>}
-    {draft && <PackageRevision key={draft.revision} projectId={projectId} checkoutId={checkoutId} draft={draft} update={update} />}
+    {draft && <PackageRevision key={draft.revision} projectId={projectId} checkoutId={checkoutId} draft={draft} update={update} openWorkspace={openWorkspace} />}
   </section>;
 }
 
-function PackageRevision({ draft, projectId, checkoutId, update }: {
+function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }: {
   draft: PackageDraft; projectId: string; checkoutId: string; update: (draft: PackageDraft) => void;
+  openWorkspace: WorkspaceProps["openWorkspace"];
 }) {
   const [text, setText] = useState(() => JSON.stringify(draft.package, null, 2));
   const currentText = useRef(text);
@@ -162,6 +169,7 @@ function PackageRevision({ draft, projectId, checkoutId, update }: {
         {draft.publication.members.map(({ key, artifact }) => <li key={key} className="pipeline-evidence">
           <strong>{artifact.name}</strong> · {artifact.version.kind.replaceAll("_", " ")} · {artifact.version.destination}
           <p className="break-all"><code>{artifact.version.id}</code> · <code>{artifact.version.revision}</code></p>
+          <WorkflowEditorAssistance projectId={projectId} checkoutId={checkoutId} artifact={artifact} openWorkspace={openWorkspace} />
           {artifact.blockers.map((blocker) => <p key={blocker}>{blocker}</p>)}
           {!!Object.keys(artifact.references).length && <details><summary>Pinned references</summary>
             <pre className="max-h-48 overflow-auto whitespace-pre-wrap text-xs">{JSON.stringify(artifact.references, null, 2)}</pre>
@@ -188,7 +196,7 @@ function PackageRevision({ draft, projectId, checkoutId, update }: {
           setText(JSON.stringify({ ...current, members: current.members.map((member) => member.key === key
             ? { ...member, body: { ...member.body, graph } } : member) }, null, 2));
         }} />
-      <PublishedArtifactPicker projectId={projectId} disabled={busy} add={(artifact) => {
+      <PublishedArtifactPicker projectId={projectId} checkoutId={checkoutId} openWorkspace={openWorkspace} disabled={busy} add={(artifact) => {
         const parsed = JSON.parse(currentText.current) as Package;
         if (!Array.isArray(parsed.members)) throw new Error("The package needs a members array.");
         const version = artifact.version;
@@ -241,8 +249,8 @@ function PackageRevision({ draft, projectId, checkoutId, update }: {
   </div>;
 }
 
-function PublishedArtifactPicker({ projectId, disabled, add }: {
-  projectId: string; disabled: boolean; add: (artifact: Artifact) => void;
+function PublishedArtifactPicker({ projectId, checkoutId, openWorkspace, disabled, add }: {
+  projectId: string; checkoutId: string; openWorkspace: WorkspaceProps["openWorkspace"]; disabled: boolean; add: (artifact: Artifact) => void;
 }) {
   const [enabled, setEnabled] = useState(false);
   const [selected, setSelected] = useState("");
@@ -275,6 +283,7 @@ function PublishedArtifactPicker({ projectId, disabled, add }: {
         {!!choice.blockers.length && <p>{choice.blockers.join(" ")}</p>}
         <Button type="button" variant="outline" disabled={disabled || load.isPending}
           onClick={() => load.mutate(choice.version)}>Edit this revision in the package</Button>
+        <WorkflowEditorAssistance key={selected} projectId={projectId} checkoutId={checkoutId} artifact={choice} openWorkspace={openWorkspace} disabled={disabled || load.isPending} />
         <details><summary>Exact reference</summary>
           <pre className="overflow-auto whitespace-pre-wrap text-xs">{JSON.stringify({ source: "published", version: choice.version }, null, 2)}</pre>
         </details>

@@ -11,6 +11,8 @@ import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { SessionMode } from "@/bindings/SessionMode";
 import { WorkflowRequirementsEditor, type StageRequirements } from "@/workflow-stage-requirements";
+import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
+import type { WorkspaceProps } from "@/workbench-contract";
 
 type ToolScope = Exclude<SessionMode, "plan">;
 type ReviewPolicy = "independent" | "cross_review" | "human_approval";
@@ -55,7 +57,7 @@ function emptyDraft(): TemplateDraft {
   };
 }
 
-export function ConversationTemplateEditor({ checkout }: { checkout: ProjectCheckout }) {
+export function ConversationTemplateEditor({ checkout, openWorkspace }: { checkout: ProjectCheckout; openWorkspace?: WorkspaceProps["openWorkspace"] }) {
   const { projectId, checkoutId } = checkout;
   const client = useQueryClient();
   const [selected, setSelected] = useState<Selection>();
@@ -117,7 +119,10 @@ export function ConversationTemplateEditor({ checkout }: { checkout: ProjectChec
         </ul> : heads.data && <p>No saved conversation templates.</p>}
       </section>
       <section className="pipeline-box pipeline-stack">
-        {selected === "new" && <TemplateForm key="new" checkoutId={checkoutId} projectId={projectId} onSaved={accept} onConflict={openHead} />}
+        {selected === "new" && <>
+          {openWorkspace && <div><WorkflowEditorAssistance projectId={projectId} checkoutId={checkoutId} openWorkspace={openWorkspace} /></div>}
+          <TemplateForm key="new" checkoutId={checkoutId} projectId={projectId} onSaved={accept} onConflict={openHead} />
+        </>}
         {reference && detail.isPending && <p role="status">Loading template revision…</p>}
         {reference && detail.error && <p role="alert">{String(detail.error)}</p>}
         {reference && detail.data && <>
@@ -127,6 +132,8 @@ export function ConversationTemplateEditor({ checkout }: { checkout: ProjectChec
               {detail.data.history.map((version) => <option key={version.revision} value={version.revision}>Revision {version.ordinal}</option>)}
             </select>
           </label>
+          {openWorkspace && <div><WorkflowEditorAssistance key={reference.revision} projectId={projectId} checkoutId={checkoutId} openWorkspace={openWorkspace}
+            artifact={{ name: detail.data.revision.template.name, version: { id: reference.templateId, revision: reference.revision, kind: "role", destination: "project" } }} /></div>}
           <TemplateForm key={reference.revision} checkoutId={checkoutId} projectId={projectId} saved={detail.data.revision}
             historical={Boolean(knownHead && reference.revision !== knownHead.revision)}
             onSaved={accept} onConflict={openHead} />

@@ -11,6 +11,7 @@ import { graphProblems, type WorkflowDefinition, type WorkflowDefinitions, type 
 import { WorkflowPublicationControls, type WorkflowPublication } from "@/workflow-publication";
 import { WorkflowPackageEditor, WorkflowPackageList, type PackageDraft, type PackageSummary } from "@/workflow-authoring-package";
 import { WorkflowLaunchPicker, preferredWorkflowRevision } from "@/workflow-launch";
+import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type Version = { id: string; revision: string };
@@ -152,7 +153,10 @@ export function ProjectPipelineDrafts({ checkout, openWorkspace }: Pick<Workspac
   const projectId = checkout.projectId;
   const drafts = useQuery({ queryKey: draftsKey(projectId), queryFn: () => invoke<ProjectDraft[]>("project_workflow_graph_drafts", { projectId }) });
   return <section aria-label="Pipeline drafts" className="pipeline-stack p-4">
-    <h1 className="text-lg font-semibold">Pipeline drafts</h1>
+    <header className="flex flex-wrap items-center justify-between gap-2">
+      <h1 className="text-lg font-semibold">Pipeline drafts</h1>
+      <WorkflowEditorAssistance projectId={projectId} checkoutId={checkout.checkoutId} openWorkspace={openWorkspace} />
+    </header>
     {drafts.isPending && <p role="status">Loading pipeline drafts…</p>}
     {drafts.error && <p role="alert">{String(drafts.error)}</p>}
     {drafts.data?.length === 0 && <p>Start a pipeline draft with Create or edit with AI in a project conversation.</p>}
@@ -188,6 +192,8 @@ function GraphAuthoringEditor({ draftId, checkout, openWorkspace, openActivity, 
   return <section aria-label="Pipeline draft editor" className="pipeline-stack h-full overflow-auto p-4">
     <header className="flex flex-wrap items-center gap-2">
       <h1 className="mr-auto text-lg font-semibold">{draft?.head?.graph.name ?? "Pipeline authoring"}</h1>
+      {draft?.publication && <WorkflowEditorAssistance projectId={projectId} checkoutId={checkout.checkoutId} openWorkspace={openWorkspace}
+        artifact={{ name: draft.head?.graph.name ?? "Pipeline", version: { ...draft.publication.workflow, kind: "pipeline", destination: "project" } }} />}
       {draft && <Button type="button" variant="outline" onClick={() => openWorkspace("conversations", draft.conversationId)}>Open source conversation</Button>}
       {runId && <Button type="button" variant="outline" onClick={() => openActivity(runId)}>Open authoring run</Button>}
       {draft && !draft.request.runId && openQueueJob && <Button type="button" variant="outline" onClick={() => openQueueJob(draft.request.jobId)}>Open queued job</Button>}
@@ -260,7 +266,9 @@ function AuthoringRevisionEditor({ projectId, checkoutId, draft, revision }: { p
         updated({ ...draft, publication });
         void client.invalidateQueries({ queryKey: ["workflow-authoring-bases", projectId] });
       }} />
-    {!draft.publication && <form className="pipeline-stack pipeline-form max-w-lg" onSubmit={requestChanges}>
+    {!draft.publication && <details open className="pipeline-evidence">
+      <summary>Assist with AI</summary>
+      <form className="pipeline-stack pipeline-form max-w-lg" onSubmit={requestChanges}>
       <label>Authoring provider<select value={provider} onChange={(event) => { setProvider(event.currentTarget.value === "claude" ? "claude" : "codex"); setSelection(null); }}>
         <option value="codex">Codex</option><option value="claude">Claude</option>
       </select></label>
@@ -270,6 +278,7 @@ function AuthoringRevisionEditor({ projectId, checkoutId, draft, revision }: { p
       {dirty && <p className="text-xs text-muted-foreground">Save your edits before requesting changes to them.</p>}
       {request.error && <p role="alert">{String(request.error)}</p>}
       <Button type="submit" disabled={!ready}>Request changes</Button>
-    </form>}
+      </form>
+    </details>}
   </div>;
 }

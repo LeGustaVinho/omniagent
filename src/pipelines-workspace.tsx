@@ -197,7 +197,7 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
       <button type="button" aria-current={view === "compare" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "compare")}>Compare models</button>
       <button type="button" aria-current={view === "automations" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "automations")}>Automation rules</button>
     </nav>
-    {view === "templates" ? <ConversationTemplateEditor key={props.checkout.checkoutId} checkout={props.checkout} />
+    {view === "templates" ? <ConversationTemplateEditor key={props.checkout.checkoutId} checkout={props.checkout} openWorkspace={props.openWorkspace} />
       : view === "compare" ? <WorkflowComparisons key={props.checkout.checkoutId} {...props} />
         : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
         : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} />
