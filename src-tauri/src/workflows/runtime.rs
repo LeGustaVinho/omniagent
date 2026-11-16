@@ -69,8 +69,8 @@ pub(super) fn insert_workflow_run(
 ) -> Result<WorkflowRun> {
     super::authoring::ensure_package_runnable(db, project, &workflow.version)?;
     roles::validate_role_pins(db, project, workflow)?;
-    ensure!(workflow.nodes.iter().all(|node| !matches!(node.instance.kind, super::BuiltinNode::Subflow | super::BuiltinNode::RepeatUntil)),
-        "An unbound subflow or repeat cannot launch");
+    ensure!(workflow.nodes.iter().all(|node| !matches!(node.instance.kind, super::BuiltinNode::Subflow | super::BuiltinNode::RepeatUntil | super::BuiltinNode::ForEach)),
+        "An unbound workflow invocation cannot launch");
     let id = Uuid::new_v4().to_string();
     db.execute("INSERT INTO job_pipeline_runs(id, project_id) VALUES (?1, ?2)", params![id, project])?;
     db.execute(

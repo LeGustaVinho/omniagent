@@ -14,6 +14,7 @@ pub mod mcp_tools;
 mod control;
 mod execution;
 pub mod inspection;
+mod iteration;
 #[cfg(test)]
 mod git_integration;
 mod job_inputs;
@@ -57,6 +58,7 @@ pub use command::{
 };
 pub(crate) use command::publish_command_result;
 pub use execution::{NodeInputs, WorkflowHostRequest, WorkflowHostSubmission};
+pub use iteration::{BuildListConfiguration, ForEachBeginConfiguration, ForEachCollectConfiguration, ForEachConfiguration, ForEachGateConfiguration, WorkflowIterationResults, WorkflowJsonItem, WorkflowJsonList};
 pub(crate) use job_inputs::{WorkflowJobInput, bind_job_input, stage_job_input};
 pub use launch::{
     ManualWorkflowLaunch, WorkflowLaunchOrigin, WorkflowLaunchReceipt, WorkflowLaunchSource,
@@ -153,8 +155,10 @@ fn compile_resolved<'definition>(
     graph: WorkflowGraph,
     definition_for: impl Fn(&NodeInstance) -> Option<&'definition NodeDefinition>,
 ) -> Result<WorkflowDefinition> {
-    ensure!(graph.nodes.iter().all(|node| !matches!(node.kind, BuiltinNode::Subflow | BuiltinNode::RepeatUntil)),
-        "Select a pinned subflow in an authoring package for reusable calls and repeats");
+    ensure!(graph.nodes.iter().all(|node| !matches!(node.kind, BuiltinNode::Subflow | BuiltinNode::RepeatUntil | BuiltinNode::ForEach)),
+        "Select a pinned subflow in an authoring package for reusable calls, repeats and iteration");
+    ensure!(graph.nodes.iter().all(|node| !node.kind.generated_iteration()),
+        "For each generates its internal stages during publication");
     compile_resolved_graph(id, graph, definition_for, true)
 }
 
@@ -232,7 +236,11 @@ fn compile_resolved_graph<'definition>(
             .context("wire target port is unavailable")?;
         ensure!(input.value.accepts(output.value), "incompatible workflow ports");
         ensure!(connections.insert((&wire.from, &wire.to)), "workflow wire already exists");
-        let accepts_multiple = nodes[to].instance.kind == BuiltinNode::Join && input.name == "branches";
+        let accepts_multiple = match nodes[to].instance.kind {
+            BuiltinNode::Join => input.name == "branches",
+            BuiltinNode::ForEachCollect => matches!(input.name.as_str(), "finished" | "result"),
+            _ => false,
+        };
         ensure!(
             incoming.insert((wire.to.node.as_str(), wire.to.port.as_str())) || accepts_multiple,
             "an input port accepts one wire"
@@ -242,19 +250,22 @@ fn compile_resolved_graph<'definition>(
     }
     for node in &nodes {
         for port in &node.definition.inputs {
-            if port.name == "arguments"
-                && let NodeConfiguration::McpTool(configuration) = &node.instance.configuration
-            {
+            let connected = incoming.contains(&(node.instance.id.as_str(), port.name.as_str()));
+            let conditionally_required = match (&node.instance.configuration, port.name.as_str()) {
+                (NodeConfiguration::McpTool(configuration), "arguments") => Some(!configuration.argument_mappings.is_empty()),
+                (NodeConfiguration::BuildList(configuration), "value") => Some(configuration.requires_evidence()),
+                _ => None,
+            };
+            if let Some(required) = conditionally_required {
                 ensure!(
-                    incoming.contains(&(node.instance.id.as_str(), port.name.as_str()))
-                        != configuration.argument_mappings.is_empty(),
-                    "MCP node {} needs one arguments connection when it maps source fields",
-                    node.instance.id
+                    connected == required,
+                    "Node {} requires input {} exactly when configured to use upstream evidence",
+                    node.instance.id, port.name
                 );
                 continue;
             }
             ensure!(
-                incoming.contains(&(node.instance.id.as_str(), port.name.as_str())),
+                connected,
                 "input {} on {} needs a connection",
                 port.name,
                 node.instance.id
@@ -281,11 +292,15 @@ fn compile_resolved_graph<'definition>(
         control::validate_release_wires(&nodes, &graph.wires)?;
     }
     let revision = digest(&serde_json::to_vec(&(&graph.name, &nodes, &graph.wires))?);
-    Ok(WorkflowDefinition {
+    let definition = WorkflowDefinition {
         version: WorkflowRevision { id, revision },
         name: graph.name,
         nodes,
         wires: graph.wires,
         subflows: Vec::new(),
-    })
+    };
+    let unit_nodes = control::unit_nodes(&definition);
+    ensure!(definition.nodes.iter().all(|node| !(node.instance.kind.generated_iteration() || node.instance.kind == BuiltinNode::BuildList)
+        || !unit_nodes.contains(node.instance.id.as_str())), "List execution currently requires a workflow outside a logical delivery unit");
+    Ok(definition)
 }

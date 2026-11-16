@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 
-import type { ComponentType } from "react";
+import { useState, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import PipelinesWorkspace from "@/pipelines-workspace";
-import type { WorkflowCanvasEdit, WorkflowDefinition, WorkflowGraph, WorkflowPort } from "@/workflow-graph-model";
+import { WorkflowGraphEditor, type WorkflowEditorState } from "@/workflow-graph-editor";
+import { defaultConfiguration, graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -133,4 +134,54 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
   expect(reloaded.getAttribute("data-position")).toBe(JSON.stringify({ x: 91, y: -8 }));
   expect(reloaded.querySelector('[data-port-handle="source:document"]')).toBeTruthy();
   expect(save().disabled).toBe(true);
+});
+
+it("configures a typed list and a bounded iteration in the package graph", async () => {
+  const list: WorkflowDefinition = {
+    kind: "build_list", title: "Build list", revision: 1, configuration: "build_list", executor: "build_list", effect: "read_evidence",
+    inputs: [control("ready"), { name: "value", value: { kind: "evidence" } }], outputs: [control("completed"), data("items", "json_list")],
+  };
+  const iteration: WorkflowDefinition = {
+    kind: "for_each", title: "For each", revision: 1, configuration: "for_each", executor: "expand_for_each", effect: "none",
+    inputs: [control("ready"), data("items", "json_list")], outputs: [control("completed"), data("results", "iteration_results")],
+  };
+  const catalog = [start, list, iteration, { ...iteration, kind: "for_each_begin", title: "Pin iteration list" }];
+  let edited: WorkflowGraph = { name: "Iteration", nodes: [
+    { id: "start", kind: "start", configuration: { kind: "none" } },
+    { id: "list", kind: "build_list", configuration: defaultConfiguration("build_list") },
+  ], wires: [wire("start", "start", "list", "ready")] };
+  function Editor() {
+    const [state, setState] = useState<WorkflowEditorState>({ graph: edited, layout: {}, updateDefinitions: {} });
+    edited = state.graph;
+    const definitions = Object.fromEntries(edited.nodes.map((node) => [node.id, catalog.find(({ kind }) => kind === node.kind)!]));
+    return <WorkflowGraphEditor projectId="project" state={state} setState={setState} definitions={definitions} catalog={catalog}
+      problems={graphProblems(edited, definitions)} disabled={false} allowDefinitionUpdates={false} />;
+  }
+
+  render(<Editor />);
+  const user = userEvent.setup();
+  const inspector = within(screen.getByRole("complementary", { name: "Node configuration" }));
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect node" }), "list");
+  expect(inspector.getByRole<HTMLTextAreaElement>("textbox", { name: "Items (JSON array)" }).value).toBe("[]");
+  fireEvent.change(inspector.getByRole("textbox", { name: "Items (JSON array)" }), { target: { value: "[0, false]" } });
+  expect(edited.nodes.find(({ id }) => id === "list")?.configuration).toEqual({ kind: "build_list", source: "values", values: [0, false] });
+  await user.selectOptions(inspector.getByRole("combobox", { name: "List source" }), "evidence");
+  fireEvent.change(inspector.getByRole("textbox", { name: /Array pointer/ }), { target: { value: "/evidence/items" } });
+  expect(edited.nodes.find(({ id }) => id === "list")?.configuration).toEqual({ kind: "build_list", source: "evidence", pointer: "/evidence/items" });
+  expect(screen.getByText(/list.value requires a connection/)).toBeTruthy();
+
+  await user.click(screen.getByRole("button", { name: "Add node" }));
+  const nodes = within(screen.getByRole("region", { name: "Node catalog" }));
+  expect(nodes.queryByRole("button", { name: "Pin iteration list" })).toBeNull();
+  await user.click(nodes.getByRole("button", { name: "For each" }));
+  fireEvent.change(inspector.getByRole("spinbutton", { name: "Maximum items" }), { target: { value: "12" } });
+  fireEvent.change(inspector.getByRole("textbox", { name: "Subflow result output" }), { target: { value: "check" } });
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Source node" }), "list");
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Output port" }), "items");
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Input port" }), "items");
+  await user.click(inspector.getByRole("button", { name: "Connect ports" }));
+  expect(edited.nodes.find(({ id }) => id === "for-each")?.configuration).toEqual({
+    kind: "for_each", maxItems: 12, readyInput: "ready", itemInput: "item", completionOutput: "completed", resultOutput: "check",
+  });
+  expect(edited.wires).toContainEqual(wire("list", "items", "for-each", "items"));
 });

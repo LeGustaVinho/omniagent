@@ -120,6 +120,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/103-workflow-package-mcp.sql"),
     include_str!("../migrations/104-workflow-mcp-tools.sql"),
     include_str!("../migrations/105-claude-plugin-actions.sql"),
+    include_str!("../migrations/106-workflow-iteration-artifacts.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -266,23 +267,26 @@ fn open_database(path: &Path) -> Result<Connection> {
         bail!("SQLite FTS5 probe did not match");
     }
     db.execute_batch("DROP TABLE temp.fts_check")?;
-    migrate(&mut db)?;
+    migrate(&mut db, MIGRATIONS.len())?;
     Ok(db)
 }
 
-fn migrate(db: &mut Connection) -> Result<()> {
-    const COMMAND_SCHEMA: usize = 30;
+fn migrate(db: &mut Connection, target: usize) -> Result<()> {
+    const TABLE_REBUILDS: [usize; 2] = [30, 106];
     let installed: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if (installed as usize) < COMMAND_SCHEMA {
-        migrate_through(db, COMMAND_SCHEMA - 1, false)?;
+    for rebuild in TABLE_REBUILDS {
+        if rebuild <= installed as usize || rebuild > target {
+            continue;
+        }
+        migrate_through(db, rebuild - 1, false)?;
         db.pragma_update(None, "foreign_keys", "OFF")?;
         db.pragma_update(None, "legacy_alter_table", "ON")?;
-        let rebuilt = migrate_through(db, COMMAND_SCHEMA, true);
+        let rebuilt = migrate_through(db, rebuild, true);
         db.pragma_update(None, "legacy_alter_table", "OFF")?;
         db.pragma_update(None, "foreign_keys", "ON")?;
         rebuilt?;
     }
-    migrate_through(db, MIGRATIONS.len(), false)
+    migrate_through(db, target, false)
 }
 
 fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -> Result<()> {
@@ -312,7 +316,7 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
         tx.pragma_update(None, "user_version", (index + 1) as u32)?;
     }
     if check_references && tx.prepare("PRAGMA foreign_key_check")?.exists([])? {
-        bail!("The command-job schema migration left an invalid reference");
+        bail!("Schema migration {target} left an invalid reference");
     }
     tx.commit()?;
     Ok(())
@@ -321,6 +325,45 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iteration_migration_preserves_workflow_artifacts_and_completion_inputs() -> Result<()> {
+        let mut db = Connection::open_in_memory()?;
+        db.pragma_update(None, "foreign_keys", "ON")?;
+        migrate(&mut db, 105)?;
+        db.execute_batch(
+            "INSERT INTO projects (id, git_common_dir, root) VALUES ('project', 'fixture.git', 'fixture');
+             INSERT INTO job_pipeline_runs (id, project_id) VALUES ('run', 'project');
+             INSERT INTO job_pipeline_nodes (pipeline_run_id, instance_id, kind)
+                 VALUES ('run', 'node', 'execution');
+             INSERT INTO workflow_revisions VALUES ('project', 'workflow', 'revision', x'00');
+             INSERT INTO workflow_run_pins VALUES ('run', 'project', 'workflow', 'revision');
+             INSERT INTO workflow_node_pins
+                 (pipeline_run_id, node_instance_id, instance_revision, definition_revision, requires_plan)
+                 VALUES ('run', 'node', 'pinned', 1, 0);
+             INSERT INTO workflow_artifacts VALUES ('saved', 'run', 'node', 'result', NULL, 'plan', x'0102');
+             INSERT INTO workflow_host_completions VALUES ('run', 'node', 'execution', 'request', 'saved');
+             INSERT INTO workflow_completion_inputs VALUES ('saved', 'execution', 'input', x'0304');",
+        )?;
+
+        migrate(&mut db, 106)?;
+        let evidence: (Vec<u8>, Vec<u8>) = db.query_row(
+            "SELECT a.payload, i.payload FROM workflow_host_completions h
+             JOIN workflow_artifacts a ON a.id = h.artifact_id
+             JOIN workflow_completion_inputs i ON i.output_artifact_id = a.id
+             WHERE h.pipeline_run_id = 'run' AND i.input_revision = 'input'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(evidence, (vec![1, 2], vec![3, 4]));
+        assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
+        assert_eq!(db.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i32>(0))?, 1);
+        db.execute(
+            "INSERT INTO workflow_artifacts VALUES ('items', 'run', 'node', 'items', NULL, 'json_list', x'05')",
+            [],
+        )?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn clean_database_has_fts_wal_and_protected_drafts() -> Result<()> {

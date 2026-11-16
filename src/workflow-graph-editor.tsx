@@ -9,6 +9,7 @@ import { AgentRoleFields } from "@/workflow-stage-model";
 import {
   changedPorts, configurationProblem, connectionProblem, defaultConfiguration, incompatibility,
   initialNodePositions, outputPort, portType, wireKey,
+  ITERATION_PORT_FIELDS, MAX_ITERATION_ITEMS,
   type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowGraph, type WorkflowGraphNode,
   type WorkflowNodeConfiguration, type WorkflowPort, type WorkflowWire,
 } from "@/workflow-graph-model";
@@ -102,7 +103,9 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       ariaLabel: `${wire.from.node}.${wire.from.port} to ${wire.to.node}.${wire.to.port}${invalid ? ` · ${invalid}` : ""}`,
     };
   }), [definitions, graph.wires]);
-  const entries = catalog.filter((candidate) => `${candidate.title} ${candidate.kind} ${candidate.effect}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const entries = catalog.filter((candidate) =>
+    !["for_each_begin", "for_each_gate", "for_each_collect"].includes(candidate.kind) &&
+    `${candidate.title} ${candidate.kind} ${candidate.effect}`.toLowerCase().includes(query.trim().toLowerCase()));
 
   useEffect(() => {
     const observer = new MutationObserver(() => setTheme(readTheme()));
@@ -242,6 +245,16 @@ function NodeFields({ projectId, checkoutId, node, definition, disabled, onChang
     </label>;
     case "command": return <CommandNodeConfiguration projectId={projectId} configuration={configuration} onChange={onChange} disabled={disabled} />;
     case "mcp_tool": return <WorkflowMcpNodeConfiguration projectId={projectId} configuration={configuration} onChange={onChange} disabled={disabled} />;
+    case "build_list": return <BuildListFields configuration={configuration} disabled={disabled} onChange={onChange} />;
+    case "for_each": return <>
+      <p className="pipeline-meta">Select a pinned subflow in the package references and map its public ports.</p>
+      <label>Maximum items<input type="number" min={1} max={MAX_ITERATION_ITEMS} step={1} disabled={disabled}
+        value={typeof configuration.maxItems === "number" ? configuration.maxItems : ""}
+        onChange={(event) => onChange({ ...configuration, maxItems: event.currentTarget.value === "" ? null : Number(event.currentTarget.value) })} /></label>
+      {ITERATION_PORT_FIELDS.map(([field, label]) => <label key={field}>{label}<input disabled={disabled}
+        value={typeof configuration[field] === "string" ? configuration[field] : ""}
+        onChange={(event) => onChange({ ...configuration, [field]: event.currentTarget.value })} /></label>)}
+    </>;
     case "condition": return <>
       <p className="pipeline-meta">Use a JSON Pointer into the source artifact, such as <code>/evidence/relativePath</code>. Equality compares JSON values by type.</p>
       <JsonConfiguration configuration={configuration} kind="condition" disabled={disabled} onChange={onChange} />
@@ -249,6 +262,43 @@ function NodeFields({ projectId, checkoutId, node, definition, disabled, onChang
     default: return <JsonConfiguration key={`${node.id}:${definition.revision}`} configuration={configuration}
       kind={definition.configuration} disabled={disabled} onChange={onChange} />;
   }
+}
+
+function BuildListFields({ configuration, disabled, onChange }: {
+  configuration: WorkflowNodeConfiguration; disabled: boolean; onChange: (configuration: WorkflowNodeConfiguration) => void;
+}) {
+  const external = configuration.source === "evidence";
+  return <>
+    <label>List source<select disabled={disabled} value={external ? "evidence" : "values"}
+      onChange={(event) => onChange(event.currentTarget.value === "evidence"
+        ? { kind: "build_list", source: "evidence", pointer: "/evidence" }
+        : defaultConfiguration("build_list"))}>
+      <option value="values">Configured items</option><option value="evidence">Source artifact</option>
+    </select></label>
+    {external ? <label>Array pointer<input disabled={disabled}
+      value={typeof configuration.pointer === "string" ? configuration.pointer : ""}
+      onChange={(event) => onChange({ ...configuration, pointer: event.currentTarget.value })} />
+      <small>Connect the Value input to the source artifact.</small>
+    </label> : <ListValues values={configuration.values} disabled={disabled}
+      onChange={(values) => onChange({ kind: "build_list", source: "values", values })} />}
+  </>;
+}
+
+function ListValues({ values, disabled, onChange }: {
+  values: unknown; disabled: boolean; onChange: (values: unknown[] | null) => void;
+}) {
+  const [text, setText] = useState(() => JSON.stringify(values ?? [], null, 2));
+  return <label>Items (JSON array)<textarea rows={4} value={text} disabled={disabled} spellCheck={false}
+    onChange={(event) => {
+      const draft = event.currentTarget.value;
+      setText(draft);
+      try {
+        const parsed: unknown = JSON.parse(draft);
+        onChange(Array.isArray(parsed) ? parsed : null);
+      } catch {
+        onChange(null);
+      }
+    }} /></label>;
 }
 
 function JsonConfiguration({ configuration, kind, disabled, onChange }: {

@@ -28,10 +28,19 @@ pub enum BuiltinNode {
     Subflow,
     RepeatUntil,
     IterationLimit,
+    BuildList,
+    ForEach,
+    ForEachBegin,
+    ForEachGate,
+    ForEachCollect,
     Result,
 }
 
 impl BuiltinNode {
+    pub(super) fn generated_iteration(self) -> bool {
+        matches!(self, Self::ForEachBegin | Self::ForEachGate | Self::ForEachCollect)
+    }
+
     pub(super) fn per_unit(self) -> bool {
         matches!(
             self,
@@ -63,6 +72,9 @@ pub enum ArtifactKind {
     Merge,
     CommandResult,
     McpToolResult,
+    JsonList,
+    JsonItem,
+    IterationResults,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +109,11 @@ pub enum ConfigurationKind {
     Condition,
     SubflowEntry,
     RepeatUntil,
+    BuildList,
+    ForEach,
+    ForEachBegin,
+    ForEachGate,
+    ForEachCollect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +133,11 @@ pub enum NodeConfiguration {
     Condition { predicate: ConditionPredicate },
     SubflowEntry { outputs: Vec<Port> },
     RepeatUntil(super::repetition::RepeatUntilConfiguration),
+    BuildList(super::iteration::BuildListConfiguration),
+    ForEach(super::iteration::ForEachConfiguration),
+    ForEachBegin(super::iteration::ForEachBeginConfiguration),
+    ForEachGate(super::iteration::ForEachGateConfiguration),
+    ForEachCollect(super::iteration::ForEachCollectConfiguration),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +163,11 @@ pub enum Executor {
     ExpandSubflow,
     RepeatSubflow,
     StopAtIterationLimit,
+    BuildList,
+    ExpandForEach,
+    BindIterationList,
+    GateIterationItem,
+    CollectIterationResults,
     PublishResult,
 }
 
@@ -418,6 +445,51 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             &[("failed", Control)],
         ),
         (
+            BuildList,
+            "Build list",
+            Executor::BuildList,
+            ConfigurationKind::BuildList,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("value", Evidence)],
+            &[("completed", Control), ("failed", Control), ("items", Data(JsonList))],
+        ),
+        (
+            ForEach,
+            "For each",
+            Executor::ExpandForEach,
+            ConfigurationKind::ForEach,
+            Effect::None,
+            &[("ready", Control), ("items", Data(JsonList))],
+            &[("completed", Control), ("results", Data(IterationResults)), ("failed", Control)],
+        ),
+        (
+            ForEachBegin,
+            "Pin iteration list",
+            Executor::BindIterationList,
+            ConfigurationKind::ForEachBegin,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("items", Data(JsonList))],
+            &[("ready", Control), ("failed", Control), ("items", Data(JsonList))],
+        ),
+        (
+            ForEachGate,
+            "Select iteration item",
+            Executor::GateIterationItem,
+            ConfigurationKind::ForEachGate,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("items", Data(JsonList)), ("previous", Evidence)],
+            &[("iterate", Control), ("item", Data(JsonItem))],
+        ),
+        (
+            ForEachCollect,
+            "Collect iteration results",
+            Executor::CollectIterationResults,
+            ConfigurationKind::ForEachCollect,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("items", Data(JsonList)), ("finished", Control), ("result", Evidence)],
+            &[("completed", Control), ("results", Data(IterationResults))],
+        ),
+        (
             Result,
             "Result",
             Executor::PublishResult,
@@ -471,6 +543,9 @@ impl ArtifactKind {
             Self::Git | Self::Merge => "git",
             Self::CommandResult => "command_result",
             Self::McpToolResult => "mcp_tool_result",
+            Self::JsonList => "json_list",
+            Self::JsonItem => "json_item",
+            Self::IterationResults => "iteration_results",
         }
     }
 }
@@ -494,6 +569,11 @@ impl NodeConfiguration {
                 super::subflow::valid_entry_ports(outputs)
             }
             (Self::RepeatUntil(configuration), ConfigurationKind::RepeatUntil) => configuration.valid(),
+            (Self::BuildList(configuration), ConfigurationKind::BuildList) => configuration.valid(),
+            (Self::ForEach(configuration), ConfigurationKind::ForEach) => configuration.valid(),
+            (Self::ForEachBegin(configuration), ConfigurationKind::ForEachBegin) => configuration.valid(),
+            (Self::ForEachGate(configuration), ConfigurationKind::ForEachGate) => configuration.valid(),
+            (Self::ForEachCollect(configuration), ConfigurationKind::ForEachCollect) => configuration.valid(),
             _ => false,
         }
     }

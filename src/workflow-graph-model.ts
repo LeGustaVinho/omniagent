@@ -21,6 +21,14 @@ export type WorkflowDefinitions = Record<string, WorkflowDefinition>;
 export type WorkflowLayout = Record<string, { x: number; y: number }>;
 export type WorkflowCanvasEdit = { layout: WorkflowLayout; updateDefinitions: Record<string, number> };
 
+export const MAX_ITERATION_ITEMS = 32;
+export const ITERATION_PORT_FIELDS = [
+  ["readyInput", "Subflow ready input"],
+  ["itemInput", "Subflow item input"],
+  ["completionOutput", "Subflow completion output"],
+  ["resultOutput", "Subflow result output"],
+] as const;
+
 export function defaultConfiguration(kind: string): WorkflowNodeConfiguration {
   switch (kind) {
     case "agent_role": return { kind, role: "" };
@@ -28,6 +36,8 @@ export function defaultConfiguration(kind: string): WorkflowNodeConfiguration {
     case "condition": return { kind, predicate: { op: "exists", pointer: "/evidence" } };
     case "command": return { kind, registrationId: "", registrationRevision: "", arguments: [], input: {}, output: "text" };
     case "mcp_tool": return { kind, serverId: "", serverRevision: "", toolName: "", contractRevision: "", arguments: {}, argumentMappings: {}, destinationPointer: null };
+    case "build_list": return { kind, source: "values", values: [] };
+    case "for_each": return { kind, maxItems: 8, readyInput: "ready", itemInput: "item", completionOutput: "completed", resultOutput: "result" };
     default: return { kind };
   }
 }
@@ -106,6 +116,23 @@ export function configurationProblem(configuration: WorkflowNodeConfiguration, d
       if (!configuration.serverId || !configuration.serverRevision || !configuration.toolName || !configuration.contractRevision) return "Select a pinned MCP server and tool.";
       if (configuration.argumentMappings === null) return "Enter a JSON object of argument names and JSON Pointers.";
       return configuration.arguments && typeof configuration.arguments === "object" && !Array.isArray(configuration.arguments) ? null : "Enter a JSON object for the mapped arguments.";
+    case "build_list": {
+      if (configuration.source === "values") {
+        return Array.isArray(configuration.values) && configuration.values.length <= MAX_ITERATION_ITEMS
+          ? null : `Enter a JSON array with at most ${MAX_ITERATION_ITEMS} items.`;
+      }
+      const pointer = configuration.pointer;
+      return configuration.source === "evidence" && typeof pointer === "string" && pointer.startsWith("/") &&
+        pointer.length <= 2048 && !/~(?![01])/.test(pointer) ? null : "Enter a JSON Pointer to an array in the source artifact.";
+    }
+    case "for_each": {
+      const { maxItems, readyInput, itemInput, completionOutput, resultOutput } = configuration;
+      if (typeof maxItems !== "number" || !Number.isInteger(maxItems) || maxItems < 1 || maxItems > MAX_ITERATION_ITEMS) {
+        return `Enter a maximum between 1 and ${MAX_ITERATION_ITEMS} items.`;
+      }
+      return ITERATION_PORT_FIELDS.every(([field]) => typeof configuration[field] === "string" && configuration[field].trim()) &&
+        readyInput !== itemInput && completionOutput !== resultOutput ? null : "Choose distinct input and output ports on the pinned subflow.";
+    }
     default: return null;
   }
 }
@@ -128,6 +155,10 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
         const mappings = node.configuration.argumentMappings;
         if (wired !== Boolean(mappings && Object.keys(mappings).length)) {
           problems.push(`${node.id}.arguments requires a connection and argument mappings together.`);
+        }
+      } else if (node.configuration.kind === "build_list" && port.name === "value") {
+        if (wired !== (node.configuration.source === "evidence")) {
+          problems.push(`${node.id}.value requires a connection in source artifact mode.`);
         }
       } else if (!wired) {
         problems.push(`${node.id}.${port.name} (${portType(port.value)}) requires a connection.`);

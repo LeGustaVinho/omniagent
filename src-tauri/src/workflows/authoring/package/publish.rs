@@ -701,6 +701,13 @@ impl<'a> GraphCompiler<'a> {
                         crate::workflows::repetition::expand_repeat(body, configuration)?,
                     );
                 }
+                PackageArtifactBody::Subflow { .. } if node.kind == BuiltinNode::ForEach => {
+                    let NodeConfiguration::ForEach(configuration) = &node.configuration else {
+                        anyhow::bail!("For each node {slot} needs a bounded item contract");
+                    };
+                    let body = self.child(artifact, blockers)?;
+                    calls.insert(slot.clone(), crate::workflows::iteration::expand_for_each(body, configuration)?);
+                }
                 PackageArtifactBody::Subflow { .. } | PackageArtifactBody::McpTool { .. } => {
                     blockers.push(format!(
                         "The node {slot} requires the reusable artifact {}.",
@@ -713,6 +720,7 @@ impl<'a> GraphCompiler<'a> {
             }
         }
         for node in &graph.nodes {
+            ensure!(!node.kind.generated_iteration(), "For each generates its internal stages during publication");
             let pin = effective_pins
                 .get_mut(&node.id)
                 .context("A workflow node lost its reviewed definition")?;
@@ -730,7 +738,7 @@ impl<'a> GraphCompiler<'a> {
                 "The pinned definition for {} is unavailable",
                 node.id
             );
-            if matches!(node.kind, BuiltinNode::Subflow | BuiltinNode::RepeatUntil)
+            if matches!(node.kind, BuiltinNode::Subflow | BuiltinNode::RepeatUntil | BuiltinNode::ForEach)
                 && !calls.contains_key(&node.id)
             {
                 blockers.push(format!("Select a pinned subflow for {}.", node.id));

@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use serde_json::{Value, json};
 
 use crate::workflows::{
-    BuiltinNode, CommandOutputFormat, Endpoint, NodeConfiguration, PinnedNode, PortType,
-    WorkflowDefinition,
+    ArtifactKind, ArtifactValue, BuiltinNode, CommandOutputFormat, Endpoint, NodeConfiguration,
+    PinnedNode, PortType, WorkflowArtifact, WorkflowDefinition, WorkflowIterationResults, iteration,
 };
 
 use super::{
@@ -267,9 +267,16 @@ fn simulate_graph(
     while let Some(index) = ready.pop_front() {
         let node = &definition.nodes[index];
         let mut data = BTreeMap::new();
+        let mut result_ordinal = 0;
         let inputs = incoming[index]
             .iter()
             .map(|wire| {
+                let key = if wire.to.port == "result" && node.instance.kind == BuiltinNode::ForEachCollect {
+                    result_ordinal += 1;
+                    format!("result.{result_ordinal}")
+                } else {
+                    wire.to.port.clone()
+                };
                 let source = by_node
                     .get(wire.from.node.as_str())
                     .map(|position: &usize| &steps[*position]);
@@ -277,7 +284,7 @@ fn simulate_graph(
                     .and_then(|step| step.outputs.get(&wire.from.port))
                     .and_then(|output| output.value.as_ref())
                 {
-                    data.insert(wire.to.port.as_str(), value);
+                    data.insert(key, value);
                 }
                 TraceInput {
                     port: wire.to.port.clone(),
@@ -325,7 +332,8 @@ pub(super) fn intrinsic(kind: BuiltinNode) -> bool {
             | BuiltinNode::Join
             | BuiltinNode::Result
             | BuiltinNode::IterationLimit
-    )
+            | BuiltinNode::BuildList
+    ) || kind.generated_iteration()
 }
 
 fn trace_node(
@@ -333,7 +341,7 @@ fn trace_node(
     body: &PackageArtifactBody,
     scenario: &WorkflowSimulationScenario,
     inputs: Vec<TraceInput>,
-    data: &BTreeMap<&str, &Value>,
+    data: &BTreeMap<String, &Value>,
     routed_failure: bool,
 ) -> Result<TraceStep> {
     use BuiltinNode::*;
@@ -346,16 +354,25 @@ fn trace_node(
         outputs: BTreeMap::new(),
         reason: None,
     };
-    let skipped = step
-        .inputs
+    let selected_list = (kind == ForEachCollect).then(|| simulated_list(&step.inputs, data)).transpose()?.flatten();
+    let count = selected_list.as_ref().map(iteration::list_value).transpose()?.map_or(0, |list| list.values.len());
+    let mut finished = 0;
+    let mut results = 0;
+    let relevant: Vec<_> = step.inputs.iter().filter(|input| {
+        if kind != ForEachCollect { return true; }
+        match input.port.as_str() {
+            "finished" => { finished += 1; finished <= count }
+            "result" => { results += 1; results <= count }
+            _ => true,
+        }
+    }).collect();
+    let skipped = relevant
         .iter()
         .any(|input| input.state == Signal::Skipped);
-    let waiting = step
-        .inputs
+    let waiting = relevant
         .iter()
         .any(|input| input.state == Signal::Waiting);
-    let selected = step
-        .inputs
+    let selected = relevant
         .iter()
         .any(|input| input.state == Signal::Selected);
     if skipped && (kind != Join || !waiting && !selected) {
@@ -395,6 +412,47 @@ fn trace_node(
             step.reason = Some("The workflow reached its configured iteration limit.".into());
             step.outputs.insert("failed".into(), control_output());
             return Ok(step);
+        }
+        BuildList => {
+            let NodeConfiguration::BuildList(configuration) = &node.instance.configuration else { anyhow::bail!("Missing pinned list configuration"); };
+            let id = step.inputs.iter().find(|input| input.port == "value").map(|input| simulation_artifact_id(&input.from));
+            match configuration.build_from_value(id.as_deref().zip(data.get("value").copied())) {
+                Ok(list) => { values.insert("items".into(), serde_json::to_value(ArtifactValue::JsonList(list))?); Some("completed") }
+                Err(_) => return Ok(failed_iteration(step, "The configured list source did not produce a bounded JSON array.")),
+            }
+        }
+        ForEachBegin => {
+            let NodeConfiguration::ForEachBegin(configuration) = &node.instance.configuration else { anyhow::bail!("Missing pinned iteration size"); };
+            let source = simulated_list(&step.inputs, data)?.context("The simulation has no iteration list")?;
+            let Some(list) = iteration::bind_list(&source, configuration.max_items)? else {
+                return Ok(failed_iteration(step, "The list exceeds the configured For each limit."));
+            };
+            values.insert("items".into(), serde_json::to_value(ArtifactValue::JsonList(list))?);
+            Some("ready")
+        }
+        ForEachGate => {
+            let NodeConfiguration::ForEachGate(configuration) = &node.instance.configuration else { anyhow::bail!("Missing pinned iteration ordinal"); };
+            let source = simulated_list(&step.inputs, data)?.context("The simulation has no iteration list")?;
+            let Some(item) = iteration::item_for(&source, configuration.ordinal)? else {
+                step.state = TraceState::Skipped;
+                step.reason = Some("The sample list has no item at this ordinal.".into());
+                return Ok(step);
+            };
+            values.insert("item".into(), serde_json::to_value(ArtifactValue::JsonItem(item))?);
+            Some("iterate")
+        }
+        ForEachCollect => {
+            let NodeConfiguration::ForEachCollect(configuration) = &node.instance.configuration else { anyhow::bail!("Missing pinned iteration result type"); };
+            let source = selected_list.context("The simulation has no iteration list")?;
+            let results = relevant.iter().filter(|input| input.port == "result").enumerate().map(|(index, input)| {
+                let sample = data.get(&format!("result.{}", index + 1)).context("The simulation is missing an iteration result")?;
+                ensure!(serde_json::from_value::<ArtifactKind>(sample["kind"].clone())? == configuration.result_kind,
+                    "The simulated iteration result has an incompatible type");
+                Ok(simulation_artifact_id(&input.from))
+            }).collect::<anyhow::Result<_>>()?;
+            let result = WorkflowIterationResults { list_artifact_id: source.id, result_kind: configuration.result_kind, results };
+            values.insert("results".into(), serde_json::to_value(ArtifactValue::IterationResults(result))?);
+            Some("completed")
         }
         _ => {
             let Some(outcome) = scenario.outcomes.get(&node.instance.id) else {
@@ -472,6 +530,28 @@ fn trace_node(
         node.instance.id
     );
     Ok(step)
+}
+
+fn simulation_artifact_id(endpoint: &Endpoint) -> String {
+    format!("simulation:{}:{}", endpoint.node, endpoint.port)
+}
+
+fn simulated_list(inputs: &[TraceInput], data: &BTreeMap<String, &Value>) -> Result<Option<WorkflowArtifact>> {
+    let Some(value) = data.get("items") else { return Ok(None); };
+    let from = &inputs.iter().find(|input| input.port == "items").context("Missing simulated list source")?.from;
+    let artifact = WorkflowArtifact {
+        id: simulation_artifact_id(from), workflow_run_id: "simulation".into(), node_instance_id: from.node.clone(),
+        port: from.port.clone(), unit_id: None, value: serde_json::from_value((*value).clone())?,
+    };
+    iteration::list_value(&artifact)?.validate()?;
+    Ok(Some(artifact))
+}
+
+fn failed_iteration(mut step: TraceStep, reason: &str) -> TraceStep {
+    step.state = TraceState::Failed;
+    step.reason = Some(reason.into());
+    step.outputs.insert("failed".into(), control_output());
+    step
 }
 
 fn trace_start(

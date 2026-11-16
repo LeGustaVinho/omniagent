@@ -80,6 +80,9 @@ pub enum ArtifactValue {
     Merge(WorkflowMergeReference),
     CommandResult(super::WorkflowCommandResult),
     McpToolResult(super::mcp_tools::WorkflowMcpToolResult),
+    JsonList(super::iteration::WorkflowJsonList),
+    JsonItem(super::iteration::WorkflowJsonItem),
+    IterationResults(super::iteration::WorkflowIterationResults),
 }
 
 impl ArtifactValue {
@@ -99,6 +102,9 @@ impl ArtifactValue {
             Self::Merge(_) => ArtifactKind::Merge,
             Self::CommandResult(_) => ArtifactKind::CommandResult,
             Self::McpToolResult(_) => ArtifactKind::McpToolResult,
+            Self::JsonList(_) => ArtifactKind::JsonList,
+            Self::JsonItem(_) => ArtifactKind::JsonItem,
+            Self::IterationResults(_) => ArtifactKind::IterationResults,
         }
     }
 }
@@ -444,6 +450,10 @@ impl Store {
                     .and_then(|evidence| evidence.artifact).context("MCP tool result is unavailable in the owning project")?;
                 ensure!(saved.workflow_run_id == run && saved.node_instance_id == node && &saved.value == value,
                     "MCP tool result differs from its verified scope");
+            }
+            ArtifactValue::JsonList(list) => list.validate()?,
+            ArtifactValue::JsonItem(_) | ArtifactValue::IterationResults(_) => {
+                // These values are issued only by the control scheduler for a pinned port.
             }
         }
         Ok(())

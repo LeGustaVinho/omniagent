@@ -93,8 +93,8 @@ pub struct ControlDependency {
 fn is_control(kind: BuiltinNode) -> bool {
     matches!(
         kind,
-        BuiltinNode::Condition | BuiltinNode::Parallel | BuiltinNode::Join | BuiltinNode::IterationLimit
-    )
+        BuiltinNode::Condition | BuiltinNode::Parallel | BuiltinNode::Join | BuiltinNode::IterationLimit | BuiltinNode::BuildList
+    ) || kind.generated_iteration()
 }
 
 pub(super) fn uses_control(definition: &WorkflowDefinition) -> bool {
@@ -432,13 +432,30 @@ impl<'a> Evaluation<'a> {
             .filter(|wire| wire.to.node == node_id)
             .map(|wire| Ok((wire, self.dependency(wire, unit)?)))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let ignored = dependencies
+        let selected_artifact = |port: &str| dependencies.iter().find_map(|(wire, outcome)| match outcome {
+            Arrival::Selected(Some(artifact)) if wire.to.port == port => Some(artifact),
+            _ => None,
+        });
+        let relevant = if node.instance.kind == ForEachCollect {
+            let count = selected_artifact("items").map(super::iteration::list_value).transpose()?
+                .map_or(0, |list| list.values.len());
+            let mut finished = 0;
+            let mut results = 0;
+            dependencies.iter().filter(|(wire, _)| match wire.to.port.as_str() {
+                "finished" => { finished += 1; finished <= count }
+                "result" => { results += 1; results <= count }
+                _ => true,
+            }).collect::<Vec<_>>()
+        } else {
+            dependencies.iter().collect()
+        };
+        let ignored = relevant
             .iter()
             .any(|(_, outcome)| matches!(outcome, Arrival::Ignored));
-        let pending = dependencies
+        let pending = relevant
             .iter()
             .any(|(_, outcome)| matches!(outcome, Arrival::Pending));
-        let selected = dependencies
+        let selected = relevant
             .iter()
             .any(|(_, outcome)| matches!(outcome, Arrival::Selected(_)));
         let (state, port, reason, attempt) =
@@ -479,6 +496,66 @@ impl<'a> Evaluation<'a> {
                     Parallel => (ControlStageState::Completed, Some("branches"), None, None),
                     Join => (ControlStageState::Completed, Some("joined"), None, None),
                     IterationLimit => (ControlStageState::Failed, Some("failed"), Some("Reached the configured iteration limit"), None),
+                    BuildList => {
+                        let NodeConfiguration::BuildList(configuration) = &node.instance.configuration else {
+                            anyhow::bail!("Missing pinned list configuration");
+                        };
+                        let evidence = selected_artifact("value");
+                        match configuration.build(evidence) {
+                            Ok(list) => {
+                                let inputs = evidence.into_iter().map(|artifact| ("value".into(), artifact.clone())).collect();
+                                self.record_iteration_artifact(node_id, "items", ArtifactValue::JsonList(list), &inputs)?;
+                                (ControlStageState::Completed, Some("completed"), None, None)
+                            }
+                            Err(_) => (ControlStageState::Failed, Some("failed"), Some("The configured list source did not produce a bounded JSON array"), None),
+                        }
+                    }
+                    ForEachBegin => {
+                        let NodeConfiguration::ForEachBegin(configuration) = &node.instance.configuration else {
+                            anyhow::bail!("Missing pinned iteration size");
+                        };
+                        let source = selected_artifact("items").context("Missing pinned iteration list")?;
+                        if let Some(list) = super::iteration::bind_list(source, configuration.max_items)? {
+                            self.record_iteration_artifact(node_id, "items", ArtifactValue::JsonList(list),
+                                &std::collections::BTreeMap::from([("items".into(), source.clone())]))?;
+                            (ControlStageState::Completed, Some("ready"), None, None)
+                        } else {
+                            (ControlStageState::Failed, Some("failed"), Some("The list exceeds the configured For each limit"), None)
+                        }
+                    }
+                    ForEachGate => {
+                        let NodeConfiguration::ForEachGate(configuration) = &node.instance.configuration else {
+                            anyhow::bail!("Missing pinned iteration ordinal");
+                        };
+                        let source = selected_artifact("items").context("Missing pinned iteration list")?;
+                        if let Some(item) = super::iteration::item_for(source, configuration.ordinal)? {
+                            let previous = selected_artifact("previous").context("Missing prior iteration result")?;
+                            self.record_iteration_artifact(node_id, "item", ArtifactValue::JsonItem(item), &std::collections::BTreeMap::from([
+                                ("items".into(), source.clone()), ("previous".into(), previous.clone()),
+                            ]))?;
+                            (ControlStageState::Completed, Some("iterate"), None, None)
+                        } else {
+                            (ControlStageState::Skipped, None, Some("The pinned list has no item at this ordinal"), None)
+                        }
+                    }
+                    ForEachCollect => {
+                        let NodeConfiguration::ForEachCollect(configuration) = &node.instance.configuration else {
+                            anyhow::bail!("Missing pinned iteration result type");
+                        };
+                        let source = selected_artifact("items").context("Missing pinned iteration list")?;
+                        let outputs = relevant.iter().filter_map(|(wire, outcome)| match outcome {
+                            Arrival::Selected(Some(artifact)) if wire.to.port == "result" => Some(artifact),
+                            _ => None,
+                        });
+                        let mut inputs = std::collections::BTreeMap::from([("items".into(), source.clone())]);
+                        let results = super::iteration::collect_results(source, configuration, outputs.enumerate().map(|(index, artifact)| {
+                            let ordinal = (index + 1) as u16;
+                            inputs.insert(format!("result.{ordinal}"), artifact.clone());
+                            (ordinal, artifact)
+                        }))?;
+                        self.record_iteration_artifact(node_id, "results", ArtifactValue::IterationResults(results), &inputs)?;
+                        (ControlStageState::Completed, Some("completed"), None, None)
+                    }
                     LoadContext => {
                         let document = dependencies
                             .iter()
@@ -557,6 +634,15 @@ impl<'a> Evaluation<'a> {
                 })
                 .collect(),
         }))
+    }
+
+    fn record_iteration_artifact(&self, node: &str, port: &str, value: ArtifactValue, inputs: &std::collections::BTreeMap<String, WorkflowArtifact>) -> Result<()> {
+        let identity = inputs.iter().map(|(port, artifact)| (port, &artifact.id)).collect::<Vec<_>>();
+        let revision = super::digest(&serde_json::to_vec(&(identity, &value))?);
+        let artifact = super::artifacts::insert_artifact(self.db, &self.run.project_id, self.run.id.clone(), node.into(), port.into(), value)?;
+        let plan_key = self.run.plan_revision.as_deref().unwrap_or("");
+        super::execution::record_host_completion(self.db, &artifact, plan_key, &revision)?;
+        super::inspection::record_workflow_completion_inputs(self.db, &artifact, plan_key, inputs)
     }
 
     fn load_context(&self, node: &str, document: &WorkflowArtifact) -> Result<()> {
