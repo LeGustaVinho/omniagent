@@ -8,7 +8,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import KnowledgeWorkspace from "@/knowledge-workspace";
-import type { IndexedLinkResolution } from "@/repository-note-links";
+import type { IndexedLinkResolution, IndexedNoteRelationships } from "@/repository-note-links";
 import type { NoteRevision } from "@/repository-note-buffers";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -46,13 +46,24 @@ afterEach(() => {
 const checkoutId = "release-worktree";
 const source = "notes/Start.md";
 const destination = "guides/Café.md";
+const firstDuplicate = "handbook/Checklist.md";
+const secondDuplicate = "release/Checklist.md";
+const originalBacklink = "planning/Old.md";
+const newBacklink = "planning/New.md";
+const asset = "notes/assets/brief.png";
+const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/6X+X1gAAAAASUVORK5CYII=";
 const alias = "Launch Alias";
 const sourceMarkdown = [
   "# Start",
   "",
   "[[Launch Alias#Cutover|Open heading]]",
   "[[Launch Alias#^proof|Open block]]",
+  "[[Checklist|Choose duplicate]]",
+  "[[Unknown|Missing note]]",
+  "[[Launch Alias#Missing heading|Broken heading]]",
+  "[[./assets/brief.png|Fixture image]]",
   "",
+  "## Validation",
   "[[La",
 ].join("\n");
 const destinationMarkdown = [
@@ -61,6 +72,10 @@ const destinationMarkdown = [
 const notes = [
   { path: source, title: "Start", markdown: sourceMarkdown, frontmatter: null, preview: "Release links." },
   { path: destination, title: "Café", markdown: destinationMarkdown, frontmatter: "aliases:\n  - Launch Alias", preview: "Proof paragraph" },
+  { path: firstDuplicate, title: "Handbook checklist", markdown: "# Handbook checklist", frontmatter: null, preview: "Handbook tasks." },
+  { path: secondDuplicate, title: "Release checklist", markdown: "# Release checklist", frontmatter: null, preview: "Release tasks." },
+  { path: originalBacklink, title: "Old plan", markdown: "# Old plan\n\n[[Start]]", frontmatter: null, preview: "Prior links." },
+  { path: newBacklink, title: "New plan", markdown: "# New plan\n\n[[Start]]", frontmatter: null, preview: "Current links." },
 ];
 const props: WorkspaceProps = {
   checkout: { projectId: "project", checkoutId, repositoryRoot: "C:\\repo", checkoutRoot: "C:\\repo\\release" },
@@ -77,8 +92,11 @@ function resolution({ sourcePath, target, anchor }: LinkQuery): IndexedLinkResol
   if (target === alias) {
     if (anchor === "Cutover") return { status: "resolved", location: location(destination, anchor, 7) };
     if (anchor === "^proof") return { status: "resolved", location: location(destination, anchor, 9) };
+    if (anchor) return { status: "missing_anchor", location: location(destination, anchor) };
     return { status: "resolved", location: location(destination) };
   }
+  if (target === "Checklist") return { status: "ambiguous", candidates: [location(firstDuplicate), location(secondDuplicate)] };
+  if (target === "./assets/brief.png") return { status: "attachment", paths: [asset] };
   return { status: "missing" };
 }
 
@@ -93,19 +111,25 @@ function wikiTokens(markdown: string) {
 }
 
 function setupRepository() {
+  let indexChannel: { onmessage: (notice: { checkoutId: string; kind: "paths"; paths: string[] }) => void };
+  let refreshed = false;
+  const indexRows = () => notes.filter(({ path }) => path !== (refreshed ? originalBacklink : newBacklink))
+    .map(({ path, title, frontmatter, preview }, id) => ({ id: id + 1, path, title, frontmatter, preview, tags: [] }));
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     const input = (args ?? {}) as {
       checkoutId: string; path: string; baseRevision: string; bufferRevision: string; markdown: string;
-      queries: LinkQuery[]; prefix: string; query: string;
+      queries: LinkQuery[]; prefix: string; query: string; channel: typeof indexChannel;
     };
     if ("checkoutId" in input) expect(input.checkoutId).toBe(checkoutId);
     switch (command) {
       case "workbench_layout": return null;
       case "save_workbench_layout": return;
-      case "watch_repository_note_index": return "index-watch";
+      case "watch_repository_note_index":
+        indexChannel = input.channel;
+        return "index-watch";
       case "unwatch_repository_note_index": return;
       case "rebuild_repository_note_index":
-        return notes.map(({ path, title, frontmatter, preview }, id) => ({ id: id + 1, path, title, frontmatter, preview, tags: [] }));
+      case "reconcile_repository_note_index": return indexRows();
       case "repository_note_catalog":
       case "list_repository_markdown_drafts": return [];
       case "read_repository_markdown_draft": return null;
@@ -130,9 +154,31 @@ function setupRepository() {
           { ...location(source, null, 4), title: "Start", snippet: "Link to proof" },
           { ...location(destination, "^proof", 9), title: "Café", snippet: "Proof paragraph" },
         ] : [];
+      case "repository_indexed_note": return input.path === source
+        ? { headings: [{ label: "Start", level: 1, line: 1 }, { label: "Validation", level: 2, line: 10 }] }
+        : { headings: [{ label: "Café", level: 1, line: 5 }, { label: "Cutover", level: 2, line: 7 }] };
+      case "repository_note_relationships": {
+        if (input.path !== source) return { outgoing: [], backlinks: [] };
+        return {
+          outgoing: wikiTokens(sourceMarkdown).map(({ target, anchor, alias: label }, index) => ({
+            link: { target, anchor, alias: label, line: index + 3, syntax: "wiki", embed: false },
+            resolution: resolution({ sourcePath: source, target, anchor }),
+          })),
+          backlinks: refreshed ? [{ path: newBacklink, title: "New plan", line: 3, label: "Updated backlink" }]
+            : [{ path: originalBacklink, title: "Old plan", line: 3, label: "Earlier backlink" }],
+        } satisfies IndexedNoteRelationships;
+      }
+      case "read_repository_attachment":
+        return input.path === asset ? { relativePath: asset, mimeType: "image/png", contentBase64: png } : null;
       default: throw new Error(`Unexpected IPC command ${command}`);
     }
   });
+  return {
+    updateBacklinks() {
+      refreshed = true;
+      indexChannel.onmessage({ checkoutId, kind: "paths", paths: [originalBacklink, newBacklink] });
+    },
+  };
 }
 
 function renderWorkspace() {
@@ -243,4 +289,73 @@ it("uses scoped wiki suggestions and opens title and content results by keyboard
   await waitFor(() => expect(selectedLine(targetEditor)).toBe(9));
   expect(screen.getAllByRole("button", { name: "Close Café.md" })).toHaveLength(1);
   expect(screen.queryByRole("listbox", { name: "Note search results" })).toBeNull();
+});
+
+it("shows link problems and previews, scopes attachment reads, and refreshes backlinks after an index event", async () => {
+  const { updateBacklinks } = setupRepository();
+  const user = renderWorkspace();
+  const sourceEditor = await editorFor(source);
+  await user.click(screen.getByRole("button", { name: "Note details" }));
+  const inspector = within(screen.getByRole("complementary", { name: "Note details" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("repository_indexed_note", { checkoutId, path: source }));
+  await user.click(await inspector.findByRole("button", { name: "Validation" }));
+  await waitFor(() => expect(selectedLine(sourceEditor)).toBe(10));
+  await user.click(inspector.getByRole("button", { name: "Links" }));
+  const outgoing = within(inspector.getByRole("region", { name: "Outgoing links" }));
+  expect(await outgoing.findByRole("button", { name: /Missing note.*Missing/ })).toBeTruthy();
+  const chooseDuplicate = await outgoing.findByRole("button", { name: /Choose duplicate.*Ambiguous/ });
+  expect(await inspector.findByRole("button", { name: /Earlier backlink/ })).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("repository_note_relationships", { checkoutId, path: source });
+
+  async function checkAmbiguousDialog() {
+    const dialog = within(await screen.findByRole("dialog", { name: "Choose a note" }));
+    const target = dialog.getByRole("combobox", { name: "Target note" });
+    expect(dialog.getAllByRole("option").map((item) => (item as HTMLOptionElement).value)).toEqual(["", firstDuplicate, secondDuplicate]);
+    expect((dialog.getByRole("button", { name: "Open note" }) as HTMLButtonElement).disabled).toBe(true);
+    return { dialog, target };
+  }
+
+  await user.click(chooseDuplicate);
+  const fromInspector = await checkAmbiguousDialog();
+  await user.click(fromInspector.dialog.getByRole("button", { name: "Close dialog" }));
+
+  await act(async () => { updateBacklinks(); });
+  const updated = await inspector.findByRole("button", { name: /Updated backlink/ });
+  expect(inspector.queryByRole("button", { name: /Earlier backlink/ })).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("reconcile_repository_note_index", { checkoutId, paths: [originalBacklink, newBacklink] });
+  await user.click(updated);
+  const backlinkEditor = await editorFor(newBacklink);
+  await waitFor(() => expect(selectedLine(backlinkEditor)).toBe(3));
+
+  await selectTab(user, "Start.md");
+  await user.click(screen.getByRole("button", { name: "Source" }));
+  await followEditorLink(await editorFor(source), "Choose duplicate");
+  const fromSource = await checkAmbiguousDialog();
+  await user.click(fromSource.dialog.getByRole("button", { name: "Close dialog" }));
+  await user.click(screen.getByRole("button", { name: "Reading" }));
+  const reading = within(await screen.findByLabelText(`Reading view for ${source}`));
+  await user.click(reading.getByRole("button", { name: "Missing note" }));
+  const missing = within(await screen.findByRole("dialog", { name: "Repair note link" }));
+  expect((missing.getByRole("button", { name: "Open note" }) as HTMLButtonElement).disabled).toBe(true);
+  await user.click(missing.getByRole("button", { name: "Close dialog" }));
+
+  await user.click(reading.getByRole("button", { name: "Broken heading" }));
+  const missingAnchor = within(await screen.findByRole("dialog", { name: "Repair note link" }));
+  expect(missingAnchor.getByRole("alert").textContent).toContain("The heading or block is unavailable");
+  await user.click(missingAnchor.getByRole("button", { name: "Close dialog" }));
+
+  await user.click(reading.getByRole("button", { name: "Fixture image" }));
+  const attachment = within(await screen.findByRole("dialog", { name: "Fixture image" }));
+  expect((await attachment.findByRole("img", { name: "Fixture image" })).getAttribute("src")).toBe(`data:image/png;base64,${png}`);
+  expect(invoke).toHaveBeenCalledWith("read_repository_attachment", { checkoutId, path: asset });
+  expect(screen.queryByRole("button", { name: "Close brief.png" })).toBeNull();
+  await user.click(attachment.getByRole("button", { name: "Close dialog" }));
+
+  await user.click(reading.getByRole("button", { name: "Choose duplicate" }));
+  const { dialog: ambiguous, target } = await checkAmbiguousDialog();
+  await user.selectOptions(target, secondDuplicate);
+  await user.click(ambiguous.getByRole("button", { name: "Open note" }));
+  await editorFor(secondDuplicate);
+  expect(invoke).toHaveBeenCalledWith("open_repository_document", { checkoutId, path: secondDuplicate });
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_document", { checkoutId, path: firstDuplicate });
 });
