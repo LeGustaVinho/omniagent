@@ -64,7 +64,9 @@ type DispatchInventory = {
     instructions: { sources: InstructionSource[]; unresolved: string[] } | null;
     filesystemSkills: SkillSource[];
     reportedSkills: { entries: SkillSource[]; reported: boolean } | null;
-    requestedSkill: { name: string; matchingIds: string[] } | null;
+    requestedSkill: { name: string; matchingIds: string[]; selections?: {
+      id: string; name: string; namespace: string | null; path: string; revision: string;
+    }[] } | null;
     plugins: PluginInventory | null;
   };
   observations: InventoryObservation[];
@@ -183,6 +185,11 @@ function SavedInventory({ evidence }: { evidence: DispatchInventory }) {
     <div>
       <h3 className="font-medium">Skills</h3>
       {inventory.requestedSkill && <p className="text-muted-foreground">Requested skill {inventory.requestedSkill.name}</p>}
+      {!!inventory.requestedSkill?.selections?.length && <ul aria-label="Selected native skill inputs" className="grid gap-1">
+        {inventory.requestedSkill.selections.map(({ id, name, namespace, path, revision }) => <li key={id} className="break-all">
+          <strong>{namespace ? `${namespace} · ${name}` : name}</strong><p>{path}</p><p>Recorded revision <code>{revision}</code></p>
+        </li>)}
+      </ul>}
       {inventory.reportedSkills && <p className="text-muted-foreground">
         {inventory.reportedSkills.reported ? "CLI reported skill availability" : "CLI skill availability unreported"}
       </p>}

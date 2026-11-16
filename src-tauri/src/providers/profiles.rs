@@ -547,7 +547,7 @@ fn handshake_probe(
     )
 }
 
-fn run_probe<T>(
+pub(super) fn run_probe<T>(
     launch: impl FnOnce(LaunchRequest<'_>) -> io::Result<CapturedProcess>,
     executable: &Path,
     cwd: &Path,

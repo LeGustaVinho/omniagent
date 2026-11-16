@@ -16,6 +16,8 @@ pub enum SkillSource {
 pub struct SkillRequest {
     pub name: String,
     pub matching_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selections: Vec<super::composer_customizations::SelectedComposerSkill>,
 }
 
 pub(crate) fn explicit_skill_request<'a>(
@@ -56,6 +58,7 @@ pub(crate) fn explicit_skill_request<'a>(
     Some(SkillRequest {
         name: name.into(),
         matching_ids,
+        selections: Vec::new(),
     })
 }
 

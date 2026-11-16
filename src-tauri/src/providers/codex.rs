@@ -678,7 +678,7 @@ impl CodexSession {
                 Ok(self.events(events))
             }
             Request::ListSkills => {
-                let catalog = self.decode_skills(result)?;
+                let catalog = decode_skill_catalog(&self.request.checkout, result)?;
                 Ok(self.events(vec![
                     self.event(ProviderEventData::SkillsReported { catalog }),
                 ]))
@@ -742,14 +742,14 @@ impl CodexSession {
         })
     }
 
-    fn decode_skills(&self, result: &Value) -> Result<SkillCatalog> {
+    fn decode_skills(checkout: &Path, result: &Value) -> Result<SkillCatalog> {
         let scope = result["data"]
             .as_array()
             .into_iter()
             .flatten()
             .find(|entry| {
                 entry["cwd"].as_str().is_some_and(|cwd| {
-                    dunce::simplified(Path::new(cwd)) == dunce::simplified(&self.request.checkout)
+                    dunce::simplified(Path::new(cwd)) == dunce::simplified(checkout)
                 })
             });
         let Some((scope, skills)) =
@@ -1678,6 +1678,14 @@ impl CliSession for CodexSession {
     }
 
     fn send(&mut self, input: TurnInput) -> Result<AdapterUpdate> {
+        self.send_with_composer_skills(input, &[])
+    }
+
+    fn send_with_composer_skills(
+        &mut self,
+        input: TurnInput,
+        skills: &[super::composer_customizations::SelectedComposerSkill],
+    ) -> Result<AdapterUpdate> {
         ensure!(
             self.active.is_none(),
             "Codex already has a turn in progress"
@@ -1692,8 +1700,12 @@ impl CliSession for CodexSession {
             .as_ref()
             .context("Codex session has not started")?;
         let mut items = Vec::new();
-        if !input.text.is_empty() || input.attachments.is_empty() {
+        if !input.text.is_empty() || (input.attachments.is_empty() && skills.is_empty()) {
             items.push(json!({"type": "text", "text": input.text}));
+        }
+        for skill in skills {
+            ensure!(skill.provider == Provider::Codex, "Skill is outside this provider");
+            items.push(json!({"type": "skill", "name": skill.name, "path": skill.path}));
         }
         for attachment in &input.attachments {
             items.push(attachment.block(Provider::Codex)?);
@@ -2003,6 +2015,10 @@ fn string(value: &Value, key: &str) -> Option<String> {
     value[key].as_str().map(str::to_owned)
 }
 
+pub(super) fn decode_skill_catalog(checkout: &Path, result: &Value) -> Result<SkillCatalog> {
+    CodexSession::decode_skills(checkout, result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2016,6 +2032,25 @@ mod tests {
 
     fn outbound(update: &AdapterUpdate, index: usize) -> Result<Value> {
         Ok(serde_json::from_slice(update.outbound[index].as_bytes())?)
+    }
+
+    #[test]
+    fn composer_plugin_selection_uses_the_native_skill_block_and_exact_path() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let path = checkout.path().join("plugin-cache/skills/format/SKILL.md");
+        let mut session = negotiate(SessionMode::ReadOnly, SessionIntent::Start, checkout.path())?;
+        let input = TurnInput { message_id: "selected-export".into(), text: "Check the input.".into(), attachments: Vec::new() };
+        let skill = super::super::composer_customizations::SelectedComposerSkill {
+            id: "skill-source-id".into(), provider: Provider::Codex, name: "format".into(),
+            path: path.clone(), namespace: Some("fixture@market".into()), revision: "pinned-revision".into(),
+        };
+        let frame = outbound(&session.send_with_composer_skills(input, &[skill])?, 0)?;
+        assert_eq!(frame["method"], "turn/start");
+        assert_eq!(frame["params"]["input"], json!([
+            {"type":"text", "text":"Check the input."},
+            {"type":"skill", "name":"format", "path":path}
+        ]));
+        Ok(())
     }
 
     #[test]

@@ -651,6 +651,14 @@ pub trait CliSession: Send {
     fn query_skill_inventory(&mut self) -> anyhow::Result<Option<WireMessage>> {
         Ok(None)
     }
+    fn send_with_composer_skills(
+        &mut self,
+        input: TurnInput,
+        skills: &[composer_customizations::SelectedComposerSkill],
+    ) -> anyhow::Result<AdapterUpdate> {
+        anyhow::ensure!(skills.is_empty(), "This adapter has no qualified composer skill input");
+        self.send(input)
+    }
     fn send(&mut self, input: TurnInput) -> anyhow::Result<AdapterUpdate>;
     fn steer(
         &mut self,
@@ -814,5 +822,6 @@ pub mod runtime;
 pub(crate) mod sandbox;
 pub mod side;
 pub mod skills;
+pub mod composer_customizations;
 pub mod steering;
 pub mod suggestions;

@@ -313,6 +313,9 @@ impl Store {
             }
             let message = load_messages(&tx, &conversation, std::slice::from_ref(&revision))?
                 .pop().context("Queued instruction lost its revision")?;
+            if crate::providers::composer_customizations::contains_skill_token(&message.text) {
+                return Ok(None);
+            }
             tx.execute(
                 "INSERT INTO instruction_delivery_attempts(job_id, run_id, revision_id, policy_key, route,
                      provider_session_id, provider_turn_id, steering_state)

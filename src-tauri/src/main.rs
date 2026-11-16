@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod conversation_runtime;
+mod composer_customization_ipc;
 mod conversation_goal_runtime;
 mod conversation_continuation_runtime;
 mod conversation_steering_ipc;
@@ -392,6 +393,7 @@ fn main() {
             conversation_continuation_runtime::preview_conversation_reference,
             conversation_continuation_runtime::conversation_reference_draft,
             conversation_continuation_runtime::edit_conversation_reference_draft,
+            composer_customization_ipc::composer_customizations,
             ipc::checkout_conversation,
             ipc::create_conversation,
             ipc::fork_conversation,

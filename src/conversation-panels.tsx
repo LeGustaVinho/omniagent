@@ -31,6 +31,8 @@ import { SideQuestionPanel, type SideSubmission, useSideRequests, useSuggestionM
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
 import { ConversationReferenceChips, type ConversationReferencePreview } from "@/conversation-reference";
+import { ComposerCustomizationPicker, conversationSkillMessage, hasComposerSkills, useComposerCustomizations,
+  type ComposerCustomization } from "@/conversation-customization-picker";
 import {
   ConversationLibraryNavigation, ConversationReferencePicker, ConversationTitleEditor,
   conversationLibraryKey, useConversationRename, useConversationTitle,
@@ -319,6 +321,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const isSideQuestion = sideQuestion !== undefined;
   const sideCompletion = completesSideQuestion(text);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const [composerCursor, setComposerCursor] = useState(0);
+  const hasSkills = hasComposerSkills(text);
   const [showSideQuestions, setShowSideQuestions] = useState(false);
   const goalInput = goalCommand(text);
   const composingGoal = !isSideQuestion && (mode === "goal" || goalInput !== undefined);
@@ -390,12 +394,16 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     setDraftError("");
   }
   const effectiveEffort = efforts?.efforts.includes(effort) ? effort : null;
+  const customizationPicker = useComposerCustomizations({
+    conversationId, selection, effort: effectiveEffort, mode: mode === "goal" ? "read_only" : mode,
+    draft: text, cursor: composerCursor, enabled: visible && !composingGoal && !isSideQuestion,
+  });
   const steeringPreview = useQuery({
     queryKey: ["conversation", conversationId, "steering-route", run?.id, history.data?.contextId, selection, effectiveEffort, mode],
     queryFn: () => invoke<boolean>("preview_conversation_steering", { conversationId, runId: run?.id,
       expectedContextId: history.data?.contextId, selection, effort: effectiveEffort, mode }),
     enabled: visible && live && run?.status === "running" && Boolean(history.data?.contextId && selected?.option.selectable)
-      && Boolean(text.trim()) && !isSideQuestion && !composingGoal && !hasReferences,
+      && Boolean(text.trim()) && !isSideQuestion && !composingGoal && !hasReferences && !hasSkills,
     retry: false,
     refetchInterval: 1250,
   });
@@ -528,16 +536,27 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     });
   }
 
+  function pickCustomization(option: ComposerCustomization) {
+    const next = customizationPicker.pick(option);
+    editDraft(next.text);
+    setComposerCursor(next.cursor);
+    requestAnimationFrame(() => {
+      composer.current?.focus();
+      composer.current?.setSelectionRange(next.cursor, next.cursor);
+    });
+  }
+
   const canStartGoal = Boolean(history.data?.contextId && selected?.option.selectable && !busy && !latest.isPending && !latestJob.isPending
     && !goal.isPending && !goal.error && !hasCurrentGoal(goal.data) && !send.isPending && !recover.isPending);
   const referencesReady = !library || (referenceDraft.isSuccess && !editReferenceDraft.isPending);
-  const canSend = referencesReady && (composingGoal ? Boolean(!hasReferences && text.trim() && !startGoal.isPending && (goalInput === "" || canStartGoal))
+  const canSend = referencesReady && !customizationPicker.pinned.some(({ option }) => !option)
+    && (composingGoal ? Boolean(!hasReferences && !hasSkills && text.trim() && !startGoal.isPending && (goalInput === "" || canStartGoal))
     : Boolean(text.trim() && selected?.option.selectable && (isSideQuestion
-    ? !hasReferences && Boolean(sideQuestion) && history.data?.contextId && !askSide.isPending
+    ? !hasReferences && !hasSkills && Boolean(sideQuestion) && history.data?.contextId && !askSide.isPending
     : history.data?.contextId && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending)));
   const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
   const historyBusy = live || isLiveRun(attempt) || send.isPending || continueSend.isPending || steer.isPending;
-  const steerRun = canSend && !hasReferences && !steer.isPending && !isSideQuestion && !composingGoal && run?.status === "running"
+  const steerRun = canSend && !hasReferences && !hasSkills && !steer.isPending && !isSideQuestion && !composingGoal && run?.status === "running"
     && steeringPreview.data && !instructions.data.some((item) => item.editable && !item.recordedContext) ? run.id : undefined;
 
   function submit(event: FormEvent) {
@@ -623,7 +642,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           {history.data?.messages.map((message) => (
             <li key={message.revisionId} className={message.role === "user" ? "conv-user" : "conv-assistant"}>
               <p className="sr-only">{message.role === "user" ? "You" : "Assistant"}</p>
-              {message.role === "user" ? <p>{message.text}</p> : <ConversationMarkdown>{message.text}</ConversationMarkdown>}
+              {message.role === "user" ? <p>{conversationSkillMessage(message.text)}</p> : <ConversationMarkdown>{message.text}</ConversationMarkdown>}
               <ConversationMessageHistoryActions message={message} disabled={historyBusy} onAction={setHistoryAction} />
             </li>
           ))}
@@ -678,6 +697,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           </div>
         </div>}
       <form onSubmit={submit} className="conv-composer">
+          <ComposerCustomizationPicker picker={customizationPicker} onPick={pickCustomization}
+            onRemove={(token) => editDraft(customizationPicker.remove(token))} />
           <ConversationReferenceChips references={references}
             disabled={editReferenceDraft.isPending || send.isPending || continueSend.isPending}
             onRemove={(previewId) => editReferenceDraft.mutate({ previewId, attach: false })} />
@@ -689,8 +710,33 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           </button>}
           <label htmlFor={`draft-${conversationId}`} className="sr-only">Message draft</label>
           <textarea ref={composer} id={`draft-${conversationId}`} placeholder="Ask about this repository…"
-            value={text} onChange={(event) => editDraft(event.target.value)} disabled={draft.isPending || Boolean(draft.error) || send.isPending || startGoal.isPending}
+            aria-autocomplete="list"
+            aria-controls={customizationPicker.options.length ? customizationPicker.listId : undefined}
+            aria-activedescendant={customizationPicker.options.length ? `${customizationPicker.listId}-${customizationPicker.highlighted}` : undefined}
+            value={text} onChange={(event) => {
+              setComposerCursor(event.currentTarget.selectionStart);
+              editDraft(event.currentTarget.value);
+            }} onSelect={(event) => setComposerCursor(event.currentTarget.selectionStart)}
+            disabled={draft.isPending || Boolean(draft.error) || send.isPending || startGoal.isPending}
             onKeyDown={(event) => {
+              if (customizationPicker.active && !event.nativeEvent.isComposing) {
+                const option = customizationPicker.options[customizationPicker.highlighted];
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  customizationPicker.dismiss();
+                  return;
+                }
+                if (option && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+                  event.preventDefault();
+                  customizationPicker.move(event.key === "ArrowDown" ? 1 : -1);
+                  return;
+                }
+                if (option && !event.shiftKey && !event.ctrlKey && !event.metaKey && (event.key === "Enter" || event.key === "Tab")) {
+                  event.preventDefault();
+                  pickCustomization(option);
+                  return;
+                }
+              }
               if (sideCompletion && event.key === "Tab" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 completeSideQuestion();
@@ -757,6 +803,9 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           </p>}
           {hasReferences && (isSideQuestion || composingGoal) && <p className="conv-alert">
             Remove the conversation references to send a side question or start a goal.
+          </p>}
+          {hasSkills && (isSideQuestion || composingGoal) && <p className="conv-alert">
+            Remove the selected skills to send a side question or start a goal.
           </p>}
           {send.error && <p role="alert" className="conv-alert">{String(send.error)}</p>}
           {askSide.error && <p role="alert" className="conv-alert">{String(askSide.error)}</p>}

@@ -41,11 +41,12 @@ use super::{
         CapabilityAssessment, CapabilityScope, CapabilitySubject, ReportedCapabilities,
         Verification,
     },
+    composer_customizations::{project_composer_messages, resolve_selected_skills},
     configuration,
     launch_scope::{CandidateReviewCheckout, ScopedLaunch, ScopedLaunchEvidence},
     planning::{PlanSource, STRUCTURED_PLANNING_PROMPT, StructuredPlan},
     plugins::{PluginInventory, probe_run_plugins},
-    skills::{SkillCatalog, explicit_skill_request},
+    skills::{SkillCatalog, SkillRequest, explicit_skill_request},
     steering::{SteerOutcome, SteerTarget},
     suggestions::SuggestionOutcome,
 };
@@ -302,6 +303,7 @@ fn start_turn(
             last_parent_message: None,
             reported: ReportedCapabilities::default(),
             reported_skills: None,
+            composer_skill_sources: Vec::new(),
             plugin_inventory: None,
             scoped_launch: None,
             candidate_review: None,
@@ -415,6 +417,7 @@ struct TurnExecution {
     last_parent_message: Option<String>,
     reported: ReportedCapabilities,
     reported_skills: Option<SkillCatalog>,
+    composer_skill_sources: Vec<std::fs::File>,
     plugin_inventory: Option<PluginInventory>,
     scoped_launch: Option<ScopedLaunchEvidence>,
     candidate_review: Option<MaterializedCandidate>,
@@ -1484,9 +1487,10 @@ impl TurnExecution {
             &filesystem_skills,
             checkout,
         )?;
+        let projected_input = project_composer_messages(&self.plan.input);
         let native_seed = self.plan.native_goal_seed.as_ref();
         let mut input = if let Some(seed) = native_seed {
-            let mut projected = self.plan.input.clone();
+            let mut projected = projected_input.to_vec();
             let goal = projected
                 .iter_mut()
                 .rfind(|message| message.text == seed.managed_instructions)
@@ -1494,7 +1498,7 @@ impl TurnExecution {
             goal.text = seed.objective.clone();
             format_input(&projected)?
         } else {
-            format_input(&self.plan.input)?
+            format_input(&projected_input)?
         };
         let conversation_references = self.app.block_on(self.store.conversation_dispatch_references(
             self.plan.run.id.clone(), self.plan.input.iter().map(|message| message.revision_id.clone()).collect(),
@@ -1503,9 +1507,7 @@ impl TurnExecution {
             input.text.push_str("\n\nQuoted conversation references supplied by OmniAgent (JSON data):\n");
             input.text.push_str(&serde_json::to_string(&conversation_references)?);
         }
-        let objective = self
-            .plan
-            .input
+        let objective = projected_input
             .iter()
             .rev()
             .find(|message| message.role == MessageRole::User)
@@ -1581,10 +1583,19 @@ impl TurnExecution {
         if let Some(blocked) = assessment.take_if(|report| !report.blockers.is_empty()) {
             return self.record_attachment_assessment(blocked).map(|()| true);
         }
+        let (selected_skills, skill_files): (Vec<_>, Vec<_>) = self.plan.input.last()
+            .filter(|message| message.role == MessageRole::User)
+            .map(|message| resolve_selected_skills(&self.plan.scope, &message.text, self.reported_skills.as_ref()))
+            .transpose()?
+            .unwrap_or_default()
+            .into_iter()
+            .unzip();
+        ensure!(self.plan.native_goal_seed.is_none() || selected_skills.is_empty(), "The native goal route cannot carry selected skills");
+        self.composer_skill_sources = skill_files;
         let update = if self.plan.native_goal_seed.is_some() {
             session.seed_native_goal_context(input)?
         } else {
-            session.send(input)?
+            session.send_with_composer_skills(input, &selected_skills)?
         };
         if let Some(mut report) = assessment {
             report.check_encoded_request(
@@ -1606,13 +1617,21 @@ impl TurnExecution {
                 }
             })
         });
-        let requested_skill = self.plan.input.last().and_then(|message| {
-            explicit_skill_request(
-                self.plan.scope.provider,
-                &message.text,
-                reported_skills.entries.iter().chain(&filesystem_skills),
-            )
-        });
+        let requested_skill = if selected_skills.is_empty() {
+            self.plan.input.last().and_then(|message| {
+                explicit_skill_request(
+                    self.plan.scope.provider,
+                    &message.text,
+                    reported_skills.entries.iter().chain(&filesystem_skills),
+                )
+            })
+        } else {
+            Some(SkillRequest {
+                name: selected_skills.iter().map(|skill| skill.name.as_str()).collect::<Vec<_>>().join(", "),
+                matching_ids: selected_skills.iter().map(|skill| skill.id.clone()).collect(),
+                selections: selected_skills,
+            })
+        };
         let snapshot = ContextSnapshot {
             version: 13,
             context_id: self.plan.context_id.clone(),
