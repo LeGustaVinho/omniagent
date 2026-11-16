@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -156,10 +156,11 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
   </div>;
 }
 
-export function RepositoryDeliveryWorkspace({ checkout, startSimulation, openActivity }: WorkspaceProps) {
+export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation, openActivity }: WorkspaceProps) {
   const client = useQueryClient();
   const { projectId, checkoutId } = checkout;
-  const [selected, setSelected] = useState("");
+  const [selected, setSelected] = useState(target ?? "");
+  useEffect(() => setSelected(target ?? ""), [target]);
   const runs = useQuery({
     queryKey: ["repository-delivery", projectId, "list"],
     queryFn: () => invoke<DeliveryRun[]>("list_repository_deliveries", { projectId }),

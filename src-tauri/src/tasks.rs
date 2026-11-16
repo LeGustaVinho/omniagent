@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::store::Store;
@@ -25,34 +26,38 @@ pub use descriptions::{
     DescriptionOwner, DescriptionRevision, TaskDirectWork, TaskDispatchContext, WorkDescriptions,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectTask {
     pub id: String,
     pub project_id: String,
     pub title: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectEpic {
     pub id: String,
     pub project_id: String,
     pub title: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum TaskPlacement {
     Task { epic_id: Option<String> },
     Subtask { parent_task_id: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProjectWork {
     pub task: ProjectTask,
     pub placement: TaskPlacement,
     pub checklist_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProjectWorkHierarchy {
     pub epics: Vec<ProjectEpic>,
     pub work: Vec<ProjectWork>,
@@ -107,6 +112,24 @@ impl Store {
             Ok(epic)
         })
         .await
+    }
+
+    pub async fn create_project_task_in_epic(
+        &self,
+        project: String,
+        epic: String,
+        title: String,
+    ) -> Result<ProjectTask> {
+        self.execute(move |db| {
+            let tx = db.transaction()?;
+            let task = insert_project_task(&tx, project, title)?;
+            tx.execute(
+                "INSERT INTO project_task_memberships(project_id, task_id, epic_id) VALUES (?1, ?2, ?3)",
+                params![task.project_id, task.id, epic],
+            ).context("epic must belong to the same project")?;
+            tx.commit()?;
+            Ok(task)
+        }).await
     }
 
     pub async fn create_project_subtask(

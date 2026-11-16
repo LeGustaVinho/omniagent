@@ -9,6 +9,7 @@ import { exampleNotes } from "@/ide-knowledge-data";
 import { resolveWiki } from "@/knowledge-document";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
+import { ProjectTasksWorkspace } from "@/project-tasks";
 import { deliveryConversation } from "@/conversation-preview-data";
 import { DeliveryStatus, InlineIssue, IntegrationNotice } from "@/tasks-git-ui";
 import {
@@ -364,6 +365,10 @@ function TaskDetails({ task, parent, children, onSelect, onCheck, onAddItem, tab
 }
 
 export default function TasksWorkspace(props: WorkspaceProps) {
+  return props.simulation ? <PreviewTasksWorkspace {...props} /> : <ProjectTasksWorkspace key={props.checkout.projectId} {...props} />;
+}
+
+function PreviewTasksWorkspace(props: WorkspaceProps) {
   const { simulation, startSimulation, target } = props;
   const git = useGitSimulation();
   const [tasks, setTasks] = useState<DeliveryTask[]>([releaseTask, ...exampleTasks]);
