@@ -6,7 +6,7 @@ use comrak::{
     parse_document,
 };
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 mod source;
 use source::{SourceMap, TableCellMap};
@@ -21,7 +21,7 @@ pub struct MarkdownAnalysis {
     pub nodes: Vec<MarkdownNode>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MarkdownRange {
     pub from: usize,

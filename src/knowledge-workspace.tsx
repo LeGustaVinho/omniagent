@@ -17,6 +17,8 @@ import type { NoteJump } from "@/knowledge-editor";
 import { useRepositoryNotes, type NoteBuffer } from "@/repository-note-buffers";
 import { noteAttachmentCandidates, RepositoryNoteMedia } from "@/repository-note-media";
 import { NotePropertyEditor } from "@/note-property-editor";
+import { KnowledgeSearch } from "@/knowledge-navigation";
+import { useRepositoryNoteIndex } from "@/repository-note-index";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const Editor = lazy(() => import("@/knowledge-editor").then(({ MarkdownEditor }) => ({ default: MarkdownEditor })));
@@ -74,6 +76,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const [sidebar, setSidebar] = useFileSidebar();
   const [display, setDisplay] = useState<"tree" | "search">("tree");
   const [query, setQuery] = useState("");
+  const noteIndex = useRepositoryNoteIndex(checkout.checkoutId, !simulated, query);
   const [graph, setGraph] = useState(false);
   const [inspector, setInspector] = useState<Inspector | null>(window.innerWidth >= 1180 ? "outline" : null);
   const [modes, setModes] = useState<Record<string, NoteMode>>({});
@@ -93,12 +96,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const source = note?.content ?? "";
   const activeMode = active ? modes[active] ?? "live" : "live";
   const catalog = useMemo(() => {
-    const indexed = new Map(repository.catalog.map(({ path, frontmatter }) => [path, frontmatter ?? ""]));
+    const indexed = new Map((noteIndex.index.data ?? repository.catalog).map(({ path, frontmatter }) => [path, frontmatter ?? ""]));
     for (const path of repository.draftPaths) if (!indexed.has(path)) indexed.set(path, "");
     for (const [path, value] of Object.entries(notes)) indexed.set(path, value.content);
     return [...indexed].map(([path, content]) => ({ path, content }));
-  }, [notes, repository.catalog, repository.draftPaths]);
-  const matches = findFileText(catalog, query, true);
+  }, [notes, noteIndex.index.data, repository.catalog, repository.draftPaths]);
+  const matches = simulated ? findFileText(catalog, query, true) : [];
   const outgoing = wikiLinks(source);
   const backlinks = active ? catalog.flatMap(({ path, content }) => {
     if (path === active) return [];
@@ -292,8 +295,10 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           </div>
         </div>
         <div className="file-sidebar-scroll">
-          {display === "search" ? <FileSearch query={query} setQuery={setQuery} results={matches} unavailable={false}
+          {display === "search" ? simulated ? <FileSearch query={query} setQuery={setQuery} results={matches} unavailable={false}
             placeholder="Find notes and content" onOpen={open} />
+            : <KnowledgeSearch query={query} onQueryChange={setQuery} results={noteIndex.hits} pending={noteIndex.searching}
+              error={noteIndex.error ? String(noteIndex.error) : undefined} onOpen={({ path, line, anchor }) => open(path, line ?? undefined, anchor ?? undefined)} />
             : <FileTree paths={catalog.map(({ path }) => path)} active={active} onOpen={open} />}
         </div>
       </FileSidebar>}

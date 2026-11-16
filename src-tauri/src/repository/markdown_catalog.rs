@@ -33,7 +33,17 @@ impl Store {
     }
 }
 
-fn list_notes(root: &Path) -> Result<Vec<RepositoryNoteCatalogEntry>> {
+pub(super) fn list_notes(root: &Path) -> Result<Vec<RepositoryNoteCatalogEntry>> {
+    Ok(note_paths(root)?
+        .into_iter()
+        .map(|path| RepositoryNoteCatalogEntry {
+            frontmatter: read_frontmatter(&root.join(&path)).ok().flatten(),
+            path,
+        })
+        .collect())
+}
+
+pub(super) fn note_paths(root: &Path) -> Result<Vec<String>> {
     let names = git_query(
         &git_path()?,
         root,
@@ -68,13 +78,10 @@ fn list_notes(root: &Path) -> Result<Vec<RepositoryNoteCatalogEntry>> {
         {
             continue;
         }
-        entries.push(RepositoryNoteCatalogEntry {
-            path: name.to_owned(),
-            frontmatter: read_frontmatter(&path).ok().flatten(),
-        });
+        entries.push(name.to_owned());
     }
-    entries.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-    entries.dedup_by(|left, right| left.path == right.path);
+    entries.sort_unstable();
+    entries.dedup();
     Ok(entries)
 }
 

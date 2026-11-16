@@ -20,6 +20,7 @@ pub mod documents;
 mod isolated_git;
 mod markdown;
 mod markdown_catalog;
+pub mod markdown_index;
 pub mod verification;
 pub mod verified_git;
 mod worktrees;

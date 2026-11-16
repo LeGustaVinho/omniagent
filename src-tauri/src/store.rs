@@ -1,7 +1,9 @@
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::mpsc as std_mpsc,
+    sync::{Arc, Mutex, Weak},
     thread,
     time::Duration,
 };
@@ -85,6 +87,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/070-generated-image-evidence.sql"),
     include_str!("../migrations/071-attachment-history-deletion.sql"),
     include_str!("../migrations/072-project-description-drafts.sql"),
+    include_str!("../migrations/073-repository-note-index.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -94,6 +97,7 @@ pub struct Store {
     writer: mpsc::Sender<DatabaseJob>,
     pub(crate) event_signal: watch::Sender<()>,
     pub(crate) job_signal: watch::Sender<()>,
+    pub(crate) note_index_locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
 }
 
 pub enum DraftKey {
@@ -141,6 +145,7 @@ impl Store {
             writer,
             event_signal: watch::channel(()).0,
             job_signal: watch::channel(()).0,
+            note_index_locks: Arc::default(),
         })
     }
 

@@ -10,6 +10,7 @@ mod goal_verification_ipc;
 mod ipc;
 mod markdown_analysis_ipc;
 mod note_runtime;
+mod note_index_runtime;
 mod queue_runtime;
 mod task_delivery_ipc;
 mod task_assignment_ipc;
@@ -284,6 +285,9 @@ fn main() {
             desktop::list_repository_markdown_revisions,
             desktop::read_repository_markdown,
             desktop::repository_note_catalog,
+            note_index_runtime::rebuild_repository_note_index,
+            note_index_runtime::repository_indexed_note,
+            note_index_runtime::search_repository_note_index,
             note_runtime::open_repository_document,
             note_runtime::save_repository_document,
             note_runtime::read_repository_attachment,

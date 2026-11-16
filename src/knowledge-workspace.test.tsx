@@ -88,6 +88,13 @@ function mockRepository() {
         { path: release, frontmatter: null },
         { path: checklist, frontmatter: checklistProperties },
       ];
+      case "rebuild_repository_note_index": return [
+        { id: 1, path: release, title: "Release notes", tags: [], frontmatter: null },
+        { id: 2, path: checklist, title: "Launch notes", tags: [], frontmatter: checklistProperties },
+      ];
+      case "search_repository_note_index": return [
+        { path: checklist, title: "Launch notes", snippet: "Keep the saved checklist." },
+      ];
       case "list_repository_markdown_drafts": return Array.from(drafts.keys());
       case "open_repository_document": {
         const document = Array.from(onDisk.values()).find(({ revision }) => revision.relativePath.toLowerCase() === input.path.toLowerCase());
@@ -155,6 +162,29 @@ async function editor(path: string) {
 function tab(name: string) {
   return within(screen.getByRole("button", { name: `Close ${name}` }).closest(".file-tab-label")!);
 }
+
+it("opens an unopened note from the checkout-wide full-text index", async () => {
+  mockRepository();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  await editor(release);
+  const user = userEvent.setup();
+  if (!screen.queryByRole("button", { name: "Search notes" })) {
+    await user.click(screen.getByRole("button", { name: "Toggle Knowledge navigation" }));
+  }
+  await user.click(screen.getByRole("button", { name: "Search notes" }));
+  const search = screen.getByRole("combobox", { name: "Find notes and content" });
+  await user.click(search);
+  await user.paste("saved checklist");
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("search_repository_note_index", {
+    checkoutId, query: "saved checklist", limit: 100,
+  }));
+  expect(await screen.findByRole("option", { name: /Launch notes.*Keep the saved checklist/i })).toBeTruthy();
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_document", { checkoutId, path: checklist });
+  await user.keyboard("{Enter}");
+  expect((await editor(checklist)).state.doc.toString()).toBe(checklistSource);
+  expect(screen.getAllByRole("button", { name: "Close Checklist.md" })).toHaveLength(1);
+});
 
 it("reuses canonical tabs, shares edits with Reading, and offers Cancel, Save and Discard on the last editor", async () => {
   const repository = mockRepository();
