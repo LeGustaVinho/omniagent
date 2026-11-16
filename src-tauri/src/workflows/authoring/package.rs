@@ -16,6 +16,8 @@ mod model;
 mod publish;
 mod request;
 #[cfg(test)]
+mod authoring_acceptance;
+#[cfg(test)]
 mod subflow_tests;
 #[cfg(test)]
 mod tests;
