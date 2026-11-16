@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     attachments::AttachmentDispatch,
+    context_records::assembly::RoleDispatchContext,
     conversations::{MessageRevision, SessionScope},
     protection,
     providers::{
@@ -27,6 +28,12 @@ pub struct ContextSnapshot {
     pub version: u16,
     pub context_id: String,
     pub scope: SessionScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_policy_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_context: Option<RoleDispatchContext>,
     pub base_commit: Option<String>,
     pub submitted_messages: Vec<MessageRevision>,
     pub native_history: NativeHistory,
@@ -132,14 +139,13 @@ impl Store {
     pub(crate) async fn prepare_dispatch(
         &self,
         run_id: String,
-        snapshot: ContextSnapshot,
+        mut snapshot: ContextSnapshot,
         frames: Vec<Vec<u8>>,
     ) -> Result<String> {
         ensure!(
             !frames.is_empty() && frames.iter().all(|frame| !frame.is_empty()),
             "dispatch requires exact protocol frames"
         );
-        let snapshot_cipher = protection::protect(&serde_json::to_vec(&snapshot)?)?;
         let frame_cipher = protection::protect(&serde_json::to_vec(&frames)?)?;
         let dispatched = self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -157,6 +163,12 @@ impl Store {
             ensure!(serde_json::from_str::<SessionScope>(&scope)? == snapshot.scope,
                 "snapshot does not use the admitted session scope");
             crate::jobs::validate_instruction_revisions(&tx, &run_id, &snapshot.submitted_messages)?;
+            snapshot.session_id = Some(session.clone());
+            snapshot.job_policy_revision = tx.query_row(
+                "SELECT policy_key FROM job_attempt_policies WHERE run_id = ?1",
+                [&run_id], |row| row.get(0),
+            ).optional()?;
+            let snapshot_cipher = protection::protect(&serde_json::to_vec(&snapshot)?)?;
             let snapshot_id = Uuid::new_v4().to_string();
             let dispatch_id = Uuid::new_v4().to_string();
             tx.execute("INSERT INTO context_snapshots(id, run_id, context_id, payload) VALUES (?1, ?2, ?3, ?4)",

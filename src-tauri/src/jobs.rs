@@ -69,7 +69,8 @@ pub(crate) use native_goal_evidence::{
 pub(crate) use native_goal_qualification::{NativeGoalSeed, effective_qualification_matches};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use pipeline::{
-    PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease, ReleaseBlocker,
+    PipelineAgentInput, PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease,
+    ReleaseBlocker,
 };
 pub(crate) use policy::validate_attempt_dispatch;
 pub use policy::{

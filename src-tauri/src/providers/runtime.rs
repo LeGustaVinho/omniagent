@@ -16,6 +16,7 @@ use crate::{
         AttachmentDispatch, AttachmentFormat, AttachmentInput, AttachmentSource,
         CapturedAttachment, CapturedPayload, StagedAttachments,
     },
+    context_records::assembly::DispatchRoleContext,
     conversations::{AttemptPlan, MessageRevision, MessageRole, PermissionRoute},
     diagnostics,
     dispatch::{ContextSnapshot, Delivery, EventSource, NativeHistory},
@@ -1415,6 +1416,34 @@ impl TurnExecution {
         } else {
             format_input(&self.plan.input)?
         };
+        let objective = self
+            .plan
+            .input
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .map_or_else(String::new, |message| message.text.clone());
+        let role_context = match self.app.block_on(
+            self.store
+                .dispatch_role_context(self.plan.run.id.clone(), objective),
+        )? {
+            DispatchRoleContext::Unconfigured => None,
+            DispatchRoleContext::Assembled(context) => {
+                input.text.push_str(&context.selection.prompt_suffix()?);
+                Some(context)
+            }
+            DispatchRoleContext::OverBudget(blocked) => {
+                self.reject_dispatch(DispatchRejection::RequiredContextOverBudget {
+                    required_bytes: blocked.required_bytes,
+                    available_bytes: blocked.available_bytes,
+                })?;
+                anyhow::bail!(
+                    "Required role context needs {} bytes with {} available",
+                    blocked.required_bytes,
+                    blocked.available_bytes
+                );
+            }
+        };
         let task_context = self
             .app
             .block_on(self.store.task_dispatch_context(self.plan.run.id.clone()))?;
@@ -1498,9 +1527,12 @@ impl TurnExecution {
             )
         });
         let snapshot = ContextSnapshot {
-            version: 12,
+            version: 13,
             context_id: self.plan.context_id.clone(),
             scope: self.plan.scope.clone(),
+            session_id: None,
+            job_policy_revision: None,
+            role_context,
             base_commit: repository::base_commit(&self.plan.scope.checkout)?,
             submitted_messages: self.plan.input.clone(),
             native_history,

@@ -2693,6 +2693,9 @@ mod tests {
                     version: 1,
                     context_id: attempt.context_id.clone(),
                     scope: attempt.scope.clone(),
+                    session_id: None,
+                    job_policy_revision: None,
+                    role_context: None,
                     base_commit: None,
                     submitted_messages: attempt.input.clone(),
                     native_history,
@@ -6995,6 +6998,252 @@ mod tests {
                 .await?,
             Some(selected)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dispatch_pins_role_policy_and_keeps_each_selected_context_revision() -> Result<()> {
+        use crate::{
+            context_records::{
+                ContextProvenance, ContextRecordContent, ContextRecordKind, ContextReviewDecision,
+                ContextReviewStatus,
+                assembly::{
+                    ContextBlock, ContextInputRevision, RequiredContextInstruction,
+                    RoleContextPolicy,
+                },
+            },
+            jobs::{
+                AdmissionBlocker, AdmissionEnvironment, DispatchRejection, JobRequest,
+                PipelineAgentInput, PipelineDispatch, PipelineNodeKind,
+            },
+        };
+
+        let (_dir, store, chat, scope) = setup().await?;
+        std::fs::write(&scope.executable, b"fixture")?;
+        ensure!(
+            Command::new("git.exe")
+                .current_dir(&scope.checkout)
+                .args([
+                    "-c",
+                    "user.name=OmniAgent Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=.git/disabled-hooks",
+                    "commit",
+                    "--allow-empty",
+                    "--quiet",
+                    "-m",
+                    "Fixture base",
+                ])
+                .status()?
+                .success()
+        );
+        let base =
+            crate::repository::base_commit(&scope.checkout)?.context("missing fixture base")?;
+        let project = crate::repository::register(&store, scope.checkout.clone())
+            .await?
+            .project_id;
+        let pipeline = "role-context-workflow".to_owned();
+        store
+            .register_job_pipeline(project.clone(), pipeline.clone())
+            .await?;
+        store
+            .register_job_pipeline_node(
+                project.clone(),
+                pipeline.clone(),
+                "review".into(),
+                PipelineNodeKind::Execution,
+            )
+            .await?;
+        let record = |text: &str| ContextRecordContent {
+            title: "Audit expectations".into(),
+            markdown: text.into(),
+        };
+        let first = store
+            .propose_context_record(
+                project.clone(),
+                None,
+                ContextRecordKind::ProjectConvention,
+                record("Audit the request format"),
+                ContextProvenance::Operator,
+            )
+            .await?;
+        store
+            .review_context_revision(
+                project.clone(),
+                first.record_id.clone(),
+                first.id.clone(),
+                ContextReviewStatus::Proposed,
+                ContextReviewDecision::Accept,
+            )
+            .await?;
+
+        let policy = RoleContextPolicy {
+            revision_id: "review-policy-r1".into(),
+            role: "reviewer".into(),
+            available_bytes: 8192,
+            required: vec![RequiredContextInstruction {
+                instruction_id: "review-constraints".into(),
+                revision_id: "constraints-r2".into(),
+                title: "Review constraints".into(),
+                markdown: "Keep all existing guarantees".into(),
+            }],
+            explicit_links: Vec::new(),
+        };
+        let env = AdmissionEnvironment {
+            runner: scope.runner.clone(),
+            bridge_available: false,
+        };
+        let execute = |role_context: RoleContextPolicy| {
+            let (store, env, scope, pipeline, checkout) = (
+                store.clone(),
+                env.clone(),
+                scope.clone(),
+                pipeline.clone(),
+                chat.checkout_id.clone(),
+            );
+            async move {
+                let job = store
+                    .submit_pipeline_agent_job_with_input(
+                        PipelineDispatch {
+                            pipeline_run_id: pipeline,
+                            node_instance_id: "review".into(),
+                            plan_revision: None,
+                            release_id: None,
+                        },
+                        scope,
+                        JobRequest {
+                            checkout_id: Some(checkout),
+                            task_id: None,
+                            mode: SessionMode::ReadOnly,
+                            instructions: "Audit the context".into(),
+                            dependencies: Vec::new(),
+                            requires_bridge: false,
+                        },
+                        PipelineAgentInput {
+                            role_context: Some(role_context),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                let plan = store
+                    .claim_next_job(env)
+                    .await?
+                    .context("missing context job")?;
+                let run = plan.run.id.clone();
+                let conversation = plan.conversation_id.clone();
+                let session = plan.agent_session_id.clone();
+                let frames = Arc::new(Mutex::new(Vec::new()));
+                let runner = Arc::new(FixtureRunner(WireLog {
+                    store: store.clone(),
+                    runtime: tokio::runtime::Handle::current(),
+                    conversation: conversation.clone(),
+                    frames: frames.clone(),
+                }));
+                let outcome = start_managed_turn(store.clone(), runner, plan, None)
+                    .wait()
+                    .await?;
+                let evidence = store.agent_dispatch(conversation, run).await?;
+                Ok::<_, anyhow::Error>((job.id, session, outcome, evidence, frames))
+            }
+        };
+
+        let (_, session, outcome, first_dispatch, _) = execute(policy.clone()).await?;
+        assert_eq!(outcome, RunStatus::Succeeded);
+        let first_dispatch = first_dispatch.context("missing first dispatch")?;
+        assert_eq!(
+            first_dispatch.snapshot.session_id.as_deref(),
+            Some(session.as_str())
+        );
+        assert_eq!(first_dispatch.snapshot.base_commit.as_ref(), Some(&base));
+        assert_eq!(
+            first_dispatch.snapshot.job_policy_revision.as_deref(),
+            Some("default")
+        );
+        let pinned = first_dispatch
+            .snapshot
+            .role_context
+            .context("missing protected role selection")?;
+        assert_eq!(pinned.policy_revision_id, policy.revision_id);
+        assert_eq!(
+            pinned.policy_digest,
+            crate::providers::capabilities::revision(&policy)?
+        );
+        assert_eq!(pinned.selection.role, policy.role);
+        assert_eq!(pinned.selection.blocks.len(), 2);
+        let frame: Value = serde_json::from_slice(&first_dispatch.frames[0])?;
+        let prompt = frame
+            .pointer("/params/input/0/text")
+            .and_then(Value::as_str)
+            .context("missing input frame")?;
+        let (_, encoded) = prompt
+            .split_once("\n\nAssembled context\n")
+            .context("missing selected context")?;
+        assert_eq!(
+            serde_json::from_str::<Vec<ContextBlock>>(encoded)?,
+            pinned.selection.blocks
+        );
+
+        let edited = store
+            .propose_context_revision(
+                project.clone(),
+                first.record_id.clone(),
+                first.id.clone(),
+                record("Audit response headers instead"),
+                ContextProvenance::Operator,
+            )
+            .await?;
+        store
+            .review_context_revision(
+                project.clone(),
+                first.record_id.clone(),
+                edited.id.clone(),
+                ContextReviewStatus::Proposed,
+                ContextReviewDecision::Accept,
+            )
+            .await?;
+        let (_, _, outcome, second_dispatch, _) = execute(policy.clone()).await?;
+        assert_eq!(outcome, RunStatus::Succeeded);
+        let later = second_dispatch
+            .context("missing later dispatch")?
+            .snapshot
+            .role_context
+            .unwrap();
+        assert_eq!(later.selection.blocks[0], pinned.selection.blocks[0]);
+        assert_eq!(
+            pinned.selection.blocks[1].markdown,
+            "Audit the request format"
+        );
+        assert_eq!(
+            later.selection.blocks[1].markdown,
+            "Audit response headers instead"
+        );
+        assert!(
+            matches!(&later.selection.blocks[1].revision, ContextInputRevision::Record { version, revision: 2 } if version.revision_id == edited.id)
+        );
+
+        let (blocked, _, outcome, evidence, writes) = execute(RoleContextPolicy {
+            revision_id: "review-policy-r2".into(),
+            available_bytes: 1,
+            ..policy
+        })
+        .await?;
+        assert_eq!(outcome, RunStatus::Failed);
+        assert!(evidence.is_none());
+        assert!(writes.lock().unwrap().iter().all(|bytes| {
+            serde_json::from_slice::<Value>(bytes)
+                .is_ok_and(|frame| frame["method"] != "turn/start")
+        }));
+        let inspection = store
+            .inspect_job(project, blocked, env)
+            .await?
+            .context("missing blocked job")?;
+        assert!(inspection.blockers.iter().any(|blocker| matches!(blocker, AdmissionBlocker::DispatchRejected {
+            rejection: DispatchRejection::RequiredContextOverBudget { available_bytes: 1, required_bytes }
+        } if *required_bytes > 1)));
         Ok(())
     }
 

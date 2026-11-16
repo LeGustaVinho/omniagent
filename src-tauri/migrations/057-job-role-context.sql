@@ -1,0 +1,4 @@
+CREATE TABLE job_role_contexts (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+    policy BLOB NOT NULL
+) STRICT, WITHOUT ROWID;

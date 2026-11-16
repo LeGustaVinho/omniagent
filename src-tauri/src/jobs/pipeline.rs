@@ -5,6 +5,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{
+    context_records::assembly::{RoleContextPolicy, bind_role_context},
     conversations::SessionScope,
     protection,
     providers::{SessionMode, questions::QuestionRoute},
@@ -34,10 +35,11 @@ pub struct PipelineDispatch {
 }
 
 #[derive(Default)]
-struct PipelineAgentInput {
-    pinned: Option<(JobContext, QuestionRoute)>,
-    target: Option<TaskRunScope>,
-    markdown_revision: Option<String>,
+pub struct PipelineAgentInput {
+    pub pinned: Option<(JobContext, QuestionRoute)>,
+    pub target: Option<TaskRunScope>,
+    pub markdown_revision: Option<String>,
+    pub role_context: Option<RoleContextPolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
@@ -400,10 +402,6 @@ impl Store {
         context: JobContext,
         question_route: QuestionRoute,
     ) -> Result<Job> {
-        ensure!(
-            question_route.is_native() || scope.mode == SessionMode::ReadOnly,
-            "structured planning needs a read-only profile"
-        );
         self.submit_pipeline_agent_job_with_input(
             binding,
             scope,
@@ -416,13 +414,25 @@ impl Store {
         .await
     }
 
-    async fn submit_pipeline_agent_job_with_input(
+    pub async fn submit_pipeline_agent_job_with_input(
         &self,
         binding: PipelineDispatch,
         scope: SessionScope,
         mut request: JobRequest,
         input: PipelineAgentInput,
     ) -> Result<Job> {
+        if let Some((_, route)) = &input.pinned {
+            ensure!(
+                route.is_native() || scope.mode == SessionMode::ReadOnly,
+                "structured planning needs a read-only profile"
+            );
+        }
+        if let (Some(target), Some(policy)) = (&input.target, &input.role_context) {
+            ensure!(
+                target.role == policy.role,
+                "task participation must use the role pinned for dispatch"
+            );
+        }
         ensure!(
             scope.mode == request.mode
                 && scope.checkout.is_absolute()
@@ -465,6 +475,9 @@ impl Store {
                 )?;
                 if let Some(revision) = &input.markdown_revision {
                     bind_job_markdown(&tx, &job.id, revision)?;
+                }
+                if let Some(policy) = &input.role_context {
+                    bind_role_context(&tx, &job.id, policy)?;
                 }
                 if let Some(target) = &input.target {
                     bind_task_run_scope(

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{protection, store::Store};
+use crate::{protection, providers::capabilities::revision, store::Store};
 
 use super::ContextRecordContent;
 
@@ -41,7 +41,8 @@ pub struct ContextBlock {
     pub markdown: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RequiredContextInstruction {
     pub instruction_id: String,
     pub revision_id: String,
@@ -157,6 +158,105 @@ pub struct RequiredContextOverBudget {
 pub enum RoleContextAssessment {
     Ready(AssembledRoleContext),
     RequiredContextOverBudget(RequiredContextOverBudget),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleContextPolicy {
+    pub revision_id: String,
+    pub role: String,
+    pub available_bytes: u64,
+    pub required: Vec<RequiredContextInstruction>,
+    pub explicit_links: Vec<ContextVersionRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleDispatchContext {
+    pub policy_revision_id: String,
+    pub policy_digest: String,
+    pub selection: AssembledRoleContext,
+}
+
+pub(crate) enum DispatchRoleContext {
+    Unconfigured,
+    Assembled(RoleDispatchContext),
+    OverBudget(RequiredContextOverBudget),
+}
+
+pub(crate) fn bind_role_context(
+    db: &Connection,
+    job: &str,
+    policy: &RoleContextPolicy,
+) -> Result<()> {
+    ensure!(
+        !policy.revision_id.trim().is_empty() && !policy.role.trim().is_empty(),
+        "role context requires the immutable revision of a named role"
+    );
+    ensure!(
+        policy
+            .required
+            .iter()
+            .all(|item| !item.instruction_id.trim().is_empty()
+                && !item.revision_id.trim().is_empty()),
+        "required instructions need stable identities and revisions"
+    );
+    let encrypted = protection::protect(&serde_json::to_vec(policy)?)?;
+    db.execute(
+        "INSERT INTO job_role_contexts (job_id, policy) VALUES (?1, ?2)",
+        params![job, encrypted],
+    )?;
+    Ok(())
+}
+
+impl Store {
+    pub(crate) async fn dispatch_role_context(
+        &self,
+        run: String,
+        objective: String,
+    ) -> Result<DispatchRoleContext> {
+        let pinned = self.execute(move |db| {
+            let row = db.query_row(
+                "SELECT j.project_id, coalesce(shared.scope_task_id, j.task_id), bound.policy
+                 FROM job_attempts attempt JOIN jobs j ON j.id = attempt.job_id
+                 JOIN job_role_contexts bound ON bound.job_id = j.id
+                 LEFT JOIN job_worktree_scopes shared ON shared.job_id = j.id
+                 WHERE attempt.run_id = ?1",
+                [run], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Vec<u8>>(2)?)),
+            ).optional()?;
+            row.map(|(project, task, encrypted)| {
+                let policy: RoleContextPolicy = serde_json::from_slice(&protection::unprotect(&encrypted)?)?;
+                Ok((project, task, policy))
+            }).transpose()
+        }).await?;
+        let Some((project_id, task_id, policy)) = pinned else {
+            return Ok(DispatchRoleContext::Unconfigured);
+        };
+        let policy_digest = revision(&policy)?;
+        let result = self
+            .assemble_role_context(RoleContextRequest {
+                project_id,
+                task_id,
+                role: policy.role,
+                available_bytes: policy.available_bytes,
+                objective,
+                required: policy.required,
+                explicit_links: policy.explicit_links,
+            })
+            .await?;
+        match result {
+            RoleContextAssessment::Ready(selection) => {
+                Ok(DispatchRoleContext::Assembled(RoleDispatchContext {
+                    policy_revision_id: policy.revision_id,
+                    policy_digest,
+                    selection,
+                }))
+            }
+            RoleContextAssessment::RequiredContextOverBudget(blocker) => {
+                Ok(DispatchRoleContext::OverBudget(blocker))
+            }
+        }
+    }
 }
 
 impl Store {

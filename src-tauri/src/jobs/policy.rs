@@ -103,6 +103,12 @@ pub enum DispatchRejection {
     NativeDelegationUnverified,
     NativeGoalUnverified,
     SubagentAuditUnverified,
+    RequiredContextOverBudget {
+        #[ts(type = "number")]
+        required_bytes: u64,
+        #[ts(type = "number")]
+        available_bytes: u64,
+    },
     Requirements {
         capabilities: Vec<Capability>,
         customizations: Vec<RequiredCustomization>,
