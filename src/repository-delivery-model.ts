@@ -24,6 +24,7 @@ export type DeliveryArtifact = {
     | { kind: "worktree"; evidence: { checkout_id: string; task: TaskReference } }
     | { kind: "candidate"; evidence: { id: string; tree: string; target: { runId: string; unitId: string } } }
     | { kind: "checks" | "git"; evidence: ScopedEvidence }
+    | { kind: "merge"; evidence: ScopedEvidence & { commitEvidenceId: string } }
     | { kind: "acceptance"; evidence: { evidence: ScopedEvidence; reviewArtifactId: string; completionCriteria: string[] } };
 };
 

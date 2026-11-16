@@ -1,6 +1,6 @@
-mod command;
+pub(super) mod command;
 pub mod ipc;
-mod materialize;
+pub(super) mod materialize;
 
 use std::{collections::HashSet, path::PathBuf};
 
@@ -373,24 +373,7 @@ impl Store {
             let candidate = load_selected_candidate(&tx, &project, &task, &id)?;
             require_current(&tx, &candidate)?;
             let (capture, _) = load_capture(&tx, &candidate.target)?;
-            let (policy_revision, mut gates) = load_policy(&tx, &project)?;
-            for name in required {
-                ensure!(!name.trim().is_empty(), "required check name must be non-empty");
-                if let Some(pinned) = gates.iter_mut().find(|pinned| pinned.gate.name == name) {
-                    pinned.gate.required = true;
-                } else {
-                    gates.push(PinnedGate {
-                        gate: CandidateGate {
-                            action: CandidateGateAction::Unavailable {
-                                reason: format!("No command is configured for required check {name}"),
-                            },
-                            required: true,
-                            name,
-                        },
-                        executable_revision: None,
-                    });
-                }
-            }
+            let (policy_revision, gates) = policy_with_requirements(&tx, &project, required)?;
             let verification = Uuid::new_v4().to_string();
             tx.execute("INSERT INTO candidate_verifications(id, candidate_id, policy_revision, gates) VALUES (?1, ?2, ?3, ?4)",
                 params![verification, id, policy_revision, encode(&gates)?])?;
@@ -597,6 +580,54 @@ pub(crate) fn load_current_candidate_verification(
     let candidate = load_selected_candidate(db, project, task, id)?;
     require_current(db, &candidate)?;
     current_verification(db, &candidate)
+}
+
+pub(super) fn gate_results_for_required_checks(
+    db: &Connection,
+    project: &str,
+    required: Vec<String>,
+) -> Result<(String, Vec<CandidateGateResult>)> {
+    let (revision, gates) = policy_with_requirements(db, project, required)?;
+    Ok((
+        revision,
+        gates
+            .into_iter()
+            .map(|pinned| CandidateGateResult {
+                gate: pinned.gate,
+                executable_revision: pinned.executable_revision,
+                outcome: None,
+            })
+            .collect(),
+    ))
+}
+
+fn policy_with_requirements(
+    db: &Connection,
+    project: &str,
+    required: Vec<String>,
+) -> Result<(String, Vec<PinnedGate>)> {
+    let (revision, mut gates) = load_policy(db, project)?;
+    for name in required {
+        ensure!(
+            !name.trim().is_empty(),
+            "required check name must be non-empty"
+        );
+        if let Some(pinned) = gates.iter_mut().find(|pinned| pinned.gate.name == name) {
+            pinned.gate.required = true;
+        } else {
+            gates.push(PinnedGate {
+                gate: CandidateGate {
+                    action: CandidateGateAction::Unavailable {
+                        reason: format!("No command is configured for required check {name}"),
+                    },
+                    required: true,
+                    name,
+                },
+                executable_revision: None,
+            });
+        }
+    }
+    Ok((revision, gates))
 }
 
 fn load_policy(db: &Connection, project: &str) -> Result<(String, Vec<PinnedGate>)> {

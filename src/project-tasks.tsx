@@ -7,45 +7,23 @@ import { TaskParticipants } from "@/task-participants";
 import { TaskAssignment } from "@/task-assignment";
 import { ProjectDescription } from "@/project-description";
 import { ProjectAgileTable, ProjectKanban } from "@/project-agile-views";
+import { SavedDeliveryMerge, VerifiedDeliveryHistory } from "@/repository-delivery-history";
 import {
   canComplete, canMove, checklistQuery, commitQuery, deliveryQuery, epicStateQuery, latestEvidence, questionBlockerLabel, statusLabel,
-  taskStateQuery, terminalStatus, workflowStates, workLevels,
+  taskStateQuery, terminalStatus, workflowStates, workDeliveryUnitsQuery, workLevels,
   type AgileRow, type EvidenceTarget, type Hierarchy, type Item, type TaskQuestionBlocker, type Work, type WorkKind,
   type WorkflowState, type WorkflowStatus,
 } from "@/project-agile-model";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type Change = (operation: () => Promise<unknown>) => void;
+type DeliveryLink = { taskId: string; title: string; deliveryId: string };
 
-function CommitDetails({ projectId, taskId, evidenceId, openActivity, openWorkspace, showPatch = false }: {
-  projectId: string; taskId: string; evidenceId: string;
-  openActivity: WorkspaceProps["openActivity"]; openWorkspace: WorkspaceProps["openWorkspace"]; showPatch?: boolean;
-}) {
-  const commit = useQuery(commitQuery(projectId, taskId, evidenceId));
-  const patch = useQuery({ queryKey: ["delivery-verified-patch", projectId, taskId, evidenceId], enabled: showPatch,
-    queryFn: () => invoke<{ patchBase64: string } | null>("verified_delivery_patch", { projectId, taskId, evidenceId }), staleTime: Infinity,
-  });
-  if (commit.error) return <p role="alert">{String(commit.error)}</p>;
-  if (!commit.data) return null;
-  const evidence = commit.data;
-  return <li className="grid gap-1 break-words">
-    <span>{evidence.purpose} · {evidence.branch}</span><code className="break-all">{evidence.sha}</code>
-    <Button type="button" variant="outline" onClick={() => openActivity(evidence.captureRunId)}>Open implementation attempt</Button>
-    <Button type="button" variant="outline" onClick={() => openWorkspace("git", `attempt:${evidence.captureRunId}`)}>Open saved Git diff</Button>
-    {showPatch && <>
-      {patch.isPending && <p role="status">Loading accepted diff…</p>}
-      {patch.error && <p role="alert">{String(patch.error)}</p>}
-      {patch.data === null && <p>Accepted diff unavailable.</p>}
-      {patch.data && <pre aria-label="Accepted diff" className="max-h-72 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-xs">
-        {new TextDecoder().decode(Uint8Array.from(atob(patch.data.patchBase64), (byte) => byte.charCodeAt(0)))}
-      </pre>}
-    </>}
-  </li>;
-}
-
-function LiveTaskDetails({ projectId, task, change, busy, links, selectedEvidence, openWork, move, check }: {
-  projectId: string; task: AgileRow; change: Change; busy: boolean; links: WorkspaceProps;
-  selectedEvidence?: EvidenceTarget; openWork: (id: string) => void;
+function LiveTaskDetails({
+  projectId, task, change, busy, links, selectedEvidence, selectedDeliveryId, contributors, openDelivery, openWork, move, check,
+}: {
+  projectId: string; task: AgileRow; change: Change; busy: boolean; links: WorkspaceProps; contributors: DeliveryLink[];
+  selectedEvidence?: EvidenceTarget; selectedDeliveryId?: string; openDelivery: (link: DeliveryLink) => void; openWork: (id: string) => void;
   move: (row: AgileRow, state: WorkflowStatus) => void; check: (id: string, item: Item, checked: boolean) => void;
 }) {
   const args = { projectId, taskId: task.id };
@@ -53,22 +31,27 @@ function LiveTaskDetails({ projectId, task, change, busy, links, selectedEvidenc
   const state = useQuery(taskStateQuery(projectId, task.id));
   const checklist = useQuery(checklistQuery(projectId, task.id));
   const deliveries = useQuery(deliveryQuery(projectId, task.id));
+  const units = useQuery(workDeliveryUnitsQuery(projectId, task.id));
   const saved = state.data;
   const question = saved?.questionBlocker;
   const closed = saved && terminalStatus(saved.state);
   const mayCompleteManually = saved && canComplete(saved, task.hasChildren);
   const feasible = workflowStates.filter(({ value }) => canMove({ ...task, workflow: saved }, value));
-  const error = state.error ?? checklist.error ?? deliveries.error;
+  const error = state.error ?? checklist.error ?? deliveries.error ?? units.error;
+  const recordedUnits = new Set(deliveries.data?.flatMap(({ evidence }) => evidence.kind === "verified_commit" ? evidence.unitEvidenceIds : []));
+  const unitHistory = new Map(units.data?.map((entry) => [entry.commit.id, entry]));
+  const independentUnits = units.data?.filter(({ commit }) => !recordedUnits.has(commit.id));
+  const waiting = saved?.waitingForMerge ? "Waiting for merge" : saved?.waitingForCommit ? "Waiting for commit" : undefined;
   return <section className="pipeline-stack" aria-label={task.title}>
     <h3 className="font-medium break-words">{task.title}</h3>
-    {saved && <p role="status">{saved.waitingForCommit && !question ? `${statusLabel(saved.state)} · Waiting for commit` : statusLabel(saved.state)}</p>}
+    {saved && <p role="status">{waiting && !question ? `${statusLabel(saved.state)} · ${waiting}` : statusLabel(saved.state)}</p>}
     {feasible.length > 0 && <label className="delivery-field">Move work to <select className="delivery-filter" value="" disabled={busy} onChange={(event) => {
       const next = feasible.find(({ value }) => value === event.currentTarget.value)?.value;
       if (next) move({ ...task, workflow: saved }, next);
     }}><option value="">Choose a state</option>{feasible.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}</select></label>}
     {selectedEvidence && <section className="pipeline-form pipeline-stack" aria-label="Recorded Git evidence">
-      <h4>Recorded Git evidence</h4><ul><CommitDetails {...args} evidenceId={selectedEvidence.evidenceId}
-        openActivity={links.openActivity} openWorkspace={links.openWorkspace} showPatch /></ul>
+      <h4>Recorded Git evidence</h4><VerifiedDeliveryHistory {...args} evidenceId={selectedEvidence.evidenceId}
+        history={unitHistory.get(selectedEvidence.evidenceId)} openActivity={links.openActivity} openWorkspace={links.openWorkspace} showPatch />
     </section>}
     <ProjectDescription kind="work" id={task.id} links={links} />
     {question && <section className="pipeline-form pipeline-stack" aria-label="Task question blocker">
@@ -111,18 +94,44 @@ function LiveTaskDetails({ projectId, task, change, busy, links, selectedEvidenc
     <TaskAssignment projectId={projectId} taskId={task.id} />
     <TaskGoals projectId={projectId} taskId={task.id} openActivity={links.openActivity} />
     <TaskParticipants projectId={projectId} taskId={task.id} openActivity={links.openActivity} />
+    {saved?.pendingMerge && <section className="pipeline-evidence grid gap-1" aria-label="Committed delivery awaiting integration">
+      <h4 className="font-medium">Committed delivery awaiting integration</h4>
+      <p>Completion SHA <code className="break-all">{saved.pendingMerge.sourceSha}</code></p>
+      <p>Working branch <code className="break-all">{saved.pendingMerge.sourceBranch}</code></p>
+      <p>Destination branch <code className="break-all">{saved.pendingMerge.destinationBranch}</code></p>
+      <Button type="button" variant="outline" onClick={() => links.openWorkspace("pipelines", saved.pendingMerge?.workflowRunId)}>
+        Open workflow awaiting merge
+      </Button>
+    </section>}
+    {Boolean(independentUnits?.length) && <section className="pipeline-stack" aria-label="Other committed units">
+      <h4 className="font-medium">Other committed units</h4>
+      {independentUnits?.map((history) => <details key={history.commit.id} className="pipeline-evidence">
+        <summary>{history.commit.purpose}</summary>
+        <VerifiedDeliveryHistory {...args} evidenceId={history.commit.id} history={history}
+          openActivity={links.openActivity} openWorkspace={links.openWorkspace} />
+      </details>)}
+    </section>}
     {Boolean(deliveries.data?.length) && <section className="pipeline-stack" aria-label="Delivery history">
-      <h4 className="font-medium">Delivery history</h4>
-      {deliveries.data?.map(({ id, evidence, recordedAt }) => <details key={id} className="pipeline-evidence">
+      <h4 className="font-medium">{task.kind === "task" ? "Task delivery history" : "Sub-Task delivery history"}</h4>
+      {deliveries.data?.map(({ id, evidence, recordedAt, merge }) => <details key={id} className="pipeline-evidence" open={id === selectedDeliveryId || undefined}>
         <summary>{evidence.kind === "manual" ? "Manual completion" : "Verified delivery"} · {new Date(recordedAt).toLocaleString()}</summary>
         {evidence.kind === "manual" ? (evidence.note && <p>{evidence.note}</p>) : <>
           <p>Completion SHA <code className="break-all">{evidence.completionSha}</code></p>
+          <SavedDeliveryMerge {...args} workflowRunId={evidence.workflowRunId} receipt={merge} />
           {saved?.activeWorkflowRunId !== evidence.workflowRunId && <Button type="button" variant="outline"
             onClick={() => links.openWorkspace("pipelines", evidence.workflowRunId)}>Open saved workflow</Button>}
           <ul className="pipeline-stack">{evidence.unitEvidenceIds.map((evidenceId) =>
-            <CommitDetails key={evidenceId} {...args} evidenceId={evidenceId} openActivity={links.openActivity} openWorkspace={links.openWorkspace} />)}</ul>
+            <li key={evidenceId}><VerifiedDeliveryHistory {...args} evidenceId={evidenceId} history={unitHistory.get(evidenceId)}
+              openActivity={links.openActivity} openWorkspace={links.openWorkspace} /></li>)}</ul>
         </>}
       </details>)}
+    </section>}
+    {contributors.length > 0 && <section className="pipeline-stack" aria-label="Contributing Sub-Task deliveries">
+      <h4 className="font-medium">Contributing Sub-Task deliveries</h4>
+      <ul className="pipeline-stack">{contributors.map((link) => <li key={link.taskId}>
+        <Button type="button" variant="outline" onClick={() => openDelivery(link)}
+          aria-label={`Open Sub-Task delivery for ${link.title}`}>{link.title}</Button>
+      </li>)}</ul>
     </section>}
     {error && <p role="alert">{String(error)}</p>}
   </section>;
@@ -143,7 +152,8 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   const client = useQueryClient();
   const [selected, setSelected] = useState(props.target);
   const [selectedEvidence, setSelectedEvidence] = useState<EvidenceTarget>();
-  useEffect(() => { setSelected(props.target); setSelectedEvidence(undefined); }, [props.target]);
+  const [selectedDelivery, setSelectedDelivery] = useState<DeliveryLink>();
+  useEffect(() => { setSelected(props.target); setSelectedEvidence(undefined); setSelectedDelivery(undefined); }, [props.target]);
   const [view, setView] = useState<"kanban" | "table">("kanban");
   const [level, setLevel] = useState<WorkKind>("task");
   const [search, setSearch] = useState("");
@@ -178,9 +188,14 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   })), ...all.map(({ task, placement }, index): AgileRow => ({
     ...task, kind: placement.kind, parentId: placement.kind === "subtask" ? placement.parentTaskId : placement.epicId ?? undefined,
     status: states[index]?.data?.state, workflow: states[index]?.data, checklist: checklists[index]?.data?.items ?? [],
-    commit: commits.get(task.id), evidence: evidence[index], hasChildren: parents.has(task.id),
+    commit: commits.get(task.id), evidence: evidence[index], deliveries: deliveries[index]?.data, hasChildren: parents.has(task.id),
   }))];
   const current = rows.find(({ id }) => id === selected);
+  const contributors = current?.kind === "task" ? rows.flatMap((row) => {
+    if (row.kind !== "subtask" || row.parentId !== current.id) return [];
+    const delivery = row.workflow?.completion ?? row.deliveries?.at(-1);
+    return delivery ? [{ taskId: row.id, title: row.title, deliveryId: delivery.id }] : [];
+  }) : [];
   const normalizedSearch = search.trim().toLocaleLowerCase();
   const matched = rows.filter(({ title, status }) => (!filterStatus || status === filterStatus) && title.toLocaleLowerCase().includes(normalizedSearch));
   const kanbanRows = matched.filter(({ kind }) => kind === level);
@@ -189,10 +204,11 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   function openWork(id: string) {
     setSelected(id);
     setSelectedEvidence(undefined);
+    setSelectedDelivery(undefined);
   }
   const views = {
     selected, busy: mutation.isPending, openWork,
-    openEvidence: (target: EvidenceTarget) => { setSelected(target.taskId); setSelectedEvidence(target); },
+    openEvidence: (target: EvidenceTarget) => { openWork(target.taskId); setSelectedEvidence(target); },
     openQuestion: ({ runId, conversationId, requestId }: TaskQuestionBlocker) => props.openActivity(runId, conversationId, requestId),
   };
   function check(taskId: string, item: Item, checked: boolean) {
@@ -259,10 +275,13 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
       </div>
       {current && <aside className="delivery-detail" aria-label="Work detail">
         <div className="delivery-detail-content grid gap-3 p-4">
-          <button type="button" className="justify-self-end text-xs text-muted-foreground hover:underline" onClick={() => { setSelected(undefined); setSelectedEvidence(undefined); }}>Close detail</button>
+          <button type="button" className="justify-self-end text-xs text-muted-foreground hover:underline"
+            onClick={() => { setSelected(undefined); setSelectedEvidence(undefined); setSelectedDelivery(undefined); }}>Close detail</button>
           {current.kind === "epic" ? <EpicState key={current.id} projectId={projectId} epic={current} links={props} /> :
             <LiveTaskDetails key={current.id} projectId={projectId} task={current} busy={mutation.isPending}
               change={(operation) => mutation.mutate(operation)} links={props} openWork={openWork} move={move} check={check}
+              contributors={contributors} selectedDeliveryId={selectedDelivery?.taskId === current.id ? selectedDelivery.deliveryId : undefined}
+              openDelivery={(link) => { openWork(link.taskId); setSelectedDelivery(link); }}
               selectedEvidence={selectedEvidence?.taskId === current.id ? selectedEvidence : undefined} />}
         </div>
       </aside>}

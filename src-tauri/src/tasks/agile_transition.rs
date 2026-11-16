@@ -60,6 +60,10 @@ impl Store {
                             !current.waiting_for_commit,
                             "Verify the pending commit before moving this task."
                         );
+                        ensure!(
+                            !current.waiting_for_merge,
+                            "Verify the pending merge before moving this task."
+                        );
                         store_requested_workflow_state(&tx, &project, &task, next)?;
                     }
                 }

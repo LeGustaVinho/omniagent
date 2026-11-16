@@ -21,10 +21,17 @@ pub use checklists::progress::{
     ChecklistProgressError, ChecklistProgressReceipt, ChecklistProgressRecord,
 };
 pub use checklists::{ChecklistExecutionMode, ChecklistItem, TaskChecklist};
+pub use delivery::milestone::{
+    DeliveryCompletionMilestone, DeliveryMilestonePolicy, PendingTaskDeliveryMerge,
+};
+pub(crate) use delivery::milestone::{
+    delivery_merge_candidate, load_delivery_milestone_policy, record_verified_task_delivery,
+    record_verified_task_merge,
+};
+pub(crate) use delivery::validate_repository_delivery_open;
 pub use delivery::{
     TaskDelivery, TaskDeliveryEvidence, TaskDeliveryState, TaskPrerequisiteBlocker,
 };
-pub(crate) use delivery::{record_verified_task_delivery, validate_repository_delivery_open};
 pub use descriptions::{
     DescriptionDraft, DescriptionEditorConflict, DescriptionEditorSave, DescriptionEditorState,
     DescriptionOwner, DescriptionRevision, TaskDirectWork, TaskDispatchContext, WorkDescriptions,

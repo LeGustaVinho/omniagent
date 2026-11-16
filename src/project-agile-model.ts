@@ -1,6 +1,7 @@
 import { queryOptions } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { RequestId } from "@/conversation-inputs";
+import type { VerifiedMerge } from "@/delivery-merge-model";
 
 export const workflowStates = [
   { value: "backlog", label: "Backlog" }, { value: "ready", label: "Ready" },
@@ -25,6 +26,8 @@ export type WorkflowState = {
   state: WorkflowStatus;
   hasDirectWork: boolean;
   waitingForCommit: boolean;
+  waitingForMerge?: boolean;
+  pendingMerge?: { workflowRunId: string; commitEvidenceIds: string[]; sourceBranch: string; sourceSha: string; destinationBranch: string } | null;
   checklistResolved: boolean;
   pendingRepositoryChanges: boolean;
   activeWorkflowRunId: string | null;
@@ -32,9 +35,18 @@ export type WorkflowState = {
   prerequisiteBlockers?: { taskId: string; title: string }[];
   completion?: Delivery | null;
 };
-export type Delivery = { id: string; recordedAt: string; evidence: { kind: "manual"; note: string | null } |
+export type Delivery = { id: string; recordedAt: string; merge?: VerifiedMerge | null; evidence: { kind: "manual"; note: string | null } |
   { kind: "verified_commit"; completionSha: string; workflowRunId: string; unitEvidenceIds: string[] } };
-export type VerifiedCommit = { branch: string; sha: string; captureRunId: string; purpose: string; verifiedAt?: string };
+export type VerifiedCommit = {
+  id: string; projectId: string; taskId: string; unitId: string; branch: string; sha: string;
+  captureRunId: string; purpose: string; verifiedAt: string; candidateRevision: string; tree: string;
+  acceptanceId: string; acceptanceArtifactId?: string; verificationId: string; pendingChangesRetained: boolean;
+};
+export type DeliveryAttempt = { runId: string; conversationId: string };
+export type VerifiedDeliveryUnitHistory = {
+  commit: VerifiedCommit; workflowRunId: string; planRevision: string; approvalArtifactId: string | null;
+  implementation: DeliveryAttempt; review: DeliveryAttempt | null;
+};
 export type EvidenceTarget = { taskId: string; evidenceId: string };
 export type AgileRow = Work & {
   kind: WorkKind;
@@ -44,6 +56,7 @@ export type AgileRow = Work & {
   checklist: Item[];
   commit?: VerifiedCommit | null;
   evidence?: EvidenceTarget;
+  deliveries?: Delivery[];
   hasChildren: boolean;
 };
 
@@ -64,7 +77,7 @@ export function questionBlockerLabel(question: TaskQuestionBlocker) {
 
 export function canComplete(workflow: WorkflowState, hasChildren: boolean) {
   return !terminalStatus(workflow.state) && !workflow.activeWorkflowRunId && !workflow.pendingRepositoryChanges &&
-    !workflow.questionBlocker && !workflow.prerequisiteBlockers?.length && workflow.checklistResolved &&
+    !workflow.waitingForMerge && !workflow.questionBlocker && !workflow.prerequisiteBlockers?.length && workflow.checklistResolved &&
     (!hasChildren || workflow.hasDirectWork);
 }
 
@@ -73,7 +86,7 @@ export function canMove(row: AgileRow, next: WorkflowStatus) {
   if (!workflow || workflow.state === next) return false;
   if (terminalStatus(workflow.state)) return next === "ready" && (!row.hasChildren || workflow.hasDirectWork);
   if (next === "cancelled") return true;
-  if (workflow.questionBlocker || workflow.prerequisiteBlockers?.length || workflow.waitingForCommit) return false;
+  if (workflow.questionBlocker || workflow.prerequisiteBlockers?.length || workflow.waitingForCommit || workflow.waitingForMerge) return false;
   return next !== "completed" || canComplete(workflow, row.hasChildren);
 }
 
@@ -102,9 +115,15 @@ export function commitQuery(projectId: string, taskId: string, evidenceId: strin
     queryFn: () => invoke<VerifiedCommit | null>("verified_delivery_commit", { projectId, taskId, evidenceId }), staleTime: Infinity });
 }
 
+export function workDeliveryUnitsQuery(projectId: string, taskId: string) {
+  return queryOptions({ queryKey: ["project-tasks", projectId, taskId, "verified-units"],
+    queryFn: () => invoke<VerifiedDeliveryUnitHistory[]>("verified_work_delivery_units", { projectId, taskId }), refetchInterval: 2500 });
+}
+
 export function latestEvidence(taskId: string, deliveries: readonly Delivery[], completion?: Delivery | null): EvidenceTarget | undefined {
   const delivery = completion?.evidence.kind === "verified_commit" ? completion :
     deliveries.findLast(({ evidence }) => evidence.kind === "verified_commit");
-  const evidenceId = delivery?.evidence.kind === "verified_commit" ? delivery.evidence.unitEvidenceIds.at(-1) : undefined;
+  if (delivery?.evidence.kind !== "verified_commit") return;
+  const evidenceId = delivery.evidence.unitEvidenceIds.at(-1);
   return evidenceId ? { taskId, evidenceId } : undefined;
 }

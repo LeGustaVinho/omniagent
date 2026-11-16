@@ -92,6 +92,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/075-markdown-rename-previews.sql"),
     include_str!("../migrations/076-conversation-library-activity.sql"),
     include_str!("../migrations/077-conversation-continuation.sql"),
+    include_str!("../migrations/078-verified-merge.sql"),
+    include_str!("../migrations/079-delivery-milestones.sql"),
+    include_str!("../migrations/080-destination-drift.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

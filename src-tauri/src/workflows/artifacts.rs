@@ -33,6 +33,14 @@ pub struct ScopedEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkflowMergeReference {
+    pub task: TaskReference,
+    pub id: String,
+    pub commit_evidence_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkflowAcceptanceReference {
     pub evidence: ScopedEvidence,
     pub review_artifact_id: String,
@@ -69,6 +77,7 @@ pub enum ArtifactValue {
     Checks(ScopedEvidence),
     Acceptance(WorkflowAcceptanceReference),
     Git(ScopedEvidence),
+    Merge(WorkflowMergeReference),
 }
 
 impl ArtifactValue {
@@ -85,6 +94,7 @@ impl ArtifactValue {
             Self::Checks(_) => ArtifactKind::Checks,
             Self::Acceptance(_) => ArtifactKind::Acceptance,
             Self::Git(_) => ArtifactKind::Git,
+            Self::Merge(_) => ArtifactKind::Merge,
         }
     }
 }
@@ -399,6 +409,21 @@ impl Store {
                     "Git evidence is unavailable in the owning task"
                 );
             }
+            ArtifactValue::Merge(reference) => {
+                ensure!(
+                    reference.task.project_id == project
+                        && self
+                            .verified_delivery_merge(
+                                project.into(),
+                                reference.task.task_id.clone(),
+                                reference.commit_evidence_id.clone(),
+                            )
+                            .await?
+                            .is_some_and(|receipt| receipt.id == reference.id
+                                && receipt.workflow_run_id == run),
+                    "integration evidence is unavailable in the owning task and workflow"
+                );
+            }
         }
         Ok(())
     }
@@ -490,9 +515,11 @@ pub(super) fn load_artifact(
          WHERE a.id = ?1 AND a.kind = ?2 AND w.project_id = ?3 AND w.pipeline_run_id = ?4",
         params![id, kind.key(), project, run], |row| row.get(0),
     ).optional()?;
-    evidence
-        .map(|evidence| Ok(serde_json::from_slice(&protection::unprotect(&evidence)?)?))
-        .transpose()
+    let Some(evidence) = evidence else {
+        return Ok(None);
+    };
+    let artifact: WorkflowArtifact = serde_json::from_slice(&protection::unprotect(&evidence)?)?;
+    Ok((artifact.value.kind() == kind).then_some(artifact))
 }
 
 pub(super) fn insert_artifact(

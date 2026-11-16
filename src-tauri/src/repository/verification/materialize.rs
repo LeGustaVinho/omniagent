@@ -72,45 +72,7 @@ pub(super) fn materialize(
         tree == selected.tree,
         "the saved candidate no longer reproduces its selected tree"
     );
-    let base = &selected.base_commit;
-    let commit = git.object_with_input(
-        &["commit-tree", &tree, "-p", base],
-        Some(b"Selected candidate\n"),
-    )?;
-    let roots = format!("{commit}\n");
-    let pack = git.root().join(".git/objects/pack/candidate");
-    git.run(
-        &[
-            "pack-objects",
-            "--quiet",
-            "--revs",
-            pack.to_str().context("invalid pack path")?,
-        ],
-        Some(roots.as_bytes()),
-    )?;
-    fs::remove_file(git.root().join(".git/objects/info/alternates"))?;
-    git.run(&["update-ref", "--no-deref", "HEAD", &commit], None)?;
-    // The candidate test sees canonical Git blob bytes with no checkout filters.
-    let info = git.root().join(".git/info");
-    fs::create_dir_all(&info)?;
-    fs::write(
-        info.join("attributes"),
-        "* -text -eol -filter -ident -working-tree-encoding\n",
-    )?;
-    git.run(&["read-tree", &tree], None)?;
-    git.run(&["checkout-index", "--all"], None)?;
-    ensure!(
-        git.object(&["write-tree"])? == tree,
-        "materialized index has changed"
-    );
-    ensure!(
-        git.run(&["status", "--porcelain=v1", "--untracked-files=all"], None)?
-            .is_empty(),
-        "materialized candidate checkout has unexpected working-tree changes"
-    );
-    Ok(MaterializedCandidate {
-        scratch: git.scratch,
-    })
+    git.materialize_tree(&tree, &[&selected.base_commit], b"Selected candidate\n")
 }
 
 fn replay(
@@ -216,13 +178,13 @@ fn replay(
     Ok((git, tree))
 }
 
-struct ScratchGit {
+pub(in crate::repository) struct ScratchGit {
     scratch: tempfile::TempDir,
     executable: PathBuf,
 }
 
 impl ScratchGit {
-    fn new(common: &Path, base: &str) -> Result<Self> {
+    pub(in crate::repository) fn new(common: &Path, base: &str) -> Result<Self> {
         let git = Self {
             scratch: tempfile::tempdir()?,
             executable: git_path()?,
@@ -250,8 +212,55 @@ impl ScratchGit {
         Ok(git)
     }
 
-    fn root(&self) -> &Path {
+    pub(in crate::repository) fn root(&self) -> &Path {
         self.scratch.path()
+    }
+
+    pub(in crate::repository) fn materialize_tree(
+        self,
+        tree: &str,
+        parents: &[&str],
+        message: &[u8],
+    ) -> Result<MaterializedCandidate> {
+        let mut args = vec!["commit-tree", tree];
+        for parent in parents {
+            args.extend(["-p", parent]);
+        }
+        let commit = self.object_with_input(&args, Some(message))?;
+        let roots = format!("{commit}\n");
+        let pack = self.root().join(".git/objects/pack/candidate");
+        self.run(
+            &[
+                "pack-objects",
+                "--quiet",
+                "--revs",
+                pack.to_str().context("invalid pack path")?,
+            ],
+            Some(roots.as_bytes()),
+        )?;
+        fs::remove_file(self.root().join(".git/objects/info/alternates"))?;
+        self.run(&["update-ref", "--no-deref", "HEAD", &commit], None)?;
+        // The candidate test sees canonical Git blob bytes with no checkout filters.
+        let info = self.root().join(".git/info");
+        fs::create_dir_all(&info)?;
+        fs::write(
+            info.join("attributes"),
+            "* -text -eol -filter -ident -working-tree-encoding\n",
+        )?;
+        self.run(&["read-tree", tree], None)?;
+        self.run(&["checkout-index", "--all"], None)?;
+        ensure!(
+            self.object(&["write-tree"])? == tree,
+            "materialized index has changed"
+        );
+        ensure!(
+            self.run(&["status", "--porcelain=v1", "--untracked-files=all"], None)?
+                .is_empty(),
+            "materialized candidate checkout has unexpected working-tree changes"
+        );
+        Ok(MaterializedCandidate {
+            scratch: self.scratch,
+        })
     }
 
     fn apply(&self, patch: &[u8]) -> Result<()> {
@@ -275,7 +284,7 @@ impl ScratchGit {
         Ok(result.into())
     }
 
-    fn run(&self, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
+    pub(in crate::repository) fn command(&self) -> std::process::Command {
         let mut command = git_command(&self.executable, self.root());
         command
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -299,8 +308,13 @@ impl ScratchGit {
                 "core.symlinks=false",
                 "-c",
                 "core.protectNTFS=true",
-            ])
-            .args(args);
+            ]);
+        command
+    }
+
+    fn run(&self, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
+        let mut command = self.command();
+        command.args(args);
         if let Some(bytes) = input {
             use std::io::{Seek, Write};
             let mut data = tempfile::tempfile()?;

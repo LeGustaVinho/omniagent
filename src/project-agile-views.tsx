@@ -26,7 +26,8 @@ export function WorkBlockers({ row, openQuestion, openWork }: Pick<Views, "openQ
     {work?.prerequisiteBlockers?.map((dependency) => <p key={dependency.taskId}>Waiting for <button type="button"
       className="text-primary hover:underline" onClick={() => openWork(dependency.taskId)}>{dependency.title}</button></p>)}
     {work?.waitingForCommit && <p>Waiting for commit</p>}
-    {work?.pendingRepositoryChanges && !work.waitingForCommit && <p>Unreviewed repository changes</p>}</>;
+    {work?.waitingForMerge && <p>Waiting for merge</p>}
+    {work?.pendingRepositoryChanges && !work.waitingForCommit && !work.waitingForMerge && <p>Unreviewed repository changes</p>}</>;
 }
 
 function EvidenceLink({ row, reference, openEvidence }: { row: AgileRow; reference: "branch" | "commit"; openEvidence: Views["openEvidence"] }) {

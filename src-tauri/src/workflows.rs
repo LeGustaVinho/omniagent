@@ -11,6 +11,7 @@ mod execution;
 #[cfg(test)]
 mod git_integration;
 mod job_inputs;
+mod merge_execution;
 mod operator;
 mod plan_revision;
 #[cfg(test)]
@@ -28,7 +29,7 @@ pub(crate) use approval::{
 };
 pub use artifacts::{
     ApprovalReference, ArtifactValue, CandidateReference, ScopedEvidence, TaskReference,
-    WorkflowAcceptanceReference, WorkflowArtifact,
+    WorkflowAcceptanceReference, WorkflowArtifact, WorkflowMergeReference,
 };
 pub use builtin::{DeliveryRoles, builtin_delivery_graph};
 pub use execution::{NodeInputs, WorkflowHostRequest, WorkflowHostSubmission};

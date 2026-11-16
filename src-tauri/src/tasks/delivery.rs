@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -7,16 +7,17 @@ use crate::{
     jobs::saved_checkpoint_is_current,
     protection,
     providers::{ProviderEvent, ProviderEventData, RequestId},
-    repository::verified_git::load_verified_delivery_commit,
+    repository::verified_merge::{VerifiedMerge, load_verified_delivery_merge},
     store::Store,
     workflows::{
-        active_delivery_workflow, detach_active_delivery_workflow, load_delivery_units,
-        waiting_for_delivery_commit,
+        active_delivery_workflow, detach_active_delivery_workflow, waiting_for_delivery_commit,
     },
 };
 
+use self::milestone::{DeliveryCompletionMilestone, PendingTaskDeliveryMerge, pending_merge};
 use super::{TaskWorkflowState, activity::load_task_details, load_project_task};
 
+pub(crate) mod milestone;
 #[cfg(test)]
 mod tests;
 
@@ -44,6 +45,8 @@ pub struct TaskDelivery {
     pub id: String,
     pub recorded_at: String,
     pub evidence: TaskDeliveryEvidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge: Option<VerifiedMerge>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -51,6 +54,8 @@ pub struct TaskDelivery {
 pub struct TaskDeliveryState {
     pub state: TaskWorkflowState,
     pub waiting_for_commit: bool,
+    pub waiting_for_merge: bool,
+    pub pending_merge: Option<PendingTaskDeliveryMerge>,
     pub pending_repository_changes: bool,
     pub checklist_resolved: bool,
     pub has_direct_work: bool,
@@ -128,7 +133,10 @@ impl Store {
                 )?
                 .query_map(params![project, task], read_delivery)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            records.into_iter().map(decode_delivery).collect()
+            records
+                .into_iter()
+                .map(|receipt| decode_delivery(db, &project, &task, receipt))
+                .collect()
         })
         .await
     }
@@ -262,65 +270,6 @@ pub(crate) fn validate_repository_delivery_open(
     Ok(())
 }
 
-pub(crate) fn record_verified_task_delivery(
-    db: &Connection,
-    project: &str,
-    task: &str,
-    workflow_run: &str,
-    plan_revision: &str,
-) -> Result<TaskDelivery> {
-    let receipt = db
-        .query_row(
-            "SELECT id, recorded_at, payload FROM task_delivery_events
-         WHERE project_id = ?1 AND task_id = ?2 AND workflow_run_id = ?3
-           AND workflow_plan_revision = ?4",
-            params![project, task, workflow_run, plan_revision],
-            read_delivery,
-        )
-        .optional()?;
-    if let Some(receipt) = receipt {
-        return decode_delivery(receipt);
-    }
-    ensure!(
-        active_delivery_workflow(db, project, task)?.as_deref() == Some(workflow_run),
-        "this workflow is no longer active for this task"
-    );
-    let units = load_delivery_units(db, project, task, workflow_run)?;
-    let mut previous_sha: Option<String> = None;
-    let mut unit_evidence_ids = Vec::with_capacity(units.len());
-    for unit in units {
-        let id = unit
-            .commit_evidence_id
-            .context("a planned unit is still waiting for a verified commit")?;
-        let evidence = load_verified_delivery_commit(db, project, task, &id)?
-            .context("unit commit evidence is missing")?;
-        ensure!(
-            unit.plan_revision == plan_revision
-                && evidence.unit_id == unit.unit.id
-                && evidence.purpose == unit.unit.purpose
-                && evidence.checkout_id == unit.checkout_id
-                && previous_sha
-                    .as_ref()
-                    .is_none_or(|sha| sha == &evidence.base_commit),
-            "unit commit evidence does not match the planned delivery chain"
-        );
-        unit_evidence_ids.push(id);
-        previous_sha = Some(evidence.sha);
-    }
-    let completion_sha = previous_sha.context("delivery requires at least one planned unit")?;
-    insert_delivery(
-        db,
-        project,
-        task,
-        TaskDeliveryEvidence::VerifiedCommit {
-            workflow_run_id: workflow_run.into(),
-            plan_revision: plan_revision.into(),
-            unit_evidence_ids,
-            completion_sha,
-        },
-    )
-}
-
 pub(super) fn load_delivery_state(
     db: &Connection,
     project: &str,
@@ -360,6 +309,15 @@ fn load_delivery_core(db: &Connection, project: &str, task: &str) -> Result<Task
     let active_workflow_run_id = active_delivery_workflow(db, project, task)?;
     let waiting_for_commit =
         active_workflow_run_id.is_some() && waiting_for_delivery_commit(db, project, task)?;
+    let merge_candidate = active_workflow_run_id
+        .as_deref()
+        .map(|workflow| pending_merge(db, project, task, workflow))
+        .transpose()?
+        .flatten();
+    let waiting_for_merge = merge_candidate
+        .as_ref()
+        .is_some_and(|(milestone, _)| *milestone == DeliveryCompletionMilestone::VerifiedMerge);
+    let pending_merge = merge_candidate.map(|(_, candidate)| candidate);
     let pending_repository_changes: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM pending_worktree_changes
          WHERE project_id = ?1 AND scope_task_id = ?2)",
@@ -378,7 +336,7 @@ fn load_delivery_core(db: &Connection, project: &str, task: &str) -> Result<Task
         && (!checklist_resolved || pending_repository_changes);
     let completion = latest
         .and_then(|(_, id, at, payload)| payload.map(|payload| (id, at, payload)))
-        .map(decode_delivery)
+        .map(|receipt| decode_delivery(db, project, task, receipt))
         .transpose()?
         .filter(|_| checklist_resolved && !pending_repository_changes);
     let children = child_states(db, project, task, false)?;
@@ -403,7 +361,7 @@ fn load_delivery_core(db: &Connection, project: &str, task: &str) -> Result<Task
         TaskWorkflowState::Completed
     } else if question_blocker.is_some() {
         TaskWorkflowState::Blocked
-    } else if waiting_for_commit || awaiting_completion {
+    } else if waiting_for_commit || waiting_for_merge || awaiting_completion {
         TaskWorkflowState::InReview
     } else {
         group_state(
@@ -420,6 +378,8 @@ fn load_delivery_core(db: &Connection, project: &str, task: &str) -> Result<Task
     Ok(TaskDeliveryState {
         state,
         waiting_for_commit,
+        waiting_for_merge,
+        pending_merge,
         pending_repository_changes,
         checklist_resolved,
         has_direct_work,
@@ -579,6 +539,7 @@ fn insert_delivery(
         id,
         recorded_at,
         evidence,
+        merge: None,
     })
 }
 
@@ -596,11 +557,27 @@ fn read_delivery(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProtectedDelivery>
     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
 }
 
-fn decode_delivery((id, recorded_at, protected): ProtectedDelivery) -> Result<TaskDelivery> {
+fn decode_delivery(
+    db: &Connection,
+    project: &str,
+    task: &str,
+    (id, recorded_at, protected): ProtectedDelivery,
+) -> Result<TaskDelivery> {
     let evidence = serde_json::from_slice(&protection::unprotect(&protected)?)?;
+    let merge = match &evidence {
+        TaskDeliveryEvidence::VerifiedCommit {
+            unit_evidence_ids, ..
+        } => unit_evidence_ids
+            .last()
+            .map(|commit| load_verified_delivery_merge(db, project, task, commit))
+            .transpose()?
+            .flatten(),
+        TaskDeliveryEvidence::Manual { .. } => None,
+    };
     Ok(TaskDelivery {
         id,
         recorded_at,
         evidence,
+        merge,
     })
 }

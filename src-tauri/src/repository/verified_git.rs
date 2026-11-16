@@ -28,6 +28,7 @@ pub enum DeliveryGitPolicy {
     #[default]
     AutomaticCommitUserMerge,
     UserCommitsAndMerges,
+    AutomaticLocalCommitAndMerge,
 }
 
 impl DeliveryGitPolicy {
@@ -35,7 +36,12 @@ impl DeliveryGitPolicy {
         match self {
             Self::AutomaticCommitUserMerge => "automatic_commit_user_merge",
             Self::UserCommitsAndMerges => "user_commits_and_merges",
+            Self::AutomaticLocalCommitAndMerge => "automatic_local_commit_and_merge",
         }
+    }
+
+    fn automatically_commits(self) -> bool {
+        !matches!(self, Self::UserCommitsAndMerges)
     }
 }
 
@@ -170,8 +176,7 @@ impl Store {
             }
             DeliveryRead::Current(state) => state,
         };
-        if state.policy == DeliveryGitPolicy::UserCommitsAndMerges && request.external_sha.is_none()
-        {
+        if !state.policy.automatically_commits() && request.external_sha.is_none() {
             return Ok(DeliveryCommitOutcome::WaitingForCommit);
         }
         let policy = state.policy;
@@ -287,7 +292,7 @@ impl Store {
                     DeliveryRead::Saved(_) => return Ok(()),
                     DeliveryRead::Current(state) => state,
                 };
-                ensure!(state.policy == DeliveryGitPolicy::AutomaticCommitUserMerge, "Git delivery policy changed; retry the commit action");
+                ensure!(state.policy.automatically_commits(), "Git delivery policy changed; retry the commit action");
                 if let Some(previous) = state.intent {
                     ensure!(previous.sha == intent.sha && previous.captured_index_digest == intent.captured_index_digest,
                         "a different commit is already prepared for this unit");
@@ -305,7 +310,7 @@ impl Store {
     }
 }
 
-fn load_policy(db: &Connection, project: &str) -> Result<DeliveryGitPolicy> {
+pub(crate) fn load_policy(db: &Connection, project: &str) -> Result<DeliveryGitPolicy> {
     let mode: Option<String> = db.query_row(
         "SELECT m.mode FROM projects p LEFT JOIN project_delivery_git_policies m ON m.project_id = p.id WHERE p.id = ?1",
         [project],
@@ -316,6 +321,9 @@ fn load_policy(db: &Connection, project: &str) -> Result<DeliveryGitPolicy> {
             Ok(DeliveryGitPolicy::AutomaticCommitUserMerge)
         }
         Some("user_commits_and_merges") => Ok(DeliveryGitPolicy::UserCommitsAndMerges),
+        Some("automatic_local_commit_and_merge") => {
+            Ok(DeliveryGitPolicy::AutomaticLocalCommitAndMerge)
+        }
         Some(_) => anyhow::bail!("invalid Git delivery policy"),
     }
 }
@@ -450,7 +458,7 @@ fn settle_commit(
         external.clone()
     } else if actual_head == candidate.base_commit {
         ensure!(
-            state.policy == DeliveryGitPolicy::AutomaticCommitUserMerge,
+            state.policy.automatically_commits(),
             "manual Git delivery requires a commit SHA"
         );
         update_branch = true;

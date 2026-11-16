@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
+import type { DeliveryGitPolicy } from "@/delivery-git-policy";
+import type { MergeAttempt, MergeOutcome } from "@/delivery-merge-model";
 import { DeliveryAgent } from "@/repository-delivery-agent";
 import { VerifiedDeliveryHistory } from "@/repository-delivery-history";
 import {
@@ -21,9 +23,10 @@ type Verification = {
   gates: { gate: { name: string; required: boolean }; outcome: { status: string; reason?: string } | null }[];
 };
 type Acceptance = { candidate: { id: string }; verification: { id: string } };
-type UnitOutcome = { status: "waiting_for_commit" } | { status: "artifact"; artifact: { id: string } };
+type UnitOutcome = { status: "waiting_for_commit" } | { status: "artifact"; artifact: { id: string } }
+  | { status: "commit_with_merge"; artifact: { id: string }; merge: MergeOutcome };
 
-export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationInputs, actions, openActivity, active }: {
+export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationInputs, actions, openActivity, active, onAutomaticMerge }: {
   scope: DeliveryTarget;
   unit: DeliveryUnit;
   delivery: DeliverySnapshot;
@@ -31,6 +34,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
   actions: DeliveryActions;
   openActivity: WorkspaceProps["openActivity"];
   active: boolean;
+  onAutomaticMerge?: MergeAttempt;
 }) {
   const { taskId, unit: planned, commitEvidenceId } = unit;
   const { id: unitId } = planned;
@@ -86,7 +90,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
     Boolean(newestCheck?.data.id));
   const policy = useQuery({
     queryKey: ["delivery-git-policy", scope.projectId],
-    queryFn: () => invoke<"automatic_commit_user_merge" | "user_commits_and_merges">("delivery_git_policy", { projectId: scope.projectId }),
+    queryFn: () => invoke<DeliveryGitPolicy>("delivery_git_policy", { projectId: scope.projectId }),
     enabled: Boolean(accepted),
   });
   const captureArtifact = capture.data?.kind === "saved" ? capture.data.artifact : undefined;
@@ -170,6 +174,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
                 action: "verify_commit", externalSha: null,
               });
               setManualWait(outcome.status === "waiting_for_commit");
+              if (outcome.status === "commit_with_merge") onAutomaticMerge?.(outcome.merge);
               return outcome;
             })}>Accept diff</Button>
         </>}
@@ -184,6 +189,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
                 action: "verify_commit", externalSha: sha.trim() || null,
               });
               setManualWait(outcome.status === "waiting_for_commit");
+              if (outcome.status === "commit_with_merge") onAutomaticMerge?.(outcome.merge);
               return outcome;
             })}>{manual || sha.trim() ? "Verify commit" : "Create verified commit"}</Button>
         </>}

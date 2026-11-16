@@ -40,6 +40,7 @@ use super::{
 
 mod commit_intent;
 mod history_integration;
+mod milestones;
 mod live_cli_acceptance;
 
 #[tokio::test]

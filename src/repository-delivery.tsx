@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
+import type { MergeOutcome } from "@/delivery-merge-model";
 import { DeliveryAgent } from "@/repository-delivery-agent";
 import {
   matchingJob, matchingReview, type DeliveryActions, type DeliveryInputs, type DeliveryRun,
   type DeliverySnapshot, type DeliveryTarget, type DeliveryUnit,
 } from "@/repository-delivery-model";
 import { RepositoryDeliveryUnit } from "@/repository-delivery-unit";
+import { RepositoryDeliveryMerge } from "@/repository-delivery-merge";
 import { SavedDeliverySource } from "@/repository-delivery-history";
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -17,6 +19,7 @@ type TaskOption = { id: string; title: string };
 type TaskDeliveryStatus = {
   state: string;
   waitingForCommit: boolean;
+  waitingForMerge?: boolean;
   checklistResolved: boolean;
   pendingRepositoryChanges: boolean;
   activeWorkflowRunId: string | null;
@@ -32,6 +35,7 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
   const [chosenTask, setChosenTask] = useState("");
   const [title, setTitle] = useState("");
   const [proposal, setProposal] = useState("");
+  const [automaticMerge, setAutomaticMerge] = useState<MergeOutcome>();
   const scope: DeliveryTarget = { projectId, runId: delivery.run.id };
   const context = delivery.artifacts.find(({ nodeInstanceId, port }) => nodeInstanceId === "context" && port === "context");
   const plan = delivery.artifacts.find(({ id }) => id === delivery.run.planRevision);
@@ -136,7 +140,7 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
       Prepare managed worktree
     </Button>}
     {state.data && <div className="pipeline-stack">
-      <p role="status">Task · {state.data.waitingForCommit ? "In review · Waiting for commit" : state.data.state.replaceAll("_", " ")}</p>
+      <p role="status">Task · {state.data.waitingForCommit ? "In review · Waiting for commit" : state.data.waitingForMerge ? "In review · Waiting for merge" : state.data.state.replaceAll("_", " ")}</p>
       {state.data.completion?.evidence.completionSha && <p>Completion SHA <code className="break-all">{state.data.completion.evidence.completionSha}</code></p>}
       {!state.data.checklistResolved && <p>Resolve the task checklist before completing delivery.</p>}
       {state.data.pendingRepositoryChanges && <p>Additional repository changes are assigned to this Task or Sub-Task.</p>}
@@ -152,8 +156,11 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
     {plan && release && worktree && units.data?.map((unit) => <RepositoryDeliveryUnit
       key={unit.unit.id} scope={scope} delivery={delivery} unit={unit}
       implementationInputs={{ plan: plan.id, worktree: worktree.id, release: release.id }}
-      actions={actions} openActivity={openActivity} active={activeDelivery && unit.unit.id === awaitingUnit} />)}
-    {activeDelivery && linked && last && finalGit && !awaitingUnit && !result && <Button variant="outline" disabled={actions.busy}
+      actions={actions} openActivity={openActivity} onAutomaticMerge={setAutomaticMerge}
+      active={activeDelivery && unit.unit.id === awaitingUnit} />)}
+    {last?.commitEvidenceId && finalGit && !awaitingUnit && <RepositoryDeliveryMerge key={last.commitEvidenceId}
+      scope={scope} unit={last} gitArtifactId={finalGit.id} actions={actions} automaticOutcome={automaticMerge} />}
+    {activeDelivery && linked && last && finalGit && !awaitingUnit && !result && <Button variant="outline" disabled={actions.busy || state.data?.waitingForMerge}
       onClick={() => actions.execute(() => invoke("execute_repository_delivery_unit", {
         input: { ...scope, taskId, unitId: last.unit.id, nodeId: "result",
           inputs: { git: finalGit.id, task: linked.id }, request: { action: "result" } },
@@ -183,6 +190,7 @@ export function RepositoryDeliveryWorkspace({ checkout, target, startSimulation,
   const refresh = () => Promise.all([
     client.invalidateQueries({ queryKey: ["repository-delivery", projectId] }),
     client.invalidateQueries({ queryKey: ["delivery-selection", projectId] }),
+    client.invalidateQueries({ queryKey: ["delivery-merge", projectId] }),
     client.invalidateQueries({ queryKey: ["project-job-queue"] }),
   ]);
   const start = useMutation({

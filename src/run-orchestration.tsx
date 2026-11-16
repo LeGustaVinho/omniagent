@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { GoalEvidence, type InspectedGoal } from "@/goal-evidence";
 import { GoalVerificationPanel } from "@/goal-verification-panel";
 import { WorktreeEvidence } from "@/worktree-evidence";
+import { AttemptDeliveryHistory } from "@/repository-delivery-history";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type Scope = { projectId: string; runId: string; conversationId?: string };
@@ -156,6 +157,7 @@ function OrchestrationDetails({ data, scope, live, navigation }: {
       {requestingRun && <Button variant="outline" onClick={() => navigation.openActivity(requestingRun)}>Open requesting attempt</Button>}
     </div>}
     {job && <WorktreeEvidence projectId={scope.projectId} runId={scope.runId} ownerTaskId={job.ownerTaskId} />}
+    {job?.taskId && <AttemptDeliveryHistory projectId={scope.projectId} runId={scope.runId} navigation={navigation} />}
   </>;
 }
 

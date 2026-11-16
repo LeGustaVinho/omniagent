@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { revisionMessage, savedCandidate } from "@/git-demo-data";
-import { defaultDeliveryGitPolicy, type SimulatedDeliveryGitPolicy } from "@/delivery-git-policy";
+import { defaultDeliveryGitPolicy, type DeliveryGitPolicy } from "@/delivery-git-policy";
 import type { SimulationSession } from "@/workbench-contract";
 
 export const exampleWorktrees = [
@@ -29,7 +29,7 @@ interface GitSession {
   trees: Partial<Record<WorktreeId, WorktreeChanges>>;
   worktrees: readonly GitWorktree[];
   drift: false | "advanced" | "conflict";
-  gitMode: SimulatedDeliveryGitPolicy;
+  gitMode: DeliveryGitPolicy;
   mergeRequired: boolean;
   candidateCommitted: boolean;
 }
@@ -104,7 +104,7 @@ function useGitState(epoch?: number) {
     setDrift: (value: GitSession["drift"]) => setSession((current) => ({
       ...current, drift: value, candidateCommitted: value ? false : current.candidateCommitted,
     })),
-    setGitMode: (value: SimulatedDeliveryGitPolicy) => setSession((current) => ({ ...current, gitMode: value })),
+    setGitMode: (value: DeliveryGitPolicy) => setSession((current) => ({ ...current, gitMode: value })),
     setMergeRequired: (value: boolean) => setSession((current) => ({ ...current, mergeRequired: value })),
   };
 }

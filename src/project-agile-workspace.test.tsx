@@ -73,6 +73,8 @@ function testWorkspace(seed = true) {
       };
       case "project_task_checklist": return { items: checklist };
       case "project_task_deliveries": return scope.taskId === standalone.id ? [evidence] : [];
+      case "verified_work_delivery_units": return [];
+      case "verified_delivery_merge": return null;
       case "project_task_runs": case "project_task_goals": case "project_task_assignments": case "conversation_models": return [];
       case "verified_delivery_commit": expect(args).toEqual({ projectId, taskId: standalone.id, evidenceId: "unit-commit" }); return commit;
       case "verified_delivery_patch": expect(args).toEqual({ projectId, taskId: standalone.id, evidenceId: "unit-commit" }); return { patchBase64: btoa(acceptedDiff) };

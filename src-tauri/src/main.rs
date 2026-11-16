@@ -4,6 +4,7 @@ mod conversation_runtime;
 mod conversation_goal_runtime;
 mod conversation_continuation_runtime;
 mod agile_runtime;
+mod delivery_merge_ipc;
 mod desktop;
 mod git_review_runtime;
 mod ide_source_runtime;
@@ -258,6 +259,17 @@ fn main() {
             task_delivery_ipc::set_delivery_git_policy,
             task_delivery_ipc::verified_delivery_commit,
             task_delivery_ipc::verified_delivery_patch,
+            delivery_merge_ipc::delivery_milestone_policy,
+            delivery_merge_ipc::set_delivery_milestone_policy,
+            delivery_merge_ipc::delivery_destination_drift_policy,
+            delivery_merge_ipc::set_delivery_destination_drift_policy,
+            delivery_merge_ipc::accept_delivery_destination_drift,
+            delivery_merge_ipc::delivery_destination_drift_patch,
+            delivery_merge_ipc::delivery_merge_preview,
+            delivery_merge_ipc::verified_delivery_merge,
+            delivery_merge_ipc::verified_delivery_merge_for_commit,
+            delivery_merge_ipc::verified_work_delivery_units,
+            delivery_merge_ipc::verified_attempt_deliveries,
             task_delivery_ipc::project_task_delivery_state,
             task_delivery_ipc::project_epic_delivery_state,
             task_delivery_ipc::project_task_deliveries,

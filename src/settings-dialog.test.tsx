@@ -73,24 +73,49 @@ it("shows reported CLI permissions independently of Windows sandbox support", as
   expect(screen.getByText("Windows command sandbox").nextElementSibling?.textContent).toBe("Unsupported for this CLI on the Windows host");
 });
 
-it("shows the effective Git default and saves an explicit manual project policy", async () => {
-  invoke.mockImplementation(async (command: string) => {
+it("saves Git automation independently of its completion milestone and destination drift policy", async () => {
+  invoke.mockImplementation(async (command: string, args?: { policy?: unknown }) => {
     switch (command) {
       case "appearance_settings": return defaultAppearance;
       case "candidate_gate_policy": return { revision: "fixture", gates: [] };
       case "delivery_git_policy": return "automatic_commit_user_merge";
-      case "set_delivery_git_policy": return "user_commits_and_merges";
+      case "set_delivery_git_policy": return args?.policy;
+      case "delivery_milestone_policy": return { milestone: "verified_commit", destinationBranch: null };
+      case "delivery_destination_drift_policy": return "pause";
+      case "set_delivery_milestone_policy":
+      case "set_delivery_destination_drift_policy": return args?.policy;
       default: throw new Error(`Unexpected command ${command}`);
     }
   });
   openSettings({ initialPage: "git", simulation: null });
   const policy = screen.getByLabelText("After accepting a diff") as HTMLSelectElement;
+  const user = userEvent.setup();
   await waitFor(() => expect(policy.value).toBe("automatic_commit_user_merge"));
-  await userEvent.setup().selectOptions(policy, "user_commits_and_merges");
+  await user.selectOptions(policy, "user_commits_and_merges");
   expect(invoke).toHaveBeenCalledWith("set_delivery_git_policy", {
     projectId: exampleCheckout.projectId, policy: "user_commits_and_merges",
   });
   await waitFor(() => expect(policy.value).toBe("user_commits_and_merges"));
+  await user.selectOptions(policy, "automatic_local_commit_and_merge");
+  await waitFor(() => expect(policy.value).toBe("automatic_local_commit_and_merge"));
+
+  const completion = screen.getByLabelText<HTMLSelectElement>("Complete repository work at");
+  expect(completion.value).toBe("verified_commit");
+  await user.selectOptions(completion, "verified_merge");
+  const save = screen.getByRole<HTMLButtonElement>("button", { name: "Save completion settings" });
+  expect(save.disabled).toBe(true);
+  await user.type(screen.getByLabelText("Merge destination"), "release/integration");
+  await user.click(save);
+  expect(invoke).toHaveBeenCalledWith("set_delivery_milestone_policy", {
+    projectId: exampleCheckout.projectId, policy: { milestone: "verified_merge", destinationBranch: "release/integration" },
+  });
+  const drift = screen.getByLabelText<HTMLSelectElement>("When the destination branch advances");
+  expect(drift.value).toBe("pause");
+  await user.selectOptions(drift, "prepare_and_recheck");
+  await waitFor(() => expect(drift.value).toBe("prepare_and_recheck"));
+  expect(invoke).toHaveBeenCalledWith("set_delivery_destination_drift_policy", {
+    projectId: exampleCheckout.projectId, policy: "prepare_and_recheck",
+  });
 });
 
 it("checks a backup profile and recovers a failed simulated update without desktop commands", async () => {

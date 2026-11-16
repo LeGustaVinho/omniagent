@@ -36,14 +36,6 @@ pub(super) fn run(
     selected: &SelectedCandidate,
     gate: &PinnedGate,
 ) -> CandidateGateOutcome {
-    let CandidateGateAction::Command {
-        executable,
-        arguments,
-        timeout_seconds,
-    } = &gate.gate.action
-    else {
-        unreachable!("verification dispatch only runs command gates");
-    };
     let checkout = match materialize::materialize(capture, selected) {
         Ok(checkout) => checkout,
         Err(error) => {
@@ -52,12 +44,36 @@ pub(super) fn run(
             ));
         }
     };
+    run_in_checkout(
+        checkout.path(),
+        &gate.gate.action,
+        gate.executable_revision.as_deref(),
+    )
+}
+
+pub(in crate::repository) fn run_in_checkout(
+    checkout: &Path,
+    action: &CandidateGateAction,
+    expected_revision: Option<&str>,
+) -> CandidateGateOutcome {
+    let (executable, arguments, timeout_seconds) = match action {
+        CandidateGateAction::Command {
+            executable,
+            arguments,
+            timeout_seconds,
+        } => (executable, arguments, timeout_seconds),
+        CandidateGateAction::Unavailable { reason } => {
+            return CandidateGateOutcome::CouldNotRun {
+                reason: reason.clone(),
+            };
+        }
+    };
     let Ok((executable_lock, actual_revision)) = pin_executable(executable) else {
         return unavailable(
             "The configured executable cannot be opened as a local locked file".into(),
         );
     };
-    if Some(&actual_revision) != gate.executable_revision.as_ref() {
+    if Some(actual_revision.as_str()) != expected_revision {
         return unavailable(
             "The configured executable is missing or its revision has changed".into(),
         );
@@ -66,7 +82,7 @@ pub(super) fn run(
     let process = match DirectWindowsRunner.launch(LaunchRequest {
         version: CONTRACT_VERSION,
         executable,
-        checkout: checkout.path(),
+        checkout,
         arguments: &args,
     }) {
         Ok(process) => process,

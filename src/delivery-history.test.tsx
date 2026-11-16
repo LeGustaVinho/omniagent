@@ -9,6 +9,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { Job } from "@/bindings/Job";
 import { ProjectTasksWorkspace } from "@/project-tasks";
 import { RepositoryDeliveryWorkspace } from "@/repository-delivery";
+import { AttemptDeliveryHistory } from "@/repository-delivery-history";
+import type { VerifiedDeliveryUnitHistory } from "@/project-agile-model";
 import type { DeliverySnapshot } from "@/repository-delivery-model";
 import { RunOrchestrationPanel } from "@/run-orchestration";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
@@ -71,6 +73,8 @@ it("reopens a completed task and navigates its original note, selected diff, acc
         kind: "verified_commit", workflowRunId: runId, completionSha: sha, unitEvidenceIds: [receiptId],
       } }];
       case "project_task_runs": case "project_task_assignments": case "conversation_models": return [];
+      case "verified_work_delivery_units": return [];
+      case "verified_delivery_merge": return null;
       case "list_repository_markdown_revisions": return [updated, note];
       case "list_repository_deliveries": return [delivery.run];
       case "inspect_repository_delivery":

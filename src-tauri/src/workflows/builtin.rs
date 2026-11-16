@@ -7,6 +7,8 @@ use super::{
     BuiltinNode, Endpoint, NodeConfiguration, NodeInstance, Wire, WorkflowGraph, WorkflowRun,
 };
 
+pub(super) const BUILTIN_DELIVERY_ID: &str = "builtin-task-delivery";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryRoles {
@@ -71,6 +73,7 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
         ),
         ("accept", AcceptCandidate, None),
         ("commit", VerifyCommit, None),
+        ("merge", VerifyMerge, None),
         ("result", Result, None),
     ]
     .into_iter()
@@ -111,6 +114,8 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
         ("accept", "accepted", "commit", "ready"),
         ("accept", "acceptance", "commit", "acceptance"),
         ("implement", "candidate", "commit", "candidate"),
+        ("commit", "verified", "merge", "ready"),
+        ("commit", "git", "merge", "git"),
         ("commit", "verified", "result", "ready"),
         ("commit", "git", "result", "git"),
         ("work", "task", "result", "task"),
@@ -143,7 +148,7 @@ impl Store {
         let version = self
             .save_workflow_revision(
                 project.clone(),
-                "builtin-task-delivery".into(),
+                BUILTIN_DELIVERY_ID.into(),
                 builtin_delivery_graph(roles),
             )
             .await?;

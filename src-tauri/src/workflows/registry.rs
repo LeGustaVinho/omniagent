@@ -15,6 +15,7 @@ pub enum BuiltinNode {
     VerifyCandidate,
     AcceptCandidate,
     VerifyCommit,
+    VerifyMerge,
     Result,
 }
 
@@ -27,6 +28,7 @@ impl BuiltinNode {
                 | Self::VerifyCandidate
                 | Self::AcceptCandidate
                 | Self::VerifyCommit
+                | Self::VerifyMerge
                 | Self::Result
         )
     }
@@ -46,6 +48,7 @@ pub enum ArtifactKind {
     Checks,
     Acceptance,
     Git,
+    Merge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +95,7 @@ pub enum Executor {
     CheckCandidate,
     RecordCandidateAcceptance,
     VerifyGitCommit,
+    VerifyGitMerge,
     PublishResult,
 }
 
@@ -108,6 +112,7 @@ pub enum Effect {
     VerifyCandidate,
     RecordAcceptance,
     VerifyRepositoryCommit,
+    VerifyRepositoryMerge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +273,15 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             &[("verified", Control), ("git", Data(Git))],
         ),
         (
+            VerifyMerge,
+            "Verify merge",
+            Executor::VerifyGitMerge,
+            ConfigurationKind::None,
+            Effect::VerifyRepositoryMerge,
+            &[("ready", Control), ("git", Data(Git))],
+            &[("verified", Control), ("integration", Data(Merge))],
+        ),
+        (
             Result,
             "Result",
             Executor::PublishResult,
@@ -316,7 +330,9 @@ impl ArtifactKind {
             Self::Candidate => "candidate",
             Self::Checks => "checks",
             Self::Acceptance => "acceptance",
-            Self::Git => "git",
+            // Existing databases classify both receipts as repository Git evidence.
+            // Protected payloads and pinned ports distinguish the two receipts.
+            Self::Git | Self::Merge => "git",
         }
     }
 }

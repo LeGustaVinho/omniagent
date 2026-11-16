@@ -4,7 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     protection,
-    repository::verified_git::{DeliveryCommitOutcome, DeliveryCommitRequest},
+    repository::{
+        destination_drift::DestinationDriftOutcome,
+        verified_git::{DeliveryCommitOutcome, DeliveryCommitRequest},
+        verified_merge::VerifiedMerge,
+    },
     store::Store,
 };
 
@@ -22,8 +26,24 @@ use super::{
 )]
 pub enum WorkflowUnitRequest {
     VerifyCandidate,
-    AcceptCandidate { completion_criteria: Vec<String> },
-    VerifyCommit { external_sha: Option<String> },
+    AcceptCandidate {
+        completion_criteria: Vec<String>,
+    },
+    VerifyCommit {
+        external_sha: Option<String>,
+    },
+    VerifyMerge {
+        expected_source_branch: String,
+        expected_source_sha: String,
+        destination_branch: String,
+        expected_destination_sha: String,
+        external_sha: Option<String>,
+        drift_acceptance_id: Option<String>,
+        #[serde(default)]
+        prepare_drift: bool,
+        #[serde(default)]
+        perform: bool,
+    },
     Result,
 }
 
@@ -38,10 +58,37 @@ pub struct WorkflowUnitSubmission {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum WorkflowUnitOutcome {
     WaitingForCommit,
-    Artifact { artifact: WorkflowArtifact },
+    WaitingForMerge,
+    DestinationMoved {
+        actual_sha: String,
+    },
+    DestinationDrift {
+        recovery: DestinationDriftOutcome,
+    },
+    DestinationCheckedOut {
+        checkout: String,
+    },
+    Conflicted,
+    MergeBlocked {
+        reason: String,
+    },
+    MergeVerified {
+        evidence: VerifiedMerge,
+    },
+    Artifact {
+        artifact: WorkflowArtifact,
+    },
+    CommitWithMerge {
+        artifact: WorkflowArtifact,
+        merge: Box<WorkflowUnitOutcome>,
+    },
 }
 
 impl Store {
@@ -58,9 +105,6 @@ impl Store {
             inputs,
             request,
         } = submission;
-        let (node, inputs) = self
-            .workflow_execution_inputs(&project_id, &run_id, &node_id, Some(&unit_id), &inputs)
-            .await?;
         let unit = self
             .execute({
                 let (project, task, unit) = (project_id.clone(), task_id.clone(), unit_id.clone());
@@ -72,6 +116,15 @@ impl Store {
             unit.workflow_run_id == run_id,
             "logical unit belongs to a different delivery"
         );
+        if matches!(request, WorkflowUnitRequest::VerifyMerge { .. }) {
+            return self
+                .execute_workflow_merge_submission(&unit, node_id, inputs, request)
+                .await;
+        }
+        let (node, inputs) = self
+            .workflow_execution_inputs(&project_id, &run_id, &node_id, Some(&unit_id), &inputs)
+            .await?;
+        let committing = node.definition.executor == Executor::VerifyGitCommit;
         let task = TaskReference {
             project_id: project_id.clone(),
             task_id: task_id.clone(),
@@ -242,31 +295,72 @@ impl Store {
                             && last.commit_evidence_id.as_ref() == Some(&commit.id)),
                     "the result requires a complete ordered delivery and its final commit"
                 );
+                if self
+                    .project_task_delivery_state(project_id.clone(), task_id.clone())
+                    .await?
+                    .is_some_and(|state| {
+                        state.active_workflow_run_id.as_deref() == Some(run_id.as_str())
+                            && state.waiting_for_merge
+                    })
+                {
+                    return Ok(WorkflowUnitOutcome::WaitingForMerge);
+                }
                 ("delivery", ArtifactValue::Git(commit.clone()))
             }
             _ => anyhow::bail!("the host request does not match the pinned unit executor"),
         };
         let artifact = self
-            .execute(move |db| {
-                let active = load_delivery_unit(db, &project_id, &task_id, &unit_id)?
-                    .context("delivery was superseded before recording evidence")?;
-                ensure!(
-                    active.plan_revision == unit.plan_revision
-                        && active.checkout_id == unit.checkout_id,
-                    "delivery scope changed before recording evidence"
-                );
-                insert_scoped_artifact(
-                    db,
-                    &project_id,
-                    run_id,
-                    node_id,
-                    port.into(),
-                    Some(unit_id),
-                    value,
-                )
-            })
+            .record_workflow_unit_artifact(&unit, node_id, port, value)
             .await?;
+        if committing {
+            let follow_up = match self
+                .pin_and_follow_up_workflow_merge(&unit, &artifact)
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => Some(WorkflowUnitOutcome::MergeBlocked {
+                    reason: crate::diagnostics::preview(&format!("{error:#}")),
+                }),
+            };
+            if let Some(merge) = follow_up {
+                return Ok(WorkflowUnitOutcome::CommitWithMerge {
+                    artifact,
+                    merge: Box::new(merge),
+                });
+            }
+        }
         Ok(WorkflowUnitOutcome::Artifact { artifact })
+    }
+
+    pub(super) async fn record_workflow_unit_artifact(
+        &self,
+        unit: &WorkflowDeliveryUnit,
+        node: String,
+        port: &str,
+        value: ArtifactValue,
+    ) -> Result<WorkflowArtifact> {
+        let unit = unit.clone();
+        let port = port.to_owned();
+        self.execute(move |db| {
+            let active = load_delivery_unit(db, &unit.project_id, &unit.task_id, &unit.unit.id)?
+                .context("delivery was superseded before recording evidence")?;
+            ensure!(
+                active.workflow_run_id == unit.workflow_run_id
+                    && active.plan_revision == unit.plan_revision
+                    && active.checkout_id == unit.checkout_id,
+                "delivery scope changed before recording evidence"
+            );
+            insert_scoped_artifact(
+                db,
+                &unit.project_id,
+                unit.workflow_run_id,
+                node,
+                port,
+                Some(unit.unit.id),
+                value,
+            )
+        })
+        .await
     }
 }
 

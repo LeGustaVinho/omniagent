@@ -16,6 +16,8 @@ use uuid::Uuid;
 use crate::{customizations, store::Store};
 
 mod candidates;
+pub mod delivery_history;
+pub mod destination_drift;
 pub mod documents;
 pub mod git_review;
 mod isolated_git;
@@ -29,6 +31,7 @@ pub mod markdown_links;
 pub mod markdown_renames;
 pub mod verification;
 pub mod verified_git;
+pub mod verified_merge;
 mod worktrees;
 pub(crate) mod writers;
 pub use candidates::{AttemptWorktreeEvidence, CandidateRevision, GitChanges, LiveWorktree};
@@ -216,7 +219,7 @@ fn canonical_git_path(path: Option<&str>) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("repository path cannot be represented in UTF-8"))
 }
 
-fn git_path() -> io::Result<PathBuf> {
+pub(crate) fn git_path() -> io::Result<PathBuf> {
     let paths = env::var_os("PATH").unwrap_or_default();
     env::split_paths(&paths)
         .filter(|dir| dir.is_absolute())
