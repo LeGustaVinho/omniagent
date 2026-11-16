@@ -11,7 +11,9 @@ import {
 import { useTaskAssignments } from "@/task-assignment";
 import type { WorkspaceProps } from "@/workbench-contract";
 
-export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, job, label, actions, openActivity }: {
+type PlanRevisionSource = { sourceAttemptId: string; proposalSequence: string; expectedPlanRevision: string | null };
+
+export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, job, label, actions, openActivity, planRevision }: {
   scope: DeliveryTarget;
   nodeId: DeliveryNode;
   inputs: DeliveryInputs;
@@ -21,17 +23,22 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
   label: string;
   actions: DeliveryActions;
   openActivity: WorkspaceProps["openActivity"];
+  planRevision?: PlanRevisionSource;
 }) {
   const [selection, setSelection] = useState<DeliveryModelChoice>(null);
+  const [revisionSource, setRevisionSource] = useState<PlanRevisionSource>();
+  const [feedback, setFeedback] = useState("");
   const attempt = job?.latestAttempt;
   const active = Boolean(job && (
     (!attempt && job.queueState === "queued") ||
     (attempt && ["starting", "running", "waiting_for_input"].includes(attempt.status))
   ));
+  const revising = Boolean(revisionSource && planRevision && attempt?.status === "succeeded");
+  const choosing = !active && (attempt?.status !== "succeeded" || revising);
   const models = useQueries({ queries: deliveryProviders.map((provider) => ({
     queryKey: ["repository-delivery-models", provider],
     queryFn: () => invoke<DeliveryModel[]>("conversation_models", { provider }),
-    enabled: !active && attempt?.status !== "succeeded",
+    enabled: choosing,
     retry: false,
     staleTime: 60_000,
   })) });
@@ -53,7 +60,10 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
         Open {label.toLowerCase()} attempt
       </Button>}
     </div>}
-    {!active && attempt?.status !== "succeeded" && <>
+    {planRevision && !active && attempt?.status === "succeeded" && !revising &&
+      <Button type="button" variant="outline" disabled={actions.busy}
+        onClick={() => setRevisionSource(planRevision)}>Request plan revision</Button>}
+    {choosing && <>
       <ModelPicker label={`${label} model`} options={options}
         loading={loadingOptions} disabled={actions.busy}
         selection={{ mode: "single", selected: effectiveSelection, onChange: setSelection }} />
@@ -61,12 +71,31 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
         {ready ? "Model from task assignment" : `Task assignment · ${planned.modelId} · ${loadingOptions ? "Checking model availability" : "Unavailable in current profiles"}`}
       </p>}
       {assignments.error && <p role="alert">{String(assignments.error)}</p>}
-      <Button type="button" disabled={!ready || actions.busy}
+      {revising && revisionSource ? <div className="pipeline-form pipeline-stack">
+        <label className="pipeline-stack">
+          Feedback for proposal {revisionSource.proposalSequence}
+          <textarea rows={4} value={feedback} onChange={(event) => setFeedback(event.currentTarget.value)} />
+        </label>
+        <div className="pipeline-actions">
+          <Button type="button" disabled={!ready || !feedback.trim() || actions.busy}
+            onClick={() => actions.execute(async () => {
+              const queued = await invoke("request_repository_plan_revision", { input: {
+                ...scope, contextId: inputs.context, ...revisionSource,
+                selection: effectiveSelection, effort: null, feedback,
+              } });
+              setRevisionSource(undefined);
+              setFeedback("");
+              return queued;
+            })}>Queue plan revision</Button>
+          <Button type="button" variant="outline" disabled={actions.busy}
+            onClick={() => { setRevisionSource(undefined); setFeedback(""); }}>Cancel revision request</Button>
+        </div>
+      </div> : <Button type="button" disabled={!ready || actions.busy}
         onClick={() => actions.execute(() => invoke("submit_repository_delivery_agent", {
           input: { ...scope, nodeId, unitId, inputs, selection: effectiveSelection, effort: null },
         }))}>
         {job ? "Queue another attempt" : `Queue ${label.toLowerCase()}`}
-      </Button>
+      </Button>}
     </>}
   </section>;
 }

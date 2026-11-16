@@ -12,6 +12,7 @@ mod execution;
 mod git_integration;
 mod job_inputs;
 mod operator;
+mod plan_revision;
 #[cfg(test)]
 mod planning_integration;
 mod registry;
@@ -34,6 +35,7 @@ pub use execution::{NodeInputs, WorkflowHostRequest, WorkflowHostSubmission};
 pub(crate) use job_inputs::{WorkflowJobInput, bind_job_input, stage_job_input};
 pub(crate) use operator::waiting_for_delivery_commit;
 pub use operator::{WorkflowAgentTarget, WorkflowOperatorJob, WorkflowPlanProposal};
+pub use plan_revision::{WorkflowPlanHistory, WorkflowPlanRevisionRequest};
 pub use registry::{
     ArtifactKind, BuiltinNode, ConfigurationKind, Effect, Executor, NodeConfiguration,
     NodeDefinition, Port, PortType, builtin_registry,

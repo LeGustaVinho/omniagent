@@ -21,6 +21,8 @@ use super::{
 pub(crate) struct WorkflowJobInput {
     pub unit_id: Option<String>,
     pub artifacts: NodeInputs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_revision_request: Option<super::WorkflowPlanRevisionRequest>,
 }
 
 pub(crate) fn stage_job_input(
@@ -43,6 +45,13 @@ pub(crate) fn stage_job_input(
     );
     if let Some(plan) = &binding.plan_revision {
         require_current_plan(db, project, &binding.pipeline_run_id, plan)?;
+    }
+    if let Some(revision) = &input.plan_revision_request {
+        ensure!(
+            pinned.definition.kind == BuiltinNode::Plan,
+            "only a planner can revise a plan"
+        );
+        super::plan_revision::check_revision_admission(db, project, binding, revision)?;
     }
     if let Some(unit_id) = &input.unit_id {
         let task = request

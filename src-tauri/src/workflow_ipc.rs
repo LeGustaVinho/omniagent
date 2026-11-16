@@ -7,8 +7,8 @@ use omniagent::{
     workflows::{
         ArtifactValue, DeliveryRoles, NodeInputs, WorkflowAgentSubmission, WorkflowArtifact,
         WorkflowDeliveryUnit, WorkflowHostRequest, WorkflowHostSubmission, WorkflowOperatorJob,
-        WorkflowPlanProposal, WorkflowRun, WorkflowUnitOutcome, WorkflowUnitRequest,
-        WorkflowUnitSubmission,
+        WorkflowPlanHistory, WorkflowPlanProposal, WorkflowPlanRevisionRequest, WorkflowRun,
+        WorkflowUnitOutcome, WorkflowUnitRequest, WorkflowUnitSubmission,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -222,26 +222,131 @@ pub async fn submit_repository_delivery_agent(
             "review-candidate" => "Review the selected candidate tree for correctness and evaluate the pinned unit criteria.",
             _ => anyhow::bail!("select an agent stage of the built-in delivery"),
         };
-        let target = store.workflow_operator_agent_target(
-            &input.project_id, &input.run_id, &input.node_id, input.unit_id.as_deref(), &input.inputs,
-        ).await?;
-        let scope = selected_scope(&store, target.checkout_id.clone(), input.selection, input.effort, target.mode).await?;
-        store.submit_workflow_agent(WorkflowAgentSubmission {
-            project_id: input.project_id,
-            dispatch: PipelineDispatch {
-                pipeline_run_id: input.run_id, node_instance_id: input.node_id,
-                plan_revision: target.plan_revision, release_id: target.release_id,
-            },
-            scope,
-            request: JobRequest {
-                checkout_id: Some(target.checkout_id), task_id: target.task_id, mode: target.mode,
-                instructions: instructions.into(), dependencies: Vec::new(), requires_bridge: false,
-            },
-            input: PipelineAgentInput::default(),
-            artifacts: input.inputs,
-            unit_id: input.unit_id,
-        }).await
+        let submission = delivery_agent_submission(&store, input, instructions.into()).await?;
+        store.submit_workflow_agent(submission).await
     }.await.map_err(report)
+}
+
+async fn delivery_agent_submission(
+    store: &Store,
+    input: DeliveryAgentInput,
+    instructions: String,
+) -> Result<WorkflowAgentSubmission> {
+    let target = store
+        .workflow_operator_agent_target(
+            &input.project_id,
+            &input.run_id,
+            &input.node_id,
+            input.unit_id.as_deref(),
+            &input.inputs,
+        )
+        .await?;
+    let scope = selected_scope(
+        store,
+        target.checkout_id.clone(),
+        input.selection,
+        input.effort,
+        target.mode,
+    )
+    .await?;
+    Ok(WorkflowAgentSubmission {
+        project_id: input.project_id,
+        dispatch: PipelineDispatch {
+            pipeline_run_id: input.run_id,
+            node_instance_id: input.node_id,
+            plan_revision: target.plan_revision,
+            release_id: target.release_id,
+        },
+        scope,
+        request: JobRequest {
+            checkout_id: Some(target.checkout_id),
+            task_id: target.task_id,
+            mode: target.mode,
+            instructions,
+            dependencies: Vec::new(),
+            requires_bridge: false,
+        },
+        input: PipelineAgentInput::default(),
+        artifacts: input.inputs,
+        unit_id: input.unit_id,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryPlanRevisionInput {
+    project_id: String,
+    run_id: String,
+    context_id: String,
+    source_attempt_id: String,
+    proposal_sequence: String,
+    expected_plan_revision: Option<String>,
+    selection: ModelSelection,
+    effort: Option<String>,
+    feedback: String,
+}
+
+#[tauri::command]
+pub async fn request_repository_plan_revision(
+    store: State<'_, Store>,
+    input: DeliveryPlanRevisionInput,
+) -> Result<Job, String> {
+    async {
+        anyhow::ensure!(
+            !input.feedback.trim().is_empty(),
+            "Add feedback for the planner"
+        );
+        let base = store
+            .publish_workflow_artifact(
+                input.project_id.clone(),
+                input.run_id.clone(),
+                "plan".into(),
+                "plan".into(),
+                ArtifactValue::Plan {
+                    run_id: input.source_attempt_id,
+                    event_sequence: input.proposal_sequence.parse()?,
+                },
+            )
+            .await?;
+        let submission = delivery_agent_submission(
+            &store,
+            DeliveryAgentInput {
+                project_id: input.project_id,
+                run_id: input.run_id,
+                node_id: "plan".into(),
+                unit_id: None,
+                inputs: NodeInputs::from([("context".into(), input.context_id)]),
+                selection: input.selection,
+                effort: input.effort,
+            },
+            String::new(),
+        )
+        .await?;
+        store
+            .request_workflow_plan_revision(
+                submission,
+                WorkflowPlanRevisionRequest {
+                    base_revision_id: base.id,
+                    expected_plan_revision: input.expected_plan_revision,
+                    feedback: input.feedback,
+                },
+            )
+            .await
+    }
+    .await
+    .map_err(report)
+}
+
+#[tauri::command]
+pub async fn repository_plan_history(
+    store: State<'_, Store>,
+    project_id: String,
+    run_id: String,
+) -> Result<Option<WorkflowPlanHistory>, String> {
+    store
+        .workflow_plan_history(project_id, run_id)
+        .await
+        .map_err(report)
 }
 
 #[tauri::command]

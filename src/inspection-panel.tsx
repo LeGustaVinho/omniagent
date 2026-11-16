@@ -11,6 +11,7 @@ import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun
 import { deliveryBase, deliveryBranch, deliveryNotePath, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
 import type { DeliveryStep, QuestionFocus, WorkspaceProps } from "@/workbench-contract";
 import { RunOrchestrationPanel } from "@/run-orchestration";
+import { RunPlanHistory } from "@/run-plan-history";
 
 const steps: Record<DeliveryStep, string> = {
   note: "Ready to plan", question: "Waiting for input", plan: "Awaiting implementation approval",
@@ -146,6 +147,7 @@ function RecordedConversationRun({ conversationId, projectId, runId, focusQuesti
       {!activity.live && <DownstreamHistory projectId={projectId} runId={runId} openActivity={openActivity} />}
       {(run.status === "failed" || run.status === "interrupted") && <JobFailurePanel projectId={projectId} runId={runId} />}
       <ConversationRequests conversationId={owner} runId={runId} activity={activity} focusQuestion={focusQuestion} />
+      <RunPlanHistory projectId={projectId} runId={runId} openActivity={openActivity} />
       {activity.live && <StopConversation {...activity} />}
       {activity.error && <p role="alert">{String(activity.error)}</p>}
     </div>

@@ -43,6 +43,7 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
     enabled: planAttempt?.status === "succeeded",
   });
   const currentProposal = proposals.data?.find(({ sequence }) => sequence === proposal) ?? proposals.data?.at(-1);
+  const selectedPlanAttempt = plan?.value.kind === "plan" ? plan.value.evidence.run_id : undefined;
   const reviewing = plan ? matchingJob(delivery, "review-plan", { plan: plan.id }) : undefined;
   const review = matchingReview(delivery, reviewing);
   const linked = delivery.artifacts.find(({ id }) => id === delivery.hostOutputs?.work);
@@ -78,7 +79,13 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
   return <div className="pipeline-stack">
     {context?.value.kind === "markdown" && <SavedDeliverySource document={context.value.evidence} />}
     {context && <DeliveryAgent scope={scope} nodeId="plan" inputs={{ context: context.id }} job={planner}
+      planRevision={currentProposal && planAttempt?.status === "succeeded" ? {
+        sourceAttemptId: planAttempt.runId, proposalSequence: currentProposal.sequence,
+        expectedPlanRevision: delivery.run.planRevision,
+      } : undefined}
       label="Planning" actions={actions} openActivity={openActivity} />}
+    {selectedPlanAttempt && selectedPlanAttempt !== planAttempt?.runId && <Button type="button" variant="outline"
+      onClick={() => openActivity(selectedPlanAttempt)}>Open selected plan attempt</Button>}
     {currentProposal && <>
       {proposals.data && proposals.data.length > 1 && <label className="pipeline-stack">Planning proposal
         <select value={currentProposal.sequence} onChange={(event) => setProposal(event.currentTarget.value)}>

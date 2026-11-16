@@ -158,6 +158,15 @@ impl Store {
     }
 
     pub async fn submit_workflow_agent(&self, submission: WorkflowAgentSubmission) -> Result<Job> {
+        self.submit_workflow_agent_with_revision(submission, None)
+            .await
+    }
+
+    pub(super) async fn submit_workflow_agent_with_revision(
+        &self,
+        submission: WorkflowAgentSubmission,
+        plan_revision_request: Option<super::WorkflowPlanRevisionRequest>,
+    ) -> Result<Job> {
         let WorkflowAgentSubmission {
             project_id,
             dispatch,
@@ -334,7 +343,11 @@ impl Store {
             scope,
             request,
             input,
-            WorkflowJobInput { unit_id, artifacts },
+            WorkflowJobInput {
+                unit_id,
+                artifacts,
+                plan_revision_request,
+            },
         )
         .await
     }

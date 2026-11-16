@@ -264,6 +264,8 @@ fn main() {
             workflow_ipc::execute_repository_delivery_host,
             workflow_ipc::submit_repository_delivery_agent,
             workflow_ipc::repository_delivery_plan_proposals,
+            workflow_ipc::request_repository_plan_revision,
+            workflow_ipc::repository_plan_history,
             workflow_ipc::publish_repository_delivery_evidence,
             workflow_ipc::publish_repository_delivery_candidate,
             workflow_ipc::execute_repository_delivery_unit,
