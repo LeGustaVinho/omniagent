@@ -3,6 +3,7 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { DeliveryAgent } from "@/repository-delivery-agent";
+import { VerifiedDeliveryHistory } from "@/repository-delivery-history";
 import {
   matchingJob, matchingReview, type DeliveryActions, type DeliveryInputs,
   type DeliverySnapshot, type DeliveryTarget, type DeliveryUnit,
@@ -20,23 +21,7 @@ type Verification = {
   gates: { gate: { name: string; required: boolean }; outcome: { status: string; reason?: string } | null }[];
 };
 type Acceptance = { candidate: { id: string }; verification: { id: string } };
-type Commit = { sha: string; branch: string; verifiedAt: string; captureRunId: string; pendingChangesRetained: boolean };
 type UnitOutcome = { status: "waiting_for_commit" } | { status: "artifact"; artifact: { id: string } };
-
-function SavedCommit({ projectId, taskId, evidenceId }: { projectId: string; taskId: string; evidenceId: string }) {
-  const receipt = useQuery({
-    queryKey: ["delivery-verified-commit", projectId, taskId, evidenceId],
-    queryFn: () => invoke<Commit | null>("verified_delivery_commit", { projectId, taskId, evidenceId }),
-  });
-  if (receipt.error) return <p role="alert">{String(receipt.error)}</p>;
-  if (!receipt.data) return <p>Loading verified commit…</p>;
-  const commit = receipt.data;
-  return <div className="pipeline-stack">
-    <p>Verified commit <code className="break-all">{commit.sha}</code></p>
-    <p className="text-muted-foreground">{commit.branch} · {new Date(commit.verifiedAt).toLocaleString()}</p>
-    {commit.pendingChangesRetained && <p>Additional changes stayed assigned to this work scope.</p>}
-  </div>;
-}
 
 export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationInputs, actions, openActivity, active }: {
   scope: DeliveryTarget;
@@ -117,7 +102,8 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
 
   return <section className="pipeline-form pipeline-stack" aria-label={planned.purpose}>
     <h3 className="font-medium">{planned.ordinal}. {planned.purpose}</h3>
-    {commitEvidenceId && <SavedCommit projectId={scope.projectId} taskId={taskId} evidenceId={commitEvidenceId} />}
+    {commitEvidenceId && <VerifiedDeliveryHistory projectId={scope.projectId} taskId={taskId} evidenceId={commitEvidenceId}
+      unitId={unitId} delivery={delivery} openActivity={openActivity} />}
     {!commitEvidenceId && !active && <p className="text-muted-foreground">Waiting for the preceding verified commit.</p>}
     {active && <>
       <DeliveryAgent scope={scope} nodeId="implement" inputs={implementationInputs} unitId={unitId} taskId={taskId}

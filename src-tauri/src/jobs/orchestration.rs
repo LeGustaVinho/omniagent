@@ -9,6 +9,7 @@ use crate::{
     providers::SessionMode,
     repository::RepositoryMarkdownRevision,
     store::Store,
+    tasks::WorkDescriptions,
     workflows::{ArtifactValue, WorkflowArtifact, WorkflowPlanUnit},
 };
 
@@ -26,6 +27,7 @@ pub struct RunOrchestration {
     stage_pin: Option<WorkflowStagePin>,
     context: Option<ContextBudget>,
     document: Option<DocumentSource>,
+    task_descriptions: Option<WorkDescriptions>,
     goal: Option<InspectedGoal>,
     unit: Option<WorkflowPlanUnit>,
 }
@@ -139,7 +141,7 @@ impl Store {
                 "SELECT payload FROM context_snapshots WHERE run_id = ?1",
                 [&run], |row| row.get::<_, Vec<u8>>(0),
             ).optional()?.map(|bytes| decode(&bytes)).transpose()?;
-            let (route, context, document) = if let Some(saved) = snapshot {
+            let (route, context, document, task_descriptions) = if let Some(saved) = snapshot {
                 (
                     Some(ProfileRoute { mode: saved.scope.mode, question_route: saved.question_route }),
                     saved.role_context.map(|role| ContextBudget {
@@ -150,9 +152,11 @@ impl Store {
                         decisions: role.selection.decisions,
                     }),
                     saved.repository_markdown.map(|document| document.revision),
+                    saved.task_context.map(|task| task.descriptions)
+                        .filter(|descriptions| descriptions != &WorkDescriptions::default()),
                 )
             } else {
-                (None, None, None)
+                (None, None, None, None)
             };
             let document = match (document, stage) {
                 (None, Some(stage)) => {
@@ -181,7 +185,7 @@ impl Store {
                  WHERE a.run_id = ?1 AND u.project_id = ?2",
                 params![run, project], |row| row.get::<_, Vec<u8>>(0),
             ).optional()?.map(|bytes| decode(&bytes)).transpose()?;
-            Ok(Some(RunOrchestration { job, route, policy, stage_pin, context, document, goal, unit }))
+            Ok(Some(RunOrchestration { job, route, policy, stage_pin, context, document, task_descriptions, goal, unit }))
         }).await
     }
 }

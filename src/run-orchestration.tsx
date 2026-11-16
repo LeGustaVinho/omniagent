@@ -13,6 +13,8 @@ import type { WorkspaceProps } from "@/workbench-contract";
 
 type Scope = { projectId: string; runId: string; conversationId?: string };
 type SourceDocument = { revisionId: string; checkoutId: string; path: string; sha256: string; baseCommit: string | null };
+type Description = { id: string; revision: number; markdown: string | null };
+type WorkDescriptions = { epic?: Description; task?: Description; subtask?: Description };
 type Orchestration = {
   job: {
     id: string; kind: string; taskId: string | null; ownerTaskId: string | null; origin: JobOrigin;
@@ -30,9 +32,11 @@ type Orchestration = {
   } | null;
   context: {
     role: string; policyRevision: string; availableBytes: number; usedBytes: number;
-    decisions: { title: string; reason: string; selectionOrder: number | null; encodedBytes: number }[];
+    decisions: { title: string; reason: string; selectionOrder: number | null; encodedBytes: number;
+      revision?: { source: "instruction"; revisionId: string } | { source: "record"; version: { revisionId: string } } }[];
   } | null;
   document: SourceDocument | null;
+  taskDescriptions?: WorkDescriptions | null;
   goal: InspectedGoal | null;
   unit: { purpose: string; ordinal: number } | null;
 };
@@ -68,11 +72,23 @@ function SavedDocument({ document }: { document: SourceDocument }) {
   </details>;
 }
 
+function SavedDescriptions({ descriptions }: { descriptions: WorkDescriptions }) {
+  const entries = [["Epic", descriptions.epic], ["Task", descriptions.task], ["Sub-Task", descriptions.subtask]] as const;
+  return <details>
+    <summary>Saved work descriptions</summary>
+    {entries.map(([label, description]) => description && <section key={label} className="grid gap-1">
+      <h4>{label} description · Revision {description.revision}</h4>
+      <p className="break-all">Revision ID <code>{description.id}</code></p>
+      {description.markdown && <pre className="max-h-72 overflow-auto whitespace-pre-wrap">{description.markdown}</pre>}
+    </section>)}
+  </details>;
+}
+
 function OrchestrationDetails({ data, scope, live, navigation }: {
   data: Orchestration; scope: Scope; live: boolean;
   navigation?: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
 }) {
-  const { context, document, goal, job, policy, route, stagePin, unit } = data;
+  const { context, document, goal, job, policy, route, stagePin, taskDescriptions, unit } = data;
   const stage = job?.stage;
   const taskId = job?.taskId;
   const requestingRun = job?.origin.type === "agent" ? job.origin.runId : undefined;
@@ -128,9 +144,12 @@ function OrchestrationDetails({ data, scope, live, navigation }: {
       <ul className="grid gap-1">{context.decisions.map((decision, index) => <li key={index}>
         <span className="break-words">{decision.title}</span> · {words(decision.reason)} · {decision.encodedBytes.toLocaleString()} bytes
         {decision.selectionOrder !== null && ` · Included ${decision.selectionOrder + 1}`}
+        {decision.revision && <p className="break-all">Revision <code>{decision.revision.source === "record" ?
+          decision.revision.version.revisionId : decision.revision.revisionId}</code></p>}
       </li>)}</ul>
     </details>}
     {document && <SavedDocument document={document} />}
+    {taskDescriptions && <SavedDescriptions descriptions={taskDescriptions} />}
     {navigation && <div className="flex flex-wrap gap-2">
       {taskId && <Button variant="outline" onClick={() => navigation.openWorkspace("tasks", taskId)}>Open task</Button>}
       {stage && <Button variant="outline" onClick={() => navigation.openWorkspace("pipelines", stage.pipelineRunId)}>Open workflow</Button>}

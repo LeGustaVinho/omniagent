@@ -155,6 +155,7 @@ impl DeliveryCheckout {
         Ok(CommitIntent {
             sha,
             captured_index_digest,
+            acceptance_artifact_id: None,
         })
     }
 

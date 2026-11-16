@@ -135,6 +135,8 @@ function LiveTaskDetails({ projectId, task, hasChildren, change, busy, links }: 
         <summary>{evidence.kind === "manual" ? "Manual completion" : "Verified delivery"} · {new Date(recordedAt).toLocaleString()}</summary>
         {evidence.kind === "manual" ? (evidence.note && <p>{evidence.note}</p>) : <>
           <p>Completion SHA <code className="break-all">{evidence.completionSha}</code></p>
+          {saved?.activeWorkflowRunId !== evidence.workflowRunId && <Button type="button" variant="outline"
+            onClick={() => links.openWorkspace("pipelines", evidence.workflowRunId)}>Open saved workflow</Button>}
           <ul className="pipeline-stack">{evidence.unitEvidenceIds.map((evidenceId) =>
             <CommitDetails key={evidenceId} {...args} evidenceId={evidenceId} openActivity={links.openActivity} />)}</ul>
         </>}

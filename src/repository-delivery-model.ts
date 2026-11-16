@@ -7,6 +7,7 @@ export type DeliveryNode = "plan" | "review-plan" | "implement" | "review-candid
 export type DeliveryInputs = Record<string, string>;
 type TaskReference = { projectId: string; taskId: string };
 type ScopedEvidence = { task: TaskReference; id: string };
+export type DeliverySource = { id: string; checkoutId: string; relativePath: string; sha256: string };
 
 export type DeliveryArtifact = {
   id: string;
@@ -14,7 +15,7 @@ export type DeliveryArtifact = {
   port: string;
   unitId: string | null;
   value:
-    | { kind: "markdown"; evidence: { checkoutId: string; relativePath: string; sha256: string } }
+    | { kind: "markdown"; evidence: DeliverySource }
     | { kind: "plan"; evidence: { run_id: string; event_sequence: number } }
     | { kind: "review"; evidence: { run_id: string } }
     | { kind: "task"; evidence: TaskReference }

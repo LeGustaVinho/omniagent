@@ -1,6 +1,6 @@
 use omniagent::{
     diagnostics,
-    repository::verified_git::{DeliveryGitPolicy, VerifiedCommit},
+    repository::{verification::VerifiedDeliveryPatch, verified_git::{DeliveryGitPolicy, VerifiedCommit}},
     store::Store,
     tasks::{ChecklistItem, ProjectWorkHierarchy, TaskChecklist, TaskDelivery, TaskDeliveryState, TaskWorkflowState},
 };
@@ -83,6 +83,13 @@ pub async fn set_delivery_git_policy(
         .set_delivery_git_policy(project_id, policy)
         .await
         .map_err(report)
+}
+
+#[tauri::command]
+pub async fn verified_delivery_patch(
+    store: State<'_, Store>, project_id: String, task_id: String, evidence_id: String,
+) -> Result<Option<VerifiedDeliveryPatch>, String> {
+    store.verified_delivery_patch(project_id, task_id, evidence_id).await.map_err(report)
 }
 
 #[tauri::command]

@@ -47,6 +47,7 @@ pub struct DeliveryCommitRequest {
     pub unit_id: String,
     pub purpose: String,
     pub acceptance_id: String,
+    pub acceptance_artifact_id: String,
     pub external_sha: Option<String>,
 }
 
@@ -65,6 +66,8 @@ pub struct VerifiedCommit {
     pub task_id: String,
     pub unit_id: String,
     pub acceptance_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance_artifact_id: Option<String>,
     pub candidate_revision: String,
     pub verification_id: String,
     pub capture_run_id: String,
@@ -91,6 +94,8 @@ pub enum DeliveryCommitOutcome {
 struct CommitIntent {
     sha: String,
     captured_index_digest: String,
+    #[serde(default)]
+    acceptance_artifact_id: Option<String>,
 }
 
 struct DeliveryState {
@@ -261,7 +266,7 @@ impl Store {
             artifact.revision == candidate.target.capture_revision,
             "captured index revision changed"
         );
-        let intent = tokio::task::spawn_blocking({
+        let mut intent = tokio::task::spawn_blocking({
             let purpose = request.purpose.clone();
             move || {
                 checkout.prepare(
@@ -273,6 +278,7 @@ impl Store {
             }
         })
         .await??;
+        intent.acceptance_artifact_id = Some(request.acceptance_artifact_id.clone());
         self.execute({
             let request = request.clone();
             move |db| {
@@ -283,7 +289,8 @@ impl Store {
                 };
                 ensure!(state.policy == DeliveryGitPolicy::AutomaticCommitUserMerge, "Git delivery policy changed; retry the commit action");
                 if let Some(previous) = state.intent {
-                    ensure!(previous == intent, "a different commit is already prepared for this unit");
+                    ensure!(previous.sha == intent.sha && previous.captured_index_digest == intent.captured_index_digest,
+                        "a different commit is already prepared for this unit");
                 } else {
                     tx.execute(
                         "INSERT INTO delivery_commit_intents(acceptance_id, project_id, task_id, unit_id, payload)
@@ -323,6 +330,10 @@ fn load_delivery(db: &Connection, request: &DeliveryCommitRequest) -> Result<Del
         let evidence: VerifiedCommit = decode(&receipt)?;
         ensure!(
             evidence.acceptance_id == request.acceptance_id
+                && evidence
+                    .acceptance_artifact_id
+                    .as_ref()
+                    .is_none_or(|id| id == &request.acceptance_artifact_id)
                 && evidence.purpose == request.purpose
                 && request
                     .external_sha
@@ -350,7 +361,7 @@ fn load_delivery(db: &Connection, request: &DeliveryCommitRequest) -> Result<Del
         "the candidate or requested purpose differs from the approved logical unit"
     );
     validate_unit_capture(db, &unit, &acceptance.candidate.target.run_id)?;
-    validate_unit_acceptance(db, &unit, &acceptance.id)?;
+    validate_unit_acceptance(db, &unit, &acceptance.id, &request.acceptance_artifact_id)?;
     check_predecessor(db, &unit, &acceptance)?;
     let owner = writer_owner(
         db,
@@ -367,12 +378,20 @@ fn load_delivery(db: &Connection, request: &DeliveryCommitRequest) -> Result<Del
         params![request.acceptance_id, request.project_id, request.task_id, request.unit_id],
         |row| row.get(0),
     ).optional()?;
+    let intent: Option<CommitIntent> = intent.as_deref().map(decode).transpose()?;
+    ensure!(
+        intent
+            .as_ref()
+            .and_then(|intent| intent.acceptance_artifact_id.as_ref())
+            .is_none_or(|id| id == &request.acceptance_artifact_id),
+        "the prepared commit records a different acceptance artifact"
+    );
     Ok(DeliveryRead::Current(DeliveryState {
         acceptance,
         unit,
         policy,
         managed,
-        intent: intent.as_deref().map(decode).transpose()?,
+        intent,
     }))
 }
 
@@ -488,6 +507,7 @@ fn settle_commit(
         task_id: request.task_id,
         unit_id: request.unit_id,
         acceptance_id: state.acceptance.id,
+        acceptance_artifact_id: Some(request.acceptance_artifact_id),
         candidate_revision: candidate.id.clone(),
         verification_id: state.acceptance.verification.id,
         capture_run_id: candidate.target.run_id.clone(),

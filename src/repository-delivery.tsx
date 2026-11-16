@@ -8,6 +8,7 @@ import {
   type DeliverySnapshot, type DeliveryTarget, type DeliveryUnit,
 } from "@/repository-delivery-model";
 import { RepositoryDeliveryUnit } from "@/repository-delivery-unit";
+import { SavedDeliverySource } from "@/repository-delivery-history";
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -75,9 +76,7 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity }: {
   const error = proposals.error ?? tasks.error ?? units.error ?? state.error;
 
   return <div className="pipeline-stack">
-    {context?.value.kind === "markdown" && <p>
-      <span className="font-medium">{context.value.evidence.relativePath}</span> · <code>{context.value.evidence.sha256.slice(0, 12)}</code>
-    </p>}
+    {context?.value.kind === "markdown" && <SavedDeliverySource document={context.value.evidence} />}
     {context && <DeliveryAgent scope={scope} nodeId="plan" inputs={{ context: context.id }} job={planner}
       label="Planning" actions={actions} openActivity={openActivity} />}
     {currentProposal && <>

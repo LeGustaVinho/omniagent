@@ -242,6 +242,7 @@ fn main() {
             task_delivery_ipc::delivery_git_policy,
             task_delivery_ipc::set_delivery_git_policy,
             task_delivery_ipc::verified_delivery_commit,
+            task_delivery_ipc::verified_delivery_patch,
             task_delivery_ipc::project_task_delivery_state,
             task_delivery_ipc::project_epic_delivery_state,
             task_delivery_ipc::project_task_deliveries,

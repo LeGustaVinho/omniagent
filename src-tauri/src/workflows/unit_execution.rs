@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -207,6 +207,7 @@ impl Store {
                         unit_id: unit_id.clone(),
                         purpose: unit.unit.purpose.clone(),
                         acceptance_id: acceptance.id,
+                        acceptance_artifact_id: inputs["acceptance"].id.clone(),
                         external_sha,
                     })
                     .await?;
@@ -273,20 +274,18 @@ pub(crate) fn validate_unit_acceptance(
     db: &Connection,
     unit: &WorkflowDeliveryUnit,
     acceptance_id: &str,
+    artifact_id: &str,
 ) -> Result<()> {
-    let mut statement = db.prepare("SELECT payload FROM workflow_artifacts WHERE pipeline_run_id = ?1 AND unit_id = ?2 AND kind = 'acceptance'")?;
-    let mut rows = statement.query(params![unit.workflow_run_id, unit.unit.id])?;
-    while let Some(row) = rows.next()? {
-        let payload: Vec<u8> = row.get(0)?;
-        let artifact: WorkflowArtifact = serde_json::from_slice(&protection::unprotect(&payload)?)?;
-        if let ArtifactValue::Acceptance(reference) = artifact.value
-            && reference.evidence.id == acceptance_id
-            && reference.evidence.task.project_id == unit.project_id
-            && reference.evidence.task.task_id == unit.task_id
-            && reference.completion_criteria == unit.unit.completion_criteria
-        {
-            return Ok(());
-        }
-    }
-    anyhow::bail!("candidate acceptance lacks the exact workflow review and unit criteria")
+    let payload: Vec<u8> = db.query_row(
+        "SELECT payload FROM workflow_artifacts WHERE pipeline_run_id = ?1 AND unit_id = ?2 AND kind = 'acceptance' AND id = ?3",
+        params![unit.workflow_run_id, unit.unit.id, artifact_id], |row| row.get(0),
+    ).optional()?.context("candidate acceptance artifact is unavailable in this unit")?;
+    let artifact: WorkflowArtifact = serde_json::from_slice(&protection::unprotect(&payload)?)?;
+    ensure!(
+        matches!(artifact.value, ArtifactValue::Acceptance(reference)
+        if reference.evidence.id == acceptance_id && reference.evidence.task.project_id == unit.project_id
+        && reference.evidence.task.task_id == unit.task_id && reference.completion_criteria == unit.unit.completion_criteria),
+        "candidate acceptance lacks the exact workflow review and unit criteria"
+    );
+    Ok(())
 }

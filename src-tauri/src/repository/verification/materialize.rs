@@ -37,6 +37,32 @@ pub(super) fn selected_tree(
     Ok(tree)
 }
 
+pub(super) fn saved_patch(
+    capture: &CandidateRevision,
+    selected: &SelectedCandidate,
+) -> Result<Vec<u8>> {
+    let (git, tree) = replay(capture, &selected.selection)?;
+    ensure!(
+        tree == selected.tree,
+        "the saved candidate no longer reproduces its selected tree"
+    );
+    git.run(
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-renames",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            &selected.base_commit,
+            &tree,
+            "--",
+        ],
+        None,
+    )
+}
+
 pub(super) fn materialize(
     capture: &CandidateRevision,
     selected: &SelectedCandidate,

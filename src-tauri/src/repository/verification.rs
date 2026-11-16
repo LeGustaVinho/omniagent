@@ -5,6 +5,7 @@ mod materialize;
 use std::{collections::HashSet, path::PathBuf};
 
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -150,7 +151,64 @@ pub struct CandidateAcceptance {
     pub accepted_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifiedDeliveryPatch {
+    pub candidate_id: String,
+    pub base_commit: String,
+    pub tree: String,
+    pub patch_base64: String,
+}
+
 impl Store {
+    /// Inspect the exact verified selection in an isolated Git object store.
+    pub async fn verified_delivery_patch(
+        &self,
+        project: String,
+        task: String,
+        evidence: String,
+    ) -> Result<Option<VerifiedDeliveryPatch>> {
+        let Some(commit) = self
+            .verified_delivery_commit(project.clone(), task.clone(), evidence)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let accepted = self
+            .candidate_acceptance(project.clone(), task.clone(), commit.acceptance_id.clone())
+            .await?
+            .context("the verified commit's candidate acceptance is unavailable")?;
+        let selected = accepted.candidate;
+        ensure!(
+            selected.target.project_id == project
+                && selected.target.task_id == task
+                && selected.target.unit_id == commit.unit_id
+                && selected.target.run_id == commit.capture_run_id
+                && selected.id == commit.candidate_revision
+                && selected.checkout_id == commit.checkout_id
+                && selected.tree == commit.tree
+                && selected.base_commit == commit.base_commit
+                && accepted.verification.id == commit.verification_id,
+            "the accepted selection does not match the verified commit"
+        );
+        let capture = self
+            .execute({
+                let target = selected.target.clone();
+                move |db| load_capture(db, &target).map(|(capture, _)| capture)
+            })
+            .await?;
+        let patch = tokio::task::spawn_blocking(move || {
+            let bytes = materialize::saved_patch(&capture, &selected)?;
+            Ok::<_, anyhow::Error>(VerifiedDeliveryPatch {
+                candidate_id: selected.id,
+                base_commit: selected.base_commit,
+                tree: selected.tree,
+                patch_base64: STANDARD.encode(bytes),
+            })
+        })
+        .await??;
+        Ok(Some(patch))
+    }
     pub async fn candidate_gate_policy(&self, project: String) -> Result<CandidateGatePolicy> {
         self.execute(move |db| {
             ensure!(
