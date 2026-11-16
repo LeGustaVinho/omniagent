@@ -338,6 +338,7 @@ fn main() {
             workflow_ipc::triggers::workflow_trigger_rules,
             workflow_ipc::triggers::save_workflow_trigger_rule,
             workflow_ipc::triggers::workflow_trigger_activations,
+            workflow_ipc::authoring::publish_reviewed_workflow,
             workflow_ipc::graph_editor::workflow_graph_registry,
             workflow_ipc::graph_editor::project_workflow_graph_drafts,
             workflow_ipc::comparison::comparison_source_commit,

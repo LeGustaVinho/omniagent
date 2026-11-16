@@ -26,7 +26,7 @@ fn graph(name: &str) -> WorkflowGraph {
     }
 }
 
-async fn finish_request(
+pub(super) async fn finish_request(
     store: &Store,
     draft: &AuthoringDraft,
     scope: &SessionScope,

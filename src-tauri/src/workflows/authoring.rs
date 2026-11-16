@@ -25,6 +25,8 @@ const MAX_GRAPH_BYTES: usize = 48 * 1024;
 mod editor;
 use editor::{DraftDocument, ProtectedDraft};
 pub use editor::{ProjectWorkflowDraft, WorkflowCanvasEdit, WorkflowNodePosition};
+mod publication;
+pub use publication::{WorkflowPublication, WorkflowPublicationOutcome};
 
 #[cfg(test)]
 mod tests;
@@ -44,6 +46,7 @@ pub struct AuthoringDraft {
     base: Option<WorkflowRevision>,
     head: Option<DraftRevision>,
     request: RequestStatus,
+    publication: Option<WorkflowPublication>,
 }
 
 #[derive(Serialize)]
@@ -143,7 +146,10 @@ impl Store {
                 params![id, draft_scope.project, draft_scope.checkout, draft_scope.conversation, draft_scope.workflow, draft_scope.base],
             )?;
             if let Some(definition) = pinned {
-                save_revision(&tx, &id, None, None, None, DraftDocument::from_definition(definition))?;
+                let layout = publication::published_layout(&tx, &draft_scope.project, &definition.version)?;
+                let mut document = DraftDocument::from_definition(definition);
+                document.layout = layout;
+                save_revision(&tx, &id, None, None, None, document)?;
             }
             let draft_scope = load_scope(&tx, &draft_scope.project, &id)?;
             queue_request(&tx, &id, &draft_scope, scope, brief)?;
@@ -175,7 +181,9 @@ impl Store {
         let draft = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                reconcile(&tx, &id, &load_scope(&tx, &project, &id)?)?;
+                let stored = load_scope(&tx, &project, &id)?;
+                publication::ensure_editable(&tx, &id)?;
+                reconcile(&tx, &id, &stored)?;
                 let stored = load_scope(&tx, &project, &id)?;
                 ensure!(
                     stored.head.as_deref() == Some(&parent),
@@ -221,6 +229,7 @@ impl Store {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let stored = load_scope(&tx, &project, &id)?;
+            publication::ensure_editable(&tx, &id)?;
             ensure!(
                 stored.head.as_deref() == Some(&parent),
                 "The draft changed. Load its latest revision before saving."
@@ -313,6 +322,7 @@ fn load_head(db: &Connection, id: &str, head: Option<&str>) -> Result<Option<Dra
 fn load_draft(db: &Connection, id: &str, scope: DraftScope) -> Result<AuthoringDraft> {
     Ok(AuthoringDraft {
         id: id.into(),
+        publication: publication::load_publication(db, &scope.project, id)?,
         conversation_id: scope.conversation,
         head: load_head(db, id, scope.head.as_deref())?,
         base: scope.base.map(|revision| WorkflowRevision {

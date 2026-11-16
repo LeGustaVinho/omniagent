@@ -350,6 +350,15 @@ fn load_registration(
     unseal(&payload)
 }
 
+pub(super) fn validate_command_binding(
+    db: &Connection,
+    project: &str,
+    configuration: &CommandConfiguration,
+) -> Result<()> {
+    load_registration(db, project, configuration)?.invocation(configuration.clone())?;
+    Ok(())
+}
+
 impl SavedRegistration {
     fn invocation(self, configuration: CommandConfiguration) -> Result<PreparedCommand> {
         ensure!(

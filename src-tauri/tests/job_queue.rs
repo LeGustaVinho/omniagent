@@ -28,6 +28,8 @@ fn remove_recent_schema(db: &rusqlite::Connection) -> Result<()> {
         "DROP TABLE workflow_trigger_activations;
          DROP TABLE workflow_trigger_revisions;
          DROP TABLE workflow_trigger_rules;
+         DROP TABLE workflow_authoring_publications;
+         DROP TABLE workflow_published_heads;
          DROP TABLE workflow_launches;
          DROP TABLE workflow_command_results;
          DROP TABLE workflow_command_registrations;

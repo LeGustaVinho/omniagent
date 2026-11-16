@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { liveModelsQuery, sameModelSelection } from "@/live-models";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { graphProblems, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowGraph, type WorkflowLayout } from "@/workflow-graph-model";
+import { WorkflowPublicationControls, type WorkflowPublication } from "@/workflow-publication";
 import { WorkflowLaunchPicker, preferredWorkflowRevision } from "@/workflow-launch";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -21,6 +22,7 @@ type Draft = {
   base: Version | null;
   head: Revision | null;
   request: { jobId: string; runId: string | null; state: string; diagnostic: string | null };
+  publication?: WorkflowPublication | null;
 };
 
 const chatKey = (conversationId: string) => ["conversation", conversationId, "workflow-authoring"];
@@ -199,8 +201,8 @@ function AuthoringRevisionEditor({ projectId, draft, revision }: { projectId: st
     onSuccess: (next) => { setFeedback(""); updated(next); },
   });
   const dirty = JSON.stringify(editor) !== JSON.stringify(original);
-  const editingDisabled = pending(draft) || save.isPending || request.isPending;
-  const ready = Boolean(readModel && feedback.trim() && !dirty && !pending(draft) && !save.isPending && !request.isPending);
+  const editingDisabled = Boolean(draft.publication) || pending(draft) || save.isPending || request.isPending;
+  const ready = Boolean(readModel && feedback.trim() && !dirty && !editingDisabled);
   function requestChanges(event: FormEvent) {
     event.preventDefault();
     if (ready) request.mutate();
@@ -214,12 +216,18 @@ function AuthoringRevisionEditor({ projectId, draft, revision }: { projectId: st
       <p className="break-all text-xs text-muted-foreground">Draft revision <code>{revision.id}</code></p>
       <div className="flex gap-2">
         {dirty && <Button type="button" variant="outline" disabled={editingDisabled} onClick={() => { setEditor(original); save.reset(); }}>Revert unsaved changes</Button>}
-        <Button type="button" disabled={!dirty || editingDisabled || !registry.data || problems.length > 0}
-          onClick={() => save.mutate()}>Save draft revision</Button>
+        {!draft.publication && <Button type="button" disabled={!dirty || editingDisabled || !registry.data || problems.length > 0}
+          onClick={() => save.mutate()}>Save draft revision</Button>}
       </div>
     </div>
     {save.error && <p role="alert">{String(save.error)}</p>}
-    <form className="pipeline-stack pipeline-form max-w-lg" onSubmit={requestChanges}>
+    <WorkflowPublicationControls projectId={projectId} draftId={draft.id} revisionId={revision.id} base={draft.base}
+      graph={revision.graph} disabled={dirty || editingDisabled || !registry.data || problems.length > 0} publication={draft.publication}
+      onPublished={(publication) => {
+        updated({ ...draft, publication });
+        void client.invalidateQueries({ queryKey: ["workflow-authoring-bases", projectId] });
+      }} />
+    {!draft.publication && <form className="pipeline-stack pipeline-form max-w-lg" onSubmit={requestChanges}>
       <label>Authoring provider<select value={provider} onChange={(event) => { setProvider(event.currentTarget.value === "claude" ? "claude" : "codex"); setSelection(null); }}>
         <option value="codex">Codex</option><option value="claude">Claude</option>
       </select></label>
@@ -229,6 +237,6 @@ function AuthoringRevisionEditor({ projectId, draft, revision }: { projectId: st
       {dirty && <p className="text-xs text-muted-foreground">Save your edits before requesting changes to them.</p>}
       {request.error && <p role="alert">{String(request.error)}</p>}
       <Button type="submit" disabled={!ready}>Request changes</Button>
-    </form>
+    </form>}
   </div>;
 }

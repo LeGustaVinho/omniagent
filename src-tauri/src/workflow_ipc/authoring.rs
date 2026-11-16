@@ -5,13 +5,25 @@ use omniagent::{
     store::Store,
     workflows::{
         WorkflowGraph, WorkflowRevision,
-        authoring::{AuthoringBase, AuthoringDraft, WorkflowCanvasEdit},
+        authoring::{AuthoringBase, AuthoringDraft, WorkflowCanvasEdit, WorkflowPublicationOutcome},
     },
 };
 use tauri::State;
 
 use super::report;
 use crate::conversation_runtime::selected_scope;
+
+#[tauri::command]
+pub async fn publish_reviewed_workflow(
+    store: State<'_, Store>,
+    project_id: String,
+    draft_id: String,
+    reviewed_revision_id: String,
+    expected_base: Option<WorkflowRevision>,
+) -> Result<WorkflowPublicationOutcome, String> {
+    store.publish_reviewed_workflow(project_id, draft_id, reviewed_revision_id, expected_base)
+        .await.map_err(report)
+}
 
 #[tauri::command]
 pub async fn workflow_authoring_bases(
