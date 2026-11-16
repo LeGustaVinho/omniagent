@@ -4,9 +4,13 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { ArrowUpRight, FileText } from "lucide-react";
-import { anchorKey, parseWiki, prepareReading, resolveWiki, withoutProperties, type NoteTarget } from "@/knowledge-document";
+import {
+  anchorKey, getProperties, parseReadingAddress, parseReadingFile, prepareReading, readingLocalAddress, resolveWiki, withoutProperties,
+  type NoteTarget,
+} from "@/knowledge-document";
 import { fileName, type ExampleFile } from "@/ide-knowledge-data";
 import { NoteDiagram, noteAttachments, type NoteAttachment } from "@/knowledge-media";
+import { noteAttachmentCandidates, RepositoryNoteMedia } from "@/repository-note-media";
 import "katex/dist/katex.css";
 
 const markdownPlugins = [remarkGfm, remarkMath];
@@ -23,21 +27,26 @@ const heading = (Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") => function Markd
   return <Tag data-note-anchor={anchorKey(textContent(children))}>{children}</Tag>;
 };
 
-function trustedPreviewUrl(url: string) {
-  if (/^omni-(?:wiki|mark):/.test(url)) return url;
-  return url.startsWith("#") ? url : "";
+function trustedPreviewUrl(url: string, path: string) {
+  if (/^omni-(?:wiki|mark|file):/.test(url)) return url;
+  if (url.startsWith("#")) return url;
+  return readingLocalAddress(path, url);
 }
 
-export function NoteReading({ path, content, files, jump, onLink, onAttachment }: {
+export function NoteReading({ path, content, files, jump, onLink, onAttachment, sampleAttachments = true, checkoutId, onRepositoryAttachment }: {
   path: string;
   content: string;
   files: readonly ExampleFile[];
   jump?: { anchor?: string; line?: number; token: number };
   onLink: (link: NoteTarget) => void;
   onAttachment: (attachment: NoteAttachment) => void;
+  sampleAttachments?: boolean;
+  checkoutId?: string;
+  onRepositoryAttachment?: (paths: string[], label: string) => void;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const rendered = prepareReading(content, path, files);
+  const properties = getProperties(content);
   useEffect(() => {
     if (!jump?.anchor || !root.current) return;
     const key = anchorKey(jump.anchor);
@@ -59,16 +68,18 @@ export function NoteReading({ path, content, files, jump, onLink, onAttachment }
     a: ({ href, children }) => {
       if (href?.startsWith("omni-mark:")) return <mark>{children}</mark>;
       if (href?.startsWith("omni-wiki:")) {
-        let value: string;
-        try {
-          value = decodeURIComponent(href.slice("omni-wiki:".length));
-        } catch {
-          return <span>{children}</span>;
-        }
-        const link = parseWiki(value.replace(/^!/, ""), value.startsWith("!"));
-        const attachment = noteAttachments.find(({ name }) => link.target.split("/").at(-1)?.toLowerCase() === name);
+        const link = parseReadingAddress(href);
+        if (!link) return <span>{children}</span>;
+        const attachment = sampleAttachments ? noteAttachments.find(({ name }) => link.target.split("/").at(-1)?.toLowerCase() === name) : undefined;
         if (attachment) return <button type="button" className="note-inline-link" onClick={() => onAttachment(attachment)}><FileText size={13} />{children}</button>;
-        const targets = resolveWiki(link, path, files);
+        const paths = noteAttachmentCandidates(link.target, link.sourcePath ?? path, true);
+        if (checkoutId && paths.length > 0) {
+          const label = link.alias ?? link.target;
+          if (link.embed) return <RepositoryNoteMedia checkoutId={checkoutId} paths={paths} title={label} />;
+          if (onRepositoryAttachment) return <button type="button" className="note-inline-link"
+            onClick={() => onRepositoryAttachment(paths, label)}>{children}</button>;
+        }
+        const targets = resolveWiki(link, link.sourcePath ?? path, files);
         const note = targets.length === 1 ? files.find(({ path: filePath }) => filePath === targets[0]?.path) : undefined;
         const excerpt = note && withoutProperties(note.content).split("\n").filter((line) => line.trim() && !line.startsWith("#")).slice(0, 2).join(" ");
         const problem = targets.length > 1 ? "Ambiguous note reference" : "Unresolved note reference";
@@ -79,9 +90,21 @@ export function NoteReading({ path, content, files, jump, onLink, onAttachment }
           </span>
         );
       }
+      const asset = href && parseReadingFile(href);
+      if (asset && checkoutId && onRepositoryAttachment) {
+        const paths = noteAttachmentCandidates(asset[1], asset[0], false);
+        if (paths.length > 0) return <button type="button" className="note-inline-link"
+          onClick={() => onRepositoryAttachment(paths, textContent(children) || asset[1])}>{children}</button>;
+      }
       return href?.startsWith("#") ? <a href={href}>{children}</a> : <span>{children}</span>;
     },
-    img: ({ alt }) => <span className="file-help">Attachment preview unavailable · {alt}</span>,
+    img: ({ alt, src }) => {
+      const file = src && parseReadingFile(src);
+      if (checkoutId && file) {
+        return <RepositoryNoteMedia checkoutId={checkoutId} paths={noteAttachmentCandidates(file[1], file[0], false)} title={alt || file[1]} />;
+      }
+      return <span className="file-help">Attachment preview unavailable · {alt}</span>;
+    },
     p: ({ children }) => {
       const body = textContent(children);
       const block = /\s+(\^[\w-]+)\s*$/.exec(body)?.[1];
@@ -92,7 +115,13 @@ export function NoteReading({ path, content, files, jump, onLink, onAttachment }
   return (
     <div className="note-reading" ref={root} aria-label={`Reading view for ${path}`}>
       <article>
-        <ReactMarkdown skipHtml urlTransform={trustedPreviewUrl} remarkPlugins={markdownPlugins} rehypePlugins={readingPlugins} components={components}>
+        {properties.length > 0 && <dl aria-label="Properties" className="note-reading-properties">
+          {properties.map(({ key, value }, index) => <div key={`${key}:${index}`}>
+            <dt>{key}</dt><dd>{value}</dd>
+          </div>)}
+        </dl>}
+        <ReactMarkdown skipHtml urlTransform={(url) => trustedPreviewUrl(url, path)} remarkPlugins={markdownPlugins}
+          rehypePlugins={readingPlugins} components={components}>
           {rendered}
         </ReactMarkdown>
       </article>

@@ -199,3 +199,11 @@ pub async fn read_repository_markdown(
 fn markdown_error(error: impl std::fmt::Display) -> String {
     diagnostics::preview(&error.to_string())
 }
+
+#[tauri::command]
+pub async fn repository_note_catalog(
+    store: State<'_, Store>,
+    checkout_id: String,
+) -> Result<Vec<omniagent::repository::RepositoryNoteCatalogEntry>, String> {
+    store.repository_note_catalog(checkout_id).await.map_err(markdown_error)
+}

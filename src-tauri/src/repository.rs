@@ -19,6 +19,7 @@ mod candidates;
 pub mod documents;
 mod isolated_git;
 mod markdown;
+mod markdown_catalog;
 pub mod verification;
 pub mod verified_git;
 mod worktrees;
@@ -29,6 +30,7 @@ pub(crate) use candidates::{
 };
 pub(crate) use markdown::bind_job_markdown;
 pub use markdown::{RepositoryMarkdown, RepositoryMarkdownRevision};
+pub use markdown_catalog::RepositoryNoteCatalogEntry;
 pub use worktrees::strategy::{BranchStrategy, TaskBranchStrategy};
 pub use worktrees::{GitStartingState, ManagedWorktree, WorktreeStart, provision_task_worktree};
 pub(crate) use worktrees::{

@@ -217,6 +217,7 @@ fn main() {
             app.manage(store);
             app.manage(scheduler);
             app.manage(ipc::EventSubscriptions::default());
+            app.manage(note_runtime::NoteWatches::default());
             app.manage(fixture_runtime::FixtureRuns::default());
             desktop::create_tray(app)?;
             desktop::notify_job_activity(app.handle().clone(), notices)?;
@@ -277,10 +278,17 @@ fn main() {
             desktop::choose_repository_markdown,
             desktop::list_repository_markdown_revisions,
             desktop::read_repository_markdown,
-            markdown_analysis_ipc::analyze_note_markdown,
+            desktop::repository_note_catalog,
             note_runtime::open_repository_document,
             note_runtime::save_repository_document,
             note_runtime::read_repository_attachment,
+            markdown_analysis_ipc::analyze_note_markdown,
+            note_runtime::read_repository_markdown_draft,
+            note_runtime::list_repository_markdown_drafts,
+            note_runtime::save_repository_markdown_draft,
+            note_runtime::discard_repository_markdown_draft,
+            note_runtime::watch_repository_note,
+            note_runtime::unwatch_repository_note,
             ipc::active_checkout,
             ipc::registered_checkouts,
             omniagent::appearance::appearance_settings,

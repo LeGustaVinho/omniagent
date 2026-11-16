@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  anchorLine, getProperties, headings, parseWiki, prepareReading, repairWikiAddress,
+  anchorLine, getProperties, headings, parseReadingAddress, parseWiki, prepareReading, repairWikiAddress,
   resolveWiki, rewriteNoteReferences, updateProperty, wikiLinks,
 } from "@/knowledge-document";
 import { exampleNotes } from "@/ide-knowledge-data";
@@ -42,5 +42,22 @@ describe("Knowledge example document projection", () => {
     expect(headings(source)).toEqual([{ anchor: "Visible", label: "Visible", level: 1, line: 8 }]);
     expect(prepareReading(source, "example.md", [])).toContain("# Visible");
     expect(prepareReading(source, "example.md", [])).not.toContain("# Hidden");
+  });
+
+  it("keeps relative wikilinks in nested transclusions scoped to the source note", () => {
+    const files = [
+      { path: "docs/intro.md", content: "![[/ops/checks#Approval]]" },
+      { path: "ops/checks.markdown", content: "# Approval\nReview [[./Handoff#Verify|the next step]].\n# Unrelated\nWrong section" },
+      { path: "ops/Handoff.md", content: "---\naliases:\n  - \"Review, confirm\"\n  - Handoff guide # preserve\n---\n## Verify" },
+      { path: "docs/Handoff.md", content: "# Wrong note" },
+    ];
+    const rendered = prepareReading(files[0]!.content, files[0]!.path, files);
+    const link = parseReadingAddress(rendered.match(/omni-wiki:[^)]+/)![0])!;
+    expect(link.sourcePath).toBe("ops/checks.markdown");
+    expect(resolveWiki(link, link.sourcePath!, files)).toEqual([{ path: "ops/Handoff.md", anchor: "Verify" }]);
+    expect(resolveWiki(parseWiki("Review, confirm"), files[0]!.path, files)).toEqual([{ path: "ops/Handoff.md", anchor: undefined }]);
+    expect(resolveWiki(parseWiki("Handoff guide"), files[0]!.path, files)).toEqual([{ path: "ops/Handoff.md", anchor: undefined }]);
+    expect(rendered).not.toContain("Wrong section");
+    expect(prepareReading("%%\n![[/ops/checks]]\n%%\nAfter", files[0]!.path, files)).not.toContain("Embedded");
   });
 });

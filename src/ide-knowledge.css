@@ -230,6 +230,7 @@
 .note-body { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .note-body [hidden] { display: none; }
 .note-file-view, .note-editor { display: flex; flex: 1; height: 100%; min-height: 0; min-width: 0; flex-direction: column; }
+.note-editable-view { flex: 1; min-height: 0; min-width: 0; }
 .cm-note-heading { font-weight: 650; }
 .cm-note-heading-1 { font-size: 1.4em; }
 .cm-note-heading-2 { font-size: 1.2em; }
@@ -258,6 +259,10 @@
 
 .note-reading { flex: 1; min-height: 0; height: 100%; overflow: auto; }
 .note-reading article { max-width: 720px; margin: 0 auto; padding: 25px clamp(14px, 4vw, 38px) 44px; font-size: 14px; line-height: 1.75; }
+.note-reading-properties { border-bottom: 1px solid var(--border); margin-bottom: 16px; padding-bottom: 8px; }
+.note-reading-properties > div { display: grid; grid-template-columns: minmax(80px, 1fr) 3fr; gap: 12px; overflow-wrap: anywhere; }
+.note-reading-properties dt { color: var(--muted-foreground); }
+.note-file-view :is(.note-media-image, video), .note-pdf-preview { display: block; max-width: 100%; }
 .note-reading article :is(h1,h2,h3,h4,h5,h6) { font-weight: 600; line-height: 1.28; scroll-margin: 14px; }
 .note-reading article h1 { margin: 4px 0 19px; font-size: 27px; letter-spacing: -.025em; }
 .note-reading article h2 { margin: 27px 0 9px; font-size: 19px; letter-spacing: -.015em; }

@@ -6,6 +6,7 @@ export interface NoteTarget {
   alias?: string;
   anchor?: string;
   embed: boolean;
+  sourcePath?: string;
 }
 
 export interface NoteLocation {
@@ -125,9 +126,36 @@ function unquote(value: string) {
   return value.replace(/^["']|["']$/g, "");
 }
 
+function yamlScalar(value: string) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try { return JSON.parse(trimmed) as string; } catch { return unquote(trimmed); }
+  }
+  return trimmed.startsWith("'") && trimmed.endsWith("'")
+    ? trimmed.slice(1, -1).replaceAll("''", "'")
+    : trimmed;
+}
+
 function noteAliases(source: string) {
-  const aliases = getProperties(source).find(({ key }) => key === "aliases")?.value ?? "";
-  return aliases.replace(/^\[|\]$/g, "").split(",").map((alias) => unquote(alias.trim().toLowerCase())).filter(Boolean);
+  const lines = frontmatter(source)?.body.split(/\r?\n/) ?? [];
+  for (const [index, line] of lines.entries()) {
+    const property = lineParts(line);
+    if (property?.key !== "aliases" && property?.key !== "alias") continue;
+    const value = property.value.trim();
+    if (value.startsWith("[") && value.endsWith("]")) {
+      const entries = value.slice(1, -1).match(/"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^,]+/g) ?? [];
+      return entries.map(yamlScalar).filter(Boolean);
+    }
+    if (value) return [yamlScalar(value)];
+    const aliases: string[] = [];
+    for (const continuation of lines.slice(index + 1)) {
+      const entry = /^\s*-\s+(.*?)\s*$/.exec(continuation)?.[1];
+      if (entry) aliases.push(yamlScalar(lineParts("item: " + entry)?.value ?? entry));
+      else if (continuation.trim() && !continuation.trimStart().startsWith("#")) break;
+    }
+    return aliases;
+  }
+  return [];
 }
 
 export function resolveWiki(link: NoteTarget, from: string, files: readonly ExampleFile[]): NoteLocation[] {
@@ -135,21 +163,25 @@ export function resolveWiki(link: NoteTarget, from: string, files: readonly Exam
   const find = (path: string) => {
     const normalized = normalizeRepositoryPath(path);
     if (!normalized) return [];
-    const candidates = [normalized.toLowerCase(), (normalized + ".md").toLowerCase()];
+    const key = normalized.toLowerCase();
+    const candidates = /\.(?:md|markdown)$/i.test(key) ? [key] : [key, key + ".md", key + ".markdown"];
     return files.filter((file) => candidates.includes(file.path.toLowerCase())).map(({ path: canonical }) => ({ path: canonical, anchor: link.anchor }));
   };
   if (!raw) return link.anchor ? find(from) : [];
   if (raw.startsWith("/")) return find(raw.slice(1));
+  const parent = from.slice(0, from.lastIndexOf("/") + 1);
+  if (raw.startsWith("./") || raw.startsWith("../")) return find(parent + raw);
   if (raw.includes("/")) {
     const exact = find(raw);
     if (exact.length) return exact;
-    return find(`${from.slice(0, from.lastIndexOf("/") + 1)}${raw}`);
+    return find(parent + raw);
   }
-  const lower = raw.toLowerCase().replace(/\.md$/, "");
+  const lower = raw.toLowerCase().replace(/\.(?:md|markdown)$/, "");
   return files.flatMap((file) => {
-    const name = fileName(file.path).toLowerCase().replace(/\.md$/, "");
+    const name = fileName(file.path).toLowerCase().replace(/\.(?:md|markdown)$/, "");
     const title = unquote(getProperties(file.content).find(({ key }) => key === "title")?.value ?? "").toLowerCase();
-    return name === lower || title === lower || noteAliases(file.content).includes(lower) ? [{ path: file.path, anchor: link.anchor }] : [];
+    return name === lower || title === lower || noteAliases(file.content).some((alias) => alias.toLowerCase() === lower)
+      ? [{ path: file.path, anchor: link.anchor }] : [];
   });
 }
 
@@ -229,26 +261,76 @@ function escapedLabel(label: string) {
   return label.replace(/[\\\[\]]/g, "\\$&");
 }
 
+export function readingWikiAddress(path: string, raw: string) {
+  return "omni-wiki:" + encodeURIComponent(JSON.stringify([path, raw]));
+}
+
+export function parseReadingAddress(href: string): NoteTarget | undefined {
+  try {
+    const input: unknown = JSON.parse(decodeURIComponent(href.slice("omni-wiki:".length)));
+    if (!Array.isArray(input) || input.length !== 2 || typeof input[0] !== "string" || typeof input[1] !== "string") return;
+    const [sourcePath, raw] = input;
+    return { ...parseWiki(raw.replace(/^!/, ""), raw.startsWith("!")), sourcePath };
+  } catch {
+    return undefined;
+  }
+}
+
+export function readingLocalAddress(path: string, destination: string) {
+  if (!destination || destination.startsWith("#") || /^[\\/]{2}/.test(destination) || /^[a-z][\w+.-]*:/i.test(destination)) return "";
+  try {
+    const [target, hash] = destination.split("#", 2).map(decodeURIComponent);
+    if (!target || target.includes(":") || /^[\\/]{2}/.test(target)) return "";
+    if (/\.(?:md|markdown)$/i.test(target)) {
+      const relative = target.startsWith("/") ? target : "./" + target;
+      return readingWikiAddress(path, relative + (hash ? "#" + hash : ""));
+    }
+    return "omni-file:" + encodeURIComponent(JSON.stringify([path, target]));
+  } catch {
+    return "";
+  }
+}
+
+export function parseReadingFile(href: string): [string, string] | undefined {
+  if (!href.startsWith("omni-file:")) return;
+  try {
+    const value: unknown = JSON.parse(decodeURIComponent(href.slice("omni-file:".length)));
+    if (Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && typeof value[1] === "string") {
+      return [value[0], value[1]];
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 export function prepareReading(source: string, path: string, files: readonly ExampleFile[], lineage: readonly string[] = [path]): string {
-  const prepared = byMarkdownLine(withoutProperties(source), (line) => {
+  const content = byText(withoutProperties(source), (text) => text, true);
+  return byMarkdownLine(content, (line) => {
     const wholeEmbed = /^\s*!\[\[([^\]]+)\]\]\s*$/.exec(line)?.[1];
-    if (!wholeEmbed) return line;
-    const matches = resolveWiki(parseWiki(wholeEmbed, true), path, files);
-    const target = matches.length === 1 ? matches[0] : undefined;
-    const note = files.find((file) => file.path === target?.path);
-    if (!target || !note) return line;
-    const content = lineage.includes(target.path) || lineage.length >= 4
-      ? "This transclusion points to a note already in the current embed chain."
-      : excerpt(note.content, target.anchor);
-    if (!content) return line;
-    const embedded = content === "This transclusion points to a note already in the current embed chain."
-      ? content : prepareReading(content, target.path, files, [...lineage, target.path]);
-    return `> **Embedded · ${fileName(target.path)}**\n>\n` + embedded.split("\n").map((row) => `> ${row}`).join("\n");
+    if (wholeEmbed) {
+      const matches = resolveWiki(parseWiki(wholeEmbed, true), path, files);
+      const target = matches.length === 1 ? matches[0] : undefined;
+      const note = files.find((file) => file.path === target?.path);
+      if (target && note) {
+        if (lineage.includes(target.path)) return "> This transclusion points to a note already in the current embed chain.";
+        if (lineage.length >= 4) return "> This transclusion reached the maximum embed depth.";
+        const excerptSource = excerpt(note.content, target.anchor);
+        if (excerptSource) {
+          const embedded = prepareReading(excerptSource, target.path, files, [...lineage, target.path]);
+          return `> **Embedded · ${fileName(target.path)}**\n>\n` + embedded.split("\n").map((row) => `> ${row}`).join("\n");
+        }
+      }
+    }
+    return byText(line, (text) => text.replace(/(\]\()(<[^>]+>|[^()\s]+)(?=[\s)])/g,
+      (original, prefix: string, destination: string) => {
+        const url = readingLocalAddress(path, destination.replace(/^<|>$/g, ""));
+        return url ? prefix + url : original;
+      })
+    .replace(wikiPattern, (_entry: string, embed: string, raw: string) => {
+      const { target, alias, anchor } = parseWiki(raw);
+      const label = alias ?? (target || anchor || raw);
+      return `[${escapedLabel(label)}](${readingWikiAddress(path, embed + raw)})`;
+    }).replace(/==([^=]+)==/g, (_match, value: string) => `[${escapedLabel(value)}](omni-mark:${encodeURIComponent(value)})`)
+      .replace(/^> \[!([A-Za-z]+)\]\s*(.*)$/, (_match, kind: string, label: string) => `> **${kind}${label ? " · " + label : ""}**`));
   });
-  return byText(prepared, (text) => text.replace(wikiPattern, (_entry: string, embed: string, raw: string) => {
-    const { target, alias, anchor } = parseWiki(raw);
-    const label = alias ?? (target || anchor || raw);
-    return `[${escapedLabel(label)}](omni-wiki:${encodeURIComponent(embed + raw)})`;
-  }).replace(/==([^=]+)==/g, (_match, value: string) => `[${escapedLabel(value)}](omni-mark:${encodeURIComponent(value)})`)
-    .replace(/^> \[!([A-Za-z]+)\]\s*(.*)$/, (_match, kind: string, label: string) => `> **${kind}${label ? " · " + label : ""}**`), true);
 }

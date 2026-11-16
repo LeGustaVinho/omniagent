@@ -1,0 +1,101 @@
+import { invoke } from "@tauri-apps/api/core";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { normalizeRepositoryPath } from "@/ide-knowledge-data";
+import type { NoteAttachmentContent } from "@/repository-note-buffers";
+
+const fileExtension = /\.(?:avif|bmp|gif|jpe?g|png|svg|webp|aac|flac|m4a|mp3|ogg|opus|wav|m4v|mov|mp4|ogv|webm|pdf)$/i;
+const imageTypes = new Set(["image/avif", "image/bmp", "image/gif", "image/jpeg", "image/png", "image/svg+xml", "image/webp"]);
+const audioTypes = new Set(["audio/aac", "audio/flac", "audio/mp4", "audio/mpeg", "audio/ogg", "audio/opus", "audio/wav", "audio/x-wav"]);
+const videoTypes = new Set(["video/mp4", "video/ogg", "video/quicktime", "video/webm", "video/x-m4v"]);
+
+export function noteAttachmentCandidates(target: string, from: string, wiki: boolean) {
+  if (!fileExtension.test(target) || target.includes(":") || /^[\\/]{2}/.test(target)) return [];
+  const path = target.replaceAll("\\", "/");
+  const parent = from.slice(0, from.lastIndexOf("/") + 1);
+  const reference = path.startsWith("/") ? path.slice(1) : parent + path;
+  const candidates = wiki && !path.startsWith("/") && !/^\.\.?\//.test(path) ? [reference, path] : [reference];
+  return [...new Set(candidates.flatMap((candidate) => {
+    const normalized = normalizeRepositoryPath(candidate);
+    return normalized && normalized.split("/")[0]?.toLowerCase() !== ".git" ? [normalized] : [];
+  }))];
+}
+
+function PdfAttachment({ base64, title }: { base64: string; title: string }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [page, setPage] = useState(1);
+  const [pageCount, setPageCount] = useState(1);
+  const [status, setStatus] = useState("Rendering PDF…");
+  useEffect(() => {
+    let alive = true;
+    let loading: import("pdfjs-dist").PDFDocumentLoadingTask | undefined;
+    let rendering: import("pdfjs-dist").RenderTask | undefined;
+    const target = canvas.current;
+    if (!target) return;
+    setStatus("Rendering PDF…");
+    void (async () => {
+      try {
+        const pdf = await import("pdfjs-dist");
+        if (!alive) return;
+        pdf.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+        loading = pdf.getDocument({
+          data: Uint8Array.from(atob(base64), (value) => value.charCodeAt(0)), enableXfa: false, useSystemFonts: true,
+        });
+        const document = await loading.promise;
+        const renderedPage = await document.getPage(page);
+        if (!alive) return;
+        setPageCount(document.numPages);
+        const original = renderedPage.getViewport({ scale: 1 });
+        const maxDimension = Math.max(original.width, original.height);
+        if (!Number.isFinite(maxDimension) || maxDimension <= 0) throw new Error("Invalid PDF page");
+        const view = renderedPage.getViewport({ scale: Math.min(1, 1400 / maxDimension) });
+        target.width = Math.max(1, Math.ceil(view.width));
+        target.height = Math.max(1, Math.ceil(view.height));
+        rendering = renderedPage.render({ canvas: target, viewport: view, background: "#ffffff" });
+        await rendering.promise;
+        if (alive) setStatus("");
+      } catch {
+        if (alive) setStatus("This PDF could not be rendered.");
+      }
+    })();
+    return () => {
+      alive = false;
+      rendering?.cancel();
+      if (loading) void loading.destroy().catch(() => undefined);
+    };
+  }, [base64, page]);
+
+  return <span className="note-pdf-preview">
+    <canvas ref={canvas} className="note-pdf" aria-label={`${title} page ${page}`} hidden={Boolean(status)} />
+    {status && <span role="status" className="file-help">{status}</span>}
+    {pageCount > 1 && <span className="file-toolbar">
+      <button type="button" className="fw-btn" disabled={page === 1} onClick={() => setPage(page - 1)}>Previous page</button>
+      <span>Page {page} of {pageCount}</span>
+      <button type="button" className="fw-btn" disabled={page === pageCount} onClick={() => setPage(page + 1)}>Next page</button>
+    </span>}
+  </span>;
+}
+
+export function RepositoryNoteMedia({ checkoutId, paths, title }: { checkoutId: string; paths: string[]; title: string }) {
+  const attachment = useQuery({
+    queryKey: ["repository-note-attachment", checkoutId, ...paths],
+    enabled: paths.length > 0,
+    queryFn: async () => {
+      for (const path of paths) {
+        const content = await invoke<NoteAttachmentContent | null>("read_repository_attachment", { checkoutId, path });
+        if (content) return content;
+      }
+      return null;
+    },
+  });
+  const file = attachment.data;
+  if (!paths.length || attachment.error || file === null) return <span className="file-help">Attachment unavailable · {title}</span>;
+  if (!file) return <span className="file-help" role="status">Loading attachment · {title}</span>;
+  const dataUrl = `data:${file.mimeType};base64,${file.contentBase64}`;
+  if (file.mimeType === "application/pdf") return <PdfAttachment key={file.relativePath} base64={file.contentBase64} title={title} />;
+  if (imageTypes.has(file.mimeType)) return <img className="note-media-image" src={dataUrl} alt={title} loading="lazy" />;
+  if (audioTypes.has(file.mimeType)) return <audio src={dataUrl} aria-label={title} controls preload="metadata" />;
+  if (videoTypes.has(file.mimeType)) return <video src={dataUrl} aria-label={title} controls preload="metadata" />;
+  return <span className="file-help">Attachment preview unavailable · {title}</span>;
+}

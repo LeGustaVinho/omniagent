@@ -14,6 +14,8 @@ import {
 } from "@/knowledge-document";
 import { AttachmentPreview, noteAttachments, type NoteAttachment } from "@/knowledge-media";
 import type { NoteJump } from "@/knowledge-editor";
+import { useRepositoryNotes, type NoteBuffer } from "@/repository-note-buffers";
+import { noteAttachmentCandidates, RepositoryNoteMedia } from "@/repository-note-media";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const Editor = lazy(() => import("@/knowledge-editor").then(({ MarkdownEditor }) => ({ default: MarkdownEditor })));
@@ -42,6 +44,7 @@ type KnowledgeDialog =
   | { kind: "rename"; path: string }
   | { kind: "rewrite"; path: string; destination: string; edits: RewrittenNote[] }
   | { kind: "link"; from: string; link: NoteTarget; matches: NoteLocation[] }
+  | { kind: "repositoryAttachment"; paths: string[]; label: string }
   | { kind: "attachment"; attachment: NoteAttachment };
 
 function initialNotes(simulated: boolean, recovery: boolean): Record<string, Note> {
@@ -52,7 +55,7 @@ function initialNotes(simulated: boolean, recovery: boolean): Record<string, Not
   }]));
 }
 
-function isDirty(note?: Note) {
+function isDirty(note?: NoteBuffer) {
   return Boolean(note && (note.external !== undefined || note.content !== note.saved));
 }
 
@@ -63,8 +66,10 @@ export default function KnowledgeWorkspace(props: WorkspaceProps) {
 function KnowledgeSurface({ checkout, target, simulation, startSimulation, openWorkspace }: WorkspaceProps) {
   const simulated = Boolean(simulation);
   const initialPath = target ? normalizeRepositoryPath(target) : simulated ? deliveryNote : undefined;
-  const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "knowledge", simulated, initialPath });
-  const [notes, setNotes] = useState(() => initialNotes(simulated, simulation?.scenario === "recovery"));
+  const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "knowledge", simulated, initialPath: simulated ? initialPath : undefined });
+  const [examples, setNotes] = useState(() => initialNotes(simulated, simulation?.scenario === "recovery"));
+  const repository = useRepositoryNotes(checkout.checkoutId, !simulated);
+  const notes = simulated ? examples : repository.notes;
   const [sidebar, setSidebar] = useFileSidebar();
   const [display, setDisplay] = useState<"tree" | "search">("tree");
   const [query, setQuery] = useState("");
@@ -78,12 +83,19 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const [problem, setProblem] = useState("");
   const [selection, setSelection] = useState("");
   const [selectedAnchor, setSelectedAnchor] = useState("");
-  const lastTarget = useRef(initialPath);
+  const lastTarget = useRef(simulated ? initialPath : undefined);
+  const lastOpen = useRef(0);
+  const { load: loadNote, watch: watchNote, getNote } = repository;
   const active = dock.path;
   const note = active ? notes[active] : undefined;
   const source = note?.content ?? "";
   const activeMode = active ? modes[active] ?? "live" : "live";
-  const catalog = useMemo(() => Object.entries(notes).map(([path, value]) => ({ path, content: value.content })), [notes]);
+  const catalog = useMemo(() => {
+    const indexed = new Map(repository.catalog.map(({ path, frontmatter }) => [path, frontmatter ?? ""]));
+    for (const path of repository.draftPaths) if (!indexed.has(path)) indexed.set(path, "");
+    for (const [path, value] of Object.entries(notes)) indexed.set(path, value.content);
+    return [...indexed].map(([path, content]) => ({ path, content }));
+  }, [notes, repository.catalog, repository.draftPaths]);
   const matches = findFileText(catalog, query, true);
   const outgoing = wikiLinks(source);
   const backlinks = active ? catalog.flatMap(({ path, content }) => {
@@ -96,10 +108,55 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   }) : [];
 
   const open = useCallback((path: string, line?: number, anchor?: string) => {
-    if (line || anchor) setJumps((before) => ({ ...before, [path]: { line, anchor, token: (before[path]?.token ?? 0) + 1 } }));
-    setGraph(false);
-    dock.open(path);
-  }, [dock.open]);
+    const focus = (file: string) => {
+      if (line || anchor) setJumps((before) => ({ ...before, [file]: { line, anchor, token: (before[file]?.token ?? 0) + 1 } }));
+      setGraph(false);
+      dock.open(file);
+    };
+    if (simulated) { focus(path); return; }
+    const request = ++lastOpen.current;
+    void loadNote(path).then((file) => {
+      if (!file || request !== lastOpen.current) return;
+      const anchorTarget = !line && anchor ? anchorLine(getNote(file)?.content ?? "", anchor) : undefined;
+      if (anchorTarget) setJumps((before) => ({ ...before, [file]: { line: anchorTarget, anchor, token: (before[file]?.token ?? 0) + 1 } }));
+      else focus(file);
+      if (anchorTarget) { setGraph(false); dock.open(file); }
+      watchNote(file);
+    });
+  }, [dock.open, getNote, loadNote, simulated, watchNote]);
+
+  useEffect(() => {
+    if (simulated || !dock.ready || !active) return;
+    let current = true;
+    void loadNote(active).then((file) => {
+      if (!current || !file) return;
+      if (file !== active) {
+        dock.open(file);
+        dock.api?.getPanel(`editor:${active}`)?.api.close();
+      }
+      watchNote(file);
+    });
+    return () => { current = false; };
+  }, [active, dock.api, dock.open, dock.ready, loadNote, simulated, watchNote]);
+
+  useEffect(() => {
+    if (simulated || !active || !note) return;
+    const seen = new Set([active]);
+    const inspect = (path: string, content: string, depth: number) => {
+      if (depth >= 3) return;
+      for (const embed of wikiLinks(content)) {
+        if (!embed.embed) continue;
+        const targets = resolveWiki(embed, path, catalog);
+        const target = targets.length === 1 ? targets[0] : undefined;
+        if (!target || seen.has(target.path)) continue;
+        seen.add(target.path);
+        const buffer = notes[target.path];
+        if (buffer) inspect(target.path, buffer.content, depth + 1);
+        else if (!repository.failures[target.path]) void loadNote(target.path);
+      }
+    };
+    inspect(active, note.content, 0);
+  }, [active, catalog, loadNote, note, notes, repository.failures, simulated]);
 
   useEffect(() => {
     if (!target || !dock.ready) return;
@@ -111,16 +168,26 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   }, [dock.ready, open, target]);
 
   const update = (path: string, content: string) => {
+    if (!simulated) { repository.update(path, content); return; }
     setNotes((before) => {
       const current = before[path];
       return current && current.content !== content ? { ...before, [path]: { ...current, content } } : before;
     });
   };
-  const save = (path: string) => {
+  const save = async (path: string) => {
     const external = notes[path]?.external;
     if (external !== undefined) {
       setDialog({ kind: "conflict", path, external });
       return false;
+    }
+    if (!simulated) {
+      const saved = await repository.save(path);
+      if (saved) setStatus(`Saved ${path}`);
+      else {
+        const incoming = getNote(path)?.external;
+        if (incoming !== undefined) setDialog({ kind: "conflict", path, external: incoming });
+      }
+      return saved;
     }
     setNotes((before) => {
       const current = before[path];
@@ -130,14 +197,21 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     setStatus(`Saved ${path}`);
     return true;
   };
-  const discard = (path: string) => {
-    const entry = notes[path];
+  const discard = async (path: string) => {
+    if (!simulated) return repository.resolve(path, false);
+    const entry = examples[path];
     if (!entry) return;
     const content = entry.external ?? entry.saved;
     setNotes((before) => ({ ...before, [path]: { content, saved: content, revision: entry.revision + Number(entry.external !== undefined) } }));
   };
+  const closePanel = (path: string, api: FilePanelApi) => {
+    api.close();
+    if (!simulated && !dock.api?.panels.some((panel) => (panel.params as { path?: string } | undefined)?.path === path)) {
+      repository.stopWatching(path);
+    }
+  };
   const close = (path: string, api: FilePanelApi) => {
-    if (!isDirty(notes[path]) || !dock.api || keepOnlyCleanClose(dock.api, path, api)) api.close();
+    if (!isDirty(notes[path]) || !dock.api || keepOnlyCleanClose(dock.api, path, api)) closePanel(path, api);
     else setDialog({ kind: "close", path, api });
   };
   const closeDialog = () => { setDialog(undefined); setProblem(""); };
@@ -147,11 +221,16 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     open(path, anchor ? anchorLine(targetSource, anchor) : undefined, anchor);
   };
   const navigateLink = (from: string, link: NoteTarget) => {
-    const attachment = noteAttachments.find(({ name }) => link.target === name);
+    from = link.sourcePath ?? from;
+    const attachment = simulated ? noteAttachments.find(({ name }) => link.target === name) : undefined;
     if (attachment) { setDialog({ kind: "attachment", attachment }); return; }
+    if (!simulated) {
+      const paths = noteAttachmentCandidates(link.target, from, true);
+      if (paths.length) { setDialog({ kind: "repositoryAttachment", paths, label: link.alias ?? link.target }); return; }
+    }
     const targets = resolveWiki(link, from, catalog);
     const only = targets[0];
-    if (targets.length === 1 && only && (!only.anchor || anchorLine(notes[only.path]?.content ?? "", only.anchor))) {
+    if (targets.length === 1 && only && (!simulated || !only.anchor || anchorLine(notes[only.path]?.content ?? "", only.anchor))) {
       navigateLocation(only);
       return;
     }
@@ -172,9 +251,9 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     setDialog({ kind: "rewrite", path, destination: to, edits });
   };
   const finishRename = (proposal: Extract<KnowledgeDialog, { kind: "rewrite" }>) => {
-    const moved = notes[proposal.path];
+    const moved = examples[proposal.path];
     if (!moved) return;
-    const changed = { ...notes };
+    const changed = { ...examples };
     const skipped: string[] = [];
     for (const edit of proposal.edits) {
       const current = changed[edit.path];
@@ -211,10 +290,9 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           </div>
         </div>
         <div className="file-sidebar-scroll">
-          {display === "search" ? <FileSearch query={query} setQuery={setQuery} results={matches} unavailable={!simulated}
+          {display === "search" ? <FileSearch query={query} setQuery={setQuery} results={matches} unavailable={false}
             placeholder="Find notes and content" onOpen={open} />
-            : simulated ? <FileTree paths={catalog.map(({ path }) => path)} active={active} onOpen={open} />
-              : <p className="file-sidebar-note">Repository note indexing is pending for this checkout.</p>}
+            : <FileTree paths={catalog.map(({ path }) => path)} active={active} onOpen={open} />}
         </div>
       </FileSidebar>}
       <div className="file-workspace-main">
@@ -227,6 +305,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           </div>
         </header>
         {dock.error && <p role="alert" className="file-status"><AlertCircle size={15} />{dock.error}</p>}
+        {repository.error && <p role="alert" className="file-status"><AlertCircle size={15} />{repository.error}</p>}
         {status && <p role="status" className="file-status">{status}</p>}
         {!graph && <div className="note-mode-bar">
           <div className="note-modes" aria-label="Note display modes">
@@ -243,9 +322,9 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
             <button type="button" className="fw-icon" title="Save note (Ctrl+S)" aria-label="Save note" disabled={!isDirty(note)}
               onClick={() => { if (active) save(active); }}><Save size={15} /></button>
             <button type="button" className="fw-icon" title="Split Reading view" aria-label="Split Reading view" disabled={!note}
-              onClick={() => { if (active) { setModes((before) => ({ ...before, [active]: "live" })); dock.split(active, "reading"); } }}><SplitSquareHorizontal size={15} /></button>
-            <button type="button" className="fw-icon" title="Rename note" aria-label="Rename note" disabled={!note}
-              onClick={() => { if (active) { setDestination(active); setDialog({ kind: "rename", path: active }); } }}><FilePenLine size={15} /></button>
+              onClick={() => { if (active) { setModes((before) => before[active] === "reading" ? { ...before, [active]: "live" } : before); dock.split(active, "reading"); } }}><SplitSquareHorizontal size={15} /></button>
+            {simulated && <button type="button" className="fw-icon" title="Rename note" aria-label="Rename note" disabled={!note}
+              onClick={() => { if (active) { setDestination(active); setDialog({ kind: "rename", path: active }); } }}><FilePenLine size={15} /></button>}
           </div>
         </div>}
         <div className="note-body">
@@ -253,24 +332,38 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
             <FileDock onReady={dock.onReady} context={{
               renderFile: (path, view) => {
                 const entry = notes[path];
-                if (!entry) return <FileUnavailable title="Note unavailable" detail={simulated ? path : `${path} · note integration is pending.`} />;
+                if (!entry) {
+                  const failure = repository.failures[path];
+                  return failure || simulated
+                    ? <FileUnavailable title="Note unavailable" detail={failure ?? path} />
+                    : <p role="status" className="file-help">Loading {path}…</p>;
+                }
                 const selectedMode = view === "reading" ? "reading" : modes[path] ?? "live";
                 const onLink = (link: NoteTarget) => navigateLink(path, link);
+                const sourceProblem = repository.notes[path]?.sourceProblem;
                 return (
                   <div className="note-file-view">
                     <div className="ide-file-caption">
                       <span>{path.replaceAll("/", " / ")}</span>
-                      <span>{isDirty(entry) ? "Unsaved · " : ""}r{entry.revision}</span>
+                      <span>{isDirty(entry) ? "Unsaved · " : ""}{simulated ? `r${entry.revision}` : entry.revision}</span>
                     </div>
+                    {sourceProblem && <p role="alert" className="file-help">{sourceProblem}</p>}
+                    {!simulated && entry.external !== undefined && <button type="button" className="fw-btn fw-outlined"
+                      onClick={() => setDialog({ kind: "conflict", path, external: entry.external! })}>Review external change</button>}
                     <Suspense fallback={<p role="status" className="file-help">Loading note view…</p>}>
-                      {selectedMode === "reading" ? <Reading path={path} content={entry.content} files={catalog} jump={jumps[path]} onLink={onLink} onAttachment={(attachment) => setDialog({ kind: "attachment", attachment })} />
-                        : <Editor analyze mode={selectedMode} path={path} source={entry.content} files={catalog} jump={jumps[path]} onChange={(content) => update(path, content)} onLink={onLink} />}
+                      {view === "editor" && <div className="note-editable-view" hidden={selectedMode === "reading"}>
+                        <Editor mode={selectedMode === "source" ? "source" : "live"} path={path} source={entry.content} files={catalog} jump={jumps[path]} analyze onChange={(content) => update(path, content)} onLink={onLink} />
+                      </div>}
+                      {selectedMode === "reading" && <Reading path={path} content={entry.content} files={catalog} jump={jumps[path]} onLink={onLink}
+                        checkoutId={simulated ? undefined : checkout.checkoutId} sampleAttachments={simulated}
+                        onAttachment={(attachment) => setDialog({ kind: "attachment", attachment })}
+                        onRepositoryAttachment={(paths, label) => setDialog({ kind: "repositoryAttachment", paths, label })} />}
                     </Suspense>
                   </div>
                 );
               },
-              empty: <FileUnavailable title={simulated ? "Open a note" : "Note integration pending"}
-                detail={simulated ? "Choose a note from the tree or search by title and content." : "Explore Markdown editing, backlinks and graph navigation with example notes."}
+              empty: <FileUnavailable title="Open a note"
+                detail="Choose a note from the tree or search by title and content."
                 onSimulate={simulated ? undefined : () => startSimulation()} />,
               dirty: (path) => isDirty(notes[path]),
               requestClose: close,
@@ -315,9 +408,14 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                   {getProperties(source).length === 0 && <p className="file-help">This note has no frontmatter properties.</p>}
                 </section>}
                 {inspector === "attachments" && <section aria-label="Attachments"><h3>Attachments</h3>
-                  {noteAttachments.map((attachment) => <button type="button" className="note-attachment-row" key={attachment.name} onClick={() => setDialog({ kind: "attachment", attachment })}>
+                  {simulated && noteAttachments.map((attachment) => <button type="button" className="note-attachment-row" key={attachment.name} onClick={() => setDialog({ kind: "attachment", attachment })}>
                     <strong>{attachment.name}</strong><small>{attachment.detail}</small>
                   </button>)}
+                  {!simulated && outgoing.flatMap((link, index) => noteAttachmentCandidates(link.target, active, true).length ? [
+                    <button type="button" className="note-attachment-row" key={index} onClick={() => navigateLink(active, link)}>
+                      {link.alias ?? link.target}
+                    </button>,
+                  ] : [])}
                 </section>}
               </>}
             </div>
@@ -326,8 +424,10 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
 
         {simulated && active && note && !graph && <footer className="ide-statusbar note-statusbar">
           <button type="button" className="fw-btn" onClick={() => {
-            const external = note.external ?? note.saved + "\n\n> External review added a new readiness note.\n";
-            setNotes((before) => ({ ...before, [active]: { ...note, external } }));
+            const example = examples[active];
+            if (!example) return;
+            const external = example.external ?? example.saved + "\n\n> External review added a new readiness note.\n";
+            setNotes((before) => ({ ...before, [active]: { ...example, external } }));
             setStatus(`External changes need review in ${active}`);
             setDialog({ kind: "conflict", path: active, external });
           }}>{note.external === undefined ? "Simulate external change" : "Review external change"}</button>
@@ -341,9 +441,14 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       {dialog?.kind === "close" && <FileDialog title="Save note before closing?" description={`${dialog.path} has unsaved changes.`} onClose={closeDialog}>
         <div className="file-dialog-footer">
           <button type="button" className="fw-btn" onClick={closeDialog}>Cancel</button>
-          <button type="button" className="fw-btn fw-destructive" onClick={() => { discard(dialog.path); dialog.api.close(); closeDialog(); }}>Discard changes</button>
-          <button type="button" className="fw-btn fw-primary" onClick={() => { if (save(dialog.path)) { dialog.api.close(); closeDialog(); } }}>Save and close</button>
+          <button type="button" className="fw-btn fw-destructive" onClick={() => { void discard(dialog.path).then(() => {
+            closePanel(dialog.path, dialog.api); closeDialog();
+          }, (failure: unknown) => setProblem(String(failure))); }}>Discard changes</button>
+          <button type="button" className="fw-btn fw-primary" onClick={() => { void save(dialog.path).then((saved) => {
+            if (saved) { closePanel(dialog.path, dialog.api); closeDialog(); }
+          }); }}>Save and close</button>
         </div>
+        {problem && <p role="alert">{problem}</p>}
       </FileDialog>}
       {dialog?.kind === "conflict" && <FileDialog title="Note revision conflict" description={`Review the local and external versions of ${dialog.path}.`} onClose={closeDialog}>
         <div className="file-dialog-comparison">
@@ -354,12 +459,20 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           <button type="button" className="fw-btn" onClick={closeDialog}>Review later</button>
           <button type="button" className="fw-btn fw-outlined" onClick={() => {
             const { path, external } = dialog;
+            if (!simulated) {
+              void repository.resolve(path, false).then(closeDialog, (failure: unknown) => setProblem(String(failure)));
+              return;
+            }
             setNotes((before) => ({ ...before, [path]: { content: external, saved: external, revision: (before[path]?.revision ?? 0) + 1 } }));
             setStatus(`Loaded external revision of ${path}`);
             closeDialog();
           }}>Load external version</button>
           <button type="button" className="fw-btn fw-primary" onClick={() => {
             const { path, external } = dialog;
+            if (!simulated) {
+              void repository.resolve(path, true).then(closeDialog, (failure: unknown) => setProblem(String(failure)));
+              return;
+            }
             setNotes((before) => {
               const current = before[path];
               return current ? { ...before, [path]: { ...current, external: undefined, saved: external, revision: current.revision + 1 } } : before;
@@ -368,6 +481,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
             closeDialog();
           }}>Keep local edits</button>
         </div>
+        {problem && <p role="alert">{problem}</p>}
       </FileDialog>}
       {dialog?.kind === "rename" && <FileDialog title="Rename note" description={`Choose a new repository path for ${dialog.path}.`} onClose={closeDialog}>
         <label>New path<input value={destination} onChange={(event) => setDestination(event.target.value)} /></label>
@@ -415,6 +529,9 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       </FileDialog>}
       {dialog?.kind === "attachment" && <FileDialog title={dialog.attachment.name} description={dialog.attachment.detail} onClose={closeDialog}>
         <AttachmentPreview attachment={dialog.attachment} />
+      </FileDialog>}
+      {dialog?.kind === "repositoryAttachment" && <FileDialog title={dialog.label} description="Repository attachment" onClose={closeDialog}>
+        <RepositoryNoteMedia checkoutId={checkout.checkoutId} paths={dialog.paths} title={dialog.label} />
       </FileDialog>}
     </section>
   );
