@@ -1,7 +1,8 @@
 use std::{fs, process::Command};
 
+use super::replacement::ReplacementStep;
 use super::*;
-use crate::repository::{git_path, git_query, register};
+use crate::repository::{git_path, git_query, provision_task_worktree, register};
 
 const OLD: &str = "\u{feff}first\r\nkeep LF\nlast CR\rфинал";
 const EDIT: &str = "new first\nkeep LF\nnew last\nфинал";
@@ -171,6 +172,152 @@ async fn resolves_in_checkout_junctions_and_rejects_external_documents_and_attac
             .is_err()
     );
     assert_eq!(fs::read(outside.join("private.md"))?, b"outside");
+    Ok(())
+}
+
+#[test]
+fn detects_a_post_precheck_change_and_preserves_both_versions() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = dunce::canonicalize(temp.path())?;
+    let destination = root.join("Document.md");
+    fs::write(&destination, b"old")?;
+    let result = replace(
+        &root,
+        &destination,
+        &hash(b"old"),
+        b"edited",
+        1024,
+        |step| {
+            if step == ReplacementStep::BeforeDisplacement {
+                fs::write(&destination, b"concurrent writer")?;
+            }
+            Ok(())
+        },
+    )?;
+    let FileSave::Conflict(recovery) = result else {
+        anyhow::bail!("the displaced bytes did not trigger conflict recovery");
+    };
+    assert_eq!(
+        fs::read(recovery.displaced_path.unwrap())?,
+        b"concurrent writer"
+    );
+    assert_eq!(fs::read(recovery.edited_path.unwrap())?, b"edited");
+    assert_eq!(fs::read(destination)?, b"concurrent writer");
+    Ok(())
+}
+
+#[test]
+fn retains_recoverable_edit_when_replacement_cannot_be_performed() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = dunce::canonicalize(temp.path())?;
+    let destination = root.join("Document.md");
+    fs::write(&destination, b"old")?;
+    let blocker = open_locked_local_file(&destination)?;
+    let FileSave::RecoveryRequired(recovery) =
+        replace(&root, &destination, &hash(b"old"), b"edited", 1024, |_| {
+            Ok(())
+        })?
+    else {
+        anyhow::bail!("a write-sharing violation was not reported");
+    };
+    assert_eq!(fs::read(recovery.edited_path.unwrap())?, b"edited");
+    assert!(recovery.displaced_path.is_none());
+    assert_eq!(fs::read(&destination)?, b"old");
+    drop(blocker);
+    Ok(())
+}
+
+#[test]
+fn preserves_both_backups_if_another_writer_takes_the_destination() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = dunce::canonicalize(temp.path())?;
+    let folder = root.join("notes");
+    fs::create_dir(&folder)?;
+    let destination = folder.join("Document.md");
+    fs::write(&destination, b"old")?;
+    let result = replace(
+        &root,
+        &destination,
+        &hash(b"old"),
+        b"edited",
+        1024,
+        |step| {
+            assert!(fs::rename(&folder, root.join("moved")).is_err());
+            if step == ReplacementStep::BeforeInstall {
+                fs::write(&destination, b"other writer")?;
+            }
+            Ok(())
+        },
+    )?;
+    let FileSave::RecoveryRequired(recovery) = result else {
+        anyhow::bail!("the newly created destination was overwritten");
+    };
+    assert_eq!(fs::read(destination)?, b"other writer");
+    assert_eq!(fs::read(recovery.displaced_path.unwrap())?, b"old");
+    assert_eq!(fs::read(recovery.edited_path.unwrap())?, b"edited");
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_checkout_respects_its_existing_writer_reservation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("profile.sqlite"))?;
+    let project = register(&store, init_repository(temp.path())?).await?;
+    let task = store
+        .create_project_task(project.project_id.clone(), "Guide edits".into())
+        .await?;
+    let worktree = provision_task_worktree(
+        &store,
+        temp.path().join("worktrees"),
+        project.project_id.clone(),
+        task.id.clone(),
+        project.checkout_id,
+    )
+    .await?;
+    let checkout = worktree.checkout_id.clone();
+    let document = open_document(&store, &checkout, "Guide.md").await?;
+    let (entered_signal, entered) = tokio::sync::oneshot::channel();
+    let (release, release_signal) = std::sync::mpsc::channel();
+    let blocker = tokio::spawn({
+        let (store, checkout) = (store.clone(), checkout.clone());
+        async move {
+            with_managed_worktree_writer(&store, project.project_id, checkout, task.id, move |_| {
+                entered_signal
+                    .send(())
+                    .map_err(|()| anyhow::anyhow!("writer observer closed"))?;
+                release_signal.recv()?;
+                Ok(())
+            })
+            .await
+        }
+    });
+    entered.await?;
+    let result = store
+        .save_repository_document(
+            checkout.clone(),
+            "Guide.md".into(),
+            document.revision.id.clone(),
+            EDIT.into(),
+        )
+        .await;
+    release.send(())?;
+    blocker.await??;
+    assert!(result.is_err(), "editor bypassed the reserved writer");
+    let before = fs::read(worktree.root.join("Guide.md"))?;
+    assert_eq!(before, OLD.as_bytes());
+    let result = store
+        .save_repository_document(
+            checkout,
+            "Guide.md".into(),
+            document.revision.id,
+            EDIT.into(),
+        )
+        .await?;
+    assert!(
+        matches!(result, RepositoryDocumentSave::Saved { .. }),
+        "{result:?}"
+    );
+    assert_eq!(fs::read(worktree.root.join("Guide.md"))?, RESULT.as_bytes());
     Ok(())
 }
 
