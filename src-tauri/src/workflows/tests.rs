@@ -38,13 +38,14 @@ fn graph(role: &str) -> WorkflowGraph {
             (
                 "plan",
                 Plan,
-                NodeConfiguration::AgentRole { role: role.into() },
+                NodeConfiguration::AgentRole { role: role.into(), model: None },
             ),
             (
                 "review",
                 ReviewPlan,
                 NodeConfiguration::AgentRole {
                     role: "reviewer".into(),
+                    model: None,
                 },
             ),
             ("work", LinkWork, NodeConfiguration::None),

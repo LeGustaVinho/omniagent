@@ -95,16 +95,23 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
       {environment.error && <p role="alert">{String(environment.error)}</p>}
       {outcomes.error && <p role="alert">{String(outcomes.error)}</p>}
       <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3" aria-label="Comparison results">
-        {result.candidates.map((candidate) => <li key={candidate.jobId} className="pipeline-box pipeline-stack">
-          <header><h2>{candidate.selection.modelId}</h2><small>{candidate.selection.provider}</small></header>
-          <p role="status">{candidate.state.replaceAll("_", " ")}</p>
-          <ComparisonCandidateOutcome outcome={outcomes.data?.find((result) => result.jobId === candidate.jobId && result.runId === candidate.runId)}
-            succeeded={candidate.state === "succeeded"} />
-          <ComparisonEnvironment environment={environment.data?.find((entry) => entry.jobId === candidate.jobId && entry.dispatchId === candidate.dispatchId)} />
-          {candidate.runId && candidate.conversationId && <Button type="button" variant="outline"
-            onClick={() => openActivity(candidate.runId!, candidate.conversationId!)}>Open execution</Button>}
-          {!candidate.runId && openQueueJob && <Button type="button" variant="outline" onClick={() => openQueueJob(candidate.jobId)}>Open queued job</Button>}
-        </li>)}
+        {result.candidates.map((candidate) => {
+          const rating = candidate.modelReference
+            ? candidate.modelReference.rating
+            : modelsQuery.options.find((entry) => sameModelSelection(entry.selection, candidate.selection))?.rating ?? null;
+          return <li key={candidate.jobId} className="pipeline-box pipeline-stack">
+            <header><h2>{candidate.modelReference?.name ?? candidate.selection.modelId}</h2><small>{candidate.selection.provider}</small>
+              <ModelRatingMeters rating={rating} />
+            </header>
+            <p role="status">{candidate.state.replaceAll("_", " ")}</p>
+            <ComparisonCandidateOutcome outcome={outcomes.data?.find((result) => result.jobId === candidate.jobId && result.runId === candidate.runId)}
+              succeeded={candidate.state === "succeeded"} />
+            <ComparisonEnvironment environment={environment.data?.find((entry) => entry.jobId === candidate.jobId && entry.dispatchId === candidate.dispatchId)} />
+            {candidate.runId && candidate.conversationId && <Button type="button" variant="outline"
+              onClick={() => openActivity(candidate.runId!, candidate.conversationId!)}>Open execution</Button>}
+            {!candidate.runId && openQueueJob && <Button type="button" variant="outline" onClick={() => openQueueJob(candidate.jobId)}>Open queued job</Button>}
+          </li>;
+        })}
       </ol>
       <ComparisonSyntheses key={result.id} projectId={projectId} group={result} outcomes={outcomes.data} options={modelsQuery.options}
         openActivity={openActivity} openQueueJob={openQueueJob} />

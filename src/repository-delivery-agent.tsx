@@ -2,8 +2,8 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Job } from "@/bindings/Job";
 import { Button } from "@/components/ui/button";
-import { ModelPicker } from "@/components/model-picker";
-import { availableModelSelection, useLiveModelOptions } from "@/live-models";
+import { ModelPicker, ModelRatingMeters } from "@/components/model-picker";
+import { availableModelSelection, sameModelSelection, useLiveModelOptions } from "@/live-models";
 import { useProjectModelDefaults } from "@/model-defaults";
 import {
   deliveryProviders, type DeliveryActions, type DeliveryInputs,
@@ -15,7 +15,7 @@ import { ReviewComparisonInputs, SavedComparisonInputs, type ComparisonSelection
 
 type PlanRevisionSource = { sourceAttemptId: string; proposalSequence: string; expectedPlanRevision: string | null };
 
-export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, job, label, actions, openActivity, planRevision }: {
+export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, job, label, actions, openActivity, planRevision, pinnedModel }: {
   scope: DeliveryTarget;
   nodeId: DeliveryNode;
   inputs: DeliveryInputs;
@@ -26,6 +26,7 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
   actions: DeliveryActions;
   openActivity: WorkspaceProps["openActivity"];
   planRevision?: PlanRevisionSource;
+  pinnedModel?: DeliveryModelChoice;
 }) {
   const [selection, setSelection] = useState<DeliveryModelChoice>(null);
   const [revisionSource, setRevisionSource] = useState<PlanRevisionSource>();
@@ -40,15 +41,16 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
   const choosing = !active && (attempt?.status !== "succeeded" || revising);
   const { options, loading: loadingOptions } = useLiveModelOptions(deliveryProviders, choosing);
   const role = nodeId === "implement" ? "implementer" : nodeId === "review-candidate" ? "candidate reviewer" : undefined;
-  const assignments = useTaskAssignments(scope.projectId, taskId, Boolean(role) && !active && attempt?.status !== "succeeded");
+  const assignments = useTaskAssignments(scope.projectId, taskId, !pinnedModel && Boolean(role) && !active && attempt?.status !== "succeeded");
   const planned = assignments.data?.find((assignment) => assignment.role === role);
-  const defaults = useProjectModelDefaults(scope.projectId, choosing && (nodeId === "plan" || nodeId === "implement"));
+  const defaults = useProjectModelDefaults(scope.projectId, !pinnedModel && choosing && (nodeId === "plan" || nodeId === "implement"));
   const projectDefault = nodeId === "plan" ? defaults.data?.planning : nodeId === "implement" ? defaults.data?.implementation : undefined;
   const plannedSelection = planned?.modelId ? {
     provider: planned.provider, profileId: planned.profileId, modelId: planned.modelId,
   } : null;
-  const preferred = selection ?? plannedSelection ?? projectDefault;
+  const preferred = pinnedModel ?? selection ?? plannedSelection ?? projectDefault;
   const effectiveSelection = availableModelSelection(options, preferred);
+  const pinnedOption = pinnedModel && options.find(({ selection }) => sameModelSelection(selection, pinnedModel));
   const ready = effectiveSelection !== null;
   return <section className="pipeline-stack" aria-label={label}>
     <h3 className="text-sm font-medium">{label}</h3>
@@ -66,12 +68,16 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
         onClick={() => setRevisionSource(planRevision)}>Request plan revision</Button>}
     {choosing && <>
       <ModelPicker label={`${label} model`} options={options}
-        loading={loadingOptions} disabled={actions.busy}
-        selection={{ mode: "single", selected: effectiveSelection, onChange: setSelection }} />
-      {!selection && planned?.modelId && <p className="text-sm text-muted-foreground">
+        loading={loadingOptions} disabled={Boolean(pinnedModel) || actions.busy}
+        selection={{ mode: "single", selected: pinnedModel ?? effectiveSelection, onChange: setSelection }} />
+      {pinnedModel && <div className="text-sm text-muted-foreground">
+        <p>{ready ? "Pinned stage model" : `Pinned stage model · ${pinnedModel.modelId} · ${loadingOptions ? "Checking availability" : "Unavailable in current profiles"}`}</p>
+        {pinnedOption && <ModelRatingMeters rating={pinnedOption.rating} />}
+      </div>}
+      {!pinnedModel && !selection && planned?.modelId && <p className="text-sm text-muted-foreground">
         {ready ? "Model from task assignment" : `Task assignment · ${planned.modelId} · ${loadingOptions ? "Checking model availability" : "Unavailable in current profiles"}`}
       </p>}
-      {!selection && !plannedSelection && projectDefault && <p className="text-sm text-muted-foreground">
+      {!pinnedModel && !selection && !plannedSelection && projectDefault && <p className="text-sm text-muted-foreground">
         {ready ? "Model from project defaults" : `Project model · ${projectDefault.modelId} · ${loadingOptions ? "Checking availability" : "Unavailable in current profiles"}`}
       </p>}
       {assignments.error && <p role="alert">{String(assignments.error)}</p>}

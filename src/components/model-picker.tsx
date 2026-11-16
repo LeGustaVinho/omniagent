@@ -78,7 +78,10 @@ export function ModelPicker({ label, options, selection, layout = "field", loadi
   const [theme, setTheme] = useState<string>();
   const selected = selection.mode === "multiple" ? selection.selected : selection.selected ? [selection.selected] : [];
   const selectedKeys = new Set(selected.map(modelKey));
-  const selectedOptions = options.filter((option) => selectedKeys.has(modelKey(option.selection)));
+  const selectedOptions = selected.flatMap((choice) => {
+    const option = options.find((entry) => modelKey(entry.selection) === modelKey(choice));
+    return option ? [option] : [];
+  });
   const preview = options.find((option) => modelKey(option.selection) === inspected) ?? selectedOptions[0] ?? options.find(({ selectable }) => selectable);
   const reset = selection.mode === "single" ? selection.reset : undefined;
   let summary = selectedOptions[0]?.name ?? reset?.label ?? "Choose model";

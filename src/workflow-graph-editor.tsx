@@ -4,6 +4,7 @@ import { Background, Controls, Handle, MarkerType, Position, ReactFlow, useUpdat
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CommandNodeConfiguration } from "@/workflow-command";
+import { AgentRoleFields } from "@/workflow-stage-model";
 import {
   changedPorts, configurationProblem, connectionProblem, defaultConfiguration, incompatibility,
   initialNodePositions, outputPort, portType, wireKey,
@@ -228,8 +229,7 @@ function NodeFields({ projectId, node, definition, disabled, onChange }: {
   const { configuration } = node;
   switch (definition.configuration) {
     case "none": return null;
-    case "agent_role": return <label>Agent role <input value={typeof configuration.role === "string" ? configuration.role : ""}
-      required disabled={disabled} onChange={(event) => onChange({ kind: "agent_role", role: event.currentTarget.value })} /></label>;
+    case "agent_role": return <AgentRoleFields configuration={configuration} onChange={onChange} disabled={disabled} />;
     case "required_checks": return <label>Required checks<textarea rows={3} disabled={disabled}
       value={Array.isArray(configuration.names) ? configuration.names.join("\n") : ""}
       onChange={(event) => onChange({ kind: "required_checks", names: event.currentTarget.value ? event.currentTarget.value.split("\n") : [] })} />

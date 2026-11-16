@@ -2,12 +2,14 @@ import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
 import type { ModelSelection } from "@/bindings/ModelSelection";
+import type { ModelRating } from "@/bindings/ModelRating";
 import { Button } from "@/components/ui/button";
 import type { CandidateOutcome } from "@/workflow-comparison-outcomes";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 export type ComparisonCandidate = {
   selection: ModelSelection;
+  modelReference?: { name: string; rating: ModelRating | null; catalogVersion: number };
   jobId: string;
   runId: string | null;
   conversationId: string | null;

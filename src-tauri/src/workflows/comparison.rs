@@ -2,13 +2,13 @@ use std::{collections::HashSet, path::PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
     conversations::{MessageRole, SessionScope},
     jobs::{JobRequest, insert_selected_operator_job},
-    model_catalog::ModelSelection,
+    model_catalog::{ModelOption, ModelRating, ModelSelection},
     protection,
     providers::SessionMode,
     repository::{
@@ -41,11 +41,30 @@ pub struct ModelComparison {
 #[serde(rename_all = "camelCase")]
 pub struct ComparisonCandidate {
     pub selection: ModelSelection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_reference: Option<ComparisonModelReference>,
     pub job_id: String,
     pub run_id: Option<String>,
     pub conversation_id: Option<String>,
     pub dispatch_id: Option<String>,
     pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComparisonModelReference {
+    pub name: String,
+    pub rating: Option<ModelRating>,
+    pub catalog_version: u16,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CandidateSelection {
+    #[serde(flatten)]
+    selection: ModelSelection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_reference: Option<ComparisonModelReference>,
 }
 
 pub(crate) struct ComparisonPin {
@@ -83,6 +102,26 @@ impl Store {
         profiles: Vec<SessionScope>,
         storage: PathBuf,
     ) -> Result<ModelComparison> {
+        self.start_model_comparison_with_options(
+            project,
+            checkout,
+            commit,
+            prompt,
+            profiles.into_iter().map(|scope| (scope, None)).collect(),
+            storage,
+        )
+        .await
+    }
+
+    pub async fn start_model_comparison_with_options(
+        &self,
+        project: String,
+        checkout: String,
+        commit: String,
+        prompt: String,
+        profiles: Vec<(SessionScope, Option<ModelOption>)>,
+        storage: PathBuf,
+    ) -> Result<ModelComparison> {
         let prompt = prompt.trim().to_owned();
         ensure!(!prompt.is_empty(), "Enter the shared comparison prompt");
         ensure!(
@@ -93,7 +132,7 @@ impl Store {
         let mut selections = HashSet::new();
         let profiles = profiles
             .into_iter()
-            .map(|scope| {
+            .map(|(scope, option)| {
                 ensure!(
                     scope.checkout == root && scope.mode == SessionMode::ReadOnly,
                     "Each candidate needs a verified read-only profile for this project"
@@ -103,7 +142,24 @@ impl Store {
                     selections.insert(selection.clone()),
                     "Select each model and execution profile only once"
                 );
-                Ok((selection, scope))
+                ensure!(
+                    option
+                        .as_ref()
+                        .is_none_or(|option| option.selection == selection && option.selectable),
+                    "The catalog reference differs from the selected candidate"
+                );
+                let model_reference = option.map(|option| ComparisonModelReference {
+                    name: option.name,
+                    rating: option.rating,
+                    catalog_version: option.catalog_version,
+                });
+                Ok((
+                    CandidateSelection {
+                        selection,
+                        model_reference,
+                    },
+                    scope,
+                ))
             })
             .collect::<Result<Vec<_>>>()?;
         let verified = repository::verify_checkout(self, checkout.clone(), root).await?;
@@ -281,8 +337,13 @@ fn load_group(db: &Connection, project: &str, id: &str) -> Result<ModelCompariso
     let candidates = rows
         .map(|row| {
             let (selection, job_id, run_id, conversation_id, dispatch_id, state) = row?;
+            let CandidateSelection {
+                selection,
+                model_reference,
+            } = serde_json::from_str(&selection)?;
             Ok(ComparisonCandidate {
-                selection: serde_json::from_str(&selection)?,
+                selection,
+                model_reference,
                 job_id,
                 run_id,
                 conversation_id,

@@ -324,9 +324,15 @@ impl Store {
                 "this node has no release input"
             );
         }
-        let NodeConfiguration::AgentRole { role } = &node.instance.configuration else {
+        let NodeConfiguration::AgentRole { role, model } = &node.instance.configuration else {
             anyhow::bail!("the pinned node has no agent role");
         };
+        ensure!(
+            model.as_ref().is_none_or(|selection| selection.provider == scope.provider
+                && selection.profile_id == scope.profile_id
+                && scope.model.as_deref() == Some(selection.model_id.as_str())),
+            "the scheduled CLI profile and model must match the pinned stage override"
+        );
         ensure!(
             input
                 .role_context

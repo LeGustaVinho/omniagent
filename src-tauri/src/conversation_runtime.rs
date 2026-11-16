@@ -11,7 +11,7 @@ use omniagent::{
         JobScheduler, PendingInstruction, ProjectQueue, QueueState, RecoveryAction,
         SavedSideRequest, SidePurpose, SideSubmission,
     },
-    model_catalog::ModelSelection,
+    model_catalog::{ModelOption, ModelSelection},
     providers::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionMode,
         configuration::InstructionInventory,
@@ -149,6 +149,17 @@ pub(crate) async fn selected_scope(
     effort: Option<String>,
     mode: SessionMode,
 ) -> Result<SessionScope> {
+    let (scope, _) = selected_scope_with_model_option(store, checkout_id, selection, effort, mode).await?;
+    Ok(scope)
+}
+
+pub(crate) async fn selected_scope_with_model_option(
+    store: &Store,
+    checkout_id: String,
+    selection: ModelSelection,
+    effort: Option<String>,
+    mode: SessionMode,
+) -> Result<(SessionScope, ModelOption)> {
     let DesktopProfile {
         executable,
         version,
@@ -162,19 +173,22 @@ pub(crate) async fn selected_scope(
             .is_none_or(|value| selected.efforts.contains(value)),
         "The selected thinking level is no longer available"
     );
-    Ok(SessionScope {
-        provider: selection.provider,
-        profile_id: selection.profile_id,
-        account_binding,
-        checkout: repository::checkout_root(store, checkout_id).await?,
-        executable,
-        cli_version: version,
-        runner: DirectWindowsRunner.identity().into(),
-        permission_revision: DESKTOP_PERMISSION_REVISION.into(),
-        mode,
-        model: Some(selection.model_id),
-        effort,
-    })
+    Ok((
+        SessionScope {
+            provider: selection.provider,
+            profile_id: selection.profile_id,
+            account_binding,
+            checkout: repository::checkout_root(store, checkout_id).await?,
+            executable,
+            cli_version: version,
+            runner: DirectWindowsRunner.identity().into(),
+            permission_revision: DESKTOP_PERMISSION_REVISION.into(),
+            mode,
+            model: Some(selection.model_id),
+            effort,
+        },
+        selected.option.clone(),
+    ))
 }
 
 fn choose_live_model<'a>(

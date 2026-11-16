@@ -27,6 +27,8 @@ pub mod role_templates;
 pub mod triggers;
 mod runtime;
 #[cfg(test)]
+mod stage_models;
+#[cfg(test)]
 mod tests;
 mod unit_execution;
 mod units;

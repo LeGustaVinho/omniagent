@@ -1,3 +1,4 @@
+use crate::conversation_runtime::selected_scope_with_model_option;
 use anyhow::Result;
 use omniagent::{
     model_catalog::ModelSelection,
@@ -114,23 +115,29 @@ pub async fn start_model_comparison(
     async {
         let mut scopes = Vec::with_capacity(selections.len());
         for selected in selections {
-            scopes.push(
-                selected_scope(
-                    &store,
-                    checkout_id.clone(),
-                    selected,
-                    None,
-                    SessionMode::ReadOnly,
-                )
-                .await?,
-            );
+            let (scope, option) = selected_scope_with_model_option(
+                &store,
+                checkout_id.clone(),
+                selected,
+                None,
+                SessionMode::ReadOnly,
+            )
+            .await?;
+            scopes.push((scope, Some(option)));
         }
         let storage = app
             .path()
             .app_local_data_dir()?
             .join("comparison-checkouts");
         store
-            .start_model_comparison(project_id, checkout_id, commit, prompt, scopes, storage)
+            .start_model_comparison_with_options(
+                project_id,
+                checkout_id,
+                commit,
+                prompt,
+                scopes,
+                storage,
+            )
             .await
     }
     .await

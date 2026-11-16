@@ -31,7 +31,7 @@ export type DeliveryArtifact = {
 export type DeliveryRun = { id: string; planRevision: string | null };
 export type DeliveryJob = { nodeId: DeliveryNode; unitId: string | null; inputs: DeliveryInputs; job: Job };
 export type DeliveryWorkflowDefinition = {
-  nodes: { instance: { id: string; kind: string }; definition: { title: string } }[];
+  nodes: { instance: { id: string; kind: string; configuration?: { kind: string; model?: ModelSelection | null } }; definition: { title: string } }[];
   wires: { from: { node: string; port: string }; to: { node: string; port: string } }[];
 };
 export type DeliverySnapshot = {
@@ -51,6 +51,11 @@ export type DeliveryActions = { execute: DeliveryAction; busy: boolean };
 export type DeliveryModelChoice = ModelSelection | null;
 
 export const deliveryProviders: Provider[] = ["codex", "claude", "antigravity"];
+
+export function pinnedDeliveryStageModel(delivery: DeliverySnapshot, nodeId: DeliveryNode) {
+  const config = delivery.definition?.nodes.find(({ instance }) => instance.id === nodeId)?.instance.configuration;
+  return config?.kind === "agent_role" ? config.model : undefined;
+}
 
 export function deliveryGitControlId(runId: string, nodeId: string, unitId: string) {
   return `delivery-${runId}-${nodeId}-${unitId}`;

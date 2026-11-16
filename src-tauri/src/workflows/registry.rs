@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::model_catalog::ModelSelection;
 
 use super::{ConditionPredicate, command::CommandConfiguration};
 
@@ -94,7 +95,11 @@ pub enum ConfigurationKind {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NodeConfiguration {
     None,
-    AgentRole { role: String },
+    AgentRole {
+        role: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<ModelSelection>,
+    },
     RequiredChecks { names: Vec<String> },
     Command(CommandConfiguration),
     Condition { predicate: ConditionPredicate },
@@ -419,7 +424,11 @@ impl NodeConfiguration {
     pub(super) fn matches(&self, kind: ConfigurationKind) -> bool {
         match (self, kind) {
             (Self::None, ConfigurationKind::None) => true,
-            (Self::AgentRole { role }, ConfigurationKind::AgentRole) => !role.trim().is_empty(),
+            (Self::AgentRole { role, model }, ConfigurationKind::AgentRole) => {
+                !role.trim().is_empty() && model.as_ref().is_none_or(|selection| {
+                    !selection.profile_id.trim().is_empty() && !selection.model_id.trim().is_empty()
+                })
+            }
             (Self::RequiredChecks { names }, ConfigurationKind::RequiredChecks) => {
                 names.iter().all(|name| !name.trim().is_empty())
             }

@@ -6,7 +6,7 @@ import type { MergeOutcome } from "@/delivery-merge-model";
 import { deliveryQuery, taskStateQuery } from "@/project-agile-model";
 import { DeliveryAgent } from "@/repository-delivery-agent";
 import {
-  matchingJob, matchingReview, type DeliveryActions, type DeliveryInputs, type DeliveryRun,
+  matchingJob, matchingReview, pinnedDeliveryStageModel, type DeliveryActions, type DeliveryInputs, type DeliveryRun,
   type DeliverySnapshot, type DeliveryTarget, type DeliveryUnit,
 } from "@/repository-delivery-model";
 import { RepositoryDeliveryUnit } from "@/repository-delivery-unit";
@@ -106,6 +106,7 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
       mergeOutcome={mergeOutcome} savedMerge={archived?.merge} openWorkspace={openWorkspace} />}
     {context?.value.kind === "markdown" && <SavedDeliverySource document={context.value.evidence} />}
     {context && <DeliveryAgent scope={scope} nodeId="plan" inputs={{ context: context.id }} job={planner}
+      pinnedModel={pinnedDeliveryStageModel(delivery, "plan")}
       planRevision={currentProposal && planAttempt?.status === "succeeded" ? {
         sourceAttemptId: planAttempt.runId, proposalSequence: currentProposal.sequence,
         expectedPlanRevision: delivery.run.planRevision,
@@ -131,6 +132,7 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
           }))}>Record plan revision</Button>}
     </>}
     {plan && <DeliveryAgent key={plan.id} scope={scope} nodeId="review-plan" inputs={{ plan: plan.id }} job={reviewing}
+      pinnedModel={pinnedDeliveryStageModel(delivery, "review-plan")}
       label="Plan review" actions={actions} openActivity={openActivity} />}
     {reviewing?.latestAttempt?.status === "succeeded" && !review &&
       <Button variant="outline" disabled={actions.busy} onClick={() => actions.execute(() => invoke("publish_repository_delivery_evidence", {

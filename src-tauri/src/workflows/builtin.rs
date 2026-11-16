@@ -40,6 +40,7 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
             Plan,
             AgentRole {
                 role: roles.planner,
+                model: Option::None,
             },
         ),
         (
@@ -47,6 +48,7 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
             ReviewPlan,
             AgentRole {
                 role: roles.plan_reviewer,
+                model: Option::None,
             },
         ),
         ("work", LinkWork, None),
@@ -57,6 +59,7 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
             Implement,
             AgentRole {
                 role: roles.implementer,
+                model: Option::None,
             },
         ),
         (
@@ -64,6 +67,7 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
             ReviewCandidate,
             AgentRole {
                 role: roles.candidate_reviewer,
+                model: Option::None,
             },
         ),
         (
