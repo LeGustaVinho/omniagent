@@ -17,7 +17,12 @@ use crate::{
     store::Store,
 };
 
-use super::{ContextSnapshot, Delivery, EventSource};
+use super::{
+    ContextSnapshot, Delivery, EventSource,
+    generated_image_evidence::{
+        GeneratedImageEvidence, generated_image_metadata, owns_image_location,
+    },
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +34,7 @@ pub struct DispatchProfileEvidence {
     pub profile: DispatchProfile,
     pub assessment: Option<HistoricalAssessment>,
     pub model_observations: Vec<ModelObservation>,
+    pub generated_images: Vec<GeneratedImageEvidence>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,10 +107,12 @@ impl Store {
                     Ok(db
                         .query_row(
                             "SELECT d.id, s.id, d.turn_id, d.delivery, s.payload, r.checkout_id,
-                                coalesce((SELECT max(seq) FROM agent_events WHERE run_id = r.id), 0)
+                                coalesce((SELECT max(seq) FROM agent_events WHERE run_id = r.id), 0),
+                                cli.provider_session_id, a.provider_turn_id
                          FROM runs r
                          JOIN checkouts c ON c.id = r.checkout_id
                          JOIN agent_attempts a ON a.run_id = r.id
+                         JOIN agent_sessions cli ON cli.id = a.agent_session_id
                          JOIN context_snapshots s ON s.run_id = r.id
                          JOIN dispatches d ON d.snapshot_id = s.id AND d.ordinal = 1
                          WHERE c.project_id = ?1 AND a.conversation_id = ?2 AND r.id = ?3",
@@ -118,6 +126,8 @@ impl Store {
                                     row.get::<_, Vec<u8>>(4)?,
                                     row.get::<_, String>(5)?,
                                     row.get::<_, i64>(6)?,
+                                    row.get::<_, Option<String>>(7)?,
+                                    row.get::<_, Option<String>>(8)?,
                                 ))
                             },
                         )
@@ -125,8 +135,17 @@ impl Store {
                 }
             })
             .await?;
-        let Some((dispatch_id, snapshot_id, turn_id, delivery, payload, checkout_id, through)) =
-            record
+        let Some((
+            dispatch_id,
+            snapshot_id,
+            turn_id,
+            delivery,
+            payload,
+            checkout_id,
+            through,
+            provider_session_id,
+            provider_turn_id,
+        )) = record
         else {
             return Ok(None);
         };
@@ -137,18 +156,19 @@ impl Store {
             .as_ref()
             .map(|assessment| reported_model(&assessment.scope))
             .unwrap_or_default();
-        let model_observations = if delivery == Delivery::Submitted {
-            self.dispatch_model_observations(
+        let (model_observations, generated_images) = if delivery == Delivery::Submitted {
+            self.dispatch_profile_observations(
                 run_id,
                 through,
                 &dispatch_id,
                 &snapshot.scope,
                 &checkout_id,
                 reported_at_dispatch.clone(),
+                (provider_session_id.as_deref(), provider_turn_id.as_deref()),
             )
             .await?
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let scope = snapshot.scope;
         Ok(Some(DispatchProfileEvidence {
@@ -171,10 +191,11 @@ impl Store {
             },
             assessment: snapshot.capabilities.map(historical_assessment),
             model_observations,
+            generated_images,
         }))
     }
 
-    async fn dispatch_model_observations(
+    async fn dispatch_profile_observations(
         &self,
         run_id: String,
         through: i64,
@@ -182,10 +203,12 @@ impl Store {
         scope: &SessionScope,
         checkout_id: &str,
         mut reported: ObservedModel,
-    ) -> Result<Vec<ModelObservation>> {
+        provider_location: (Option<&str>, Option<&str>),
+    ) -> Result<(Vec<ModelObservation>, Vec<GeneratedImageEvidence>)> {
         let mut cursor = 0;
         let mut submitted = false;
         let mut observations = Vec::<ModelObservation>::new();
+        let mut generated_images = Vec::new();
         // Read a bounded page at a time so decrypting a long run does not monopolize the store.
         while cursor < through {
             let events = self
@@ -228,6 +251,21 @@ impl Store {
                     continue;
                 }
                 match event.data {
+                    data @ ProviderEventData::MediaGeneration { .. }
+                        if !application
+                            && scope.provider == Provider::Codex
+                            && owns_image_location(
+                                &event.location,
+                                provider_location.0,
+                                provider_location.1,
+                            ) =>
+                    {
+                        generated_images.extend(generated_image_metadata(
+                            seq,
+                            event.location,
+                            data,
+                        ));
+                    }
                     ProviderEventData::SessionReady { model, effort }
                     | ProviderEventData::ModelObserved { model, effort }
                         if !application =>
@@ -263,7 +301,7 @@ impl Store {
                 }
             }
         }
-        Ok(observations)
+        Ok((observations, generated_images))
     }
 }
 
@@ -323,14 +361,15 @@ mod tests {
                 DeclaredSource, EvidenceBoundary, EvidenceOrigin, ObservedResult, PolicyBlocker,
                 ResolvedCapability,
             },
+            generated_image::{GeneratedImageMime, TINY_PNG_BASE64, capture_codex_image},
             questions::QuestionRoute,
         },
         runs::RunStatus,
     };
 
     #[tokio::test]
-    async fn reads_frozen_profile_and_separates_later_provider_reports_after_restart() -> Result<()>
-    {
+    async fn reads_frozen_profile_generated_images_and_later_provider_reports_after_restart()
+    -> Result<()> {
         let directory = tempfile::tempdir()?;
         let checkout = dunce::canonicalize(directory.path())?;
         ensure!(
@@ -476,10 +515,37 @@ mod tests {
             model: Some(model.into()),
             effort: None,
         };
+        let image_event = |source, item: &str, parent: Option<&str>| {
+            store.record_agent_observation(
+                run_id.clone(),
+                source,
+                ProviderEvent {
+                    location: ProviderLocation {
+                        session_id: Some("image-session".into()),
+                        turn_id: Some("image-turn".into()),
+                        item_id: Some(item.into()),
+                        parent_item_id: parent.map(str::to_owned),
+                    },
+                    data: ProviderEventData::MediaGeneration {
+                        media_type: "image".into(),
+                        tool: "imageGeneration".into(),
+                        producing_model: None,
+                        status: Some("completed".into()),
+                        image: Some(capture_codex_image(
+                            &serde_json::json!({"status":"completed","result":TINY_PNG_BASE64}),
+                        )),
+                    },
+                },
+            )
+        };
         event(EventSource::Provider, marker(dispatch_id.clone())).await?;
         event(EventSource::Application, marker("another-dispatch".into())).await?;
         event(EventSource::Provider, report("pre-marker")).await?;
+        image_event(EventSource::Provider, "before-dispatch", None).await?;
         event(EventSource::Application, marker(dispatch_id.clone())).await?;
+        image_event(EventSource::Application, "application-image", None).await?;
+        image_event(EventSource::Provider, "generated-image", None).await?;
+        image_event(EventSource::Provider, "child-image", Some("delegated")).await?;
         event(EventSource::Application, report("application-metadata")).await?;
         store
             .record_agent_observation(
@@ -530,14 +596,18 @@ mod tests {
             store
                 .dispatch_profile_evidence(
                     attempt.run.project_id.clone(),
-                    other_conversation.id,
+                    other_conversation.id.clone(),
                     run_id.clone()
                 )
                 .await?
                 .is_none()
         );
         let saved = store
-            .dispatch_profile_evidence(attempt.run.project_id, conversation.id, run_id)
+            .dispatch_profile_evidence(
+                attempt.run.project_id.clone(),
+                conversation.id.clone(),
+                run_id.clone(),
+            )
             .await?
             .expect("the authorized dispatch profile");
         assert_eq!(saved.dispatch_id, dispatch_id);
@@ -568,14 +638,97 @@ mod tests {
             Some("effective-at-dispatch")
         );
         assert!(saved.model_observations[1].reassessment.is_none());
+        assert_eq!(saved.generated_images.len(), 1);
+        let image = &saved.generated_images[0];
+        assert_eq!(image.item_id, "generated-image");
+        assert_eq!(image.mime, Some(GeneratedImageMime::Png));
+        assert!(image.unavailable_reason.is_none());
+        let sequence = image.event_sequence.parse()?;
+        assert_eq!(
+            store
+                .dispatch_generated_image(
+                    attempt.run.project_id.clone(),
+                    conversation.id.clone(),
+                    run_id.clone(),
+                    sequence
+                )
+                .await?
+                .as_deref(),
+            Some(TINY_PNG_BASE64)
+        );
+        assert!(
+            store
+                .dispatch_generated_image(
+                    "other-project".into(),
+                    conversation.id.clone(),
+                    run_id.clone(),
+                    sequence
+                )
+                .await?
+                .is_none()
+        );
+        assert!(
+            store
+                .dispatch_generated_image(
+                    attempt.run.project_id.clone(),
+                    other_conversation.id,
+                    run_id.clone(),
+                    sequence
+                )
+                .await?
+                .is_none()
+        );
+        for event in store
+            .agent_observations(conversation.id.clone(), run_id.clone(), 0)
+            .await?
+        {
+            if matches!(event.event.data, ProviderEventData::MediaGeneration { .. })
+                && event.seq != sequence
+            {
+                assert!(
+                    store
+                        .dispatch_generated_image(
+                            attempt.run.project_id.clone(),
+                            conversation.id.clone(),
+                            run_id.clone(),
+                            event.seq
+                        )
+                        .await?
+                        .is_none()
+                );
+            }
+        }
         let serialized = serde_json::to_string(&saved)?;
         for input in [
             "internal-account-binding",
             "protected private prompt",
             "private wire bytes",
+            TINY_PNG_BASE64,
         ] {
             assert!(!serialized.contains(input));
         }
+        store
+            .execute(move |db| {
+                let (event, image): (Vec<u8>, Vec<u8>) = db.query_row(
+                    "SELECT e.payload, i.payload FROM agent_events e
+                 JOIN generated_image_evidence_payloads i ON i.event_seq = e.seq WHERE e.seq = ?1",
+                    [sequence],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let event = protection::unprotect(&event)?;
+                assert!(!String::from_utf8(event)?.contains(TINY_PNG_BASE64));
+                assert!(!image.starts_with(b"\x89PNG"));
+                assert!(protection::unprotect(&image)?.starts_with(b"\x89PNG"));
+                db.execute("DELETE FROM agent_events WHERE seq = ?1", [sequence])?;
+                let remaining: u32 = db.query_row(
+                    "SELECT count(*) FROM generated_image_evidence_payloads WHERE event_seq = ?1",
+                    [sequence],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(remaining, 0);
+                Ok(())
+            })
+            .await?;
         Ok(())
     }
 }

@@ -1282,6 +1282,8 @@ impl CodexSession {
                 tool: "imageGeneration".into(),
                 producing_model: string(item, "model"),
                 status: string(item, "status"),
+                image: (completed && params["threadId"].as_str().is_some() && params["turnId"].as_str().is_some())
+                    .then(|| super::generated_image::capture_codex_image(item)),
             },
             ("agentMessage", true) => ProviderEventData::AssistantMessage {
                 text: required_string(item, "text")?.to_owned(),
@@ -2793,6 +2795,9 @@ mod tests {
                 tool: "imageGeneration".into(),
                 producing_model: None,
                 status: Some("completed".into()),
+                image: Some(super::super::generated_image::GeneratedImageCapture::Unavailable {
+                    reason: super::super::generated_image::ImageCaptureIssue::InlineImageUnavailable,
+                }),
             }
         );
         Ok(())

@@ -25,7 +25,9 @@ mod schema;
 fn remove_recent_schema(db: &rusqlite::Connection) -> Result<()> {
     schema::restore_question_view_before_structured_planning(db)?;
     db.execute_batch(
-        "DROP TABLE goal_criterion_evidence;
+        "DROP TABLE side_output_fixture_payloads;
+         DROP TABLE generated_image_evidence_payloads;
+         DROP TABLE goal_criterion_evidence;
          ALTER TABLE job_attempt_policies DROP COLUMN evidence;
          DROP TABLE attempt_subagent_audit_routing;
          DROP TABLE task_delivery_events;

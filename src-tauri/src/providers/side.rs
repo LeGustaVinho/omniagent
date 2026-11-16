@@ -23,6 +23,8 @@ use super::{
 
 mod codex_fresh;
 pub(crate) use codex_fresh::run_fresh_codex_until;
+mod output_fixture;
+pub use output_fixture::{OutputFixture, OutputFixtureReceipt};
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +60,8 @@ impl SideInput {
             pin: self.pin,
             outcome,
             usage: None,
+            output_fixture: None,
+            output_fixture_audio: None,
         }
     }
 }
@@ -73,6 +77,7 @@ pub enum SideUnavailable {
     ProfileMismatch,
     AccountChanged,
     UnverifiedProfile,
+    OutputFixtureUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -130,6 +135,10 @@ pub struct SideResponse {
     pub pin: SidePin,
     pub outcome: SideOutcome,
     pub usage: Option<SideUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_fixture: Option<OutputFixtureReceipt>,
+    #[serde(skip)]
+    pub(crate) output_fixture_audio: Option<Vec<u8>>,
 }
 
 impl SideResponse {
@@ -465,6 +474,8 @@ pub fn run_native_until(
         pin: pin.clone(),
         outcome,
         usage: None,
+        output_fixture: None,
+        output_fixture_audio: None,
     };
     let result = (|| -> Result<SideResponse> {
         super::runtime::bounded_write(&mut process, session.start()?.outbound)?;

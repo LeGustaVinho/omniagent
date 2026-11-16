@@ -1,6 +1,7 @@
 use std::{cell::Cell, io, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
@@ -17,11 +18,11 @@ use crate::{
         },
         profiles::verify_account_binding,
         side::{
-            self, SideInput, SideOutcome, SidePin, SideResponse, SideRoute, SideSource,
+            self, OutputFixture, SideInput, SideOutcome, SidePin, SideResponse, SideRoute, SideSource,
             SideUnavailable,
         },
     },
-    runner::{LaunchRequest, Runner},
+    runner::{DirectWindowsRunner, LaunchRequest, Runner},
     runs::{self, RunRecord, RunStatus},
     store::Store,
 };
@@ -100,6 +101,8 @@ pub struct SavedSideRequest {
     pub question: String,
     pub response: Option<SideResponse>,
     pub evidence_id: Option<String>,
+    pub evidence_checked_at: Option<String>,
+    pub output_fixture: Option<OutputFixture>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -112,6 +115,8 @@ pub(super) struct SidePayload {
     pub pin: SidePin,
     pub question: String,
     pub context: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_fixture: Option<OutputFixture>,
 }
 
 impl SidePayload {
@@ -187,10 +192,26 @@ impl Store {
         purpose: SidePurpose,
         question: String,
     ) -> Result<SideSubmission> {
+        self.enqueue_side_request_with_fixture(conversation, expected_context, expected_source_run, scope, purpose, question, None).await
+    }
+
+    pub async fn enqueue_side_request_with_fixture(
+        &self,
+        conversation: String,
+        expected_context: Option<String>,
+        expected_source_run: Option<String>,
+        scope: SessionScope,
+        purpose: SidePurpose,
+        question: String,
+        output_fixture: Option<OutputFixture>,
+    ) -> Result<SideSubmission> {
+        ensure!(output_fixture.is_none() || (purpose == SidePurpose::Validation && expected_source_run.is_some()),
+            "An output fixture requires an explicit validation of a recorded source run");
         let question = match purpose {
             SidePurpose::Question => question.trim().to_owned(),
             SidePurpose::Suggestion => "Suggest one useful follow-up prompt the user might send. Return only a JSON object with a single string field named prompt.".into(),
-            SidePurpose::Validation => "Return the exact code labeled 'Verification code' in the supplied context, without commentary. If a file-reading tool is available, try reading fixture.txt first. The code is in the supplied context even when file access is unavailable.".into(),
+            SidePurpose::Validation => output_fixture.map(|fixture| fixture.label().to_owned()).unwrap_or_else(||
+                "Return the exact code labeled 'Verification code' in the supplied context, without commentary. If a file-reading tool is available, try reading fixture.txt first. The code is in the supplied context even when file access is unavailable.".into()),
         };
         ensure!(
             !question.is_empty() && question.len() <= 8192,
@@ -222,6 +243,10 @@ impl Store {
                 if purpose == SidePurpose::Validation {
                     ensure!(matches!(scope.mode, SessionMode::ReadOnly | SessionMode::Plan),
                         "The isolated validation requires a read-only or planning profile");
+                }
+                if let Some(fixture) = output_fixture
+                    && (scope.provider != Provider::Codex || scope.runner != DirectWindowsRunner::IDENTITY || !fixture.available()) {
+                    return Ok(unavailable(SideUnavailable::OutputFixtureUnavailable));
                 }
                 let fresh_route = match scope.provider {
                     Provider::Codex => SideRoute::FreshCodexSession,
@@ -258,6 +283,12 @@ impl Store {
                         return Ok(unavailable(SideUnavailable::UnverifiedProfile));
                     }
                     if let Some(job_id) = queued_validation(&tx, &source.run_id)? {
+                        let existing_payload: Vec<u8> = tx.query_row(
+                            "SELECT payload FROM job_side_requests WHERE job_id = ?1", [&job_id], |row| row.get(0)
+                        )?;
+                        if decode::<SidePayload>(&existing_payload)?.output_fixture != output_fixture {
+                            return Ok(unavailable(SideUnavailable::Busy));
+                        }
                         return Ok(SideSubmission::Queued { job_id });
                     }
                     (fresh_route, None)
@@ -310,7 +341,7 @@ impl Store {
                 let title = match purpose {
                     SidePurpose::Question => "Side question",
                     SidePurpose::Suggestion => "Composer suggestion",
-                    SidePurpose::Validation => "Validate isolated side requests",
+                    SidePurpose::Validation => output_fixture.map(OutputFixture::label).unwrap_or("Validate isolated side requests"),
                 };
                 let job = insert_job(
                     &tx,
@@ -340,6 +371,7 @@ impl Store {
                     route,
                     question,
                     context,
+                    output_fixture,
                     pin: SidePin {
                         context_id: source.context_id,
                         provider_source,
@@ -371,11 +403,12 @@ impl Store {
     pub async fn saved_side_requests(&self, conversation: String) -> Result<Vec<SavedSideRequest>> {
         self.execute(move |db| {
             let mut query = db.prepare(
-                "SELECT j.project_id, s.job_id, s.context_id, s.source_run_id, s.payload, response.payload, validation.evidence_id
+                "SELECT j.project_id, s.job_id, s.context_id, s.source_run_id, s.payload, response.payload, validation.evidence_id, e.checked_at
                  FROM job_side_requests s JOIN jobs j ON j.id = s.job_id
                  LEFT JOIN job_attempts a ON a.job_id = j.id AND a.ordinal = (SELECT max(ordinal) FROM job_attempts WHERE job_id = j.id)
                  LEFT JOIN job_side_responses response ON response.run_id = a.run_id
                  LEFT JOIN side_validation_evidence validation ON validation.run_id = response.run_id
+                 LEFT JOIN capability_evidence e ON e.id = validation.evidence_id
                  WHERE s.conversation_id = ?1 AND NOT s.discarded ORDER BY j.sequence",
             )?;
             let mut rows = query.query([&conversation])?;
@@ -383,15 +416,41 @@ impl Store {
             while let Some(row) = rows.next()? {
                 let job = load_job(db, row.get_ref(0)?.as_str()?, row.get_ref(1)?.as_str()?)?.context("Missing side request job")?;
                 let payload: SidePayload = decode(row.get_ref(4)?.as_blob()?)?;
-                let response = row.get::<_, Option<Vec<u8>>>(5)?.as_deref().map(decode).transpose()?;
+                let response: Option<SideResponse> = row.get::<_, Option<Vec<u8>>>(5)?.as_deref().map(decode).transpose()?;
+                let evidence_checked_at = if let Some(fixture) = response.as_ref().and_then(|response| response.output_fixture.as_ref()) {
+                    fixture.checked_at.clone()
+                } else {
+                    row.get(7)?
+                };
                 saved.push(SavedSideRequest {
                     job, conversation_id: conversation.clone(), context_id: row.get(2)?, source_run_id: row.get(3)?,
                     purpose: payload.purpose, question: payload.question, response, evidence_id: row.get(6)?,
+                    evidence_checked_at,
+                    output_fixture: payload.output_fixture,
                     provider: payload.scope.provider, profile_id: payload.scope.profile_id,
                     model: payload.scope.model, effort: payload.scope.effort, mode: payload.scope.mode,
                 });
             }
             Ok(saved)
+        }).await
+    }
+
+    pub async fn side_output_fixture_audio(
+        &self,
+        project: String,
+        conversation: String,
+        run: String,
+    ) -> Result<Option<String>> {
+        self.execute(move |db| {
+            let protected: Option<Vec<u8>> = db.query_row(
+                "SELECT b.payload FROM side_output_fixture_payloads b
+                 JOIN job_attempts a ON a.run_id = b.run_id
+                 JOIN job_side_requests s ON s.job_id = a.job_id
+                 JOIN jobs j ON j.id = a.job_id
+                 WHERE j.project_id = ?1 AND s.conversation_id = ?2 AND b.run_id = ?3 AND s.validation = 1 AND NOT s.discarded",
+                params![project, conversation, run], |row| row.get(0),
+            ).optional()?;
+            protected.map(|payload| Ok(STANDARD.encode(protection::unprotect(&payload)?))).transpose()
         }).await
     }
 }
@@ -653,6 +712,7 @@ pub(super) fn start(
                     context,
                     payload.profile.reported_model.as_deref(),
                     payload.profile.reported_effort.as_deref(),
+                    payload.output_fixture,
                     &stopped,
                 ),
                 SideRoute::CodexSample => side::run_native_until(
@@ -713,7 +773,7 @@ pub(super) fn start(
             {
                 response.outcome = SideOutcome::NoText;
             }
-            let fixture_result = (payload.purpose == SidePurpose::Validation && launched.get()
+            let fixture_result = (payload.purpose == SidePurpose::Validation && payload.output_fixture.is_none() && launched.get()
                 && matches!(status, RunStatus::Succeeded | RunStatus::Failed)
                 && !matches!(response.outcome, SideOutcome::Unavailable { .. }))
             .then(|| {
@@ -724,7 +784,17 @@ pub(super) fn start(
                     ObservedResult::Failed
                 }
             });
+            if status != RunStatus::Succeeded {
+                response.output_fixture = None;
+                response.output_fixture_audio = None;
+            } else if let Some(receipt) = &mut response.output_fixture {
+                receipt.checked_at = Some(tx.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |row| row.get(0))?);
+            }
             settle(&tx, &current, status, &response)?;
+            if let Some(audio) = response.output_fixture_audio.take() {
+                tx.execute("INSERT INTO side_output_fixture_payloads VALUES (?1, ?2)",
+                    params![run.id, protection::protect(&audio)?])?;
+            }
             if let Some(result) = fixture_result {
                 let evidence = insert_side_fixture_evidence(&tx, &payload.profile, result, &run.id)?;
                 tx.execute("INSERT INTO side_validation_evidence VALUES (?1, ?2, ?3)", params![run.id, evidence, payload.route.as_str()])?;

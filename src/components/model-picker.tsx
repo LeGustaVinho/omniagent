@@ -1,6 +1,6 @@
 import { Check, ChevronDown } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
-import { useId, useRef, useState } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelRating } from "@/bindings/ModelRating";
 import type { ModelSelection } from "@/bindings/ModelSelection";
@@ -29,6 +29,7 @@ interface ModelPickerProps {
   layout?: "inline" | "field";
   loading?: boolean;
   disabled?: boolean;
+  previewDetails?: (option: ModelOption) => ReactNode;
 }
 
 function modelKey({ provider, profileId, modelId }: ModelSelection) {
@@ -70,7 +71,7 @@ export function ModelRatingMeters({ rating }: { rating: ModelRating | null }) {
   );
 }
 
-export function ModelPicker({ label, options, selection, layout = "field", loading, disabled }: ModelPickerProps) {
+export function ModelPicker({ label, options, selection, layout = "field", loading, disabled, previewDetails }: ModelPickerProps) {
   const labelId = useId();
   const trigger = useRef<HTMLButtonElement>(null);
   const [inspected, setInspected] = useState<string>();
@@ -131,6 +132,7 @@ export function ModelPicker({ label, options, selection, layout = "field", loadi
           </div>
           {!options.length && <p className="model-picker-empty">{loading ? "Checking available models…" : "No models reported by this profile."}</p>}
           {preview && <div className="model-picker-rating" aria-label={`Ratings for ${preview.name}`}><ModelRatingMeters rating={preview.rating} /></div>}
+          {preview && previewDetails?.(preview)}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>

@@ -717,7 +717,7 @@ impl Store {
         &self,
         run_id: String,
         source: EventSource,
-        event: ProviderEvent,
+        mut event: ProviderEvent,
     ) -> Result<()> {
         let wakes_notices = matches!(
             event.data,
@@ -727,6 +727,12 @@ impl Store {
                 | ProviderEventData::QuestionReplySettled { .. }
                 | ProviderEventData::SteeringSettled { .. }
         );
+        let protected_image = if source == EventSource::Provider && event.location.parent_item_id.is_none() {
+            crate::providers::generated_image::take_generated_image_bytes(&mut event.data)
+                .map(|bytes| protection::protect(&bytes)).transpose()?
+        } else {
+            None
+        };
         let payload = protection::protect(&serde_json::to_vec(&event)?)?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -781,6 +787,10 @@ impl Store {
             tx.execute("INSERT INTO agent_events(run_id, source, payload, inspect_diagnostic) VALUES (?1, ?2, ?3, ?4)",
                 params![run_id, source.as_sql(), payload, diagnostic])?;
             let event_seq = tx.last_insert_rowid();
+            if let Some(image) = protected_image {
+                tx.execute("INSERT INTO generated_image_evidence_payloads (event_seq, payload) VALUES (?1, ?2)",
+                    params![event_seq, image])?;
+            }
             if native_goal {
                 crate::jobs::record_native_goal_turn(&tx, &run_id, event_seq, &event)?;
             }

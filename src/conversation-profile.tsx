@@ -5,7 +5,10 @@ import type { Capability } from "@/bindings/Capability";
 import type { ModelRating } from "@/bindings/ModelRating";
 import type { Provider } from "@/bindings/Provider";
 import type { SessionMode } from "@/bindings/SessionMode";
+import { SideCapabilityValidation, SideFixtureEvidence, type SideValidationTarget } from "@/capability-side-validation";
 import { ModelRatingMeters } from "@/components/model-picker";
+import { CapabilityOutputEvidence, type GeneratedImageEvidence } from "@/generated-image-evidence";
+import { useRecordedCapabilityProfile } from "@/model-capability-preview";
 
 type CapabilitySubject =
   | { kind: "protocol"; capability: Capability }
@@ -75,6 +78,7 @@ export type DispatchProfileEvidence = {
     reported: ObservedModel;
     reassessment: { eventSequence: string; assessment: HistoricalAssessment } | null;
   }[];
+  generatedImages?: GeneratedImageEvidence[];
 };
 
 const providers: Record<Provider, string> = { codex: "Codex", claude: "Claude", antigravity: "Antigravity" };
@@ -116,7 +120,11 @@ function VerificationDetails({ evidence }: { evidence: Verification }) {
   </div>;
 }
 
-function AssessmentDetails({ assessment }: { assessment: HistoricalAssessment }) {
+function AssessmentDetails({ assessment, conversationId, validation }: {
+  assessment: HistoricalAssessment;
+  conversationId: string;
+  validation?: SideValidationTarget;
+}) {
   return <div className="grid gap-2">
     <dl className="break-all">
       <dt>Transport</dt><dd>{transports[assessment.transport]}</dd>
@@ -125,18 +133,25 @@ function AssessmentDetails({ assessment }: { assessment: HistoricalAssessment })
       {assessment.providerRevision && <><dt>Provider configuration revision</dt><dd>{assessment.providerRevision}</dd></>}
     </dl>
     <ul aria-label="Capability evidence" className="grid gap-1">
-      {assessment.capabilities.map(({ descriptor, status, evidence }) => <li key={JSON.stringify(descriptor.subject)}>
-        <details className="rounded border border-border px-2 py-1">
-          <summary className="cursor-pointer break-words capitalize">{subjectLabel(descriptor.subject)} · {status}</summary>
-          <div className="grid gap-1 pt-1 text-muted-foreground">
-            <p>Verification status · {status}</p>
-            <p>Source {descriptor.source} · Availability {descriptor.availability} · Scope {words(descriptor.boundary)}</p>
-            {descriptor.observed && <p>Observed result {descriptor.observed}</p>}
-            {descriptor.blocker && <p>Blocked by the read-only profile</p>}
-            {evidence && <VerificationDetails evidence={evidence} />}
-          </div>
-        </details>
-      </li>)}
+      {assessment.capabilities.map(({ descriptor, status, evidence }) => {
+        const sideRequest = descriptor.subject.kind === "protocol" && descriptor.subject.capability === "side_request";
+        return <li key={JSON.stringify(descriptor.subject)}>
+          <details className="rounded border border-border px-2 py-1">
+            <summary className="cursor-pointer break-words capitalize">{subjectLabel(descriptor.subject)} · {status}</summary>
+            <div className="grid gap-1 pt-1 text-muted-foreground">
+              <p>Verification status · {status}</p>
+              <p>Source {descriptor.source} · Availability {descriptor.availability} · Scope {words(descriptor.boundary)}</p>
+              {descriptor.observed && <p>Observed result {descriptor.observed}</p>}
+              {descriptor.blocker && <p>Blocked by the read-only profile</p>}
+              {evidence && <VerificationDetails evidence={evidence} />}
+              {evidence && sideRequest && <SideFixtureEvidence conversationId={conversationId}
+                evidenceId={evidence.id} attemptId={evidence.artifactId} />}
+              {sideRequest && validation && status !== "blocked" && status !== "unavailable" &&
+                <SideCapabilityValidation target={validation} />}
+            </div>
+          </details>
+        </li>;
+      })}
     </ul>
   </div>;
 }
@@ -149,8 +164,22 @@ function ModelReference({ model, ratings }: { model: string; ratings: Record<str
   </div>;
 }
 
-function ProfileDetails({ evidence }: { evidence: DispatchProfileEvidence }) {
+function ProfileDetails({ evidence, conversationId, runId, live }: {
+  evidence: DispatchProfileEvidence;
+  conversationId: string;
+  runId: string;
+  live: boolean;
+}) {
   const { profile, assessment, modelObservations } = evidence;
+  const validation: SideValidationTarget | undefined = !live && evidence.delivery === "submitted"
+    && profile.provider !== "antigravity" && profile.requestedModel
+    && (profile.mode === "read_only" || profile.mode === "plan") ? {
+    conversationId,
+    sourceRunId: runId,
+    mode: profile.mode,
+    effort: profile.requestedEffort,
+    selection: { provider: profile.provider, profileId: profile.profileId, modelId: profile.requestedModel },
+  } : undefined;
   const dispatchModels = Array.from(new Set([profile.requestedModel, profile.reportedAtDispatch.model]
     .filter((model): model is string => Boolean(model))));
   const modelIds = Array.from(new Set([
@@ -180,7 +209,8 @@ function ProfileDetails({ evidence }: { evidence: DispatchProfileEvidence }) {
       </dl>
       {modelIds.length > 0 && ratings.error && <p role="alert">Catalog ratings unavailable.</p>}
       {ratings.data && dispatchModels.map((model) => <ModelReference key={model} model={model} ratings={ratings.data} />)}
-      {assessment ? <AssessmentDetails assessment={assessment} /> : <p>Capability assessment unavailable.</p>}
+      {assessment ? <AssessmentDetails assessment={assessment} conversationId={conversationId} validation={validation} />
+        : <p>Capability assessment unavailable.</p>}
     </section>
     {modelObservations.length > 0 && <section aria-label="Provider model reports after dispatch" className="grid gap-2">
       <h3 className="text-sm font-medium">Provider model reports after dispatch</h3>
@@ -189,7 +219,7 @@ function ProfileDetails({ evidence }: { evidence: DispatchProfileEvidence }) {
         {reported.model && ratings.data && <ModelReference model={reported.model} ratings={ratings.data} />}
         {reassessment && <details>
           <summary className="cursor-pointer">Assessment after report · Event {reassessment.eventSequence}</summary>
-          <AssessmentDetails assessment={reassessment.assessment} />
+          <AssessmentDetails assessment={reassessment.assessment} conversationId={conversationId} />
         </details>}
       </li>)}</ol>
     </section>}
@@ -203,19 +233,19 @@ export function ConversationProfile({ projectId, conversationId, runId, live }: 
   live: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const evidence = useQuery({
-    queryKey: ["conversation-profile-evidence", projectId, conversationId, runId, live],
-    enabled: expanded,
-    refetchInterval: ({ state }) => expanded && live && (!state.data || state.data.delivery === "prepared") ? 1250 : false,
-    queryFn: () => invoke<DispatchProfileEvidence | null>("conversation_profile_evidence", { projectId, conversationId, runId }),
-  });
+  const evidence = useRecordedCapabilityProfile({ projectId, conversationId, runId, live }, expanded);
   return <details onToggle={(event) => setExpanded(event.currentTarget.open)} className="min-w-0">
     <summary className="cursor-pointer">Profile and capabilities</summary>
     {expanded && <div className="grid gap-3 pt-2 text-xs">
       {evidence.isPending && <p role="status">Loading dispatch profile…</p>}
       {evidence.error && <p role="alert">{String(evidence.error)}</p>}
       {evidence.data === null && <p>Dispatch profile unavailable.</p>}
-      {evidence.data && <ProfileDetails evidence={evidence.data} />}
+      {evidence.data && <>
+        <ProfileDetails evidence={evidence.data} conversationId={conversationId} runId={runId} live={live} />
+        <CapabilityOutputEvidence scope={{ projectId, conversationId, runId }} generatedImages={evidence.data.generatedImages ?? []}
+          managedValidation={evidence.data.profile.provider === "codex" && evidence.data.profile.runner === "windows-direct"
+            && evidence.data.profile.mode !== "approved_write"} />
+      </>}
     </div>}
   </details>;
 }

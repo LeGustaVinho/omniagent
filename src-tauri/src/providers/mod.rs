@@ -482,6 +482,8 @@ pub enum ProviderEventData {
         tool: String,
         producing_model: Option<String>,
         status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<generated_image::GeneratedImageCapture>,
     },
     ChildActivity {
         child_id: Option<String>,
@@ -800,6 +802,7 @@ pub mod capabilities;
 pub mod claude;
 pub mod codex;
 pub mod configuration;
+pub mod generated_image;
 pub mod goal;
 pub mod launch_scope;
 pub mod planning;

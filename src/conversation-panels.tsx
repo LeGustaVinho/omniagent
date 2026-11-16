@@ -15,6 +15,7 @@ import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import type { RunRecord } from "@/bindings/RunRecord";
 import { ModelPicker } from "@/components/model-picker";
+import { ModelCapabilityPreview } from "@/model-capability-preview";
 import { EffortSelect, type EffortSet } from "@/components/effort-select";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { Button } from "@/components/ui/button";
@@ -559,6 +560,12 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
                 <option value="antigravity">Antigravity</option>
               </select>
               <ModelPicker label="Model" layout="inline" options={models.data?.map(({ option }) => option) ?? []} loading={models.isPending}
+                previewDetails={(option) => <ModelCapabilityPreview option={option}
+                  scope={run ? { projectId: run.projectId, conversationId, runId: run.id, live } : undefined}
+                  openEvidence={run ? () => {
+                    if (inspector) inspector.openActivity(run.id, conversationId);
+                    else setInspectedRun(run.id);
+                  } : undefined} />}
                 selection={{ mode: "single", selected: selection, onChange: (model) => { setSelection(model); setEffort(""); } }} />
               <ConversationModeSelect mode={mode} onChange={setMode} />
               <EffortSelect capabilities={efforts} loading={Boolean(antigravityModel && modelEfforts.isPending)}

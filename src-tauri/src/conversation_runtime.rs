@@ -13,6 +13,7 @@ use omniagent::{
         ApprovalDecision, Provider, ProviderEvent, ProviderEventData, RequestId, SessionMode,
         profiles::{DESKTOP_PERMISSION_REVISION, DesktopModel, DesktopProfile, desktop_profile},
         questions::{QuestionOrigin, QuestionReply},
+        side::OutputFixture,
     },
     repository,
     runner::{DirectWindowsRunner, Runner},
@@ -200,23 +201,35 @@ pub async fn enqueue_conversation_side_request(
     mode: SessionMode,
     purpose: SidePurpose,
     question: String,
+    output_fixture: Option<OutputFixture>,
 ) -> Result<SideSubmission, String> {
     async {
         let chat = store.conversation(conversation_id.clone()).await?;
         let scope = selected_scope(&store, chat.checkout_id, selection, effort, mode).await?;
         store
-            .enqueue_side_request(
+            .enqueue_side_request_with_fixture(
                 conversation_id,
                 expected_context_id,
                 expected_source_run_id,
                 scope,
                 purpose,
                 question,
+                output_fixture,
             )
             .await
     }
     .await
     .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn conversation_output_fixture_audio(
+    store: State<'_, Store>,
+    project_id: String,
+    conversation_id: String,
+    run_id: String,
+) -> Result<Option<String>, String> {
+    store.side_output_fixture_audio(project_id, conversation_id, run_id).await.map_err(ui_error)
 }
 
 #[tauri::command]
@@ -689,6 +702,18 @@ pub async fn conversation_profile_evidence(
         .dispatch_profile_evidence(project_id, conversation_id, run_id)
         .await
         .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn conversation_generated_image_evidence(
+    store: State<'_, Store>,
+    project_id: String,
+    conversation_id: String,
+    run_id: String,
+    event_sequence: String,
+) -> Result<Option<String>, String> {
+    let sequence = event_sequence.parse::<i64>().map_err(|_| "Invalid event sequence".to_owned())?;
+    store.dispatch_generated_image(project_id, conversation_id, run_id, sequence).await.map_err(ui_error)
 }
 
 #[derive(Serialize)]

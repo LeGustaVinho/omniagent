@@ -25,6 +25,7 @@ use crate::{
 };
 
 mod attachment_evidence;
+mod generated_image_evidence;
 mod instruction_evidence;
 mod inventory;
 mod lineage;

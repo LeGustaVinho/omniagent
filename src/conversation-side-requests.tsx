@@ -10,10 +10,22 @@ import { ConversationMarkdown } from "@/conversation-markdown";
 import { isLiveRun } from "@/conversation-run";
 import { SettingRow } from "@/settings-controls";
 
-type SideOutcome = { kind: "answered"; text: string } | { kind: "unavailable"; reason: string }
+type SideOutcome = { kind: "answered"; text: string; route: string } | { kind: "unavailable"; reason: string }
   | { kind: "no_text" | "failed" | "timed_out" | "cancelled" | "interrupted" };
 
-interface SideRequest {
+export type OutputFixture = "audio_generation" | "browser_control" | "host_control";
+
+export type OutputFixtureReceipt = {
+  tool: string;
+  revision: number;
+  providerCallId: string;
+  result:
+    | { kind: "audio_generation"; voice: string; phrase: string; byteLen: number; sha256: string }
+    | { kind: "browser_control"; browser: string; target: string; operation: string; result: string }
+    | { kind: "host_control"; operation: string; before: string; after: string };
+};
+
+export interface SideRequest {
   job: Job;
   contextId: string;
   sourceRunId: string;
@@ -24,8 +36,10 @@ interface SideRequest {
   mode: SessionMode;
   purpose: "question" | "suggestion" | "validation";
   question: string;
-  response: { outcome: SideOutcome } | null;
+  response: { outcome: SideOutcome; outputFixture?: OutputFixtureReceipt } | null;
+  outputFixture?: OutputFixture | null;
   evidenceId: string | null;
+  evidenceCheckedAt: string | null;
 }
 
 type SuggestionMode = "off" | "native" | "omniagent";
@@ -71,13 +85,14 @@ export type SideSubmission = { status: "queued"; jobId: string } | { status: "sk
 
 const providers: Record<Provider, string> = { codex: "Codex", claude: "Claude Code", antigravity: "Antigravity" };
 
-function unavailableReason(reason: string) {
+export function sideUnavailableReason(reason: string) {
   switch (reason) {
     case "source_boundary_unavailable": return "An eligible completed source turn is required.";
     case "invalid_input": return "The question or saved context exceeds the side request limit.";
     case "profile_mismatch": return "The selected profile differs from the saved source.";
     case "account_changed": return "The authenticated CLI account changed or could not be confirmed.";
     case "unverified_profile": return "This profile has no verified tool-disabled route.";
+    case "output_fixture_unavailable": return "The selected CLI, runner, or installed fixture tool is unavailable.";
     case "busy": return "The CLI is still using the source session. Try again after the main turn finishes.";
     default: return "The selected CLI has no available isolated route.";
   }
@@ -109,7 +124,7 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
       <button type="button" className="conv-icon-button ml-auto" aria-label="Close side questions" onClick={onClose}><X size={16} /></button>
     </header>
     {submission?.status === "unavailable" && <p role="status" className="conv-alert">
-      {[providers[submission.provider], submission.model].filter(Boolean).join(" · ")} · {unavailableReason(submission.reason)}
+      {[providers[submission.provider], submission.model].filter(Boolean).join(" · ")} · {sideUnavailableReason(submission.reason)}
     </p>}
     {saved.isError && <p role="alert" className="conv-alert">{String(saved.error)}</p>}
     {control.isError && <p role="alert" className="conv-alert">{String(control.error)}</p>}
@@ -139,7 +154,7 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
             }}>Copy answer</Button>
           </> : <p className="text-muted-foreground" role="status">
             {pending ? (job.latestAttempt?.cancelRequested ? "Stopping…" : isLiveRun(job.latestAttempt) ? "Running…" : "Waiting for the queue…")
-              : outcome?.kind === "unavailable" ? unavailableReason(outcome.reason)
+              : outcome?.kind === "unavailable" ? sideUnavailableReason(outcome.reason)
                 : job.queueState === "cancelled" || job.latestAttempt?.status === "cancelled" || outcome?.kind === "cancelled" ? "Cancelled"
                   : job.latestAttempt?.status === "interrupted" || outcome?.kind === "interrupted" ? "Interrupted"
                     : outcome?.kind === "timed_out" ? "Timed out"
