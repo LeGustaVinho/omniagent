@@ -8,6 +8,7 @@ use omniagent::{
         AdmissionBlocker, AdmissionEnvironment, JobRequest, PipelineDispatch, PipelineNodeKind,
         RecoveryAction,
     },
+    model_catalog::ModelSelection,
     providers::{Provider, ProviderEvent, ProviderEventData, SessionMode},
     repository::{self, provision_task_worktree},
     runner::{DirectWindowsRunner, Runner},
@@ -608,9 +609,18 @@ async fn checklist_attempt_retains_its_role_and_actual_profile_after_reassignmen
 
     details.planned_assignments[0].provider = Provider::Claude;
     details.planned_assignments[0].profile_id = "reassigned-profile".into();
-    details.planned_assignments[0].model = None;
+    details.planned_assignments[0].model = Some("reassigned-model".into());
     store
-        .set_project_task_details(project.clone(), child.id.clone(), details.clone())
+        .set_project_task_assignment(
+            project.clone(),
+            child.id.clone(),
+            "reviewer".into(),
+            Some(ModelSelection {
+                provider: Provider::Claude,
+                profile_id: "reassigned-profile".into(),
+                model_id: "reassigned-model".into(),
+            }),
+        )
         .await?;
     drop(store);
     let store = Store::open(database)?;

@@ -2,8 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
 import type { Capability } from "@/bindings/Capability";
+import type { ModelRating } from "@/bindings/ModelRating";
 import type { Provider } from "@/bindings/Provider";
 import type { SessionMode } from "@/bindings/SessionMode";
+import { ModelRatingMeters } from "@/components/model-picker";
 
 type CapabilitySubject =
   | { kind: "protocol"; capability: Capability }
@@ -127,6 +129,7 @@ function AssessmentDetails({ assessment }: { assessment: HistoricalAssessment })
         <details className="rounded border border-border px-2 py-1">
           <summary className="cursor-pointer break-words capitalize">{subjectLabel(descriptor.subject)} · {status}</summary>
           <div className="grid gap-1 pt-1 text-muted-foreground">
+            <p>Verification status · {status}</p>
             <p>Source {descriptor.source} · Availability {descriptor.availability} · Scope {words(descriptor.boundary)}</p>
             {descriptor.observed && <p>Observed result {descriptor.observed}</p>}
             {descriptor.blocker && <p>Blocked by the read-only profile</p>}
@@ -138,8 +141,28 @@ function AssessmentDetails({ assessment }: { assessment: HistoricalAssessment })
   </div>;
 }
 
+function ModelReference({ model, ratings }: { model: string; ratings: Record<string, ModelRating> }) {
+  const rating = Object.hasOwn(ratings, model) ? ratings[model] ?? null : null;
+  return <div role="group" aria-label={`Reference rating for ${model}`}>
+    <p className="break-words font-medium">{model} · Catalog reference</p>
+    <ModelRatingMeters rating={rating} />
+  </div>;
+}
+
 function ProfileDetails({ evidence }: { evidence: DispatchProfileEvidence }) {
   const { profile, assessment, modelObservations } = evidence;
+  const dispatchModels = Array.from(new Set([profile.requestedModel, profile.reportedAtDispatch.model]
+    .filter((model): model is string => Boolean(model))));
+  const modelIds = Array.from(new Set([
+    ...dispatchModels,
+    ...modelObservations.flatMap(({ reported }) => reported.model ? [reported.model] : []),
+  ])).sort();
+  const ratings = useQuery({
+    queryKey: ["catalog-model-ratings", profile.provider, modelIds],
+    queryFn: () => invoke<Record<string, ModelRating>>("catalog_model_ratings", { provider: profile.provider, modelIds }),
+    enabled: modelIds.length > 0,
+    staleTime: Infinity,
+  });
   return <>
     <section className="grid gap-2" aria-label="Effective profile at dispatch">
       <dl className="break-all">
@@ -155,12 +178,15 @@ function ProfileDetails({ evidence }: { evidence: DispatchProfileEvidence }) {
         <dt>Dispatch</dt><dd>{evidence.dispatchId} · {evidence.delivery}</dd>
         <dt>Context snapshot</dt><dd>{evidence.snapshotId}</dd>
       </dl>
+      {modelIds.length > 0 && ratings.error && <p role="alert">Catalog ratings unavailable.</p>}
+      {ratings.data && dispatchModels.map((model) => <ModelReference key={model} model={model} ratings={ratings.data} />)}
       {assessment ? <AssessmentDetails assessment={assessment} /> : <p>Capability assessment unavailable.</p>}
     </section>
     {modelObservations.length > 0 && <section aria-label="Provider model reports after dispatch" className="grid gap-2">
       <h3 className="text-sm font-medium">Provider model reports after dispatch</h3>
       <ol className="grid gap-2">{modelObservations.map(({ eventSequence, reported, reassessment }) => <li key={eventSequence} className="grid gap-1">
         <p className="break-words">{reported.model ?? "Model unavailable"}{reported.effort && ` · Effort ${reported.effort}`} · Event {eventSequence}</p>
+        {reported.model && ratings.data && <ModelReference model={reported.model} ratings={ratings.data} />}
         {reassessment && <details>
           <summary className="cursor-pointer">Assessment after report · Event {reassessment.eventSequence}</summary>
           <AssessmentDetails assessment={reassessment.assessment} />

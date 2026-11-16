@@ -8,13 +8,15 @@ import {
   deliveryProviders, type DeliveryActions, type DeliveryInputs, type DeliveryModel,
   type DeliveryModelChoice, type DeliveryNode, type DeliveryTarget,
 } from "@/repository-delivery-model";
+import { useTaskAssignments } from "@/task-assignment";
 import type { WorkspaceProps } from "@/workbench-contract";
 
-export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, job, label, actions, openActivity }: {
+export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, job, label, actions, openActivity }: {
   scope: DeliveryTarget;
   nodeId: DeliveryNode;
   inputs: DeliveryInputs;
   unitId?: string | null;
+  taskId?: string;
   job?: Job;
   label: string;
   actions: DeliveryActions;
@@ -34,8 +36,15 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, job, label
     staleTime: 60_000,
   })) });
   const options = models.flatMap(({ data }) => data?.map(({ option }) => option) ?? []);
-  const ready = selection && options.some(({ selection: option, selectable }) => selectable &&
-    option.provider === selection.provider && option.profileId === selection.profileId && option.modelId === selection.modelId);
+  const loadingOptions = models.some(({ isFetching }) => isFetching);
+  const role = nodeId === "implement" ? "implementer" : nodeId === "review-candidate" ? "candidate reviewer" : undefined;
+  const assignments = useTaskAssignments(scope.projectId, taskId, Boolean(role) && !active && attempt?.status !== "succeeded");
+  const planned = assignments.data?.find((assignment) => assignment.role === role);
+  const effectiveSelection = selection ?? (planned?.modelId ? {
+    provider: planned.provider, profileId: planned.profileId, modelId: planned.modelId,
+  } : null);
+  const ready = effectiveSelection && options.some(({ selection: option, selectable }) => selectable &&
+    option.provider === effectiveSelection.provider && option.profileId === effectiveSelection.profileId && option.modelId === effectiveSelection.modelId);
   return <section className="pipeline-stack" aria-label={label}>
     <h3 className="text-sm font-medium">{label}</h3>
     {job && <div className="pipeline-actions">
@@ -46,11 +55,15 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, job, label
     </div>}
     {!active && attempt?.status !== "succeeded" && <>
       <ModelPicker label={`${label} model`} options={options}
-        loading={models.some(({ isFetching }) => isFetching)} disabled={actions.busy}
-        selection={{ mode: "single", selected: selection, onChange: setSelection }} />
+        loading={loadingOptions} disabled={actions.busy}
+        selection={{ mode: "single", selected: effectiveSelection, onChange: setSelection }} />
+      {!selection && planned?.modelId && <p className="text-sm text-muted-foreground">
+        {ready ? "Model from task assignment" : `Task assignment · ${planned.modelId} · ${loadingOptions ? "Checking model availability" : "Unavailable in current profiles"}`}
+      </p>}
+      {assignments.error && <p role="alert">{String(assignments.error)}</p>}
       <Button type="button" disabled={!ready || actions.busy}
         onClick={() => actions.execute(() => invoke("submit_repository_delivery_agent", {
-          input: { ...scope, nodeId, unitId, inputs, selection, effort: null },
+          input: { ...scope, nodeId, unitId, inputs, selection: effectiveSelection, effort: null },
         }))}>
         {job ? "Queue another attempt" : `Queue ${label.toLowerCase()}`}
       </Button>

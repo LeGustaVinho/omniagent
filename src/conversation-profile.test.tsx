@@ -40,7 +40,17 @@ it("scopes inspection to the run and keeps later model evidence separate from th
       },
     }],
   };
-  vi.mocked(invoke).mockResolvedValue(dispatch);
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "conversation_profile_evidence") return dispatch;
+    if (command === "catalog_model_ratings") {
+      expect(args).toEqual({ provider: "codex", modelIds: ["later-model", "original-model", "requested-model"] });
+      return {
+        "original-model": { intelligenceTenths: 738, priceScore: 65, apiReferenceCents: 400 },
+        "later-model": { intelligenceTenths: 169, priceScore: 0, apiReferenceCents: 20 },
+      };
+    }
+    throw new Error(`Unexpected command ${command}`);
+  });
   const client = new QueryClient();
   const user = userEvent.setup();
   render(<QueryClientProvider client={client}><ConversationProfile {...requested} live={false} /></QueryClientProvider>);
@@ -52,11 +62,18 @@ it("scopes inspection to the run and keeps later model evidence separate from th
   expect(original.getByText("requested-model")).toBeTruthy();
   expect(original.getByText("original-model")).toBeTruthy();
   expect(original.getByText("original-config")).toBeTruthy();
+  const rating = within(await original.findByRole("group", { name: "Reference rating for original-model" }));
+  expect(rating.getByRole("meter", { name: "Intelligence" })).toBeTruthy();
+  expect(rating.getByText("API reference $4.00 / 1M tokens")).toBeTruthy();
+  expect(within(original.getByRole("group", { name: "Reference rating for requested-model" })).getByText("Unrated")).toBeTruthy();
   await user.click(original.getByText("reasoning · verified"));
   expect(original.getByText(/saved-verification/)).toBeTruthy();
+  expect(original.getByText("Verification status · verified")).toBeTruthy();
 
   const later = within(screen.getByRole("region", { name: "Provider model reports after dispatch" }));
   expect(later.getByText(/later-model · Effort high · Event 27/)).toBeTruthy();
+  expect(within(later.getByRole("group", { name: "Reference rating for later-model" }))
+    .getByText("API reference $0.20 / 1M tokens")).toBeTruthy();
   await user.click(later.getByText("Assessment after report · Event 28"));
   expect(later.getByText("later-config")).toBeTruthy();
   expect(later.getByText("reasoning · reported")).toBeTruthy();

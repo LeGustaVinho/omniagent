@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     conversations::SessionScope,
+    model_catalog::ModelSelection,
     protection,
     providers::{Provider, SessionMode},
     runs::RunStatus,
@@ -102,6 +103,55 @@ pub struct TaskRun {
 }
 
 impl Store {
+    pub async fn set_project_task_assignment(
+        &self,
+        project: String,
+        task: String,
+        role: String,
+        selection: Option<ModelSelection>,
+    ) -> Result<Vec<PlannedAssignment>> {
+        ensure!(!role.trim().is_empty(), "an assignment requires a role");
+        ensure!(
+            selection.as_ref().is_none_or(|selection| {
+                !selection.profile_id.trim().is_empty() && !selection.model_id.trim().is_empty()
+            }),
+            "an assignment requires a profile and model"
+        );
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            load_project_task(&tx, &project, &task)?.context("task is outside the selected project")?;
+            let mut details = load_task_details(&tx, &project, &task)?;
+            details.planned_assignments.retain(|saved| saved.role != role);
+            if let Some(selection) = selection {
+                details.planned_assignments.push(PlannedAssignment {
+                    role,
+                    provider: selection.provider,
+                    profile_id: selection.profile_id,
+                    model: Some(selection.model_id),
+                });
+            }
+            let payload = ProtectedTaskDetails {
+                acceptance_criteria: details.acceptance_criteria,
+                blockers: details.blockers,
+                planned_assignments: details.planned_assignments.clone(),
+            };
+            tx.execute(
+                "INSERT INTO project_task_details(project_id, task_id, priority, workflow_state, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(project_id, task_id) DO UPDATE SET payload = excluded.payload",
+                params![
+                    project,
+                    task,
+                    details.priority,
+                    details.workflow_state.key(),
+                    protection::protect(&serde_json::to_vec(&payload)?)?
+                ],
+            )?;
+            tx.commit()?;
+            Ok(details.planned_assignments)
+        }).await
+    }
+
     pub async fn project_task_details(
         &self,
         project: String,

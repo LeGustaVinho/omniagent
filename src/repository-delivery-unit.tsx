@@ -120,7 +120,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
     {commitEvidenceId && <SavedCommit projectId={scope.projectId} taskId={taskId} evidenceId={commitEvidenceId} />}
     {!commitEvidenceId && !active && <p className="text-muted-foreground">Waiting for the preceding verified commit.</p>}
     {active && <>
-      <DeliveryAgent scope={scope} nodeId="implement" inputs={implementationInputs} unitId={unitId}
+      <DeliveryAgent scope={scope} nodeId="implement" inputs={implementationInputs} unitId={unitId} taskId={taskId}
         job={implementation} label="Implementation" actions={actions} openActivity={openActivity} />
       {implementation?.latestAttempt?.status === "succeeded" && attemptId && <WorktreeEvidence projectId={scope.projectId} runId={attemptId} ownerTaskId={implementation.worktreeOwnerTaskId} />}
       {capture.data?.kind === "unavailable" && <p role="alert">{capture.data.reason}</p>}
@@ -148,7 +148,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
       {candidate?.value.kind === "candidate" && <>
         <p className="break-all">Candidate tree <code>{candidate.value.evidence.tree}</code></p>
         <DeliveryAgent key={candidate.id} scope={scope} nodeId="review-candidate" inputs={reviewInputs}
-          unitId={unitId} job={reviewing} label="Candidate review" actions={actions} openActivity={openActivity} />
+          unitId={unitId} taskId={taskId} job={reviewing} label="Candidate review" actions={actions} openActivity={openActivity} />
         {!review && reviewing?.latestAttempt?.status === "succeeded" && <Button variant="outline" disabled={actions.busy}
           onClick={() => actions.execute(() => invoke("publish_repository_delivery_evidence", {
             ...scope, nodeId: "review-candidate", attemptId: reviewing.latestAttempt?.runId, planSequence: null, expectedPlanRevision: null,

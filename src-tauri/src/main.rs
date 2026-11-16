@@ -9,6 +9,7 @@ mod fixture_runtime;
 mod ipc;
 mod queue_runtime;
 mod task_delivery_ipc;
+mod task_assignment_ipc;
 mod task_participants_ipc;
 mod workflow_ipc;
 
@@ -252,6 +253,9 @@ fn main() {
             task_delivery_ipc::append_project_checklist_item,
             task_delivery_ipc::revise_project_checklist_item,
             task_participants_ipc::project_task_runs,
+            task_assignment_ipc::project_task_assignments,
+            task_assignment_ipc::set_project_task_assignment,
+            task_assignment_ipc::catalog_model_ratings,
             workflow_ipc::start_repository_delivery,
             workflow_ipc::list_repository_deliveries,
             workflow_ipc::inspect_repository_delivery,
