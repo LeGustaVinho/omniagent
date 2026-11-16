@@ -3,6 +3,7 @@ import { Dialog } from "radix-ui";
 import { useEffect, useRef, useState } from "react";
 import type { AppearanceSettings } from "@/bindings/AppearanceSettings";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
+import { CandidateGateSettings } from "@/candidate-gate-settings";
 import { Button } from "@/components/ui/button";
 import { ProjectQueueHistoryPolicy } from "@/conversation-history-controls";
 import { CustomizationsSettings } from "@/customizations-panel";
@@ -57,7 +58,10 @@ const pages: readonly Page[] = [
   ] },
   { id: "execution", scope: "project", title: "Execution policies", icon: Shield, entries: policyFields.execution },
   { id: "conversation", scope: "project", title: "Conversation defaults", icon: SlidersHorizontal, entries: policyFields.conversation },
-  { id: "git", scope: "project", title: "Git and delivery", icon: GitPullRequest, entries: policyFields.git },
+  { id: "git", scope: "project", title: "Git and delivery", icon: GitPullRequest, entries: [
+    ...policyFields.git,
+    { id: "candidate-gates", label: "Candidate verification checks", description: "Build commands, test commands and required checks" },
+  ] },
   { id: "automation", scope: "project", title: "Workflow automation", icon: Workflow, entries: policyFields.automation },
   { id: "customizations", scope: "checkout", title: "Customizations", icon: Braces, entries: [
     { id: "customization-inventory", label: "Repository inventory", description: "Hooks, MCP servers, plugin declarations, skills, Markdown instructions and approved revisions" },
@@ -257,6 +261,11 @@ function SettingsSession({
           <ProjectQuestionTimeout key={`timeout-${checkout.projectId}`} projectId={checkout.projectId} />
           <PolicyForm fields={policyFields.execution.filter(({ id }) => !["subagent-policy", "subagent-cap", "subagent-audit", "live-wait"].includes(id))}
             stored={undefined} simulate={simulate} />
+        </>;
+      case "git":
+        return simulation || !checkout ? policy("git") : <>
+          <CandidateGateSettings key={checkout.projectId} projectId={checkout.projectId} />
+          {policy("git")}
         </>;
       default:
         return policy(currentPage.id);
