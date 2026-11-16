@@ -1,21 +1,28 @@
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 
 use crate::{
     conversations::AttemptPlan,
-    dispatch::{ContextSnapshot, Delivery},
+    dispatch::{ContextSnapshot, Delivery, EventSource},
     jobs::{AdmissionBlocker, AdmissionEnvironment, Job},
-    providers::{Provider, SessionMode},
+    providers::{Provider, ProviderEvent, ProviderEventData, SessionMode},
     repository::{
         self, AttemptWorktreeEvidence, BranchStrategy, ManagedWorktree,
-        verification::{CandidateSelection, CandidateTarget, SelectedCandidate},
+        verification::{
+            CandidateGate, CandidateGateAction, CandidateGateOutcome, CandidateSelection,
+            CandidateTarget, CandidateVerification, SelectedCandidate,
+        },
         verified_git::{CommitSource, DeliveryGitPolicy, VerifiedCommit},
     },
     runs::RunStatus,
     store::Store,
-    tasks::{TaskDeliveryEvidence, TaskWorkflowState},
+    tasks::{PlannedAssignment, TaskDeliveryEvidence, TaskRunRole, TaskWorkflowState},
 };
 
 use super::{
@@ -479,6 +486,288 @@ async fn exercise_subtask_delivery(strategy: BranchStrategy) -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn changed_candidate_needs_fresh_required_checks_and_preserves_review_participation()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("delivery.sqlite");
+    let store = Store::open(database.clone())?;
+    let checkout = approved_delivery_repository(&store, temp.path()).await?;
+    let project = checkout.project_id.clone();
+    let task = store
+        .create_project_task(project.clone(), "Checked and reviewed change".into())
+        .await?
+        .id;
+    let fixture =
+        approve_delivery_fixture_for_work(&store, temp.path(), checkout, Some(task.clone()))
+            .await?;
+    let [unit] = fixture.units.as_slice() else {
+        anyhow::bail!("expected one logical unit");
+    };
+    let worktree = store
+        .live_managed_worktree(project.clone(), task.clone())
+        .await?
+        .context("managed worktree is unavailable")?
+        .worktree;
+    let base = git(&worktree.root, &["rev-parse", "HEAD"])?;
+    let executable = PathBuf::from(std::env::var_os("SystemRoot").context("missing SystemRoot")?)
+        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let policy_revision = store.set_candidate_gate_policy(project.clone(), vec![CandidateGate {
+        name: "required build".into(),
+        required: true,
+        action: CandidateGateAction::Command {
+            executable,
+            arguments: vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(),
+                "if ((Get-Content -LiteralPath 'second.txt' -Raw).Trim() -eq 'second.txt') { exit 0 } else { exit 17 }".into()],
+            timeout_seconds: Some(30),
+        },
+    }]).await?;
+
+    let first_assignment = PlannedAssignment {
+        model: Some("original-model".into()),
+        ..first_reviewer()
+    };
+    let mut details = store
+        .project_task_details(project.clone(), task.clone())
+        .await?
+        .context("task details are unavailable")?;
+    details.planned_assignments = vec![first_assignment.clone()];
+    store
+        .set_project_task_details(project.clone(), task.clone(), details.clone())
+        .await?;
+    let job = queue_implementation(&store, &fixture, &worktree, unit).await?;
+    let capture = capture_implementation(
+        &store,
+        &fixture,
+        &worktree,
+        unit,
+        &["first.txt", "second.txt"],
+        job,
+    )
+    .await?;
+
+    let incomplete = select_candidate(&store, &fixture, capture.clone(), &["first.txt"]).await?;
+    let reviewed_incomplete = review_candidate(
+        &store,
+        &fixture,
+        &worktree,
+        unit,
+        &incomplete,
+        &first_assignment,
+    )
+    .await?;
+    let failed = verify_candidate(&store, &fixture, unit, &incomplete).await?;
+    let failed_check = checked_evidence(&store, &project, &task, &failed).await?;
+    assert_eq!(failed_check.policy_revision, policy_revision);
+    assert!(
+        matches!(failed_check.gates.as_slice(), [result] if result.gate.required &&
+        matches!(&result.outcome, Some(CandidateGateOutcome::Failed { exit_code: 17, .. })))
+    );
+    assert!(!failed_check.allows_acceptance());
+    let error = accept_candidate(
+        &store,
+        &fixture,
+        unit,
+        &incomplete,
+        &reviewed_incomplete,
+        &failed,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("required checks"), "{error:#}");
+    let blocked = store
+        .project_task_delivery_state(project.clone(), task.clone())
+        .await?
+        .context("task state is unavailable after failed checks")?;
+    assert_ne!(blocked.state, TaskWorkflowState::Completed);
+    assert!(blocked.completion.is_none());
+    assert_eq!(git(&worktree.root, &["rev-parse", "HEAD"])?, base);
+
+    let approved_candidate =
+        select_candidate(&store, &fixture, capture.clone(), &["second.txt"]).await?;
+    let reviewed_approved = review_candidate(
+        &store,
+        &fixture,
+        &worktree,
+        unit,
+        &approved_candidate,
+        &first_assignment,
+    )
+    .await?;
+    let passed = verify_candidate(&store, &fixture, unit, &approved_candidate).await?;
+    let approved_check = checked_evidence(&store, &project, &task, &passed).await?;
+    assert_eq!(approved_check.policy_revision, policy_revision);
+    assert!(approved_check.allows_acceptance());
+    let acceptance = accept_candidate(
+        &store,
+        &fixture,
+        unit,
+        &approved_candidate,
+        &reviewed_approved,
+        &passed,
+    )
+    .await?;
+    let ArtifactValue::Acceptance(reference) = &acceptance.value else {
+        anyhow::bail!("expected acceptance");
+    };
+    let prior_acceptance = store
+        .current_candidate_acceptance(project.clone(), task.clone(), reference.evidence.id.clone())
+        .await?;
+    let prior_reviewers =
+        review_participants(&store, &project, &task, &first_assignment.role).await?;
+    assert_eq!(prior_reviewers.len(), 2);
+    for participant in &prior_reviewers {
+        assert_eq!(participant.provider, first_assignment.provider);
+        assert_eq!(participant.profile_id, first_assignment.profile_id);
+        assert_eq!(
+            participant.requested_model.as_deref(),
+            Some("original-model")
+        );
+        assert_eq!(
+            participant.reported_model.as_deref(),
+            Some("observed-original-model")
+        );
+    }
+
+    let reassigned = PlannedAssignment {
+        role: first_assignment.role.clone(),
+        provider: Provider::Codex,
+        profile_id: "reassigned-reviewer".into(),
+        model: Some("replacement-model".into()),
+    };
+    details.planned_assignments = vec![reassigned.clone()];
+    store
+        .set_project_task_details(project.clone(), task.clone(), details.clone())
+        .await?;
+    let changed = select_candidate(&store, &fixture, capture, &["first.txt", "second.txt"]).await?;
+    let ArtifactValue::Candidate(new_candidate) = &changed.value else {
+        anyhow::bail!("expected new candidate");
+    };
+    assert_ne!(new_candidate.id, prior_acceptance.candidate.id);
+    assert_ne!(new_candidate.tree, prior_acceptance.candidate.tree);
+    let pending = store
+        .current_candidate_verification(project.clone(), task.clone(), new_candidate.id.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        pending.to_string().contains("current project gate policy"),
+        "{pending:#}"
+    );
+    let old = AcceptedUnit {
+        candidate: approved_candidate,
+        acceptance,
+    };
+    let rejected = commit(&store, &fixture, unit, &old, None)
+        .await
+        .unwrap_err();
+    assert!(rejected.to_string().contains("superseded"), "{rejected:#}");
+    assert_eq!(git(&worktree.root, &["rev-parse", "HEAD"])?, base);
+    let reviewed_changed =
+        review_candidate(&store, &fixture, &worktree, unit, &changed, &reassigned).await?;
+    assert!(
+        accept_candidate(&store, &fixture, unit, &changed, &reviewed_changed, &passed)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .project_task_deliveries(project.clone(), task.clone())
+            .await?
+            .is_empty()
+    );
+
+    let verified_change = verify_candidate(&store, &fixture, unit, &changed).await?;
+    let new_check = checked_evidence(&store, &project, &task, &verified_change).await?;
+    assert_eq!(new_check.candidate_id, new_candidate.id);
+    assert_eq!(new_check.policy_revision, policy_revision);
+    assert_ne!(new_check.id, approved_check.id);
+    assert!(new_check.allows_acceptance());
+    let accepted_change = AcceptedUnit {
+        acceptance: accept_candidate(
+            &store,
+            &fixture,
+            unit,
+            &changed,
+            &reviewed_changed,
+            &verified_change,
+        )
+        .await?,
+        candidate: changed,
+    };
+    let result = commit(&store, &fixture, unit, &accepted_change, None).await?;
+    let evidence = verified(&store, &fixture, unit, result).await?;
+    assert_eq!(evidence.verification_id, new_check.id);
+    assert_eq!(
+        store
+            .project_task_delivery_state(project.clone(), task.clone())
+            .await?
+            .context("completed task state is unavailable")?
+            .state,
+        TaskWorkflowState::Completed
+    );
+
+    drop(store);
+    let reopened = Store::open(database)?;
+    let updated = reopened
+        .project_task_details(project.clone(), task.clone())
+        .await?
+        .context("reopened task details are unavailable")?;
+    assert_eq!(updated.planned_assignments, details.planned_assignments);
+    assert_eq!(updated.workflow_state, TaskWorkflowState::Completed);
+    let saved = review_participants(&reopened, &project, &task, &first_assignment.role).await?;
+    assert_eq!(saved.len(), 3);
+    assert_eq!(&saved[..2], prior_reviewers.as_slice());
+    let latest = &saved[2];
+    let ArtifactValue::Review { run_id } = reviewed_changed.value else {
+        anyhow::bail!("expected review");
+    };
+    assert_eq!(latest.run_id, run_id);
+    assert_eq!(latest.provider, reassigned.provider);
+    assert_eq!(latest.profile_id, reassigned.profile_id);
+    assert_eq!(latest.requested_model.as_deref(), Some("replacement-model"));
+    assert_eq!(
+        latest.reported_model.as_deref(),
+        Some("observed-replacement-model")
+    );
+    assert_eq!(
+        reopened
+            .candidate_acceptance(project, task, prior_acceptance.id.clone())
+            .await?,
+        Some(prior_acceptance)
+    );
+    Ok(())
+}
+
+async fn checked_evidence(
+    store: &Store,
+    project: &str,
+    task: &str,
+    artifact: &WorkflowArtifact,
+) -> Result<CandidateVerification> {
+    let ArtifactValue::Checks(evidence) = &artifact.value else {
+        anyhow::bail!("expected check evidence");
+    };
+    store
+        .candidate_verification(project.into(), task.into(), evidence.id.clone())
+        .await?
+        .context("candidate check receipt is unavailable")
+}
+
+async fn review_participants(
+    store: &Store,
+    project: &str,
+    task: &str,
+    role: &str,
+) -> Result<Vec<crate::tasks::TaskRun>> {
+    let role = TaskRunRole::Workflow(role.into());
+    Ok(store
+        .project_task_runs(project.into(), task.into())
+        .await?
+        .into_iter()
+        .filter(|run| run.role == role)
+        .collect())
+}
+
 struct AcceptedUnit {
     candidate: WorkflowArtifact,
     acceptance: WorkflowArtifact,
@@ -535,13 +824,41 @@ async fn capture_queued_implementation_and_review(
     name: &str,
     implement: Job,
 ) -> Result<AcceptedUnit> {
-    let unit_id = &unit.unit.id;
+    let target = capture_implementation(store, fixture, worktree, unit, &[name], implement).await?;
+    let candidate = select_candidate(store, fixture, target, &[name]).await?;
+    let review = review_candidate(
+        store,
+        fixture,
+        worktree,
+        unit,
+        &candidate,
+        &first_reviewer(),
+    )
+    .await?;
+    let checks = verify_candidate(store, fixture, unit, &candidate).await?;
+    let acceptance = accept_candidate(store, fixture, unit, &candidate, &review, &checks).await?;
+    Ok(AcceptedUnit {
+        candidate,
+        acceptance,
+    })
+}
+
+async fn capture_implementation(
+    store: &Store,
+    fixture: &ApprovedDeliveryFixture,
+    worktree: &ManagedWorktree,
+    unit: &WorkflowDeliveryUnit,
+    files: &[&str],
+    implement: Job,
+) -> Result<CandidateTarget> {
     let env = fixture_admission();
-    let writer = claim_fixture_job(store, implement, env.clone()).await?;
+    let writer = claim_fixture_job(store, implement, env).await?;
     let run = writer.run.id;
     store.mark_agent_running(run.clone()).await?;
     ensure!(repository::capture_worktree_start(store, run.clone()).await?);
-    fs::write(worktree.root.join(name), format!("{name}\n"))?;
+    for name in files {
+        fs::write(worktree.root.join(name), format!("{name}\n"))?;
+    }
     repository::save_worktree_candidate(store, run.clone()).await?;
     store
         .finish_agent_attempt(run.clone(), RunStatus::Succeeded, None)
@@ -552,31 +869,62 @@ async fn capture_queued_implementation_and_review(
     else {
         anyhow::bail!("writer candidate was not saved");
     };
+    Ok(CandidateTarget {
+        project_id: fixture.project.clone(),
+        task_id: unit.task_id.clone(),
+        unit_id: unit.unit.id.clone(),
+        capture_revision: artifact.revision,
+        run_id: run,
+    })
+}
+
+async fn select_candidate(
+    store: &Store,
+    fixture: &ApprovedDeliveryFixture,
+    target: CandidateTarget,
+    paths: &[&str],
+) -> Result<WorkflowArtifact> {
+    let task = target.task_id.clone();
     let candidate = store
         .select_worktree_candidate(
-            CandidateTarget {
-                project_id: fixture.project.clone(),
-                task_id: unit.task_id.clone(),
-                unit_id: unit_id.clone(),
-                capture_revision: artifact.revision,
-                run_id: run,
-            },
+            target,
             CandidateSelection {
-                tracked_paths: Some(vec![name.into()]),
+                tracked_paths: Some(paths.iter().map(|path| (*path).to_owned()).collect()),
                 untracked_paths: Vec::new(),
             },
         )
         .await?;
-    let artifact = store
+    store
         .publish_workflow_candidate(
             fixture.project.clone(),
             fixture.run.id.clone(),
             "implement".into(),
-            unit.task_id.clone(),
-            candidate.id.clone(),
+            task,
+            candidate.id,
         )
-        .await?;
+        .await
+}
 
+fn first_reviewer() -> PlannedAssignment {
+    PlannedAssignment {
+        role: "candidate reviewer".into(),
+        provider: Provider::Claude,
+        profile_id: "candidate-reviewer".into(),
+        model: None,
+    }
+}
+
+async fn review_candidate(
+    store: &Store,
+    fixture: &ApprovedDeliveryFixture,
+    worktree: &ManagedWorktree,
+    unit: &WorkflowDeliveryUnit,
+    artifact: &WorkflowArtifact,
+    assignment: &PlannedAssignment,
+) -> Result<WorkflowArtifact> {
+    let ArtifactValue::Candidate(candidate) = &artifact.value else {
+        anyhow::bail!("selection artifact has no candidate");
+    };
     let mut review = submission(
         &fixture.checkout,
         &fixture.run,
@@ -584,21 +932,37 @@ async fn capture_queued_implementation_and_review(
         Some(unit.plan_revision.clone()),
         SessionMode::ReadOnly,
     );
-    review.scope.provider = Provider::Claude;
-    review.scope.profile_id = "candidate-reviewer".into();
+    review.scope.provider = assignment.provider;
+    review.scope.profile_id = assignment.profile_id.clone();
+    review.scope.model = assignment.model.clone();
     review.scope.checkout = worktree.root.clone();
     review.scope.executable = Path::new(&fixture.checkout.repository_root).join("codex.exe");
     review.request.checkout_id = Some(worktree.checkout_id.clone());
     review.request.task_id = Some(unit.task_id.clone());
-    review.unit_id = Some(unit_id.clone());
+    review.unit_id = Some(unit.unit.id.clone());
     review.artifacts = NodeInputs::from([("candidate".into(), artifact.id.clone())]);
     let review = store.submit_workflow_agent(review).await?;
-    let reviewer = claim_fixture_job(store, review, env).await?;
-    seal_review(store, &candidate, &reviewer).await?;
+    let reviewer = claim_fixture_job(store, review, fixture_admission()).await?;
+    seal_review(store, candidate, &reviewer).await?;
+    if let Some(model) = &assignment.model {
+        store
+            .record_agent_observation(
+                reviewer.run.id.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: Default::default(),
+                    data: ProviderEventData::ModelObserved {
+                        model: Some(format!("observed-{model}")),
+                        effort: None,
+                    },
+                },
+            )
+            .await?;
+    }
     store
         .finish_agent_attempt(reviewer.run.id.clone(), RunStatus::Succeeded, None)
         .await?;
-    let review = store
+    store
         .publish_workflow_artifact(
             fixture.project.clone(),
             fixture.run.id.clone(),
@@ -608,19 +972,38 @@ async fn capture_queued_implementation_and_review(
                 run_id: reviewer.run.id,
             },
         )
-        .await?;
+        .await
+}
+
+async fn verify_candidate(
+    store: &Store,
+    fixture: &ApprovedDeliveryFixture,
+    unit: &WorkflowDeliveryUnit,
+    candidate: &WorkflowArtifact,
+) -> Result<WorkflowArtifact> {
     let WorkflowUnitOutcome::Artifact { artifact: checks } = store
         .execute_workflow_unit(unit_request(
             fixture,
             unit,
             "verify-candidate",
-            NodeInputs::from([("candidate".into(), artifact.id.clone())]),
+            NodeInputs::from([("candidate".into(), candidate.id.clone())]),
             WorkflowUnitRequest::VerifyCandidate,
         ))
         .await?
     else {
         anyhow::bail!("missing candidate checks");
     };
+    Ok(checks)
+}
+
+async fn accept_candidate(
+    store: &Store,
+    fixture: &ApprovedDeliveryFixture,
+    unit: &WorkflowDeliveryUnit,
+    candidate: &WorkflowArtifact,
+    review: &WorkflowArtifact,
+    checks: &WorkflowArtifact,
+) -> Result<WorkflowArtifact> {
     let WorkflowUnitOutcome::Artifact {
         artifact: acceptance,
     } = store
@@ -629,9 +1012,9 @@ async fn capture_queued_implementation_and_review(
             unit,
             "accept",
             NodeInputs::from([
-                ("candidate".into(), artifact.id.clone()),
-                ("review".into(), review.id),
-                ("checks".into(), checks.id),
+                ("candidate".into(), candidate.id.clone()),
+                ("review".into(), review.id.clone()),
+                ("checks".into(), checks.id.clone()),
             ]),
             WorkflowUnitRequest::AcceptCandidate {
                 completion_criteria: unit.unit.completion_criteria.clone(),
@@ -641,10 +1024,7 @@ async fn capture_queued_implementation_and_review(
     else {
         anyhow::bail!("missing candidate acceptance");
     };
-    Ok(AcceptedUnit {
-        candidate: artifact,
-        acceptance,
-    })
+    Ok(acceptance)
 }
 
 fn fixture_admission() -> AdmissionEnvironment {
