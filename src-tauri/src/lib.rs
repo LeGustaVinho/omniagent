@@ -1,5 +1,6 @@
 pub mod appearance;
 pub mod attachments;
+pub mod context_records;
 pub mod conversations;
 pub mod customizations;
 pub mod diagnostics;
