@@ -71,10 +71,11 @@ export function withoutProperties(content: string) {
   return block ? content.slice(block.start.length + block.body.length + block.end.length) : content;
 }
 
-function byMarkdownLine(content: string, map: (line: string) => string) {
+function byMarkdownLine(content: string, map: (line: string) => string, inComment?: () => boolean) {
   let fence: string | undefined;
   return content.split(/(\r?\n)/).map((line) => {
     if (line === "\n" || line === "\r\n") return line;
+    if (!fence && inComment?.()) return map(line);
     const boundary = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
     if (boundary && (!fence || fence[0] === boundary[0] && boundary.length >= fence.length)) {
       fence = fence ? undefined : boundary;
@@ -102,7 +103,7 @@ function byText(content: string, map: (text: string) => string, stripComments = 
       cursor = offset + token[0].length;
     }
     return output + fragment(line.slice(cursor));
-  });
+  }, () => commenting);
 }
 
 export function parseWiki(raw: string, embed = false): NoteTarget {
