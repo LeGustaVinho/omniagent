@@ -71,3 +71,23 @@ it("shares one canonical buffer, refreshes clean content and preserves edits dur
   unmount();
   expect(invoke).toHaveBeenCalledWith("unwatch_repository_note", { watchId: "watch" });
 });
+
+it("restores the original revision and unsaved content beside an external revision after reopening", async () => {
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    switch (command) {
+      case "repository_note_catalog": return [];
+      case "list_repository_markdown_drafts": return [path];
+      case "open_repository_document": return documentAt("r2", "# External");
+      case "read_repository_markdown_draft": return { base: revision("r1"), revision: "draft", markdown: "# Recovered buffer" };
+      case "read_repository_markdown": return { markdown: "\uFEFF# Original\r\n" };
+      default: throw new Error(command);
+    }
+  });
+  const { result } = renderHook(() => useRepositoryNotes(checkoutId, true));
+  await act(async () => { await result.current.load(path); });
+  expect(result.current.draftPaths).toEqual([path]);
+  expect(invoke).toHaveBeenCalledWith("read_repository_markdown", { checkoutId, revisionId: "r1" });
+  expect(result.current.notes[path]).toMatchObject({
+    base: revision("r1"), content: "# Recovered buffer", external: "# External", saved: "# Original\n", draftRevision: "draft",
+  });
+});
