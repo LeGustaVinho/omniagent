@@ -607,3 +607,15 @@ pub async fn conversation_attachment_content(
         .await
         .map_err(ui_error)
 }
+
+#[tauri::command]
+pub async fn conversation_dispatch_inventory(
+    store: State<'_, Store>,
+    conversation_id: String,
+    run_id: String,
+) -> Result<Option<omniagent::dispatch::DispatchInventory>, String> {
+    store
+        .dispatch_inventory(conversation_id, run_id)
+        .await
+        .map_err(ui_error)
+}

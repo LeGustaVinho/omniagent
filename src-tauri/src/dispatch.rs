@@ -24,11 +24,13 @@ use crate::{
 
 mod attachment_evidence;
 mod instruction_evidence;
+mod inventory;
 pub use attachment_evidence::{AttachmentEvidence, AttachmentTransport};
 pub use instruction_evidence::{
     InstructionDispatch, InstructionDispatchMode, InstructionDispatchStatus, InstructionReceipt,
     InstructionReview,
 };
+pub use inventory::DispatchInventory;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

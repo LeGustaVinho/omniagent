@@ -249,6 +249,7 @@ fn main() {
             conversation_runtime::conversation_events,
             conversation_runtime::conversation_input,
             conversation_runtime::conversation_attachment_content,
+            conversation_runtime::conversation_dispatch_inventory,
             ipc::fixture_input_evidence,
             ipc::subscribe_events,
             ipc::unsubscribe_events,
