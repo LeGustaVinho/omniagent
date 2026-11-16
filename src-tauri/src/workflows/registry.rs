@@ -104,6 +104,8 @@ pub enum NodeConfiguration {
         role: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<ModelSelection>,
+        #[serde(default, skip_serializing_if = "super::stage_requirements::StageRequirementConfiguration::is_empty")]
+        requirements: super::stage_requirements::StageRequirementConfiguration,
     },
     RequiredChecks { names: Vec<String> },
     Command(CommandConfiguration),
@@ -461,8 +463,8 @@ impl NodeConfiguration {
     pub(super) fn matches(&self, kind: ConfigurationKind) -> bool {
         match (self, kind) {
             (Self::None, ConfigurationKind::None) => true,
-            (Self::AgentRole { role, model }, ConfigurationKind::AgentRole) => {
-                !role.trim().is_empty() && model.as_ref().is_none_or(|selection| {
+            (Self::AgentRole { role, model, requirements }, ConfigurationKind::AgentRole) => {
+                !role.trim().is_empty() && requirements.is_valid() && model.as_ref().is_none_or(|selection| {
                     !selection.profile_id.trim().is_empty() && !selection.model_id.trim().is_empty()
                 })
             }

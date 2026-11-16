@@ -32,6 +32,8 @@ pub struct ConversationTemplate {
     pub tool_scope: SessionMode,
     pub completion_contract: String,
     pub review_policy: TemplateReviewPolicy,
+    #[serde(default, skip_serializing_if = "super::stage_requirements::StageRequirements::is_empty")]
+    pub requirements: super::stage_requirements::StageRequirements,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -261,6 +263,7 @@ pub(crate) fn save_conversation_template_in_tx(
     force_revision: bool,
 ) -> Result<SaveConversationTemplate> {
     validate_conversation_template(&mut template)?;
+    ensure!(template.requirements.is_valid(), "The role requirements are invalid or exceed the limits");
     let payload = protection::protect(&serde_json::to_vec(&template)?)?;
     let revision = Uuid::new_v4().to_string();
     let (id, ordinal, base_revision) = if let Some(base) = base {

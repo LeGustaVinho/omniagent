@@ -44,6 +44,7 @@ fn role() -> PackageArtifactBody {
             tool_scope: SessionMode::ReadOnly,
             completion_contract: "Identify an exact affected file".into(),
             review_policy: TemplateReviewPolicy::HumanApproval,
+            requirements: Default::default(),
         },
     }
 }
@@ -120,6 +121,7 @@ async fn reviewed_workflow_package_is_atomic_and_pins_related_artifacts_after_re
             configuration: NodeConfiguration::AgentRole {
                 role: "Pinned planner".into(),
                 model: None,
+                requirements: Default::default(),
             },
             editable_fields: vec![],
         },

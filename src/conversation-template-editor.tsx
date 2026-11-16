@@ -10,6 +10,7 @@ import type { JobRole } from "@/bindings/JobRole";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { SessionMode } from "@/bindings/SessionMode";
+import { WorkflowRequirementsEditor, type StageRequirements } from "@/workflow-stage-requirements";
 
 type ToolScope = Exclude<SessionMode, "plan">;
 type ReviewPolicy = "independent" | "cross_review" | "human_approval";
@@ -22,6 +23,7 @@ type TemplateDraft = {
   toolScope: ToolScope;
   completionContract: string;
   reviewPolicy: ReviewPolicy;
+  requirements?: StageRequirements;
 };
 type Version = { revision: string; ordinal: number; baseRevision: string | null };
 type Head = { templateId: string; version: Version; name: string };
@@ -204,6 +206,9 @@ function TemplateForm({ checkoutId, projectId, saved, historical = false, onSave
       {option?.blocker && <p role="alert">{option.blocker}</p>}
       {draft.toolScope === "approved_write" && <p>Writing stages require project permission and a workflow release.</p>}
       {!historical && <ProfileMatrix matrix={matrix.data} loading={Boolean(liveModel && !effortUnavailable && matrix.isPending)} error={matrix.error} />}
+      <WorkflowRequirementsEditor projectId={projectId} checkoutId={checkoutId} mode={draft.toolScope} model={draft.model}
+        options={live.options} effort={draft.effort} disabled={historical || save.isPending} configuration={{ stage: draft.requirements }}
+        onChange={({ stage }) => update("requirements", stage)} />
       <label>Completion contract<textarea rows={3} value={draft.completionContract}
         onChange={(event) => update("completionContract", event.currentTarget.value)} /></label>
       <label>Review policy<select value={draft.reviewPolicy} onChange={(event) => update("reviewPolicy", event.currentTarget.value as ReviewPolicy)}>

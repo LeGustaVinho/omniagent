@@ -1548,6 +1548,7 @@ impl TurnExecution {
                 );
             }
         }
+        let required_stage_skills = self.check_stage_requirements(&capabilities, &instructions)?;
         self.check_dispatch_requirements(
             &capabilities,
             &instructions,
@@ -1650,13 +1651,20 @@ impl TurnExecution {
         if let Some(blocked) = assessment.take_if(|report| !report.blockers.is_empty()) {
             return self.record_attachment_assessment(blocked).map(|()| true);
         }
-        let (selected_skills, skill_files): (Vec<_>, Vec<_>) = self.plan.input.last()
+        let (mut selected_skills, mut skill_files): (Vec<_>, Vec<_>) = self.plan.input.last()
             .filter(|message| message.role == MessageRole::User)
             .map(|message| resolve_selected_skills(&self.plan.scope, &message.text, self.reported_skills.as_ref()))
             .transpose()?
             .unwrap_or_default()
             .into_iter()
             .unzip();
+        for (skill, file) in required_stage_skills {
+            if !selected_skills.contains(&skill) {
+                selected_skills.push(skill);
+                skill_files.push(file);
+            }
+        }
+        ensure!(selected_skills.len() <= 8, "The turn has more than eight selected skills");
         ensure!(self.plan.native_goal_seed.is_none() || selected_skills.is_empty(), "The native goal route cannot carry selected skills");
         self.composer_skill_sources = skill_files;
         let update = if self.plan.native_goal_seed.is_some() {

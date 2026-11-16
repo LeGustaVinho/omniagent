@@ -138,7 +138,7 @@ impl Store {
     }
 }
 
-fn probe_codex_skills(
+pub(crate) fn probe_codex_skills(
     scope: &SessionScope,
     checkout: &repository::CheckoutLayout,
 ) -> Result<Option<SkillCatalog>> {
@@ -269,7 +269,7 @@ fn discover(
     Ok(options)
 }
 
-fn current_skill(entry: &SkillEntry) -> Result<Option<(SelectedComposerSkill, File)>> {
+pub(crate) fn current_skill(entry: &SkillEntry) -> Result<Option<(SelectedComposerSkill, File)>> {
     if !entry.path.is_absolute()
         || !entry.path.ends_with("SKILL.md")
         || entry.name.trim().is_empty()

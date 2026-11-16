@@ -102,6 +102,7 @@ export function queueBlockerReason(blocker: AdmissionBlocker): string {
         case "native_delegation_unverified": return "The CLI did not confirm its reserved native subagent limit.";
         case "native_goal_unverified": return "The selected CLI profile no longer matches its native goal qualification.";
         case "subagent_audit_unverified": return "The effective CLI profile changed after its native subagent audit was verified.";
+        case "stage_requirements": return "The effective profile or worktree did not satisfy the role or stage requirements. Open the attempt assessment for details.";
         case "required_context_over_budget": return `Required role instructions need ${rejection.requiredBytes} bytes and the role allows ${rejection.availableBytes}. Shorten the instructions or increase the role budget before submitting a new job.`;
         case "requirements": {
           const missing = [

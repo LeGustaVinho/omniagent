@@ -45,6 +45,7 @@ async fn template_stage_and_comparison_retain_the_exact_model_and_catalog_refere
         tool_scope: SessionMode::ReadOnly,
         completion_contract: "Save the result.".into(),
         review_policy: TemplateReviewPolicy::Independent,
+        requirements: Default::default(),
     };
     let SaveConversationTemplate::Saved { detail } = store
         .save_conversation_template(project.clone(), None, template)

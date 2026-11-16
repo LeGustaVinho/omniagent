@@ -12,6 +12,8 @@ use crate::{
 };
 use tokio::runtime::Handle;
 
+mod stage;
+
 use super::{
     super::{
         Provider,

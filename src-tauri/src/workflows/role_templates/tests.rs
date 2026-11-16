@@ -29,6 +29,7 @@ fn template() -> ConversationTemplate {
         tool_scope: SessionMode::ReadOnly,
         completion_contract: "Provide links to tests and review results.".into(),
         review_policy: TemplateReviewPolicy::CrossReview,
+        requirements: Default::default(),
     }
 }
 

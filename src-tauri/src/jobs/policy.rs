@@ -104,6 +104,7 @@ pub enum DispatchRejection {
     NativeDelegationUnverified,
     NativeGoalUnverified,
     SubagentAuditUnverified,
+    StageRequirements,
     RequiredContextOverBudget {
         #[ts(type = "number")]
         required_bytes: u64,

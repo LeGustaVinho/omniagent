@@ -197,14 +197,14 @@ function GraphAuthoringEditor({ draftId, checkout, openWorkspace, openActivity, 
     {draft && <>
       <RequestState draft={draft} />
       {draft.base && <p className="text-xs text-muted-foreground">Published base <code>{draft.base.revision}</code></p>}
-      {draft.head && <AuthoringRevisionEditor key={draft.head.id} projectId={projectId} draft={draft} revision={draft.head} />}
+      {draft.head && <AuthoringRevisionEditor key={draft.head.id} projectId={projectId} checkoutId={checkout.checkoutId} draft={draft} revision={draft.head} />}
       <WorkflowLaunchPicker key={launchVersion?.revision ?? draft.id} projectId={projectId}
         checkoutId={checkout.checkoutId} preferred={launchVersion} openWorkspace={openWorkspace} />
     </>}
   </section>;
 }
 
-function AuthoringRevisionEditor({ projectId, draft, revision }: { projectId: string; draft: Draft; revision: Revision }) {
+function AuthoringRevisionEditor({ projectId, checkoutId, draft, revision }: { projectId: string; checkoutId: string; draft: Draft; revision: Revision }) {
   const client = useQueryClient();
   const original: WorkflowEditorState = { graph: revision.graph, layout: revision.layout ?? {}, updateDefinitions: {} };
   const [editor, setEditor] = useState(original);
@@ -243,7 +243,7 @@ function AuthoringRevisionEditor({ projectId, draft, revision }: { projectId: st
   return <div className="pipeline-stack">
     {registry.isPending && <p role="status">Loading node registry…</p>}
     {registry.error && <p role="alert">{String(registry.error)}</p>}
-    {registry.data && <WorkflowGraphEditor projectId={projectId} state={editor} setState={setEditor} definitions={definitions}
+    {registry.data && <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={editor} setState={setEditor} definitions={definitions}
       catalog={catalog} problems={problems} disabled={editingDisabled} />}
     <div className="flex flex-wrap items-center justify-between gap-2">
       <p className="break-all text-xs text-muted-foreground">Draft revision <code>{revision.id}</code></p>

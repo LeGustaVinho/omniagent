@@ -41,6 +41,7 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
             AgentRole {
                 role: roles.planner,
                 model: Option::None,
+                requirements: Default::default(),
             },
         ),
         (
@@ -49,6 +50,7 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
             AgentRole {
                 role: roles.plan_reviewer,
                 model: Option::None,
+                requirements: Default::default(),
             },
         ),
         ("work", LinkWork, None),
@@ -60,6 +62,7 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
             AgentRole {
                 role: roles.implementer,
                 model: Option::None,
+                requirements: Default::default(),
             },
         ),
         (
@@ -68,6 +71,7 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
             AgentRole {
                 role: roles.candidate_reviewer,
                 model: Option::None,
+                requirements: Default::default(),
             },
         ),
         (

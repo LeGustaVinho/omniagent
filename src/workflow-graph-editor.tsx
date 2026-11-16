@@ -62,8 +62,9 @@ function connectionWire(connection: Connection): WorkflowWire | undefined {
 
 const readTheme = (): "light" | "dark" => document.documentElement.dataset.appTheme === "light" ? "light" : "dark";
 
-export function WorkflowGraphEditor({ projectId, state, setState, definitions, catalog, problems, disabled }: {
+export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled }: {
   projectId: string;
+  checkoutId?: string;
   state: WorkflowEditorState;
   setState: Dispatch<SetStateAction<WorkflowEditorState>>;
   definitions: WorkflowDefinitions;
@@ -209,7 +210,7 @@ export function WorkflowGraphEditor({ projectId, state, setState, definitions, c
         </select></label>
         {node && definition && <>
           <p className="text-sm text-muted-foreground">Version {definition.revision} · {definition.effect.replaceAll("_", " ")}</p>
-          <NodeFields key={node.id} projectId={projectId} node={node} definition={definition} disabled={disabled} onChange={(configuration) => configure(node.id, configuration)} />
+          <NodeFields key={node.id} projectId={projectId} checkoutId={checkoutId} node={node} definition={definition} disabled={disabled} onChange={(configuration) => configure(node.id, configuration)} />
           {available && <VersionReview node={node} previous={definition} next={available} wires={graph.wires}
             disabled={disabled} apply={() => updateVersion(node, available)} />}
           {definition.inputs.length > 0 && <ConnectInput key={`${node.id}:${definition.revision}`} graph={graph} node={node}
@@ -223,13 +224,15 @@ export function WorkflowGraphEditor({ projectId, state, setState, definitions, c
   </section>;
 }
 
-function NodeFields({ projectId, node, definition, disabled, onChange }: {
-  projectId: string; node: WorkflowGraphNode; definition: WorkflowDefinition; disabled: boolean; onChange: (configuration: WorkflowNodeConfiguration) => void;
+function NodeFields({ projectId, checkoutId, node, definition, disabled, onChange }: {
+  projectId: string; checkoutId?: string; node: WorkflowGraphNode; definition: WorkflowDefinition; disabled: boolean; onChange: (configuration: WorkflowNodeConfiguration) => void;
 }) {
   const { configuration } = node;
   switch (definition.configuration) {
     case "none": return null;
-    case "agent_role": return <AgentRoleFields configuration={configuration} onChange={onChange} disabled={disabled} />;
+    case "agent_role": return <AgentRoleFields projectId={projectId} checkoutId={checkoutId}
+      mode={definition.kind === "plan" ? "plan" : definition.effect === "write_repository" ? "approved_write" : "read_only"}
+      configuration={configuration} onChange={onChange} disabled={disabled} />;
     case "required_checks": return <label>Required checks<textarea rows={3} disabled={disabled}
       value={Array.isArray(configuration.names) ? configuration.names.join("\n") : ""}
       onChange={(event) => onChange({ kind: "required_checks", names: event.currentTarget.value ? event.currentTarget.value.split("\n") : [] })} />

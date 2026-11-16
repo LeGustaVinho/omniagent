@@ -1034,6 +1034,16 @@ pub(crate) fn verified_side_profile(
         .map(|evidence| evidence.id))
 }
 
+pub(crate) fn verification_still_current(db: &Connection, id: &str) -> Result<bool> {
+    let key: Option<String> = db.query_row(
+        "SELECT qualification_key FROM capability_evidence WHERE id = ?1 AND version = ?2",
+        params![id, CAPABILITY_SCHEMA_VERSION],
+        |row| row.get(0),
+    ).optional()?;
+    Ok(key.map(|key| latest_evidence(db, &key)).transpose()?.flatten()
+        .is_some_and(|evidence| evidence.id == id && evidence.verified()))
+}
+
 fn latest_evidence(db: &Connection, hash: &str) -> Result<Option<Verification>> {
     let row = db
         .query_row(

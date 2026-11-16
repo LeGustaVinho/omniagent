@@ -7,6 +7,7 @@ import { JobFailurePanel } from "@/job-failure";
 import { commitQuery } from "@/project-agile-model";
 import { queueBlockerReason } from "@/queue-model";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { AttemptStageRequirements } from "@/workflow-stage-requirements";
 import type { ExecutionArtifact, ExecutionControl, ExecutionJob, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 
 type Navigation = Pick<WorkspaceProps, "openWorkspace" | "openActivity" | "openQueueJob">;
@@ -115,6 +116,7 @@ function WorkflowJobEvidence({ entry, snapshot, scope, navigation }: { entry: Ex
       <p>Attempt {attempt.ordinal} · <strong className="capitalize">{text(attempt.status)}</strong></p>
       <p><code>{attempt.runId}</code></p>
       {attempt.previousRunId && <p>Previous attempt <code>{attempt.previousRunId}</code></p>}
+      {job.kind !== "command" && <AttemptStageRequirements projectId={scope.projectId} runId={attempt.runId} />}
       <Button type="button" variant="outline" onClick={() => navigation.openActivity(attempt.runId, attempt.conversationId ?? undefined)}>
         {job.kind === "command" ? "Open command logs" : "Open prompts and activity"}
       </Button>

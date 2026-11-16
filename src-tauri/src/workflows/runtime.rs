@@ -337,9 +337,12 @@ impl Store {
                 "this node has no release input"
             );
         }
-        let NodeConfiguration::AgentRole { role, model } = &node.instance.configuration else {
+        let NodeConfiguration::AgentRole { role, model, requirements } = &node.instance.configuration else {
             anyhow::bail!("the pinned node has no agent role");
         };
+        if !requirements.is_empty() {
+            super::stage_requirements::validate_stage_requirements(self, project_id.clone(), requirements.clone()).await?;
+        }
         ensure!(
             model.as_ref().is_none_or(|selection| selection.provider == scope.provider
                 && selection.profile_id == scope.profile_id

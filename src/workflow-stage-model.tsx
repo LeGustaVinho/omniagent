@@ -1,9 +1,14 @@
 import type { ModelSelection } from "@/bindings/ModelSelection";
+import type { SessionMode } from "@/bindings/SessionMode";
 import { ModelPicker } from "@/components/model-picker";
 import { sameModelSelection, useLiveModelOptions } from "@/live-models";
 import type { WorkflowNodeConfiguration } from "@/workflow-graph-model";
+import { WorkflowRequirementsEditor, type RequirementConfiguration } from "@/workflow-stage-requirements";
 
-export function AgentRoleFields({ configuration, disabled, onChange }: {
+export function AgentRoleFields({ projectId, checkoutId, mode, configuration, disabled, onChange }: {
+  projectId: string;
+  checkoutId?: string;
+  mode: SessionMode;
   configuration: WorkflowNodeConfiguration;
   disabled: boolean;
   onChange: (configuration: WorkflowNodeConfiguration) => void;
@@ -22,5 +27,8 @@ export function AgentRoleFields({ configuration, disabled, onChange }: {
       reset: { label: "Use runtime model defaults", onSelect: () => onChange(inherited) } }} />
     {unavailable && <p className="text-sm text-muted-foreground">Configured stage model · {model.modelId} · Unavailable in current profiles</p>}
     {errors[0] && <p role="alert">{String(errors[0])}</p>}
+    <WorkflowRequirementsEditor projectId={projectId} checkoutId={checkoutId} mode={mode} model={model ?? null}
+      options={options} disabled={disabled} rolePin configuration={(configuration.requirements as RequirementConfiguration | undefined) ?? {}}
+      onChange={(requirements) => onChange({ ...configuration, requirements })} />
   </>;
 }
