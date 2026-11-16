@@ -2222,6 +2222,8 @@ fn close_permissions(db: &Connection, run_id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod attachment_composer_acceptance;
+
     use super::*;
     use crate::{
         dispatch::{ContextSnapshot, Delivery, NativeHistory},
