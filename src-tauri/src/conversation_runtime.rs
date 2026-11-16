@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use omniagent::{
-    conversations::SessionScope,
+    conversations::{ConversationLibraryEntry, SessionScope},
     diagnostics,
     dispatch::{ConversationArtifactRevision, ConversationSelection, QueuedSummary},
     jobs::{
@@ -39,6 +39,18 @@ async fn profile(
 
 fn ui_error(error: anyhow::Error) -> String {
     diagnostics::preview(&error.to_string())
+}
+
+#[tauri::command]
+pub async fn conversation_library(
+    store: State<'_, Store>,
+    query: Option<String>,
+    project_id: Option<String>,
+) -> Result<Vec<ConversationLibraryEntry>, String> {
+    store
+        .conversation_library(query, project_id)
+        .await
+        .map_err(ui_error)
 }
 
 pub(crate) async fn selected_scope(

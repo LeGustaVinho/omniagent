@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { IDockviewPanelProps } from "dockview-react";
-import { Activity, ArrowDown, ArrowUp, MessageSquare, Plus, RotateCcw, Search, Target } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, MessageSquare, Pencil, Plus, RotateCcw, Search, Target } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import type { Conversation } from "@/bindings/Conversation";
@@ -26,6 +26,10 @@ import { ConversationSubagentControls } from "@/subagent-quota";
 import { SideQuestionPanel, type SideSubmission, useSideRequests, useSuggestionMode } from "@/conversation-side-requests";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
+import {
+  ConversationLibraryNavigation, ConversationReferencePicker, ConversationTitleEditor,
+  conversationLibraryKey, useConversationRename, useConversationTitle,
+} from "@/conversation-library";
 import { WorktreeEvidence } from "@/worktree-evidence";
 import { openConversation } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
@@ -102,6 +106,7 @@ export function useNewConversation(checkoutId: string, onOpen: (conversation: Co
     },
     onSuccess: (conversation) => {
       void queryClient.invalidateQueries({ queryKey: key });
+      void queryClient.invalidateQueries({ queryKey: conversationLibraryKey });
       onOpen(conversation);
     },
   });
@@ -113,7 +118,6 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
   activeId?: string;
   onRenamed?: (conversation: Conversation) => void;
 }) {
-  const queryClient = useQueryClient();
   const [filter, setFilter] = useState("");
   const [notice, setNotice] = useState("");
   const [renaming, setRenaming] = useState<Conversation>();
@@ -126,16 +130,9 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
     enabled: Boolean(checkoutId),
   });
   const start = useNewConversation(checkoutId, onOpen);
-  const rename = useMutation({
-    mutationFn: ({ conversationId, title }: { conversationId: string; title: string }) =>
-      invoke<Conversation>("rename_conversation", { checkoutId, conversationId, title }),
-    onSuccess: (updated) => {
-      queryClient.setQueryData<Conversation[]>(listKey, (previous) =>
-        previous?.map((conversation) => conversation.id === updated.id ? updated : conversation));
-      void queryClient.invalidateQueries({ queryKey: listKey });
-      onRenamed?.(updated);
-      setRenaming(undefined);
-    },
+  const rename = useConversationRename(renaming, (updated) => {
+    onRenamed?.(updated);
+    setRenaming(undefined);
   });
   const error = start.error ?? conversations.error;
   const matching = conversations.data?.filter(({ title }) => title.toLowerCase().includes(filter.trim().toLowerCase()));
@@ -193,7 +190,7 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
             <Dialog.Description>{renaming.title}</Dialog.Description>
             <form className="conv-dialog-form" onSubmit={(event) => {
               event.preventDefault();
-              if (title.trim() && !rename.isPending) rename.mutate({ conversationId: renaming.id, title: title.trim() });
+              if (title.trim() && !rename.isPending) rename.mutate(title.trim());
             }}>
               <label>Conversation title<input type="text" value={title} required disabled={rename.isPending}
                 onChange={(event) => setTitle(event.currentTarget.value)} /></label>
@@ -217,6 +214,11 @@ type DesktopModel = EffortSet & { option: ModelOption };
 const selectorClass = "conv-select";
 
 export function ConversationPanel({ params, api }: IDockviewPanelProps<PanelParams>) {
+  const library = useContext(ConversationLibraryNavigation);
+  const selectedCheckout = useWorkspace((state) => state.checkout?.checkoutId);
+  const checkoutId = library?.checkoutId ?? selectedCheckout;
+  const savedTitle = useConversationTitle(checkoutId, params.conversationId);
+  const title = savedTitle.data?.title ?? params.title;
   const subscribe = useCallback((update: () => void) => {
     const listener = api.onDidVisibilityChange(update);
     return () => listener.dispose();
@@ -225,11 +227,20 @@ export function ConversationPanel({ params, api }: IDockviewPanelProps<PanelPara
   useEffect(() => {
     if (api.renderer !== "always") api.setRenderer("always");
   }, [api]);
-  return <ConversationContent key={params.conversationId} {...params} visible={visible} />;
+  useEffect(() => {
+    if (title === params.title) return;
+    api.setTitle(title);
+    api.updateParameters({ title });
+  }, [api, params.title, title]);
+  return <ConversationContent key={params.conversationId} conversationId={params.conversationId}
+    title={title} checkoutId={checkoutId} visible={visible} />;
 }
 
-function ConversationContent({ conversationId, title, visible }: PanelParams & { visible: boolean }) {
+function ConversationContent({ conversationId, title, checkoutId, visible }: PanelParams & { checkoutId?: string; visible: boolean }) {
   const queryClient = useQueryClient();
+  const library = useContext(ConversationLibraryNavigation);
+  const [renamingTitle, setRenamingTitle] = useState(false);
+  const renameTrigger = useRef<HTMLButtonElement>(null);
   const draftKey = ["conversation", conversationId, "draft"];
   const draft = useQuery({
     queryKey: draftKey,
@@ -439,7 +450,12 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
     <section className="conv-pane" aria-label={title}>
       <header className="conv-heading">
         <MessageSquare aria-hidden />
-        <h1>{title}</h1>
+        {renamingTitle && checkoutId ? <ConversationTitleEditor conversation={{ id: conversationId, checkoutId, title }}
+          onClose={() => { setRenamingTitle(false); requestAnimationFrame(() => renameTrigger.current?.focus()); }} />
+          : <><h1>{title}</h1>
+            {checkoutId && <button ref={renameTrigger} className="conv-icon-button" type="button" aria-label="Rename conversation"
+              title="Rename conversation" onClick={() => setRenamingTitle(true)}><Pencil aria-hidden /></button>}
+          </>}
         <div className="ml-auto flex items-center gap-1">
         <button type="button" className="conv-quiet-button" aria-expanded={showSideQuestions}
           onClick={() => setShowSideQuestions(!showSideQuestions)}>Side questions</button>
@@ -550,6 +566,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
               }
             }} />
           <div className="conv-composer-toolbar">
+              {library && <ConversationReferencePicker excludeId={conversationId} onOpen={library.open} />}
               <select aria-label="Provider" className={selectorClass} value={provider} onChange={(event) => {
                 setProvider(event.target.value as Provider);
                 setSelection(null);

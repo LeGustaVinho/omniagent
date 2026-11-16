@@ -11,7 +11,8 @@ import { Dialog } from "radix-ui";
 import { useEffect, useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
-import { ConversationListPanel, ConversationPanel, ConversationSidebar, useNewConversation } from "@/conversation-panels";
+import { ConversationLibrary, ConversationLibraryNavigation, type OpenLibraryConversation } from "@/conversation-library";
+import { ConversationListPanel, ConversationPanel, useNewConversation } from "@/conversation-panels";
 import { CustomizationsPanel } from "@/customizations-panel";
 import { FixtureListPanel, FixtureRunPanel } from "@/fixture-panels";
 import { ProviderSettingsPanel } from "@/provider-settings";
@@ -128,11 +129,12 @@ function useDesktopDock(checkout: ProjectCheckout, area: DesktopDockArea) {
 }
 
 function Dock({
-  dock, children,
-}: { dock: ReturnType<typeof useDesktopDock>; children?: React.ReactNode }) {
+  dock, error, children,
+}: { dock: ReturnType<typeof useDesktopDock>; error?: string; children?: React.ReactNode }) {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {dock.layoutError && <p role="status" className="work-inline px-4 py-2">Layout storage: {dock.layoutError}</p>}
+      {error && <p role="alert" className="conv-alert mx-4 my-2">{error}</p>}
       <div className="workspace-dock relative min-h-0 flex-1">
         <DockviewReact components={legacyPanels} onReady={dock.onReady} theme={themeDark} disableFloatingGroups rightHeaderActionsComponent={TabActions} />
         {!dock.ready && <div className="work-dock-empty" role="status">Restoring tabs…</div>}
@@ -143,24 +145,27 @@ function Dock({
 }
 
 export function RealConversations({
-  checkout, sidebar, onSidebarChange, compact, target,
+  checkout, sidebar, onSidebarChange, compact, target, onOpenOtherCheckout,
 }: {
   checkout: ProjectCheckout;
   sidebar: boolean;
   onSidebarChange: (visible: boolean) => void;
   compact: boolean;
   target?: string;
+  onOpenOtherCheckout?: OpenLibraryConversation;
 }) {
   const dock = useDesktopDock(checkout, "conversations");
+  const [targetError, setTargetError] = useState("");
   useEffect(() => {
     if (!dock.ready || !dock.api || !target) return;
     const api = dock.api;
+    setTargetError("");
     const existing = api.getPanel("conversation:" + target);
     if (existing) return existing.api.setActive();
     let cancelled = false;
     void invoke<Conversation>("checkout_conversation", { checkoutId: checkout.checkoutId, conversationId: target }).then((conversation) => {
       if (!cancelled) openConversation(api, conversation);
-    }).catch(() => undefined);
+    }).catch((error: unknown) => { if (!cancelled) setTargetError(String(error)); });
     return () => { cancelled = true; };
   }, [checkout.checkoutId, dock.api, dock.ready, target]);
 
@@ -172,17 +177,28 @@ export function RealConversations({
 
   const start = useNewConversation(checkout.checkoutId, open);
 
-  function updateTitle(conversation: Conversation) {
-    const panel = dock.api?.getPanel("conversation:" + conversation.id);
-    if (!panel) return;
-    panel.api.setTitle(conversation.title);
-    panel.api.updateParameters({ title: conversation.title });
+  async function openLibraryConversation(source: ProjectCheckout, conversationId: string) {
+    if (!dock.api) return;
+    if (source.checkoutId !== checkout.checkoutId) {
+      if (!onOpenOtherCheckout) throw new Error("Switch to the source worktree to open this conversation.");
+      await onOpenOtherCheckout(source, conversationId);
+      return;
+    }
+    const panel = dock.api.getPanel("conversation:" + conversationId);
+    if (panel) {
+      panel.api.setActive();
+      if (compact) onSidebarChange(false);
+      return;
+    }
+    open(await invoke<Conversation>("checkout_conversation", { checkoutId: source.checkoutId, conversationId }));
   }
 
   const contents = dock.ready
-    ? <ConversationSidebar checkoutId={checkout.checkoutId} onOpen={open} onRenamed={updateTitle} activeId={dock.activeId} />
+    ? <ConversationLibrary checkout={checkout} onOpen={openLibraryConversation} activeId={dock.activeId}
+      onStart={() => start.mutate()} startPending={start.isPending} startError={start.error} />
     : <p className="work-progress" role="status">Loading conversations…</p>;
   return (
+    <ConversationLibraryNavigation.Provider value={{ checkoutId: checkout.checkoutId, open: openLibraryConversation }}>
     <div className="flex h-full min-h-0 min-w-0">
       {!compact && sidebar && <aside className="work-context">{contents}</aside>}
       {compact && <Dialog.Root open={sidebar} onOpenChange={onSidebarChange}>
@@ -197,7 +213,7 @@ export function RealConversations({
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>}
-      <Dock dock={dock}>
+      <Dock dock={dock} error={targetError}>
         <span className="work-empty-icon"><MessageSquarePlus size={23} aria-hidden="true" /></span>
         <h2>Start a conversation</h2>
         <p>Ask an agent about this checkout or open an existing conversation.</p>
@@ -210,6 +226,7 @@ export function RealConversations({
         {start.error && <p className="conv-alert" role="alert">{String(start.error)}</p>}
       </Dock>
     </div>
+    </ConversationLibraryNavigation.Provider>
   );
 }
 

@@ -17,6 +17,7 @@ export function App() {
   const [restoring, setRestoring] = useState(true);
   const [error, setError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [libraryTarget, setLibraryTarget] = useState<{ checkoutId: string; conversationId: string }>();
 
   useEffect(() => {
     let disposed = false;
@@ -27,8 +28,9 @@ export function App() {
     return () => { disposed = true; };
   }, [selectCheckout]);
 
-  async function activateCheckout(selected: ProjectCheckout) {
+  async function activateCheckout(selected: ProjectCheckout, conversationId?: string) {
     await invoke("select_active_checkout", { checkoutId: selected.checkoutId });
+    setLibraryTarget(conversationId ? { checkoutId: selected.checkoutId, conversationId } : undefined);
     selectCheckout(selected);
     setError("");
   }
@@ -65,7 +67,8 @@ export function App() {
         <p role="status" className="p-6 text-sm text-muted-foreground">Restoring workspace…</p>
       ) : checkout ? (
         <Suspense fallback={<p role="status" className="p-6 text-sm text-muted-foreground">Loading workspace…</p>}>
-          <Workbench key={checkout.checkoutId} checkout={checkout} openRepository={openRepository} onSelectCheckout={activateCheckout} />
+          <Workbench key={checkout.checkoutId} checkout={checkout} openRepository={openRepository} onSelectCheckout={activateCheckout}
+            initialConversationId={libraryTarget?.checkoutId === checkout.checkoutId ? libraryTarget.conversationId : undefined} />
         </Suspense>
       ) : (
         <section className="work-onboarding">

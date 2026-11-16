@@ -333,6 +333,7 @@ fn main() {
             goal_verification_ipc::list_goal_criterion_evidence,
             goal_verification_ipc::record_goal_criterion_evidence,
             ipc::list_conversations,
+            conversation_runtime::conversation_library,
             ipc::checkout_conversation,
             ipc::create_conversation,
             ipc::fork_conversation,

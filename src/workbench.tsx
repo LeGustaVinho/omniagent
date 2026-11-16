@@ -92,13 +92,17 @@ function RailButton({ label, icon: Icon, current, pressed, onClick }: {
   </Tooltip.Root>;
 }
 
-export default function Workbench({ checkout, openRepository, onSelectCheckout }: {
+export default function Workbench({ checkout, openRepository, onSelectCheckout, initialConversationId }: {
   checkout: ProjectCheckout;
   openRepository: ReactNode;
-  onSelectCheckout: (checkout: ProjectCheckout) => Promise<void>;
+  onSelectCheckout: (checkout: ProjectCheckout, conversationId?: string) => Promise<void>;
+  initialConversationId?: string;
 }) {
   const lastAreaKey = "omniagent-workspace-area:" + checkout.checkoutId;
-  const [realNavigation, setRealNavigation] = useState(() => readNavigation(lastAreaKey));
+  const [realNavigation, setRealNavigation] = useState(() => {
+    const prior = readNavigation(lastAreaKey);
+    return initialConversationId ? show("conversations", initialConversationId, prior) : prior;
+  });
   const [preview, setPreview] = useState<SimulationState | null>(null);
   const [epoch, setEpoch] = useState(0);
   const [settingsPage, setSettingsPage] = useState<string>();
@@ -250,7 +254,8 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
         <div className="work-decks">
           <div className="work-deck" hidden={Boolean(preview)}>
             <RunInspectorNavigation.Provider value={{ openActivity: real.openActivity, activeRunId: realSide?.type === "activity" ? realSide.runId : undefined }}>
-              <WorkspaceViews nav={realNavigation} context={real} sidebar={!preview && sidebar} onSidebarChange={changeSidebar} compact={compact} />
+              <WorkspaceViews nav={realNavigation} context={real} sidebar={!preview && sidebar} onSidebarChange={changeSidebar} compact={compact}
+                onOpenOtherCheckout={onSelectCheckout} />
             </RunInspectorNavigation.Provider>
           </div>
           {preview && simulated && <div className="work-deck" key={"simulation-workspaces:" + preview.epoch}>
@@ -279,13 +284,14 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout }
   );
 }
 
-function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, openSystem }: {
+function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, openSystem, onOpenOtherCheckout }: {
   nav: Navigation;
   context: WorkspaceProps;
   sidebar: boolean;
   onSidebarChange: (visible: boolean) => void;
   compact: boolean;
   openSystem?: () => void;
+  onOpenOtherCheckout?: (checkout: ProjectCheckout, conversationId: string) => Promise<void>;
 }) {
   return Object.entries(nav.visited).map(([id, state]) => {
     const workspace = id as WorkspaceId;
@@ -297,7 +303,7 @@ function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, openS
         {workspace === "conversations" ? context.simulation
           ? <ConversationsPreview {...context} target={target} />
           : <RealConversations checkout={context.checkout} target={target} sidebar={visible && sidebar} onSidebarChange={onSidebarChange}
-            compact={compact} />
+            compact={compact} onOpenOtherCheckout={onOpenOtherCheckout} />
           : workspace === "diagnostics" ? context.simulation
             ? <SimulationDiagnostics {...context} openSystem={openSystem} />
             : <RealDiagnostics checkout={context.checkout} />

@@ -25,7 +25,9 @@ use crate::{
 };
 
 mod approval_evidence;
+mod library;
 pub use approval_evidence::{ApprovalDelivery, ConversationApprovalEvidence};
+pub use library::ConversationLibraryEntry;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]

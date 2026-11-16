@@ -163,7 +163,12 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
     let legacy = rusqlite::Connection::open(&database)?;
     schema::restore_question_view_before_structured_planning(&legacy)?;
     legacy.execute_batch(
-        "DROP TABLE markdown_rename_previews;
+        "DROP TRIGGER conversation_library_create;
+         DROP TRIGGER conversation_library_edit;
+         DROP TRIGGER conversation_library_attempt;
+         DROP TRIGGER conversation_library_run_state;
+         DROP TABLE conversation_library_activity;
+         DROP TABLE markdown_rename_previews;
          DROP TABLE checkout_note_links_indexed;
          DROP TABLE repository_note_link_resolutions;
          DROP TABLE repository_note_index;
