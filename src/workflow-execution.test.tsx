@@ -69,6 +69,8 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   const task = { taskId: "linked-task", projectId };
   const snapshot: WorkflowExecutionSnapshot = {
     run: { id: runId, version, planRevision: "selected-plan", projectId },
+    launch: { origin: { kind: "rule", workId: "linked-subtask" },
+      checklistItem: { itemId: "trigger-item", revision: 4, checked: true } },
     definition: { version, name: "Recorded pipeline title",
       subflows: [{ path: "quality", name: "Pinned quality checks", version: {
         id: "quality-flow", revision: "quality-revision", destination: "project", kind: "subflow",
@@ -125,6 +127,9 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><PipelinesWorkspace {...props} /></QueryClientProvider>);
   const user = userEvent.setup();
   expect(await screen.findByRole("heading", { name: "Recorded pipeline title" })).toBeTruthy();
+  expect(screen.getByText("linked-subtask")).toBeTruthy();
+  expect(screen.getByText("trigger-item")).toBeTruthy();
+  expect(screen.getByText(/Revision 4 · Checked/)).toBeTruthy();
   const graph = within(screen.getByLabelText("Workflow execution graph"));
   expect(graph.getByRole("button", { name: "Pinned source · Completed" })).toBeTruthy();
   expect(graph.getByRole("button", { name: "Queued command · Queued" })).toBeTruthy();

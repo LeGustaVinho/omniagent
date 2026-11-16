@@ -50,6 +50,10 @@ export type ExecutionRolePin = {
 };
 export type WorkflowExecutionSnapshot = {
   run: WorkflowRun;
+  launch?: {
+    origin: { kind: "editor" } | { kind: "agile" | "rule"; workId: string };
+    checklistItem?: { itemId: string; revision: number; checked: boolean };
+  } | null;
   definition: { version: WorkflowVersion; name: string; nodes: ExecutionPinnedNode[]; wires: WorkflowWire[]; subflows?: ExecutionSubflow[] };
   rolePins?: ExecutionRolePin[];
   unitNodeIds: string[];

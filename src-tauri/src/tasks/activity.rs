@@ -487,6 +487,9 @@ pub(crate) fn bind_task_run_scope(
 ) -> Result<()> {
     ensure!(!target.role.trim().is_empty(), "a task run requires a role");
     let task = task.context("a task run requires an actionable work scope")?;
+    if let Some(item) = target.checklist_item_id.as_deref() {
+        crate::workflows::pinned_workflow_checklist_for_job(db, project, job, task, Some(item))?;
+    }
     db.execute(
         "INSERT INTO job_task_run_scopes (job_id, project_id, task_id, role, checklist_item_id)
          VALUES (?1, ?2, ?3, ?4, ?5)",

@@ -150,7 +150,7 @@ impl Store {
             let tx = db.transaction()?;
             let scope = tx.query_row(
                 "SELECT r.project_id, r.task_id, m.parent_task_id, coalesce(m.epic_id, parent.epic_id),
-                        c.id, r.checklist_item_id, execution.mode, task.title, parent_task.title
+                        c.id, r.checklist_item_id, execution.mode, task.title, parent_task.title, r.job_id
                  FROM task_runs r
                  JOIN project_tasks task ON task.project_id = r.project_id AND task.id = r.task_id
                  LEFT JOIN project_task_memberships m ON m.project_id = r.project_id AND m.task_id = r.task_id
@@ -163,9 +163,10 @@ impl Store {
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?, row.get::<_, String>(7)?, row.get::<_, Option<String>>(8)?)),
+                    row.get::<_, Option<String>>(6)?, row.get::<_, String>(7)?, row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?)),
             ).optional()?;
-            let Some((project, task, parent, epic, checklist_id, checklist_item_id, mode, title, parent_title)) = scope else {
+            let Some((project, task, parent, epic, checklist_id, checklist_item_id, mode, title, parent_title, job)) = scope else {
                 return Ok(None);
             };
             let mut descriptions = WorkDescriptions {
@@ -185,7 +186,12 @@ impl Store {
                     prerequisites: details.prerequisites, blockers: details.blockers,
                 })
             } else { None };
-            let checklist = load_checklist_items(&tx, &project, &task, checklist_item_id.as_deref(), None)?;
+            let item = checklist_item_id.as_deref();
+            let pinned_item = match (job.as_deref(), item) {
+                (Some(job), Some(item)) => crate::workflows::pinned_workflow_checklist_for_job(&tx, &project, job, &task, Some(item))?,
+                _ => None,
+            };
+            let checklist = load_checklist_items(&tx, &project, &task, item, pinned_item.map(|pin| pin.revision))?;
             ensure!(checklist_item_id.is_none() || checklist.len() == 1, "the selected checklist item has no saved revision");
             Ok(Some(TaskDispatchContext {
                 task_id: task, descriptions, direct_work, checklist_mode, checklist_id, checklist_item_id, checklist,

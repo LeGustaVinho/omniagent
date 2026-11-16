@@ -413,6 +413,7 @@ pub(crate) fn bind_checklist_job_mode(
     job: &str,
     item: Option<&str>,
 ) -> Result<()> {
+    crate::workflows::pinned_workflow_checklist_for_job(db, project, job, task, item)?;
     let mode = effective_mode(db, project, task)?;
     match mode {
         ChecklistExecutionMode::TrackProgress => {

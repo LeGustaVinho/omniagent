@@ -9,6 +9,7 @@ use crate::{
     protection,
     repository::{RepositoryMarkdownRevision, workflow_markdown_revision},
     store::Store,
+    tasks::{AgileEventData, ChecklistProgressReceipt},
 };
 
 use super::{
@@ -97,6 +98,8 @@ pub struct WorkflowLaunchReceipt {
     pub version: WorkflowRevision,
     pub source: RepositoryMarkdownRevision,
     pub origin: WorkflowLaunchOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checklist_item: Option<ChecklistProgressReceipt>,
 }
 
 impl Store {
@@ -209,19 +212,7 @@ pub(crate) fn launch_workflow_in_tx(
         )?;
         ensure!(exists, "The launch work item is outside this project");
     }
-    if let WorkflowLaunchOrigin::Rule {
-        event_id, work_id, ..
-    } = origin
-    {
-        let matches_event: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM project_work_events WHERE id = ?1 AND project_id = ?2 AND task_id = ?3)",
-            params![event_id, project, work_id], |row| row.get(0),
-        )?;
-        ensure!(
-            matches_event,
-            "The Agile event does not identify this work item"
-        );
-    }
+    let checklist_item = origin_checklist_item(db, project, origin)?;
     let workflow = load_definition(db, project, revision)?
         .context("The published workflow revision is unavailable in this project")?;
     ensure!(
@@ -292,8 +283,8 @@ pub(crate) fn launch_workflow_in_tx(
         version: revision.clone(),
         source: document,
         origin: origin.clone(),
+        checklist_item,
     };
-    super::control::refresh(db, project, &run.id)?;
     db.execute(
         "INSERT INTO workflow_launches VALUES (?1, ?2, ?3, ?4)",
         params![
@@ -303,10 +294,48 @@ pub(crate) fn launch_workflow_in_tx(
             protection::protect(&serde_json::to_vec(&receipt)?)?
         ],
     )?;
+    super::control::refresh(db, project, &run.id)?;
     Ok(run)
 }
 
-fn load_workflow_launch(
+fn origin_checklist_item(
+    db: &Connection,
+    project: &str,
+    origin: &WorkflowLaunchOrigin,
+) -> Result<Option<ChecklistProgressReceipt>> {
+    let WorkflowLaunchOrigin::Rule {
+        event_id, work_id, ..
+    } = origin
+    else {
+        return Ok(None);
+    };
+    let payload: String = db.query_row(
+        "SELECT payload FROM project_work_events WHERE id = ?1 AND project_id = ?2 AND task_id = ?3",
+        params![event_id, project, work_id], |row| row.get(0),
+    ).optional()?.context("The Agile event does not identify this work item")?;
+    let event = serde_json::from_str::<AgileEventData>(&payload)?;
+    let (item_id, revision, checked) = match event {
+        AgileEventData::ChecklistChecked { item_id, revision } => (item_id, revision, true),
+        AgileEventData::ChecklistReopened { item_id, revision } => (item_id, revision, false),
+        _ => return Ok(None),
+    };
+    let saved: bool = db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM project_checklist_item_revisions
+         WHERE project_id = ?1 AND task_id = ?2 AND item_id = ?3 AND revision = ?4 AND checked = ?5)",
+        params![project, work_id, item_id, revision, checked], |row| row.get(0),
+    )?;
+    ensure!(
+        saved,
+        "The Agile event did not pin an existing checklist revision"
+    );
+    Ok(Some(ChecklistProgressReceipt {
+        item_id,
+        revision,
+        checked,
+    }))
+}
+
+pub(super) fn load_workflow_launch(
     db: &Connection,
     project: &str,
     run: &str,
@@ -318,7 +347,12 @@ fn load_workflow_launch(
             |row| row.get(0),
         )
         .optional()?;
-    saved.map(|bytes| open_receipt(&bytes)).transpose()
+    let Some(bytes) = saved else { return Ok(None) };
+    let mut receipt = open_receipt(&bytes)?;
+    if receipt.checklist_item.is_none() {
+        receipt.checklist_item = origin_checklist_item(db, project, &receipt.origin)?;
+    }
+    Ok(Some(receipt))
 }
 
 fn open_receipt(bytes: &[u8]) -> Result<WorkflowLaunchReceipt> {
@@ -340,4 +374,46 @@ pub(super) fn require_launch_work(
         );
     }
     Ok(())
+}
+
+pub(crate) fn require_launch_checklist_item(
+    db: &Connection,
+    project: &str,
+    run: &str,
+    task: &str,
+    item: Option<&str>,
+) -> Result<Option<ChecklistProgressReceipt>> {
+    let Some(receipt) = load_workflow_launch(db, project, run)? else {
+        return Ok(None);
+    };
+    if let Some(work) = receipt.origin.work_id() {
+        ensure!(
+            work == task,
+            "The workflow work scope belongs to a different Task or Sub-Task"
+        );
+    }
+    if let Some(scope) = &receipt.checklist_item {
+        ensure!(
+            item == Some(scope.item_id.as_str()),
+            "The workflow is scoped to the checklist item selected by its Agile event"
+        );
+    }
+    Ok(receipt.checklist_item)
+}
+
+pub(crate) fn pinned_workflow_checklist_for_job(
+    db: &Connection,
+    project: &str,
+    job: &str,
+    task: &str,
+    item: Option<&str>,
+) -> Result<Option<ChecklistProgressReceipt>> {
+    let pipeline: Option<String> = db.query_row(
+        "SELECT pipeline_run_id FROM job_pipeline_origins WHERE project_id = ?1 AND job_id = ?2",
+        params![project, job], |row| row.get(0),
+    ).optional()?;
+    match pipeline {
+        Some(pipeline) => require_launch_checklist_item(db, project, &pipeline, task, item),
+        None => Ok(None),
+    }
 }

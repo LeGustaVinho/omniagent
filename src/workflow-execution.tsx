@@ -54,7 +54,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation }: {
   snapshot: WorkflowExecutionSnapshot;
   navigation: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace" | "openQueueJob">;
 }) {
-  const { definition, run } = snapshot;
+  const { definition, run, launch } = snapshot;
   const [selected, setSelected] = useState(definition.nodes[0]?.instance.id ?? "");
   const [selectedUnit, setSelectedUnit] = useState<string>();
   const [subflowPath, setSubflowPath] = useState("");
@@ -84,7 +84,11 @@ function WorkflowExecutionCanvas({ snapshot, navigation }: {
   return <section className="pipeline-stack" aria-label="Pinned workflow execution">
     <header className="workflow-execution-links">
       <div className="mr-auto"><h2 className="text-lg font-semibold">{definition.name}</h2>
-        <p>Pinned workflow revision <code className="break-all">{run.version.revision}</code></p></div>
+        <p>Pinned workflow revision <code className="break-all">{run.version.revision}</code></p>
+        {launch && launch.origin.kind !== "editor" && <p>Agile work <code className="break-all">{launch.origin.workId}</code></p>}
+        {launch?.checklistItem && <p>Checklist item <code className="break-all">{launch.checklistItem.itemId}</code>
+          {" · "}Revision {launch.checklistItem.revision} · {launch.checklistItem.checked ? "Checked" : "Reopened"}</p>}
+      </div>
       <Button variant="outline" type="button" onClick={() => navigation.openWorkspace("pipelines", run.id)}>Open delivery controls</Button>
     </header>
     {!!definition.subflows?.length && <label className="workflow-execution-field">Pinned subflow

@@ -17,6 +17,7 @@ use super::{
     authoring::package::roles::{WorkflowRolePin, role_pins},
     control::{recorded_control, unit_nodes},
     digest,
+    launch::{WorkflowLaunchReceipt, load_workflow_launch},
     runtime::load_definition,
 };
 
@@ -24,6 +25,7 @@ use super::{
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowExecutionInspection {
     pub run: WorkflowRun,
+    pub launch: Option<WorkflowLaunchReceipt>,
     pub definition: WorkflowDefinition,
     pub role_pins: Vec<WorkflowRolePin>,
     pub unit_node_ids: Vec<String>,
@@ -143,6 +145,7 @@ impl Store {
             let definition = load_definition(&tx, &project, &run.version)?
                 .context("The pinned workflow definition is unavailable")?;
             let role_pins = role_pins(&tx, &project, &definition)?;
+            let launch = load_workflow_launch(&tx, &project, &run_id)?;
             let scoped_nodes = unit_nodes(&definition);
             let unit_node_ids = definition
                 .nodes
@@ -156,6 +159,7 @@ impl Store {
             let control = recorded_control(&tx, &run)?;
             Ok(Some(WorkflowExecutionInspection {
                 run,
+                launch,
                 definition,
                 role_pins,
                 unit_node_ids,

@@ -164,7 +164,8 @@ async fn a_manual_launch_pins_the_published_revision_source_and_subtask_across_r
             origin: WorkflowLaunchOrigin::Agile {
                 request_id: request.request_id.clone(),
                 work_id: subtask.id,
-            }
+            },
+            checklist_item: None,
         })
     );
     assert!(

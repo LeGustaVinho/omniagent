@@ -303,3 +303,262 @@ async fn status_and_checklist_rules_isolate_a_failed_launch_from_the_work_change
     assert_eq!(runs, 2);
     Ok(())
 }
+
+#[tokio::test]
+async fn checklist_trigger_replays_the_exact_subtask_and_item_revision() -> Result<()> {
+    use crate::{
+        jobs::AdmissionEnvironment,
+        providers::SessionMode,
+        tasks::ChecklistExecutionMode,
+        workflows::{
+            ArtifactValue,
+            tests::{approve_delivery_fixture_in_run, submission},
+        },
+    };
+
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("checklist-launch.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, directory.path()).await?;
+    let project = repo.project_id.clone();
+    let root_task = store
+        .create_project_task(project.clone(), "Parent".into())
+        .await?;
+    let subtask = store
+        .create_project_subtask(
+            project.clone(),
+            root_task.id.clone(),
+            "Follow up the selected checklist item".into(),
+        )
+        .await?;
+    store
+        .set_task_checklist_mode(
+            project.clone(),
+            subtask.id.clone(),
+            Some(ChecklistExecutionMode::RunByItem),
+        )
+        .await?;
+    store
+        .ensure_project_checklist(project.clone(), subtask.id.clone())
+        .await?;
+    let selected = store
+        .append_project_checklist_item(project.clone(), subtask.id.clone(), "Selected item".into())
+        .await?;
+    let unrelated = store
+        .append_project_checklist_item(project.clone(), subtask.id.clone(), "Separate item".into())
+        .await?;
+    let source = store
+        .capture_repository_markdown(
+            repo.checkout_id.clone(),
+            Path::new(&repo.checkout_root).join("brief.md"),
+        )
+        .await?;
+    let version = store
+        .save_workflow_revision(
+            project.clone(),
+            "checklist-workflow".into(),
+            builtin_delivery_graph(DeliveryRoles::default()),
+        )
+        .await?;
+    let rule = store
+        .save_workflow_trigger_rule(
+            project.clone(),
+            None,
+            None,
+            WorkflowTriggerSpec {
+                name: "Review checked Sub-Task item".into(),
+                enabled: true,
+                event: WorkflowTriggerEvent::ChecklistChecked,
+                work: TriggerWorkKind::Subtask,
+                target_state: None,
+                pipeline: version.clone(),
+                source: WorkflowLaunchSource {
+                    checkout_id: repo.checkout_id.clone(),
+                    revision_id: source.revision.id,
+                },
+            },
+        )
+        .await?;
+    let pinned_item = store
+        .set_project_checklist_item_checked(
+            project.clone(),
+            subtask.id.clone(),
+            selected.id.clone(),
+            selected.revision,
+            true,
+        )
+        .await?;
+    let receipts = store.workflow_trigger_activations(project.clone()).await?;
+    assert_eq!(receipts.len(), 1);
+    let launch = receipts
+        .first()
+        .context("The Sub-Task trigger did not fire")?;
+    assert_eq!(launch.rule_id, rule.id);
+    assert_eq!(launch.work_id, subtask.id);
+    let run_id = launch
+        .run_id
+        .clone()
+        .context("The checklist trigger did not record its run")?;
+    let run = store
+        .workflow_run(project.clone(), run_id.clone())
+        .await?
+        .context("Missing workflow run")?;
+    let fixture = approve_delivery_fixture_in_run(
+        &store,
+        directory.path(),
+        repo.clone(),
+        Some(subtask.id.clone()),
+        run,
+    )
+    .await?;
+    let ArtifactValue::Task(linked) = &fixture.task.value else {
+        anyhow::bail!("The workflow did not record linked work");
+    };
+    assert_eq!(linked.task_id, subtask.id);
+    let dispatch = store
+        .project_checklist_dispatch(project.clone(), subtask.id.clone())
+        .await?
+        .context("The selected Sub-Task has no prepared checklist target")?;
+
+    // Reopen a receipt written before the item field was present. Reconstruction
+    // must use the retained Agile event and keep its original item revision.
+    let old_pin = store
+        .workflow_launch(project.clone(), run_id.clone())
+        .await?
+        .context("Missing launch receipt")?;
+    assert_eq!(old_pin.checklist_item.as_ref(), Some(&pinned_item));
+    let legacy_bytes = {
+        let mut legacy = old_pin.clone();
+        legacy.checklist_item = None;
+        crate::protection::protect(&serde_json::to_vec(&legacy)?)?
+    };
+    let original_id = run_id.clone();
+    store
+        .execute(move |db| {
+            db.execute(
+                "UPDATE workflow_launches SET payload = ?1 WHERE pipeline_run_id = ?2",
+                params![legacy_bytes, original_id],
+            )?;
+            Ok(())
+        })
+        .await?;
+    drop(store);
+
+    let store = Store::open(database)?;
+    assert_eq!(
+        store
+            .workflow_launch(project.clone(), run_id.clone())
+            .await?,
+        Some(old_pin)
+    );
+    let inspected = store
+        .inspect_workflow_execution(project.clone(), run_id.clone())
+        .await?
+        .context("Missing workflow inspection")?;
+    assert_eq!(inspected.run.version, version);
+    assert_eq!(
+        inspected
+            .launch
+            .context("Missing inspected launch receipt")?
+            .checklist_item
+            .as_ref(),
+        Some(&pinned_item)
+    );
+    assert!(
+        inspected
+            .outputs
+            .iter()
+            .any(|output| output.artifact == fixture.task)
+    );
+    assert!(
+        inspected
+            .outputs
+            .iter()
+            .any(|output| output.artifact == fixture.decision)
+    );
+
+    assert!(
+        store
+            .set_pipeline_checklist_item_checked(
+                project.clone(),
+                run_id.clone(),
+                subtask.id.clone(),
+                unrelated.id.clone(),
+                unrelated.revision,
+                true,
+            )
+            .await
+            .is_err()
+    );
+    let current = store
+        .set_pipeline_checklist_item_checked(
+            project.clone(),
+            run_id,
+            subtask.id.clone(),
+            selected.id.clone(),
+            pinned_item.revision,
+            false,
+        )
+        .await?;
+    assert_ne!(current.revision, pinned_item.revision);
+    let mut scope = submission(
+        &repo,
+        &fixture.run,
+        "implement",
+        None,
+        SessionMode::ApprovedWrite,
+    )
+    .scope;
+    scope.checkout = fixture.checkout.checkout_root.into();
+    assert!(
+        store
+            .queue_project_checklist_work(
+                project.clone(),
+                subtask.id.clone(),
+                dispatch.release_id.clone(),
+                dispatch.unit_id.clone(),
+                Some(unrelated.id),
+                scope.clone(),
+            )
+            .await
+            .is_err()
+    );
+    let job = store
+        .queue_project_checklist_work(
+            project.clone(),
+            subtask.id.clone(),
+            dispatch.release_id,
+            dispatch.unit_id,
+            Some(selected.id),
+            scope,
+        )
+        .await?;
+    let attempt = store
+        .claim_next_job(AdmissionEnvironment {
+            runner: "fixture-runner".into(),
+            bridge_available: false,
+        })
+        .await?
+        .context("The pinned checklist job was not admitted")?;
+    let access = store
+        .task_dispatch_context(attempt.run.id.clone())
+        .await?
+        .context("Missing checklist dispatch context")?;
+    let saved_job = store
+        .job(project, job.id)
+        .await?
+        .context("Missing pinned checklist job")?;
+    assert_eq!(
+        saved_job
+            .latest_attempt
+            .context("Missing checklist attempt")?
+            .run_id,
+        attempt.run.id
+    );
+    assert_eq!(access.task_id, subtask.id);
+    assert_eq!(access.checklist.len(), 1);
+    assert_eq!(access.checklist[0].id, pinned_item.item_id);
+    assert_eq!(access.checklist[0].revision, pinned_item.revision);
+    assert!(access.checklist[0].checked);
+    Ok(())
+}
