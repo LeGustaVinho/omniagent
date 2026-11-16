@@ -8113,6 +8113,17 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }).await??;
+        let active_context = store.conversation(conversation.id.clone()).await?.context_id;
+        assert!(store.can_steer_conversation_draft(
+            conversation.id.clone(), run.clone(), active_context.clone(), scope.clone(),
+        ).await?);
+        let other_model = SessionScope { model: Some("other-model".into()), ..scope.clone() };
+        assert!(!store.can_steer_conversation_draft(
+            conversation.id.clone(), run.clone(), active_context.clone(), other_model,
+        ).await?);
+        assert!(!store.can_steer_conversation_draft(
+            conversation.id.clone(), run.clone(), conversation.context_id.clone(), scope.clone(),
+        ).await?);
         let followup = enqueue("Handle this instruction now").await?;
         let pending = store
             .pending_conversation_instructions(conversation.id.clone(), scheduler.environment())
@@ -8121,6 +8132,10 @@ mod tests {
             .into_iter()
             .find(|entry| entry.id == followup.id)
             .context("Missing pending steering instruction")?;
+        assert_eq!(
+            store.queued_steering_revision(conversation.id.clone(), followup.id.clone()).await?,
+            Some(instruction.revision_id.clone()),
+        );
         assert!(
             scheduler
                 .steer_pending_instruction(
@@ -8146,13 +8161,18 @@ mod tests {
         })
         .await??;
         let linked = store
-            .job(followup.project_id, followup.id)
+            .job(followup.project_id, followup.id.clone())
             .await?
             .unwrap()
             .latest_attempt
             .unwrap();
         assert_eq!(linked.run_id, run);
         assert_eq!(linked.status, RunStatus::Succeeded);
+        let history = serde_json::to_value(store.conversation_instruction_deliveries(conversation.id.clone()).await?)?;
+        assert!(history.as_array().unwrap().iter().any(|delivery| {
+            delivery["instructionId"] == followup.id && delivery["revisionId"] == instruction.revision_id
+                && delivery["runId"] == run && delivery["route"] == "steering" && delivery["state"] == "accepted"
+        }));
         assert!(
             store
                 .pending_conversation_instructions(conversation.id, scheduler.environment())

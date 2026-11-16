@@ -351,7 +351,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const activityButton = useRef<HTMLButtonElement>(null);
   const inspector = useContext(RunInspectorNavigation);
   const showingActivity = visible && run && inspectedRun === run.id;
-  const openGoalRun = (runId: string) => {
+  const openRunEvidence = (runId: string) => {
     if (inspector) inspector.openActivity(runId, conversationId);
     else setInspectedRun(runId);
   };
@@ -374,20 +374,36 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     setDraftStatus("");
     setDraftError("");
   }
+  const effectiveEffort = efforts?.efforts.includes(effort) ? effort : null;
+  const steeringPreview = useQuery({
+    queryKey: ["conversation", conversationId, "steering-route", run?.id, history.data?.contextId, selection, effectiveEffort, mode],
+    queryFn: () => invoke<boolean>("preview_conversation_steering", { conversationId, runId: run?.id,
+      expectedContextId: history.data?.contextId, selection, effort: effectiveEffort, mode }),
+    enabled: visible && live && run?.status === "running" && Boolean(history.data?.contextId && selected?.option.selectable)
+      && Boolean(text.trim()) && !isSideQuestion && !composingGoal,
+    retry: false,
+    refetchInterval: 1250,
+  });
+  const steer = useMutation({
+    mutationFn: ({ instructionId, runId }: { instructionId: string; runId: string }) =>
+      invoke<boolean>("steer_queued_conversation_instruction", { conversationId, runId, instructionId }),
+    onSettled: instructions.refresh,
+  });
   const send = useMutation({
-    mutationFn: async (submitted: string) => {
+    mutationFn: async ({ text: submitted }: { text: string; toRun?: string }): Promise<ReviewedContinuation | { instructionId: string }> => {
       const expectedContextId = history.data?.contextId;
       if (!selection || !expectedContextId || mode === "goal") throw new Error("Choose a model and wait for the conversation context.");
-      const effective = { selection, effort: efforts?.efforts.includes(effort) ? effort : null, mode };
+      const effective = { selection, effort: effectiveEffort, mode };
       await saveDraft(conversationId, submitted);
       const review = await submitConversationContinuation({ conversationId, expectedContextId, ...effective, text: submitted });
       if (review.status === "review_required") return { review, ...effective, text: submitted } satisfies ReviewedContinuation;
-      return null;
+      return { instructionId: review.job.id };
     },
-    onSuccess: (reviewed, submitted) => {
-      if (reviewed) { setContinuation(reviewed); return; }
+    onSuccess: (outcome, { text: submitted, toRun }) => {
+      if ("review" in outcome) { setContinuation(outcome); return; }
       clearSubmittedDraft(submitted);
       void instructions.refresh();
+      if (toRun) steer.mutate({ instructionId: outcome.instructionId, runId: toRun });
     },
   });
   const continueSend = useMutation({
@@ -498,7 +514,9 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     ? Boolean(sideQuestion) && history.data?.contextId && !askSide.isPending
     : history.data?.contextId && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending));
   const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
-  const historyBusy = live || isLiveRun(attempt) || send.isPending || continueSend.isPending;
+  const historyBusy = live || isLiveRun(attempt) || send.isPending || continueSend.isPending || steer.isPending;
+  const steerRun = canSend && !steer.isPending && !isSideQuestion && !composingGoal && run?.status === "running"
+    && steeringPreview.data && !instructions.data.some((item) => item.editable && !item.recordedContext) ? run.id : undefined;
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -520,7 +538,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     stickToEnd.current = true;
     if (historyRegion.current) historyRegion.current.scrollTop = historyRegion.current.scrollHeight;
     setShowJump(false);
-    send.mutate(text);
+    steer.reset();
+    send.mutate({ text });
   }
 
   function completeSideQuestion() {
@@ -614,7 +633,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
         </div>
       </div>
       <div className="conv-composer-area">
-        {goal.data && <ConversationGoalCard value={goal.data} refresh={refreshGoal} openRun={openGoalRun} />}
+        {goal.data && <ConversationGoalCard value={goal.data} refresh={refreshGoal} openRun={openRunEvidence} />}
         {showJump && <button type="button" className="conv-jump" onClick={() => {
           stickToEnd.current = true;
           if (historyRegion.current) historyRegion.current.scrollTop = historyRegion.current.scrollHeight;
@@ -625,7 +644,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           request?.scrollIntoView({ block: "nearest" });
           (request?.querySelector<HTMLElement>("button, input, select") ?? request)?.focus({ preventScroll: true });
         }}>{job?.queuedQuestion ? "View answer" : "Waiting for input"} <ArrowUp aria-hidden /></button>}
-        <ConversationInstructions conversationId={conversationId} instructions={instructions} />
+        <ConversationInstructions conversationId={conversationId} instructions={instructions} openRun={openRunEvidence} />
         {queued && job && (job.job.downstreamWait || job.queuedQuestion || (job.job.queuedRecovery && !instructions.data.some(({ id }) => id === job.job.id))) && <div className="conv-queued">
           <strong>{job.job.downstreamWait ? "Waiting for downstream jobs" : job.queuedQuestion ? "Queued answer" : "Queued message"}</strong>
           <div>
@@ -685,6 +704,9 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
               <EffortSelect capabilities={efforts} loading={Boolean(antigravityModel && modelEfforts.isPending)}
                 className={selectorClass} value={effort} onChange={setEffort} />
               {live && <StopConversation {...activity} />}
+              {steerRun && <Button type="button" variant="outline" onClick={() => { steer.reset(); send.mutate({ text, toRun: steerRun }); }}>
+                Send to active turn
+              </Button>}
                 <Button type="submit" className="conv-send" disabled={!canSend}>
                   {isSideQuestion ? askSide.isPending ? "Queueing…" : "Ask side question"
                     : startGoal.isPending ? "Starting goal…" : goalInput === "" ? "Open Goal Mode" : composingGoal ? "Start goal"
@@ -705,6 +727,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           {(draftError || draft.error) && <p role="alert" className="conv-alert">{draftError || String(draft.error)}</p>}
           {send.error && <p role="alert" className="conv-alert">{String(send.error)}</p>}
           {askSide.error && <p role="alert" className="conv-alert">{String(askSide.error)}</p>}
+          {steer.data === false && <p role="status" className="text-xs text-muted-foreground">Instruction queued for the next turn.</p>}
+          {steer.isError && <p role="alert" className="conv-alert">{String(steer.error)}</p>}
       </form>
       </div>
       </div>
@@ -717,7 +741,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
         onClose={() => { validateSide.reset(); setShowSideQuestions(false); }} />}
       </div>
       {visible && goalSettings && <GoalSettingsDialog objective={goalSettings.objective} options={models.data?.map(({ option }) => option) ?? []}
-        selected={selection} onSelect={(model) => { setSelection(model); setEffort(""); }} value={goal.data} refresh={refreshGoal} openRun={openGoalRun}
+        selected={selection} onSelect={(model) => { setSelection(model); setEffort(""); }} value={goal.data} refresh={refreshGoal} openRun={openRunEvidence}
         pending={startGoal.isPending} error={startGoal.error ? String(startGoal.error) : undefined} canStart={canStartGoal}
         onStart={(definition) => startGoal.mutate({ definition, submittedDraft: goalSettings.submittedDraft })}
         onClose={() => { setGoalSettings(undefined); startGoal.reset(); }} />}

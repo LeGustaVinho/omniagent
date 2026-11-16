@@ -3,6 +3,7 @@
 mod conversation_runtime;
 mod conversation_goal_runtime;
 mod conversation_continuation_runtime;
+mod conversation_steering_ipc;
 mod agile_runtime;
 mod delivery_merge_ipc;
 mod desktop;
@@ -427,6 +428,9 @@ fn main() {
             conversation_runtime::latest_conversation_job,
             conversation_runtime::pending_conversation_instructions,
             conversation_runtime::steer_pending_instruction,
+            conversation_steering_ipc::preview_conversation_steering,
+            conversation_steering_ipc::steer_queued_conversation_instruction,
+            conversation_steering_ipc::conversation_instruction_deliveries,
             conversation_runtime::resolve_uncertain_steering,
             conversation_runtime::request_goal_stop,
             conversation_runtime::resume_goal,

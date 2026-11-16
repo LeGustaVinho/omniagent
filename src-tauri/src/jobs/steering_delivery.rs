@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::Serialize;
 
 use crate::{
     conversations::{SessionScope, load_conversation, load_messages},
@@ -23,6 +24,17 @@ use super::{
 pub(crate) struct SteeringInput {
     pub target: SteerTarget,
     pub input: TurnInput,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstructionDeliveryEvidence {
+    instruction_id: String,
+    revision_id: String,
+    run_id: String,
+    route: String,
+    state: String,
+    can_resolve: bool,
 }
 
 struct LiveSteeringScope {
@@ -171,6 +183,71 @@ fn delivery_policy(
 }
 
 impl Store {
+    pub async fn can_steer_conversation_draft(
+        &self,
+        conversation: String,
+        run: String,
+        expected_context: String,
+        scope: SessionScope,
+    ) -> Result<bool> {
+        self.execute(move |db| {
+            let selected = load_conversation(db, &conversation)?;
+            if selected.context_id != expected_context {
+                return Ok(false);
+            }
+            let Some(live) = live_scope(db, &conversation, &run)? else {
+                return Ok(false);
+            };
+            if live.scope != scope || live.snapshot.context_id != expected_context {
+                return Ok(false);
+            }
+            Ok(!db.query_row(
+                "SELECT EXISTS (SELECT 1 FROM instruction_delivery_attempts
+                    WHERE run_id = ?1 AND steering_state IN ('claimed', 'prepared', 'unconfirmed') AND NOT superseded)",
+                [run], |row| row.get::<_, bool>(0),
+            )?)
+        }).await
+    }
+
+    pub async fn queued_steering_revision(&self, conversation: String, instruction: String) -> Result<Option<String>> {
+        self.execute(move |db| {
+            Ok(db.query_row(
+                "SELECT i.revision_id FROM queued_conversation_instructions i JOIN jobs j ON j.id = i.job_id
+                 JOIN message_revisions r ON r.id = i.revision_id
+                 WHERE j.conversation_id = ?1 AND i.job_id = ?2 AND j.queue_state = 'queued'
+                   AND i.attachment_labels IS NULL AND r.revision = 1",
+                params![conversation, instruction], |row| row.get(0),
+            ).optional()?)
+        }).await
+    }
+
+    pub async fn conversation_instruction_deliveries(&self, conversation: String) -> Result<Vec<InstructionDeliveryEvidence>> {
+        self.execute(move |db| {
+            load_conversation(db, &conversation)?;
+            let mut statement = db.prepare(
+                "SELECT i.job_id, i.revision_id, i.run_id, i.route,
+                        CASE WHEN i.review_resolution IS NOT NULL THEN i.review_resolution
+                             WHEN i.route = 'steering' THEN i.steering_state
+                             WHEN EXISTS (SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
+                                 WHERE s.run_id = i.run_id AND d.ordinal = 1 AND d.delivery = 'submitted') THEN 'accepted'
+                             WHEN EXISTS (SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
+                                 WHERE s.run_id = i.run_id AND d.ordinal = 1 AND d.delivery = 'unconfirmed') THEN 'unconfirmed'
+                             ELSE 'claimed' END AS state,
+                        i.steering_state = 'unconfirmed' AND NOT i.superseded AND NOT EXISTS (
+                            SELECT 1 FROM active_agent_attempts a WHERE a.run_id = i.run_id
+                        )
+                 FROM instruction_delivery_attempts i JOIN jobs j ON j.id = i.job_id
+                 JOIN agent_attempts a ON a.run_id = i.run_id
+                 WHERE j.conversation_id = ?1 AND a.conversation_id = ?1
+                 ORDER BY a.ordinal DESC, j.sequence DESC LIMIT 30",
+            )?;
+            Ok(statement.query_map([conversation], |row| Ok(InstructionDeliveryEvidence {
+                instruction_id: row.get(0)?, revision_id: row.get(1)?, run_id: row.get(2)?,
+                route: row.get(3)?, state: row.get(4)?, can_resolve: row.get::<_, Option<bool>>(5)?.unwrap_or_default(),
+            }))?.collect::<rusqlite::Result<_>>()?)
+        }).await
+    }
+
     pub async fn resolve_uncertain_steering(
         &self,
         conversation: String,

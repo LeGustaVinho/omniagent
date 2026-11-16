@@ -13,21 +13,36 @@ const deliveryLabels: Record<InstructionDelivery, string> = {
   needs_review: "Delivery needs review",
 };
 
+export type InstructionDeliveryEvidence = {
+  instructionId: string;
+  revisionId: string;
+  runId: string;
+  route: "steering" | "continuation" | "standalone";
+  state: "claimed" | "prepared" | "accepted" | "rejected" | "unconfirmed" | "undelivered" | "discarded";
+  canResolve: boolean;
+};
+
 export function useConversationInstructions(conversationId: string, visible: boolean) {
   const queryClient = useQueryClient();
   const key = ["conversation", conversationId, "instructions"];
+  const deliveryKey = ["conversation", conversationId, "instruction-deliveries"];
   const query = useQuery({
     queryKey: key,
     queryFn: () => invoke<PendingInstruction[]>("pending_conversation_instructions", { conversationId }),
     enabled: visible,
     refetchInterval: visible ? 500 : false,
   });
+  const deliveries = useQuery({ queryKey: deliveryKey,
+    queryFn: () => invoke<InstructionDeliveryEvidence[]>("conversation_instruction_deliveries", { conversationId }),
+    enabled: visible, refetchInterval: visible ? 900 : false,
+  });
   const refresh = () => Promise.all([
     queryClient.invalidateQueries({ queryKey: key }),
+    queryClient.invalidateQueries({ queryKey: deliveryKey }),
     queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "latest-job"] }),
     queryClient.invalidateQueries({ queryKey: ["project-job-queue"] }),
   ]);
-  return { data: query.data ?? [], error: query.error, refresh };
+  return { data: query.data ?? [], deliveries: deliveries.data ?? [], error: query.error, refresh };
 }
 
 function InstructionRow({ item, conversationId, refresh }: {
@@ -75,15 +90,53 @@ function InstructionRow({ item, conversationId, refresh }: {
   </li>;
 }
 
-export function ConversationInstructions({ conversationId, instructions }: {
+function DeliveryEvidence({ item, conversationId, openRun, refresh }: {
+  item: InstructionDeliveryEvidence;
+  conversationId: string;
+  openRun: (runId: string) => void;
+  refresh: () => Promise<unknown>;
+}) {
+  const { instructionId, revisionId, runId, state } = item;
+  const resolve = useMutation({
+    mutationFn: (confirmedUndelivered: boolean) => invoke("resolve_uncertain_steering", {
+      conversationId, instructionId, revisionId, runId, confirmedUndelivered,
+    }),
+    onSettled: refresh,
+  });
+  const labels: Record<InstructionDeliveryEvidence["state"], string> = {
+    claimed: "Awaiting dispatch", prepared: "Dispatch prepared", accepted: "Delivered", rejected: "Returned to queue",
+    unconfirmed: "Delivery needs review", undelivered: "Confirmed undelivered", discarded: "Discarded after review",
+  };
+  return <li className="conv-queued grid gap-1">
+    <strong>{labels[state]} · {item.route === "steering" ? "Active turn" : "Next turn"}</strong>
+    <button type="button" className="conv-quiet-button justify-self-start" onClick={() => openRun(runId)}>
+      {state === "accepted" ? "Open receiving turn" : "Open delivery attempt"}
+    </button>
+    {item.canResolve && <div className="flex flex-wrap gap-2">
+      <Button type="button" variant="outline" disabled={resolve.isPending} onClick={() => resolve.mutate(true)}>Confirm undelivered and queue</Button>
+      <Button type="button" variant="outline" disabled={resolve.isPending} onClick={() => resolve.mutate(false)}>Discard instruction</Button>
+    </div>}
+    {resolve.error && <p role="alert" className="conv-alert">{String(resolve.error)}</p>}
+  </li>;
+}
+
+export function ConversationInstructions({ conversationId, instructions, openRun }: {
   conversationId: string;
   instructions: ReturnType<typeof useConversationInstructions>;
+  openRun: (runId: string) => void;
 }) {
   return <>
     {instructions.data.length > 0 && <ol aria-label="Pending instructions" className="grid max-h-44 gap-1.5 overflow-y-auto">
       {instructions.data.map((item) => <InstructionRow key={item.id} item={item}
         conversationId={conversationId} refresh={instructions.refresh} />)}
     </ol>}
+    {instructions.deliveries.length > 0 && <details className="conv-pending-instruction">
+      <summary>Instruction delivery history</summary>
+      <ol className="grid max-h-44 gap-1.5 overflow-y-auto">
+        {instructions.deliveries.map((item) => <DeliveryEvidence key={`${item.instructionId}:${item.runId}`} item={item}
+          conversationId={conversationId} openRun={openRun} refresh={instructions.refresh} />)}
+      </ol>
+    </details>}
     {instructions.error && <p role="alert" className="conv-alert">{String(instructions.error)}</p>}
   </>;
 }
