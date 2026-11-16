@@ -41,8 +41,25 @@ type InventoryObservation = {
   targets: InventoryTarget[];
 };
 
+type RecordedCheckout = {
+  runId: string;
+  checkoutId: string;
+  workingDirectory: string;
+  worktreeRoot: string | null;
+  primaryRoot: string | null;
+};
+
+type NativeHistory =
+  | { mode: "fresh" }
+  | { mode: "provider_cursor"; sessionId: string; contextId: string }
+  | { mode: "provider_recovery"; sessionId: string; contextId: string; sourceRunId: string; sourceTurnId: string | null };
+
 type DispatchInventory = {
   dispatchId: string;
+  checkout: RecordedCheckout;
+  inheritedCheckout: RecordedCheckout | null;
+  nativeHistory: NativeHistory;
+  historyReports: { eventSequence: string; turns: number | null; itemKind: string | null }[];
   inventory: {
     instructions: { sources: InstructionSource[]; unresolved: string[] } | null;
     filesystemSkills: SkillSource[];
@@ -73,6 +90,50 @@ function reportLabel(report: InventoryReport) {
   }
 }
 
+function CheckoutLocation({ checkout }: { checkout: RecordedCheckout }) {
+  return <dl className="grid break-all text-muted-foreground">
+    <dt>Checkout ID</dt><dd>{checkout.checkoutId}</dd>
+    <dt>Working directory</dt><dd>{checkout.workingDirectory}</dd>
+    {checkout.worktreeRoot && <><dt>Worktree root</dt><dd>{checkout.worktreeRoot}</dd></>}
+    {checkout.primaryRoot && checkout.primaryRoot !== checkout.worktreeRoot &&
+      <><dt>Primary checkout root</dt><dd>{checkout.primaryRoot}</dd></>}
+  </dl>;
+}
+
+function NativeContext({ evidence }: { evidence: DispatchInventory }) {
+  const { nativeHistory, inheritedCheckout, historyReports } = evidence;
+  const sourceRunId = inheritedCheckout?.runId ??
+    (nativeHistory.mode === "provider_recovery" ? nativeHistory.sourceRunId : undefined);
+  return <div className="grid gap-1">
+    <h3 className="font-medium">Provider-managed context</h3>
+    {nativeHistory.mode === "fresh" ? <p className="text-muted-foreground">Fresh session requested.</p> : <>
+      <dl className="grid break-all text-muted-foreground">
+        <dt>Requested history</dt><dd>{nativeHistory.mode === "provider_cursor" ? "Resume session" : "Recover session"}</dd>
+        <dt>Source session</dt><dd>{nativeHistory.sessionId}</dd>
+        <dt>Context boundary</dt><dd>{nativeHistory.contextId}</dd>
+        {nativeHistory.mode === "provider_recovery" && nativeHistory.sourceTurnId &&
+          <><dt>Source turn</dt><dd>{nativeHistory.sourceTurnId}</dd></>}
+        {sourceRunId && <><dt>Source attempt</dt><dd>{sourceRunId}</dd></>}
+      </dl>
+      {inheritedCheckout ? <div>
+        <h4 className="font-medium">Inherited checkout source</h4>
+        <CheckoutLocation checkout={inheritedCheckout} />
+      </div> : <p className="text-muted-foreground">Inherited checkout source unavailable.</p>}
+    </>}
+    {historyReports.length > 0 && <ol aria-label="Provider history reports">
+      {historyReports.map(({ eventSequence, turns, itemKind }) => <li key={eventSequence} className="break-all text-muted-foreground">
+        {[
+          "History reported",
+          turns !== null && `${turns} ${turns === 1 ? "turn" : "turns"}`,
+          itemKind && words(itemKind),
+          `Event ${eventSequence}`,
+        ].filter(Boolean).join(" · ")}
+      </li>)}
+    </ol>}
+    <p className="text-muted-foreground">Native context contents are unconfirmed. Open Exact input for the application’s recorded prompt.</p>
+  </div>;
+}
+
 function SavedInventory({ evidence }: { evidence: DispatchInventory }) {
   const idPrefix = useId();
   const { inventory, observations } = evidence;
@@ -100,7 +161,12 @@ function SavedInventory({ evidence }: { evidence: DispatchInventory }) {
   return <div className="grid gap-3 text-xs">
     <p className="break-all text-muted-foreground">Dispatch {evidence.dispatchId}</p>
     <div>
-      <h3 className="font-medium">Instructions</h3>
+      <h3 className="font-medium">Dispatch checkout</h3>
+      <CheckoutLocation checkout={evidence.checkout} />
+    </div>
+    <NativeContext evidence={evidence} />
+    <div>
+      <h3 className="font-medium">Detected instruction sources</h3>
       {instructions.length ? <ul className="mt-1 grid gap-2">
         {instructions.map((instruction, index) => <li id={targetId({ kind: "instruction", index })} key={index} className="break-all">
           <p>{instruction.path}</p>
@@ -117,6 +183,9 @@ function SavedInventory({ evidence }: { evidence: DispatchInventory }) {
     <div>
       <h3 className="font-medium">Skills</h3>
       {inventory.requestedSkill && <p className="text-muted-foreground">Requested skill {inventory.requestedSkill.name}</p>}
+      {inventory.reportedSkills && <p className="text-muted-foreground">
+        {inventory.reportedSkills.reported ? "CLI reported skill availability" : "CLI skill availability unreported"}
+      </p>}
       {skills.size ? <ul className="mt-1 grid gap-2">
         {Array.from(skills, ([id, sources]) => <li id={targetId({ kind: "skill", id })} key={id} className="break-all">
           <p>{sources[0]?.name} · {reportedUses.has(id) ? "Use reported" : "Use unconfirmed"}</p>

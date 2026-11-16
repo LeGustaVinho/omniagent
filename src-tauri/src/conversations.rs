@@ -9167,6 +9167,32 @@ mod tests {
         assert!(second_dispatch.snapshot.requested_skill.is_none());
         let second_instructions = second_dispatch.snapshot.instructions.as_ref().unwrap();
         assert_ne!(instructions.sources, second_instructions.sources);
+        let context_inventory = store
+            .dispatch_inventory(conversation.id.clone(), resumed_run.clone())
+            .await?
+            .context("missing retained history evidence")?;
+        assert_eq!(
+            context_inventory.checkout.checkout_id,
+            conversation.checkout_id
+        );
+        assert_eq!(
+            context_inventory.checkout.worktree_root.as_ref(),
+            Some(&second_instructions.checkout_root)
+        );
+        let inherited = context_inventory
+            .inherited_checkout
+            .context("missing native cursor checkout source")?;
+        assert_eq!(inherited.run_id, first_run);
+        assert_eq!(
+            inherited.worktree_root.as_ref(),
+            Some(&instructions.checkout_root)
+        );
+        assert!(
+            context_inventory
+                .history_reports
+                .iter()
+                .any(|report| report.turns == Some(1))
+        );
         assert!(
             store
                 .agent_dispatch("unrelated".into(), first_run.clone())

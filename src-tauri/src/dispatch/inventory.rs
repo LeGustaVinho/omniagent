@@ -1,10 +1,10 @@
 use std::{
     borrow::Cow,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::Result;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::{
@@ -18,14 +18,52 @@ use crate::{
     store::Store,
 };
 
-use super::ContextSnapshot;
+use super::{ContextSnapshot, NativeHistory};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DispatchInventory {
     pub dispatch_id: String,
+    pub checkout: RecordedCheckout,
+    pub inherited_checkout: Option<RecordedCheckout>,
+    pub native_history: NativeHistory,
+    pub history_reports: Vec<HistoryReport>,
     pub inventory: SavedInventory,
     pub observations: Vec<InventoryObservation>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordedCheckout {
+    pub run_id: String,
+    pub checkout_id: String,
+    pub working_directory: PathBuf,
+    pub worktree_root: Option<PathBuf>,
+    pub primary_root: Option<PathBuf>,
+}
+
+impl RecordedCheckout {
+    fn from_snapshot(run_id: String, checkout_id: String, snapshot: &ContextSnapshot) -> Self {
+        let instructions = snapshot.instructions.as_ref();
+        Self {
+            run_id,
+            checkout_id,
+            working_directory: instructions.map_or_else(
+                || snapshot.scope.checkout.clone(),
+                |inventory| inventory.working_directory.clone(),
+            ),
+            worktree_root: instructions.map(|inventory| inventory.checkout_root.clone()),
+            primary_root: instructions.map(|inventory| inventory.primary_root.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryReport {
+    pub event_sequence: String,
+    pub turns: Option<u64>,
+    pub item_kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,20 +127,25 @@ impl Store {
         self.execute(move |db| {
             let tx = db.transaction()?;
             let record = tx.query_row(
-                "SELECT d.id, s.payload, n.provider_session_id, a.provider_turn_id
+                "SELECT d.id, s.payload, n.provider_session_id, a.provider_turn_id, r.checkout_id
                  FROM context_snapshots s
                  JOIN dispatches d ON d.snapshot_id = s.id AND d.ordinal = 1
                  JOIN agent_attempts a ON a.run_id = s.run_id
                  JOIN agent_sessions n ON n.id = a.agent_session_id
+                 JOIN runs r ON r.id = a.run_id
                  WHERE a.conversation_id = ?1 AND a.run_id = ?2",
                 params![conversation_id, run_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?,
-                          row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?)),
+                          row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
+                          row.get::<_, String>(4)?)),
             ).optional()?;
-            let Some((dispatch_id, payload, session, turn)) = record else {
+            let Some((dispatch_id, payload, session, turn, checkout_id)) = record else {
                 return Ok(None);
             };
             let snapshot: ContextSnapshot = serde_json::from_slice(&protection::unprotect(&payload)?)?;
+            let checkout = RecordedCheckout::from_snapshot(run_id.clone(), checkout_id, &snapshot);
+            let native_history = snapshot.native_history;
+            let inherited_checkout = inherited_checkout(&tx, &run_id, &native_history)?;
             let inventory = SavedInventory {
                 instructions: snapshot.instructions,
                 filesystem_skills: snapshot.filesystem_skills,
@@ -116,6 +159,7 @@ impl Store {
             )?;
             let mut rows = query.query([run_id])?;
             let mut observations = Vec::new();
+            let mut history_reports = Vec::new();
             let mut submitted = false;
             while let Some(row) = rows.next()? {
                 let sequence: i64 = row.get(0)?;
@@ -127,15 +171,84 @@ impl Store {
                 let event: ProviderEvent = serde_json::from_slice(&protection::unprotect(&payload)?)?;
                 if source == "application" {
                     submitted = matches!(event.data, ProviderEventData::DispatchSubmitted { dispatch_id: id } if id == dispatch_id);
-                } else if (submitted || matches!(event.data, ProviderEventData::SessionCustomizationsReported { .. }))
-                    && belongs_to_dispatch(&event.location, session.as_deref(), turn.as_deref())
-                {
-                    inventory.collect(sequence, event, &mut observations);
+                } else if belongs_to_dispatch(&event.location, session.as_deref(), turn.as_deref()) {
+                    match event.data {
+                        ProviderEventData::HistoryReported { turns, item_kind }
+                            if !matches!(native_history, NativeHistory::Fresh) =>
+                        {
+                            history_reports.push(HistoryReport {
+                                event_sequence: sequence.to_string(), turns, item_kind,
+                            });
+                        }
+                        ProviderEventData::SessionCustomizationsReported { .. } =>
+                            inventory.collect(sequence, event, &mut observations),
+                        _ if submitted => inventory.collect(sequence, event, &mut observations),
+                        _ => {}
+                    }
                 }
             }
-            Ok(Some(DispatchInventory { dispatch_id, inventory, observations }))
+            Ok(Some(DispatchInventory {
+                dispatch_id, checkout, inherited_checkout, native_history, history_reports,
+                inventory, observations,
+            }))
         }).await
     }
+}
+
+fn inherited_checkout(
+    db: &Connection,
+    run_id: &str,
+    history: &NativeHistory,
+) -> Result<Option<RecordedCheckout>> {
+    let (source_run, context, session) = match history {
+        NativeHistory::Fresh => return Ok(None),
+        NativeHistory::ProviderCursor {
+            session_id,
+            context_id,
+        } => (None, context_id, session_id),
+        NativeHistory::ProviderRecovery {
+            session_id,
+            source_run_id,
+            context_id,
+            ..
+        } => (Some(source_run_id), context_id, session_id),
+    };
+    let record = db
+        .query_row(
+            "SELECT source.run_id, r.checkout_id, s.payload
+         FROM agent_attempts current
+         JOIN agent_attempts source ON source.conversation_id = current.conversation_id
+           AND source.ordinal < current.ordinal
+         JOIN agent_sessions n ON n.id = source.agent_session_id
+         JOIN runs r ON r.id = source.run_id
+         JOIN context_snapshots s ON s.run_id = source.run_id
+         JOIN dispatches d ON d.snapshot_id = s.id AND d.ordinal = 1 AND d.delivery = 'submitted'
+         WHERE current.run_id = ?1 AND source.result_context_id = ?2
+           AND n.provider_session_id = ?3
+           AND (source.run_id = ?4 OR
+                (?4 IS NULL AND source.agent_session_id = current.agent_session_id
+                 AND source.provider_terminal = 'completed' AND r.status = 'succeeded'))
+         ORDER BY source.ordinal DESC LIMIT 1",
+            params![run_id, context, session, source_run],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    record
+        .map(|(source_run, checkout_id, payload)| {
+            let snapshot = serde_json::from_slice(&protection::unprotect(&payload)?)?;
+            Ok(RecordedCheckout::from_snapshot(
+                source_run,
+                checkout_id,
+                &snapshot,
+            ))
+        })
+        .transpose()
 }
 
 impl SavedInventory {

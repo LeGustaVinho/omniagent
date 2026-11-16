@@ -20,6 +20,17 @@ it("loads saved inventory on demand and separates discovery from reported use", 
   };
   vi.mocked(invoke).mockResolvedValue({
     dispatchId: "recorded-dispatch",
+    checkout: {
+      runId: "run-a", checkoutId: "managed-checkout",
+      workingDirectory: "C:/worktrees/implementation/src", worktreeRoot: "C:/worktrees/implementation",
+      primaryRoot: "C:/fixture",
+    },
+    inheritedCheckout: {
+      runId: "source-run", checkoutId: "source-checkout",
+      workingDirectory: "C:/old-worktrees/review", worktreeRoot: null, primaryRoot: null,
+    },
+    nativeHistory: { mode: "provider_cursor", sessionId: "native-session", contextId: "source-context" },
+    historyReports: [{ eventSequence: "4", turns: 1, itemKind: null }],
     inventory: {
       instructions: { sources: [{ path: guide, scope: "checkout", revision: "guide-r1", selection: "expected", importedFrom: null, includedBytes: null }], unresolved: [] },
       filesystemSkills: [localSkill],
@@ -46,6 +57,13 @@ it("loads saved inventory on demand and separates discovery from reported use", 
   expect(await screen.findByText("Recorded revision guide-r1")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("conversation_dispatch_inventory", { conversationId: "chat-a", runId: "run-a" });
   expect(screen.getByText("workflow · Version 1.2.0")).toBeTruthy();
+  expect(screen.getByText("C:/worktrees/implementation/src")).toBeTruthy();
+  expect(screen.getByText("C:/worktrees/implementation")).toBeTruthy();
+  expect(screen.getByText("C:/old-worktrees/review")).toBeTruthy();
+  expect(screen.getByText("History reported · 1 turn · Event 4")).toBeTruthy();
+  expect(screen.getByText(/Native context contents are unconfirmed/)).toBeTruthy();
+  expect(screen.getByText("Requested skill shared")).toBeTruthy();
+  expect(screen.getByText("CLI reported skill availability")).toBeTruthy();
   expect(screen.getByText("shared · Use unconfirmed")).toBeTruthy();
   expect(screen.getByText("shared · Use reported")).toBeTruthy();
   const reports = within(screen.getByRole("list", { name: "Provider inventory observations" }));
