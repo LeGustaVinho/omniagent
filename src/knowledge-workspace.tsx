@@ -2,6 +2,8 @@ import {
   AlertCircle, BookOpen, BookOpenText, FilePenLine, FileText, GitFork, Link2,
   ListTree, Network, PanelRight, Paperclip, RotateCw, Save, Search, SplitSquareHorizontal, Wand2,
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { useQuery } from "@tanstack/react-query";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FileDialog, FileDock, FileSearch, FileSidebar, FileTree, FileUnavailable,
@@ -19,6 +21,7 @@ import { noteAttachmentCandidates, RepositoryNoteMedia } from "@/repository-note
 import { NotePropertyEditor } from "@/note-property-editor";
 import { KnowledgeSearch } from "@/knowledge-navigation";
 import { useRepositoryNoteIndex } from "@/repository-note-index";
+import type { NoteGraphProjection } from "@/knowledge-graph";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const Editor = lazy(() => import("@/knowledge-editor").then(({ MarkdownEditor }) => ({ default: MarkdownEditor })));
@@ -78,6 +81,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const [query, setQuery] = useState("");
   const noteIndex = useRepositoryNoteIndex(checkout.checkoutId, !simulated, query);
   const [graph, setGraph] = useState(false);
+  const graphEdges = useQuery({
+    queryKey: ["repository-note-edges", checkout.checkoutId, noteIndex.index.dataUpdatedAt],
+    enabled: !simulated && graph && noteIndex.index.isSuccess,
+    placeholderData: (previous, query) => query?.queryKey[1] === checkout.checkoutId ? previous : undefined,
+    queryFn: () => invoke<NoteGraphProjection["edges"]>("repository_note_edges", { checkoutId: checkout.checkoutId }),
+  });
   const [inspector, setInspector] = useState<Inspector | null>(window.innerWidth >= 1180 ? "outline" : null);
   const [modes, setModes] = useState<Record<string, NoteMode>>({});
   const [jumps, setJumps] = useState<Record<string, NoteJump>>({});
@@ -380,9 +389,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
             }} />
           </div>
           {graph && <div className="note-graph-host">
-            {simulated ? <Suspense fallback={<p role="status" className="file-help">Loading note graph…</p>}>
-              <NoteGraph files={catalog} selected={active} onOpen={open} />
-            </Suspense> : <FileUnavailable title="Graph integration pending" detail="The graph will use indexed notes from the active checkout." onSimulate={() => startSimulation()} />}
+            {!simulated && (graphEdges.error || noteIndex.index.error) ? <p role="alert" className="file-help">{String(graphEdges.error ?? noteIndex.index.error)}</p>
+              : <Suspense fallback={<p role="status" className="file-help">Loading note graph…</p>}>
+                {simulated ? <NoteGraph files={catalog} selected={active} onOpen={open} />
+                  : noteIndex.index.data && graphEdges.data ? <NoteGraph projection={{ notes: noteIndex.index.data, edges: graphEdges.data }} selected={active} onOpen={open} />
+                    : <p role="status" className="file-help">Loading note graph…</p>}
+              </Suspense>}
           </div>}
           {inspector && !graph && <aside className="note-inspector" aria-label="Note details">
             <div className="note-inspector-views">

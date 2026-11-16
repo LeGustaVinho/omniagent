@@ -2,23 +2,16 @@ import cytoscape from "cytoscape";
 import { CircleDot, Focus, Network, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fileName, type ExampleFile } from "@/ide-knowledge-data";
-import { resolveWiki, wikiLinks } from "@/knowledge-document";
+import { exampleNoteGraph, indexNoteGraph, selectNoteGraph, type NoteGraphProjection } from "@/knowledge-graph-model";
 
-function graphEdges(notes: readonly ExampleFile[]) {
-  const seen = new Set<string>();
-  return notes.flatMap(({ path, content }) => wikiLinks(content).flatMap((link) => {
-    const resolved = resolveWiki(link, path, notes);
-    const target = resolved.length === 1 ? resolved[0]?.path : undefined;
-    if (!target || target === path) return [];
-    const id = `${path}→${target}`;
-    if (seen.has(id)) return [];
-    seen.add(id);
-    return [{ id, source: path, target }];
-  }));
-}
+export type { NoteGraphProjection } from "@/knowledge-graph-model";
 
-export default function NoteGraph({ files, selected, onOpen }: {
-  files: readonly ExampleFile[];
+const elementId = (path: string, id?: number) => `note:${id ?? path}`;
+const emptyExamples: readonly ExampleFile[] = [];
+
+export default function NoteGraph({ files = emptyExamples, projection, selected, onOpen }: {
+  files?: readonly ExampleFile[];
+  projection?: NoteGraphProjection;
   selected?: string;
   onOpen: (path: string) => void;
 }) {
@@ -28,27 +21,19 @@ export default function NoteGraph({ files, selected, onOpen }: {
   const [scope, setScope] = useState<"global" | "local">("global");
   const [depth, setDepth] = useState(1);
   const [filter, setFilter] = useState("");
-  const edges = useMemo(() => graphEdges(files), [files]);
-  const eligible = useMemo(() => {
-    if (scope === "global" || !selected) return new Set(files.map(({ path }) => path));
-    const reachable = new Set([selected]);
-    for (let level = 0; level < depth; level++) {
-      const touched = edges.filter(({ source, target }) => reachable.has(source) || reachable.has(target));
-      for (const { source, target } of touched) {
-        reachable.add(source);
-        reachable.add(target);
-      }
-    }
-    return reachable;
-  }, [depth, edges, files, scope, selected]);
-  const nodes = useMemo(() => [...eligible].filter((path) => path.toLowerCase().includes(filter.trim().toLowerCase())), [eligible, filter]);
-  const nodeSet = useMemo(() => new Set(nodes), [nodes]);
-  const visibleEdges = useMemo(() => edges.filter(({ source, target }) => nodeSet.has(source) && nodeSet.has(target)), [edges, nodeSet]);
+  const [tag, setTag] = useState("");
+  const indexed = useMemo(() => indexNoteGraph(projection ?? exampleNoteGraph(files)), [files, projection]);
+  const hasActive = selected !== undefined && indexed.byPath.has(selected);
+  const local = scope === "local" && hasActive ? selected : undefined;
+  const selectedTag = indexed.tags.includes(tag) ? tag : "";
+  const { notes, edges, distance } = useMemo(() => selectNoteGraph(indexed, {
+    active: local, depth, search: filter, tag: selectedTag,
+  }), [depth, filter, indexed, local, selectedTag]);
 
   useEffect(() => { onOpenRef.current = onOpen; }, [onOpen]);
   useEffect(() => {
     const mount = container.current;
-    if (!mount || !nodes.length) return;
+    if (!mount || !notes.length) return;
     const style = getComputedStyle(document.documentElement);
     const foreground = style.getPropertyValue("--foreground").trim() || "#e7e7ec";
     const muted = style.getPropertyValue("--muted-foreground").trim() || "#a9a9b0";
@@ -56,25 +41,31 @@ export default function NoteGraph({ files, selected, onOpen }: {
     const graph = cytoscape({
       container: mount,
       elements: [
-        ...nodes.map((path) => ({ data: { id: path, name: fileName(path).replace(/\.md$/i, "") }, classes: path === selected ? "current" : "" })),
-        ...visibleEdges.map((edge) => ({ data: edge })),
+        ...notes.map(({ id, path, title }) => ({ data: { id: elementId(path, id), name: title, path }, classes: path === selected ? "current" : "" })),
+        ...edges.map(({ sourcePath, targetPath }) => ({ data: {
+          id: `edge:${JSON.stringify([sourcePath, targetPath])}`,
+          source: elementId(sourcePath, indexed.byPath.get(sourcePath)?.id),
+          target: elementId(targetPath, indexed.byPath.get(targetPath)?.id),
+        } })),
       ],
       style: [
         { selector: "node", style: { "background-color": muted, color: foreground, label: "data(name)", "font-family": "Geist, Segoe UI", "font-size": 13, width: 20, height: 20, "text-margin-y": 8, "text-valign": "bottom" } },
         { selector: ".current", style: { "background-color": accent, width: 26, height: 26 } },
         { selector: "edge", style: { width: 1.2, "line-color": muted, "target-arrow-shape": "triangle", "target-arrow-color": muted, "curve-style": "bezier", opacity: 0.65 } },
       ],
-      layout: { name: "circle", padding: 52 },
+      layout: local ? {
+        name: "concentric", padding: 52, levelWidth: () => 1,
+        concentric: (node) => -(distance.get(node.data("path")) ?? depth),
+      } : { name: "circle", padding: 52 },
       minZoom: 0.35,
       maxZoom: 2.5,
-      wheelSensitivity: 1,
     });
     instance.current = graph;
-    graph.on("tap", "node", (event) => onOpenRef.current(event.target.id()));
+    graph.on("tap", "node", (event) => onOpenRef.current(event.target.data("path")));
     const resize = new ResizeObserver(() => { if (mount.clientWidth && mount.clientHeight) graph.resize(); });
     resize.observe(mount);
     return () => { resize.disconnect(); graph.destroy(); instance.current = undefined; };
-  }, [nodes, selected, visibleEdges]);
+  }, [depth, distance, edges, indexed.byPath, local, notes, selected]);
 
   const zoomBy = (factor: number) => {
     const graph = instance.current;
@@ -84,22 +75,27 @@ export default function NoteGraph({ files, selected, onOpen }: {
   return (
     <div className="note-graph">
       <div className="note-graph-tools">
-        <Network size={16} />
-        <button type="button" className="fw-btn" aria-pressed={scope === "global"} onClick={() => setScope("global")}>Global</button>
-        <button type="button" className="fw-btn" aria-pressed={scope === "local"} onClick={() => setScope("local")} disabled={!selected}>Local</button>
-        {scope === "local" && <label>Depth <select value={depth} onChange={(event) => setDepth(Number(event.target.value))}>
+        <Network size={16} aria-hidden="true" />
+        <button type="button" className="fw-btn" aria-pressed={!local} onClick={() => setScope("global")}>Global</button>
+        <button type="button" className="fw-btn" aria-pressed={Boolean(local)} onClick={() => setScope("local")} disabled={!hasActive}>Local</button>
+        {local && <label>Depth <select value={depth} onChange={(event) => setDepth(Number(event.target.value))}>
           <option value={1}>1</option><option value={2}>2</option><option value={3}>3</option>
         </select></label>}
         <label className="file-field"><input type="search" placeholder="Filter graph" aria-label="Filter graph" value={filter} onChange={(event) => setFilter(event.target.value)} /></label>
+        {indexed.tags.length > 0 && <label>Tag <select value={selectedTag} onChange={(event) => setTag(event.target.value)}>
+          <option value="">All tags</option>{indexed.tags.map((value) => <option key={value} value={value}>{value}</option>)}
+        </select></label>}
         <div className="file-toolbar">
-          <button type="button" className="fw-icon" aria-label="Zoom in" onClick={() => zoomBy(1.2)}><ZoomIn size={15} /></button>
-          <button type="button" className="fw-icon" aria-label="Zoom out" onClick={() => zoomBy(0.83)}><ZoomOut size={15} /></button>
-          <button type="button" className="fw-icon" aria-label="Fit graph" onClick={() => instance.current?.fit(undefined, 52)}><Focus size={15} /></button>
+          <button type="button" className="fw-icon" aria-label="Zoom in" disabled={!notes.length} onClick={() => zoomBy(1.2)}><ZoomIn size={15} /></button>
+          <button type="button" className="fw-icon" aria-label="Zoom out" disabled={!notes.length} onClick={() => zoomBy(0.83)}><ZoomOut size={15} /></button>
+          <button type="button" className="fw-icon" aria-label="Fit graph" disabled={!notes.length} onClick={() => instance.current?.fit(undefined, 52)}><Focus size={15} /></button>
         </div>
       </div>
-      {nodes.length ? <div className="note-graph-canvas" ref={container} aria-label="Graph of repository notes" /> : <p className="file-sidebar-note">No notes match the current graph filter.</p>}
+      {notes.length ? <div className="note-graph-canvas" ref={container} role="img" aria-label="Graph of repository notes" /> : <p role="status" className="file-sidebar-note">{indexed.byPath.size ? "No notes match the current graph filter." : "No Markdown notes in this checkout."}</p>}
       <ul className="note-graph-node-list" aria-label="Graph notes">
-        {nodes.map((path) => <li key={path}><button type="button" className="fw-btn" title={path} onClick={() => onOpen(path)}><CircleDot size={12} />{fileName(path)}</button></li>)}
+        {notes.map(({ path, title }) => <li key={path}><button type="button" className="fw-btn" title={path}
+          aria-label={projection ? `${title} (${path})` : undefined} aria-current={path === selected ? "true" : undefined}
+          onClick={() => onOpen(path)}><CircleDot size={12} aria-hidden="true" />{projection ? title : fileName(path)}</button></li>)}
       </ul>
     </div>
   );
