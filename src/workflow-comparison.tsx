@@ -6,6 +6,7 @@ import { ModelPicker, ModelRatingMeters } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import { sameModelSelection, useLiveModelOptions } from "@/live-models";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { ComparisonCandidateOutcome, comparisonOutcome, type CandidateOutcome } from "@/workflow-comparison-outcomes";
 
 type Candidate = {
   selection: ModelSelection;
@@ -64,6 +65,11 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
     enabled: Boolean(groupId && result?.candidates.some(({ dispatchId }) => dispatchId)),
     refetchInterval: () => result && active(result) ? 1200 : false,
   });
+  const outcomes = useQuery({
+    queryKey: ["comparison-outcomes", projectId, groupId, result?.candidates.map(({ runId, state }) => [runId, state])],
+    queryFn: () => invoke<CandidateOutcome[]>("model_comparison_outcomes", { projectId, groupId }),
+    enabled: Boolean(groupId && result?.candidates.some(({ state, runId }) => runId && terminal.has(state))),
+  });
 
   return <section className="pipeline-stack min-h-0 overflow-auto p-4" aria-label="Model comparisons">
     <h1 className="text-lg font-semibold">Compare models</h1>
@@ -93,11 +99,15 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
         {groups.data?.map((group) => <option value={group.id} key={group.id}>{group.prompt} · {group.commit.slice(0, 12)}</option>)}
       </select></label>
       <p className="break-all text-sm">Pinned Git commit <code>{result.commit}</code></p>
+      <h2 className="text-base font-medium">{comparisonOutcome(result.candidates.map(({ state }) => state))}</h2>
       {environment.error && <p role="alert">{String(environment.error)}</p>}
+      {outcomes.error && <p role="alert">{String(outcomes.error)}</p>}
       <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3" aria-label="Comparison results">
         {result.candidates.map((candidate) => <li key={candidate.jobId} className="pipeline-box pipeline-stack">
           <header><h2>{candidate.selection.modelId}</h2><small>{candidate.selection.provider}</small></header>
           <p role="status">{candidate.state.replaceAll("_", " ")}</p>
+          <ComparisonCandidateOutcome outcome={outcomes.data?.find((result) => result.jobId === candidate.jobId && result.runId === candidate.runId)}
+            succeeded={candidate.state === "succeeded"} />
           <ComparisonEnvironment environment={environment.data?.find((entry) => entry.jobId === candidate.jobId && entry.dispatchId === candidate.dispatchId)} />
           {candidate.runId && candidate.conversationId && <Button type="button" variant="outline"
             onClick={() => openActivity(candidate.runId!, candidate.conversationId!)}>Open execution</Button>}

@@ -1,10 +1,18 @@
 use super::*;
 
-use crate::jobs::{AdmissionEnvironment, QueueSettings};
+use crate::{
+    jobs::{AdmissionEnvironment, FailureCause, FailureObservation, FailurePhase, QueueSettings},
+    repository::ProjectCheckout,
+};
 
-#[tokio::test]
-async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit() -> Result<()> {
-    let (_directory, store, chat, scope) = setup().await?;
+async fn comparison_repository() -> Result<(
+    tempfile::TempDir,
+    Store,
+    ProjectCheckout,
+    SessionScope,
+    String,
+)> {
+    let (directory, store, _, scope) = setup().await?;
     std::fs::write(&scope.executable, b"Fixture executable identity")?;
     let original = scope.checkout.join("review.txt");
     std::fs::write(&original, "Committed comparison input")?;
@@ -38,6 +46,12 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
     let commit = crate::repository::base_commit(&scope.checkout)?.unwrap();
     std::fs::write(&original, "Unsaved source edit")?;
     let repo = crate::repository::register(&store, scope.checkout.clone()).await?;
+    Ok((directory, store, repo, scope, commit))
+}
+
+#[tokio::test]
+async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit() -> Result<()> {
+    let (_directory, store, repo, scope, commit) = comparison_repository().await?;
     let comparison_folder = tempfile::tempdir()?;
     let prompt = "Review the tracked comparison input.";
     let mut second = scope.clone();
@@ -48,7 +62,7 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
         store
             .start_model_comparison(
                 repo.project_id.clone(),
-                chat.checkout_id.clone(),
+                repo.checkout_id.clone(),
                 commit.clone(),
                 prompt.into(),
                 vec![scope.clone(), writer],
@@ -66,7 +80,7 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
     let comparison = store
         .start_model_comparison(
             repo.project_id.clone(),
-            chat.checkout_id.clone(),
+            repo.checkout_id.clone(),
             commit.clone(),
             prompt.into(),
             vec![scope.clone(), second],
@@ -167,7 +181,10 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
     }
     assert_eq!(paths[0], paths[1]);
     assert_ne!(run_ids[0], run_ids[1]);
-    assert_eq!(std::fs::read_to_string(original)?, "Unsaved source edit");
+    assert_eq!(
+        std::fs::read_to_string(scope.checkout.join("review.txt"))?,
+        "Unsaved source edit"
+    );
     let database = scope.checkout.join("store.sqlite");
     drop(store);
     let reopened = Store::open(database)?;
@@ -216,5 +233,112 @@ async fn comparison_runs_use_one_unregistered_checkout_at_the_pinned_git_commit(
             .unwrap()
             .is_empty()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn comparison_preserves_output_order_and_success_after_another_candidate_times_out()
+-> Result<()> {
+    let (_directory, store, repo, scope, commit) = comparison_repository().await?;
+    let storage = tempfile::tempdir()?;
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: false,
+            capacity: 2,
+        })
+        .await?;
+    let profiles = ["first", "second", "third"]
+        .into_iter()
+        .map(|model| SessionScope {
+            model: Some(model.into()),
+            ..scope.clone()
+        })
+        .collect();
+    let group = store
+        .start_model_comparison(
+            repo.project_id.clone(),
+            repo.checkout_id,
+            commit,
+            "Review the pinned input".into(),
+            profiles,
+            storage.path().to_path_buf(),
+        )
+        .await?;
+    let environment = AdmissionEnvironment {
+        runner: scope.runner.clone(),
+        bridge_available: false,
+    };
+    let first = store.claim_next_job(environment.clone()).await?.unwrap();
+    let second = store.claim_next_job(environment.clone()).await?.unwrap();
+    assert!(store.claim_next_job(environment.clone()).await?.is_none());
+    let first_run = first.run.id;
+    let second_run = second.run.id.clone();
+    let execute = |plan: AttemptPlan| {
+        let runner = Arc::new(FixtureRunner(WireLog {
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            conversation: plan.conversation_id.clone(),
+            frames: Arc::default(),
+        }));
+        start_managed_turn(store.clone(), runner, plan, None)
+    };
+    assert_eq!(execute(second).wait().await?, RunStatus::Succeeded);
+    let in_progress = store
+        .model_comparisons(repo.project_id.clone())
+        .await?
+        .remove(0);
+    assert_eq!(
+        in_progress
+            .candidates
+            .iter()
+            .map(|candidate| candidate.state.as_str())
+            .collect::<Vec<_>>(),
+        ["queued", "succeeded", "queued"]
+    );
+    store
+        .finish_observed_agent_attempt(
+            first_run.clone(),
+            RunStatus::Failed,
+            None,
+            Some(FailureObservation {
+                phase: FailurePhase::Startup,
+                cause: Some(FailureCause::StartupTimeout),
+                process: None,
+            }),
+            true,
+        )
+        .await?;
+    let third = store.claim_next_job(environment).await?.unwrap();
+    let third_run = third.run.id.clone();
+    assert_eq!(execute(third).wait().await?, RunStatus::Succeeded);
+    let result = store
+        .model_comparisons(repo.project_id.clone())
+        .await?
+        .remove(0);
+    assert_eq!(
+        result
+            .candidates
+            .iter()
+            .map(|candidate| candidate.state.as_str())
+            .collect::<Vec<_>>(),
+        ["failed", "succeeded", "succeeded"]
+    );
+    let outcomes = serde_json::to_value(
+        store
+            .model_comparison_outcomes(repo.project_id, group.id)
+            .await?,
+    )?;
+    for (index, run) in [first_run, second_run, third_run].into_iter().enumerate() {
+        assert_eq!(outcomes[index]["runId"], run);
+        assert_eq!(outcomes[index]["jobId"], result.candidates[index].job_id);
+    }
+    assert_eq!(outcomes[0]["failure"]["cause"], "startup_timeout");
+    assert!(outcomes[0]["response"].is_null());
+    for outcome in [&outcomes[1], &outcomes[2]] {
+        assert_eq!(outcome["response"], "Fixture answer");
+        assert_eq!(outcome["inputTokens"], 5);
+        assert_eq!(outcome["outputTokens"], 3);
+        assert!(outcome["durationSeconds"].is_i64());
+    }
     Ok(())
 }

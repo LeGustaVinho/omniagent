@@ -6,6 +6,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { WorkflowComparisons } from "@/workflow-comparison";
+import { comparisonOutcome } from "@/workflow-comparison-outcomes";
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -87,4 +88,34 @@ it("shows each dispatch's observed instruction reads and tool use alongside the 
   expect(within(rows[1]!).getByText("expected")).toBeTruthy();
   expect(within(rows[1]!).getByText("Tools used · Search")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("model_comparison_environments", { projectId: exampleCheckout.projectId, groupId: "comparison" });
+});
+
+it("keeps the original successful response visible next to a timed-out candidate", async () => {
+  const measurements = {
+    reportedModel: "codex-reported", inputTokens: 10, outputTokens: 7, cachedInputTokens: 2,
+    reasoningTokens: 5, durationSeconds: 12, reasoning: [], failure: null, response: null,
+  };
+  vi.mocked(invoke).mockImplementation(async (name) => {
+    if (name === "conversation_models") return [];
+    if (name === "comparison_source_commit") return commit;
+    if (name === "model_comparisons") return [{ id: "comparison", commit, tree: "tree", prompt: "Review", candidates:
+      profiles.map((selection, index) => ({ selection, jobId: `job-${index}`, runId: `run-${index}`, state: index ? "succeeded" : "failed" })) }];
+    if (name === "model_comparison_outcomes") return [
+      { ...measurements, jobId: "job-1", runId: "run-1", response: "Original model answer", reasoning: [{ text: "Reported reasoning", summary: true }] },
+      { ...measurements, jobId: "job-0", runId: "run-0", failure: { cause: "startup_timeout", phase: "startup" } },
+    ];
+    throw Error(`Unexpected IPC ${name}`);
+  });
+  mount();
+  expect(await screen.findByRole("heading", { name: "Partial result" })).toBeTruthy();
+  const rows = within(screen.getByRole("list", { name: "Comparison results" })).getAllByRole("listitem");
+  expect(await within(rows[0]!).findByText(/startup timeout/)).toBeTruthy();
+  expect(within(rows[0]!).queryByText("Original model answer")).toBeNull();
+  expect(await within(rows[1]!).findByText("Original model answer")).toBeTruthy();
+  expect(within(rows[1]!).getByText("12 s")).toBeTruthy();
+  expect(within(rows[1]!).getByText("codex-reported")).toBeTruthy();
+  expect(within(rows[1]!).getByText("Output tokens").nextElementSibling?.textContent).toBe("7");
+  await userEvent.setup().click(within(rows[1]!).getByText("Available reasoning"));
+  expect(within(rows[1]!).getByText("Reported reasoning")).toBeTruthy();
+  expect(comparisonOutcome(["failed", "interrupted"])).toBe("Comparison failed");
 });

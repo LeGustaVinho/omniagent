@@ -3,7 +3,7 @@ use omniagent::{
     model_catalog::ModelSelection,
     providers::SessionMode,
     store::Store,
-    workflows::comparison::{ComparisonEnvironment, ModelComparison},
+    workflows::comparison::{ComparisonEnvironment, ComparisonOutcome, ModelComparison},
 };
 use tauri::{AppHandle, Manager, State};
 
@@ -37,6 +37,18 @@ pub async fn model_comparison_environments(
 ) -> Result<Vec<ComparisonEnvironment>, String> {
     store
         .model_comparison_environments(project_id, group_id)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn model_comparison_outcomes(
+    store: State<'_, Store>,
+    project_id: String,
+    group_id: String,
+) -> Result<Vec<ComparisonOutcome>, String> {
+    store
+        .model_comparison_outcomes(project_id, group_id)
         .await
         .map_err(report)
 }

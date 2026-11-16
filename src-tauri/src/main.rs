@@ -339,6 +339,7 @@ fn main() {
             workflow_ipc::comparison::model_comparisons,
             workflow_ipc::comparison::start_model_comparison,
             workflow_ipc::comparison::model_comparison_environments,
+            workflow_ipc::comparison::model_comparison_outcomes,
             workflow_ipc::role_templates::list_conversation_templates,
             workflow_ipc::role_templates::conversation_template_revision,
             workflow_ipc::role_templates::save_conversation_template,

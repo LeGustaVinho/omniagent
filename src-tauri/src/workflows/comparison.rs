@@ -19,7 +19,9 @@ use crate::{
 };
 
 mod evidence;
+mod outcomes;
 pub use evidence::ComparisonEnvironment;
+pub use outcomes::ComparisonOutcome;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
