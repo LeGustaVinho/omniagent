@@ -238,11 +238,13 @@ pub async fn set_project_subagent_policy(
 pub async fn conversation_subagent_quota(
     store: State<'_, Store>,
     conversation_id: String,
+    run_id: Option<String>,
 ) -> Result<ConversationSubagentQuota, String> {
-    store
-        .conversation_subagent_quota(conversation_id)
-        .await
-        .map_err(|error| error.to_string())
+    let result = match run_id {
+        Some(run) => store.conversation_run_subagent_quota(conversation_id, run).await,
+        None => store.conversation_subagent_quota(conversation_id).await,
+    };
+    result.map_err(|error| error.to_string())
 }
 
 #[tauri::command]

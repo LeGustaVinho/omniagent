@@ -446,7 +446,7 @@ function ConversationContent({ conversationId, title, visible }: PanelParams & {
         </button>}
         <ConversationHistoryControls conversationId={conversationId} history={history.data}
           disabled={live || isLiveRun(attempt) || send.isPending} />
-        <ConversationSubagentControls conversationId={conversationId} />
+        <ConversationSubagentControls conversationId={conversationId} runId={attempt?.runId} />
         </div>
       </header>
       <div className="conv-layout">

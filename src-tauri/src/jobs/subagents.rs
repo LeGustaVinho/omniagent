@@ -81,15 +81,39 @@ pub struct NativeSubagentCounts {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
 pub struct ConversationSubagentQuota {
+    pub conversation_id: String,
     pub project: ProjectSubagentPolicy,
     pub mode_override: Option<SubagentLimitMode>,
     pub requested: u32,
     pub authorized: u32,
     pub native_requested: u32,
     pub native_sessions: Vec<NativeSubagentSession>,
+    pub native_scope: Option<NativeSubagentScope>,
     pub configuration_pending: bool,
     pub managed: SubagentCounts,
     pub native: Vec<NativeSubagentCounts>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub enum NativeSubagentEnforcement {
+    Unbounded,
+    Pending,
+    Enforced,
+    StopUnconfirmed,
+    Ended,
+    Unconfirmed,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../src/bindings/")]
+pub struct NativeSubagentScope {
+    pub run_id: String,
+    pub provider: Provider,
+    pub allowance: Option<u32>,
+    pub enforcement: NativeSubagentEnforcement,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, TS)]
@@ -180,7 +204,73 @@ fn effective_quota(db: &Connection, conversation: &str) -> Result<EffectiveQuota
     })
 }
 
-fn quota_snapshot(db: &Connection, conversation: &str) -> Result<ConversationSubagentQuota> {
+fn native_quota_scope(
+    db: &Connection,
+    conversation: &str,
+    run: Option<&str>,
+) -> Result<Option<(String, NativeSubagentScope)>> {
+    let found = db
+        .query_row(
+            "SELECT coalesce(a.subagent_conversation_id, a.conversation_id), a.run_id,
+                json_quote(json_extract(s.scope, '$.provider')), s.native_subagent_limit, r.state,
+                live.run_id IS NOT NULL
+         FROM agent_attempts a JOIN agent_sessions s ON s.id = a.agent_session_id
+         LEFT JOIN active_agent_attempts live ON live.run_id = a.run_id
+         LEFT JOIN native_subagent_reservations r ON r.run_id = a.run_id
+         WHERE a.conversation_id = ?1
+           AND ((?2 IS NULL AND live.run_id IS NOT NULL) OR a.run_id = ?2)
+         ORDER BY a.ordinal DESC LIMIT 1",
+            params![conversation, run],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, bool>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    found
+        .map(|(owner, run_id, provider, allowance, state, live)| {
+            use NativeSubagentEnforcement::*;
+            let enforcement = match (live, state.as_deref(), allowance) {
+                (_, Some("needs_review"), _) => StopUnconfirmed,
+                (false, _, _) => Ended,
+                (true, Some("verified"), Some(_)) => Enforced,
+                (true, Some("reserved"), Some(_)) => Pending,
+                (true, _, None) => Unbounded,
+                (true, _, Some(_)) => Unconfirmed,
+            };
+            Ok((
+                owner,
+                NativeSubagentScope {
+                    run_id,
+                    provider: serde_json::from_str(&provider)?,
+                    allowance,
+                    enforcement,
+                },
+            ))
+        })
+        .transpose()
+}
+
+fn quota_snapshot(
+    db: &Connection,
+    conversation: &str,
+    run: Option<&str>,
+) -> Result<ConversationSubagentQuota> {
+    let native_scope = native_quota_scope(db, conversation, run)?;
+    let conversation = if run.is_some() {
+        &native_scope
+            .as_ref()
+            .context("The inspected attempt belongs to another conversation or is unavailable")?
+            .0
+    } else {
+        conversation
+    };
     let quota = effective_quota(db, conversation)?;
     let managed = db.query_row(
         "SELECT count(*) FILTER (WHERE state = 'active'), count(*) FILTER (WHERE state = 'queued'),
@@ -250,12 +340,14 @@ fn quota_snapshot(db: &Connection, conversation: &str) -> Result<ConversationSub
         }
     };
     Ok(ConversationSubagentQuota {
+        conversation_id: conversation.to_owned(),
         project: quota.project,
         mode_override: quota.mode_override,
         requested: quota.requested,
         authorized: quota.authorized(),
         native_requested: quota.native_requested,
         native_sessions,
+        native_scope: native_scope.map(|(_, scope)| scope),
         configuration_pending,
         managed,
         native,
@@ -294,7 +386,19 @@ impl Store {
     ) -> Result<ConversationSubagentQuota> {
         self.execute(move |db| {
             let tx = db.transaction()?;
-            quota_snapshot(&tx, &conversation)
+            quota_snapshot(&tx, &conversation, None)
+        })
+        .await
+    }
+
+    pub async fn conversation_run_subagent_quota(
+        &self,
+        conversation: String,
+        run: String,
+    ) -> Result<ConversationSubagentQuota> {
+        self.execute(move |db| {
+            let tx = db.transaction()?;
+            quota_snapshot(&tx, &conversation, Some(&run))
         })
         .await
     }
@@ -323,7 +427,7 @@ impl Store {
                       native_requested = coalesce(?4, conversation_subagent_quotas.native_requested)",
                  params![conversation, mode_override.map(SubagentLimitMode::key), requested, native_requested],
             )?;
-            let snapshot = quota_snapshot(&tx, &conversation)?;
+            let snapshot = quota_snapshot(&tx, &conversation, None)?;
             tx.commit()?;
             Ok(snapshot)
         }).await?;

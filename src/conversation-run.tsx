@@ -11,6 +11,7 @@ import { ConversationDeliveries, type ConversationInput } from "@/conversation-d
 import { ConversationInventory } from "@/conversation-inventory";
 import { ConversationProfile } from "@/conversation-profile";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
+import { ConversationSubagentQuotaPanel } from "@/subagent-quota";
 
 type EventData =
   | { type: "dispatch_submitted"; dispatch_id: string }
@@ -256,6 +257,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
         </>}
       </dl>
       {projection && <ConversationChildren delegation={projection.delegation} />}
+      <ConversationSubagentQuotaPanel conversationId={conversationId} runId={run.id} live={live} />
       <ConversationChecklistProgress projectId={run.projectId} runId={run.id} live={live} />
       {Boolean(projection?.auditGaps.length) && <section aria-label="Subagent audit gaps" className="grid gap-2">
         <h2 className="text-sm font-medium">Subagent audit gaps</h2>
