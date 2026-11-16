@@ -8,7 +8,7 @@ use crate::{
     protection,
     repository::{self, ManagedWorktree, RepositoryMarkdownRevision},
     store::Store,
-    tasks::insert_project_task,
+    tasks::{TaskPlacement, insert_project_work, pipeline_work_origin},
 };
 
 use super::{
@@ -223,7 +223,8 @@ impl Store {
                         insert_artifact(&tx, &project_id, run_id, node_id, port.into(), value)?
                     }
                     HostAction::CreateTask(title) => {
-                        let task = insert_project_task(&tx, project_id.clone(), title)?;
+                        let origin = pipeline_work_origin(&tx, &project_id, &run_id)?;
+                        let task = insert_project_work(&tx, project_id.clone(), title, TaskPlacement::Task { epic_id: None }, &origin)?;
                         insert_artifact(
                             &tx,
                             &project_id,

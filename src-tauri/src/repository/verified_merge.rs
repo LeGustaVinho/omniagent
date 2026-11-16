@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     protection,
     store::Store,
-    tasks::{delivery_merge_candidate, load_delivery_milestone_policy, record_verified_task_merge},
+    tasks::{WorkStateChanges, delivery_merge_candidate, load_delivery_milestone_policy, pipeline_work_origin, record_verified_task_merge},
 };
 
 use super::{
@@ -933,9 +933,12 @@ fn settle_merge<'a>(
         verified_at,
         source,
     };
+    let origin = pipeline_work_origin(db, &evidence.project_id, &evidence.workflow_run_id)?;
+    let states = WorkStateChanges::capture(db, &evidence.project_id, &evidence.task_id)?;
     db.execute("INSERT INTO workflow_verified_merges(commit_evidence_id, id, project_id, task_id, workflow_run_id, verified_at, payload)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![evidence.commit_evidence_id, evidence.id, evidence.project_id, evidence.task_id, evidence.workflow_run_id, evidence.verified_at, encode(&evidence)?])?;
     record_verified_task_merge(db, &evidence)?;
+    states.publish(db, &evidence.project_id, &origin)?;
     Ok(DeliveryMergeOutcome::Verified { evidence })
 }
 

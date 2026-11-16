@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{dispatch::ContextSnapshot, protection, store::Store};
 
 use super::{ChecklistExecutionMode, ChecklistItem, load_checklist_items, revise_checklist_item};
+use crate::tasks::{AgileEventOrigin, agile_events::agent_work_origin, pipeline_work_origin};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,8 +140,38 @@ impl Store {
                 &current,
                 current.body.clone(),
                 checked,
+                &AgileEventOrigin::Operator,
             )?;
             record_operator_check_change(&tx, &project, &task, &current, &revised)?;
+            tx.commit()?;
+            Ok(ChecklistProgressReceipt::from(&revised))
+        })
+        .await
+    }
+
+    pub async fn set_pipeline_checklist_item_checked(
+        &self,
+        project: String,
+        pipeline_run: String,
+        task: String,
+        item: String,
+        expected_revision: i64,
+        checked: bool,
+    ) -> Result<ChecklistProgressReceipt> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let origin = pipeline_work_origin(&tx, &project, &pipeline_run)?;
+            let current =
+                item_at_expected_revision(&tx, &project, &task, &item, expected_revision)?;
+            let revised = revise_checklist_item(
+                &tx,
+                &project,
+                &task,
+                &current,
+                current.body.clone(),
+                checked,
+                &origin,
+            )?;
             tx.commit()?;
             Ok(ChecklistProgressReceipt::from(&revised))
         })
@@ -289,6 +320,7 @@ impl Store {
                 &request.item_id,
                 request.expected_revision,
             )?;
+            let origin = agent_work_origin(&tx, &scope.project_id, &run)?;
             let revised = revise_checklist_item(
                 &tx,
                 &scope.project_id,
@@ -296,6 +328,7 @@ impl Store {
                 &current,
                 current.body.clone(),
                 request.checked,
+                &origin,
             )?;
             record_progress(
                 &tx,

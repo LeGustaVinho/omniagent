@@ -15,7 +15,10 @@ use crate::{
 };
 
 use self::milestone::{DeliveryCompletionMilestone, PendingTaskDeliveryMerge, pending_merge};
-use super::{TaskWorkflowState, activity::load_task_details, load_project_task};
+use super::{
+    AgileEventOrigin, TaskWorkflowState, WorkStateChanges, activity::load_task_details,
+    load_project_task,
+};
 
 pub(crate) mod milestone;
 #[cfg(test)]
@@ -149,7 +152,9 @@ impl Store {
     ) -> Result<TaskDelivery> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let states = WorkStateChanges::capture(&tx, &project, &task)?;
             let receipt = complete_manual_delivery(&tx, &project, &task, note)?;
+            states.publish(&tx, &project, &AgileEventOrigin::Operator)?;
             tx.commit()?;
             Ok(receipt)
         })
@@ -159,7 +164,9 @@ impl Store {
     pub async fn reopen_task_delivery(&self, project: String, task: String) -> Result<()> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let states = WorkStateChanges::capture(&tx, &project, &task)?;
             reopen_delivery(&tx, &project, &task)?;
+            states.publish(&tx, &project, &AgileEventOrigin::Operator)?;
             tx.commit()?;
             Ok(())
         })
@@ -169,7 +176,9 @@ impl Store {
     pub async fn cancel_task_delivery(&self, project: String, task: String) -> Result<()> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let states = WorkStateChanges::capture(&tx, &project, &task)?;
             cancel_delivery(&tx, &project, &task)?;
+            states.publish(&tx, &project, &AgileEventOrigin::Operator)?;
             tx.commit()?;
             Ok(())
         })

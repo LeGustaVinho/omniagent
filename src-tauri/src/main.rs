@@ -280,6 +280,7 @@ fn main() {
             task_delivery_ipc::cancel_task_delivery,
             task_delivery_ipc::project_work_hierarchy,
             agile_runtime::transition_project_work,
+            agile_runtime::project_work_events,
             project_description_runtime::project_description_editor,
             project_description_runtime::save_project_description_draft,
             project_description_runtime::discard_project_description_draft,

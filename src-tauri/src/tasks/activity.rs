@@ -11,7 +11,10 @@ use crate::{
     store::Store,
 };
 
-use super::{ChecklistExecutionMode, delivery::load_delivery_state, load_project_task};
+use super::{
+    AgileEventOrigin, ChecklistExecutionMode, WorkStateChanges, delivery::load_delivery_state,
+    load_project_task,
+};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -191,6 +194,7 @@ impl Store {
         let encrypted = protection::protect(&serde_json::to_vec(&details_payload)?)?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let states = WorkStateChanges::capture(&tx, &project, &task)?;
             let effective = load_delivery_state(&tx, &project, &task)?.state;
             let terminal = |state| matches!(state, TaskWorkflowState::Completed | TaskWorkflowState::Cancelled);
             let workflow_state = if terminal(effective) || terminal(details.workflow_state) {
@@ -231,6 +235,7 @@ impl Store {
                 |row| row.get(0),
             )?;
             ensure!(!cycle, "the prerequisites contain a cycle");
+            states.publish(&tx, &project, &AgileEventOrigin::Operator)?;
             tx.commit()?;
             Ok(())
         }).await

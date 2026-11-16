@@ -1,11 +1,12 @@
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::store::Store;
 
 mod activity;
+mod agile_events;
 mod agile_transition;
 mod checklists;
 mod delivery;
@@ -14,6 +15,10 @@ pub(crate) use activity::bind_task_run_scope;
 pub use activity::{
     PlannedAssignment, TaskDetails, TaskRun, TaskRunRole, TaskRunScope, TaskWorkflowState,
 };
+pub use agile_events::{
+    AgileEventData, AgileEventOrigin, AgilePipelineLink, AgilePipelineOrigin, ProjectWorkEvent,
+};
+pub(crate) use agile_events::{WorkStateChanges, pipeline_work_origin};
 pub(crate) use checklists::bind_checklist_job_mode;
 pub(crate) use checklists::progress::ChecklistProgressRequest;
 pub use checklists::progress::{
@@ -53,7 +58,7 @@ pub struct ProjectEpic {
     pub title: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum TaskPlacement {
     Task { epic_id: Option<String> },
@@ -100,7 +105,7 @@ impl Store {
         project_id: String,
         title: String,
     ) -> Result<ProjectTask> {
-        self.execute(move |db| insert_project_task(db, project_id, title))
+        self.create_project_work(project_id, title, TaskPlacement::Task { epic_id: None })
             .await
     }
 
@@ -131,16 +136,14 @@ impl Store {
         epic: String,
         title: String,
     ) -> Result<ProjectTask> {
-        self.execute(move |db| {
-            let tx = db.transaction()?;
-            let task = insert_project_task(&tx, project, title)?;
-            tx.execute(
-                "INSERT INTO project_task_memberships(project_id, task_id, epic_id) VALUES (?1, ?2, ?3)",
-                params![task.project_id, task.id, epic],
-            ).context("epic must belong to the same project")?;
-            tx.commit()?;
-            Ok(task)
-        }).await
+        self.create_project_work(
+            project,
+            title,
+            TaskPlacement::Task {
+                epic_id: Some(epic),
+            },
+        )
+        .await
     }
 
     pub async fn create_project_subtask(
@@ -149,15 +152,45 @@ impl Store {
         parent_task_id: String,
         title: String,
     ) -> Result<ProjectTask> {
+        self.create_project_work(project_id, title, TaskPlacement::Subtask { parent_task_id })
+            .await
+    }
+
+    pub async fn create_project_work(
+        &self,
+        project: String,
+        title: String,
+        placement: TaskPlacement,
+    ) -> Result<ProjectTask> {
+        self.create_work(project, title, placement, None).await
+    }
+
+    pub async fn create_pipeline_work(
+        &self,
+        project: String,
+        pipeline_run: String,
+        title: String,
+        placement: TaskPlacement,
+    ) -> Result<ProjectTask> {
+        self.create_work(project, title, placement, Some(pipeline_run))
+            .await
+    }
+
+    async fn create_work(
+        &self,
+        project: String,
+        title: String,
+        placement: TaskPlacement,
+        pipeline_run: Option<String>,
+    ) -> Result<ProjectTask> {
         self.execute(move |db| {
-            let tx = db.transaction()?;
-            let task = insert_project_task(&tx, project_id, title)?;
-            tx.execute(
-                "INSERT INTO project_task_memberships(project_id, task_id, parent_task_id)
-                 VALUES (?1, ?2, ?3)",
-                params![task.project_id, task.id, parent_task_id],
-            )
-            .context("sub-task requires a task parent in the same project")?;
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let origin = pipeline_run
+                .as_deref()
+                .map(|run| pipeline_work_origin(&tx, &project, run))
+                .transpose()?
+                .unwrap_or(AgileEventOrigin::Operator);
+            let task = insert_project_work(&tx, project, title, placement, &origin)?;
             tx.commit()?;
             Ok(task)
         })
@@ -261,10 +294,12 @@ impl Store {
     }
 }
 
-pub(crate) fn insert_project_task(
+pub(crate) fn insert_project_work(
     db: &Connection,
     project_id: String,
     title: String,
+    placement: TaskPlacement,
+    origin: &AgileEventOrigin,
 ) -> Result<ProjectTask> {
     ensure!(!title.trim().is_empty(), "task title is empty");
     let task = ProjectTask {
@@ -272,9 +307,44 @@ pub(crate) fn insert_project_task(
         project_id,
         title,
     };
+    let existing = match &placement {
+        TaskPlacement::Subtask { parent_task_id } => Some(WorkStateChanges::capture(
+            db,
+            &task.project_id,
+            parent_task_id,
+        )?),
+        TaskPlacement::Task { .. } => None,
+    };
     db.execute(
         "INSERT INTO project_tasks(project_id, id, title) VALUES (?1, ?2, ?3)",
         params![task.project_id, task.id, task.title],
     )?;
+    match &placement {
+        TaskPlacement::Task {
+            epic_id: Some(epic_id),
+        } => {
+            db.execute(
+                "INSERT INTO project_task_memberships(project_id, task_id, epic_id) VALUES (?1, ?2, ?3)",
+                params![task.project_id, task.id, epic_id],
+            ).context("epic must belong to the same project")?;
+        }
+        TaskPlacement::Subtask { parent_task_id } => {
+            db.execute(
+                "INSERT INTO project_task_memberships(project_id, task_id, parent_task_id) VALUES (?1, ?2, ?3)",
+                params![task.project_id, task.id, parent_task_id],
+            ).context("sub-task requires a task parent in the same project")?;
+        }
+        TaskPlacement::Task { epic_id: None } => {}
+    }
+    agile_events::publish_event(
+        db,
+        &task.project_id,
+        &task.id,
+        AgileEventData::Created { placement },
+        origin,
+    )?;
+    if let Some(existing) = existing {
+        existing.publish(db, &task.project_id, origin)?;
+    }
     Ok(task)
 }

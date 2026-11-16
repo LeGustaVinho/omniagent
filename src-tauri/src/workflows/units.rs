@@ -239,6 +239,8 @@ pub(crate) fn bind_delivery_commit(
             && active.checkout_id == unit.checkout_id,
         "logical unit delivery scope changed"
     );
+    let origin = crate::tasks::pipeline_work_origin(db, &unit.project_id, &unit.workflow_run_id)?;
+    let states = crate::tasks::WorkStateChanges::capture(db, &unit.project_id, &unit.task_id)?;
     let changed = db.execute(
         "UPDATE workflow_delivery_units SET commit_evidence_id = ?2 WHERE unit_id = ?1 AND (commit_evidence_id IS NULL OR commit_evidence_id = ?2)",
         params![unit.unit.id, evidence_id],
@@ -257,5 +259,6 @@ pub(crate) fn bind_delivery_commit(
             &unit.plan_revision,
         )?;
     }
+    states.publish(db, &unit.project_id, &origin)?;
     Ok(())
 }

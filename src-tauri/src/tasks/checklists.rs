@@ -3,6 +3,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::{AgileEventData, AgileEventOrigin, WorkStateChanges, agile_events::publish_event};
 use crate::{protection, store::Store};
 
 pub(super) mod progress;
@@ -194,7 +195,15 @@ impl Store {
                 &item,
                 expected_revision,
             )?;
-            let revised = revise_checklist_item(&tx, &project, &task, &current, body, checked)?;
+            let revised = revise_checklist_item(
+                &tx,
+                &project,
+                &task,
+                &current,
+                body,
+                checked,
+                &AgileEventOrigin::Operator,
+            )?;
             progress::record_operator_check_change(&tx, &project, &task, &current, &revised)?;
             tx.commit()?;
             Ok(revised)
@@ -223,6 +232,7 @@ fn revise_checklist_item(
     current: &ChecklistItem,
     body: String,
     checked: bool,
+    origin: &AgileEventOrigin,
 ) -> Result<ChecklistItem> {
     if current.body == body && current.checked == checked {
         return Ok(current.clone());
@@ -231,12 +241,25 @@ fn revise_checklist_item(
         .revision
         .checked_add(1)
         .context("checklist item revisions exhausted")?;
+    let states = (current.checked != checked)
+        .then(|| WorkStateChanges::capture(db, project, task))
+        .transpose()?;
     let encrypted = protection::protect(body.as_bytes())?;
     db.execute(
         "INSERT INTO project_checklist_item_revisions
          (project_id, task_id, item_id, revision, body, checked) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![project, task, current.id, revision, encrypted, checked],
     )?;
+    if let Some(states) = states {
+        let item_id = current.id.clone();
+        let event = if checked {
+            AgileEventData::ChecklistChecked { item_id, revision }
+        } else {
+            AgileEventData::ChecklistReopened { item_id, revision }
+        };
+        publish_event(db, project, task, event, origin)?;
+        states.publish(db, project, origin)?;
+    }
     Ok(ChecklistItem {
         revision,
         body,
