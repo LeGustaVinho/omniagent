@@ -1,6 +1,7 @@
 use omniagent::{
     conversations::compaction::{CompactionProfile, CompactionSettings, CompactionStatus},
     diagnostics,
+    jobs::JobScheduler,
     model_catalog::ModelSelection,
     providers::SessionMode,
     store::Store,
@@ -86,6 +87,48 @@ pub async fn request_conversation_compaction(
                 planning,
                 pending_text,
                 automatic,
+            )
+            .await
+    }
+    .await
+    .map_err(report)
+}
+
+#[tauri::command]
+pub async fn request_native_conversation_compaction(
+    store: State<'_, Store>,
+    scheduler: State<'_, JobScheduler>,
+    conversation_id: String,
+    expected_context_id: String,
+    selection: ModelSelection,
+    effort: Option<String>,
+    mode: SessionMode,
+    pending_text: String,
+) -> Result<CompactionStatus, String> {
+    async {
+        let checkout = store
+            .conversation(conversation_id.clone())
+            .await?
+            .checkout_id;
+        let scope =
+            selected_scope(&store, checkout, selection.clone(), effort.clone(), mode).await?;
+        scheduler
+            .run_native_compaction(
+                store.inner().clone(),
+                conversation_id.clone(),
+                expected_context_id,
+                scope,
+            )
+            .await?;
+        store
+            .conversation_compaction(
+                conversation_id,
+                Some(CompactionProfile {
+                    model: selection,
+                    effort,
+                    mode,
+                }),
+                pending_text,
             )
             .await
     }

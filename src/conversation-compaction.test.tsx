@@ -20,6 +20,7 @@ const selection: ModelSelection = { provider: "codex", profileId: "qualified-pro
 const settings = { automatic: true, thresholdPercent: 80 };
 const initial = {
   contextId, settings, eligible: true, providerCompactionObserved: true, activeSummary: null,
+  native: { eligible: true, reason: null, request: null },
   estimate: { historyTokens: 1800, pendingTokens: 30, availableTokens: 2000, projectedHistoryTokens: 800, overBudget: false, automaticNeeded: true },
   request: null,
 };
@@ -97,6 +98,43 @@ it("shows project settings and keeps an oversized draft when the summary fails",
   await waitFor(() => expect(threshold).toBe(70));
   await user.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText(/Shorten the draft, remove an attachment or reference/)).toBeTruthy();
+  expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" }).value).toBe(pendingText);
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("offers the native route independently and renders its provider boundary and usage", async () => {
+  let finish: (value: unknown) => void = () => { throw new Error("Compaction was not started"); };
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    switch (command) {
+      case "conversation_compaction_state": return initial;
+      case "request_native_conversation_compaction":
+        expect(args).toEqual({
+          conversationId, selection, effort: null, mode: "read_only", expectedContextId: contextId, pendingText,
+        });
+        return new Promise((resolve) => { finish = resolve; });
+      default: throw new Error(command);
+    }
+  });
+  const { user, send } = mount();
+  await user.click(screen.getByText("Compact context"));
+  const native = await screen.findByRole<HTMLButtonElement>("button", { name: "Compact Codex session" });
+  const managed = screen.getByRole<HTMLButtonElement>("button", { name: "Summarize with OmniAgent" });
+  expect(native.disabled).toBe(false);
+  expect(managed.disabled).toBe(false);
+  await user.click(native);
+  expect(await screen.findByText("Codex is compacting its session.")).toBeTruthy();
+  expect(managed.disabled).toBe(true);
+  finish({
+    ...initial, native: { ...initial.native, request: {
+      runId: "provider-run", sourceContextId: contextId, status: "succeeded", detail: null,
+      boundary: { turnId: "provider-turn", itemId: "provider-item" },
+      usage: { input: 123, output: 15, cachedInput: null, reasoningOutput: null },
+    } },
+  });
+  expect(await screen.findByText("Codex confirmed session compaction.")).toBeTruthy();
+  expect(screen.getByText("provider-turn")).toBeTruthy();
+  expect(screen.getByText("provider-item")).toBeTruthy();
+  expect(screen.getByText(/Provider usage.*123 input.*15 output/)).toBeTruthy();
   expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" }).value).toBe(pendingText);
   expect(send).not.toHaveBeenCalled();
 });

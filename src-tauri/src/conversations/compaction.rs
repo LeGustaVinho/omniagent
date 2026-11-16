@@ -18,6 +18,11 @@ use super::{
     context_entries, load_conversation, load_messages, reference_delivery,
 };
 
+mod native;
+
+pub(crate) use native::{NativeCompactionPlan, native_session_compacted};
+pub(super) use native::recover as recover_native_compactions;
+
 const RECENT_TURNS: usize = 2;
 const SUMMARY_MAX_BYTES: usize = 16 * 1024;
 
@@ -72,6 +77,7 @@ pub struct CompactionStatus {
     estimate: Option<CompactionEstimate>,
     eligible: bool,
     provider_compaction_observed: bool,
+    native: native::NativeStatus,
     active_summary: Option<ConversationArtifactRevision>,
     request: Option<CompactionRequest>,
 }
@@ -461,7 +467,7 @@ fn state(
         Some(overlay) => apply_projection(history, overlay),
         None => history,
     };
-    let snapshot = latest_observed_snapshot(db, conversation, profile_matches)?;
+    let snapshot = latest_observed_snapshot(db, conversation, &profile_matches)?;
     let assessment = snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.capabilities.as_ref());
@@ -514,6 +520,7 @@ fn state(
         })
     });
     Ok(CompactionStatus {
+        native: native::status(db, &chat, profile_matches)?,
         context_id: chat.context_id,
         settings,
         estimate,

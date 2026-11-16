@@ -3,11 +3,14 @@ use std::{io, path::Path, time::Duration};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::{
+    conversations::SessionScope,
     jobs::{DispatchRejection, RequiredCustomization},
     process::TerminalOutcome,
     repository::CheckoutLayout,
     runner::{LaunchRequest, Runner},
+    store::Store,
 };
+use tokio::runtime::Handle;
 
 use super::{
     super::{
@@ -21,8 +24,47 @@ use super::{
         },
         skills::SkillEntry,
     },
-    TurnExecution,
+    LaunchGate, TurnExecution,
 };
+
+pub(super) fn verify_desktop_profile(
+    app: &Handle,
+    store: &Store,
+    scope: &SessionScope,
+    runner: &dyn Runner,
+    gate: &LaunchGate,
+) -> Result<()> {
+    let configured = app.block_on(store.configured_executable(scope.provider))?;
+    let adapter = scope.provider.adapter();
+    let effective = adapter.discover(configured.executable.as_deref().map(Path::new))?;
+    ensure!(
+        effective == scope.executable,
+        "The configured CLI executable changed"
+    );
+    let neutral = tempfile::tempdir()?;
+    let cwd = dunce::canonicalize(neutral.path())?;
+    let launch = |request: LaunchRequest<'_>| {
+        let _guard = app.block_on(gate.enter()).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Interrupted, "The scheduler is exiting")
+        })?;
+        runner.launch(request)
+    };
+    let output = command_probe_with_limits(
+        launch,
+        &effective,
+        &cwd,
+        adapter.version_arguments(),
+        Duration::from_secs(5),
+        64 * 1024,
+    )?;
+    let version = published_version(scope.provider, &output.stdout)
+        .or_else(|| published_version(scope.provider, &output.stderr));
+    ensure!(
+        output.status == TerminalOutcome::Exited(0) && version.as_ref() == Some(&scope.cli_version),
+        "The configured CLI build changed or could not be verified"
+    );
+    verify_account_binding(scope, launch)
+}
 
 impl TurnExecution {
     pub(super) fn verify_effective_profile(&self, runner: &dyn Runner) -> Result<()> {
@@ -44,39 +86,7 @@ impl TurnExecution {
         else {
             return Ok(());
         };
-        let configured = self
-            .app
-            .block_on(self.store.configured_executable(scope.provider))?;
-        let adapter = scope.provider.adapter();
-        let effective = adapter.discover(configured.executable.as_deref().map(Path::new))?;
-        ensure!(
-            effective == scope.executable,
-            "The configured CLI executable changed"
-        );
-        let neutral = tempfile::tempdir()?;
-        let cwd = dunce::canonicalize(neutral.path())?;
-        let launch = |request: LaunchRequest<'_>| {
-            let _guard = self.app.block_on(gate.enter()).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Interrupted, "The scheduler is exiting")
-            })?;
-            runner.launch(request)
-        };
-        let output = command_probe_with_limits(
-            launch,
-            &effective,
-            &cwd,
-            adapter.version_arguments(),
-            Duration::from_secs(5),
-            64 * 1024,
-        )?;
-        let version = published_version(scope.provider, &output.stdout)
-            .or_else(|| published_version(scope.provider, &output.stderr));
-        ensure!(
-            output.status == TerminalOutcome::Exited(0)
-                && version.as_ref() == Some(&scope.cli_version),
-            "The configured CLI build changed or could not be verified"
-        );
-        verify_account_binding(scope, launch)
+        verify_desktop_profile(&self.app, &self.store, scope, runner, gate)
     }
 
     pub(super) fn reject_dispatch(&self, rejection: DispatchRejection) -> Result<()> {

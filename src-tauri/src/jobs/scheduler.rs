@@ -7,13 +7,16 @@ use std::{
 
 use anyhow::{Context, Result};
 use tokio::{
-    sync::{Mutex as AsyncMutex, MutexGuard, watch},
+    sync::{Mutex as AsyncMutex, MutexGuard, oneshot, watch},
     task::{JoinHandle, JoinSet},
 };
 
 use crate::{
+    conversations::SessionScope,
     diagnostics,
-    providers::runtime::{ManagedTurn, ManagedTurnControl, start_scheduled_turn},
+    providers::runtime::{
+        ManagedTurn, ManagedTurnControl, native_compaction, start_scheduled_turn,
+    },
     runner::Runner,
     store::Store,
 };
@@ -30,6 +33,7 @@ pub struct JobScheduler {
     stop: watch::Sender<bool>,
     admission: LaunchGate,
     task: Arc<AsyncMutex<Option<JoinHandle<()>>>>,
+    native_compactions: Arc<AsyncMutex<JoinSet<()>>>,
 }
 
 #[derive(Clone)]
@@ -110,6 +114,7 @@ impl JobScheduler {
             stop,
             admission,
             task: Arc::new(AsyncMutex::new(Some(task))),
+            native_compactions: Arc::new(AsyncMutex::new(JoinSet::new())),
         }
     }
 
@@ -167,6 +172,54 @@ impl JobScheduler {
         true
     }
 
+    pub async fn run_native_compaction(
+        &self,
+        store: Store,
+        conversation: String,
+        expected_context: String,
+        scope: SessionScope,
+    ) -> Result<()> {
+        let boundary = self
+            .admission
+            .enter()
+            .await
+            .context("The scheduler is exiting")?;
+        let mut workers = self.native_compactions.lock().await;
+        while let Some(result) = workers.try_join_next() {
+            result.context("Native compaction worker failed")?;
+        }
+        let runner = self.runner.clone();
+        let gate = self.admission.clone();
+        let (settled, result) = oneshot::channel();
+        workers.spawn(async move {
+            let outcome = async {
+                let boundary = gate.enter().await.context("The scheduler is exiting")?;
+                let plan = store
+                    .reserve_native_compaction(conversation, expected_context, scope)
+                    .await?;
+                drop(boundary);
+                let app = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    native_compaction::execute(&app, &store, runner.as_ref(), &gate, plan)
+                })
+                .await
+                .context("Native compaction worker stopped unexpectedly")?
+            }
+            .await;
+            if let Err(Err(error)) = settled.send(outcome) {
+                eprintln!(
+                    "Could not settle native compaction: {}",
+                    diagnostics::preview(&error.to_string())
+                );
+            }
+        });
+        drop(workers);
+        drop(boundary);
+        result
+            .await
+            .context("Native compaction worker stopped unexpectedly")?
+    }
+
     pub async fn shutdown(&self) -> Result<()> {
         self.stop_admission().await;
         let mut task = self.task.lock().await;
@@ -174,6 +227,10 @@ impl JobScheduler {
             let result = worker.await;
             task.take();
             result.context("job scheduler task failed")?;
+        }
+        let mut native = self.native_compactions.lock().await;
+        while let Some(result) = native.join_next().await {
+            result.context("Native compaction worker failed")?;
         }
         Ok(())
     }

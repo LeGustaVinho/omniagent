@@ -691,6 +691,9 @@ pub trait CliSession: Send {
     fn compact_native(&mut self) -> anyhow::Result<AdapterUpdate> {
         anyhow::bail!("this adapter has no qualified manual native compaction route")
     }
+    fn pin_native_compaction_turn(&mut self, _turn_id: String) -> anyhow::Result<()> {
+        anyhow::bail!("this adapter cannot verify the source of native compaction")
+    }
     fn receive(&mut self, frame: OutputFrame) -> anyhow::Result<AdapterUpdate>;
     fn respond_approval(
         &mut self,

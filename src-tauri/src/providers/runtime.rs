@@ -52,6 +52,7 @@ use super::{
 };
 
 mod native_goals;
+pub(crate) mod native_compaction;
 mod requirements;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

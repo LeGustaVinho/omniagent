@@ -425,6 +425,7 @@ fn main() {
             conversation_compaction_ipc::conversation_compaction_state,
             conversation_compaction_ipc::set_conversation_compaction_settings,
             conversation_compaction_ipc::request_conversation_compaction,
+            conversation_compaction_ipc::request_native_conversation_compaction,
             history_deletion_ipc::conversation_history_deletion_diffs,
             history_deletion_ipc::preview_conversation_history_deletion,
             history_deletion_ipc::confirm_conversation_history_deletion,

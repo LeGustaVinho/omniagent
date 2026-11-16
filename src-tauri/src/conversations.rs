@@ -1065,6 +1065,7 @@ impl Store {
     pub async fn recover_agent_attempts_after_restart(&self) -> Result<()> {
         self.execute(|db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            compaction::recover_native_compactions(&tx)?;
             let active = {
                 let mut query = tx.prepare("SELECT run_id FROM active_agent_attempts")?;
                 query

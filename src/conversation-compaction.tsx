@@ -10,17 +10,30 @@ type CompactionEstimate = {
   historyTokens: number; pendingTokens: number; availableTokens: number;
   projectedHistoryTokens: number | null; overBudget: boolean; automaticNeeded: boolean;
 };
+type NativeCompactionRequest = {
+  runId: string;
+  sourceContextId: string;
+  status: "starting" | "running" | "succeeded" | "failed" | "interrupted";
+  detail: string | null;
+  boundary: { turnId: string; itemId: string | null } | null;
+  usage: { input: number | null; output: number | null; cachedInput: number | null; reasoningOutput: number | null } | null;
+};
 type CompactionStatus = {
   contextId: string;
   settings: CompactionSettings;
   estimate: CompactionEstimate | null;
   eligible: boolean;
   providerCompactionObserved: boolean;
+  native: { eligible: boolean; reason: string | null; request: NativeCompactionRequest | null };
   activeSummary: { id: string; sourceContextId: string; run: { runId: string; requestedModel: string | null; observedModel: string | null } } | null;
   request: { artifactId: string; sourceContextId: string; jobId: string; status: "queued" | "activated" | "failed" | "stale"; detail: string | null } | null;
 };
 
 const pollInterval = 1000;
+
+function nativeRunning(request: NativeCompactionRequest | null | undefined) {
+  return request?.status === "starting" || request?.status === "running";
+}
 
 export function useConversationCompaction({ conversationId, selection, effort, mode, pendingText, enabled }: {
   conversationId: string;
@@ -48,17 +61,28 @@ export function useConversationCompaction({ conversationId, selection, effort, m
     queryKey,
     queryFn: () => invoke<CompactionStatus>("conversation_compaction_state", { ...profile, pendingText }),
     enabled,
-    refetchInterval: ({ state }) => state.data?.request?.status === "queued" ? pollInterval : false,
+    refetchInterval: ({ state }) => state.data?.request?.status === "queued" || nativeRunning(state.data?.native?.request) ? pollInterval : false,
   });
+  async function updateStatus(value: CompactionStatus) {
+    await client.cancelQueries({ queryKey, exact: true });
+    client.setQueryData(queryKey, value);
+  }
   const start = useMutation({
+    mutationKey: ["conversation-compaction-managed", identity],
     mutationFn: ({ contextId, text, automatic }: { contextId: string; text: string; automatic: boolean }) =>
       invoke<CompactionStatus>("request_conversation_compaction", {
         ...profile, expectedContextId: contextId, pendingText: text, automatic,
       }),
-    onSuccess: async (value) => {
-      await client.cancelQueries({ queryKey, exact: true });
-      client.setQueryData(queryKey, value);
-    },
+    onSuccess: updateStatus,
+  });
+  const startNative = useMutation({
+    mutationKey: ["conversation-compaction-native", identity],
+    mutationFn: ({ contextId, text }: { contextId: string; text: string }) =>
+      invoke<CompactionStatus>("request_native_conversation_compaction", {
+        ...profile, expectedContextId: contextId, pendingText: text,
+      }),
+    onSuccess: updateStatus,
+    onError: () => client.invalidateQueries({ queryKey, exact: true }),
   });
   const save = useMutation({
     mutationFn: (settings: CompactionSettings) => invoke<CompactionSettings>("set_conversation_compaction_settings", { conversationId, ...settings }),
@@ -76,6 +100,10 @@ export function useConversationCompaction({ conversationId, selection, effort, m
     try {
       let observed = await invoke<CompactionStatus>("conversation_compaction_state", { ...profile, pendingText: text });
       if (!current()) return null;
+      if (nativeRunning(observed.native?.request)) {
+        setSendError("Wait for the Codex context compaction to finish before sending.");
+        return null;
+      }
       if (observed.contextId !== contextId &&
         (observed.request?.status !== "activated" || observed.request.sourceContextId !== contextId)) {
         setSendError("The conversation changed before sending. Review the latest history.");
@@ -112,7 +140,7 @@ export function useConversationCompaction({ conversationId, selection, effort, m
     }
   }
 
-  return { status, start, save, beforeSend, checkingSend, sendError, pendingText };
+  return { status, start, startNative, save, beforeSend, checkingSend, sendError, pendingText };
 }
 
 export function ConversationCompactionControl({ compaction, contextId, disabled }: {
@@ -120,10 +148,13 @@ export function ConversationCompactionControl({ compaction, contextId, disabled 
   contextId: string | undefined;
   disabled?: boolean;
 }) {
-  const { status, start, save, pendingText } = compaction;
+  const { status, start, startNative, save, pendingText } = compaction;
   const value = status.data;
-  const busy = start.isPending || value?.request?.status === "queued";
-  const error = start.error ?? status.error ?? save.error;
+  const managedBusy = start.isPending || value?.request?.status === "queued";
+  const native = value?.native;
+  const nativeBusy = startNative.isPending || nativeRunning(native?.request);
+  const busy = managedBusy || nativeBusy;
+  const error = start.error ?? startNative.error ?? status.error ?? save.error;
   return <>
     <details className="relative">
       <summary className="conv-quiet-button cursor-pointer">Compact context</summary>
@@ -141,16 +172,34 @@ export function ConversationCompactionControl({ compaction, contextId, disabled 
           <Threshold value={value.settings.thresholdPercent} disabled={save.isPending}
             onSave={(thresholdPercent) => save.mutate({ ...value.settings, thresholdPercent })} />
           {value.estimate ? <>
-            <p>Estimated history {value.estimate.historyTokens.toLocaleString()} tokens · Available dialogue {Math.max(0, value.estimate.availableTokens - value.estimate.pendingTokens).toLocaleString()}</p>
+            <p>Estimated OmniAgent history {value.estimate.historyTokens.toLocaleString()} tokens · Available dialogue {Math.max(0, value.estimate.availableTokens - value.estimate.pendingTokens).toLocaleString()}</p>
             {value.estimate.projectedHistoryTokens !== null && <p>Estimated after compaction {value.estimate.projectedHistoryTokens.toLocaleString()} tokens</p>}
-          </> : <p>No qualified dialogue budget is saved for this model. Manual compaction is available.</p>}
+          </> : <p>No qualified dialogue budget is saved for this model.</p>}
           {value.activeSummary && <p className="break-all">Active summary <code>{value.activeSummary.id}</code>
             {(value.activeSummary.run.observedModel ?? value.activeSummary.run.requestedModel) && <> · {value.activeSummary.run.observedModel ?? value.activeSummary.run.requestedModel}</>}
           </p>}
           {value.request?.detail && <p role="alert">{value.request.detail}</p>}
-          {busy && <p role="status">The read-only summary job is queued or running.</p>}
+          {managedBusy && <p role="status">The read-only summary job is queued or running.</p>}
           <Button type="button" variant="outline" disabled={disabled || busy || !contextId || !value.eligible}
-            onClick={() => { if (contextId) start.mutate({ contextId, text: pendingText, automatic: false }); }}>Compact now</Button>
+            onClick={() => { if (contextId) start.mutate({ contextId, text: pendingText, automatic: false }); }}>Summarize with OmniAgent</Button>
+          {native && <div className="grid gap-2 border-t border-border pt-2">
+            <p className="font-medium">Codex native compaction</p>
+            {nativeBusy && <p role="status">Codex is compacting its session.</p>}
+            {native.reason && !nativeBusy && <p>{native.reason}</p>}
+            {native.request?.detail && !nativeBusy && <p role="alert">{native.request.detail}</p>}
+            {native.request?.status === "succeeded" && !nativeBusy && <p role="status">Codex confirmed session compaction.</p>}
+            {native.request?.boundary && !nativeBusy && <p className="break-all">Provider turn <code>{native.request.boundary.turnId}</code>
+              {native.request.boundary.itemId && <> · Item <code>{native.request.boundary.itemId}</code></>}
+            </p>}
+            {native.request?.usage && !nativeBusy && <p>Provider usage · {[
+              native.request.usage.input === null ? "" : `${native.request.usage.input.toLocaleString()} input`,
+              native.request.usage.output === null ? "" : `${native.request.usage.output.toLocaleString()} output`,
+              native.request.usage.cachedInput === null ? "" : `${native.request.usage.cachedInput.toLocaleString()} cached`,
+              native.request.usage.reasoningOutput === null ? "" : `${native.request.usage.reasoningOutput.toLocaleString()} reasoning`,
+            ].filter(Boolean).join(" · ")}</p>}
+            <Button type="button" variant="outline" disabled={disabled || busy || !contextId || !native.eligible}
+              onClick={() => { if (contextId) startNative.mutate({ contextId, text: pendingText }); }}>Compact Codex session</Button>
+          </div>}
         </>}
       </section>
     </details>

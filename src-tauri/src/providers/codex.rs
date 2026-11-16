@@ -87,6 +87,8 @@ impl CliAdapter for CodexAdapter {
             pending_goal_control: None,
             native_goal_turns: None,
             active: None,
+            completed_compaction_turn: None,
+            native_compaction_source: None,
             pending_steer: None,
             pending_sample: None,
             sample_ids: HashSet::new(),
@@ -108,6 +110,7 @@ enum Request {
     Initialize,
     OpenSession,
     VerifyFork,
+    VerifyNativeCompaction,
     ReadConfiguration,
     ListSkills,
     ModelPage,
@@ -323,6 +326,8 @@ struct CodexSession {
     pending_goal_control: Option<PendingGoalControl>,
     native_goal_turns: Option<HashSet<String>>,
     active: Option<ActiveTurn>,
+    completed_compaction_turn: Option<String>,
+    native_compaction_source: Option<String>,
     pending_steer: Option<PendingSteer>,
     pending_sample: Option<SideInput>,
     sample_ids: HashSet<String>,
@@ -579,6 +584,16 @@ impl CodexSession {
                     });
                 }
                 self.session = Some(session);
+                if self.native_compaction_source.is_some() {
+                    return Ok(AdapterUpdate {
+                        outbound: vec![self.rpc.request(
+                            "thread/turns/list",
+                            json!({"threadId": id, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded"}),
+                            Request::VerifyNativeCompaction,
+                        )?],
+                        events: Vec::new(),
+                    });
+                }
                 let mut events = Vec::new();
                 if matches!(self.request.intent, SessionIntent::Resume { .. })
                     && let Some(turns) = result["thread"]["turns"].as_array()
@@ -615,6 +630,16 @@ impl CodexSession {
                 };
                 self.session = Some(session);
                 self.opened(vec![self.event(verification)])
+            }
+            Request::VerifyNativeCompaction => {
+                let source_turn = self.native_compaction_source.as_ref()
+                    .context("The compaction source was not selected")?;
+                ensure!(matches!(
+                    result["data"].as_array().map(Vec::as_slice),
+                    Some([last]) if last["id"].as_str() == Some(source_turn) && last["status"] == "completed"
+                ), "Codex no longer ends at the recorded app turn");
+                self.native_compaction_source = None;
+                self.opened(Vec::new())
             }
             Request::ReadConfiguration => {
                 let mut codex_instructions = None;
@@ -990,6 +1015,9 @@ impl CodexSession {
 
     fn finish_compaction(&mut self, outcome: TurnOutcome) -> Vec<ProviderEvent> {
         let finished = self.event(ProviderEventData::NativeCompactionFinished { outcome });
+        self.completed_compaction_turn = (outcome == TurnOutcome::Completed)
+            .then(|| finished.location.turn_id.clone())
+            .flatten();
         self.active = None;
         self.approvals.clear();
         self.questions.clear();
@@ -1055,7 +1083,14 @@ impl CodexSession {
                 }
             }
         }
-        if self.active.is_none() && method != "error" {
+        let completed_compaction_usage = method == "thread/tokenUsage/updated"
+            && self.completed_compaction_turn.as_deref().is_some_and(|turn| {
+                params["turnId"].as_str() == Some(turn)
+                    && self.session.as_ref().is_some_and(|session| {
+                        params["threadId"].as_str() == Some(&session.id)
+                    })
+            });
+        if self.active.is_none() && method != "error" && !completed_compaction_usage {
             return Ok(AdapterUpdate::default());
         }
         let thread = params["threadId"].as_str();
@@ -1064,6 +1099,13 @@ impl CodexSession {
             .as_ref()
             .is_some_and(|turn| turn.compaction.is_some());
         if is_compaction && thread.is_none() {
+            return Ok(AdapterUpdate::default());
+        }
+        if is_compaction && method == "thread/tokenUsage/updated"
+            && self.active.as_ref().and_then(|turn| turn.id.as_deref()).is_none_or(|turn| {
+                params["turnId"].as_str() != Some(turn)
+            })
+        {
             return Ok(AdapterUpdate::default());
         }
         if let Some(thread) = thread
@@ -1733,10 +1775,20 @@ impl CliSession for CodexSession {
         })
     }
 
+    fn pin_native_compaction_turn(&mut self, turn_id: String) -> Result<()> {
+        ensure!(
+            !self.handshake_started && matches!(self.request.intent, SessionIntent::Resume { .. })
+                && !turn_id.trim().is_empty(),
+            "Codex native compaction requires a recorded turn on a resumed session"
+        );
+        self.native_compaction_source = Some(turn_id);
+        Ok(())
+    }
+
     fn compact_native(&mut self) -> Result<AdapterUpdate> {
         ensure!(
-            self.active.is_none(),
-            "Codex already has a turn in progress"
+            self.active.is_none() && self.native_compaction_source.is_none(),
+            "Codex is busy or has not verified the requested compaction source"
         );
         let session = self
             .session
@@ -2618,6 +2670,96 @@ mod tests {
             data: ProviderEventData::NativeCompactionFinished { outcome: TurnOutcome::Failed },
             location
         }] if location.turn_id.as_deref() == Some("compact")));
+        Ok(())
+    }
+
+    #[test]
+    fn native_compaction_waits_for_the_exact_current_provider_turn() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        for (turn, status, accepted) in [
+            ("unrelated", "completed", false),
+            ("original", "inProgress", false),
+            ("original", "completed", true),
+        ] {
+            let mut session = CodexAdapter.create_session(SessionRequest {
+                checkout: checkout.path().to_owned(),
+                intent: SessionIntent::Resume { provider_session_id: "session".into() },
+                mode: SessionMode::ReadOnly,
+                model: Some("gpt-6-luna".into()),
+                effort: None,
+            })?;
+            session.pin_native_compaction_turn("original".into())?;
+            assert!(session.compact_native().is_err());
+            session.start()?;
+            inbound(&mut *session, json!({"id":1,"result":{"userAgent":"fixture"}}))?;
+            let resumed = inbound(&mut *session, json!({"id":2,"result":{
+                "thread":{"id":"session"}, "model":"gpt-6-luna", "cwd":checkout.path(),
+                "sandbox":{"type":"readOnly"}
+            }}))?;
+            assert!(resumed.events.is_empty());
+            let verify = outbound(&resumed, 0)?;
+            assert_eq!(verify["method"], "thread/turns/list");
+            assert_eq!(verify["params"]["threadId"], "session");
+            assert!(session.compact_native().is_err());
+            let verified = inbound(&mut *session, json!({
+                "id":verify["id"], "result":{"data":[{"id":turn,"status":status}]}
+            }));
+            if accepted {
+                assert!(matches!(verified?.events[0].data, ProviderEventData::SessionReady { .. }));
+                let compact = outbound(&session.compact_native()?, 0)?;
+                assert_eq!(compact["method"], "thread/compact/start");
+                assert_eq!(compact["params"]["threadId"], "session");
+            } else {
+                assert!(verified.is_err());
+                assert!(session.compact_native().is_err());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_compaction_keeps_late_usage_only_for_the_confirmed_boundary() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate(SessionMode::ReadOnly, SessionIntent::Start, checkout.path())?;
+        let compact = session.compact_native()?;
+        let request = outbound(&compact, 0)?;
+        let ack = inbound(&mut *session, json!({"id":request["id"],"result":{}}))?;
+        assert!(ack.events.is_empty());
+        let boundary = inbound(&mut *session, json!({
+            "method":"item/completed","params":{
+                "threadId":"session","turnId":"compact",
+                "item":{"id":"compacted-item","type":"contextCompaction"}
+            }
+        }))?;
+        assert!(matches!(boundary.events.as_slice(),
+            [ProviderEvent { data: ProviderEventData::Compacted, location }]
+                if location.item_id.as_deref() == Some("compacted-item")));
+        inbound(&mut *session, json!({
+            "method":"turn/completed","params":{
+                "threadId":"session","turn":{"id":"compact","status":"completed"}
+            }
+        }))?;
+        for (thread, turn, accepted) in [
+            ("other-session", "compact", false),
+            ("session", "other-turn", false),
+            ("session", "compact", true),
+        ] {
+            let usage = inbound(&mut *session, json!({
+                "method":"thread/tokenUsage/updated","params":{
+                    "threadId":thread,"turnId":turn,"tokenUsage":{
+                        "last":{"inputTokens":84,"outputTokens":3,"reasoningOutputTokens":2}
+                    }
+                }
+            }))?;
+            if accepted {
+                assert!(matches!(usage.events.as_slice(), [
+                    ProviderEvent { data: ProviderEventData::Usage { input: Some(84), output: Some(3), .. }, location },
+                    ProviderEvent { data: ProviderEventData::ReasoningUsage { tokens: 2 }, .. },
+                ] if location.turn_id.as_deref() == Some("compact")));
+            } else {
+                assert!(usage.events.is_empty());
+            }
+        }
         Ok(())
     }
 
