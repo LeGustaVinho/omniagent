@@ -4,6 +4,9 @@ import { Fragment, useState } from "react";
 import { DeliveryStatus } from "@/tasks-git-ui";
 import type { VerifiedMerge } from "@/delivery-merge-model";
 import { canMove, questionBlockerLabel, recordedMergeForCommit, statusLabel, workLabel, workflowStates, type AgileRow, type EvidenceTarget, type Item, type TaskQuestionBlocker, type WorkflowStatus } from "@/project-agile-model";
+import { queueBlockerReason } from "@/queue-model";
+import { activeParticipant, participantModel, participantProviderNames, participantStatusNames } from "@/task-participants";
+import type { WorkspaceProps } from "@/workbench-contract";
 
 type Views = {
   rows: AgileRow[];
@@ -12,6 +15,8 @@ type Views = {
   openWork: (id: string) => void;
   openEvidence: (evidence: EvidenceTarget) => void;
   openQuestion: (question: TaskQuestionBlocker) => void;
+  openActivity: WorkspaceProps["openActivity"];
+  openQueueJob?: WorkspaceProps["openQueueJob"];
 };
 
 function ChecklistProgress({ items }: { items: Item[] }) {
@@ -29,6 +34,36 @@ export function WorkBlockers({ row, openQuestion, openWork }: Pick<Views, "openQ
     {work?.waitingForCommit && <p>Waiting for commit</p>}
     {work?.waitingForMerge && <p>Waiting for merge</p>}
     {work?.pendingRepositoryChanges && !work.waitingForCommit && !work.waitingForMerge && <p>Unreviewed repository changes</p>}</>;
+}
+
+export function TaskJobLinks({ row, openQueueJob }: Pick<Views, "openQueueJob"> & { row: AgileRow }) {
+  if (!openQueueJob) return null;
+  return row.blockedJobs?.map(({ job, blockers }) => {
+    const approval = blockers.find(({ type }) => type === "approval");
+    const blocker = approval ?? blockers[0];
+    if (!blocker) return null;
+    const action = approval ? "Review job approval" : "Open job blocker";
+    return <p key={job.id} className="break-words">{queueBlockerReason(blocker)} <button type="button"
+      className="text-primary hover:underline" onClick={() => openQueueJob(job.id)}>{action}</button></p>;
+  });
+}
+
+function WorkParticipation({ row, openActivity, openWork }: Pick<Views, "openActivity" | "openWork"> & { row: AgileRow }) {
+  const working = row.attempts?.filter(({ status }) => activeParticipant(status)) ?? [];
+  const past = (row.attempts?.length ?? 0) - working.length;
+  return <>
+    {working.length > 0 && <section className="grid gap-1" aria-label={`Working now for ${row.title}`}>
+      <p className="font-medium">Working now</p>
+      {working.map((attempt) => <p key={attempt.runId} className="break-words">
+        <button type="button" className="text-left text-primary hover:underline" onClick={() => openActivity(attempt.runId, attempt.conversationId)}
+          title={`Open attempt ${attempt.ordinal} · ${attempt.profileId}`}>
+          {participantProviderNames[attempt.provider]} · {attempt.profileId} · {participantModel(attempt) ?? "Model unreported"}
+        </button> · {participantStatusNames[attempt.status]}
+      </p>)}
+    </section>}
+    {past > 0 && <button type="button" className="justify-self-start text-primary hover:underline"
+      aria-label={`Work history for ${row.title}`} onClick={() => openWork(row.id)}>Work history · {past}</button>}
+  </>;
 }
 
 const evidenceLabels = {
@@ -55,7 +90,7 @@ function EvidenceLink({ row, reference, merge, openEvidence }: {
   </button>;
 }
 
-function KanbanCard({ row, selected, busy, openWork, openEvidence, openQuestion }: Omit<Views, "rows"> & { row: AgileRow }) {
+function KanbanCard({ row, selected, busy, openWork, openEvidence, openQuestion, openActivity, openQueueJob }: Omit<Views, "rows"> & { row: AgileRow }) {
   const allowed = !busy && workflowStates.some(({ value }) => canMove(row, value));
   const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, isDragging } = useDraggable({ id: row.id, disabled: !allowed });
   return <article ref={setNodeRef} className="delivery-card relative" data-selected={selected === row.id} data-dragging={isDragging}
@@ -68,6 +103,8 @@ function KanbanCard({ row, selected, busy, openWork, openEvidence, openQuestion 
     <div className="mt-1.5 grid gap-1 text-xs text-muted-foreground">
       <ChecklistProgress items={row.checklist} />
       <WorkBlockers row={row} openWork={openWork} openQuestion={openQuestion} />
+      <TaskJobLinks row={row} openQueueJob={openQueueJob} />
+      <WorkParticipation row={row} openWork={openWork} openActivity={openActivity} />
       {row.commit && <div className="flex flex-wrap gap-x-2 gap-y-1">
         <EvidenceLink row={row} reference="branch" openEvidence={openEvidence} />
         <EvidenceLink row={row} reference="commit" openEvidence={openEvidence} />
@@ -101,7 +138,7 @@ export function ProjectKanban({ move, rows, ...views }: Views & { move: (row: Ag
   </DndContext>;
 }
 
-export function ProjectAgileTable({ rows, matches, selected, busy, openWork, openEvidence, openQuestion, check }: Views & {
+export function ProjectAgileTable({ rows, matches, selected, busy, openWork, openEvidence, openQuestion, openActivity, openQueueJob, check }: Views & {
   matches: ReadonlySet<string>;
   check: (taskId: string, item: Item, checked: boolean) => void;
 }) {
@@ -138,7 +175,11 @@ export function ProjectAgileTable({ rows, matches, selected, busy, openWork, ope
             </div>
           </td>
           <td>{row.status ? <DeliveryStatus>{statusLabel(row.status)}</DeliveryStatus> : <span>Loading state…</span>}
-            <div className="mt-1 grid gap-1 text-xs text-muted-foreground"><WorkBlockers row={row} openWork={openWork} openQuestion={openQuestion} /></div></td>
+            <div className="mt-1 grid gap-1 text-xs text-muted-foreground">
+              <WorkBlockers row={row} openWork={openWork} openQuestion={openQuestion} />
+              <TaskJobLinks row={row} openQueueJob={openQueueJob} />
+              <WorkParticipation row={row} openWork={openWork} openActivity={openActivity} />
+            </div></td>
           <td><ChecklistProgress items={items} /></td>
           <td><div className="grid gap-1">
             <EvidenceLink row={row} reference="branch" openEvidence={openEvidence} />

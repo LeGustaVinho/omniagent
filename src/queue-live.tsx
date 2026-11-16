@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { ArrowRight, ListTodo, Pause, Play, Plus, RefreshCw, X } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import type { Job } from "@/bindings/Job";
 import type { JobInspection } from "@/bindings/JobInspection";
 import type { ModelOption } from "@/bindings/ModelOption";
@@ -13,16 +13,10 @@ import type { SessionMode } from "@/bindings/SessionMode";
 import { JobFailurePanel } from "@/job-failure";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
-import { matchesQueueView, queueBlockerReason, queueJobState, queueViews, type QueueView } from "@/queue-model";
+import { matchesQueueView, projectQueueQuery, queueBlockerReason, queueJobState, queueViews, type QueueView } from "@/queue-model";
 import { QueuePolicy } from "@/queue-policy";
 import { DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
-import type { WorkspaceProps } from "@/workbench-contract";
-
-interface ProjectQueue {
-  settings: { paused: boolean; capacity: number };
-  active: number;
-  jobs: JobInspection[];
-}
+import type { QueueJobFocus, WorkspaceProps } from "@/workbench-contract";
 
 type QueueAction =
   | { type: "pause_queue"; paused: boolean }
@@ -272,25 +266,33 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
   );
 }
 
-export default function LiveQueue({ checkout, openActivity, openWorkspace, onClose, active = true }: WorkspaceProps & { onClose?: () => void; active?: boolean }) {
+export default function LiveQueue({ checkout, openActivity, openWorkspace, onClose, active = true, focusJob }: WorkspaceProps & {
+  onClose?: () => void;
+  active?: boolean;
+  focusJob?: QueueJobFocus;
+}) {
   const queryClient = useQueryClient();
   const [view, setView] = useState<QueueView>("All");
   const [selected, setSelected] = useState<string>();
   const [setup, setSetup] = useState<{ checkoutId: string; parent?: ParentAttempt }>();
   const showSetup = active && setup?.checkoutId === checkout.checkoutId;
   const query = useQuery({
-    queryKey: ["project-job-queue", checkout.projectId],
-    queryFn: () => invoke<ProjectQueue>("project_job_queue", { projectId: checkout.projectId }),
+    ...projectQueueQuery(checkout.projectId),
     enabled: active,
     refetchInterval: active ? 1000 : false,
     refetchOnWindowFocus: active,
   });
+  useEffect(() => {
+    if (focusJob?.projectId !== checkout.projectId) return;
+    setView("All");
+    setSelected(focusJob.jobId);
+  }, [checkout.projectId, focusJob]);
   const visible = query.data?.jobs.filter((inspection) => {
     const state = queueJobState(inspection);
     return matchesQueueView(state, view) && (view !== "Active" || !inspection.questionWait ||
       inspection.job.latestAttempt?.status === "waiting_for_input");
   }) ?? [];
-  const selectedJob = query.data?.jobs.find(({ job }) => job.id === selected);
+  const selectedJob = query.data?.jobs.find(({ job }) => job.id === selected && job.projectId === checkout.projectId);
   const settings = query.data?.settings;
   const control = useMutation({
     mutationFn: (action: QueueAction) => applyQueueAction(checkout.projectId, action),

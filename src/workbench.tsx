@@ -17,7 +17,7 @@ import { useRunSubscription } from "@/run-projection";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import {
   exampleCheckout, nextDeliveryStep, scenarios,
-  type DeliveryAction, type DeliveryStep, type QuestionFocus, type ScenarioId, type SimulationSession, type WorkspaceId, type WorkspaceProps,
+  type DeliveryAction, type DeliveryStep, type QuestionFocus, type QueueJobFocus, type ScenarioId, type SimulationSession, type WorkspaceId, type WorkspaceProps,
 } from "@/workbench-contract";
 
 const ConversationsPreview = lazy(() => import("@/conversations-preview"));
@@ -110,6 +110,7 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
   const [realSide, setRealSide] = useState<SidePane | null>(null);
   const [previewSide, setPreviewSide] = useState<SidePane | null>(null);
   const [realQueue, setRealQueue] = useState<"open" | "closed">();
+  const [queueFocus, setQueueFocus] = useState<QueueJobFocus>();
   const [previewQueue, setPreviewQueue] = useState<"open" | "closed">();
   const [sidebarOverride, setSidebarOverride] = useState<boolean>();
   const sideTrigger = useRef<HTMLElement | null>(null);
@@ -183,6 +184,10 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
         type: "activity", runId, conversationId, focusQuestion: requestId === undefined ? undefined : { requestId },
       }),
       openChanges: (target) => showSide({ type: "changes", target }),
+      openQueueJob: simulation ? undefined : (jobId) => {
+        setQueueFocus({ projectId: checkout.projectId, jobId });
+        setRealQueue("open");
+      },
     };
   }
 
@@ -264,7 +269,8 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
               compact={compact} openSystem={() => showSettings("system")} />
           </div>}
           {realQueue && <div className="work-queue-panel" hidden={Boolean(preview) || realQueue !== "open"}>
-            <Suspense fallback={loading}><QueuePanel {...real} active={!preview && realQueue === "open"} onClose={() => setRealQueue("closed")} /></Suspense>
+            <Suspense fallback={loading}><QueuePanel {...real} focusJob={queueFocus}
+              active={!preview && realQueue === "open"} onClose={() => setRealQueue("closed")} /></Suspense>
           </div>}
           {previewQueue && simulated && <div className="work-queue-panel" key={"simulation-queue:" + preview?.epoch} hidden={previewQueue !== "open"}>
             <Suspense fallback={loading}><QueuePanel {...simulated} onClose={() => setPreviewQueue("closed")} /></Suspense>

@@ -2,6 +2,8 @@ import { queryOptions } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { RequestId } from "@/conversation-inputs";
 import type { VerifiedMerge } from "@/delivery-merge-model";
+import type { JobInspection } from "@/bindings/JobInspection";
+import type { TaskParticipantAttempt } from "@/task-participants";
 
 export const workflowStates = [
   { value: "backlog", label: "Backlog" }, { value: "ready", label: "Ready" },
@@ -57,6 +59,8 @@ export type AgileRow = Work & {
   commit?: VerifiedCommit | null;
   evidence?: EvidenceTarget;
   deliveries?: Delivery[];
+  attempts?: TaskParticipantAttempt[];
+  blockedJobs?: JobInspection[];
   hasChildren: boolean;
 };
 

@@ -93,7 +93,7 @@ it("saves a planned model with a shared rating and preserves the previous partic
   await user.click(delivery.getByRole("button", { name: "Queue implementation" }));
   expect(invoke).toHaveBeenCalledWith("submit_repository_delivery_agent", expect.any(Object));
 
-  const saved = within(screen.getByRole("region", { name: "Participant history" }));
+  const saved = within(screen.getByRole("region", { name: "Work history" }));
   expect(saved.getByText("gpt-6.1-sol-recorded")).toBeTruthy();
   await user.click(saved.getByRole("button", { name: "Open attempt 1" }));
   expect(openActivity).toHaveBeenCalledWith("original", "conversation");

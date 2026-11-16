@@ -1,12 +1,15 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import type { JobInspection } from "@/bindings/JobInspection";
 import { Button } from "@/components/ui/button";
 import { TaskGoals } from "@/goal-evidence";
-import { TaskParticipants } from "@/task-participants";
+import { TaskParticipants, taskParticipantsQuery } from "@/task-participants";
 import { TaskAssignment } from "@/task-assignment";
 import { ProjectDescription } from "@/project-description";
-import { ProjectAgileTable, ProjectKanban } from "@/project-agile-views";
+import { AgileParticipantFilters, hasParticipantFilter, matchesParticipant, type ParticipantFilter } from "@/project-agile-filters";
+import { ProjectAgileTable, ProjectKanban, TaskJobLinks } from "@/project-agile-views";
+import { projectQueueQuery } from "@/queue-model";
 import { SavedDeliveryMerge, VerifiedDeliveryHistory } from "@/repository-delivery-history";
 import {
   canComplete, canMove, checklistQuery, commitQuery, deliveryQuery, epicStateQuery, latestEvidence, questionBlockerLabel, recordedMergeForCommit, statusLabel,
@@ -66,6 +69,10 @@ function LiveTaskDetails({
     {Boolean(saved?.prerequisiteBlockers?.length) && <section className="pipeline-form pipeline-stack" aria-label="Task dependency blockers">
       <h4>Waiting for dependencies</h4>
       {saved?.prerequisiteBlockers?.map(({ taskId, title }) => <Button key={taskId} type="button" variant="outline" onClick={() => openWork(taskId)}>{title}</Button>)}
+    </section>}
+    {Boolean(task.blockedJobs?.length) && <section className="pipeline-form pipeline-stack" aria-label="Task job blockers">
+      <h4>Job blockers</h4>
+      <TaskJobLinks row={task} openQueueJob={links.openQueueJob} />
     </section>}
     {saved?.activeWorkflowRunId && <Button variant="outline" onClick={() => links.openWorkspace("pipelines", saved.activeWorkflowRunId ?? undefined)}>Open delivery workflow</Button>}
     <section className="pipeline-form pipeline-stack" aria-label="Task checklist">
@@ -162,6 +169,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   const [level, setLevel] = useState<WorkKind>("task");
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
+  const [participantFilter, setParticipantFilter] = useState<ParticipantFilter>({ agent: "", provider: "", model: null });
   const [kind, setKind] = useState<WorkKind>("task");
   const [parent, setParent] = useState("");
   const [title, setTitle] = useState("");
@@ -183,6 +191,16 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   const states = useQueries({ queries: all.map(({ task }) => taskStateQuery(projectId, task.id)) });
   const checklists = useQueries({ queries: all.map(({ task }) => checklistQuery(projectId, task.id)) });
   const deliveries = useQueries({ queries: all.map(({ task }) => deliveryQuery(projectId, task.id)) });
+  const participants = useQueries({ queries: all.map(({ task }) => taskParticipantsQuery(projectId, task.id)) });
+  const queue = useQuery({ ...projectQueueQuery(projectId), enabled: Boolean(props.openQueueJob), refetchInterval: 2500 });
+  const blockedJobs = new Map<string, JobInspection[]>();
+  for (const inspection of queue.data?.jobs ?? []) {
+    const { job, blockers } = inspection;
+    if (job.projectId !== projectId || !job.taskId || job.queueState === "cancelled" || !blockers.length) continue;
+    const jobs = blockedJobs.get(job.taskId);
+    if (jobs) jobs.push(inspection);
+    else blockedJobs.set(job.taskId, [inspection]);
+  }
   const evidence = all.map(({ task }, index) => latestEvidence(task.id, deliveries[index]?.data ?? [], states[index]?.data?.completion));
   const commitReads = useQueries({ queries: evidence.flatMap((target) => target ? [commitQuery(projectId, target.taskId, target.evidenceId)] : []) });
   const commits = new Map(evidence.filter((target) => target !== undefined).map((target, index) => [target.taskId, commitReads[index]?.data]));
@@ -193,6 +211,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
     ...task, kind: placement.kind, parentId: placement.kind === "subtask" ? placement.parentTaskId : placement.epicId ?? undefined,
     status: states[index]?.data?.state, workflow: states[index]?.data, checklist: checklists[index]?.data?.items ?? [],
     commit: commits.get(task.id), evidence: evidence[index], deliveries: deliveries[index]?.data, hasChildren: parents.has(task.id),
+    attempts: participants[index]?.data, blockedJobs: blockedJobs.get(task.id),
   }))];
   const current = rows.find(({ id }) => id === selected);
   const contributors = current?.kind === "task" ? rows.flatMap((row) => {
@@ -201,10 +220,12 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
     return delivery ? [{ taskId: row.id, title: row.title, deliveryId: delivery.id }] : [];
   }) : [];
   const normalizedSearch = search.trim().toLocaleLowerCase();
-  const matched = rows.filter(({ title, status }) => (!filterStatus || status === filterStatus) && title.toLocaleLowerCase().includes(normalizedSearch));
+  const byParticipant = hasParticipantFilter(participantFilter);
+  const matched = rows.filter(({ title, status, attempts }) => (!filterStatus || status === filterStatus) &&
+    title.toLocaleLowerCase().includes(normalizedSearch) && (!byParticipant || attempts?.some((attempt) => matchesParticipant(attempt, participantFilter))));
   const kanbanRows = matched.filter(({ kind }) => kind === level);
   const matchIds = new Set(matched.map(({ id }) => id));
-  const readError = [...states, ...epicStates, ...deliveries, ...checklists, ...commitReads].find(({ error }) => error)?.error;
+  const readError = [...states, ...epicStates, ...deliveries, ...checklists, ...commitReads, ...participants, queue].find(({ error }) => error)?.error;
   function openWork(id: string) {
     setSelected(id);
     setSelectedEvidence(undefined);
@@ -212,6 +233,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   }
   const views = {
     selected, busy: mutation.isPending, openWork,
+    openActivity: props.openActivity, openQueueJob: props.openQueueJob,
     openEvidence: (target: EvidenceTarget) => { openWork(target.taskId); setSelectedEvidence(target); },
     openQuestion: ({ runId, conversationId, requestId }: TaskQuestionBlocker) => props.openActivity(runId, conversationId, requestId),
   };
@@ -253,6 +275,8 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
       <select aria-label="Filter by state" className="delivery-filter" value={filterStatus} onChange={(event) => setFilterStatus(event.currentTarget.value)}>
         <option value="">All states</option>{workflowStates.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
       </select>
+      <AgileParticipantFilters key={projectId} attempts={participants.flatMap(({ data }) => data ?? [])}
+        value={participantFilter} onChange={setParticipantFilter} />
     </header>
     <div className="delivery-body">
       <div className="delivery-main">
@@ -272,7 +296,9 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
         </details>
         {(mutation.error || hierarchy.error || readError) && <p className="mx-4" role="alert">{String(mutation.error ?? hierarchy.error ?? readError)}</p>}
         {hierarchy.data && !rows.length && <p className="mx-4 text-muted-foreground">No project work yet.</p>}
-        {hierarchy.data && rows.length > 0 && !(view === "kanban" ? kanbanRows.length : matched.length) &&
+        {byParticipant && participants.some(({ isPending }) => isPending) && <p className="mx-4" role="status">Loading work participants…</p>}
+        {hierarchy.data && rows.length > 0 && (!byParticipant || !participants.some(({ isPending }) => isPending)) &&
+          !(view === "kanban" ? kanbanRows.length : matched.length) &&
           <p className="mx-4 text-muted-foreground">No matching work.</p>}
         {view === "kanban" ? <ProjectKanban {...views} rows={kanbanRows} move={move} /> :
           <ProjectAgileTable {...views} rows={rows} matches={matchIds} check={check} />}

@@ -8,7 +8,7 @@ import { deliveryBranch, deliveryModels, deliveryRunId, deliveryTaskId, modelNam
 import LiveQueue from "@/queue-live";
 import { matchesQueueView, queueViews, type JobState, type QueueView } from "@/queue-model";
 import { DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
-import type { DeliveryAction, DeliveryStep, WorkspaceProps } from "@/workbench-contract";
+import type { DeliveryAction, DeliveryStep, QueueJobFocus, WorkspaceProps } from "@/workbench-contract";
 
 interface Job {
   id: string;
@@ -69,7 +69,7 @@ function QueueJobForm({ onAdd, onCancel }: { onAdd: (title: string, assignment: 
   );
 }
 
-export default function QueuePanel(props: WorkspaceProps & { onClose?: () => void; active?: boolean }) {
+export default function QueuePanel(props: WorkspaceProps & { onClose?: () => void; active?: boolean; focusJob?: QueueJobFocus }) {
   return props.simulation ? <SimulatedQueue {...props} /> : <LiveQueue {...props} />;
 }
 

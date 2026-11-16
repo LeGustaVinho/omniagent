@@ -1,3 +1,5 @@
+import { queryOptions } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import type { AdmissionBlocker } from "@/bindings/AdmissionBlocker";
 import type { JobInspection } from "@/bindings/JobInspection";
 import type { ReleaseBlocker } from "@/bindings/ReleaseBlocker";
@@ -8,6 +10,19 @@ export type JobState = "Queued" | "Starting" | "Running" | "Yielding" | "Waiting
 
 export const queueViews = ["All", "Waiting", "Active", "Needs input", "History"] as const;
 export type QueueView = typeof queueViews[number];
+
+type ProjectQueue = {
+  settings: { paused: boolean; capacity: number };
+  active: number;
+  jobs: JobInspection[];
+};
+
+export function projectQueueQuery(projectId: string) {
+  return queryOptions({
+    queryKey: ["project-job-queue", projectId],
+    queryFn: () => invoke<ProjectQueue>("project_job_queue", { projectId }),
+  });
+}
 
 const runLabels: Record<RunStatus, JobState> = {
   starting: "Starting",

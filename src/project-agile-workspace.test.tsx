@@ -7,9 +7,14 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, expect, it, vi } from "vitest";
+import type { JobInspection } from "@/bindings/JobInspection";
+import type { ModelOption } from "@/bindings/ModelOption";
+import type { ModelSelection } from "@/bindings/ModelSelection";
+import type { AgentTree } from "@/conversation-children";
 import type { VerifiedMerge } from "@/delivery-merge-model";
 import type { Delivery, Hierarchy, Item, WorkflowStatus } from "@/project-agile-model";
 import { ProjectTasksWorkspace } from "@/project-tasks";
+import type { TaskParticipantAttempt } from "@/task-participants";
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -43,7 +48,15 @@ const merge: VerifiedMerge = {
 const question = { runId: "subtask-question-run", conversationId: "subtask-chat", requestId: 17, state: "live", answerRecorded: false };
 const acceptedDiff = "diff --git a/logger.rs b/logger.rs\n+Log the request context";
 
-function testWorkspace(seed = true, savedMerge?: VerifiedMerge) {
+type ActivityFixture = {
+  attempts: Record<string, TaskParticipantAttempt[]>;
+  jobs?: JobInspection[];
+  tree?: AgentTree;
+  models?: ModelOption[];
+  assignment?: ModelSelection;
+};
+
+function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: ActivityFixture) {
   const states: Record<string, WorkflowStatus> = { [parent.id]: "ready", [child.id]: "blocked", [standalone.id]: "completed",
     [blocked.id]: "blocked", [gitWaiting.id]: "in_review" };
   const hierarchy: Hierarchy = seed ? { epics: [epic], work: [
@@ -59,9 +72,12 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge) {
   const evidence: Delivery = { id: "delivery", recordedAt: "2026-11-16T12:00:00Z", evidence: {
     kind: "verified_commit", completionSha: commit.sha, workflowRunId: "workflow", unitEvidenceIds: [commit.id],
   } };
+  const reviewRole = "candidate reviewer";
+  let assignment = activity?.assignment;
   vi.mocked(invoke).mockImplementation(async (name, args) => {
     const scope = args as { projectId: string; taskId: string; evidenceId?: string; expectedState?: WorkflowStatus;
-      nextState?: WorkflowStatus; next?: Item; title: string; body: string; placement: { kind: "epic" } | Hierarchy["work"][number]["placement"] };
+      nextState?: WorkflowStatus; next?: Item; title: string; body: string; placement: { kind: "epic" } | Hierarchy["work"][number]["placement"];
+      provider?: ModelSelection["provider"]; selection?: ModelSelection };
     const checklist = checklists[scope?.taskId] ?? [];
     switch (name) {
       case "project_work_hierarchy": return { epics: [...hierarchy.epics], work: [...hierarchy.work] };
@@ -85,7 +101,18 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge) {
       case "project_task_deliveries": return scope.taskId === standalone.id ? [{ ...evidence, merge: savedMerge }] : [];
       case "verified_work_delivery_units": return [];
       case "verified_delivery_merge": return null;
-      case "project_task_runs": case "project_task_goals": case "project_task_assignments": case "conversation_models": return [];
+      case "project_task_runs": return activity?.attempts[scope.taskId] ?? [];
+      case "project_task_goals": return [];
+      case "project_job_queue": return { settings: { paused: false, capacity: 3 }, active: 1, jobs: activity?.jobs ?? [] };
+      case "conversation_agent_tree": return activity?.tree;
+      case "conversation_models": return activity?.models?.filter(({ selection }) => selection.provider === scope.provider)
+        .map((option) => ({ option })) ?? [];
+      case "project_task_assignments": return assignment ? [{ role: reviewRole, ...assignment }] : [];
+      case "set_project_task_assignment": {
+        expect(args).toMatchObject({ projectId, taskId: standalone.id, role: reviewRole });
+        assignment = scope.selection;
+        return [{ role: reviewRole, ...assignment }];
+      }
       case "verified_delivery_commit": expect(args).toEqual({ projectId, taskId: standalone.id, evidenceId: "unit-commit" }); return commit;
       case "verified_delivery_patch": expect(args).toEqual({ projectId, taskId: standalone.id, evidenceId: "unit-commit" }); return { patchBase64: btoa(acceptedDiff) };
       case "revise_project_checklist_item": {
@@ -113,10 +140,12 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const openActivity = vi.fn();
   const openWorkspace = vi.fn();
+  const openQueueJob = vi.fn();
   const app = render(<QueryClientProvider client={client}><ProjectTasksWorkspace checkout={exampleCheckout} simulation={null}
-    startSimulation={vi.fn()} openWorkspace={openWorkspace} openActivity={openActivity} openChanges={vi.fn()} /></QueryClientProvider>);
+    startSimulation={vi.fn()} openWorkspace={openWorkspace} openActivity={openActivity} openChanges={vi.fn()}
+    openQueueJob={activity?.jobs ? openQueueJob : undefined} /></QueryClientProvider>);
   const user = userEvent.setup();
-  return { ...app, states, openActivity, openWorkspace, user };
+  return { ...app, states, openActivity, openWorkspace, openQueueJob, user };
 }
 
 function dropWork(taskId: string, next: WorkflowStatus) {

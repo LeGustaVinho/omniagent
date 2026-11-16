@@ -22,7 +22,10 @@ export interface WorkspaceProps {
   openWorkspace: (workspace: WorkspaceId, target?: string) => void;
   openActivity: (runId: string, conversationId?: string, requestId?: RequestId) => void;
   openChanges: (target: "saved" | "working") => void;
+  openQueueJob?: (jobId: string) => void;
 }
+
+export type QueueJobFocus = { projectId: string; jobId: string };
 
 export const exampleCheckout: ProjectCheckout = {
   projectId: "example-project",

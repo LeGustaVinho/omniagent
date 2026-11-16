@@ -40,7 +40,7 @@ it("shows active models and keeps every reassigned or retried attempt linked to 
     <TaskParticipants projectId="project" taskId="task" openActivity={openActivity} />
   </QueryClientProvider>);
 
-  const working = within(await screen.findByRole("region", { name: "Working agents" }));
+  const working = within(await screen.findByRole("region", { name: "Working now" }));
   expect(working.getByText("Implementer · Claude Code")).toBeTruthy();
   expect(working.getByText("replacement-model")).toBeTruthy();
   expect(working.getByText("retry-observed-model")).toBeTruthy();
@@ -48,7 +48,7 @@ it("shows active models and keeps every reassigned or retried attempt linked to 
   await user.click(working.getByRole("button", { name: "Open attempt 2" }));
   expect(openActivity).toHaveBeenLastCalledWith("retry", "second-conversation");
 
-  const history = within(screen.getByRole("region", { name: "Participant history" }));
+  const history = within(screen.getByRole("region", { name: "Work history" }));
   expect(history.getAllByRole("listitem")).toHaveLength(2);
   expect(history.getByText("Unreported")).toBeTruthy();
   expect(history.getByText("original-model")).toBeTruthy();

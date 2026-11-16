@@ -237,12 +237,13 @@ function ManagedBranches({ parentId, ...tree }: TreeBranchProps & { parentId: st
   </ul>;
 }
 
-export function ConversationAgentTree({ conversationId, runId, live, delegation, openActivity }: {
+export function ConversationAgentTree({ conversationId, runId, live, delegation, openActivity, descendantsOnly = false }: {
   conversationId: string;
   runId: string;
   live: boolean;
   delegation?: Delegation;
   openActivity?: OpenActivity;
+  descendantsOnly?: boolean;
 }) {
   const saved = useQuery({
     queryKey: ["conversation-run", runId, "agent-tree", conversationId],
@@ -267,9 +268,14 @@ export function ConversationAgentTree({ conversationId, runId, live, delegation,
   }, [saved.data]);
   const rootNative = saved.data ? tree.nativeByAttempt.get(runId) :
     delegation && (Object.keys(delegation.children).length || Object.keys(delegation.parentActivity).length) ? delegation : undefined;
-  const history = saved.data?.attempts ?? [];
-  const parent = saved.data?.parent;
-  if (!rootNative && !parent && !saved.data?.managed.length && history.length < 2 && !saved.error) return null;
+  const history = descendantsOnly ? [] : saved.data?.attempts ?? [];
+  const parent = descendantsOnly ? null : saved.data?.parent;
+  if (!rootNative && !parent && !saved.data?.managed.length && history.length < 2 && !saved.error) {
+    if (!descendantsOnly) return null;
+    return <p role={saved.isPending ? "status" : undefined} className="mt-2 text-xs text-muted-foreground">
+      {saved.isPending ? "Loading subagent activity…" : "No observed subagents for this attempt."}
+    </p>;
+  }
   return <section aria-label="Agent tree" className="grid gap-2">
     <h2 className="text-sm font-medium">Agent tree</h2>
     {saved.error && <p role="alert" className="text-xs text-muted-foreground">{String(saved.error)}</p>}
