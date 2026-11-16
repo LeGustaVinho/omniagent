@@ -1,5 +1,6 @@
 mod authoring;
 mod security;
+mod settings;
 
 use std::{
     fs::{self, File},
@@ -42,8 +43,9 @@ use crate::{
     runtime_inspection::RuntimeInspection,
     store::Store,
     tasks::{ChecklistProgressError, ChecklistProgressReceipt, ChecklistProgressRequest},
-    workflows::authoring::package::mcp::{
-        ApplyOperations, AuthoringOutcome, ReadCatalog, SubmitForReview,
+    workflows::{
+        authoring::package::mcp::{ApplyOperations, AuthoringOutcome, ReadCatalog, SubmitForReview},
+        settings_proposals::{SettingsPatch, SettingsPatchCatalog, SettingsPatchCatalogQuery, SettingsProposal},
     },
 };
 
@@ -59,6 +61,7 @@ pub(crate) const REPORT_GOAL_PROGRESS: &str = "report_goal_progress";
 const UPDATE_CHECKLIST_PROGRESS: &str = "update_checklist_progress";
 pub(crate) const REQUEST_PERMISSION: &str = "request_permission";
 pub(crate) use authoring::AUTHORING_TOOLS;
+pub(crate) use settings::SETTINGS_TOOLS;
 pub(crate) const PERMISSION_PREFIX: &str = "omniagent-permission:";
 pub(crate) const VERSION: u8 = 1;
 const MAX_FRAME_BYTES: usize = 16 * 1024;
@@ -124,6 +127,8 @@ enum Operation {
     AuthoringCatalog(ReadCatalog),
     AuthoringApply(ApplyOperations),
     AuthoringSubmit(SubmitForReview),
+    ReadEditableSettings(SettingsPatchCatalogQuery),
+    ProposeSettingsPatch(SettingsPatch),
     SubmitJob(SubmitJob),
     GetJobStatus(JobStatusRequest),
     WaitForJobs(WaitForJobsRequest),
@@ -148,6 +153,9 @@ enum Response {
     Inspection(Box<RuntimeInspection>),
     AuthoringCatalog(Value),
     AuthoringOutcome(AuthoringOutcome),
+    EditableSettings(Box<SettingsPatchCatalog>),
+    SettingsProposal(Box<SettingsProposal>),
+    SettingsRejected { reason: String },
     JobSubmitted {
         job_id: String,
     },
@@ -389,6 +397,18 @@ async fn serve_pipe(
                     Operation::AuthoringSubmit(input) if ticket.package_authoring => {
                         let response = store.submit_authoring_for_review(scope.clone(), input).await
                             .map(Response::AuthoringOutcome).unwrap_or(Response::Unavailable);
+                        (response, None)
+                    }
+                    Operation::ReadEditableSettings(query) => {
+                        let response = store.read_editable_settings(scope.clone(), query).await
+                            .map(|catalog| Response::EditableSettings(Box::new(catalog)))
+                            .unwrap_or_else(settings::rejected);
+                        (response, None)
+                    }
+                    Operation::ProposeSettingsPatch(patch) => {
+                        let response = store.propose_settings_patch(scope.clone(), patch).await
+                            .map(|proposal| Response::SettingsProposal(Box::new(proposal)))
+                            .unwrap_or_else(settings::rejected);
                         (response, None)
                     }
                     Operation::SubmitJob(input) => {
@@ -779,6 +799,9 @@ impl ServerHandler for StdioBridge {
                     }}).as_object().unwrap().clone(),
             ).with_annotations(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
         ];
+        if !self.0.package_authoring {
+            tools.extend(settings::tools());
+        }
         if self.0.package_authoring {
             tools.truncate(2);
             tools.extend(authoring::tools());
@@ -801,6 +824,9 @@ impl ServerHandler for StdioBridge {
     ) -> Result<CallToolResponse, ErrorData> {
         if AUTHORING_TOOLS.contains(&request.name.as_ref()) {
             return authoring::call(&self.0, request).await;
+        }
+        if SETTINGS_TOOLS.contains(&request.name.as_ref()) {
+            return settings::call(&self.0, request).await;
         }
         if request.name == UPDATE_CHECKLIST_PROGRESS {
             let update =

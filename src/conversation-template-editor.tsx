@@ -28,7 +28,7 @@ type TemplateDraft = {
   requirements?: StageRequirements;
 };
 type Version = { revision: string; ordinal: number; baseRevision: string | null };
-type Head = { templateId: string; version: Version; name: string };
+type Head = { templateId: string; version: Version; name: string; displayLabel?: string };
 type Revision = { templateId: string; version: Version; template: TemplateDraft };
 type Detail = { revision: Revision; history: Version[] };
 type Selection = "new" | { templateId: string; revision: string };
@@ -110,10 +110,10 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: { checko
         {heads.isPending && <p role="status">Loading saved templates…</p>}
         {heads.error && <p role="alert">{String(heads.error)}</p>}
         {heads.data?.length ? <ul className="pipeline-select-list">
-          {heads.data.map(({ templateId, version, name }) => <li key={templateId}>
+          {heads.data.map(({ templateId, version, name, displayLabel }) => <li key={templateId}>
             <button type="button" aria-pressed={reference?.templateId === templateId}
               onClick={() => setSelected({ templateId, revision: version.revision })}>
-              <span>{name}<small>Revision {version.ordinal}</small></span>
+              <span>{displayLabel ?? name}<small>Revision {version.ordinal}</small></span>
             </button>
           </li>)}
         </ul> : heads.data && <p>No saved conversation templates.</p>}
@@ -134,6 +134,9 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: { checko
           </label>
           {openWorkspace && <div><WorkflowEditorAssistance key={reference.revision} projectId={projectId} checkoutId={checkoutId} openWorkspace={openWorkspace}
             artifact={{ name: detail.data.revision.template.name, version: { id: reference.templateId, revision: reference.revision, kind: "role", destination: "project" } }} /></div>}
+          {knownHead?.revision === reference.revision && <TemplateDisplayLabelEditor
+            key={`${projectId}:${reference.templateId}:${reference.revision}`} projectId={projectId}
+            templateId={reference.templateId} templateRevision={reference.revision} />}
           <TemplateForm key={reference.revision} checkoutId={checkoutId} projectId={projectId} saved={detail.data.revision}
             historical={Boolean(knownHead && reference.revision !== knownHead.revision)}
             onSaved={accept} onConflict={openHead} />
@@ -141,6 +144,64 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: { checko
       </section>
     </div>
   </div>;
+}
+
+type LabelSnapshot = { templateRevision: string; displayLabel: { revision: number; value: string | null } };
+
+function TemplateDisplayLabelEditor({ projectId, templateId, templateRevision }: {
+  projectId: string; templateId: string; templateRevision: string;
+}) {
+  const client = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<{ revision: number; value: string }>();
+  const queryKey = ["template-display-label", projectId, templateId];
+  const templatesKey = ["conversation-templates", projectId];
+  const setting = useQuery({
+    queryKey,
+    queryFn: () => invoke<LabelSnapshot>("template_display_label", { projectId, templateId }),
+    enabled: open,
+  });
+  const save = useMutation({
+    mutationFn: (edit: { revision: number; value: string }) => invoke<LabelSnapshot>("set_template_display_label", {
+      projectId, templateId, templateRevision, expectedRevision: edit.revision, label: edit.value.trim() || null,
+    }),
+    onSuccess: (result) => {
+      client.setQueryData(queryKey, result);
+      setDraft(undefined);
+      void client.invalidateQueries({ queryKey: templatesKey, exact: true });
+    },
+    onError: () => Promise.all([
+      client.invalidateQueries({ queryKey }),
+      client.invalidateQueries({ queryKey: templatesKey, exact: true }),
+    ]),
+  });
+  const current = setting.data?.displayLabel;
+  const stale = draft && draft.revision !== current?.revision;
+  const value = draft?.value ?? current?.value ?? "";
+  const dirty = !!draft && value.trim() !== (current?.value ?? "");
+  const valid = new TextEncoder().encode(value.trim()).length <= 120 && !/[\p{Cc}]/u.test(value);
+  return <details className="pipeline-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>Template display label</summary>
+    {open && <div className="pipeline-stack">
+      <p>The label appears in the template list.</p>
+      {current && setting.data?.templateRevision === templateRevision && <>
+        <label>Display label<input value={value} disabled={save.isPending}
+          onChange={(event) => {
+            const text = event.currentTarget.value;
+            setDraft({ revision: draft?.revision ?? current.revision, value: text });
+            save.reset();
+          }} /></label>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" disabled={!draft || !dirty || !valid || Boolean(stale) || save.isPending}
+            onClick={() => { if (draft) save.mutate(draft); }}>Save display label</Button>
+          {stale && <Button type="button" variant="outline" onClick={() => { setDraft(undefined); save.reset(); }}>Use current label</Button>}
+        </div>
+        {!valid && <p role="alert">Use at most 120 UTF-8 bytes and omit control characters.</p>}
+        {stale && <p role="status">The display label changed while you were editing.</p>}
+      </>}
+      {(setting.error || save.error) && <p role="alert">{String(setting.error || save.error)}</p>}
+    </div>}
+  </details>;
 }
 
 function TemplateForm({ checkoutId, projectId, saved, historical = false, onSaved, onConflict }: {

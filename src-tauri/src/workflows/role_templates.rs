@@ -66,6 +66,8 @@ pub struct ConversationTemplateHead {
     pub template_id: String,
     pub version: ConversationTemplateVersion,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_label: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,7 +106,7 @@ impl Store {
             while let Some(row) = rows.next()? {
                 let id: String = row.get(0)?;
                 let revision: String = row.get(1)?;
-                heads.push(head(load_revision(db, &project, &id, &revision)?));
+                heads.push(head(db, &project, load_revision(db, &project, &id, &revision)?)?);
             }
             heads.sort_by(|left, right| {
                 left.name
@@ -277,7 +279,7 @@ pub(crate) fn save_conversation_template_in_tx(
         let saved = load_revision(db, project, &base.template_id, &current)?;
         if current != base.expected_revision {
             return Ok(SaveConversationTemplate::Conflict {
-                current: head(saved),
+                current: head(db, project, saved)?,
             });
         }
         if !force_revision && saved.template == template {
@@ -324,12 +326,14 @@ pub(crate) fn save_conversation_template_in_tx(
     Ok(SaveConversationTemplate::Saved { detail })
 }
 
-fn head(revision: ConversationTemplateRevision) -> ConversationTemplateHead {
-    ConversationTemplateHead {
+fn head(db: &Connection, project: &str, revision: ConversationTemplateRevision) -> Result<ConversationTemplateHead> {
+    let display_label = super::settings_proposals::template_label_for_display(db, project, &revision.template_id)?;
+    Ok(ConversationTemplateHead {
         template_id: revision.template_id,
         version: revision.version,
         name: revision.template.name,
-    }
+        display_label,
+    })
 }
 
 pub(crate) fn load_revision(

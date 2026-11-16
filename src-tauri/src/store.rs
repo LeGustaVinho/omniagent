@@ -121,6 +121,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/104-workflow-mcp-tools.sql"),
     include_str!("../migrations/105-claude-plugin-actions.sql"),
     include_str!("../migrations/106-workflow-iteration-artifacts.sql"),
+    include_str!("../migrations/107-workflow-settings-proposals.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

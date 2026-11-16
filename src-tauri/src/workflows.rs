@@ -30,6 +30,7 @@ mod subflow;
 pub mod role_templates;
 pub mod triggers;
 mod runtime;
+pub mod settings_proposals;
 pub mod stage_requirements;
 #[cfg(test)]
 mod stage_models;

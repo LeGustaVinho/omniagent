@@ -37,6 +37,7 @@ function setup({ conflict = false, workspace = false }: { conflict?: boolean; wo
   let revisions: { templateId: string; version: typeof firstVersion | typeof secondVersion; template: typeof first }[] = conflict
     ? [{ templateId: "stable-template", version: firstVersion, template: first }]
     : [];
+  let displayLabel: { revision: number; value: string | null } = { revision: 0, value: null };
   vi.mocked(invoke).mockImplementation(async (command, input) => {
     switch (command) {
       case "list_repository_deliveries":
@@ -46,7 +47,13 @@ function setup({ conflict = false, workspace = false }: { conflict?: boolean; wo
         const head = revisions[0];
         if (!head) return [];
         const { templateId, version, template } = head;
-        return [{ templateId, version, name: template.name }];
+        return [{ templateId, version, name: template.name, displayLabel: displayLabel.value }];
+      }
+      case "template_display_label": return { templateRevision: revisions[0]?.version.revision, displayLabel };
+      case "set_template_display_label": {
+        const { label } = input as { label: string | null };
+        displayLabel = { revision: displayLabel.revision + 1, value: label };
+        return { templateRevision: revisions[0]?.version.revision, displayLabel };
       }
       case "conversation_models":
         return input && "provider" in input && input.provider === "codex" ? [{ option, efforts: ["high"], defaultEffort: null }] : [];
@@ -86,6 +93,19 @@ function setup({ conflict = false, workspace = false }: { conflict?: boolean; wo
   </QueryClientProvider>);
   return userEvent.setup();
 }
+
+it("saves a display label against exact revisions without replacing the template definition", async () => {
+  const user = setup({ conflict: true });
+  await user.click(await screen.findByText("Template display label"));
+  await user.type(await screen.findByRole("textbox", { name: "Display label" }), "Audit reviewer");
+  await user.click(screen.getByRole("button", { name: "Save display label" }));
+  await screen.findByRole("button", { name: /Audit reviewer.*Revision 1/ });
+  expect(invoke).toHaveBeenCalledWith("set_template_display_label", {
+    projectId: checkout.projectId, templateId: "stable-template", templateRevision: firstVersion.revision,
+    expectedRevision: 0, label: "Audit reviewer",
+  });
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_conversation_template")).toBe(false);
+});
 
 it("saves all template fields with a qualified model and reopens the exact prior revision", async () => {
   const user = setup({ workspace: true });

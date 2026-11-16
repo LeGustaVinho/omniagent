@@ -20,6 +20,7 @@ import { SystemSettings, useMaintenanceSimulation } from "@/settings-system";
 import { ProjectSubagentControls } from "@/subagent-quota";
 import { ProjectSubagentAuditControl } from "@/subagent-audit-controls";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { WorkflowSettingsProposals } from "@/workflow-settings-proposals";
 import "./settings-dialog.css";
 
 type SettingsDialogProps = Omit<WorkspaceProps, "checkout"> & {
@@ -157,6 +158,7 @@ function SettingsSession({
   checkout,
   open,
   onOpenChange,
+  openActivity,
   initialPage,
   simulation,
   startSimulation,
@@ -275,6 +277,15 @@ function SettingsSession({
           <CandidateGateSettings key={checkout.projectId} projectId={checkout.projectId} />
           <DeliveryGitSettings key={`delivery-${checkout.projectId}`} projectId={checkout.projectId} />
           <PolicyForm fields={policyFields.git} stored={undefined} simulate={simulate} />
+        </>;
+      case "automation":
+        if (simulation || !checkout) return policy("automation");
+        return <>
+          <PolicyForm fields={policyFields.automation.filter(({ id }) => id === "implementation-release")} stored={undefined} simulate={simulate} />
+          <WorkflowSettingsProposals key={checkout.projectId} checkout={checkout} onOpenRun={(runId) => {
+            onOpenChange(false);
+            openActivity(runId);
+          }} />
         </>;
       default:
         return policy(currentPage.id);

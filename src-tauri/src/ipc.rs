@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -24,6 +24,9 @@ use omniagent::{
     repository::ProjectCheckout,
     runs::{RunRecord, RunSnapshot, SubscriptionUpdate},
     store::Store,
+    workflows::settings_proposals::{
+        SettingsAutoGrant, SettingsPatchAllowlist, SettingsProposal, TemplateDisplayLabel,
+    },
 };
 use tauri::{State, ipc::Channel};
 use tokio::sync::oneshot;
@@ -261,6 +264,71 @@ pub async fn set_project_question_timeout(
         .set_project_question_timeout(project_id, minutes)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn settings_patch_allowlist(
+    store: State<'_, Store>,
+    project_id: String,
+) -> Result<SettingsPatchAllowlist, String> {
+    store.settings_patch_allowlist(project_id).await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn set_settings_patch_allowlist(
+    store: State<'_, Store>,
+    project_id: String,
+    expected_revision: i64,
+    grants: BTreeSet<SettingsAutoGrant>,
+) -> Result<SettingsPatchAllowlist, String> {
+    store.set_settings_patch_allowlist(project_id, expected_revision, grants).await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn settings_proposals(
+    store: State<'_, Store>,
+    project_id: String,
+    offset: i64,
+) -> Result<Vec<SettingsProposal>, String> {
+    store.settings_proposals(project_id, offset).await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn review_settings_proposal(
+    store: State<'_, Store>,
+    project_id: String,
+    proposal_id: String,
+    expected_review_revision: String,
+    accept: bool,
+) -> Result<SettingsProposal, String> {
+    store.review_settings_proposal(project_id, proposal_id, expected_review_revision, accept).await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn template_display_label(
+    store: State<'_, Store>,
+    project_id: String,
+    template_id: String,
+) -> Result<TemplateDisplayLabel, String> {
+    store.template_display_label(project_id, template_id).await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn set_template_display_label(
+    store: State<'_, Store>,
+    project_id: String,
+    template_id: String,
+    template_revision: String,
+    expected_revision: i64,
+    label: Option<String>,
+) -> Result<TemplateDisplayLabel, String> {
+    store.set_template_display_label(project_id, template_id, template_revision, expected_revision, label).await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
 
 #[tauri::command]

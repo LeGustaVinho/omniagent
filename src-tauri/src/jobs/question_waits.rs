@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use ts_rs::TS;
@@ -10,13 +10,12 @@ use crate::{
     providers::ProviderEvent,
     runs::{self, RunStatus},
     store::Store,
+    workflows::settings_proposals::read_question_timeout_setting,
 };
 
 use super::{
     history::structured_job_run, pipeline::load_attempt_job, policy::attempt_requirements,
 };
-
-const DEFAULT_LIVE_MINUTES: u32 = 10;
 
 pub(crate) enum QuestionTimer {
     Idle,
@@ -50,12 +49,7 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 fn project_timeout(db: &Connection, project: &str) -> Result<u32> {
-    Ok(db.query_row(
-        "SELECT coalesce(t.minutes, ?2) FROM projects p
-         LEFT JOIN project_question_timeouts t ON t.project_id = p.id WHERE p.id = ?1",
-        params![project, DEFAULT_LIVE_MINUTES],
-        |row| row.get(0),
-    )?)
+    Ok(read_question_timeout_setting(db, project)?.value)
 }
 
 impl Store {
@@ -64,19 +58,9 @@ impl Store {
     }
 
     pub async fn set_project_question_timeout(&self, project: String, minutes: u32) -> Result<()> {
-        ensure!(
-            (1..=120).contains(&minutes),
-            "Live question timeout must be between 1 and 120 minutes"
-        );
-        self.execute(move |db| {
-            db.execute(
-                "INSERT INTO project_question_timeouts(project_id, minutes) VALUES (?1, ?2)
-                 ON CONFLICT(project_id) DO UPDATE SET minutes = excluded.minutes",
-                params![project, minutes],
-            )?;
-            Ok(())
-        })
-        .await
+        self.edit_project_question_timeout(project, None, minutes)
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn poll_question_timer(&self, run: String, now: i64) -> Result<QuestionTimer> {
