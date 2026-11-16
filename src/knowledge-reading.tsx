@@ -1,4 +1,4 @@
-import { createContext, isValidElement, useContext, useEffect, useRef, type ReactNode } from "react";
+import { createContext, isValidElement, useContext, useEffect, useId, useRef, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -14,7 +14,43 @@ import { noteAttachmentCandidates, RepositoryNoteMedia } from "@/repository-note
 import "katex/dist/katex.css";
 
 const markdownPlugins = [remarkGfm, remarkMath];
-const readingPlugins = [rehypeKatex];
+const readingPlugins = [decorateTags, rehypeKatex];
+
+type ReadingNode = {
+  type: string;
+  tagName?: string;
+  value?: string;
+  children?: ReadingNode[];
+  properties?: Record<string, unknown>;
+};
+
+const tagExcludedElements = new Set(["a", "code", "pre", "script", "style"]);
+
+function decorateTags() {
+  function apply(node: ReadingNode) {
+    if (!node.children || (node.tagName && tagExcludedElements.has(node.tagName))) return;
+    node.children = node.children.flatMap((child) => {
+      if (child.type !== "text" || !child.value) {
+        apply(child);
+        return [child];
+      }
+      const text = child.value;
+      const parts: ReadingNode[] = [];
+      let end = 0;
+      for (const match of text.matchAll(/(?<![\p{L}\p{N}_/#\\])#[\p{L}\p{N}_-]+(?:\/[\p{L}\p{N}_-]+)*/gu)) {
+        if (!/[\p{L}_]/u.test(match[0])) continue;
+        const start = match.index;
+        if (start > end) parts.push({ type: "text", value: text.slice(end, start) });
+        parts.push({ type: "element", tagName: "span", properties: { className: ["note-tag"] }, children: [{ type: "text", value: match[0] }] });
+        end = start + match[0].length;
+      }
+      if (!parts.length) return [child];
+      if (end < text.length) parts.push({ type: "text", value: text.slice(end) });
+      return parts;
+    });
+  }
+  return apply;
+}
 
 function textContent(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -23,8 +59,13 @@ function textContent(node: ReactNode): string {
   return "";
 }
 
-const heading = (Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") => function MarkdownHeading({ children }: { children?: ReactNode }) {
-  return <Tag data-note-anchor={anchorKey(textContent(children))}>{children}</Tag>;
+const heading = (Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") => function MarkdownHeading({ children, id, className }: {
+  children?: ReactNode;
+  id?: string;
+  className?: string;
+}) {
+  const { anchorScope } = useContext(ReadingContext);
+  return <Tag id={id && anchorScope + id} className={className} data-note-anchor={anchorKey(textContent(children))}>{children}</Tag>;
 };
 
 function trustedPreviewUrl(url: string, path: string) {
@@ -44,7 +85,7 @@ type ReadingProps = {
   checkoutId?: string;
   onRepositoryAttachment?: (paths: string[], label: string) => void;
 };
-const ReadingContext = createContext<ReadingProps>(null!);
+const ReadingContext = createContext<ReadingProps & { anchorScope: string }>(null!);
 
 const components: Components = {
   h1: heading("h1"), h2: heading("h2"), h3: heading("h3"), h4: heading("h4"), h5: heading("h5"), h6: heading("h6"),
@@ -56,8 +97,8 @@ const components: Components = {
     }
     return <pre>{children}</pre>;
   },
-  a: function ReadingLink({ href, children }) {
-    const { path, files, onLink, onAttachment, sampleAttachments = true, checkoutId, onRepositoryAttachment } = useContext(ReadingContext);
+  a: function ReadingLink({ href, children, id, className, "aria-describedby": describedBy, "aria-label": label }) {
+    const { path, files, onLink, onAttachment, sampleAttachments = true, checkoutId, onRepositoryAttachment, anchorScope } = useContext(ReadingContext);
     if (href?.startsWith("omni-mark:")) return <mark>{children}</mark>;
     if (href?.startsWith("omni-wiki:")) {
       const link = parseReadingAddress(href);
@@ -88,7 +129,14 @@ const components: Components = {
       if (paths.length > 0) return <button type="button" className="note-inline-link"
         onClick={() => onRepositoryAttachment(paths, textContent(children) || asset[1])}>{children}</button>;
     }
-    return href?.startsWith("#") ? <a href={href}>{children}</a> : <span>{children}</span>;
+    if (!href?.startsWith("#")) return <span>{children}</span>;
+    const localTarget = href.startsWith("#user-content-fn") ? "#" + anchorScope + href.slice(1) : href;
+    return <a href={localTarget} id={id && anchorScope + id} className={className} aria-label={label}
+      aria-describedby={describedBy && anchorScope + describedBy}>{children}</a>;
+  },
+  li: function ReadingListItem({ id, className, children }) {
+    const { anchorScope } = useContext(ReadingContext);
+    return <li id={id && anchorScope + id} className={className}>{children}</li>;
   },
   img: function ReadingImage({ alt, src }) {
     const { checkoutId } = useContext(ReadingContext);
@@ -107,6 +155,7 @@ const components: Components = {
 
 export function NoteReading(props: ReadingProps) {
   const { path, content, files, jump } = props;
+  const anchorScope = useId() + "-";
   const root = useRef<HTMLDivElement>(null);
   const rendered = prepareReading(content, path, files);
   const properties = getProperties(content);
@@ -126,7 +175,7 @@ export function NoteReading(props: ReadingProps) {
             <dt>{key}</dt><dd>{value}</dd>
           </div>)}
         </dl>}
-        <ReadingContext.Provider value={props}>
+        <ReadingContext.Provider value={{ ...props, anchorScope }}>
           <ReactMarkdown skipHtml urlTransform={(url) => trustedPreviewUrl(url, path)} remarkPlugins={markdownPlugins}
             rehypePlugins={readingPlugins} components={components}>
             {rendered}

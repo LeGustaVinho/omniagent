@@ -282,6 +282,7 @@
 .note-reading article pre { margin: 0 0 14px; padding: 9px 12px; overflow: auto; border-radius: 6px; background: var(--card); border: 1px solid var(--border); font-size: 12px; }
 .note-reading article :not(pre) > code { padding: 1px 4px; border-radius: 4px; background: var(--muted); font-size: .9em; }
 .note-reading article mark { padding-inline: 2px; border-radius: 3px; color: var(--foreground); background: color-mix(in srgb, var(--primary) 25%, var(--background)); }
+.note-reading .note-tag { color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, var(--background)); padding-inline: .3em; border-radius: .3em; }
 .note-reading article a, .note-inline-link { color: var(--primary); }
 .note-inline-link { display: inline-flex; align-items: center; gap: 3px; text-align: left; text-underline-offset: 3px; text-decoration: underline; }
 .note-inline-link[data-invalid=true] { text-decoration-style: dotted; }

@@ -84,7 +84,7 @@ it("toggles a standard checkbox beside a custom Tasks state without altering met
 
   fireEvent.click(checkbox);
   expect(within(note.reading).getByRole<HTMLInputElement>("checkbox").checked).toBe(true);
-  expect(within(note.reading).getByText(waiting)).toBeTruthy();
+  expect(within(note.reading).getByText("#release/docs").closest("li")?.textContent?.trim()).toBe(waiting);
   expect(within(note.reading).getByText(custom)).toBeTruthy();
   expect(note.onChange).toHaveBeenCalledOnce();
   expect(utf8(note.buffer())).toEqual(utf8(source.replace("- [ ] Ship", "- [x] Ship")));
