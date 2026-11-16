@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::*;
 use crate::{
-    jobs::{JobAttempt, JobKind, JobScheduler},
+    jobs::{AdmissionEnvironment, DispatchRejection, JobAttempt, JobKind, JobScheduler, RecoveryAction},
     repository::AttemptWorktreeEvidence,
     runs::RunStatus,
     workflows::{
@@ -14,6 +14,10 @@ use crate::{
 };
 
 async fn terminal(store: &Store, job: &Job) -> Result<JobAttempt> {
+    terminal_after(store, job, None).await
+}
+
+async fn terminal_after(store: &Store, job: &Job, previous: Option<&str>) -> Result<JobAttempt> {
     tokio::time::timeout(Duration::from_secs(40), async {
         loop {
             if let Some(attempt) = store
@@ -21,7 +25,7 @@ async fn terminal(store: &Store, job: &Job) -> Result<JobAttempt> {
                 .await?
                 .context("Command job disappeared")?
                 .latest_attempt
-                .filter(|attempt| attempt.status.is_terminal())
+                .filter(|attempt| attempt.status.is_terminal() && Some(attempt.run_id.as_str()) != previous)
             {
                 return Ok(attempt);
             }
@@ -59,6 +63,7 @@ switch ($Mode) {
     [Console]::Write((@{msg = $data.message; nested = $data.nested.key} | ConvertTo-Json -Compress))
   }
   'invalid' { [Console]::Write("{ unfinished") }
+  'changed' { [Console]::Write('{"verified":true}') }
 }
 "#,
     )?;
@@ -111,6 +116,7 @@ switch ($Mode) {
         ("text", CommandOutputFormat::Text),
         ("invalid", CommandOutputFormat::Json),
         ("changed", CommandOutputFormat::Json),
+        ("changed-child", CommandOutputFormat::Json),
     ];
     let mut graph = builtin_delivery_graph(DeliveryRoles::default());
     for (mode, output) in modes {
@@ -120,7 +126,7 @@ switch ($Mode) {
                 r#"[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $data = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd()); [Console]::Write('text: ' + $data.message)"#.into(),
             ])
         } else {
-            (&registered, vec![mode.into()])
+            (&registered, vec![if mode == "changed-child" { "changed" } else { mode }.into()])
         };
         graph.nodes.push(NodeInstance {
             id: mode.into(),
@@ -138,10 +144,10 @@ switch ($Mode) {
             ("release", "release"),
             ("worktree", "worktree"),
         ] {
-            let (from_node, source) = if mode == "text" && target == "ready" {
-                ("json", "completed")
-            } else {
-                ("prepare", source)
+            let (from_node, source) = match (mode, target) {
+                ("text", "ready") => ("json", "completed"),
+                ("changed-child", "ready") => ("changed", "completed"),
+                _ => ("prepare", source),
             };
             graph.wires.push(Wire {
                 from: Endpoint {
@@ -296,21 +302,51 @@ switch ($Mode) {
     assert!(inspected.outputs.iter().any(|entry| entry.artifact == evidence && entry.current));
     assert!(inspected.outputs.iter().all(|entry| entry.artifact.node_instance_id != "invalid"));
     let failure = store
-        .job_failure(fixture.project.clone(), invalid.run_id)
+        .job_failure(fixture.project.clone(), invalid.run_id.clone())
         .await?
         .context("Missing failure evidence for the inspected Command attempt")?;
     assert_eq!(failure.observation.cause, Some(crate::jobs::FailureCause::InvalidResult));
     assert!(failure.logs_available);
+    let job_inspection = |job: &Job| {
+        store.inspect_workflow_execution_job(
+            fixture.project.clone(), fixture.run.id.clone(), job.id.clone(),
+            AdmissionEnvironment { runner: DirectWindowsRunner.identity().into(), bridge_available: true },
+        )
+    };
+    let invalid_recovery = job_inspection(&invalid_job).await?.context("Missing invalid Command inspection")?;
+    assert!(invalid_recovery.recovery_actions.is_empty());
+    assert!(store.queue_job_recovery(fixture.project.clone(), invalid_job.id, invalid.run_id, RecoveryAction::Retry).await.is_err());
 
-    std::fs::write(script, "throw 'This changed script must not start'")?;
-    let changed = terminal(&store, &submit("changed").await?).await?;
+    let original = std::fs::read(&script)?;
+    std::fs::write(&script, "throw 'This changed script must not start'")?;
+    let changed_job = submit("changed").await?;
+    let changed = terminal(&store, &changed_job).await?;
     assert_eq!(changed.status, RunStatus::Failed);
     assert!(
         store
-            .command_job_output(fixture.project.clone(), changed.run_id)
+            .command_job_output(fixture.project.clone(), changed.run_id.clone())
             .await?
             .is_none()
     );
+    let rejected = store.job_failure(fixture.project.clone(), changed.run_id.clone()).await?
+        .context("Missing failure evidence for the changed Command script")?;
+    assert_eq!(rejected.dispatch_rejection, Some(DispatchRejection::ProfileUnavailable));
+    let inspected = job_inspection(&changed_job).await?.context("Missing changed Command inspection")?;
+    assert_eq!(inspected.job.latest_attempt.context("Missing failed attempt")?.run_id, changed.run_id);
+    assert_eq!(inspected.recovery_actions, [RecoveryAction::Retry]);
+    assert!(submit("changed-child").await.unwrap_err().to_string().contains("control input ready is waiting"));
+    std::fs::write(script, original)?;
+    store.queue_job_recovery(fixture.project.clone(), changed_job.id.clone(), changed.run_id.clone(), RecoveryAction::Retry).await?;
+    let retried = terminal_after(&store, &changed_job, Some(&changed.run_id)).await?;
+    assert_eq!(retried.status, RunStatus::Succeeded);
+    let snapshot = store.inspect_workflow_execution(fixture.project.clone(), fixture.run.id.clone()).await?
+        .context("Missing workflow inspection after Command recovery")?;
+    let recorded = snapshot.jobs.iter().find(|entry| entry.job.id == changed_job.id).context("Missing retried job")?;
+    assert_eq!(recorded.attempts.len(), 2);
+    assert_eq!(recorded.attempts[1].run_id, retried.run_id);
+    assert_eq!(recorded.attempts[1].previous_run_id.as_deref(), Some(changed.run_id.as_str()));
+    let child = terminal(&store, &submit("changed-child").await?).await?;
+    assert_eq!(child.status, RunStatus::Succeeded);
     scheduler.shutdown().await?;
     drop(store);
     assert_eq!(
