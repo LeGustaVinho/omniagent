@@ -26,6 +26,7 @@ use crate::{
 
 mod approval_evidence;
 pub(crate) mod continuation;
+pub mod fork_checkout;
 pub mod draft_files;
 mod history;
 mod library;
@@ -340,6 +341,7 @@ impl Store {
                 &expected_context_id,
                 through_revision.as_deref(),
             )?;
+            fork_checkout::require_implicit_reuse(&tx, &source)?;
             let fork = continuation::fork_history(&tx, &source, &entries, title)?;
             tx.commit()?;
             Ok(fork)

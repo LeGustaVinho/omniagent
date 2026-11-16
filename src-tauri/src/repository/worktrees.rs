@@ -27,6 +27,7 @@ use super::{
 };
 
 pub(super) mod strategy;
+pub(super) mod conversation;
 
 use strategy::{
     BranchStrategy, TaskBranchStrategy, branch_strategy_for_scope, pin_branch_strategy,
@@ -379,8 +380,19 @@ fn prepare_provision(
     project_id: &str,
     task_id: &str,
 ) -> Result<Provision> {
+    prepare_named_provision(source, git, default_root, project_id, task_id, "task")
+}
+
+fn prepare_named_provision(
+    source: &Source,
+    git: &Path,
+    default_root: &Path,
+    project_id: &str,
+    reservation_id: &str,
+    branch_kind: &str,
+) -> Result<Provision> {
     let project_component = Uuid::parse_str(project_id)?.to_string();
-    let task_component = Uuid::parse_str(task_id)?.to_string();
+    let task_component = Uuid::parse_str(reservation_id)?.to_string();
     let root = normalize_root(source.override_root.as_deref().unwrap_or(default_root))?;
     ensure!(
         !root.starts_with(&source.common),
@@ -397,7 +409,7 @@ fn prepare_provision(
         "worktree parent is outside the configured root"
     );
     let root = parent.join(&task_component);
-    let branch = format!("codex/task-{task_component}");
+    let branch = format!("codex/{branch_kind}-{task_component}");
     ensure!(
         plain_metadata(&root)?.is_none(),
         "the requested worktree path is already occupied"
@@ -477,6 +489,12 @@ fn branch_head(git: &Path, root: &Path, branch: &str) -> Result<Option<String>> 
 }
 
 fn materialize(git: &Path, source: &Source, provision: &Provision) -> Result<CheckoutPaths> {
+    let (checkout, status) = materialize_base(git, source, provision)?;
+    ensure!(status.is_empty(), "the new worktree contains unreviewed changes");
+    Ok(checkout)
+}
+
+fn materialize_base(git: &Path, source: &Source, provision: &Provision) -> Result<(CheckoutPaths, Vec<String>)> {
     // The source may have changed while the provision intent was being saved.
     validate_source(source)?;
     let root = &provision.root;
@@ -540,16 +558,13 @@ fn materialize(git: &Path, source: &Source, provision: &Provision) -> Result<Che
         view.materialize(&index, &provision.base_commit)?;
     }
     view.copy_index(&checkout)?;
-    ensure!(
-        read_status(&view)?.is_empty(),
-        "the new worktree contains unreviewed changes"
-    );
+    let status = read_status(&view)?;
     check_branch(root, git, &provision.branch)?;
     ensure!(
         base_commit(root)?.as_deref() == Some(&provision.base_commit),
         "the worktree changed during materialization"
     );
-    Ok(checkout)
+    Ok((checkout, status))
 }
 
 fn check_branch(root: &Path, git: &Path, branch: &str) -> Result<()> {

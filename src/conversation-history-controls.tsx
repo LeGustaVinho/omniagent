@@ -2,7 +2,7 @@ import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/
 import { invoke } from "@tauri-apps/api/core";
 import { GitFork, History, Pencil, RotateCcw } from "lucide-react";
 import { Dialog } from "radix-ui";
-import { useState } from "react";
+import { useContext, useState } from "react";
 import type { ConversationHistory } from "@/bindings/ConversationHistory";
 import type { Conversation } from "@/bindings/Conversation";
 import type { MessageRevision } from "@/bindings/MessageRevision";
@@ -12,6 +12,8 @@ import type { QueueHistorySettings } from "@/bindings/QueueHistorySettings";
 import { Button } from "@/components/ui/button";
 import { SettingRow } from "@/settings-controls";
 import type { ConversationMode } from "@/conversation-mode";
+import { ForkCheckoutReview, useForkCheckoutReview } from "@/conversation-fork-checkout";
+import { ConversationLibraryNavigation } from "@/conversation-library";
 
 const policies = {
   review: "Pause for review",
@@ -226,6 +228,9 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
   const [forkTitle, setForkTitle] = useState(`${title} (fork)`);
   const [edit, setEdit] = useState(history.messages.find(({ revisionId }) => revisionId === requestedAction?.revisionId)?.text ?? "");
   const sourceContextId = requestedAction?.sourceContextId;
+  const fork = kind === "fork" || kind === "edit";
+  const checkoutReview = useForkCheckoutReview(conversationId, baseId, fork);
+  const library = useContext(ConversationLibraryNavigation);
   const archive = useQuery(snapshotQuery(conversationId, sourceContextId));
   const messages = sourceContextId ? archive.data?.messages ?? [] : history.messages;
   const client = useQueryClient();
@@ -245,20 +250,20 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
     mutationKey,
     mutationFn: async () => {
       const throughRevision = selected || null;
-      if (sourceContextId) return invoke<Conversation>("fork_retained_conversation", {
-        conversationId, expectedContextId: baseId, sourceContextId, throughRevision, title: forkTitle.trim(),
-      });
-      if (kind === "edit") return invoke<Conversation>("fork_conversation_with_message_edit", {
-        conversationId, expectedContextId: baseId, throughRevision, title: forkTitle.trim(), text: edit,
-      });
-      if (kind === "fork") return invoke<Conversation>("fork_conversation", {
-        conversationId, expectedContextId: baseId, throughRevision, title: forkTitle.trim(),
-      });
+      if (fork) {
+        const checkout = checkoutReview.confirmed;
+        if (!checkout?.previewId) throw new Error("Review a checkout for this fork.");
+        const created = await invoke<Conversation>("fork_conversation_with_checkout", {
+          request: { conversationId, expectedContextId: baseId, sourceContextId: sourceContextId ?? null,
+            throughRevision, title: forkTitle.trim(), editedText: kind === "edit" ? edit : null, checkoutPreviewId: checkout.previewId },
+        });
+        return { conversation: created, checkout };
+      }
       await invoke<string>("rewind_conversation_history", {
         conversationId, baseId, throughRevision: kind === "clear" ? null : throughRevision,
       });
     },
-    onSuccess: async (fork) => {
+    onSuccess: async (created) => {
       await Promise.all([
         client.invalidateQueries({ queryKey: ["conversation", conversationId] }),
         client.invalidateQueries({ queryKey: ["project-job-queue"] }),
@@ -266,12 +271,17 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
         client.invalidateQueries({ queryKey: ["conversations"] }),
       ]);
       close();
-      if (fork) openFork(fork);
+      if (created) {
+        const { conversation, checkout } = created;
+        if (library && checkout.targetCheckoutRoot && checkout.checkoutId !== conversation.checkoutId) {
+          await library.open({ projectId: checkout.projectId, repositoryRoot: checkout.repositoryRoot,
+            checkoutId: conversation.checkoutId, checkoutRoot: checkout.targetCheckoutRoot }, conversation.id);
+        } else openFork(conversation);
+      }
     },
     onError: () => client.invalidateQueries({ queryKey: ["conversation", conversationId, "messages"] }),
   });
   const lock = save.isPending || change.isPending;
-  const fork = kind === "fork" || kind === "edit";
   const index = messages.findIndex((message) => message.revisionId === selected);
   const message = messages[index];
   const prefix = kind === "clear" ? [] : index >= 0 ? messages.slice(0, index + 1) : messages;
@@ -317,7 +327,7 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
           </label>}
           {fork && <>
             <label>Fork title <input value={forkTitle} disabled={disabled || lock} onChange={(event) => setForkTitle(event.currentTarget.value)} /></label>
-            <p>The fork opens with an independent provider session on the current checkout.</p>
+            <ForkCheckoutReview form={checkoutReview} disabled={disabled || lock || changed} />
           </>}
           {kind === "edit" && <label>Edit user message <textarea value={edit} rows={4} disabled={disabled || lock} onChange={(event) => setEdit(event.currentTarget.value)} /></label>}
           {kind !== "clear" && <details><summary>Retained dialogue preview · {prefix.length} messages</summary>
@@ -332,7 +342,7 @@ function HistoryActionForm({ conversationId, title, history, disabled, mode, sel
           <footer>
             <Dialog.Close asChild><Button type="button" variant="outline" disabled={lock}>Close</Button></Dialog.Close>
             <Button type="button"
-              disabled={disabled || lock || changed || invalid || (!fork && !policy.data)}
+              disabled={disabled || lock || changed || invalid || (fork ? !checkoutReview.confirmed?.previewId : !policy.data)}
               onClick={() => change.mutate()}>
               {kind === "clear" ? "Confirm clear" : kind === "rewind" ? "Confirm rewind" : kind === "edit" ? "Create fork with edit" : "Create fork"}
             </Button>

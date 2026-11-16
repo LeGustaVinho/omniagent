@@ -43,6 +43,7 @@ pub use markdown::{RepositoryMarkdown, RepositoryMarkdownRevision};
 pub use markdown_catalog::RepositoryNoteCatalogEntry;
 pub use worktrees::strategy::{BranchStrategy, TaskBranchStrategy};
 pub use worktrees::{GitStartingState, ManagedWorktree, WorktreeStart, provision_task_worktree};
+pub(crate) use worktrees::conversation::{ConversationWorktreePreview, inspect_fork_checkout, materialize_fork_checkout};
 pub(crate) use worktrees::{
     capture_worktree_start, validate_task_worktree_checkout, verify_managed_recovery_candidate,
     verify_managed_recovery_checkout,

@@ -4,6 +4,7 @@ mod conversation_runtime;
 mod composer_customization_ipc;
 mod conversation_goal_runtime;
 mod conversation_continuation_runtime;
+mod conversation_fork_runtime;
 mod conversation_attachment_ipc;
 mod composer_suggestion_ipc;
 mod conversation_steering_ipc;
@@ -425,6 +426,10 @@ fn main() {
             conversation_runtime::conversation_next_prompt_instructions,
             conversation_runtime::fork_conversation_with_message_edit,
             conversation_runtime::fork_retained_conversation,
+            conversation_fork_runtime::conversation_fork_checkout_settings,
+            conversation_fork_runtime::set_conversation_fork_checkout_policy,
+            conversation_fork_runtime::preview_conversation_fork_checkout,
+            conversation_fork_runtime::fork_conversation_with_checkout,
             ipc::project_queue_history_policy,
             ipc::set_project_queue_history_policy,
             ipc::conversation_queue_history_policy,

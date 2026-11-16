@@ -7,6 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ConversationHistory } from "@/bindings/ConversationHistory";
+import { ConversationLibraryNavigation } from "@/conversation-library";
 import {
   ConversationHistoryControls, ConversationMessageHistoryActions, type ConversationMessageHistoryAction,
 } from "@/conversation-history-controls";
@@ -21,21 +22,33 @@ const later = { messageId: "message-3", revisionId: "revision-3", role: "user", 
 const original: ConversationHistory = { contextId: "original-context", messages: [first, answer, later] };
 const selection = { provider: "codex", profileId: "fixture", modelId: "codex-test" } as const;
 
-function setup() {
+function setup(defaultPolicy: "reuse_current_checkout" | "ask_for_checkout" = "reuse_current_checkout") {
   let active = original;
   const previous: { contextId: string; supersededBy: string; action: string; messageCount: number; replacedAt: string }[] = [];
   const archived = new Map<string, ConversationHistory>();
   const opened = vi.fn();
+  const navigated = vi.fn(async () => undefined);
   const fork = { id: "new-chat", contextId: "new-context", title: "Scoped chat (fork)", checkoutId: "same-checkout" };
   vi.mocked(invoke).mockImplementation(async (command, input) => {
-    const args = input as { throughRevision?: string; contextId?: string; title?: string };
+    const args = input as { throughRevision?: string; contextId?: string; choice?: string; selectedPaths?: string[];
+      request?: { title: string; checkoutPreviewId: string } };
     switch (command) {
       case "conversation_history": return active;
       case "conversation_queue_history_policy": return { projectDefault: "review", conversationOverride: null };
       case "conversation_history_inspection": return { previous: [...previous], fork: null, retainedQuestions: [{ runId: "pinned-run", requestId: 17 }] };
       case "conversation_next_prompt_instructions": return { sources: [{ path: "D:/repo/AGENTS.md", selection: "expected" }], unresolved: [] };
       case "conversation_history_revision": return archived.get(args.contextId!);
-      case "fork_conversation": case "fork_conversation_with_message_edit": case "fork_retained_conversation": return { ...fork, title: args.title };
+      case "conversation_fork_checkout_settings": return { projectDefault: defaultPolicy, conversationOverride: null, effective: defaultPolicy };
+      case "preview_conversation_fork_checkout": {
+        const choice = args.choice ?? (defaultPolicy === "ask_for_checkout" ? null : defaultPolicy);
+        const separate = choice === "create_separate_worktree";
+        return { choice, previewId: choice ? separate ? (args.selectedPaths?.length ? "chosen-separate" : "empty-separate") : "reuse-preview" : null,
+          checkoutId: "same-checkout", projectId: "fixture-project", repositoryRoot: "D:/repo", checkoutRoot: "D:/repo",
+          baseCommit: "base-sha", dirtyPaths: separate ? ["tracked.txt", "unselected.txt"] : [], selectedPaths: args.selectedPaths ?? [],
+          targetCheckoutRoot: separate ? "D:/branches/fork" : null, targetBranch: separate ? "codex/conversation-fork" : null };
+      }
+      case "fork_conversation_with_checkout": return { ...fork, title: args.request?.title,
+        checkoutId: args.request?.checkoutPreviewId === "chosen-separate" ? "fork-checkout" : fork.checkoutId };
       case "rewind_conversation_history": {
         const revision = args.throughRevision;
         const nextContextId = `context-${previous.length + 1}`;
@@ -60,8 +73,19 @@ function setup() {
       </section>)}
     </>;
   }
-  const view = render(<QueryClientProvider client={client}><Harness busy={false} /></QueryClientProvider>);
-  return { client, opened, user: userEvent.setup(), updateBusy: (busy: boolean) => view.rerender(<QueryClientProvider client={client}><Harness busy={busy} /></QueryClientProvider>) };
+  const harness = (busy: boolean) => <QueryClientProvider client={client}>
+    <ConversationLibraryNavigation.Provider value={{ checkoutId: "same-checkout", projectId: "fixture-project", open: navigated }}>
+      <Harness busy={busy} />
+    </ConversationLibraryNavigation.Provider>
+  </QueryClientProvider>;
+  const view = render(harness(false));
+  return { client, opened, navigated, user: userEvent.setup(), updateBusy: (busy: boolean) => view.rerender(harness(busy)) };
+}
+
+async function confirmFork(user: ReturnType<typeof userEvent.setup>, text: string) {
+  const button = screen.getByRole("button", { name: text }) as HTMLButtonElement;
+  await waitFor(() => expect(button.disabled).toBe(false));
+  await user.click(button);
 }
 
 it("rewinds inclusively, clears a new context, and inspects or forks the preserved revision", async () => {
@@ -89,10 +113,10 @@ it("rewinds inclusively, clears a new context, and inspects or forks the preserv
   const saved = (await screen.findByText(later.text)).closest("li")!;
   expect(saved).toBeTruthy();
   await user.click(within(saved).getByRole("button", { name: "Fork from saved message" }));
-  await user.click(screen.getByRole("button", { name: "Create fork" }));
+  await confirmFork(user, "Create fork");
   await waitFor(() => expect(opened).toHaveBeenCalledOnce());
-  expect(invoke).toHaveBeenCalledWith("fork_retained_conversation", { conversationId, expectedContextId: "context-2", sourceContextId: original.contextId,
-    throughRevision: later.revisionId, title: "Scoped chat (fork)" });
+  expect(invoke).toHaveBeenCalledWith("fork_conversation_with_checkout", { request: { conversationId, expectedContextId: "context-2", sourceContextId: original.contextId,
+    throughRevision: later.revisionId, title: "Scoped chat (fork)", editedText: null, checkoutPreviewId: "reuse-preview" } });
 });
 
 it("opens a head fork and an edited-message fork through the conversation tab callback", async () => {
@@ -100,20 +124,39 @@ it("opens a head fork and an edited-message fork through the conversation tab ca
   await screen.findByRole("region", { name: first.text });
   await user.click(screen.getByRole("button", { name: "History" }));
   await user.selectOptions(screen.getByRole("combobox", { name: "Action" }), "fork");
-  await user.click(screen.getByRole("button", { name: "Create fork" }));
+  await confirmFork(user, "Create fork");
   await waitFor(() => expect(opened).toHaveBeenCalledWith(expect.objectContaining({ id: "new-chat" })));
-  expect(invoke).toHaveBeenCalledWith("fork_conversation", { conversationId, expectedContextId: original.contextId, throughRevision: null, title: "Scoped chat (fork)" });
+  expect(invoke).toHaveBeenCalledWith("fork_conversation_with_checkout", { request: { conversationId, expectedContextId: original.contextId,
+    throughRevision: null, sourceContextId: null, title: "Scoped chat (fork)", editedText: null, checkoutPreviewId: "reuse-preview" } });
 
   await user.click(within(screen.getByRole("region", { name: first.text })).getByRole("button", { name: "Edit in a fork" }));
   const input = screen.getByRole("textbox", { name: "Edit user message" });
   expect((input as HTMLTextAreaElement).value).toBe(first.text);
   await user.clear(input);
   await user.type(input, "Alternative request");
-  await user.click(screen.getByRole("button", { name: "Create fork with edit" }));
+  await confirmFork(user, "Create fork with edit");
   await waitFor(() => expect(opened).toHaveBeenCalledTimes(2));
-  expect(invoke).toHaveBeenCalledWith("fork_conversation_with_message_edit", { conversationId, expectedContextId: original.contextId,
-    throughRevision: first.revisionId, title: "Scoped chat (fork)", text: "Alternative request" });
+  expect(invoke).toHaveBeenCalledWith("fork_conversation_with_checkout", { request: { conversationId, expectedContextId: original.contextId,
+    throughRevision: first.revisionId, sourceContextId: null, title: "Scoped chat (fork)", editedText: "Alternative request", checkoutPreviewId: "reuse-preview" } });
   expect(screen.getByRole("region", { name: first.text })).toBeTruthy();
+});
+
+it("requires an explicit checkout and opens a separate branch with the reviewed dirty paths", async () => {
+  const { user, opened, navigated } = setup("ask_for_checkout");
+  await screen.findByRole("region", { name: first.text });
+  await user.click(screen.getByRole("button", { name: "History" }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Action" }), "fork");
+  expect(await screen.findByRole("option", { name: "Choose a checkout" })).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Create fork" }) as HTMLButtonElement).disabled).toBe(true);
+  await user.selectOptions(screen.getByRole("combobox", { name: "Fork checkout" }), "create_separate_worktree");
+  await user.click(await screen.findByRole("checkbox", { name: "tracked.txt" }));
+  expect(await screen.findByText("D:/branches/fork · codex/conversation-fork")).toBeTruthy();
+  await confirmFork(user, "Create fork");
+  await waitFor(() => expect(navigated).toHaveBeenCalledWith({ projectId: "fixture-project", repositoryRoot: "D:/repo",
+    checkoutId: "fork-checkout", checkoutRoot: "D:/branches/fork" }, "new-chat"));
+  expect(opened).not.toHaveBeenCalled();
+  expect(invoke).toHaveBeenCalledWith("preview_conversation_fork_checkout", { conversationId, expectedContextId: original.contextId,
+    choice: "create_separate_worktree", selectedPaths: ["tracked.txt"] });
 });
 
 it("disables a reviewed action if the active turn starts or the saved context changes", async () => {

@@ -671,7 +671,17 @@ pub(super) fn fork_history(
     entries: &[String],
     title: String,
 ) -> Result<Conversation> {
-    let source_session: Option<String> = db
+    fork_history_at_checkout(db, source, entries, source.checkout_id.clone(), title)
+}
+
+pub(super) fn fork_history_at_checkout(
+    db: &Connection,
+    source: &Conversation,
+    entries: &[String],
+    checkout_id: String,
+    title: String,
+) -> Result<Conversation> {
+    let source_session: Option<String> = if source.checkout_id == checkout_id { db
         .query_row(
             "SELECT a.agent_session_id FROM agent_attempts a
          JOIN agent_sessions s ON s.id = a.agent_session_id
@@ -682,8 +692,8 @@ pub(super) fn fork_history(
             params![source.id, serde_json::to_string(entries)?],
             |row| row.get(0),
         )
-        .optional()?;
-    let mut fork = insert_conversation(db, source.checkout_id.clone(), title, false)?;
+        .optional()? } else { None };
+    let mut fork = insert_conversation(db, checkout_id, title, false)?;
     let mut copied = Vec::with_capacity(entries.len());
     let mut read = db.prepare(
         "SELECT m.role, r.content FROM messages m JOIN message_revisions r ON r.message_id = m.id
