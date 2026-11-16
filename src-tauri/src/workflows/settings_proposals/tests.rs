@@ -10,6 +10,10 @@ use crate::{
     repository::ProjectCheckout,
     runs::RunStatus,
     workflows::{
+        BuiltinNode, NodeConfiguration, NodeInstance, WorkflowGraph,
+        authoring::package::{
+            PackageArtifactBody, PackageDestination, PackageMember, WorkflowPackage,
+        },
         role_templates::{ConversationTemplate, SaveConversationTemplate, TemplateReviewPolicy},
         tests::approved_delivery_repository,
     },
@@ -64,6 +68,34 @@ async fn proposals_apply_only_scoped_grants_and_review_mixed_fields_atomically()
         request_id: request_id.into(),
         changes,
     };
+    let draft = store
+        .create_workflow_package(
+            project.clone(),
+            None,
+            WorkflowPackage {
+                name: "Unpublished pipeline draft".into(),
+                members: vec![PackageMember {
+                    key: "pipeline".into(),
+                    name: "Test pipeline".into(),
+                    destination: PackageDestination::Project,
+                    base: None,
+                    body: PackageArtifactBody::Pipeline {
+                        graph: WorkflowGraph {
+                            name: "Test pipeline".into(),
+                            nodes: vec![NodeInstance {
+                                id: "start".into(),
+                                kind: BuiltinNode::Start,
+                                configuration: NodeConfiguration::None,
+                            }],
+                            wires: vec![],
+                        },
+                    },
+                    references: Default::default(),
+                }],
+            },
+        )
+        .await?;
+
     let policy = store
         .set_settings_patch_allowlist(
             project.clone(),
@@ -133,6 +165,20 @@ async fn proposals_apply_only_scoped_grants_and_review_mixed_fields_atomically()
     assert_eq!(*allowlist_revision, 1);
     assert_eq!(revisions[0].before_revision, 0);
     assert_eq!(revisions[0].after_revision, 1);
+    let bypass = invoke_test_mcp_tool(&bridge, "propose_settings_patch", serde_json::json!({
+        "requestId":"do-not-publish",
+        "changes":[{"field":"publish_workflow_package","draftId":draft.id,"expectedRevision":draft.revision}]
+    })).await?;
+    assert!(bypass["error"].is_object(), "{bypass}");
+    let direct = invoke_test_mcp_tool(
+        &bridge,
+        "publish_workflow_package",
+        serde_json::json!({
+            "draftId":draft.id,"expectedRevision":draft.revision
+        }),
+    )
+    .await?;
+    assert!(direct["error"].is_object(), "{direct}");
     assert_eq!(
         store
             .propose_settings_patch(run_scope.clone(), automatic)
@@ -278,6 +324,13 @@ async fn proposals_apply_only_scoped_grants_and_review_mixed_fields_atomically()
     assert_eq!(
         renamed.display_label.value.as_deref(),
         Some("Reviewed alias")
+    );
+    assert!(
+        store
+            .workflow_package(project.clone(), draft.id)
+            .await?
+            .publication
+            .is_none()
     );
     store
         .set_project_question_timeout(project.clone(), 27)
