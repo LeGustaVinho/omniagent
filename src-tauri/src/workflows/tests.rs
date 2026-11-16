@@ -104,6 +104,24 @@ fn registry_enforces_port_types_configuration_and_control_dependencies() -> Resu
     Ok(())
 }
 
+#[test]
+fn planner_units_require_a_closed_block_and_keep_purpose_order_and_revision() -> Result<()> {
+    let body = r#"{"units":[{"purpose":"First","completionCriteria":["Build passes"]},{"purpose":"Second","completionCriteria":["Tests pass"]}]}"#;
+    let unclosed = format!("Plan\n```omniagent-plan\n{body}");
+    assert!(super::units::parse_plan_units("revision-one", &unclosed).is_err());
+    let closed = format!("{unclosed}\n```");
+    let units = super::units::parse_plan_units("revision-one", &closed)?;
+    assert_eq!(units[0].purpose, "First");
+    assert_eq!(units[0].completion_criteria, ["Build passes"]);
+    assert_eq!(units[1].ordinal, 2);
+    assert_eq!(units[1].purpose, "Second");
+    assert_ne!(
+        units[0].id,
+        super::units::parse_plan_units("revision-two", &closed)?[0].id
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn builtin_path_approves_an_exact_plan_and_prepares_scoped_units() -> Result<()> {
     let temp = tempfile::tempdir()?;
