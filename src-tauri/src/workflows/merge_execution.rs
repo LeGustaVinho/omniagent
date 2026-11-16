@@ -135,6 +135,15 @@ impl Store {
             DeliveryMergeOutcome::DestinationCheckedOut { checkout } => {
                 WorkflowUnitOutcome::DestinationCheckedOut { checkout }
             }
+            DeliveryMergeOutcome::RecoveryRequired {
+                checkout,
+                recovery_directory,
+                message,
+            } => WorkflowUnitOutcome::RecoveryRequired {
+                checkout,
+                recovery_directory,
+                message,
+            },
             DeliveryMergeOutcome::Conflicted => WorkflowUnitOutcome::Conflicted,
             DeliveryMergeOutcome::Verified { evidence } => {
                 let Some(node) = node else {

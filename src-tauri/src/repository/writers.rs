@@ -1,4 +1,6 @@
-use anyhow::{Context, Result, ensure};
+use std::path::Path;
+
+use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
@@ -91,6 +93,28 @@ pub(crate) fn writer_conflict(
             },
         )
         .optional()?)
+}
+
+// Call under the same immediate transaction that will publish the attached merge.
+// Admissions are serialized on this connection across the filesystem and ref update.
+pub(super) fn ensure_merge_destination_available(
+    db: &Connection,
+    project: &str,
+    root: &Path,
+) -> Result<()> {
+    let root = root.to_str().context("the destination checkout path is not UTF-8")?;
+    let checkout: Option<String> = db.query_row(
+        "SELECT id FROM checkouts WHERE project_id = ?1 AND root = ?2",
+        params![project, root],
+        |row| row.get(0),
+    ).optional()?;
+    let Some(checkout) = checkout else { return Ok(()); };
+    match writer_conflict(db, &checkout, "")? {
+        Some(WriterConflict::Run { id, .. }) => bail!("destination worktree is reserved by run {id}"),
+        Some(WriterConflict::App(id)) => bail!("destination worktree is reserved by app operation {id}"),
+        Some(WriterConflict::Pending { scope, .. }) => bail!("destination worktree has pending changes for scope {scope}"),
+        None => Ok(()),
+    }
 }
 
 pub(super) fn retain_pending_changes(

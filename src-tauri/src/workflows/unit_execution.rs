@@ -75,6 +75,11 @@ pub enum WorkflowUnitOutcome {
     DestinationCheckedOut {
         checkout: String,
     },
+    RecoveryRequired {
+        checkout: String,
+        recovery_directory: String,
+        message: String,
+    },
     Conflicted,
     MergeBlocked {
         reason: String,

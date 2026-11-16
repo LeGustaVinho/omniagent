@@ -1,8 +1,9 @@
+mod attached;
 mod git;
 #[cfg(test)]
 mod tests;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -18,8 +19,10 @@ use crate::{
 use super::{
     destination_drift::{DestinationDriftOutcome, authorized_destination_drift},
     verified_git::{DeliveryGitPolicy, VerifiedCommit, load_policy, load_verified_delivery_commit},
+    writers::ensure_merge_destination_available,
 };
-use git::{MergeRepository, Plan, Publication, validate_oid};
+use attached::{AttachedMergePlan, AttachedRecovery};
+use git::{AttachedPublication, MergeRepository, Plan, Publication, validate_oid};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,11 +91,24 @@ pub struct VerifiedMerge {
 )]
 pub enum DeliveryMergeOutcome {
     WaitingForMerge,
-    DestinationMoved { actual_sha: String },
-    DestinationDrift { recovery: DestinationDriftOutcome },
-    DestinationCheckedOut { checkout: String },
+    DestinationMoved {
+        actual_sha: String,
+    },
+    DestinationDrift {
+        recovery: DestinationDriftOutcome,
+    },
+    DestinationCheckedOut {
+        checkout: String,
+    },
+    RecoveryRequired {
+        checkout: String,
+        recovery_directory: String,
+        message: String,
+    },
     Conflicted,
-    Verified { evidence: VerifiedMerge },
+    Verified {
+        evidence: VerifiedMerge,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +120,8 @@ struct MergeIntent {
     destination_sha: String,
     drift_acceptance_id: Option<String>,
     integration_sha: String,
+    #[serde(default)]
+    attached: Option<AttachedMergePlan>,
 }
 
 struct MergeScope {
@@ -326,7 +344,10 @@ impl Store {
                 move |db| {
                     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                     let preparation =
-                        prepare_merge(&tx, &request, invocation, approved_tip.as_deref())?;
+                        match prepare_merge(&tx, &request, invocation, approved_tip.as_deref()) {
+                            Ok(preparation) => preparation,
+                            Err(error) => return recovery_outcome(error).map(Preparation::Return),
+                        };
                     tx.commit()?;
                     Ok(preparation)
                 }
@@ -339,8 +360,22 @@ impl Store {
         let request = request.clone();
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let outcome = settle_merge(&tx, &request, intent, invocation)?;
-            tx.commit()?;
+            let mut attached = None;
+            let outcome =
+                match settle_merge(&tx, &request, intent.as_ref(), invocation, &mut attached) {
+                    Ok(outcome) => outcome,
+                    Err(error) => return finish_attachment_error(intent.as_ref(), error),
+                };
+            if let Err(error) = tx.commit() {
+                return finish_attachment_error(intent.as_ref(), error.into());
+            }
+            drop(attached);
+            if matches!(&outcome, DeliveryMergeOutcome::Verified { .. })
+                && let Some(plan) = intent.as_ref().and_then(|intent| intent.attached.as_ref())
+            {
+                // The receipt is durable; an unavailable cleanup cannot undo it.
+                let _ = plan.cleanup_after_receipt();
+            }
             Ok(outcome)
         })
         .await
@@ -490,13 +525,32 @@ fn prepare_merge(
         return Ok(Preparation::Return(saved));
     }
     let scope = MergeScope::load(db, request)?;
-    if request.external_sha.is_some() {
-        return Ok(Preparation::Settle(None));
-    }
+    let previous = load_intent(db, &request.commit_evidence_id)?;
     let Some(actual_sha) = scope.repo.find_branch_tip(&request.destination_branch)? else {
+        require_unmodified_attachment(
+            previous.as_ref(),
+            "destination disappeared after the worktree update began",
+        )?;
         return Ok(Preparation::Return(missing_destination(request)));
     };
-    let previous = load_intent(db, &request.commit_evidence_id)?;
+    if let Some(external_sha) = &request.external_sha {
+        if let Some(intent) = &previous
+            && actual_sha == intent.integration_sha
+            && *external_sha == actual_sha
+            && intent.attached.is_some()
+        {
+            ensure!(
+                intent.matches(request),
+                "attached merge has different approval pins"
+            );
+            return Ok(Preparation::Settle(Some(intent.clone())));
+        }
+        require_unmodified_attachment(
+            previous.as_ref(),
+            "resume the attached checkout update before linking a different integration",
+        )?;
+        return Ok(Preparation::Settle(None));
+    }
     if let Some(intent) = &previous {
         ensure!(
             intent.matches(request),
@@ -505,6 +559,12 @@ fn prepare_merge(
         if actual_sha == intent.integration_sha {
             return Ok(Preparation::Settle(Some(intent.clone())));
         }
+        if actual_sha != intent.destination_sha {
+            require_unmodified_attachment(
+                Some(intent),
+                "destination changed after the worktree update began",
+            )?;
+        }
     }
     if Some(actual_sha.as_str()) != approved_tip && actual_sha != request.expected_destination_sha {
         return Ok(Preparation::Return(
@@ -512,6 +572,10 @@ fn prepare_merge(
         ));
     }
     if !local_merge_allowed(db, request, invocation)? {
+        require_unmodified_attachment(
+            previous.as_ref(),
+            "local merge is no longer authorized for the pending worktree update",
+        )?;
         return Ok(Preparation::Return(DeliveryMergeOutcome::WaitingForMerge));
     }
     let approved_tree = verify_drift_approval(
@@ -521,19 +585,20 @@ fn prepare_merge(
         &actual_sha,
         request.drift_acceptance_id.as_deref(),
     )?;
+    let attached_checkout = scope
+        .repo
+        .attached_checkout(&request.destination_branch)?
+        .map(dunce::canonicalize)
+        .transpose()?;
     if let Some(intent) = previous {
         if intent.destination_sha == actual_sha
             && intent.drift_acceptance_id == request.drift_acceptance_id
+            && reusable_attachment(intent.attached.as_ref(), attached_checkout.as_deref())?
         {
             return Ok(Preparation::Settle(Some(intent)));
         }
     }
     scope.repo.verify_chain(&scope.commits)?;
-    if let Some(checkout) = scope.repo.attached_checkout(&request.destination_branch)? {
-        return Ok(Preparation::Return(
-            DeliveryMergeOutcome::DestinationCheckedOut { checkout },
-        ));
-    }
     ensure!(
         scope.repo.branch_tip(&request.expected_source_branch)? == request.expected_source_sha,
         "approved working branch moved before merge"
@@ -547,6 +612,18 @@ fn prepare_merge(
     scope
         .repo
         .require_tree(&integration_sha, approved_tree.as_deref())?;
+    let attached =
+        if let Some(checkout) = attached_checkout.filter(|_| integration_sha != actual_sha) {
+            ensure_merge_destination_available(db, &request.project_id, &checkout)?;
+            Some(scope.repo.prepare_attached(
+                &checkout,
+                &request.destination_branch,
+                &actual_sha,
+                &integration_sha,
+            )?)
+        } else {
+            None
+        };
     let intent = MergeIntent {
         source_branch: request.expected_source_branch.clone(),
         source_sha: request.expected_source_sha.clone(),
@@ -555,6 +632,7 @@ fn prepare_merge(
         destination_sha: actual_sha,
         drift_acceptance_id: request.drift_acceptance_id.clone(),
         integration_sha,
+        attached,
     };
     db.execute(
         "INSERT INTO workflow_merge_intents(commit_evidence_id, payload) VALUES (?1, ?2)
@@ -562,6 +640,50 @@ fn prepare_merge(
         params![request.commit_evidence_id, encode(&intent)?],
     )?;
     Ok(Preparation::Settle(Some(intent)))
+}
+
+fn reusable_attachment(plan: Option<&AttachedMergePlan>, current: Option<&Path>) -> Result<bool> {
+    match plan {
+        Some(plan) if plan.publication_started()? => Ok(true),
+        Some(plan) if current == Some(plan.checkout()) => plan.unstarted_matches_current(),
+        Some(_) => Ok(false),
+        None => Ok(current.is_none()),
+    }
+}
+
+fn recovery_outcome(error: anyhow::Error) -> Result<DeliveryMergeOutcome> {
+    let recovery = error.downcast::<AttachedRecovery>()?;
+    Ok(DeliveryMergeOutcome::RecoveryRequired {
+        checkout: recovery.checkout.to_string_lossy().into_owned(),
+        recovery_directory: recovery.recovery_directory.to_string_lossy().into_owned(),
+        message: recovery.message,
+    })
+}
+
+fn after_attachment_change(plan: &AttachedMergePlan, error: anyhow::Error) -> anyhow::Error {
+    if error.is::<AttachedRecovery>() || !plan.publication_started().unwrap_or(true) {
+        return error;
+    }
+    plan.recovery_error(format!("{error:#}")).into()
+}
+
+fn finish_attachment_error(
+    intent: Option<&MergeIntent>,
+    error: anyhow::Error,
+) -> Result<DeliveryMergeOutcome> {
+    match intent.and_then(|intent| intent.attached.as_ref()) {
+        Some(plan) => recovery_outcome(after_attachment_change(plan, error)),
+        None => recovery_outcome(error),
+    }
+}
+
+fn require_unmodified_attachment(intent: Option<&MergeIntent>, message: &str) -> Result<()> {
+    if let Some(plan) = intent.and_then(|intent| intent.attached.as_ref())
+        && plan.publication_started()?
+    {
+        return Err(plan.recovery_error(message).into());
+    }
+    Ok(())
 }
 
 fn verify_drift_approval(
@@ -625,11 +747,12 @@ impl MergeIntent {
     }
 }
 
-fn settle_merge(
+fn settle_merge<'a>(
     db: &Connection,
     request: &DeliveryMergeRequest,
-    intent: Option<MergeIntent>,
+    intent: Option<&'a MergeIntent>,
     invocation: Invocation,
+    attached: &mut Option<AttachedPublication<'a>>,
 ) -> Result<DeliveryMergeOutcome> {
     if let Some(saved) = find_saved(db, request)? {
         return Ok(saved);
@@ -637,19 +760,31 @@ fn settle_merge(
     let scope = MergeScope::load(db, request)?;
     scope.repo.verify_chain(&scope.commits)?;
     let Some(actual_sha) = scope.repo.find_branch_tip(&request.destination_branch)? else {
+        require_unmodified_attachment(
+            intent,
+            "destination disappeared after the worktree update began",
+        )?;
         return Ok(missing_destination(request));
     };
     let (integration_sha, source, previous_destination_sha, drift_acceptance_id) = match intent {
         Some(intent) => {
             ensure!(
-                load_intent(db, &request.commit_evidence_id)?.as_ref() == Some(&intent),
+                load_intent(db, &request.commit_evidence_id)?.as_ref() == Some(intent),
                 "prepared merge changed before publication"
             );
             if actual_sha != intent.integration_sha {
                 if actual_sha != intent.destination_sha {
+                    require_unmodified_attachment(
+                        Some(intent),
+                        "destination changed after the worktree update began",
+                    )?;
                     return Ok(DeliveryMergeOutcome::DestinationMoved { actual_sha });
                 }
                 if !local_merge_allowed(db, request, invocation)? {
+                    require_unmodified_attachment(
+                        Some(intent),
+                        "local merge is no longer authorized for the pending worktree update",
+                    )?;
                     return Ok(DeliveryMergeOutcome::WaitingForMerge);
                 }
                 let approved_tree = verify_drift_approval(
@@ -671,7 +806,27 @@ fn settle_merge(
                 publication
                     .expected_destination_sha
                     .clone_from(&intent.destination_sha);
-                match scope.repo.publish(&publication, &intent.integration_sha)? {
+                let published = if let Some(plan) = &intent.attached {
+                    ensure_merge_destination_available(db, &request.project_id, plan.checkout())?;
+                    let hold = scope
+                        .repo
+                        .reserve_attached(plan, &request.destination_branch)?;
+                    *attached = Some(hold);
+                    scope.repo.publish_with_worktree(
+                        &publication,
+                        &intent.integration_sha,
+                        attached.as_mut(),
+                    )?
+                } else {
+                    scope.repo.publish(&publication, &intent.integration_sha)?
+                };
+                if !matches!(&published, Publication::Published) {
+                    require_unmodified_attachment(
+                        Some(intent),
+                        "the expected refs changed after the worktree update began",
+                    )?;
+                }
+                match published {
                     Publication::Published => {}
                     Publication::DestinationMoved(Some(actual_sha)) => {
                         return Ok(DeliveryMergeOutcome::DestinationMoved { actual_sha });
@@ -681,12 +836,19 @@ fn settle_merge(
                         return Ok(DeliveryMergeOutcome::DestinationCheckedOut { checkout });
                     }
                 }
+            } else if let Some(plan) = &intent.attached {
+                ensure_merge_destination_available(db, &request.project_id, plan.checkout())?;
+                *attached = Some(
+                    scope
+                        .repo
+                        .reserve_attached(plan, &request.destination_branch)?,
+                );
             }
             (
-                intent.integration_sha,
+                intent.integration_sha.clone(),
                 MergeSource::Automatic,
-                intent.destination_sha,
-                intent.drift_acceptance_id,
+                intent.destination_sha.clone(),
+                intent.drift_acceptance_id.clone(),
             )
         }
         None => {
@@ -719,10 +881,35 @@ fn settle_merge(
         .repo
         .verify_incorporation(request, &integration_sha, &scope.commits)?;
     let Some(actual_sha) = scope.repo.find_branch_tip(&request.destination_branch)? else {
+        if let Some(plan) = intent.and_then(|intent| intent.attached.as_ref()) {
+            return Err(plan
+                .recovery_error("destination disappeared before recording the integration")
+                .into());
+        }
         return Ok(missing_destination(request));
     };
     if actual_sha != integration_sha {
+        if let Some(plan) = intent.and_then(|intent| intent.attached.as_ref()) {
+            return Err(plan
+                .recovery_error("destination moved before recording the integration")
+                .into());
+        }
         return Ok(DeliveryMergeOutcome::DestinationMoved { actual_sha });
+    }
+    if let Some(held) = attached.as_ref()
+        && let Some(plan) = intent.and_then(|intent| intent.attached.as_ref())
+    {
+        let revalidated = (|| {
+            ensure!(
+                scope.repo.branch_tip(&request.expected_source_branch)?
+                    == request.expected_source_sha,
+                "approved working branch moved before recording the integration"
+            );
+            scope
+                .repo
+                .verify_attached_updated(held, &request.destination_branch)
+        })();
+        revalidated.map_err(|error| after_attachment_change(plan, error))?;
     }
     let verified_at = db.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", [], |row| {
         row.get(0)
@@ -763,6 +950,51 @@ pub(crate) fn load_verified_delivery_merge(
         params![commit_evidence_id, project, task], |row| row.get(0),
     ).optional()?;
     payload.map(|data| decode(&data)).transpose()
+}
+
+#[cfg(test)]
+impl Store {
+    pub(crate) async fn suspend_test_attached_merge(
+        &self,
+        request: DeliveryMergeRequest,
+        publish_ref: bool,
+    ) -> Result<String> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let preparation = prepare_merge(&tx, &request, Invocation::User, None)?;
+            tx.commit()?;
+            let Preparation::Settle(Some(intent)) = preparation else {
+                anyhow::bail!("test did not prepare an integration intent");
+            };
+            let plan = intent
+                .attached
+                .as_ref()
+                .context("test destination is not attached")?;
+            let scope = MergeScope::load(db, &request)?;
+            let mut attached = scope
+                .repo
+                .reserve_attached(plan, &request.destination_branch)?;
+            if publish_ref {
+                ensure!(
+                    matches!(
+                        scope.repo.publish_with_worktree(
+                            &request,
+                            &intent.integration_sha,
+                            Some(&mut attached)
+                        )?,
+                        Publication::Published
+                    ),
+                    "test did not publish the integration ref"
+                );
+            } else {
+                // Reproduce an exit after updating the checkout and index,
+                // before committing the held Git ref transaction.
+                attached.apply_test_worktree()?;
+            }
+            Ok(intent.integration_sha)
+        })
+        .await
+    }
 }
 
 fn load_intent(db: &Connection, commit_evidence_id: &str) -> Result<Option<MergeIntent>> {

@@ -30,6 +30,7 @@ export type MergeOutcome =
   | { status: "destination_checked_out"; checkout: string }
   | { status: "destination_drift"; recovery: DestinationDriftOutcome }
   | { status: "merge_blocked"; reason: string }
+  | { status: "recovery_required"; checkout: string; recoveryDirectory: string; message: string }
   | { status: "merge_verified"; evidence: VerifiedMerge }
   | { status: "artifact"; artifact: { id: string } };
 

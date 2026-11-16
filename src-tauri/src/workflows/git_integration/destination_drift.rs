@@ -219,12 +219,17 @@ async fn the_attached_destination_accepts_only_the_exact_external_update_after_f
     else {
         anyhow::bail!("the explicit acceptance was not recorded");
     };
-    assert!(matches!(
-        test.store
-            .verify_delivery_merge(test.request(Some(acceptance_id.clone())))
-            .await?,
-        DeliveryMergeOutcome::DestinationCheckedOut { .. }
-    ));
+    let draft = test.destination.join("local-draft.txt");
+    fs::write(&draft, "destination draft")?;
+    let blocked = test.store
+        .verify_delivery_merge(test.request(Some(acceptance_id.clone())))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{blocked:#}").contains("staged, modified, or untracked files"),
+        "{blocked:#}"
+    );
+    assert_eq!(git(&test.destination, &["rev-parse", "HEAD"])?, actual);
     git(
         &test.destination,
         &[
@@ -260,6 +265,7 @@ async fn the_attached_destination_accepts_only_the_exact_external_update_after_f
         Some(test.initial.as_str())
     );
     assert_eq!(evidence.integration_sha, sha);
+    assert_eq!(fs::read_to_string(&draft)?, "destination draft");
     Ok(())
 }
 

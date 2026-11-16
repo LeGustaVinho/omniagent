@@ -108,6 +108,11 @@ export function RepositoryDeliveryMerge({ scope, unit, gitArtifactId, actions, a
       {status?.status === "conflicted" && <p role="alert">The approved source conflicts with the destination branch.</p>}
       {status?.status === "destination_checked_out" && <p role="alert">The destination is checked out in {status.checkout}. Integrate there and verify the resulting SHA.</p>}
       {status?.status === "merge_blocked" && <p role="alert">{status.reason}</p>}
+      {status?.status === "recovery_required" && <div role="alert" className="break-all">
+        <p>{status.message}</p>
+        <p>Destination checkout <code>{status.checkout}</code></p>
+        <p>Preserved recovery files <code>{status.recoveryDirectory}</code></p>
+      </div>}
       {recovery && <DestinationUpdate recovery={recovery} busy={actions.busy} onAccept={acceptRecovery}
         scope={{ projectId, taskId, workflowRunId }}
         onPrepare={() => execute(false, null, null, true)}

@@ -160,9 +160,9 @@ pub(super) fn replace(
         Ok(None) => FileSave::Conflict(
             recovery.describe("the document changed during replacement; both versions were kept"),
         ),
-        Err(error) => FileSave::RecoveryRequired(recovery.describe(format!(
-            "could not verify the file replacement: {error:#}"
-        ))),
+        Err(error) => FileSave::RecoveryRequired(
+            recovery.describe(format!("could not verify the file replacement: {error:#}")),
+        ),
     })
 }
 
@@ -199,7 +199,7 @@ pub(in crate::repository) fn lock_directories(path: &Path) -> Result<Vec<File>> 
         .collect()
 }
 
-fn open_for_rename(path: &Path) -> Result<File> {
+pub(in crate::repository) fn open_for_rename(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .access_mode(GENERIC_READ | DELETE)
         .share_mode(FILE_SHARE_READ)
@@ -213,7 +213,21 @@ fn open_for_rename(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn rename(file: &File, name: &Path) -> io::Result<()> {
+pub(in crate::repository) fn open_directory_for_rename(path: &Path) -> Result<File> {
+    let directory = OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | DELETE)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = directory.metadata()?;
+    ensure!(
+        metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+        "the path changed into a link or non-directory"
+    );
+    Ok(directory)
+}
+
+pub(in crate::repository) fn rename(file: &File, name: &Path) -> io::Result<()> {
     let name = name.as_os_str().encode_wide().collect::<Vec<_>>();
     let name_offset = offset_of!(FILE_RENAME_INFO, FileName);
     let name_length = name.len() * size_of::<u16>();
@@ -241,7 +255,7 @@ fn rename(file: &File, name: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn file_identity(file: &File) -> io::Result<String> {
+pub(in crate::repository) fn file_identity(file: &File) -> io::Result<String> {
     let mut identity = FILE_ID_INFO::default();
     let loaded = unsafe {
         GetFileInformationByHandleEx(

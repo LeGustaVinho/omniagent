@@ -1,12 +1,18 @@
 use std::{
+    fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
+    os::windows::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
 use anyhow::{Context, Result, ensure};
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_DELETE_ON_CLOSE;
 
-use super::{DeliveryMergeRequest, VerifiedCommit};
+use super::{
+    DeliveryMergeRequest, VerifiedCommit,
+    attached::{AttachedMerge, AttachedMergePlan},
+};
 use crate::repository::{
     CheckoutPaths,
     documents::lock_directories,
@@ -30,6 +36,20 @@ pub(super) enum Publication {
     Published,
     DestinationMoved(Option<String>),
     DestinationCheckedOut(String),
+}
+
+pub(super) struct AttachedPublication<'a> {
+    plan: &'a AttachedMergePlan,
+    changes: AttachedMerge<'a>,
+    _head: File,
+}
+
+#[cfg(test)]
+impl AttachedPublication<'_> {
+    pub(super) fn apply_test_worktree(&mut self) -> Result<()> {
+        self.changes.apply()?;
+        self.changes.verify_updated()
+    }
 }
 
 struct Commit {
@@ -101,18 +121,114 @@ impl MergeRepository {
         let wanted = self.branch_ref(branch)?;
         let list = String::from_utf8(self.read(&["worktree", "list", "--porcelain", "-z"])?)?;
         let mut checkout = None;
+        let mut destination = None;
         for field in list.split('\0') {
             if let Some(path) = field.strip_prefix("worktree ") {
                 checkout = Some(path);
             } else if field.strip_prefix("branch ") == Some(wanted.as_str()) {
-                return Ok(Some(
+                ensure!(
+                    destination.is_none(),
+                    "the destination branch is attached to multiple worktrees"
+                );
+                destination = Some(
                     checkout
                         .context("Git did not identify the destination checkout")?
                         .to_owned(),
-                ));
+                );
             }
         }
-        Ok(None)
+        Ok(destination)
+    }
+
+    pub(super) fn prepare_attached(
+        &self,
+        checkout: &Path,
+        branch: &str,
+        previous: &str,
+        integration: &str,
+    ) -> Result<AttachedMergePlan> {
+        self.require_files_refs()?;
+        AttachedMergePlan::prepare(
+            checkout,
+            &self.paths.git_common_dir,
+            branch,
+            previous,
+            integration,
+        )
+    }
+
+    pub(super) fn reserve_attached<'a>(
+        &self,
+        plan: &'a AttachedMergePlan,
+        branch: &str,
+    ) -> Result<AttachedPublication<'a>> {
+        self.require_files_refs()?;
+        let changes = plan.reserve()?;
+        let head = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(plan.git_dir().join("HEAD.lock"))
+            .context("lock the attached destination HEAD")?;
+        self.verify_attachment(plan, branch)?;
+        Ok(AttachedPublication {
+            plan,
+            changes,
+            _head: head,
+        })
+    }
+
+    pub(super) fn verify_attached_updated(
+        &self,
+        attached: &AttachedPublication<'_>,
+        branch: &str,
+    ) -> Result<()> {
+        self.verify_attachment(attached.plan, branch)?;
+        attached.changes.verify_updated()
+    }
+
+    fn verify_attachment(&self, plan: &AttachedMergePlan, branch: &str) -> Result<()> {
+        let checkout = self
+            .attached_checkout(branch)?
+            .context("the destination branch is no longer attached to its prepared worktree")?;
+        let checkout = dunce::canonicalize(checkout)?;
+        let observed = inspect(plan.checkout())?;
+        ensure!(
+            checkout == plan.checkout()
+                && Path::new(&observed.checkout_root) == plan.checkout()
+                && Path::new(&observed.git_dir) == plan.git_dir()
+                && observed.git_common_dir == self.paths.git_common_dir,
+            "attached destination checkout identity changed after preparation"
+        );
+        let head = check(
+            git_command(&self.git, plan.checkout())
+                .args(["symbolic-ref", "--quiet", "--no-recurse", "HEAD"])
+                .output()?,
+            "verify the attached destination HEAD",
+        )?;
+        ensure!(
+            head.trim_ascii_end() == self.branch_ref(branch)?.as_bytes(),
+            "the checked out destination branch changed after preparation"
+        );
+        Ok(())
+    }
+
+    fn require_files_refs(&self) -> Result<()> {
+        let backend = self
+            .command()
+            .args(["config", "--local", "--get", "extensions.refStorage"])
+            .output()?;
+        if backend.status.code() == Some(1) && backend.stderr.is_empty() {
+            return Ok(());
+        }
+        ensure!(
+            check(backend, "identify the repository reference backend")?
+                .trim_ascii()
+                .eq_ignore_ascii_case(b"files"),
+            "merging into a checked-out branch requires Git's files reference backend"
+        );
+        Ok(())
     }
 
     pub(super) fn verify_chain(&self, commits: &[VerifiedCommit]) -> Result<()> {
@@ -264,6 +380,15 @@ impl MergeRepository {
     }
 
     pub(super) fn publish(&self, request: &DeliveryMergeRequest, sha: &str) -> Result<Publication> {
+        self.publish_with_worktree(request, sha, None)
+    }
+
+    pub(super) fn publish_with_worktree(
+        &self,
+        request: &DeliveryMergeRequest,
+        sha: &str,
+        mut attached: Option<&mut AttachedPublication<'_>>,
+    ) -> Result<Publication> {
         let _root = lock_directories(&self.root)?;
         let _metadata = lock_directories(Path::new(&self.paths.git_common_dir))?;
         let observed = inspect(&self.root)?;
@@ -283,8 +408,21 @@ impl MergeRepository {
         if tip.as_deref() != Some(request.expected_destination_sha.as_str()) {
             return Ok(Publication::DestinationMoved(tip));
         }
-        let mut child = self
-            .command()
+        let mut command = self.command();
+        let context = if attached.is_some() {
+            // Git follows the selected checkout's HEAD when writing its
+            // reflog. The detached context publishes the common branch ref
+            // while the application holds the real attached HEAD lock.
+            let detached = tempfile::tempdir()?;
+            fs::write(detached.path().join("HEAD"), format!("{sha}\n"))?;
+            let common = self.paths.git_common_dir.replace('\\', "/");
+            fs::write(detached.path().join("commondir"), format!("{common}\n"))?;
+            command.env("GIT_DIR", detached.path());
+            Some(detached)
+        } else {
+            None
+        };
+        let mut child = command
             .args([
                 "update-ref",
                 "-m",
@@ -316,9 +454,17 @@ impl MergeRepository {
                 ),
                 "prepare",
             )?;
-            // Recheck worktree attachment while Git holds both expected ref locks.
-            // A ref update has no accompanying worktree or index write.
-            if let Some(checkout) = self.attached_checkout(&request.destination_branch)? {
+            if let Some(attached) = attached.as_deref_mut() {
+                let apply = (|| {
+                    self.verify_attachment(attached.plan, &request.destination_branch)?;
+                    attached.changes.apply()?;
+                    self.verify_attached_updated(attached, &request.destination_branch)
+                })();
+                if let Err(error) = apply {
+                    let _ = send(&mut input, &mut response, "abort\n", "abort");
+                    return Err(error);
+                }
+            } else if let Some(checkout) = self.attached_checkout(&request.destination_branch)? {
                 send(&mut input, &mut response, "abort\n", "abort")?;
                 return Ok(Publication::DestinationCheckedOut(checkout));
             }
@@ -326,9 +472,18 @@ impl MergeRepository {
             Ok(Publication::Published)
         })();
         let output = child.wait_with_output()?;
+        drop(context);
         if !output.status.success() {
             let tip = self.find_branch_tip(&request.destination_branch)?;
             if tip.as_deref() != Some(request.expected_destination_sha.as_str()) {
+                if attached.is_some() && tip.as_deref() == Some(sha) {
+                    // An interrupted command may have applied the ref before
+                    // returning its acknowledgement. The durable intent can
+                    // reconcile the resulting checkout on retry.
+                    return Err(anyhow::anyhow!(
+                        "Git did not acknowledge integration; retry to reconcile the attached checkout"
+                    ));
+                }
                 return Ok(Publication::DestinationMoved(tip));
             }
             check(output, "publish the expected delivery refs")?;
