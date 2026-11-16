@@ -29,9 +29,12 @@ mod tests;
 mod unit_execution;
 mod units;
 
-pub use approval::{ApprovalDecision, ApprovalDecisionSource};
+pub use approval::{
+    ApprovalDecision, ApprovalDecisionSource, ApprovalFacts, ApprovalRuleEvidence, ApprovalRuleOutcome,
+    ApprovalRuleSettings, UnmetApproval, WorkflowApprovalPreview, WorkflowApprovalSubmission,
+};
 pub(crate) use approval::{
-    active_delivery_workflow, detach_active_delivery_workflow, is_operator_workflow_release,
+    active_delivery_workflow, detach_active_delivery_workflow, workflow_release_authorized,
 };
 pub use artifacts::{
     ApprovalReference, ArtifactValue, CandidateReference, ScopedEvidence, TaskReference,

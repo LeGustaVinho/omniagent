@@ -118,6 +118,12 @@ impl Store {
         let artifacts = self
             .workflow_run_artifacts(project.clone(), workflow.clone())
             .await?;
+        let active_outputs = self.current_workflow_host_outputs(project.clone(), workflow.clone()).await?;
+        let attempt_decision = artifacts.iter().find_map(|artifact| match &artifact.value {
+            ArtifactValue::Release(reference) if attempt.pin.release_id.as_ref() == Some(&reference.release.id) =>
+                Some(&reference.decision_artifact_id),
+            _ => None,
+        });
         let mut versions = Vec::new();
         for artifact in &artifacts {
             let ArtifactValue::Plan {
@@ -133,10 +139,12 @@ impl Store {
             {
                 continue;
             }
-            let approval = artifacts.iter().find(|item| {
-                matches!(&item.value,
-                ArtifactValue::Approval(decision) if decision.plan_revision == artifact.id)
+            let mut approvals = artifacts.iter().filter(|item| {
+                matches!(&item.value, ArtifactValue::Approval(decision) if decision.plan_revision == artifact.id)
             });
+            let approval = approvals.clone().find(|item| Some(&item.id) == attempt_decision)
+                .or_else(|| approvals.clone().find(|item| active_outputs.values().any(|id| id == &item.id)))
+                .or_else(|| approvals.next());
             let release = approval.and_then(|approval| {
                 artifacts.iter().find_map(|item| match &item.value {
                     ArtifactValue::Release(reference)

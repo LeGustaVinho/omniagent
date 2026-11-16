@@ -181,12 +181,13 @@ pub(super) fn effective_policy(db: &Connection, job: &Job) -> Result<EffectivePo
         && job.mode == SessionMode::ApprovedWrite
         && let Some(origin) = &job.pipeline
         && let Some(release) = &origin.release
-        && crate::workflows::is_operator_workflow_release(
+        && !release.revoked
+        && crate::workflows::workflow_release_authorized(
             db,
             &job.project_id,
             &origin.pipeline_run_id,
             &release.id,
-        )?
+        )? == Some(true)
     {
         return Ok(EffectivePolicy {
             role,

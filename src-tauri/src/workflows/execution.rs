@@ -12,10 +12,10 @@ use crate::{
 };
 
 use super::{
-    ApprovalDecision, ApprovalDecisionSource, ArtifactValue, Executor, PinnedNode, PortType,
-    TaskReference, WorkflowArtifact, WorkflowPlanUnit,
+    ApprovalDecision, ArtifactValue, Executor, PinnedNode, PortType,
+    TaskReference, WorkflowApprovalSubmission, WorkflowArtifact, WorkflowPlanUnit,
     approval::{
-        issue_prepared_release, record_decision, require_active_decision, require_current_plan,
+        issue_prepared_release, require_active_decision, require_current_plan,
     },
     artifacts::insert_artifact,
     digest, registry::supports_pinned_execution,
@@ -57,7 +57,6 @@ pub struct WorkflowHostSubmission {
 enum HostAction {
     Publish(&'static str, ArtifactValue),
     CreateTask(String),
-    Approve(ApprovalDecision),
     Prepare {
         decision: ApprovalDecision,
         artifact_id: String,
@@ -78,9 +77,19 @@ impl Store {
             inputs,
             request,
         } = submission;
+        if matches!(request, WorkflowHostRequest::ApproveImplementation) {
+            return self.approve_workflow_implementation(WorkflowApprovalSubmission {
+                project_id, run_id, node_id, inputs,
+            }).await;
+        }
         let (node, inputs) = self
             .workflow_execution_inputs(&project_id, &run_id, &node_id, None, &inputs)
             .await?;
+        let preparation_decision = if matches!(request, WorkflowHostRequest::PrepareWorktree { .. }) {
+            inputs.get("decision").map(|approval| approval.id.clone())
+        } else {
+            None
+        };
         let request_revision = host_request_revision(&inputs, &request)?;
         let execution_key = inputs
             .get("plan")
@@ -100,10 +109,14 @@ impl Store {
                     execution_key.clone(),
                     request_revision.clone(),
                 );
-                move |db| load_host_completion(db, &run, &node, &key, &revision)
+                let decision = preparation_decision.clone();
+                move |db| load_host_completion(db, &run, &node, &key, &revision, decision.as_deref())
             })
             .await?;
         if let Some(saved) = saved {
+            if matches!(&saved.value, ArtifactValue::Task(_)) {
+                self.approve_after_link(&project_id, &saved, &execution_key).await?;
+            }
             return Ok(saved);
         }
         let action = match (node.definition.executor, request) {
@@ -140,29 +153,6 @@ impl Store {
                     WorkflowHostRequest::CreateTask { title } => HostAction::CreateTask(title),
                     _ => unreachable!(),
                 }
-            }
-            (Executor::RecordImplementationRelease, WorkflowHostRequest::ApproveImplementation) => {
-                let ArtifactValue::Task(task) = &inputs["task"].value else {
-                    anyhow::bail!("approval requires linked work");
-                };
-                let plan = &inputs["plan"];
-                let ArtifactValue::Plan {
-                    run_id: attempt, ..
-                } = &plan.value
-                else {
-                    anyhow::bail!("approval requires a plan");
-                };
-                self.workflow_plan_units(project_id.clone(), run_id.clone(), plan.id.clone())
-                    .await?;
-                HostAction::Approve(ApprovalDecision {
-                    workflow_run_id: run_id.clone(),
-                    node_instance_id: node_id.clone(),
-                    plan_revision: plan.id.clone(),
-                    task: task.clone(),
-                    task_artifact_id: inputs["task"].id.clone(),
-                    source_checkout_id: self.workflow_plan_checkout(&project_id, attempt).await?,
-                    source: ApprovalDecisionSource::Operator,
-                })
             }
             (
                 Executor::ProvisionWorktree,
@@ -207,6 +197,7 @@ impl Store {
             self.check_artifact_source(&project_id, &run_id, &node_id, value)
                 .await?;
         }
+        let approval_plan = execution_key.clone();
         let completed = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -214,7 +205,7 @@ impl Store {
                     require_current_plan(&tx, &project_id, &run_id, &execution_key)?;
                 }
                 if let Some(saved) =
-                    load_host_completion(&tx, &run_id, &node_id, &execution_key, &request_revision)?
+                    load_host_completion(&tx, &run_id, &node_id, &execution_key, &request_revision, preparation_decision.as_deref())?
                 {
                     return Ok(saved);
                 }
@@ -241,20 +232,19 @@ impl Store {
                             }),
                         )?
                     }
-                    HostAction::Approve(decision) => record_decision(&tx, decision)?,
                     HostAction::Prepare {
                         decision,
                         artifact_id,
                         worktree,
                         units,
-                    } => issue_prepared_release(
-                        &tx,
-                        decision,
-                        artifact_id,
-                        node_id,
-                        worktree,
-                        units,
-                    )?,
+                    } => {
+                        let artifact = issue_prepared_release(&tx, decision, artifact_id, node_id, worktree, units)?;
+                        tx.execute(
+                            "DELETE FROM workflow_host_completions WHERE pipeline_run_id = ?1 AND node_instance_id = ?2 AND execution_key = ?3",
+                            params![artifact.workflow_run_id, artifact.node_instance_id, execution_key],
+                        )?;
+                        artifact
+                    }
                 };
                 record_host_completion(&tx, &artifact, &execution_key, &request_revision)?;
                 tx.commit()?;
@@ -262,6 +252,9 @@ impl Store {
             })
             .await?;
         self.job_signal.send_replace(());
+        if let ArtifactValue::Task(task) = &completed.value {
+            self.approve_after_link(&task.project_id, &completed, &approval_plan).await?;
+        }
         Ok(completed)
     }
 
@@ -404,6 +397,7 @@ fn load_host_completion(
     node: &str,
     execution_key: &str,
     revision: &str,
+    preparation_decision: Option<&str>,
 ) -> Result<Option<WorkflowArtifact>> {
     let saved: Option<(String, Vec<u8>)> = db
         .query_row(
@@ -417,6 +411,15 @@ fn load_host_completion(
     let Some((saved, payload)) = saved else {
         return Ok(None);
     };
+    if saved != revision && let Some(decision) = preparation_decision {
+        let was_prepared: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workflow_release_bindings WHERE decision_artifact_id = ?1)",
+            [decision], |row| row.get(0),
+        )?;
+        if !was_prepared {
+            return Ok(None);
+        }
+    }
     ensure!(
         saved == revision,
         "this workflow node has already completed with a different request"

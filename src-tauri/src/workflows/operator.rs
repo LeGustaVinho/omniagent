@@ -108,6 +108,11 @@ impl Store {
                  JOIN job_pipeline_runs r ON r.id = c.pipeline_run_id
                  WHERE r.project_id = ?1 AND r.id = ?2
                    AND (c.execution_key = '' OR c.execution_key = r.plan_revision)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM workflow_approval_decisions d
+                       WHERE d.decision_artifact_id = c.artifact_id AND d.rule_revision IS NOT NULL
+                         AND NOT EXISTS (SELECT 1 FROM workflow_approval_rule_heads h WHERE h.revision = d.rule_revision)
+                   )
                  ORDER BY length(c.execution_key)",
                 )?
                 .query_map(params![project, run], |row| Ok((row.get(0)?, row.get(1)?)))?

@@ -16,6 +16,7 @@ import { SavedDeliveryMerge, SavedDeliverySource } from "@/repository-delivery-h
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowCommandRun } from "@/workflow-command";
+import { WorkflowApproval } from "@/workflow-approval";
 
 type Proposal = { sequence: string; text: string };
 type TaskOption = { id: string; title: string };
@@ -47,9 +48,14 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
   const reviewing = plan ? matchingJob(delivery, "review-plan", { plan: plan.id }) : undefined;
   const review = matchingReview(delivery, reviewing);
   const linked = delivery.artifacts.find(({ id }) => id === delivery.hostOutputs?.work);
-  const approval = delivery.artifacts.find(({ value }) => value.kind === "approval" && value.evidence.planRevision === plan?.id);
+  const approvalNodeId = delivery.definition?.wires.find((wire) => wire.to.port === "task" &&
+    wire.from.node === linked?.nodeInstanceId && wire.from.port === linked.port &&
+    delivery.definition?.nodes.some(({ instance }) => instance.id === wire.to.node && instance.kind === "approve_implementation"))?.to.node ?? "approve";
+  const approval = delivery.artifacts.find(({ id, value }) => id === delivery.hostOutputs?.[approvalNodeId] &&
+    value.kind === "approval" && value.evidence.planRevision === plan?.id);
   const release = delivery.artifacts.find(({ value }) => value.kind === "release" && value.evidence.decisionArtifactId === approval?.id);
   const worktree = delivery.artifacts.find(({ id }) => id === delivery.hostOutputs?.prepare);
+  const implementationInputs = plan && release && worktree ? { plan: plan.id, worktree: worktree.id, release: release.id } : undefined;
   const taskId = linked?.value.kind === "task" ? linked.value.evidence.taskId : undefined;
   const launchOrigin = delivery.launch?.origin;
   const launchWork = launchOrigin && launchOrigin.kind !== "editor" ? launchOrigin.workId : undefined;
@@ -62,7 +68,7 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
   const units = useQuery({
     queryKey: ["repository-delivery", projectId, scope.runId, "units", taskId],
     queryFn: () => invoke<DeliveryUnit[]>("repository_delivery_units", { ...scope, taskId }),
-    enabled: Boolean(release && taskId),
+    enabled: Boolean(taskId),
   });
   const state = useQuery({
     ...taskStateQuery(projectId, taskId ?? ""),
@@ -149,10 +155,9 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
       </Button>
       </>}
     </div>}
-    {plan && review && linked && !approval && <Button disabled={actions.busy}
-      onClick={() => actions.execute(() => host({ plan: plan.id, task: linked.id }, { action: "approve_implementation" }))}>
-      Approve implementation
-    </Button>}
+    {plan && review && linked && <WorkflowApproval key={`${scope.runId}:${plan.id}`} scope={scope}
+      nodeId={approvalNodeId} planId={plan.id} taskArtifactId={linked.id} actions={actions}
+      source={approval?.value.kind === "approval" ? approval.value.evidence.source : undefined} />}
     {approval && linked && !release && <Button disabled={actions.busy}
       onClick={() => actions.execute(() => host({ decision: approval.id, task: linked.id }, { action: "prepare_worktree" }))}>
       Prepare managed worktree
@@ -187,13 +192,13 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
         Reopen work
       </Button>}
     </section>}
-    {plan && release && worktree && units.data?.map((unit) => <RepositoryDeliveryUnit
+    {units.data?.map((unit) => (unit.commitEvidenceId || implementationInputs) && <RepositoryDeliveryUnit
       key={unit.unit.id} scope={scope} delivery={delivery} unit={unit}
-      implementationInputs={{ plan: plan.id, worktree: worktree.id, release: release.id }}
+      implementationInputs={implementationInputs ?? {}}
       actions={actions} openActivity={openActivity} commitNodeId={gitNodes.commit}
       onCommitBlocked={(reason) => setCommitState({ unitId: unit.unit.id, reason })}
       onAutomaticMerge={(outcome) => setMergeState({ unitId: unit.unit.id, outcome })}
-      active={Boolean(currentTask) && unit.unit.id === awaitingUnit} />)}
+      active={Boolean(implementationInputs && currentTask) && unit.unit.id === awaitingUnit} />)}
     {currentTask && last?.commitEvidenceId && finalGit && !awaitingUnit && <RepositoryDeliveryMerge key={last.commitEvidenceId}
       scope={scope} unit={last} gitArtifactId={finalGit.id} actions={actions} automaticOutcome={mergeOutcome}
       mergeNodeId={gitNodes.merge} onOutcome={(outcome) => setMergeState({ unitId: last.unit.id, outcome })} />}

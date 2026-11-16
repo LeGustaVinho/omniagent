@@ -15,10 +15,17 @@ use super::{
     units::record_delivery_units,
 };
 
+mod rules;
+pub use rules::{
+    ApprovalFacts, ApprovalRuleEvidence, ApprovalRuleOutcome, ApprovalRuleSettings, UnmetApproval,
+    WorkflowApprovalPreview, WorkflowApprovalSubmission,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecisionSource {
     Operator,
+    AutomaticRule,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +38,8 @@ pub struct ApprovalDecision {
     pub task_artifact_id: String,
     pub source_checkout_id: String,
     pub source: ApprovalDecisionSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_evidence: Option<ApprovalRuleEvidence>,
 }
 
 impl Store {
@@ -62,7 +71,8 @@ impl Store {
             let id: Option<String> = db
                 .query_row(
                     "SELECT decision_artifact_id FROM workflow_approval_decisions
-                 WHERE pipeline_run_id = ?1 AND node_instance_id = ?2 AND plan_revision = ?3",
+                 WHERE pipeline_run_id = ?1 AND node_instance_id = ?2 AND plan_revision = ?3
+                 ORDER BY generation DESC LIMIT 1",
                     params![run, node, plan],
                     |row| row.get(0),
                 )
@@ -113,12 +123,12 @@ pub(crate) fn active_delivery_workflow(
     ).optional()?)
 }
 
-pub(crate) fn is_operator_workflow_release(
+pub(crate) fn workflow_release_authorized(
     db: &Connection,
     project: &str,
     run: &str,
     release_id: &str,
-) -> Result<bool> {
+) -> Result<Option<bool>> {
     let decision: Option<String> = db
         .query_row(
             "SELECT b.decision_artifact_id FROM workflow_release_bindings b
@@ -129,16 +139,17 @@ pub(crate) fn is_operator_workflow_release(
         )
         .optional()?;
     let Some(decision) = decision else {
-        return Ok(false);
+        let typed: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workflow_run_pins WHERE project_id = ?1 AND pipeline_run_id = ?2)",
+            params![project, run], |row| row.get(0),
+        )?;
+        return Ok(typed.then_some(false));
     };
     let saved = load_artifact(db, project, run, &decision, ArtifactKind::Approval)?;
-    Ok(matches!(
-        saved.map(|artifact| artifact.value),
-        Some(ArtifactValue::Approval(ApprovalDecision {
-            source: ApprovalDecisionSource::Operator,
-            ..
-        }))
-    ))
+    let Some(ArtifactValue::Approval(approval)) = saved.map(|artifact| artifact.value) else {
+        return Ok(Some(false));
+    };
+    Ok(Some(decision_is_active(db, &approval, &decision)?))
 }
 
 pub(crate) fn detach_active_delivery_workflow(
@@ -168,15 +179,20 @@ pub(super) fn record_decision(
     let node = decision.node_instance_id.clone();
     let plan = decision.plan_revision.clone();
     require_current_plan(db, &project, &run, &plan)?;
-    let linked: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workflow_host_completions WHERE pipeline_run_id = ?1 AND execution_key = ?2 AND artifact_id = ?3)",
-        params![run, plan, decision.task_artifact_id], |row| row.get(0),
-    )?;
-    ensure!(
-        linked,
-        "only the task linked after review of this plan can be approved"
-    );
+    validate_linked_task(db, &decision)?;
     crate::tasks::validate_repository_delivery_open(db, &project, &task)?;
+    ensure!(
+        rules::rule_authorizes(db, &decision)?,
+        "the automatic approval rule no longer applies"
+    );
+    let rule_revision = if decision.source == ApprovalDecisionSource::AutomaticRule {
+        decision
+            .rule_evidence
+            .as_ref()
+            .map(|evidence| evidence.revision.clone())
+    } else {
+        None
+    };
     let artifact = insert_artifact(
         db,
         &project,
@@ -186,8 +202,11 @@ pub(super) fn record_decision(
         ArtifactValue::Approval(decision),
     )?;
     db.execute(
-        "INSERT INTO workflow_approval_decisions VALUES (?1, ?2, ?3, ?4)",
-        params![run, node, plan, artifact.id],
+        "INSERT INTO workflow_approval_decisions
+            (pipeline_run_id, node_instance_id, plan_revision, decision_artifact_id, generation, rule_revision)
+         SELECT ?1, ?2, ?3, ?4, coalesce(max(generation), 0) + 1, ?5
+         FROM workflow_approval_decisions WHERE pipeline_run_id = ?1 AND node_instance_id = ?2 AND plan_revision = ?3",
+        params![run, node, plan, artifact.id, rule_revision],
     )?;
     detach_active_delivery_workflow(db, &project, &task)?;
     db.execute(
@@ -195,6 +214,18 @@ pub(super) fn record_decision(
         params![project, task, run, plan, artifact.id],
     )?;
     Ok(artifact)
+}
+
+pub(super) fn validate_linked_task(db: &Connection, decision: &ApprovalDecision) -> Result<()> {
+    let linked: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workflow_host_completions WHERE pipeline_run_id = ?1 AND execution_key = ?2 AND artifact_id = ?3)",
+        params![decision.workflow_run_id, decision.plan_revision, decision.task_artifact_id], |row| row.get(0),
+    )?;
+    ensure!(
+        linked,
+        "only the task linked after review of this plan can be approved"
+    );
+    Ok(())
 }
 
 pub(super) fn require_current_plan(
@@ -220,6 +251,18 @@ pub(super) fn require_active_decision(
     decision: &ApprovalDecision,
     decision_id: &str,
 ) -> Result<()> {
+    ensure!(
+        decision_is_active(db, decision, decision_id)?,
+        "implementation approval has been superseded or revoked"
+    );
+    Ok(())
+}
+
+fn decision_is_active(
+    db: &Connection,
+    decision: &ApprovalDecision,
+    decision_id: &str,
+) -> Result<bool> {
     let active = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM workflow_delivery_heads h JOIN job_pipeline_runs r ON r.id = h.pipeline_run_id
          WHERE h.project_id = ?1 AND h.task_id = ?2 AND h.pipeline_run_id = ?3
@@ -227,11 +270,38 @@ pub(super) fn require_active_decision(
         params![decision.task.project_id, decision.task.task_id, decision.workflow_run_id, decision.plan_revision, decision_id],
         |row| row.get::<_, bool>(0),
     )?;
-    ensure!(
-        active,
-        "implementation approval has been superseded or revoked"
-    );
-    Ok(())
+    Ok(active && rules::rule_authorizes(db, decision)?)
+}
+
+pub(super) fn active_approval(
+    db: &Connection,
+    target: &ApprovalDecision,
+) -> Result<Option<String>> {
+    let id: Option<String> = db.query_row(
+        "SELECT decision_artifact_id FROM workflow_delivery_heads WHERE project_id = ?1 AND task_id = ?2
+            AND pipeline_run_id = ?3 AND plan_revision = ?4",
+        params![target.task.project_id, target.task.task_id, target.workflow_run_id, target.plan_revision],
+        |row| row.get(0),
+    ).optional()?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let saved = load_artifact(
+        db,
+        &target.task.project_id,
+        &target.workflow_run_id,
+        &id,
+        ArtifactKind::Approval,
+    )?;
+    let Some(ArtifactValue::Approval(decision)) = saved.map(|artifact| artifact.value) else {
+        return Ok(None);
+    };
+    Ok((decision.node_instance_id == target.node_instance_id
+        && decision.task == target.task
+        && decision.task_artifact_id == target.task_artifact_id
+        && decision.source_checkout_id == target.source_checkout_id
+        && decision_is_active(db, &decision, &id)?)
+    .then_some(id))
 }
 
 pub(super) fn issue_prepared_release(

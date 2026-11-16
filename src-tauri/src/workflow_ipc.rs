@@ -17,6 +17,7 @@ use tauri::{Manager, State};
 
 use crate::conversation_runtime::selected_scope;
 
+pub mod approval;
 pub mod authoring;
 pub mod command;
 pub mod comparison;

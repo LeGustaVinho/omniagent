@@ -137,6 +137,20 @@ pub(super) fn record_delivery_units(
     units: Vec<WorkflowPlanUnit>,
 ) -> Result<()> {
     for unit in units {
+        let existing = db.query_row(
+            "SELECT pipeline_run_id, plan_revision, project_id, task_id, checkout_id, unit, commit_evidence_id
+             FROM workflow_delivery_units WHERE unit_id = ?1",
+            [&unit.id], |row| Ok(decode_unit(row)),
+        ).optional()?.transpose()?;
+        if let Some(existing) = existing {
+            ensure!(existing.workflow_run_id == decision.workflow_run_id
+                && existing.plan_revision == decision.plan_revision
+                && existing.project_id == decision.task.project_id
+                && existing.task_id == decision.task.task_id
+                && existing.checkout_id == checkout && existing.unit == unit,
+                "the preparation differs from the worktree and units originally scoped to this plan");
+            continue;
+        }
         db.execute(
             "INSERT INTO workflow_delivery_units VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
             params![

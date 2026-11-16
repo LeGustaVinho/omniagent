@@ -19,7 +19,7 @@ export type DeliveryArtifact = {
     | { kind: "plan"; evidence: { run_id: string; event_sequence: number } }
     | { kind: "review"; evidence: { run_id: string } }
     | { kind: "task"; evidence: TaskReference }
-    | { kind: "approval"; evidence: { planRevision: string } }
+    | { kind: "approval"; evidence: { planRevision: string; source?: "operator" | "automatic_rule" } }
     | { kind: "release"; evidence: { decisionArtifactId: string; release: { id: string; revoked: boolean } } }
     | { kind: "worktree"; evidence: { checkout_id: string; task: TaskReference } }
     | { kind: "candidate"; evidence: { id: string; tree: string; target: { runId: string; unitId: string } } }
