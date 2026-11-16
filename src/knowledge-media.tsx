@@ -1,31 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-
-let mermaidInstance: Promise<typeof import("mermaid")["default"]> | undefined;
-let diagramSequence = 0;
-
-function loadMermaid() {
-  if (!mermaidInstance) {
-    mermaidInstance = import("mermaid").then(({ default: engine }) => {
-      engine.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral", suppressErrorRendering: true, flowchart: { htmlLabels: false } });
-      return engine;
-    });
-  }
-  return mermaidInstance;
-}
+import { renderNoteDiagram } from "@/knowledge-diagram";
 
 export function NoteDiagram({ source }: { source: string }) {
   const [rendered, setRendered] = useState<{ source: string; image?: string; error?: string }>();
   useEffect(() => {
-    let current = true;
-    void loadMermaid()
-      .then((engine) => {
-        const cleaned = source.replace(/%%\{[\s\S]*?\}%%/g, "").replace(/^---\s*\n[\s\S]*?\n---\s*\n/, "");
-        return engine.render("note-diagram-" + ++diagramSequence, cleaned);
-      })
-      .then(({ svg }) => { if (current) setRendered({ source, image: "data:image/svg+xml," + encodeURIComponent(svg) }); })
-      .catch(() => { if (current) setRendered({ source, error: "The Mermaid diagram could not be rendered. Review its source." }); });
-    return () => { current = false; };
+    const request = new AbortController();
+    void renderNoteDiagram(source, request.signal)
+      .then((image) => { if (!request.signal.aborted) setRendered({ source, image }); })
+      .catch(() => { if (!request.signal.aborted) setRendered({ source, error: "The Mermaid diagram could not be rendered. Review its source." }); });
+    return () => request.abort();
   }, [source]);
 
   if (rendered?.source !== source) return <p role="status" className="file-help">Rendering diagram…</p>;
