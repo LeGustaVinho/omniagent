@@ -95,7 +95,8 @@ pub(crate) use steering_delivery::{
     record_event as record_steering_event, settle_interrupted as settle_steering_at_stop,
 };
 pub use subagent_audit::{
-    ConversationSubagentAudit, SubagentAuditField, SubagentAuditGap, SubagentAuditPolicy,
+    AttemptSubagentAudit, AttemptSubagentRoute, ConversationSubagentAudit, SubagentAuditField,
+    SubagentAuditGap, SubagentAuditManagedReason, SubagentAuditPolicy, SubagentAuditPolicySource,
     SubagentAuditSource,
 };
 pub(crate) use subagent_audit::{

@@ -78,6 +78,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/063-workflow-runtime.sql"),
     include_str!("../migrations/064-verified-git.sql"),
     include_str!("../migrations/065-task-deliveries.sql"),
+    include_str!("../migrations/066-subagent-audit-routing.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

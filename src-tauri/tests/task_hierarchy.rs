@@ -158,7 +158,8 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
 
     let legacy = rusqlite::Connection::open(&database)?;
     legacy.execute_batch(
-        "DROP TABLE task_delivery_events;
+        "DROP TABLE attempt_subagent_audit_routing;
+         DROP TABLE task_delivery_events;
          DROP TABLE verified_delivery_commits;
          DROP TABLE delivery_commit_intents;
          DROP TABLE project_delivery_git_policies;

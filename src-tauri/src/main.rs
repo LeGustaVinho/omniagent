@@ -305,6 +305,7 @@ fn main() {
             ipc::project_subagent_audit,
             ipc::set_project_subagent_audit,
             ipc::conversation_subagent_audit,
+            ipc::attempt_subagent_audit,
             ipc::set_conversation_subagent_audit,
             ipc::conversation_draft,
             ipc::save_conversation_draft,

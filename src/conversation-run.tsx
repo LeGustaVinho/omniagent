@@ -12,6 +12,7 @@ import { ConversationInventory } from "@/conversation-inventory";
 import { ConversationProfile } from "@/conversation-profile";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
 import { ConversationSubagentQuotaPanel } from "@/subagent-quota";
+import { AttemptSubagentAudit } from "@/subagent-audit-controls";
 
 type EventData =
   | { type: "dispatch_submitted"; dispatch_id: string }
@@ -259,16 +260,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
       {projection && <ConversationChildren delegation={projection.delegation} />}
       <ConversationSubagentQuotaPanel conversationId={conversationId} runId={run.id} live={live} />
       <ConversationChecklistProgress projectId={run.projectId} runId={run.id} live={live} />
-      {Boolean(projection?.auditGaps.length) && <section aria-label="Subagent audit gaps" className="grid gap-2">
-        <h2 className="text-sm font-medium">Subagent audit gaps</h2>
-        {projection?.auditGaps.map((gap) => <div key={gap.source} className="grid gap-1 text-xs text-muted-foreground">
-          {gap.nativeDelegationDetected && <p role="alert">The CLI reported a native child after native delegation was disabled.</p>}
-          {gap.missing.length > 0 && <p>
-            {gap.source === "native" ? "Native delegation" : "Managed child"} · Missing {gap.missing.map((field) => field.replaceAll("_", " ")).join(", ")}
-            {gap.source === "native" && ` · ${gap.affectedChildren} identified with gaps · ${gap.unidentified} without confirmed identity`}
-          </p>}
-        </div>)}
-      </section>}
+      <AttemptSubagentAudit conversationId={conversationId} runId={run.id} live={live} gaps={projection?.auditGaps ?? []} />
       {Boolean(projection?.tools.length) && <details>
         <summary>Tool activity</summary>
         <ol>{projection?.tools.map((tool, index) => <li key={index}>{tool.name} · {tool.phase}</li>)}</ol>

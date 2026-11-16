@@ -12,9 +12,10 @@ use crate::{
 };
 
 use super::{
-    AdmissionBlocker, Job, JobKind, SubagentAuditField, SubagentAuditPolicy, SubagentAuditRoute,
+    AdmissionBlocker, Job, JobKind, SubagentAuditPolicy, SubagentAuditRoute,
     history::structured_job_run,
     subagent_audit::{
+        AuditRequirement, REQUIRED_AUDIT_FIELDS, SubagentAuditManagedReason, SubagentAuditRouting,
         audit_checkout, direct_audit_policy, job_audit_policy, native_audit_candidate,
     },
 };
@@ -136,6 +137,7 @@ pub(crate) struct SubagentAllocation {
     pub native_requested: u32,
     pub strict_total: bool,
     pub audit: SubagentAuditRoute,
+    pub audit_routing: Option<SubagentAuditRouting>,
 }
 
 struct SubagentAdmission<'a> {
@@ -143,7 +145,7 @@ struct SubagentAdmission<'a> {
     checkout: &'a str,
     scope: Option<&'a SessionScope>,
     managed_slots: u32,
-    audit: SubagentAuditPolicy,
+    audit: AuditRequirement,
 }
 
 struct EffectiveQuota {
@@ -521,7 +523,7 @@ fn authorize(
         checkout,
         scope,
         managed_slots,
-        audit,
+        audit: requirement,
     } = admission;
     let native = conversation
         .map(|id| native_subagent_sessions(db, id))
@@ -548,27 +550,25 @@ fn authorize(
             reason: STRICT_CONTROL_REQUIRED,
         }));
     }
-    let audit = if audit == SubagentAuditPolicy::Complete {
+    let (audit, managed_reason) = if requirement.policy == SubagentAuditPolicy::Complete {
         let candidate = scope
             .map(|s| native_audit_candidate(db, s, checkout))
             .transpose()?
             .flatten();
         match candidate {
-            Some(evidence_id) => SubagentAuditRoute::Native { evidence_id },
-            None if has_controls => SubagentAuditRoute::Managed,
+            Some(evidence_id) => (SubagentAuditRoute::Native { evidence_id }, None),
+            None if has_controls => (
+                SubagentAuditRoute::Managed,
+                Some(SubagentAuditManagedReason::NativeEvidenceUnavailable),
+            ),
             None => {
                 return Ok(Err(AdmissionBlocker::SubagentAudit {
-                    missing: vec![
-                        SubagentAuditField::Identity,
-                        SubagentAuditField::Prompt,
-                        SubagentAuditField::ContextProvenance,
-                        SubagentAuditField::Response,
-                    ],
+                    missing: REQUIRED_AUDIT_FIELDS.to_vec(),
                 }));
             }
         }
     } else {
-        SubagentAuditRoute::Available
+        (SubagentAuditRoute::Available, None)
     };
     let active: u32 = db.query_row(
         "SELECT count(*) FROM managed_subagent_states WHERE conversation_id = ?1 AND state = 'active'",
@@ -592,11 +592,15 @@ fn authorize(
     } else {
         strict.then(|| native_requested.min(limit.saturating_sub(used + managed_slots)))
     };
-    let audit = if native_allowance == Some(0) && matches!(audit, SubagentAuditRoute::Native { .. })
+    let (audit, managed_reason) = if native_allowance == Some(0)
+        && matches!(audit, SubagentAuditRoute::Native { .. })
     {
-        SubagentAuditRoute::Managed
+        (
+            SubagentAuditRoute::Managed,
+            Some(SubagentAuditManagedReason::ZeroNativeAllowance),
+        )
     } else {
-        audit
+        (audit, managed_reason)
     };
     Ok(Ok(SubagentAllocation {
         conversation_id: conversation.map(str::to_owned),
@@ -604,6 +608,10 @@ fn authorize(
         native_requested,
         strict_total: strict,
         audit,
+        audit_routing: Some(SubagentAuditRouting {
+            policy_source: requirement.source,
+            managed_reason,
+        }),
     }))
 }
 

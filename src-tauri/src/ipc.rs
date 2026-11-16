@@ -10,7 +10,7 @@ use omniagent::{
     customizations::CustomizationInventory,
     evidence::FixtureInputEvidence,
     jobs::{
-        ConversationSubagentAudit, ConversationSubagentQuota, ProjectSubagentPolicy,
+        AttemptSubagentAudit, ConversationSubagentAudit, ConversationSubagentQuota, ProjectSubagentPolicy,
         QueueHistoryPolicy, QueueHistorySettings, SubagentAuditPolicy, SubagentLimitMode,
     },
     providers::{
@@ -298,6 +298,15 @@ pub async fn conversation_subagent_audit(
         .conversation_subagent_audit(conversation_id)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn attempt_subagent_audit(
+    store: State<'_, Store>,
+    conversation_id: String,
+    run_id: String,
+) -> Result<Option<AttemptSubagentAudit>, String> {
+    store.attempt_subagent_audit(conversation_id, run_id).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]

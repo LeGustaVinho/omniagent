@@ -70,6 +70,13 @@ pub enum SubagentAuditField {
     Response,
 }
 
+pub(super) const REQUIRED_AUDIT_FIELDS: [SubagentAuditField; 4] = [
+    SubagentAuditField::Identity,
+    SubagentAuditField::Prompt,
+    SubagentAuditField::ContextProvenance,
+    SubagentAuditField::Response,
+];
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -97,6 +104,81 @@ pub(crate) enum SubagentAuditRoute {
     Native {
         evidence_id: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentAuditPolicySource {
+    ProjectDefault,
+    ConversationOverride,
+    Workflow,
+    OriginatingAttempt,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentAuditManagedReason {
+    NativeEvidenceUnavailable,
+    ZeroNativeAllowance,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SubagentAuditRouting {
+    pub(crate) policy_source: SubagentAuditPolicySource,
+    pub(crate) managed_reason: Option<SubagentAuditManagedReason>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AttemptSubagentRoute {
+    Available,
+    Managed {
+        reason: Option<SubagentAuditManagedReason>,
+    },
+    Native {
+        evidence_id: String,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttemptSubagentAudit {
+    pub effective_policy: SubagentAuditPolicy,
+    pub policy_source: Option<SubagentAuditPolicySource>,
+    pub policy_conversation_id: String,
+    pub required_fields: Vec<SubagentAuditField>,
+    pub route: AttemptSubagentRoute,
+}
+
+pub(super) struct AuditRequirement {
+    pub(super) policy: SubagentAuditPolicy,
+    pub(super) source: SubagentAuditPolicySource,
+}
+
+impl AuditRequirement {
+    fn from_conversation(settings: ConversationSubagentAudit) -> Self {
+        Self {
+            policy: settings.effective(),
+            source: if settings.conversation_override.is_some() {
+                SubagentAuditPolicySource::ConversationOverride
+            } else {
+                SubagentAuditPolicySource::ProjectDefault
+            },
+        }
+    }
+
+    fn raised(self, policy: SubagentAuditPolicy, source: SubagentAuditPolicySource) -> Self {
+        if policy > self.policy {
+            Self { policy, source }
+        } else {
+            self
+        }
+    }
 }
 
 fn project_default(db: &Connection, project: &str) -> Result<SubagentAuditPolicy> {
@@ -163,6 +245,71 @@ impl Store {
         .await
     }
 
+    pub async fn attempt_subagent_audit(
+        &self,
+        conversation_id: String,
+        run_id: String,
+    ) -> Result<Option<AttemptSubagentAudit>> {
+        self.execute(move |db| {
+            let record = db
+                .query_row(
+                    "SELECT coalesce(a.subagent_conversation_id, a.conversation_id),
+                        audit.route, audit.native_evidence_id, routing.decision
+                 FROM agent_attempts a
+                 LEFT JOIN attempt_subagent_audit audit ON audit.run_id = a.run_id
+                 LEFT JOIN attempt_subagent_audit_routing routing ON routing.run_id = a.run_id
+                 WHERE a.conversation_id = ?1 AND a.run_id = ?2",
+                    params![conversation_id, run_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((policy_conversation_id, route, evidence_id, routing)) = record else {
+                return Ok(None);
+            };
+            let routing: Option<SubagentAuditRouting> =
+                routing.as_deref().map(serde_json::from_str).transpose()?;
+            let (effective_policy, route) = match route.as_deref() {
+                None => (
+                    SubagentAuditPolicy::Available,
+                    AttemptSubagentRoute::Available,
+                ),
+                Some("managed") => (
+                    SubagentAuditPolicy::Complete,
+                    AttemptSubagentRoute::Managed {
+                        reason: routing.as_ref().and_then(|routing| routing.managed_reason),
+                    },
+                ),
+                Some("native") => (
+                    SubagentAuditPolicy::Complete,
+                    AttemptSubagentRoute::Native {
+                        evidence_id: evidence_id
+                            .context("Missing recorded native audit evidence")?,
+                    },
+                ),
+                Some(_) => anyhow::bail!("Unknown subagent audit route"),
+            };
+            Ok(Some(AttemptSubagentAudit {
+                effective_policy,
+                policy_source: routing.map(|routing| routing.policy_source),
+                policy_conversation_id,
+                required_fields: if effective_policy == SubagentAuditPolicy::Complete {
+                    REQUIRED_AUDIT_FIELDS.to_vec()
+                } else {
+                    Vec::new()
+                },
+                route,
+            }))
+        })
+        .await
+    }
+
     pub async fn set_conversation_subagent_audit(
         &self,
         conversation: String,
@@ -199,15 +346,26 @@ pub(super) fn job_audit_policy(
     db: &Connection,
     job: &Job,
     conversation: Option<&str>,
-) -> Result<SubagentAuditPolicy> {
-    let policy = conversation
-        .map(|id| conversation_settings(db, id).map(|settings| settings.effective()))
-        .unwrap_or_else(|| project_default(db, &job.project_id))?
-        .max(stage_policy(db, &job.id)?);
+) -> Result<AuditRequirement> {
+    let policy = if let Some(id) = conversation {
+        AuditRequirement::from_conversation(conversation_settings(db, id)?)
+    } else {
+        AuditRequirement {
+            policy: project_default(db, &job.project_id)?,
+            source: SubagentAuditPolicySource::ProjectDefault,
+        }
+    };
+    let policy = policy.raised(
+        stage_policy(db, &job.id)?,
+        SubagentAuditPolicySource::Workflow,
+    );
     if let JobOrigin::Agent { run_id, .. } = &job.origin
         && has_complete_audit(db, run_id)?
     {
-        return Ok(SubagentAuditPolicy::Complete);
+        return Ok(AuditRequirement {
+            policy: SubagentAuditPolicy::Complete,
+            source: SubagentAuditPolicySource::OriginatingAttempt,
+        });
     }
     Ok(policy)
 }
@@ -216,11 +374,14 @@ pub(super) fn direct_audit_policy(
     db: &Connection,
     conversation: &str,
     source_run: Option<&str>,
-) -> Result<SubagentAuditPolicy> {
-    let mut policy = conversation_settings(db, conversation)?.effective();
+) -> Result<AuditRequirement> {
+    let mut policy = AuditRequirement::from_conversation(conversation_settings(db, conversation)?);
     if let Some(run) = source_run {
         if has_complete_audit(db, run)? {
-            policy = SubagentAuditPolicy::Complete;
+            policy = AuditRequirement {
+                policy: SubagentAuditPolicy::Complete,
+                source: SubagentAuditPolicySource::OriginatingAttempt,
+            };
         }
         if let Some(source) = structured_job_run(db, run)? {
             let job: String = db.query_row(
@@ -228,7 +389,7 @@ pub(super) fn direct_audit_policy(
                 [&source],
                 |row| row.get(0),
             )?;
-            policy = policy.max(stage_policy(db, &job)?);
+            policy = policy.raised(stage_policy(db, &job)?, SubagentAuditPolicySource::Workflow);
         }
     }
     Ok(policy)
@@ -301,7 +462,14 @@ pub(crate) fn pin_attempt_audit(
     db: &Connection,
     run: &str,
     route: &SubagentAuditRoute,
+    routing: Option<&SubagentAuditRouting>,
 ) -> Result<()> {
+    if let Some(routing) = routing {
+        db.execute(
+            "INSERT INTO attempt_subagent_audit_routing(run_id, decision) VALUES (?1, ?2)",
+            params![run, serde_json::to_string(routing)?],
+        )?;
+    }
     let (kind, evidence) = match route {
         SubagentAuditRoute::Available => return Ok(()),
         SubagentAuditRoute::Managed => ("managed", None),

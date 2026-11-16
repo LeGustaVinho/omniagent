@@ -5,11 +5,12 @@ use omniagent::{
     attachments::{AttachmentDelivery, AttachmentSource},
     conversations::{AttemptPlan, Conversation, SessionScope},
     jobs::{
-        AdmissionBlocker, AdmissionEnvironment, InstructionDelivery, Job, JobContext,
+        AdmissionBlocker, AdmissionEnvironment, AttemptSubagentRoute, InstructionDelivery, Job, JobContext,
         JobNoticeKind, JobOrigin, JobPermission, JobRequest, JobRequestConflict, JobRequirements,
         JobRole, JobRule, JobWorkspace, PipelineDispatch, PipelineNodeKind, ProjectSubagentPolicy,
         QueueHistoryPolicy, QueueSettings, QueueState, RecoveryAction, SubagentAuditField,
-        SubagentAuditPolicy, SubagentAuditSource, SubagentCounts, SubagentLimitMode,
+        SubagentAuditManagedReason, SubagentAuditPolicy, SubagentAuditPolicySource, SubagentAuditSource,
+        SubagentCounts, SubagentLimitMode,
     },
     providers::{Capability, Provider, SessionIntent, SessionMode},
     repository,
@@ -20,7 +21,8 @@ use omniagent::{
 
 fn remove_recent_schema(db: &rusqlite::Connection) -> Result<()> {
     db.execute_batch(
-        "DROP TABLE task_delivery_events;
+        "DROP TABLE attempt_subagent_audit_routing;
+         DROP TABLE task_delivery_events;
          DROP TABLE verified_delivery_commits;
          DROP TABLE delivery_commit_intents;
          DROP TABLE project_delivery_git_policies;
@@ -1336,6 +1338,14 @@ async fn subagent_audit_overrides_are_independent_and_a_pipeline_stage_can_requi
             "Available evidence".into(),
         )
         .await?;
+    let audit = reopened
+        .attempt_subagent_audit(chat.clone(), baseline.run.id.clone())
+        .await?
+        .context("missing admission audit")?;
+    assert_eq!(audit.effective_policy, SubagentAuditPolicy::Available);
+    assert_eq!(audit.policy_source, Some(SubagentAuditPolicySource::ConversationOverride));
+    assert_eq!(audit.route, AttemptSubagentRoute::Available);
+    assert!(audit.required_fields.is_empty());
     store.mark_agent_running(baseline.run.id.clone()).await?;
     let observe_partial = |run: String| {
         store.record_agent_observation(
@@ -1436,6 +1446,16 @@ async fn subagent_audit_overrides_are_independent_and_a_pipeline_stage_can_requi
         .claim_next_job(environment(false))
         .await?
         .context("Audit did not select managed-only fallback")?;
+    let audit = reopened
+        .attempt_subagent_audit(chat.clone(), parent.run.id.clone())
+        .await?
+        .context("missing workflow audit")?;
+    assert_eq!(audit.effective_policy, SubagentAuditPolicy::Complete);
+    assert_eq!(audit.policy_source, Some(SubagentAuditPolicySource::Workflow));
+    assert_eq!(audit.required_fields.len(), 4);
+    assert_eq!(audit.route, AttemptSubagentRoute::Managed {
+        reason: Some(SubagentAuditManagedReason::NativeEvidenceUnavailable),
+    });
     let quota = store.conversation_subagent_quota(chat.clone()).await?;
     assert_eq!(quota.native_sessions.len(), 1);
     assert_eq!(quota.native_sessions[0].allowance, 0);
@@ -1450,6 +1470,13 @@ async fn subagent_audit_overrides_are_independent_and_a_pipeline_stage_can_requi
         .claim_next_job(environment(false))
         .await?
         .context("Audit-only reservation blocked managed delegation")?;
+    let audit = reopened
+        .attempt_subagent_audit(child.conversation_id.clone(), child.run.id.clone())
+        .await?
+        .context("missing child audit")?;
+    assert_eq!(audit.policy_conversation_id, chat);
+    assert_eq!(audit.policy_source, Some(SubagentAuditPolicySource::OriginatingAttempt));
+    assert!(reopened.attempt_subagent_audit(chat.clone(), child.run.id.clone()).await?.is_none());
     store.mark_agent_running(child.run.id.clone()).await?;
     store
         .finish_agent_attempt(
@@ -1484,9 +1511,17 @@ async fn subagent_audit_overrides_are_independent_and_a_pipeline_stage_can_requi
             .status,
         RunStatus::Failed
     );
-    assert!(store.agent_observations(chat, parent.run.id, 0).await?.iter().any(|event| matches!(
+    assert!(store.agent_observations(chat.clone(), parent.run.id.clone(), 0).await?.iter().any(|event| matches!(
         &event.event.data, ProviderEventData::SubagentAuditGap { report } if report.native_delegation_detected
     )));
+    store
+        .set_conversation_subagent_audit(chat.clone(), Some(SubagentAuditPolicy::Complete))
+        .await?;
+    let historical = reopened
+        .attempt_subagent_audit(chat, parent.run.id)
+        .await?
+        .context("historical audit disappeared after editing the conversation policy")?;
+    assert_eq!(historical.policy_source, Some(SubagentAuditPolicySource::Workflow));
     Ok(())
 }
 

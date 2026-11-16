@@ -1692,7 +1692,12 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             allocation.strict_total,
         )?;
     }
-    crate::jobs::pin_attempt_audit(db, &run.id, &allocation.audit)?;
+    crate::jobs::pin_attempt_audit(
+        db,
+        &run.id,
+        &allocation.audit,
+        allocation.audit_routing.as_ref(),
+    )?;
     let mut answered_question = None;
     if let (Some((origin, reply)), Some((request_event_seq, _))) = (answer, answered_request) {
         link_question_reply(db, &run.id, request_event_seq, &origin, reply)?;
@@ -7647,7 +7652,10 @@ mod tests {
     #[tokio::test]
     async fn native_subagent_audit_requires_a_complete_authenticated_fixture_and_rechecks_the_scope()
     -> Result<()> {
-        use crate::{jobs::SubagentAuditPolicy, providers::ChildDetails};
+        use crate::{
+            jobs::{AttemptSubagentRoute, SubagentAuditPolicy, SubagentAuditPolicySource},
+            providers::ChildDetails,
+        };
 
         let (_dir, store, conversation, scope) = setup().await?;
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -7781,6 +7789,20 @@ mod tests {
         );
         assert!(admitted.native_subagent_limit.is_none());
         let verified_id = admitted.run.id.clone();
+        let audit = store
+            .attempt_subagent_audit(conversation.id.clone(), verified_id.clone())
+            .await?
+            .context("missing native audit route")?;
+        assert_eq!(
+            audit.policy_source,
+            Some(SubagentAuditPolicySource::ConversationOverride)
+        );
+        assert_eq!(
+            audit.route,
+            AttemptSubagentRoute::Native {
+                evidence_id: evidence_id.clone()
+            }
+        );
         assert_eq!(
             start_managed_turn(store.clone(), runner.clone(), admitted, None)
                 .wait()
