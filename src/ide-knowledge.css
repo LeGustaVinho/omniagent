@@ -230,6 +230,14 @@
 .note-body { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .note-body [hidden] { display: none; }
 .note-file-view, .note-editor { display: flex; flex: 1; height: 100%; min-height: 0; min-width: 0; flex-direction: column; }
+.cm-note-heading { font-weight: 650; }
+.cm-note-heading-1 { font-size: 1.4em; }
+.cm-note-heading-2 { font-size: 1.2em; }
+.cm-note-emphasis { font-style: italic; }
+.cm-note-strong { font-weight: 700; }
+.cm-note-strike { text-decoration: line-through; }
+.cm-note-highlight { background: color-mix(in srgb, var(--primary) 25%, transparent); }
+.cm-note-code { background: var(--muted); }
 .note-editor-tools { display: flex; gap: 2px; align-items: center; padding: 3px 8px; min-height: 35px; border-bottom: 1px solid var(--border); background: var(--background); }
 .note-editor-mount { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .note-statusbar .fw-primary { padding-inline: 9px; }

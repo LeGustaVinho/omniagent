@@ -8,6 +8,7 @@ mod fixture;
 mod fixture_runtime;
 mod goal_verification_ipc;
 mod ipc;
+mod markdown_analysis_ipc;
 mod queue_runtime;
 mod task_delivery_ipc;
 mod task_assignment_ipc;
@@ -275,6 +276,7 @@ fn main() {
             desktop::choose_repository_markdown,
             desktop::list_repository_markdown_revisions,
             desktop::read_repository_markdown,
+            markdown_analysis_ipc::analyze_note_markdown,
             ipc::active_checkout,
             ipc::registered_checkouts,
             omniagent::appearance::appearance_settings,

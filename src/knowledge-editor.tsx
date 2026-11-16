@@ -1,14 +1,15 @@
 import { autocompletion } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, redo, undo } from "@codemirror/commands";
-import { markdown } from "@codemirror/lang-markdown";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
-import { Compartment, EditorSelection, EditorState } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState, StateEffect, StateField, Transaction } from "@codemirror/state";
 import {
   Decoration, drawSelection, EditorView, highlightActiveLine, keymap, lineNumbers, ViewPlugin, WidgetType,
   type DecorationSet, type ViewUpdate,
 } from "@codemirror/view";
 import { Braces, CheckSquare, List, Redo2, Search, Table2, Undo2 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef } from "react";
 import type { ExampleFile } from "@/ide-knowledge-data";
 import { fileName } from "@/ide-knowledge-data";
@@ -112,7 +113,81 @@ const livePreview = ViewPlugin.fromClass(class {
   }
 }, { decorations: (plugin) => plugin.decorations });
 
-export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLink }: {
+type SourceRange = { from: number; to: number };
+type SyntaxNode = {
+  kind: string;
+  range: SourceRange;
+  markers?: SourceRange[];
+  target?: string;
+  alias?: string | null;
+  anchor?: string | null;
+  status?: string;
+  checked?: boolean;
+  valueRange?: SourceRange;
+  level?: number;
+};
+type CanonicalSyntax = { bufferRevision: string; nodes: SyntaxNode[] };
+const analyzed = StateEffect.define<CanonicalSyntax>();
+const canonicalSyntax = StateField.define<CanonicalSyntax | undefined>({
+  create: () => undefined,
+  update(previous, transaction) {
+    const analysis = transaction.effects.find((effect) => effect.is(analyzed));
+    return analysis?.value ?? (transaction.docChanged ? undefined : previous);
+  },
+});
+const formatted = {
+  emphasis: Decoration.mark({ class: "cm-note-emphasis" }),
+  strong: Decoration.mark({ class: "cm-note-strong" }),
+  strikethrough: Decoration.mark({ class: "cm-note-strike" }),
+  highlight: Decoration.mark({ class: "cm-note-highlight" }),
+  code_span: Decoration.mark({ class: "cm-note-code" }),
+};
+
+function canonicalDecorations(view: EditorView): DecorationSet {
+  const syntax = view.state.field(canonicalSyntax);
+  if (!syntax) return Decoration.none;
+  const decorations: ReturnType<Decoration["range"]>[] = [];
+  const { doc, selection } = view.state;
+  const conceal = Decoration.replace({});
+  for (const node of syntax.nodes) {
+    const { from, to } = node.range;
+    if (from < 0 || from >= to || to > doc.length || !view.visibleRanges.some((range) => range.from < to && range.to > from)) continue;
+    const active = selection.ranges.some((range) => range.from <= to && range.to >= from);
+    if (node.kind === "heading") {
+      const start = doc.lineAt(from).from;
+      decorations.push(Decoration.line({ class: `cm-note-heading cm-note-heading-${node.level ?? 1}` }).range(start));
+    }
+    const formatting = formatted[node.kind as keyof typeof formatted];
+    if (formatting) decorations.push(formatting.range(from, to));
+    if (active) continue;
+    if (node.kind === "wikilink" || node.kind === "embed") {
+      const label = node.alias || node.target || node.anchor || "";
+      if (label) decorations.push(Decoration.replace({ widget: new ConcealedWiki(label, node.target ?? label) }).range(from, to));
+    } else if (node.kind === "task_marker" && node.valueRange && [" ", "x", "X"].includes(node.status ?? "")) {
+      decorations.push(Decoration.replace({ widget: new TaskMarker(Boolean(node.checked), node.valueRange.from) }).range(from, to));
+    } else {
+      for (const marker of node.markers ?? []) {
+        if (marker.from >= from && marker.to <= to && marker.from < marker.to) {
+          decorations.push(conceal.range(marker.from, marker.to));
+        }
+      }
+    }
+  }
+  return Decoration.set(decorations, true);
+}
+
+const canonicalLivePreview = ViewPlugin.fromClass(class {
+  decorations: DecorationSet;
+  constructor(view: EditorView) { this.decorations = canonicalDecorations(view); }
+  update(event: ViewUpdate) {
+    if (event.docChanged || event.viewportChanged || event.selectionSet
+      || event.startState.field(canonicalSyntax) !== event.state.field(canonicalSyntax)) {
+      this.decorations = canonicalDecorations(event.view);
+    }
+  }
+}, { decorations: (plugin) => plugin.decorations });
+
+export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLink, analyze = false }: {
   mode: "source" | "live";
   path: string;
   source: string;
@@ -120,14 +195,16 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
   jump?: NoteJump;
   onChange: (content: string) => void;
   onLink: (link: NoteTarget) => void;
+  analyze?: boolean;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const instance = useRef<EditorView>(undefined);
   const compartment = useRef(new Compartment()).current;
-  const fresh = useRef({ source, onChange, onLink, mode, files });
+  const fresh = useRef({ source, onChange, onLink, mode, files, analyze });
+  const generation = useRef(0);
   const reflected = useRef(source);
   const updating = useRef(false);
-  useEffect(() => { fresh.current = { source, onChange, onLink, mode, files }; }, [source, onChange, onLink, mode, files]);
+  useEffect(() => { fresh.current = { source, onChange, onLink, mode, files, analyze }; }, [source, onChange, onLink, mode, files, analyze]);
 
   useEffect(() => {
     const target = mount.current;
@@ -138,11 +215,12 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
       state: EditorState.create({
         doc: fresh.current.source,
         extensions: [
-          markdown(), lineNumbers(), highlightActiveLine(), drawSelection(), history(), search({ top: true }),
+          markdown({ base: markdownLanguage }), lineNumbers(), highlightActiveLine(), drawSelection(), history(), search({ top: true }),
           keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           editorTheme,
-          compartment.of(fresh.current.mode === "live" ? livePreview : []),
+          canonicalSyntax,
+          compartment.of(fresh.current.mode === "live" ? (fresh.current.analyze ? canonicalLivePreview : livePreview) : []),
           EditorView.contentAttributes.of({ "aria-label": `Markdown editor for ${path}` }),
           EditorView.lineWrapping,
           autocompletion({ override: [(context) => {
@@ -168,6 +246,17 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
               if (!event.ctrlKey && !event.metaKey) return false;
               const position = editor.posAtCoords({ x: event.clientX, y: event.clientY });
               if (position === null) return false;
+              if (fresh.current.analyze) {
+                const link = editor.state.field(canonicalSyntax)?.nodes.find((node) => (node.kind === "wikilink" || node.kind === "embed")
+                  && position >= node.range.from && position <= node.range.to);
+                if (!link) return false;
+                event.preventDefault();
+                fresh.current.onLink({
+                  target: link.target ?? "", alias: link.alias ?? undefined, anchor: link.anchor ?? undefined,
+                  raw: editor.state.sliceDoc(link.range.from, link.range.to).replace(/^!?\[\[|\]\]$/g, ""), embed: link.kind === "embed",
+                });
+                return true;
+              }
               const line = editor.state.doc.lineAt(position);
               for (const link of line.text.matchAll(/(!?)\[\[([^\]]+)\]\]/g)) {
                 const column = position - line.from;
@@ -188,8 +277,8 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
   }, [compartment, path]);
 
   useEffect(() => {
-    instance.current?.dispatch({ effects: compartment.reconfigure(mode === "live" ? livePreview : []) });
-  }, [compartment, mode]);
+    instance.current?.dispatch({ effects: compartment.reconfigure(mode === "live" ? (analyze ? canonicalLivePreview : livePreview) : []) });
+  }, [analyze, compartment, mode]);
 
   useEffect(() => {
     const view = instance.current;
@@ -197,11 +286,29 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
     reflected.current = source;
     updating.current = true;
     try {
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: source } });
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: source }, annotations: Transaction.addToHistory.of(false) });
     } finally {
       updating.current = false;
     }
   }, [source]);
+
+  useEffect(() => {
+    if (!analyze) return;
+    const bufferRevision = String(++generation.current);
+    const markdown = source.replace(/\r\n?/g, "\n");
+    const timer = window.setTimeout(() => {
+      void invoke<CanonicalSyntax>("analyze_note_markdown", { markdown: source, bufferRevision }).then((analysis) => {
+        const editor = instance.current;
+        if (String(generation.current) !== bufferRevision || analysis.bufferRevision !== bufferRevision
+          || !editor || editor.state.doc.toString() !== markdown) return;
+        editor.dispatch({ effects: analyzed.of(analysis) });
+      }).catch(() => undefined);
+    }, 75);
+    return () => {
+      ++generation.current;
+      window.clearTimeout(timer);
+    };
+  }, [analyze, path, source]);
 
   useEffect(() => {
     const view = instance.current;

@@ -264,7 +264,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                     </div>
                     <Suspense fallback={<p role="status" className="file-help">Loading note view…</p>}>
                       {selectedMode === "reading" ? <Reading path={path} content={entry.content} files={catalog} jump={jumps[path]} onLink={onLink} onAttachment={(attachment) => setDialog({ kind: "attachment", attachment })} />
-                        : <Editor mode={selectedMode} path={path} source={entry.content} files={catalog} jump={jumps[path]} onChange={(content) => update(path, content)} onLink={onLink} />}
+                        : <Editor analyze mode={selectedMode} path={path} source={entry.content} files={catalog} jump={jumps[path]} onChange={(content) => update(path, content)} onLink={onLink} />}
                     </Suspense>
                   </div>
                 );

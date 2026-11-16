@@ -10,6 +10,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow = "1"
 base64 = "0.23"
+comrak = { version = "0.59.0", default-features = false }
 dunce = "1"
 infer = "0.22"
 regex = "1"
