@@ -1,9 +1,8 @@
-import { useQueries } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";
 import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import { ModelPicker } from "@/components/model-picker";
+import { LIVE_MODEL_PROVIDERS, useLiveModelOptions } from "@/live-models";
 import { participantModel, participantProviderNames, type TaskParticipantAttempt } from "@/task-participants";
 
 type AgentProfile = Pick<TaskParticipantAttempt, "provider" | "profileId">;
@@ -31,7 +30,7 @@ export function matchesParticipant(attempt: TaskParticipantAttempt, { agent, pro
     (!model || (agentKey(model) === agentKey(attempt) && model.modelId === participantModel(attempt)));
 }
 
-const providers = Object.keys(participantProviderNames) as Provider[];
+const providers = LIVE_MODEL_PROVIDERS;
 
 function filterModels(catalog: ModelOption[], attempts: readonly TaskParticipantAttempt[]) {
   const options = new Map(catalog.map((option) => [modelKey(option.selection), option]));
@@ -61,12 +60,8 @@ export function AgileParticipantFilters({ attempts, value, onChange }: {
   value: ParticipantFilter;
   onChange: (filters: ParticipantFilter) => void;
 }) {
-  const catalogs = useQueries({ queries: providers.map((provider) => ({
-    queryKey: ["conversation-models", provider],
-    queryFn: () => invoke<{ option: ModelOption }[]>("conversation_models", { provider }),
-    staleTime: 60_000,
-  })) });
-  const options = filterModels(catalogs.flatMap(({ data }) => data?.map(({ option }) => option) ?? []), attempts);
+  const { options: catalog, loading } = useLiveModelOptions(providers);
+  const options = filterModels(catalog, attempts);
   const agents = new Map(attempts.map(({ provider, profileId }) => [agentKey({ provider, profileId }), { provider, profileId }]));
 
   return <>
@@ -83,7 +78,7 @@ export function AgileParticipantFilters({ attempts, value, onChange }: {
       {providers.map((provider) => <option key={provider} value={provider}>{participantProviderNames[provider]}</option>)}
     </select>
     <ModelPicker label="Filter by model" layout="inline" options={options}
-      loading={!options.length && catalogs.some(({ isPending }) => isPending)}
+      loading={!options.length && loading}
       selection={{ mode: "single", selected: value.model, onChange: (model) => onChange({ ...value, model }),
         reset: { label: "All models", onSelect: () => onChange({ ...value, model: null }) } }}
       previewDetails={({ selection }) => <p className="px-3 pb-2 text-xs break-all text-muted-foreground">

@@ -1,5 +1,4 @@
 import type { Job } from "@/bindings/Job";
-import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 
@@ -40,7 +39,6 @@ export type DeliveryUnit = {
 export type DeliveryTarget = { projectId: string; runId: string };
 export type DeliveryAction = (operation: () => Promise<unknown>) => void;
 export type DeliveryActions = { execute: DeliveryAction; busy: boolean };
-export type DeliveryModel = { option: ModelOption };
 export type DeliveryModelChoice = ModelSelection | null;
 
 export const deliveryProviders: Provider[] = ["codex", "claude", "antigravity"];

@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import { ModelPicker, ModelRatingMeters } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
+import { sameModelSelection, useLiveModelOptions } from "@/live-models";
 
 type Scope = { projectId: string; taskId: string };
 type Assignment = { role: string; provider: Provider; profileId: string; modelId: string | null };
@@ -38,28 +38,22 @@ function ModelAssignment({ assignment, disabled, save }: {
 }) {
   const [requestedProvider, setProvider] = useState<Provider>();
   const provider = requestedProvider ?? assignment?.provider ?? "codex";
-  const models = useQuery({
-    queryKey: ["conversation-models", provider],
-    queryFn: () => invoke<{ option: ModelOption }[]>("conversation_models", { provider }),
-    staleTime: 60_000,
-  });
-  const options = models.data?.map(({ option }) => option) ?? [];
+  const { options, loading, errors } = useLiveModelOptions([provider]);
   const selected = assignment?.provider === provider && assignment.modelId ? {
     provider,
     profileId: assignment.profileId,
     modelId: assignment.modelId,
   } : null;
-  const selectedOption = options.find(({ selection }) =>
-    selection.provider === selected?.provider && selection.profileId === selected?.profileId && selection.modelId === selected?.modelId);
+  const selectedOption = options.find(({ selection }) => sameModelSelection(selection, selected));
   return <>
     <label>Agent provider <select value={provider} disabled={disabled}
       onChange={(event) => setProvider(event.currentTarget.value as Provider)}>
       {Object.entries(providerNames).map(([key, name]) => <option key={key} value={key}>{name}</option>)}
     </select></label>
-    <ModelPicker label="Assignment model" options={options} loading={models.isPending}
-      disabled={disabled || (models.isPending && !assignment)}
+    <ModelPicker label="Assignment model" options={options} loading={loading}
+      disabled={disabled || (loading && !assignment)}
       selection={{ mode: "single", selected, onChange: save }} />
-    {models.error && <p role="alert">{String(models.error)}</p>}
+    {errors[0] && <p role="alert">{String(errors[0])}</p>}
     {assignment && <div className="grid gap-1">
       <p className="break-words">Saved assignment · {providerNames[assignment.provider]} · {assignment.modelId ?? "Profile default"} · {assignment.profileId}</p>
       {selectedOption && <div role="group" aria-label={`Reference rating for ${selectedOption.name}`}>

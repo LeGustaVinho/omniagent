@@ -8,6 +8,7 @@ import type { PluginInventory } from "@/bindings/PluginInventory";
 import type { PluginInventoryStatus } from "@/bindings/PluginInventoryStatus";
 import type { Provider } from "@/bindings/Provider";
 import { Button } from "@/components/ui/button";
+import { ExecutionProfileModelSettings } from "@/model-default-settings";
 import { useWorkspace } from "@/workspace-state";
 
 const PROVIDERS: Record<Provider, string> = {
@@ -153,6 +154,7 @@ function ExecutableSettings({ profile }: { profile: ConfiguredExecutable }) {
     setConfigured(updated.executable);
     setPath(updated.executable ?? "");
     setProbe(null);
+    void queryClient.invalidateQueries({ queryKey: ["conversation-models", provider] });
   }
 
   function submit(event: FormEvent) {
@@ -197,6 +199,7 @@ function ExecutableSettings({ profile }: { profile: ConfiguredExecutable }) {
       )}
       {inventory.isError && <p role="alert" className="mt-3 text-sm text-red-300">{String(inventory.error)}</p>}
       {inventory.data && <PluginList inventory={inventory.data} />}
+      <ExecutionProfileModelSettings provider={provider} />
     </section>
   );
 }

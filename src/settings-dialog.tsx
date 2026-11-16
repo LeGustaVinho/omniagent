@@ -9,6 +9,7 @@ import { DeliveryGitSettings, SimulatedDeliveryGitSettings } from "@/delivery-gi
 import { Button } from "@/components/ui/button";
 import { ProjectQueueHistoryPolicy } from "@/conversation-history-controls";
 import { CustomizationsSettings } from "@/customizations-panel";
+import { ProjectModelSettings, projectModelSettings } from "@/model-default-settings";
 import { ProjectAttachmentSettings } from "@/provider-settings";
 import { defaultAppearance, useAppearancePresentation, useEditableAppearance } from "@/settings-appearance";
 import { SettingRow } from "@/settings-controls";
@@ -59,7 +60,7 @@ const pages: readonly Page[] = [
     { id: "attachment-limits", label: "Attachment limits", description: "Files per turn, native and staged bytes per file and turn, UTF-8 excerpt size" },
   ] },
   { id: "execution", scope: "project", title: "Execution policies", icon: Shield, entries: policyFields.execution },
-  { id: "conversation", scope: "project", title: "Conversation defaults", icon: SlidersHorizontal, entries: policyFields.conversation },
+  { id: "conversation", scope: "project", title: "Conversation defaults", icon: SlidersHorizontal, entries: [projectModelSettings.conversation, ...policyFields.conversation] },
   { id: "git", scope: "project", title: "Git and delivery", icon: GitPullRequest, entries: [
     deliveryGitSetting,
     ...policyFields.git,
@@ -252,6 +253,7 @@ function SettingsSession({
       case "conversation":
         if (simulation || !checkout) return policy("conversation");
         return <>
+          <ProjectModelSettings key={`conversation-model-${checkout.projectId}`} projectId={checkout.projectId} purposes={["conversation"]} />
           <ProjectQueueHistoryPolicy key={checkout.projectId} projectId={checkout.projectId} />
           <ComposerSuggestionSettings />
           <PolicyForm fields={policyFields.conversation.filter(({ id }) => id !== "queued-context" && id !== "suggestions")} stored={undefined} simulate={simulate} />
@@ -259,10 +261,11 @@ function SettingsSession({
       case "execution":
         if (simulation || !checkout) return policy("execution");
         return <>
+          <ProjectModelSettings key={`work-models-${checkout.projectId}`} projectId={checkout.projectId} purposes={["planning", "implementation"]} />
           <ProjectSubagentControls key={checkout.projectId} projectId={checkout.projectId} />
           <ProjectSubagentAuditControl key={`audit-${checkout.projectId}`} projectId={checkout.projectId} />
           <ProjectQuestionTimeout key={`timeout-${checkout.projectId}`} projectId={checkout.projectId} />
-          <PolicyForm fields={policyFields.execution.filter(({ id }) => !["subagent-policy", "subagent-cap", "subagent-audit", "live-wait"].includes(id))}
+          <PolicyForm fields={policyFields.execution.filter(({ id }) => !["planning-model", "implementation-model", "subagent-policy", "subagent-cap", "subagent-audit", "live-wait"].includes(id))}
             stored={undefined} simulate={simulate} />
         </>;
       case "git":

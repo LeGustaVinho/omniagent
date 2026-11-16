@@ -31,7 +31,7 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
-it("starts delivery from a saved Markdown revision and queues planning after reopening the run", async () => {
+it.each([false, true])("starts delivery from saved Markdown and queues planning after reopening (project default: %s)", async (useDefault) => {
   const checkout = {
     projectId: "project", checkoutId: "source-checkout", checkoutRoot: "C:/fixture/repo", repositoryRoot: "C:/fixture/repo",
   };
@@ -75,6 +75,9 @@ it("starts delivery from a saved Markdown revision and queues planning after reo
         return run;
       case "inspect_repository_delivery": return args && "runId" in args && args.runId === run.id ? { ...snapshot, jobs } :
         { run: previous, jobs: [], artifacts: [] };
+      case "project_model_defaults":
+        expect(args).toEqual({ projectId: checkout.projectId });
+        return { conversation: null, planning: useDefault ? model.selection : null, implementation: null };
       case "conversation_models": return args && "provider" in args && args.provider === "codex" ? [{ option: model }] : [];
       case "repository_delivery_tasks": return [];
       case "submit_repository_delivery_agent":
@@ -107,8 +110,12 @@ it("starts delivery from a saved Markdown revision and queues planning after reo
   const planning = await screen.findByRole("region", { name: "Planning" });
   expect(within(planning).getByText("Plan Mode")).toBeTruthy();
   const queue = within(planning).getByRole<HTMLButtonElement>("button", { name: "Queue planning" });
-  expect(queue.disabled).toBe(true);
-  await user.click(await within(planning).findByRole("button", { name: model.name }));
+  if (useDefault) {
+    expect(await within(planning).findByText("Model from project defaults")).toBeTruthy();
+  } else {
+    expect(queue.disabled).toBe(true);
+    await user.click(await within(planning).findByRole("button", { name: model.name }));
+  }
   expect(queue.disabled).toBe(false);
   await user.click(queue);
 

@@ -43,6 +43,9 @@ function setup(kind: "task" | "subtask", locked = false) {
       case "set_task_branch_strategy": overrideStrategy = args.strategy ?? null; return;
       case "project_checklist_dispatch": return release;
       case "project_task_assignments": return [{ role: "implementer", ...selection }];
+      case "project_model_defaults": return { conversation: null, planning: null, implementation: null };
+      case "conversation_models": return (input as { provider?: string }).provider === selection.provider
+        ? [{ option: { selection, name: "Implementation model", selectable: true, rating: null, unavailableReason: null, catalogVersion: 1 } }] : [];
       case "queue_project_checklist_work": return { id: "queued-work" };
       default: throw new Error(`Unexpected ${name}`);
     }

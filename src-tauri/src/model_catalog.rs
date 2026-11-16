@@ -5,6 +5,8 @@ use ts_rs::TS;
 
 use crate::providers::Provider;
 
+pub mod defaults;
+
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]

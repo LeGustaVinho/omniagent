@@ -10,13 +10,14 @@ import type { Job } from "@/bindings/Job";
 import type { JobInspection } from "@/bindings/JobInspection";
 import type { RecoveryAction } from "@/bindings/RecoveryAction";
 import type { ConversationHistory } from "@/bindings/ConversationHistory";
-import type { ModelOption } from "@/bindings/ModelOption";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import type { RunRecord } from "@/bindings/RunRecord";
 import { ModelPicker } from "@/components/model-picker";
 import { ModelCapabilityPreview } from "@/model-capability-preview";
-import { EffortSelect, type EffortSet } from "@/components/effort-select";
+import { EffortSelect } from "@/components/effort-select";
+import { availableModelSelection, liveModelsQuery, sameModelSelection } from "@/live-models";
+import { useCheckoutModelDefaults, useExecutionProfileDefault } from "@/model-defaults";
 import { ConversationModeSelect, completesSideQuestion, goalCommand, sideQuestionCommand,
   sideQuestionCommandPrefix, type ConversationMode } from "@/conversation-mode";
 import { ConversationGoalCard, GoalSettingsDialog, goalDefinition, hasCurrentGoal, useConversationGoal, type GoalDefinition } from "@/conversation-goal";
@@ -219,7 +220,6 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
 }
 
 type PanelParams = { conversationId: string; title: string };
-type DesktopModel = EffortSet & { option: ModelOption };
 const selectorClass = "conv-select";
 
 export function ConversationPanel({ params, api, containerApi }: IDockviewPanelProps<PanelParams>) {
@@ -311,8 +311,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const activeEdit = useRef(0);
   const [draftError, setDraftError] = useState("");
   const [draftStatus, setDraftStatus] = useState("");
-  const [provider, setProvider] = useState<Provider>("codex");
-  const [selection, setSelection] = useState<ModelSelection | null>(null);
+  const [providerOverride, setProvider] = useState<Provider>();
+  const [explicitSelection, setSelection] = useState<ModelSelection | null>(null);
   const [effort, setEffort] = useState("");
   const [mode, setMode] = useState<ConversationMode>("read_only");
   const [continuation, setContinuation] = useState<ReviewedContinuation>();
@@ -333,22 +333,22 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const composingGoal = !isSideQuestion && (mode === "goal" || goalInput !== undefined);
   const { overview: goal, refresh: refreshGoal } = useConversationGoal(conversationId, visible);
   const [goalSettings, setGoalSettings] = useState<{ objective: string; submittedDraft?: string }>();
-  const models = useQuery({
-    queryKey: ["conversation-models", provider],
-    queryFn: () => invoke<DesktopModel[]>("conversation_models", { provider }),
-    staleTime: 60_000,
-  });
-  const selected = models.data?.find(({ option }) => option.selection.modelId === selection?.modelId
-    && option.selection.provider === selection?.provider && option.selection.profileId === selection?.profileId);
+  const checkoutDefaults = useCheckoutModelDefaults(checkoutId, visible);
+  const projectModel = mode === "plan" ? checkoutDefaults.data?.planning : checkoutDefaults.data?.conversation;
+  const provider = explicitSelection?.provider ?? providerOverride ?? projectModel?.provider ?? "codex";
+  const models = useQuery(liveModelsQuery(provider));
+  const modelOptions = models.data?.map(({ option }) => option) ?? [];
+  const profileId = modelOptions.find(({ selectable }) => selectable)?.selection.profileId;
+  const profileDefault = useExecutionProfileDefault(provider, profileId, visible && !explicitSelection);
+  const selection = explicitSelection ?? availableModelSelection(modelOptions, projectModel, profileDefault.data);
+  const selected = models.data?.find(({ option }) => sameModelSelection(option.selection, selection));
   const antigravityModel = provider === "antigravity" ? selected?.option.selection.modelId : undefined;
   const modelEfforts = useQuery({
-    queryKey: ["conversation-models", provider, antigravityModel],
-    queryFn: () => invoke<DesktopModel[]>("conversation_models", { provider, modelId: antigravityModel }),
+    ...liveModelsQuery(provider, antigravityModel),
     enabled: Boolean(antigravityModel),
-    staleTime: 60_000,
   });
   const efforts = antigravityModel
-    ? modelEfforts.data?.find(({ option }) => option.selection.modelId === antigravityModel)
+    ? modelEfforts.data?.find(({ option }) => sameModelSelection(option.selection, selection))
     : selected;
   const jobKey = ["conversation", conversationId, "latest-job"];
   const latestJob = useQuery({
@@ -768,7 +768,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
                 <option value="claude">Claude Code</option>
                 <option value="antigravity">Antigravity</option>
               </select>
-              <ModelPicker label="Model" layout="inline" options={models.data?.map(({ option }) => option) ?? []} loading={models.isPending}
+              <ModelPicker label="Model" layout="inline" options={modelOptions} loading={models.isPending}
                 previewDetails={(option) => <ModelCapabilityPreview option={option}
                   scope={run ? { projectId: run.projectId, conversationId, runId: run.id, live } : undefined}
                   openEvidence={run ? () => {

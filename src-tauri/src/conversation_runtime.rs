@@ -155,10 +155,7 @@ pub(crate) async fn selected_scope(
         models,
         account_binding,
     } = profile(store, selection.provider, Some(selection.model_id.clone())).await?;
-    let selected = models
-        .into_iter()
-        .find(|model| model.option.selection == selection && model.option.selectable)
-        .context("The selected model is no longer available")?;
+    let selected = choose_live_model(&models, &selection)?;
     ensure!(
         effort
             .as_ref()
@@ -178,6 +175,22 @@ pub(crate) async fn selected_scope(
         model: Some(selection.model_id),
         effort,
     })
+}
+
+fn choose_live_model<'a>(
+    models: &'a [DesktopModel],
+    selection: &ModelSelection,
+) -> Result<&'a DesktopModel> {
+    models
+        .iter()
+        .find(|model| model.option.selection == *selection && model.option.selectable)
+        .context("The selected model is no longer available")
+}
+
+pub(crate) async fn validate_model_choice(store: &Store, selection: &ModelSelection) -> Result<()> {
+    let available = profile(store, selection.provider, Some(selection.model_id.clone())).await?;
+    choose_live_model(&available.models, selection)?;
+    Ok(())
 }
 
 #[tauri::command]

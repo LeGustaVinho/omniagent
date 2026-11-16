@@ -21,6 +21,7 @@ mod fixture_runtime;
 mod goal_verification_ipc;
 mod ipc;
 mod markdown_analysis_ipc;
+mod model_defaults_runtime;
 mod note_runtime;
 mod note_index_runtime;
 mod queue_runtime;
@@ -442,6 +443,11 @@ fn main() {
             ipc::conversation_draft,
             ipc::save_conversation_draft,
             conversation_runtime::conversation_models,
+            model_defaults_runtime::project_model_defaults,
+            model_defaults_runtime::checkout_model_defaults,
+            model_defaults_runtime::set_project_model_default,
+            model_defaults_runtime::execution_profile_default_model,
+            model_defaults_runtime::set_execution_profile_default_model,
             conversation_runtime::start_conversation_turn,
             conversation_runtime::enqueue_managed_agent_job,
             conversation_runtime::enqueue_conversation_side_request,

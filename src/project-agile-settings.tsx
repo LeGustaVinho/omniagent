@@ -3,7 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Job } from "@/bindings/Job";
 import type { ModelSelection } from "@/bindings/ModelSelection";
+import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
+import { availableModelSelection, LIVE_MODEL_PROVIDERS, useLiveModelOptions } from "@/live-models";
+import { useProjectModelDefaults } from "@/model-defaults";
 import { useTaskAssignments } from "@/task-assignment";
 import type { Item, Work } from "@/project-agile-model";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -152,11 +155,17 @@ function QueueChecklist({ scope, mode, items, openQueueJob }: {
 }) {
   const client = useQueryClient();
   const [itemId, setItemId] = useState("");
+  const [chosenModel, setChosenModel] = useState<ModelSelection>();
   const assignments = useTaskAssignments(scope.projectId, scope.taskId, true);
   const assignment = assignments.data?.find(({ role }) => role === "implementer");
   const target = useQuery({ queryKey: ["project-tasks", scope.projectId, scope.taskId, "checklist-release"],
     queryFn: () => invoke<DispatchTarget | null>("project_checklist_dispatch", scope), refetchInterval: 2500,
   });
+  const defaults = useProjectModelDefaults(scope.projectId, Boolean(target.data));
+  const { options, loading } = useLiveModelOptions(LIVE_MODEL_PROVIDERS, Boolean(target.data));
+  const assigned = assignment?.modelId ? { provider: assignment.provider, profileId: assignment.profileId, modelId: assignment.modelId } : null;
+  const preferred = chosenModel ?? assigned ?? defaults.data?.implementation;
+  const model = availableModelSelection(options, preferred);
   const queue = useMutation({
     mutationFn: ({ releaseId, unitId, selection, item }: { releaseId: string; unitId: string; selection: ModelSelection; item: string | null }) =>
       invoke<Job>("queue_project_checklist_work", { ...scope, expectedReleaseId: releaseId, expectedUnitId: unitId, selection, itemId: item }),
@@ -170,12 +179,14 @@ function QueueChecklist({ scope, mode, items, openQueueJob }: {
       <option value="">Choose a checklist item</option>{items.map(({ id, body }) => <option key={id} value={id}>{body}</option>)}
     </select></label>}
     {target.data === null && <p>Approve and prepare repository delivery before queuing checklist work.</p>}
-    {target.data && !assignment?.modelId && assignments.data && <p>Choose an implementation model in Planned model assignments.</p>}
-    <Button type="button" variant="outline" className="justify-self-start" disabled={!available || !target.data || !assignment?.modelId || queue.isPending}
+    {target.data && <ModelPicker label="Checklist run model" options={options} loading={loading} disabled={queue.isPending}
+      selection={{ mode: "single", selected: model, onChange: setChosenModel }} />}
+    {target.data && preferred && !model && !loading && <p>Model {preferred.modelId} is unavailable in its execution profile.</p>}
+    <Button type="button" variant="outline" className="justify-self-start" disabled={!available || !target.data || !model || queue.isPending}
       onClick={() => {
-        if (!target.data || !assignment?.modelId) return;
+        if (!target.data || !model) return;
         queue.mutate({ releaseId: target.data.releaseId, unitId: target.data.unitId, item: mode === "run_by_item" ? itemId : null,
-          selection: { provider: assignment.provider, profileId: assignment.profileId, modelId: assignment.modelId } });
+          selection: model });
       }}>{mode === "track_progress" ? "Queue checklist progress" : "Queue selected checklist item"}</Button>
     {queue.data && <p role="status">Checklist work queued. {openQueueJob && <button type="button" className="text-primary underline" onClick={() => openQueueJob(queue.data!.id)}>Open queued job</button>}</p>}
     {error && <p role="alert">{String(error)}</p>}

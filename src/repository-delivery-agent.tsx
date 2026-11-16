@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { useQueries } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { Job } from "@/bindings/Job";
 import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
+import { availableModelSelection, useLiveModelOptions } from "@/live-models";
+import { useProjectModelDefaults } from "@/model-defaults";
 import {
-  deliveryProviders, type DeliveryActions, type DeliveryInputs, type DeliveryModel,
+  deliveryProviders, type DeliveryActions, type DeliveryInputs,
   type DeliveryModelChoice, type DeliveryNode, type DeliveryTarget,
 } from "@/repository-delivery-model";
 import { useTaskAssignments } from "@/task-assignment";
@@ -35,23 +36,18 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
   ));
   const revising = Boolean(revisionSource && planRevision && attempt?.status === "succeeded");
   const choosing = !active && (attempt?.status !== "succeeded" || revising);
-  const models = useQueries({ queries: deliveryProviders.map((provider) => ({
-    queryKey: ["repository-delivery-models", provider],
-    queryFn: () => invoke<DeliveryModel[]>("conversation_models", { provider }),
-    enabled: choosing,
-    retry: false,
-    staleTime: 60_000,
-  })) });
-  const options = models.flatMap(({ data }) => data?.map(({ option }) => option) ?? []);
-  const loadingOptions = models.some(({ isFetching }) => isFetching);
+  const { options, loading: loadingOptions } = useLiveModelOptions(deliveryProviders, choosing);
   const role = nodeId === "implement" ? "implementer" : nodeId === "review-candidate" ? "candidate reviewer" : undefined;
   const assignments = useTaskAssignments(scope.projectId, taskId, Boolean(role) && !active && attempt?.status !== "succeeded");
   const planned = assignments.data?.find((assignment) => assignment.role === role);
-  const effectiveSelection = selection ?? (planned?.modelId ? {
+  const defaults = useProjectModelDefaults(scope.projectId, choosing && (nodeId === "plan" || nodeId === "implement"));
+  const projectDefault = nodeId === "plan" ? defaults.data?.planning : nodeId === "implement" ? defaults.data?.implementation : undefined;
+  const plannedSelection = planned?.modelId ? {
     provider: planned.provider, profileId: planned.profileId, modelId: planned.modelId,
-  } : null);
-  const ready = effectiveSelection && options.some(({ selection: option, selectable }) => selectable &&
-    option.provider === effectiveSelection.provider && option.profileId === effectiveSelection.profileId && option.modelId === effectiveSelection.modelId);
+  } : null;
+  const preferred = selection ?? plannedSelection ?? projectDefault;
+  const effectiveSelection = availableModelSelection(options, preferred);
+  const ready = effectiveSelection !== null;
   return <section className="pipeline-stack" aria-label={label}>
     <h3 className="text-sm font-medium">{label}</h3>
     {nodeId === "plan" && <p className="text-xs text-muted-foreground">Plan Mode</p>}
@@ -71,6 +67,9 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
         selection={{ mode: "single", selected: effectiveSelection, onChange: setSelection }} />
       {!selection && planned?.modelId && <p className="text-sm text-muted-foreground">
         {ready ? "Model from task assignment" : `Task assignment · ${planned.modelId} · ${loadingOptions ? "Checking model availability" : "Unavailable in current profiles"}`}
+      </p>}
+      {!selection && !plannedSelection && projectDefault && <p className="text-sm text-muted-foreground">
+        {ready ? "Model from project defaults" : `Project model · ${projectDefault.modelId} · ${loadingOptions ? "Checking availability" : "Unavailable in current profiles"}`}
       </p>}
       {assignments.error && <p role="alert">{String(assignments.error)}</p>}
       {revising && revisionSource ? <div className="pipeline-form pipeline-stack">
