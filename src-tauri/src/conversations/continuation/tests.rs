@@ -222,6 +222,7 @@ async fn verifies_native_cursor_and_pins_reference_delivery_for_all_three_contin
             reason,
             seed,
             settings,
+            ..
         } = inspected
         else {
             bail!("A changed model reused a verified session");

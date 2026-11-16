@@ -403,6 +403,7 @@ fn main() {
             conversation_continuation_runtime::set_conversation_continuation_policy,
             conversation_continuation_runtime::submit_conversation_continuation,
             conversation_continuation_runtime::confirm_conversation_continuation,
+            conversation_continuation_runtime::conversation_continuation_checkouts,
             conversation_continuation_runtime::conversation_reference_source,
             conversation_continuation_runtime::preview_conversation_reference,
             conversation_continuation_runtime::conversation_reference_draft,

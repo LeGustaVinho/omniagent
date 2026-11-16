@@ -179,19 +179,20 @@ pub async fn review_conversation_attachment_draft(
     effort: Option<String>,
     mode: SessionMode,
     text: String,
+    target_checkout_id: Option<String>,
 ) -> Result<AttachmentDraftReview, String> {
     async {
-        let owner = store.conversation(conversation_id.clone()).await?;
+        let checkout = store.conversation_continuation_checkout_id(conversation_id.clone(),target_checkout_id.clone()).await?;
         let scope = crate::conversation_runtime::selected_scope(
             &store,
-            owner.checkout_id,
+            checkout,
             selection,
             effort,
             mode,
         )
         .await?;
         store
-            .review_conversation_attachment_draft(conversation_id, expected_revision, scope, text)
+            .review_conversation_attachment_draft_at_checkout(conversation_id, expected_revision, scope, text, target_checkout_id)
             .await
     }
     .await

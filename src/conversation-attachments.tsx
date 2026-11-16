@@ -42,6 +42,7 @@ type Review = {
 };
 type ReviewInput = {
   conversationId: string; expectedRevision: string; selection: ModelSelection; effort: string | null; mode: "read_only" | "plan"; text: string;
+  targetCheckoutId?: string;
 };
 
 const deliveryLabels = { native: "Native content", excerpt: "Text excerpt", reference: "File reference" };
@@ -122,12 +123,12 @@ export function useConversationAttachments(conversationId: string, enabled: bool
   };
 }
 
-export function useConversationAttachmentReview({ conversationId, revision, contextId, selection, effort, text, mode, enabled }: {
+export function useConversationAttachmentReview({ conversationId, revision, contextId, selection, effort, text, mode, enabled, targetCheckoutId }: {
   conversationId: string; revision: string | null; contextId?: string; selection: ModelSelection | null;
-  effort: string | null; text: string; mode: "read_only" | "plan" | "goal"; enabled: boolean;
+  effort: string | null; text: string; mode: "read_only" | "plan" | "goal"; enabled: boolean; targetCheckoutId?: string;
 }) {
   const key = enabled && revision && contextId && selection && mode !== "goal"
-    ? JSON.stringify([revision, contextId, selection.provider, selection.profileId, selection.modelId, effort, mode, text]) : null;
+    ? JSON.stringify([revision, contextId, selection.provider, selection.profileId, selection.modelId, effort, mode, text, targetCheckoutId]) : null;
   const mutation = useMutation({
     scope: { id: `conversation-attachment-review:${conversationId}` },
     mutationFn: async ({ input, key }: { input: ReviewInput; key: string }) => ({
@@ -136,7 +137,7 @@ export function useConversationAttachmentReview({ conversationId, revision, cont
   });
   const request = useRef<(() => void) | undefined>(undefined);
   request.current = key && revision && selection && mode !== "goal" ? () => mutation.mutate({ key,
-    input: { conversationId, expectedRevision: revision, selection, effort, mode, text },
+    input: { conversationId, expectedRevision: revision, selection, effort, mode, text, ...(targetCheckoutId && { targetCheckoutId }) },
   }) : undefined;
   useEffect(() => {
     if (!key) return;

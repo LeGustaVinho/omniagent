@@ -5,6 +5,7 @@ import { useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { Job } from "@/bindings/Job";
 import type { ModelSelection } from "@/bindings/ModelSelection";
+import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 
 type Choice = "same_tab" | "fork_with_context" | "fresh";
 type Settings = { projectDefault: Choice; conversationOverride: Choice | null; effective: Choice };
@@ -19,7 +20,8 @@ export type ConversationContinuationReview = {
   status: "review_required";
   previewId: string;
   contextId: string;
-  reason: "profile_changed" | "session_unavailable" | "policy_changed";
+  reason: "profile_changed" | "checkout_changed" | "session_unavailable" | "policy_changed";
+  targetCheckout?: ProjectCheckout;
   settings: Settings;
   seed: {
     revisionId: string;
@@ -56,6 +58,7 @@ const choiceLabels: Record<Choice, string> = {
 const choices = Object.keys(choiceLabels) as Choice[];
 const reasons: Record<ConversationContinuationReview["reason"], string> = {
   profile_changed: "The selected execution profile differs from the previous session.",
+  checkout_changed: "The next turn will use a separate checkout and a fresh provider session.",
   session_unavailable: "There is no verified provider session for the saved history.",
   policy_changed: "The previous provider session uses a different subagent policy.",
 };
@@ -78,6 +81,7 @@ export function ConversationContinuationDialog({ review, pending, error, onConfi
           event.preventDefault();
           if (!pending) onConfirm(choice);
         }}>
+          {review.targetCheckout && <p className="break-all">Continue in <code>{review.targetCheckout.checkoutRoot}</code></p>}
           <fieldset className="grid gap-1" disabled={pending}>
             <legend className="text-xs text-muted-foreground">Continuation method</legend>
             {choices.map((entry) => <label className="!flex items-center gap-2" key={entry}>
@@ -120,10 +124,16 @@ export function ConversationContinuationDialog({ review, pending, error, onConfi
 
 const settingsKey = ["conversation-continuation-settings"];
 
-export function ConversationContinuationSettings({ conversationId }: { conversationId: string }) {
+export function ConversationContinuationSettings({ conversationId, targetCheckoutId, onCheckout }: {
+  conversationId: string; targetCheckoutId?: string; onCheckout?: (checkoutId: string | undefined) => void;
+}) {
   const [open, setOpen] = useState(false);
   const client = useQueryClient();
   const key = [...settingsKey, conversationId];
+  const checkouts = useQuery({ queryKey: ["conversation-continuation-checkouts", conversationId],
+    enabled: open && Boolean(onCheckout),
+    queryFn: () => invoke<ProjectCheckout[]>("conversation_continuation_checkouts", { conversationId }),
+  });
   const settings = useQuery({
     queryKey: key,
     queryFn: () => invoke<Settings>("conversation_continuation_settings", { conversationId }),
@@ -137,11 +147,17 @@ export function ConversationContinuationSettings({ conversationId }: { conversat
       void client.invalidateQueries({ queryKey: settingsKey });
     },
   });
-  const error = settings.error ?? save.error;
+  const error = settings.error ?? save.error ?? checkouts.error;
   return <Popover.Root open={open} onOpenChange={setOpen}>
     <Popover.Trigger asChild><button type="button" className="conv-quiet-button">Continuation</button></Popover.Trigger>
     <Popover.Portal>
       <Popover.Content align="end" sideOffset={6} className="work-project-popover conv-dialog-form" aria-label="Continuation settings">
+        {onCheckout && <label>Checkout for next send
+          <select value={targetCheckoutId ?? ""} disabled={checkouts.isPending} onChange={(event) => onCheckout(event.currentTarget.value || undefined)}>
+            <option value="">Current checkout</option>
+            {checkouts.data?.slice(1).map((checkout) => <option key={checkout.checkoutId} value={checkout.checkoutId}>{checkout.checkoutRoot}</option>)}
+          </select>
+        </label>}
         {settings.isPending && <p role="status">Loading continuation settings…</p>}
         {settings.data && <>
           <label>Project default

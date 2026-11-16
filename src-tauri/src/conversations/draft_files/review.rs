@@ -28,9 +28,9 @@ use super::*;
 
 const MEDIA_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
 
-
 #[cfg(test)]
 mod tests;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentDraftReview {
@@ -66,6 +66,8 @@ pub enum AttachmentTarget {
 #[derive(Deserialize, Serialize)]
 struct ReviewSeal {
     scope: SessionScope,
+    #[serde(default)]
+    target_checkout_id: Option<String>,
     context_id: String,
     prompt_digest: [u8; 32],
     project_limits: AttachmentLimits,
@@ -84,6 +86,7 @@ pub(crate) struct PreparedAttachmentDraft {
     revision: String,
     context_id: String,
     pub(crate) preview_id: String,
+    pub(crate) checkout_id: String,
     pub(crate) files: FrozenAttachments,
 }
 
@@ -101,14 +104,38 @@ impl Store {
         scope: SessionScope,
         text: String,
     ) -> Result<AttachmentDraftReview> {
-        let (conversation, draft, limits) = self
+        self.review_conversation_attachment_draft_at_checkout(
+            conversation_id,
+            expected_revision,
+            scope,
+            text,
+            None,
+        )
+        .await
+    }
+
+    pub async fn review_conversation_attachment_draft_at_checkout(
+        &self,
+        conversation_id: String,
+        expected_revision: String,
+        scope: SessionScope,
+        text: String,
+        target_checkout_id: Option<String>,
+    ) -> Result<AttachmentDraftReview> {
+        let (conversation, checkout, draft, limits) = self
             .execute({
                 let conversation_id = conversation_id.clone();
                 move |db| {
                     let conversation = load_conversation(db, &conversation_id)?;
+                    let checkout =
+                        crate::conversations::fork_checkout::resolve_continuation_checkout(
+                            db,
+                            &conversation,
+                            target_checkout_id.as_deref(),
+                        )?;
                     let draft = load_draft(db, &conversation_id)?;
-                    let limits = limits_for_checkout(db, &conversation.checkout_id)?;
-                    Ok((conversation, draft, limits))
+                    let limits = limits_for_checkout(db, &checkout.checkout_id)?;
+                    Ok((conversation, checkout.checkout_id, draft, limits))
                 }
             })
             .await?;
@@ -116,8 +143,7 @@ impl Store {
             draft.revision.as_deref() == Some(&expected_revision),
             "The attachment draft changed. Review it again."
         );
-        let qualification =
-            attachment_qualification(self, &conversation.checkout_id, &scope).await?;
+        let qualification = attachment_qualification(self, &checkout, &scope).await?;
         let reviewed_scope = scope.clone();
         let context_id = conversation.context_id;
         let (mut reviewed, files) = tokio::task::spawn_blocking(move || {
@@ -128,6 +154,7 @@ impl Store {
                         reviewed,
                         ReviewSeal {
                             scope: reviewed_scope,
+                            target_checkout_id: Some(checkout),
                             context_id,
                             prompt_digest: Sha256::digest(text).into(),
                             project_limits: limits,
@@ -169,7 +196,7 @@ impl Store {
         let Some(preview_id) = preview_id else {
             return Ok(None);
         };
-        let (owner, revision, seal, limits) = self.execute({
+        let (owner, checkout, revision, seal, limits) = self.execute({
             let preview_id = preview_id.clone();
             move |db| {
                 let owner = load_conversation(db, &conversation)?;
@@ -177,9 +204,10 @@ impl Store {
                     "SELECT revision, preview_payload FROM conversation_attachment_drafts WHERE conversation_id = ?1 AND preview_id = ?2",
                     params![conversation, preview_id], |row| Ok((row.get(0)?, row.get(1)?)),
                 ).optional()?.context("The attachment preview expired. Review the files again.")?;
-                let limits = limits_for_checkout(db, &owner.checkout_id)?;
                 let seal: ReviewSeal = serde_json::from_slice(&protection::unprotect(&payload)?)?;
-                Ok((owner, revision, seal, limits))
+                let checkout = crate::conversations::fork_checkout::resolve_continuation_checkout(db, &owner, seal.target_checkout_id.as_deref())?;
+                let limits = limits_for_checkout(db, &checkout.checkout_id)?;
+                Ok((owner, checkout.checkout_id, revision, seal, limits))
             }
         }).await?;
         let digest: [u8; 32] = Sha256::digest(text).into();
@@ -189,7 +217,7 @@ impl Store {
                 && seal.context_id == owner.context_id,
             "The message, selected profile, or conversation changed. Review the files again."
         );
-        let qualification = attachment_qualification(self, &owner.checkout_id, scope).await?;
+        let qualification = attachment_qualification(self, &checkout, scope).await?;
         ensure!(
             limits == seal.project_limits && qualification.limits == seal.qualified_limits,
             "Attachment limits changed. Review the files again."
@@ -223,13 +251,14 @@ impl Store {
             }
         })
         .await??;
-        let files = freeze_attachments(self, owner.checkout_id, &root, previews)
+        let files = freeze_attachments(self, checkout.clone(), &root, previews)
             .await?
             .context("The attachment preview is empty")?;
         Ok(Some(PreparedAttachmentDraft {
             revision,
             context_id,
             preview_id,
+            checkout_id: checkout,
             files,
         }))
     }

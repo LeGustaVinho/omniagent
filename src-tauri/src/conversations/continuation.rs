@@ -5,7 +5,7 @@ use super::{
     previous_attempt, reference_delivery, draft_files::{consume_attachment_draft, verify_attachment_draft},
 };
 use crate::{
-    attachments::{AttachmentDelivery, CapturedPayload, captured_for_revision},
+    attachments::{AttachmentDelivery, AttachmentSource, CapturedPayload, captured_for_revision},
     jobs::{Job, SubagentAllocation, direct_subagent_allocation, queue_conversation_continuation},
     protection,
     providers::SessionMode,
@@ -65,6 +65,7 @@ pub struct ContinuationSettings {
 #[serde(rename_all = "snake_case")]
 pub enum ContinuationReason {
     ProfileChanged,
+    CheckoutChanged,
     SessionUnavailable,
     PolicyChanged,
 }
@@ -106,6 +107,8 @@ pub enum ContinuationInspection {
         reason: ContinuationReason,
         settings: ContinuationSettings,
         seed: Vec<SeedMessage>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_checkout: Option<crate::repository::ProjectCheckout>,
     },
 }
 
@@ -124,6 +127,8 @@ struct SealedReview {
     reference_ids: Vec<String>,
     #[serde(default)]
     attachment_preview_id: Option<String>,
+    #[serde(default)]
+    target_checkout_id: Option<String>,
 }
 
 enum ContinuationRoute {
@@ -205,7 +210,7 @@ impl Store {
             let inspected =
                 match continuation_route(&tx, &conversation, &expected_context_id, &scope)? {
                     ContinuationRoute::Review(reason) => {
-                        seal_review(&tx, &project, &conversation, scope, reason, Vec::new(), None)?
+                        seal_review(&tx, &project, &conversation, scope, reason, Vec::new(), None, None)?
                     }
                     _ => ContinuationInspection::Automatic,
                 };
@@ -245,6 +250,20 @@ impl Store {
         reference_ids: Vec<String>,
         attachment_preview_id: Option<String>,
     ) -> Result<ContinuationInspection> {
+        self.submit_conversation_with_files_at_checkout(conversation_id, expected_context_id, scope, text,
+            reference_ids, attachment_preview_id, None).await
+    }
+
+    pub async fn submit_conversation_with_files_at_checkout(
+        &self,
+        conversation_id: String,
+        expected_context_id: String,
+        scope: SessionScope,
+        text: String,
+        reference_ids: Vec<String>,
+        attachment_preview_id: Option<String>,
+        requested_checkout_id: Option<String>,
+    ) -> Result<ContinuationInspection> {
         let attachments = self.prepare_attachment_draft_submission(
             conversation_id.clone(), &scope, &text, attachment_preview_id.clone(),
         ).await?;
@@ -252,13 +271,26 @@ impl Store {
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let conversation = load_conversation(&tx, &conversation_id)?;
-                let (project, root) = checkout(&tx, &conversation)?;
-                validate_scope(&scope, &root)?;
+                let target = super::fork_checkout::resolve_continuation_checkout(&tx, &conversation, requested_checkout_id.as_deref())?;
+                let project = target.project_id;
+                validate_scope(&scope, &target.root)?;
+                let moving = target.checkout_id != conversation.checkout_id;
+                if moving {
+                    let draft_has_files: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM conversation_attachment_drafts WHERE conversation_id = ?1)", [&conversation_id], |row| row.get(0))?;
+                    ensure!(!draft_has_files || attachments.is_some(), "Review the draft files in the destination checkout before continuing");
+                    check_idle_base(&tx, &conversation_id, &expected_context_id)?;
+                    ensure!(!busy(&tx, &conversation)?, "Wait for pending work to settle before changing checkouts");
+                }
+                ensure!(attachments.as_ref().is_none_or(|draft| draft.checkout_id == target.checkout_id),
+                    "Review the draft files in the destination checkout before continuing");
                 verify_attachment_draft(&tx, &conversation_id, attachments.as_ref())?;
                 reference_delivery::verify_draft_references(&tx, &conversation_id, &project, &reference_ids)?;
-                let route = continuation_route(&tx, &conversation, &expected_context_id, &scope)?;
+                let route = if moving { ContinuationRoute::Review(ContinuationReason::CheckoutChanged) }
+                    else { continuation_route(&tx, &conversation, &expected_context_id, &scope)? };
                 if let ContinuationRoute::Review(reason) = route {
-                    let reviewed = seal_review(&tx, &project, &conversation, scope, reason, reference_ids, attachment_preview_id)?;
+                    let reviewed = seal_review(&tx, &project, &conversation, scope, reason, reference_ids, attachment_preview_id,
+                        moving.then_some(target.checkout_id))?;
                     tx.commit()?;
                     return Ok(reviewed);
                 }
@@ -319,11 +351,14 @@ impl Store {
             let (context_id, preview) = load_continuation_review(&tx, &conversation_id, &preview_id)?;
             let source = check_idle_base(&tx, &conversation_id, &context_id)?;
             ensure!(!busy(&tx, &source)?, "The conversation has pending work. Review the continuation after it settles.");
-            let (project, root) = checkout(&tx, &source)?;
-            validate_scope(&scope, &root)?;
+            let target = super::fork_checkout::resolve_continuation_checkout(&tx, &source, preview.target_checkout_id.as_deref())?;
+            let project = target.project_id;
+            validate_scope(&scope, &target.root)?;
             ensure!(preview.scope == scope, "The selected profile changed. Review the continuation again.");
             ensure!(preview.attachment_preview_id.as_deref() == attachments.as_ref().map(|draft| draft.preview_id.as_str()),
                 "The reviewed files changed. Review the continuation again.");
+            ensure!(attachments.as_ref().is_none_or(|draft| draft.checkout_id == target.checkout_id),
+                "Review the draft files in the destination checkout before continuing");
             verify_attachment_draft(&tx, &conversation_id, attachments.as_ref())?;
             reference_delivery::verify_draft_references(&tx, &conversation_id, &project, &preview.reference_ids)?;
             let entries = context_entries(&tx, &conversation_id, &context_id)?;
@@ -331,13 +366,23 @@ impl Store {
                 preview.seed_digest == protected_history_digest(&tx, &source)?,
                 "The reviewed history changed. Review the continuation again."
             );
+            if target.checkout_id != source.checkout_id && choice != ContinuationChoice::Fresh {
+                require_destination_seed_references(&tx, &entries, &target.root)?;
+            }
             consume_matching_draft(&tx, &source.id, &text)?;
             reference_delivery::consume_draft_references(&tx, &source.id)?;
             consume_attachment_draft(&tx, &source.id)?;
             let conversation = match choice {
-                ContinuationChoice::SameTab => source,
-                ContinuationChoice::ForkWithContext => fork_history(&tx, &source, &entries, format!("{} (fork)", source.title))?,
-                ContinuationChoice::Fresh => insert_conversation(&tx, source.checkout_id, "New conversation".into(), false)?,
+                ContinuationChoice::SameTab => {
+                    let mut same = source;
+                    if target.checkout_id != same.checkout_id {
+                        tx.execute("UPDATE conversations SET checkout_id = ?2 WHERE id = ?1", params![same.id, target.checkout_id])?;
+                        same.checkout_id = target.checkout_id;
+                    }
+                    same
+                }
+                ContinuationChoice::ForkWithContext => fork_history_at_checkout(&tx, &source, &entries, target.checkout_id, format!("{} (fork)", source.title))?,
+                ContinuationChoice::Fresh => insert_conversation(&tx, target.checkout_id, "New conversation".into(), false)?,
             };
             let job = queue_conversation_continuation(
                 &tx, project, &conversation, &conversation.context_id, &scope, &text, &preview.reference_ids,
@@ -353,6 +398,27 @@ impl Store {
         Ok(continued)
     }
 
+    pub async fn conversation_continuation_review_checkout(&self, conversation_id: String, preview_id: String) -> Result<String> {
+        self.execute(move |db| {
+            let source = load_conversation(db, &conversation_id)?;
+            let (_, review) = load_continuation_review(db, &conversation_id, &preview_id)?;
+            Ok(super::fork_checkout::resolve_continuation_checkout(db, &source, review.target_checkout_id.as_deref())?.checkout_id)
+        }).await
+    }
+}
+
+fn require_destination_seed_references(db: &Connection, entries: &[String], root: &Path) -> Result<()> {
+    for revision in entries {
+        for attachment in captured_for_revision(db, revision)? {
+            if let (AttachmentSource::Checkout { relative_path }, CapturedPayload::Reference { .. }) =
+                (&attachment.metadata.source, &attachment.payload) {
+                attachment.validate_reference(root).with_context(|| format!(
+                    "The saved reference {} cannot be used in the destination checkout. Choose a fresh conversation to continue with this draft.",
+                    relative_path.display()))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn load_continuation_review(db: &Connection, conversation_id: &str, preview_id: &str) -> Result<(String, SealedReview)> {
@@ -413,15 +479,22 @@ fn seal_review(
     reason: ContinuationReason,
     reference_ids: Vec<String>,
     attachment_preview_id: Option<String>,
+    target_checkout_id: Option<String>,
 ) -> Result<ContinuationInspection> {
     let entries = context_entries(db, &conversation.id, &conversation.context_id)?;
     let seed = preview_seed(db, conversation, &entries)?;
     let preview_id = new_id();
+    let target_checkout = target_checkout_id.as_deref().map(|target| db.query_row(
+        "SELECT p.id, p.root, c.id, c.root FROM checkouts c JOIN projects p ON p.id = c.project_id WHERE c.id = ?1 AND p.id = ?2",
+        params![target,project], |row| Ok(crate::repository::ProjectCheckout { project_id: row.get(0)?, repository_root: row.get(1)?,
+            checkout_id: row.get(2)?, checkout_root: row.get(3)? }),
+    )).transpose()?;
     let payload = protection::protect(&serde_json::to_vec(&SealedReview {
         scope,
         seed_digest: protected_history_digest(db, conversation)?,
         reference_ids,
         attachment_preview_id,
+        target_checkout_id,
     })?)?;
     db.execute(
         "INSERT INTO conversation_continuation_previews VALUES (?1, ?2, ?3, ?4)
@@ -434,6 +507,7 @@ fn seal_review(
         reason,
         settings: settings(db, project, &conversation.id)?,
         seed,
+        target_checkout,
     })
 }
 

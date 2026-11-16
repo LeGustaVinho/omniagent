@@ -316,6 +316,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const [effort, setEffort] = useState("");
   const [mode, setMode] = useState<ConversationMode>("read_only");
   const [continuation, setContinuation] = useState<ReviewedContinuation>();
+  const [continuationCheckoutId, setContinuationCheckoutId] = useState<string>();
   const [historyAction, setHistoryAction] = useState<ConversationMessageHistoryAction>();
   const dismissHistoryAction = useCallback(() => setHistoryAction(undefined), []);
   const text = draft.data ?? "";
@@ -402,6 +403,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const attachmentReview = useConversationAttachmentReview({
     conversationId, revision: attachments.draft.revision, contextId: history.data?.contextId,
     selection, effort: effectiveEffort, mode, text, enabled: visible && Boolean(selected?.option.selectable),
+    targetCheckoutId: continuationCheckoutId,
   });
   const customizationPicker = useComposerCustomizations({
     conversationId, selection, effort: effectiveEffort, mode: mode === "goal" ? "read_only" : mode,
@@ -431,7 +433,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
       if (hasAttachments && !attachmentPreviewId) throw new Error("Review the files before sending.");
       await saveDraft(conversationId, submitted);
       const review = await submitConversationContinuation({ conversationId, expectedContextId, ...effective, text: submitted,
-        ...(referenceIds && { referenceIds }), ...(attachmentPreviewId && { attachmentPreviewId }) });
+        ...(referenceIds && { referenceIds }), ...(attachmentPreviewId && { attachmentPreviewId }),
+        ...(continuationCheckoutId && { targetCheckoutId: continuationCheckoutId }) });
       if (review.status === "review_required") return { review, ...effective, text: submitted } satisfies ReviewedContinuation;
       return { instructionId: review.job.id };
     },
@@ -456,7 +459,10 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
       setContinuation(undefined);
       void instructions.refresh();
       void queryClient.invalidateQueries({ queryKey: conversationLibraryKey });
-      if (conversation.id !== conversationId) openFork(conversation);
+      if (library && intent.review.targetCheckout) {
+        setContinuationCheckoutId(undefined);
+        await library.open(intent.review.targetCheckout, conversation.id);
+      } else if (conversation.id !== conversationId) openFork(conversation);
       if (library) await Promise.all([queryClient.invalidateQueries({ queryKey: referenceDraftKey }), attachments.refresh()]);
     },
     onError: () => { if (library) void queryClient.invalidateQueries({ queryKey: referenceDraftKey }); },
@@ -603,7 +609,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
               title="Rename conversation" onClick={() => setRenamingTitle(true)}><Pencil aria-hidden /></button>}
           </>}
         <div className="ml-auto flex items-center gap-1">
-        <ConversationContinuationSettings conversationId={conversationId} />
+        <ConversationContinuationSettings conversationId={conversationId} targetCheckoutId={continuationCheckoutId}
+          onCheckout={library ? setContinuationCheckoutId : undefined} />
         <button type="button" className="conv-quiet-button" onClick={() => { startGoal.reset(); setGoalSettings({ objective: "" }); }}>
           <Target size={14} aria-hidden /> Goal
         </button>

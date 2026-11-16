@@ -10,6 +10,7 @@ use omniagent::{
     diagnostics,
     model_catalog::ModelSelection,
     providers::SessionMode,
+    repository::ProjectCheckout,
     store::Store,
 };
 use tauri::State;
@@ -53,30 +54,37 @@ pub async fn submit_conversation_continuation(
     text: String,
     reference_ids: Option<Vec<String>>,
     attachment_preview_id: Option<String>,
+    target_checkout_id: Option<String>,
 ) -> Result<ContinuationInspection, String> {
     async {
-        let conversation = store.conversation(conversation_id.clone()).await?;
+        let checkout_id = store.conversation_continuation_checkout_id(conversation_id.clone(), target_checkout_id.clone()).await?;
         let scope = crate::conversation_runtime::selected_scope(
             &store,
-            conversation.checkout_id,
+            checkout_id,
             selection,
             effort,
             mode,
         )
         .await?;
         store
-            .submit_conversation_with_files(
+            .submit_conversation_with_files_at_checkout(
                 conversation_id,
                 expected_context_id,
                 scope,
                 text,
                 reference_ids.unwrap_or_default(),
                 attachment_preview_id,
+                target_checkout_id,
             )
             .await
     }
     .await
     .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn conversation_continuation_checkouts(store: State<'_, Store>, conversation_id: String) -> Result<Vec<ProjectCheckout>, String> {
+    store.conversation_continuation_checkouts(conversation_id).await.map_err(ui_error)
 }
 
 #[tauri::command]
@@ -149,10 +157,10 @@ pub async fn confirm_conversation_continuation(
     text: String,
 ) -> Result<ContinuedConversation, String> {
     async {
-        let conversation = store.conversation(conversation_id.clone()).await?;
+        let checkout_id = store.conversation_continuation_review_checkout(conversation_id.clone(), preview_id.clone()).await?;
         let scope = crate::conversation_runtime::selected_scope(
             &store,
-            conversation.checkout_id,
+            checkout_id,
             selection,
             effort,
             mode,
