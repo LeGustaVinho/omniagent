@@ -78,6 +78,7 @@ function PdfAttachment({ base64, title }: { base64: string; title: string }) {
 }
 
 export function RepositoryNoteMedia({ checkoutId, paths, title }: { checkoutId: string; paths: string[]; title: string }) {
+  const [failedFile, setFailedFile] = useState<NoteAttachmentContent>();
   const attachment = useQuery({
     queryKey: ["repository-note-attachment", checkoutId, ...paths],
     enabled: paths.length > 0,
@@ -92,10 +93,12 @@ export function RepositoryNoteMedia({ checkoutId, paths, title }: { checkoutId: 
   const file = attachment.data;
   if (!paths.length || attachment.error || file === null) return <span className="file-help">Attachment unavailable · {title}</span>;
   if (!file) return <span className="file-help" role="status">Loading attachment · {title}</span>;
+  if (failedFile === file) return <span className="file-help">Attachment preview unavailable · {title}</span>;
   const dataUrl = `data:${file.mimeType};base64,${file.contentBase64}`;
+  const onError = () => setFailedFile(file);
   if (file.mimeType === "application/pdf") return <PdfAttachment key={file.relativePath} base64={file.contentBase64} title={title} />;
-  if (imageTypes.has(file.mimeType)) return <img className="note-media-image" src={dataUrl} alt={title} loading="lazy" />;
-  if (audioTypes.has(file.mimeType)) return <audio src={dataUrl} aria-label={title} controls preload="metadata" />;
-  if (videoTypes.has(file.mimeType)) return <video src={dataUrl} aria-label={title} controls preload="metadata" />;
+  if (imageTypes.has(file.mimeType)) return <img className="note-media-image" src={dataUrl} alt={title} loading="lazy" onError={onError} />;
+  if (audioTypes.has(file.mimeType)) return <audio src={dataUrl} aria-label={title} controls preload="metadata" onError={onError} />;
+  if (videoTypes.has(file.mimeType)) return <video src={dataUrl} aria-label={title} controls preload="metadata" onError={onError} />;
   return <span className="file-help">Attachment preview unavailable · {title}</span>;
 }
