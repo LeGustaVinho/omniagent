@@ -3451,6 +3451,15 @@ mod tests {
             runner: scope.runner.clone(),
             bridge_available: true,
         };
+        let project: String = store.execute({
+            let checkout = conversation.checkout_id.clone();
+            move |db| Ok(db.query_row(
+                "SELECT project_id FROM checkouts WHERE id = ?1",
+                [checkout],
+                |row| row.get(0),
+            )?)
+        }).await?;
+        let task = store.create_project_task(project.clone(), "Goal question task".into()).await?;
         let goal = store
             .start_conversation_goal(
                 JobContext {
@@ -3458,7 +3467,7 @@ mod tests {
                     context_id: conversation.context_id,
                 },
                 scope,
-                None,
+                Some(task.id.clone()),
                 GoalDefinition {
                     objective: "Request a decision in one turn".into(),
                     criteria: vec![],
@@ -3508,6 +3517,20 @@ mod tests {
         drop(store);
 
         let store = Store::open(database)?;
+        let inspector = store.run_orchestration(
+            project.clone(), attempt.run.id.clone(), Some(conversation.id.clone()),
+        ).await?.context("The goal inspector is unavailable after restart")?;
+        let inspector = serde_json::to_value(inspector)?;
+        let goals = store.project_task_goals(project.clone(), task.id.clone()).await?;
+        let linked = serde_json::to_value(goals.first().context("The linked goal is unavailable after restart")?)?;
+        assert_eq!(linked["revisionId"], goal.id);
+        assert_eq!(linked["blocker"], "Waiting for input");
+        assert_eq!(linked["attempt"]["runId"], attempt.run.id);
+        assert_eq!(inspector["goal"], linked);
+        let task_state = serde_json::to_value(store.project_task_delivery_state(project.clone(), task.id).await?)?;
+        assert_eq!(task_state["state"], "blocked");
+        assert_eq!(task_state["questionBlocker"]["runId"], attempt.run.id);
+        assert_eq!(task_state["questionBlocker"]["requestId"], 44);
         assert_eq!(
             store
                 .saved_conversation_questions(conversation.id.clone(), attempt.run.id.clone())
@@ -4411,6 +4434,336 @@ mod tests {
         ).await?;
         assert_ne!(replacement.id, goal.id);
         assert_eq!(store.goal_verification(project, run).await?, Some(completed));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_goal_completion_waits_for_the_recorded_candidate_checks() -> Result<()> {
+        use crate::{
+            jobs::{
+                AdmissionEnvironment, GoalCriterionEvidence, GoalCriterionStatus, GoalDefinition,
+                GoalVerificationStatus, JobContext, JobPermission, JobRole, JobRule, JobWorkspace,
+            },
+            providers::goal::{NativeGoalEvaluation, NativeGoalObservation, NativeGoalState},
+            repository::{
+                self, AttemptWorktreeEvidence, provision_task_worktree,
+                verification::{
+                    CandidateGate, CandidateGateAction, CandidateSelection, CandidateTarget,
+                },
+            },
+        };
+
+        let (_source, store, _, mut scope) = setup().await?;
+        let worktrees = tempfile::tempdir()?;
+        let git = |arguments: &[&str]| -> Result<()> {
+            let result = Command::new("git.exe")
+                .current_dir(&scope.checkout)
+                .args(arguments)
+                .output()?;
+            ensure!(
+                result.status.success(),
+                "Git fixture failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            Ok(())
+        };
+        for name in ["result.txt", "extra.txt"] {
+            std::fs::write(scope.checkout.join(name), "baseline\n")?;
+        }
+        git(&["add", "--", "result.txt", "extra.txt"])?;
+        git(&[
+            "-c",
+            "user.name=OmniAgent Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=NUL",
+            "commit",
+            "--quiet",
+            "-m",
+            "Initial",
+        ])?;
+        let project = repository::register(&store, scope.checkout.clone()).await?;
+        let task = store
+            .create_project_task(project.project_id.clone(), "Native result".into())
+            .await?;
+        let worktree = provision_task_worktree(
+            &store,
+            worktrees.path().to_path_buf(),
+            project.project_id.clone(),
+            task.id.clone(),
+            project.checkout_id,
+        )
+        .await?;
+        store
+            .set_project_job_rules(
+                project.project_id.clone(),
+                vec![],
+                vec![JobRule {
+                    role: JobRole::Operator,
+                    operation: SessionMode::ApprovedWrite,
+                    workspace: JobWorkspace::Project,
+                    permission: JobPermission::Allow,
+                    requirements: Default::default(),
+                }],
+            )
+            .await?;
+        let executable =
+            PathBuf::from(std::env::var_os("SystemRoot").context("missing SystemRoot")?)
+                .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        store.set_candidate_gate_policy(project.project_id.clone(), vec![CandidateGate {
+            name: "required result check".into(), required: true,
+            action: CandidateGateAction::Command {
+                executable, arguments: vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(),
+                    "if ((Get-Content -LiteralPath 'result.txt' -Raw).Trim() -eq 'verified result') { exit 0 } else { exit 17 }".into()],
+                timeout_seconds: Some(30),
+            },
+        }]).await?;
+        scope.checkout = worktree.root.clone();
+        scope.runner = crate::runner::DirectWindowsRunner::IDENTITY.into();
+        scope.executable = std::env::current_exe()?;
+        scope.mode = SessionMode::ApprovedWrite;
+        let conversation = store
+            .create_conversation(worktree.checkout_id.clone(), "Native goal".into())
+            .await?;
+        let goal = store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: conversation.id.clone(),
+                    context_id: conversation.context_id,
+                },
+                scope.clone(),
+                Some(task.id.clone()),
+                GoalDefinition {
+                    objective: "Produce checked and accepted work".into(),
+                    criteria: vec![
+                        "The configured check passed".into(),
+                        "The checked tree was accepted".into(),
+                    ],
+                    max_turns: Some(1),
+                    max_seconds: None,
+                    token_budget: None,
+                },
+                None,
+            )
+            .await?;
+        let attempt = store
+            .claim_next_job(AdmissionEnvironment {
+                runner: scope.runner,
+                bridge_available: true,
+            })
+            .await?
+            .context("the native goal fixture was not admitted")?;
+        let project = project.project_id;
+        let run = attempt.run.id.clone();
+        store.mark_agent_running(run.clone()).await?;
+        ensure!(repository::capture_worktree_start(&store, run.clone()).await?);
+        let dispatch = prepare_fixture_dispatch(&store, &attempt).await?;
+        store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        let native_location = |turn: Option<&str>| ProviderLocation {
+            session_id: Some("verification-thread".into()),
+            turn_id: turn.map(str::to_owned),
+            ..Default::default()
+        };
+        store
+            .record_agent_observation(
+                run.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: native_location(None),
+                    data: ProviderEventData::SessionReady {
+                        model: None,
+                        effort: None,
+                    },
+                },
+            )
+            .await?;
+        // Model the qualified native executor's persisted protocol boundary without a vendor login.
+        store.execute({
+            let revision = goal.id.clone();
+            let run = run.clone();
+            move |db| {
+                let tx = db.transaction()?;
+                tx.execute(
+                    "INSERT INTO capability_evidence(id, version, qualification_key, origin, payload)
+                     VALUES ('verification-fixture', 1, 'test', 'protocol_fixture', X'00')", [],
+                )?;
+                tx.execute(
+                    "INSERT INTO native_goal_executors(run_id, revision_id, provider_session_id, evidence_id)
+                     VALUES (?1, ?2, 'verification-thread', 'verification-fixture')",
+                    params![run, revision],
+                )?;
+                tx.execute("UPDATE goal_revisions SET continuation_owner = 'native' WHERE id = ?1", [revision])?;
+                tx.commit()?;
+                Ok(())
+            }
+        }).await?;
+        let verdict = NativeGoalObservation {
+            provider_session_id: "verification-thread".into(),
+            provider_goal_id: Some("provider-verification-goal".into()),
+            provider_turn_id: Some("native-evaluation-turn".into()),
+            state: NativeGoalState::Completed,
+            reported_state: Some("complete".into()),
+            tokens_used: Some(15),
+            token_budget: None,
+            elapsed_seconds: Some(1),
+            evaluation: Some(NativeGoalEvaluation {
+                verdict: Some("complete".into()),
+                reason: Some("Provider reported the work done".into()),
+                evaluator: Some("protocol-fixture".into()),
+            }),
+        };
+        for data in [
+            ProviderEventData::TurnStarted,
+            ProviderEventData::TurnFinished {
+                outcome: TurnOutcome::Completed,
+            },
+            ProviderEventData::GoalObserved {
+                observation: verdict.clone(),
+            },
+        ] {
+            store
+                .record_agent_observation(
+                    run.clone(),
+                    EventSource::Provider,
+                    ProviderEvent {
+                        location: native_location(Some("native-evaluation-turn")),
+                        data,
+                    },
+                )
+                .await?;
+        }
+        std::fs::write(worktree.root.join("result.txt"), "verified result\n")?;
+        std::fs::write(worktree.root.join("extra.txt"), "alternate selection\n")?;
+        repository::save_worktree_candidate(&store, run.clone()).await?;
+        store
+            .record_native_goal_result(run.clone(), "completed")
+            .await?;
+        store
+            .finish_observed_agent_attempt(
+                run.clone(),
+                RunStatus::Succeeded,
+                Some("Recorded native result".into()),
+                None,
+                true,
+            )
+            .await?;
+
+        let pending = store
+            .goal_verification(project.clone(), run.clone())
+            .await?
+            .context("the verdict lost its saved result")?;
+        assert_eq!(pending.provider_result.as_deref(), Some("completed"));
+        assert_eq!(pending.status, GoalVerificationStatus::Verifying);
+        assert!(
+            pending
+                .criteria
+                .iter()
+                .all(|criterion| criterion.status == GoalCriterionStatus::Pending)
+        );
+        let Some(AttemptWorktreeEvidence::Saved { artifact }) = store
+            .attempt_worktree_evidence(project.clone(), run.clone())
+            .await?
+        else {
+            anyhow::bail!("the native writer candidate was not captured");
+        };
+        let target = CandidateTarget {
+            project_id: project.clone(),
+            task_id: task.id.clone(),
+            unit_id: "delivered-tree".into(),
+            run_id: run.clone(),
+            capture_revision: artifact.revision,
+        };
+        let select = |target, paths: Vec<String>| {
+            store.select_worktree_candidate(
+                target,
+                CandidateSelection {
+                    tracked_paths: Some(paths),
+                    untracked_paths: Vec::new(),
+                },
+            )
+        };
+        let selected = select(target.clone(), vec!["result.txt".into()]).await?;
+        let alternate = select(
+            CandidateTarget {
+                unit_id: "alternate-tree".into(),
+                ..target
+            },
+            vec!["result.txt".into(), "extra.txt".into()],
+        )
+        .await?;
+        assert_ne!(selected.tree, alternate.tree);
+        let verify =
+            |id: String| store.verify_selected_candidate(project.clone(), task.id.clone(), id);
+        let verified = verify(selected.id.clone()).await?;
+        let wrong = verify(alternate.id).await?;
+        assert!(verified.allows_acceptance());
+        assert!(wrong.allows_acceptance());
+        let gate = |verification_id| GoalCriterionEvidence::CandidateGate {
+            verification_id,
+            gate_index: 0,
+        };
+        let checked = store
+            .record_goal_criterion_evidence(
+                project.clone(),
+                run.clone(),
+                1,
+                gate(verified.id.clone()),
+            )
+            .await?;
+        assert_eq!(checked.candidate_id.as_deref(), Some(selected.id.as_str()));
+        assert_eq!(checked.criteria[0].status, GoalCriterionStatus::Passed);
+        assert_eq!(checked.status, GoalVerificationStatus::Verifying);
+        let mismatch = store
+            .record_goal_criterion_evidence(project.clone(), run.clone(), 2, gate(wrong.id))
+            .await
+            .unwrap_err();
+        assert!(mismatch.to_string().contains("same recorded candidate"));
+        assert_eq!(
+            store
+                .goal_verification(project.clone(), run.clone())
+                .await?,
+            Some(checked)
+        );
+        let accepted = store
+            .accept_candidate_verification(
+                project.clone(),
+                task.id.clone(),
+                selected.id,
+                verified.id,
+            )
+            .await?;
+        let completed = store
+            .record_goal_criterion_evidence(
+                project.clone(),
+                run.clone(),
+                2,
+                GoalCriterionEvidence::CandidateAcceptance {
+                    acceptance_id: accepted.id,
+                },
+            )
+            .await?;
+        assert_eq!(completed.status, GoalVerificationStatus::Completed);
+        assert_eq!(completed.provider_result.as_deref(), Some("completed"));
+        let inspection = store
+            .run_orchestration(project.clone(), run, Some(conversation.id))
+            .await?
+            .unwrap();
+        let inspection = serde_json::to_value(inspection)?;
+        assert_eq!(
+            inspection["goal"]["evidence"]["nativeObservation"]["observation"],
+            serde_json::to_value(verdict)?
+        );
+        assert!(
+            store
+                .project_task_delivery_state(project, task.id)
+                .await?
+                .unwrap()
+                .completion
+                .is_none()
+        );
         Ok(())
     }
 
