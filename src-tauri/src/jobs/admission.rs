@@ -217,6 +217,7 @@ pub(crate) fn queue_conversation_continuation(
     expected_context_id: &str,
     scope: &SessionScope,
     text: &str,
+    reference_ids: &[String],
 ) -> Result<Job> {
     ensure!(
         instructions::preserves_destination(
@@ -231,7 +232,7 @@ pub(crate) fn queue_conversation_continuation(
         conversation_id: conversation.id.clone(),
         context_id: expected_context_id.into(),
     };
-    queue_conversation_instruction(
+    let job = queue_conversation_instruction(
         db,
         project,
         &conversation.checkout_id,
@@ -239,7 +240,12 @@ pub(crate) fn queue_conversation_continuation(
         scope,
         text,
         None,
-    )
+    )?;
+    if !reference_ids.is_empty() {
+        let revision = instructions::load_revision(db, &job.id)?.context("Queued conversation lost its revision")?;
+        crate::conversations::reference_delivery::bind_references(db, &revision.revision_id, reference_ids)?;
+    }
+    Ok(job)
 }
 
 impl Store {

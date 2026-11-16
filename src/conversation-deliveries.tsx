@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { SavedAttachments, type AttachmentEvidence } from "@/conversation-attachment-evidence";
+import { ReferencePreview, type ConversationReferencePreview } from "@/conversation-reference";
 
 type InstructionDispatch = {
   instructionId: string;
@@ -24,6 +25,7 @@ export type ConversationInput = {
   attachments: AttachmentEvidence[];
   removedAttachmentCount: number;
   instructions: InstructionDispatch[];
+  conversationReferences?: { messageRevisionId: string; reference: ConversationReferencePreview }[];
 };
 
 const modes: Record<InstructionDispatch["mode"], string> = {
@@ -96,6 +98,11 @@ export function ConversationDeliveries({ input, conversationId, runId, live }: {
       Exact input is unavailable after attachment history was deleted.
     </p> : <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{input.frames.join("")}</pre>}
     <SavedAttachments attachments={input.attachments} conversationId={conversationId} runId={runId} />
+    {Boolean(input.conversationReferences?.length) && <details className="mt-2">
+      <summary>Conversation references</summary>
+      {input.conversationReferences?.map(({ messageRevisionId, reference }) =>
+        <ReferencePreview key={`${messageRevisionId}:${reference.id}`} reference={reference} />)}
+    </details>}
     {input.instructions.length > 0 && <ol aria-label="Instruction deliveries" className="mt-2 grid gap-2">
       {input.instructions.map((item) => <DeliveryRow key={item.instructionId} item={item}
         conversationId={conversationId} runId={runId} live={live} />)}

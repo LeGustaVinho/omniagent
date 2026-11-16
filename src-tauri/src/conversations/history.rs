@@ -207,6 +207,7 @@ impl Store {
                  SELECT ?1, payload FROM message_attachments WHERE message_revision_id = ?2",
                 params![revised, original],
             )?;
+            super::reference_delivery::copy_references(&tx, &original, &revised)?;
             copied.push(revised);
             fork.context_id = activate_context(&tx, &fork.id, &copied)?;
             tx.commit()?;

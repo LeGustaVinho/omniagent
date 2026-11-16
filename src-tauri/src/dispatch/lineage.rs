@@ -18,6 +18,7 @@ use crate::{
 use super::{ContextSnapshot, NativeHistory};
 
 mod conversation_artifacts;
+pub(crate) use conversation_artifacts::{load_conversation_artifact, record_conversation_excerpt};
 pub use conversation_artifacts::{
     ArtifactSource, ByteRange, ConversationArtifactRevision, ConversationSelection, ExcerptSource,
     QueuedSummary, SelectedMessageSpan, SummaryRun,
@@ -74,6 +75,12 @@ pub enum DispatchSourceRevision {
         request_id: String,
         source_context_id: String,
         covered: Vec<ArtifactSource>,
+    },
+    ConversationReference {
+        message_revision_id: String,
+        project_id: String,
+        source_conversation_id: String,
+        artifact_revision_id: String,
     },
     LiveInstruction {
         origin: MessageRevisionOrigin,
@@ -402,6 +409,17 @@ fn collect(
             covered: request.covered,
         });
     }
+    for submitted in &snapshot.conversation_references {
+        let reference = &submitted.reference;
+        messages.extend(crate::conversations::reference_delivery::source_revisions(&reference.artifact)
+            .into_iter().map(str::to_owned));
+        sources.push(DispatchSourceRevision::ConversationReference {
+            message_revision_id: submitted.message_revision_id.clone(),
+            project_id: reference.project_id.clone(),
+            source_conversation_id: reference.source_conversation_id.clone(),
+            artifact_revision_id: reference.artifact.id().into(),
+        });
+    }
     if let Some(markdown) = &snapshot.repository_markdown {
         sources.push(DispatchSourceRevision::RepositoryMarkdown {
             revision: markdown.revision.clone(),
@@ -639,6 +657,7 @@ mod tests {
             role_context: None,
             base_commit: None,
             submitted_messages: attempt.input.clone(),
+            conversation_references: Vec::new(),
             native_history: NativeHistory::Fresh,
             capabilities: None,
             filesystem_skills: Vec::new(),

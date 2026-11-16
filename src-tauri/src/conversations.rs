@@ -28,6 +28,8 @@ mod approval_evidence;
 pub(crate) mod continuation;
 mod history;
 mod library;
+pub mod references;
+pub(crate) mod reference_delivery;
 pub use approval_evidence::{ApprovalDelivery, ConversationApprovalEvidence};
 pub use continuation::{
     ContinuationChoice, ContinuationInspection, ContinuationLevel, ContinuationSettings,
@@ -35,6 +37,7 @@ pub use continuation::{
 };
 pub use history::ConversationHistoryInspection;
 pub use library::ConversationLibraryEntry;
+pub use reference_delivery::SubmittedConversationReference;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -438,6 +441,7 @@ impl Store {
                 SELECT ?1, payload FROM message_attachments WHERE message_revision_id = ?2",
                 params![revision, entries[index]],
             )?;
+            reference_delivery::copy_references(&tx, &entries[index], &revision)?;
             entries[index] = revision;
             let context = activate_context(&tx, &conversation_id, &entries)?;
             tx.commit()?;
@@ -2739,6 +2743,7 @@ mod tests {
                     role_context: None,
                     base_commit: None,
                     submitted_messages: attempt.input.clone(),
+                    conversation_references: Vec::new(),
                     native_history,
                     capabilities,
                     filesystem_skills: Vec::new(),
@@ -8610,6 +8615,74 @@ mod tests {
             store.conversation_messages(id).await?[0].text,
             "newer revision"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_conversation_reference_survives_restart_and_reaches_the_exact_dispatch() -> Result<()> {
+        use crate::{
+            dispatch::{DispatchSourceRevision, SelectedMessageSpan},
+            jobs::AdmissionEnvironment,
+        };
+        use super::references::ConversationReferenceSelection;
+
+        let (_dir, store, source, scope) = setup().await?;
+        std::fs::write(&scope.executable, b"fixture")?;
+        let source_text = "Source café 🦀\nKeep these exact bytes.";
+        let source_turn = prepare(&store, &source.id, scope.clone(), source_text).await?;
+        confirm(&store, &source_turn).await?;
+        let history = store.conversation_history(source.id.clone()).await?;
+        let chosen = &history.messages[0];
+        let destination = store.create_conversation(source.checkout_id, "Reference destination".into()).await?;
+        let preview = store.preview_conversation_reference(
+            destination.id.clone(), source.id.clone(),
+            ConversationReferenceSelection::Messages {
+                context_id: history.context_id.clone(),
+                spans: vec![SelectedMessageSpan { revision_id: chosen.revision_id.clone(), byte_range: None }],
+            },
+        ).await?;
+        let prompt = "Explain the referenced conversation.";
+        store.save_conversation_draft(destination.id.clone(), prompt.into()).await?;
+        store.edit_conversation_reference_draft(destination.id.clone(), preview.id.clone(), true).await?;
+        store.replace_conversation_message(source.id.clone(), history.context_id, chosen.message_id.clone(), "Replacement".into()).await?;
+        drop(store);
+
+        let database = scope.checkout.join("store.sqlite");
+        let store = Store::open(database.clone())?;
+        assert_eq!(store.conversation_reference_draft(destination.id.clone()).await?, [preview.clone()]);
+        assert!(store.submit_conversation_continuation(destination.id.clone(), destination.context_id.clone(), scope.clone(), prompt.into()).await.is_err());
+        assert_eq!(store.conversation_draft(destination.id.clone()).await?, prompt);
+        assert!(matches!(store.submit_conversation_with_references(
+            destination.id.clone(), destination.context_id, scope.clone(), prompt.into(), vec![preview.id.clone()],
+        ).await?, ContinuationInspection::Queued { .. }));
+        assert!(store.conversation_reference_draft(destination.id.clone()).await?.is_empty());
+        assert!(store.conversation_draft(destination.id.clone()).await?.is_empty());
+
+        let plan = store.claim_next_job(AdmissionEnvironment { runner: scope.runner.clone(), bridge_available: false })
+            .await?.context("Reference turn was not admitted")?;
+        let run_id = plan.run.id.clone();
+        let message_revision_id = plan.input.last().context("Missing admitted turn")?.revision_id.clone();
+        assert_eq!(plan.input.last().unwrap().text, prompt);
+        let runner = Arc::new(FixtureRunner(WireLog {
+            store: store.clone(), runtime: tokio::runtime::Handle::current(), conversation: destination.id.clone(), frames: Arc::default(),
+        }));
+        assert_eq!(start_managed_turn(store.clone(), runner, plan, None).wait().await?, RunStatus::Succeeded);
+        drop(store);
+        let reopened = Store::open(database)?;
+        let evidence = reopened.agent_dispatch(destination.id.clone(), run_id.clone()).await?.context("Missing dispatch")?;
+        let reference = SubmittedConversationReference { message_revision_id, reference: preview.clone() };
+        assert_eq!(evidence.snapshot.conversation_references, [reference.clone()]);
+        assert_eq!(evidence.snapshot.scope.checkout, scope.checkout);
+        let wire: Value = serde_json::from_slice(&evidence.frames[0])?;
+        let text = wire["params"]["input"][0]["text"].as_str().context("Missing provider input")?;
+        let (_, payload) = text.split_once("(JSON data):\n").context("Missing quoted wire input")?;
+        assert_eq!(serde_json::from_str::<Vec<SubmittedConversationReference>>(payload)?, [reference]);
+        let lineage = reopened.dispatch_lineage(destination.id.clone(), run_id.clone()).await?.context("Missing lineage")?;
+        assert!(lineage.sources.iter().any(|entry| matches!(entry,
+            DispatchSourceRevision::ConversationReference { source_conversation_id, artifact_revision_id, .. }
+            if source_conversation_id == &source.id && artifact_revision_id == preview.artifact.id())));
+        assert!(reopened.dispatches_using_message(source.id, chosen.revision_id.clone()).await?
+            .iter().any(|entry| entry.run_id == run_id && entry.conversation_id == destination.id));
         Ok(())
     }
 

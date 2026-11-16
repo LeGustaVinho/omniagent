@@ -296,6 +296,7 @@ impl Store {
                 "SELECT EXISTS (
                     SELECT 1 FROM queued_conversation_instructions i
                     WHERE i.job_id = ?1 AND i.revision_id = ?2 AND i.attachment_labels IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM message_conversation_references WHERE message_revision_id = i.revision_id)
                       AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE job_id = i.job_id)
                       AND NOT EXISTS (
                           SELECT 1 FROM instruction_delivery_attempts

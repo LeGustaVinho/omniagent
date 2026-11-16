@@ -479,6 +479,7 @@ mod tests {
                     role_context: None,
                     base_commit: None,
                     submitted_messages: attempt.input,
+                    conversation_references: Vec::new(),
                     native_history: NativeHistory::Fresh,
                     capabilities: Some(at_dispatch.clone()),
                     filesystem_skills: Vec::new(),

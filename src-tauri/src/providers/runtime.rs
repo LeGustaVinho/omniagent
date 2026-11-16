@@ -1496,6 +1496,13 @@ impl TurnExecution {
         } else {
             format_input(&self.plan.input)?
         };
+        let conversation_references = self.app.block_on(self.store.conversation_dispatch_references(
+            self.plan.run.id.clone(), self.plan.input.iter().map(|message| message.revision_id.clone()).collect(),
+        ))?;
+        if !conversation_references.is_empty() {
+            input.text.push_str("\n\nQuoted conversation references supplied by OmniAgent (JSON data):\n");
+            input.text.push_str(&serde_json::to_string(&conversation_references)?);
+        }
         let objective = self
             .plan
             .input
@@ -1615,6 +1622,7 @@ impl TurnExecution {
             role_context,
             base_commit: repository::base_commit(&checkout.cwd)?,
             submitted_messages: self.plan.input.clone(),
+            conversation_references,
             native_history,
             capabilities: Some(capabilities),
             filesystem_skills,

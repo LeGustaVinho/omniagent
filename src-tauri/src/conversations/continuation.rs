@@ -2,7 +2,7 @@ use super::{
     Conversation, MessageRevision, MessageRole, SessionScope, activate_context,
     automatic_continuity, check_idle_base, consume_matching_draft, context_entries,
     insert_conversation, insert_message, load_conversation, load_messages, new_id,
-    previous_attempt,
+    previous_attempt, reference_delivery,
 };
 use crate::{
     attachments::{AttachmentDelivery, CapturedPayload, captured_for_revision},
@@ -120,6 +120,8 @@ pub struct ContinuedConversation {
 struct SealedReview {
     scope: SessionScope,
     seed_digest: [u8; 32],
+    #[serde(default)]
+    reference_ids: Vec<String>,
 }
 
 enum ContinuationRoute {
@@ -201,7 +203,7 @@ impl Store {
             let inspected =
                 match continuation_route(&tx, &conversation, &expected_context_id, &scope)? {
                     ContinuationRoute::Review(reason) => {
-                        seal_review(&tx, &project, &conversation, scope, reason)?
+                        seal_review(&tx, &project, &conversation, scope, reason, Vec::new())?
                     }
                     _ => ContinuationInspection::Automatic,
                 };
@@ -218,19 +220,32 @@ impl Store {
         scope: SessionScope,
         text: String,
     ) -> Result<ContinuationInspection> {
+        self.submit_conversation_with_references(conversation_id, expected_context_id, scope, text, Vec::new()).await
+    }
+
+    pub async fn submit_conversation_with_references(
+        &self,
+        conversation_id: String,
+        expected_context_id: String,
+        scope: SessionScope,
+        text: String,
+        reference_ids: Vec<String>,
+    ) -> Result<ContinuationInspection> {
         let outcome = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let conversation = load_conversation(&tx, &conversation_id)?;
                 let (project, root) = checkout(&tx, &conversation)?;
                 validate_scope(&scope, &root)?;
+                reference_delivery::verify_draft_references(&tx, &conversation_id, &project, &reference_ids)?;
                 let route = continuation_route(&tx, &conversation, &expected_context_id, &scope)?;
                 if let ContinuationRoute::Review(reason) = route {
-                    let reviewed = seal_review(&tx, &project, &conversation, scope, reason)?;
+                    let reviewed = seal_review(&tx, &project, &conversation, scope, reason, reference_ids)?;
                     tx.commit()?;
                     return Ok(reviewed);
                 }
                 consume_matching_draft(&tx, &conversation_id, &text)?;
+                reference_delivery::consume_draft_references(&tx, &conversation_id)?;
                 let job = queue_conversation_continuation(
                     &tx,
                     project,
@@ -238,6 +253,7 @@ impl Store {
                     &expected_context_id,
                     &scope,
                     &text,
+                    &reference_ids,
                 )?;
                 match route {
                     ContinuationRoute::Queue => (),
@@ -287,18 +303,22 @@ impl Store {
             validate_scope(&scope, &root)?;
             let preview: SealedReview = serde_json::from_slice(&protection::unprotect(&payload)?)?;
             ensure!(preview.scope == scope, "The selected profile changed. Review the continuation again.");
+            reference_delivery::verify_draft_references(&tx, &conversation_id, &project, &preview.reference_ids)?;
             let entries = context_entries(&tx, &conversation_id, &context_id)?;
             ensure!(
                 preview.seed_digest == protected_history_digest(&tx, &source)?,
                 "The reviewed history changed. Review the continuation again."
             );
             consume_matching_draft(&tx, &source.id, &text)?;
+            reference_delivery::consume_draft_references(&tx, &source.id)?;
             let conversation = match choice {
                 ContinuationChoice::SameTab => source,
                 ContinuationChoice::ForkWithContext => fork_history(&tx, &source, &entries, format!("{} (fork)", source.title))?,
                 ContinuationChoice::Fresh => insert_conversation(&tx, source.checkout_id, "New conversation".into(), false)?,
             };
-            let job = queue_conversation_continuation(&tx, project, &conversation, &conversation.context_id, &scope, &text)?;
+            let job = queue_conversation_continuation(
+                &tx, project, &conversation, &conversation.context_id, &scope, &text, &preview.reference_ids,
+            )?;
             pin_continuation(&tx, &job.id, &conversation, None)?;
             tx.execute("DELETE FROM conversation_continuation_previews WHERE id = ?1", [&preview_id])?;
             tx.commit()?;
@@ -358,6 +378,7 @@ fn seal_review(
     conversation: &Conversation,
     scope: SessionScope,
     reason: ContinuationReason,
+    reference_ids: Vec<String>,
 ) -> Result<ContinuationInspection> {
     let entries = context_entries(db, &conversation.id, &conversation.context_id)?;
     let seed = preview_seed(db, conversation, &entries)?;
@@ -365,6 +386,7 @@ fn seal_review(
     let payload = protection::protect(&serde_json::to_vec(&SealedReview {
         scope,
         seed_digest: protected_history_digest(db, conversation)?,
+        reference_ids,
     })?)?;
     db.execute(
         "INSERT INTO conversation_continuation_previews VALUES (?1, ?2, ?3, ?4)
@@ -600,6 +622,10 @@ fn protected_history_digest(db: &Connection, conversation: &Conversation) -> Res
             hash.update(bytes.len().to_le_bytes());
             hash.update(bytes);
         }
+        for reference in reference_delivery::reference_ids(db, &revision)? {
+            hash.update(reference.len().to_le_bytes());
+            hash.update(reference.as_bytes());
+        }
     }
     Ok(hash.finalize().into())
 }
@@ -640,6 +666,7 @@ pub(super) fn fork_history(
         };
         let copy = insert_message(db, &fork.id, role, payload)?;
         crate::dispatch::record_message_copy(db, revision, &copy)?;
+        reference_delivery::copy_references(db, revision, &copy)?;
         db.execute(
             "INSERT INTO message_attachments (message_revision_id, payload)
              SELECT ?1, payload FROM message_attachments WHERE message_revision_id = ?2",

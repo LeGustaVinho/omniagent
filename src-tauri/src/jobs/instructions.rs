@@ -342,6 +342,7 @@ impl Store {
                     )?;
                 }
             }
+            crate::conversations::reference_delivery::copy_references(&tx, &expected, &revision)?;
             tx.execute("UPDATE queued_conversation_instructions SET revision_id = ?2 WHERE job_id = ?1",
                 params![id, revision])?;
             let job = load_job(&tx, &instruction.project, &id)?.context("Instruction lost its job")?;

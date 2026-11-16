@@ -30,6 +30,7 @@ import { ConversationSubagentControls } from "@/subagent-quota";
 import { SideQuestionPanel, type SideSubmission, useSideRequests, useSuggestionMode } from "@/conversation-side-requests";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
+import { ConversationReferenceChips, type ConversationReferencePreview } from "@/conversation-reference";
 import {
   ConversationLibraryNavigation, ConversationReferencePicker, ConversationTitleEditor,
   conversationLibraryKey, useConversationRename, useConversationTitle,
@@ -265,6 +266,20 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     },
     staleTime: Infinity,
   });
+  const referenceDraftKey = ["conversation", conversationId, "reference-draft"];
+  const referenceDraft = useQuery({
+    queryKey: referenceDraftKey,
+    queryFn: () => invoke<ConversationReferencePreview[]>("conversation_reference_draft", { conversationId }),
+    enabled: Boolean(library) && visible,
+  });
+  const editReferenceDraft = useMutation({
+    mutationFn: ({ previewId, attach }: { previewId: string; attach: boolean }) =>
+      invoke<ConversationReferencePreview[]>("edit_conversation_reference_draft", { conversationId, previewId, attach }),
+    onSuccess: (references) => queryClient.setQueryData(referenceDraftKey, references),
+    onError: () => queryClient.invalidateQueries({ queryKey: referenceDraftKey }),
+  });
+  const references = referenceDraft.data ?? [];
+  const hasReferences = references.length > 0;
   const historyKey = ["conversation", conversationId, "messages"];
   const history = useQuery({
     queryKey: historyKey,
@@ -380,7 +395,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     queryFn: () => invoke<boolean>("preview_conversation_steering", { conversationId, runId: run?.id,
       expectedContextId: history.data?.contextId, selection, effort: effectiveEffort, mode }),
     enabled: visible && live && run?.status === "running" && Boolean(history.data?.contextId && selected?.option.selectable)
-      && Boolean(text.trim()) && !isSideQuestion && !composingGoal,
+      && Boolean(text.trim()) && !isSideQuestion && !composingGoal && !hasReferences,
     retry: false,
     refetchInterval: 1250,
   });
@@ -394,29 +409,35 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
       const expectedContextId = history.data?.contextId;
       if (!selection || !expectedContextId || mode === "goal") throw new Error("Choose a model and wait for the conversation context.");
       const effective = { selection, effort: effectiveEffort, mode };
+      const referenceIds = references.length > 0 ? references.map(({ id }) => id) : undefined;
       await saveDraft(conversationId, submitted);
-      const review = await submitConversationContinuation({ conversationId, expectedContextId, ...effective, text: submitted });
+      const review = await submitConversationContinuation({ conversationId, expectedContextId, ...effective, text: submitted,
+        ...(referenceIds && { referenceIds }) });
       if (review.status === "review_required") return { review, ...effective, text: submitted } satisfies ReviewedContinuation;
       return { instructionId: review.job.id };
     },
-    onSuccess: (outcome, { text: submitted, toRun }) => {
+    onSuccess: async (outcome, { text: submitted, toRun }) => {
       if ("review" in outcome) { setContinuation(outcome); return; }
       clearSubmittedDraft(submitted);
       void instructions.refresh();
       if (toRun) steer.mutate({ instructionId: outcome.instructionId, runId: toRun });
+      if (library) await queryClient.invalidateQueries({ queryKey: referenceDraftKey });
     },
+    onError: () => { if (library) void queryClient.invalidateQueries({ queryKey: referenceDraftKey }); },
   });
   const continueSend = useMutation({
     mutationFn: ({ choice, intent }: { choice: Parameters<typeof confirmConversationContinuation>[0]["choice"]; intent: ReviewedContinuation }) =>
       confirmConversationContinuation({ conversationId, previewId: intent.review.previewId, choice,
         selection: intent.selection, effort: intent.effort, mode: intent.mode, text: intent.text }),
-    onSuccess: ({ conversation }, { intent }) => {
+    onSuccess: async ({ conversation }, { intent }) => {
       clearSubmittedDraft(intent.text);
       setContinuation(undefined);
       void instructions.refresh();
       void queryClient.invalidateQueries({ queryKey: conversationLibraryKey });
       if (conversation.id !== conversationId) openFork(conversation);
+      if (library) await queryClient.invalidateQueries({ queryKey: referenceDraftKey });
     },
+    onError: () => { if (library) void queryClient.invalidateQueries({ queryKey: referenceDraftKey }); },
   });
   const startGoal = useMutation({
     mutationFn: async ({ definition, submittedDraft }: { definition: GoalDefinition; submittedDraft?: string }) => {
@@ -470,15 +491,15 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const suggestionSource = useRef<string>(undefined);
   useEffect(() => {
     if (run && isLiveRun(run)) suggestionSource.current = run.id;
-    if (!visible || !suggestionsEnabled || busy || text.trim() || !selection || !selected?.option.selectable
+    if (!visible || !suggestionsEnabled || busy || hasReferences || text.trim() || !selection || !selected?.option.selectable
       || run?.status !== "succeeded" || suggestionSource.current !== run.id) return;
     suggestionSource.current = undefined;
     void invoke<SideSubmission>("enqueue_conversation_side_request", {
       conversationId, expectedSourceRunId: run.id, selection, effort: sideEffort, mode: sideMode,
       purpose: "suggestion", question: "",
     }).then(() => queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "side-requests"] }), () => {});
-  }, [run, visible, suggestionsEnabled, busy, text, selection, selected, conversationId, queryClient, sideEffort, sideMode]);
-  const suggested = suggestionsEnabled && !busy && !text.trim() ? sideHistory.data?.find((item) =>
+  }, [run, visible, suggestionsEnabled, busy, hasReferences, text, selection, selected, conversationId, queryClient, sideEffort, sideMode]);
+  const suggested = suggestionsEnabled && !busy && !hasReferences && !text.trim() ? sideHistory.data?.find((item) =>
     item.purpose === "suggestion" && item.contextId === history.data?.contextId
     && item.sourceRunId === run?.id && item.provider === selection?.provider && item.profileId === selection?.profileId
     && item.model === selection?.modelId && item.effort === sideEffort && item.mode === sideMode)?.response?.outcome : undefined;
@@ -509,13 +530,14 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
 
   const canStartGoal = Boolean(history.data?.contextId && selected?.option.selectable && !busy && !latest.isPending && !latestJob.isPending
     && !goal.isPending && !goal.error && !hasCurrentGoal(goal.data) && !send.isPending && !recover.isPending);
-  const canSend = composingGoal ? Boolean(text.trim() && !startGoal.isPending && (goalInput === "" || canStartGoal))
+  const referencesReady = !library || (referenceDraft.isSuccess && !editReferenceDraft.isPending);
+  const canSend = referencesReady && (composingGoal ? Boolean(!hasReferences && text.trim() && !startGoal.isPending && (goalInput === "" || canStartGoal))
     : Boolean(text.trim() && selected?.option.selectable && (isSideQuestion
-    ? Boolean(sideQuestion) && history.data?.contextId && !askSide.isPending
-    : history.data?.contextId && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending));
+    ? !hasReferences && Boolean(sideQuestion) && history.data?.contextId && !askSide.isPending
+    : history.data?.contextId && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending)));
   const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
   const historyBusy = live || isLiveRun(attempt) || send.isPending || continueSend.isPending || steer.isPending;
-  const steerRun = canSend && !steer.isPending && !isSideQuestion && !composingGoal && run?.status === "running"
+  const steerRun = canSend && !hasReferences && !steer.isPending && !isSideQuestion && !composingGoal && run?.status === "running"
     && steeringPreview.data && !instructions.data.some((item) => item.editable && !item.recordedContext) ? run.id : undefined;
 
   function submit(event: FormEvent) {
@@ -656,6 +678,9 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           </div>
         </div>}
       <form onSubmit={submit} className="conv-composer">
+          <ConversationReferenceChips references={references}
+            disabled={editReferenceDraft.isPending || send.isPending || continueSend.isPending}
+            onRemove={(previewId) => editReferenceDraft.mutate({ previewId, attach: false })} />
           {sideCompletion && <button type="button" className="conv-quiet-button" onClick={completeSideQuestion}>
             <code>/btw</code> Ask a side question
           </button>}
@@ -682,7 +707,9 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
               }
             }} />
           <div className="conv-composer-toolbar">
-              {library && <ConversationReferencePicker projectId={library.projectId} excludeId={conversationId} onOpen={library.open} />}
+              {library && <ConversationReferencePicker projectId={library.projectId} excludeId={conversationId} onOpen={library.open}
+                onAttach={referencesReady && !send.isPending && !continueSend.isPending
+                  ? ({ id }) => editReferenceDraft.mutate({ previewId: id, attach: true }) : undefined} />}
               <select aria-label="Provider" className={selectorClass} value={provider} onChange={(event) => {
                 setProvider(event.target.value as Provider);
                 setSelection(null);
@@ -725,6 +752,12 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           </div>}
           {draftStatus && <p role="status" className="text-xs text-muted-foreground">{draftStatus}</p>}
           {(draftError || draft.error) && <p role="alert" className="conv-alert">{draftError || String(draft.error)}</p>}
+          {(referenceDraft.error || editReferenceDraft.error) && <p role="alert" className="conv-alert">
+            {String(referenceDraft.error || editReferenceDraft.error)}
+          </p>}
+          {hasReferences && (isSideQuestion || composingGoal) && <p className="conv-alert">
+            Remove the conversation references to send a side question or start a goal.
+          </p>}
           {send.error && <p role="alert" className="conv-alert">{String(send.error)}</p>}
           {askSide.error && <p role="alert" className="conv-alert">{String(askSide.error)}</p>}
           {steer.data === false && <p role="status" className="text-xs text-muted-foreground">Instruction queued for the next turn.</p>}

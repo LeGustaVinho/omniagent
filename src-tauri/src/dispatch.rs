@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::{
     attachments::AttachmentDispatch,
     context_records::assembly::RoleDispatchContext,
-    conversations::{MessageRevision, SessionScope},
+    conversations::{MessageRevision, SessionScope, SubmittedConversationReference, reference_delivery},
     protection,
     providers::{
         ProviderEvent,
@@ -41,7 +41,7 @@ pub use instruction_evidence::{
     InstructionReview,
 };
 pub use inventory::DispatchInventory;
-pub(crate) use lineage::record_message_copy;
+pub(crate) use lineage::{load_conversation_artifact, record_conversation_excerpt, record_message_copy};
 pub use lineage::{
     ArtifactSource, ByteRange, ConversationArtifactRevision, ConversationSelection,
     DispatchIdentity, DispatchLineage, DispatchSourceRevision, DispatchUse, ExcerptSource,
@@ -63,6 +63,8 @@ pub struct ContextSnapshot {
     pub role_context: Option<RoleDispatchContext>,
     pub base_commit: Option<String>,
     pub submitted_messages: Vec<MessageRevision>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversation_references: Vec<SubmittedConversationReference>,
     pub native_history: NativeHistory,
     #[serde(default)]
     pub capabilities: Option<CapabilityAssessment>,
@@ -202,6 +204,9 @@ impl Store {
             ensure!(serde_json::from_str::<SessionScope>(&scope)? == snapshot.scope,
                 "snapshot does not use the admitted session scope");
             crate::jobs::validate_instruction_revisions(&tx, &run_id, &snapshot.submitted_messages)?;
+            let message_revisions = snapshot.submitted_messages.iter().map(|message| message.revision_id.clone()).collect::<Vec<_>>();
+            ensure!(reference_delivery::submitted_references(&tx, &run_id, &message_revisions)? == snapshot.conversation_references,
+                "The attached conversation references changed before dispatch");
             snapshot.session_id = Some(session.clone());
             snapshot.job_policy_revision = tx.query_row(
                 "SELECT policy_key FROM job_attempt_policies WHERE run_id = ?1",

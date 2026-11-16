@@ -146,13 +146,7 @@ impl Store {
     ) -> Result<ConversationArtifactRevision> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let excerpts = selected_sources(&tx, &selection)?;
-            let artifact = ConversationArtifactRevision::Excerpt {
-                id: Uuid::new_v4().to_string(),
-                source_context_id: selection.context_id,
-                excerpts,
-            };
-            save(&tx, &selection.conversation_id, None, &artifact)?;
+            let artifact = record_conversation_excerpt(&tx, selection)?;
             tx.commit()?;
             Ok(artifact)
         })
@@ -215,7 +209,9 @@ impl Store {
     ) -> Result<Option<ConversationArtifactRevision>> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            if let Some(artifact) = load(&tx, &source_conversation_id, &artifact_id)? {
+            if let Some(artifact) =
+                load_conversation_artifact(&tx, &source_conversation_id, &artifact_id)?
+            {
                 return Ok(Some(artifact));
             }
             let pending: Option<(Vec<u8>, String, String)> = tx
@@ -271,6 +267,20 @@ impl Store {
             Ok(query.query_map([derived], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
         }).await
     }
+}
+
+pub(crate) fn record_conversation_excerpt(
+    db: &Connection,
+    selection: ConversationSelection,
+) -> Result<ConversationArtifactRevision> {
+    let excerpts = selected_sources(db, &selection)?;
+    let artifact = ConversationArtifactRevision::Excerpt {
+        id: Uuid::new_v4().to_string(),
+        source_context_id: selection.context_id,
+        excerpts,
+    };
+    save(db, &selection.conversation_id, None, &artifact)?;
+    Ok(artifact)
 }
 
 fn selected_sources(
@@ -411,7 +421,7 @@ fn save(
     Ok(())
 }
 
-fn load(
+pub(crate) fn load_conversation_artifact(
     db: &Connection,
     source_conversation_id: &str,
     artifact_id: &str,
@@ -428,6 +438,7 @@ mod tests {
     use std::process::Command;
 
     use crate::{
+        conversations::references::{ConversationReferenceSelection, load_conversation_reference},
         dispatch::{Delivery, DispatchSourceRevision, EventSource},
         jobs::AdmissionEnvironment,
         providers::{
@@ -539,6 +550,7 @@ mod tests {
             role_context: None,
             base_commit: None,
             submitted_messages: attempt.input.clone(),
+            conversation_references: Vec::new(),
             native_history: NativeHistory::Fresh,
             capabilities: None,
             filesystem_skills: Vec::new(),
@@ -623,6 +635,39 @@ mod tests {
             matches!(&summary, ConversationArtifactRevision::Summary { covered, run, text, source_context_id, .. }
             if covered[0].origin.revision_id == revision && run.requested_model.as_deref() == Some("requested-fixture")
                 && run.observed_model.as_deref() == Some("observed-fixture") && text == "Sealed summary" && source_context_id == &history.context_id)
+        );
+        let reference_source = store
+            .conversation_reference_source(unrelated.id.clone(), source.id.clone(), None)
+            .await?;
+        assert_eq!(reference_source.summaries.len(), 1);
+        assert_eq!(reference_source.summaries[0].artifact_id, queued.request_id);
+        assert_eq!(reference_source.summaries[0].context_id, history.context_id);
+        assert_eq!(reference_source.summaries[0].text, "Sealed summary");
+        let reference = store
+            .preview_conversation_reference(
+                unrelated.id.clone(),
+                source.id.clone(),
+                ConversationReferenceSelection::Summary {
+                    artifact_id: queued.request_id.clone(),
+                },
+            )
+            .await?;
+        assert_eq!(reference.artifact, summary);
+        let (destination, project, preview) = (
+            unrelated.id.clone(),
+            checkout.project_id.clone(),
+            reference.id.clone(),
+        );
+        assert_eq!(
+            store
+                .execute(move |db| load_conversation_reference(
+                    db,
+                    &destination,
+                    &project,
+                    &preview
+                ))
+                .await?,
+            reference
         );
         assert_eq!(
             store.conversation(source.id.clone()).await?.context_id,

@@ -2,6 +2,10 @@ use omniagent::{
     conversations::{
         ContinuationChoice, ContinuationInspection, ContinuationLevel, ContinuationSettings,
         ContinuedConversation,
+        references::{
+            ConversationReferenceSelection, ConversationReferenceSnapshot,
+            ConversationReferenceSource,
+        },
     },
     diagnostics,
     model_catalog::ModelSelection,
@@ -47,6 +51,7 @@ pub async fn submit_conversation_continuation(
     effort: Option<String>,
     mode: SessionMode,
     text: String,
+    reference_ids: Option<Vec<String>>,
 ) -> Result<ContinuationInspection, String> {
     async {
         let conversation = store.conversation(conversation_id.clone()).await?;
@@ -59,11 +64,75 @@ pub async fn submit_conversation_continuation(
         )
         .await?;
         store
-            .submit_conversation_continuation(conversation_id, expected_context_id, scope, text)
+            .submit_conversation_with_references(
+                conversation_id,
+                expected_context_id,
+                scope,
+                text,
+                reference_ids.unwrap_or_default(),
+            )
             .await
     }
     .await
     .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn conversation_reference_source(
+    store: State<'_, Store>,
+    destination_conversation_id: String,
+    source_conversation_id: String,
+    source_context_id: Option<String>,
+) -> Result<ConversationReferenceSource, String> {
+    store
+        .conversation_reference_source(
+            destination_conversation_id,
+            source_conversation_id,
+            source_context_id,
+        )
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn preview_conversation_reference(
+    store: State<'_, Store>,
+    destination_conversation_id: String,
+    source_conversation_id: String,
+    selection: ConversationReferenceSelection,
+) -> Result<ConversationReferenceSnapshot, String> {
+    store
+        .preview_conversation_reference(
+            destination_conversation_id,
+            source_conversation_id,
+            selection,
+        )
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn conversation_reference_draft(
+    store: State<'_, Store>,
+    conversation_id: String,
+) -> Result<Vec<ConversationReferenceSnapshot>, String> {
+    store
+        .conversation_reference_draft(conversation_id)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn edit_conversation_reference_draft(
+    store: State<'_, Store>,
+    conversation_id: String,
+    preview_id: String,
+    attach: bool,
+) -> Result<Vec<ConversationReferenceSnapshot>, String> {
+    store
+        .edit_conversation_reference_draft(conversation_id, preview_id, attach)
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]

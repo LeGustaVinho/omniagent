@@ -6,6 +6,7 @@ import { createContext, useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
+import { ConversationReferenceSelection, type ConversationReferencePreview } from "@/conversation-reference";
 
 type ConversationLibraryEntry = {
   conversation: Conversation;
@@ -174,44 +175,61 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   </section>;
 }
 
-export function ConversationReferencePicker({ projectId, excludeId, onOpen }: {
+export function ConversationReferencePicker({ projectId, excludeId, onOpen, onAttach }: {
   projectId: string; excludeId: string; onOpen: OpenLibraryConversation;
+  onAttach?: (reference: ConversationReferencePreview) => void;
 }) {
   const [shown, setShown] = useState(false);
   const [query, setQuery] = useState("");
-  const list = useConversationLibrary(query, projectId, shown);
+  const [source, setSource] = useState<ConversationLibraryEntry>();
+  const list = useConversationLibrary(query, projectId, shown && !source);
+  function changeShown(next: boolean) {
+    setShown(next);
+    if (!next) setSource(undefined);
+  }
   const open = useMutation({
     mutationFn: (entry: ConversationLibraryEntry) => openEntry(onOpen, entry),
-    onSuccess: () => setShown(false),
+    onSuccess: () => changeShown(false),
   });
-  const matches = list.data?.filter(({ conversation }) => conversation.id !== excludeId);
+  const matches = list.data?.filter(({ conversation, checkout }) =>
+    conversation.id !== excludeId && checkout.projectId === projectId);
   const error = list.error ?? open.error;
-  return <Popover.Root open={shown} onOpenChange={setShown}>
+  return <Popover.Root open={shown} onOpenChange={changeShown}>
     <Popover.Trigger asChild>
       <button className="conv-quiet-button" type="button" aria-label="Find conversation references">@conversation</button>
     </Popover.Trigger>
     <Popover.Portal>
       <Popover.Content align="start" sideOffset={6} className="work-project-popover" aria-label="Conversation references">
-        <label className="conv-search"><Search aria-hidden />
-          <input type="search" aria-label="Search conversation references" placeholder="Search this project"
-            value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
-        </label>
         {error && <p role="alert" className="conv-alert">{String(error)}</p>}
-        {list.isPending && <p role="status">Loading conversations…</p>}
-        {matches?.length === 0 && <p>No matching conversations.</p>}
-        <ul className="max-h-64 overflow-auto">
-          {matches?.map((entry) => <li key={entry.conversation.id}>
-            <Button type="button" variant="ghost" className="h-auto justify-start" aria-label={`Open source ${entry.conversation.title}`}
-              aria-describedby={`reference-metadata-${excludeId}-${entry.conversation.id}`} disabled={open.isPending}
-              onClick={() => open.mutate(entry)}>
-              <MessageSquare aria-hidden />
-              <span className="min-w-0">
-                <strong className="block truncate">{entry.conversation.title}</strong>
-                <ConversationMetadata entry={entry} id={`reference-metadata-${excludeId}-${entry.conversation.id}`} />
-              </span>
-            </Button>
-          </li>)}
-        </ul>
+        {source && onAttach ? <ConversationReferenceSelection
+          key={source.conversation.id}
+          destinationConversationId={excludeId}
+          source={source}
+          onBack={() => setSource(undefined)}
+          onAttach={(reference) => { onAttach(reference); changeShown(false); }}
+        /> : <>
+          <label className="conv-search"><Search aria-hidden />
+            <input type="search" aria-label="Search conversation references" placeholder="Search this project"
+              value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
+          </label>
+          {list.isPending && <p role="status">Loading conversations…</p>}
+          {matches?.length === 0 && <p>No matching conversations.</p>}
+          <ul className="max-h-64 overflow-auto">
+            {matches?.map((entry) => <li key={entry.conversation.id} className="grid gap-1 border-b border-border last:border-0">
+              <Button type="button" variant="ghost" className="h-auto justify-start" aria-label={`Open source ${entry.conversation.title}`}
+                aria-describedby={`reference-metadata-${excludeId}-${entry.conversation.id}`} disabled={open.isPending}
+                onClick={() => open.mutate(entry)}>
+                <MessageSquare aria-hidden />
+                <span className="min-w-0">
+                  <strong className="block truncate">{entry.conversation.title}</strong>
+                  <ConversationMetadata entry={entry} id={`reference-metadata-${excludeId}-${entry.conversation.id}`} />
+                </span>
+              </Button>
+              {onAttach && <Button type="button" variant="outline" aria-label={`Choose excerpt or summary from ${entry.conversation.title}`}
+                disabled={open.isPending} onClick={() => setSource(entry)}>Choose excerpt or summary</Button>}
+            </li>)}
+          </ul>
+        </>}
       </Popover.Content>
     </Popover.Portal>
   </Popover.Root>;

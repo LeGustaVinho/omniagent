@@ -99,6 +99,7 @@ function repository() {
         return updated;
       }
       case "conversation_draft": return drafts.get(input.conversationId!) ?? "";
+      case "conversation_reference_draft": return [];
       case "save_conversation_draft":
         drafts.set(input.conversationId!, input.text!);
         return;

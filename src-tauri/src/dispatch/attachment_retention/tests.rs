@@ -357,6 +357,7 @@ async fn dispatch(
         role_context: None,
         base_commit: None,
         submitted_messages: attempt.input.clone(),
+        conversation_references: Vec::new(),
         native_history: NativeHistory::Fresh,
         capabilities: None,
         filesystem_skills: vec![],

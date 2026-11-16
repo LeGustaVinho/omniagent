@@ -737,6 +737,7 @@ pub struct ConversationInput {
     attachments: Vec<omniagent::dispatch::AttachmentEvidence>,
     removed_attachment_count: usize,
     instructions: Vec<omniagent::dispatch::InstructionDispatch>,
+    conversation_references: Vec<omniagent::conversations::SubmittedConversationReference>,
 }
 
 #[tauri::command]
@@ -764,6 +765,7 @@ pub async fn conversation_input(
                 attachments: dispatch.attachments,
                 removed_attachment_count: dispatch.removed_attachment_count,
                 instructions: dispatch.instructions,
+                conversation_references: dispatch.snapshot.conversation_references,
             })
         })
         .transpose()
