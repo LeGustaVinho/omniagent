@@ -657,6 +657,19 @@ pub(super) async fn approve_delivery_fixture_for_work(
     repo: ProjectCheckout,
     task_id: Option<String>,
 ) -> Result<ApprovedDeliveryFixture> {
+    let run = store
+        .start_builtin_delivery(repo.project_id.clone(), DeliveryRoles::default())
+        .await?;
+    approve_delivery_fixture_in_run(store, temp_path, repo, task_id, run).await
+}
+
+pub(super) async fn approve_delivery_fixture_in_run(
+    store: &Store,
+    temp_path: &Path,
+    repo: ProjectCheckout,
+    task_id: Option<String>,
+    run: WorkflowRun,
+) -> Result<ApprovedDeliveryFixture> {
     let project = repo.project_id.clone();
     let root = Path::new(&repo.checkout_root);
     let planned_text = if task_id.is_some() {
@@ -665,9 +678,6 @@ pub(super) async fn approve_delivery_fixture_for_work(
         "Do each change separately.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"First change\",\"completionCriteria\":[\"First file updated\"]},{\"purpose\":\"Second change\",\"completionCriteria\":[\"Second file updated\"]}]}\n```"
     };
     let unit_count = if task_id.is_some() { 1 } else { 2 };
-    let run = store
-        .start_builtin_delivery(project.clone(), DeliveryRoles::default())
-        .await?;
     let host = |node: &str, inputs, request| WorkflowHostSubmission {
         project_id: project.clone(),
         run_id: run.id.clone(),

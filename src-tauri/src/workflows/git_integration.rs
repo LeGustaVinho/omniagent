@@ -41,6 +41,7 @@ use super::{
 mod commit_intent;
 mod destination_drift;
 mod history_integration;
+mod merge_policy;
 mod milestones;
 mod live_cli_acceptance;
 
