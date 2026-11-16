@@ -7,6 +7,8 @@ use super::{
 };
 
 mod bindings;
+#[cfg(test)]
+mod tests;
 
 use bindings::{DestinationBindings, LocalCatalog};
 pub use bindings::{ExchangeBinding, ExchangeBindingKind, ExchangeBindingRequirement};
