@@ -4,6 +4,7 @@ mod conversation_runtime;
 mod composer_customization_ipc;
 mod conversation_goal_runtime;
 mod conversation_continuation_runtime;
+mod conversation_attachment_ipc;
 mod conversation_steering_ipc;
 mod agile_runtime;
 mod delivery_merge_ipc;
@@ -207,6 +208,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .on_window_event(desktop::hide_main_on_close)
+        .on_webview_event(conversation_attachment_ipc::retain_attachment_drop)
         .setup(|app| {
             let path = app.path().app_local_data_dir()?.join("omniagent.sqlite3");
             let store = Store::open(path)?;
@@ -228,6 +230,7 @@ fn main() {
                 )
             });
             app.manage(store);
+            app.manage(conversation_attachment_ipc::AttachmentDropReceipts::default());
             app.manage(scheduler);
             app.manage(ipc::EventSubscriptions::default());
             app.manage(note_runtime::NoteWatches::default());
@@ -401,6 +404,10 @@ fn main() {
             conversation_continuation_runtime::preview_conversation_reference,
             conversation_continuation_runtime::conversation_reference_draft,
             conversation_continuation_runtime::edit_conversation_reference_draft,
+            conversation_attachment_ipc::conversation_attachment_draft,
+            conversation_attachment_ipc::pick_conversation_attachments,
+            conversation_attachment_ipc::accept_conversation_attachment_drop,
+            conversation_attachment_ipc::edit_conversation_attachment_draft,
             composer_customization_ipc::composer_customizations,
             ipc::checkout_conversation,
             ipc::create_conversation,

@@ -100,6 +100,7 @@ function repository() {
       }
       case "conversation_draft": return drafts.get(input.conversationId!) ?? "";
       case "conversation_reference_draft": return [];
+      case "conversation_attachment_draft": return { revision: null, files: [] };
       case "save_conversation_draft":
         drafts.set(input.conversationId!, input.text!);
         return;

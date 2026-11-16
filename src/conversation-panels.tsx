@@ -31,6 +31,7 @@ import { SideQuestionPanel, type SideSubmission, useSideRequests, useSuggestionM
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
 import { ConversationReferenceChips, type ConversationReferencePreview } from "@/conversation-reference";
+import { ConversationAttachments, useConversationAttachments } from "@/conversation-attachments";
 import { ComposerCustomizationPicker, conversationSkillMessage, hasComposerSkills, useComposerCustomizations,
   type ComposerCustomization } from "@/conversation-customization-picker";
 import {
@@ -321,6 +322,9 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const isSideQuestion = sideQuestion !== undefined;
   const sideCompletion = completesSideQuestion(text);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const composerForm = useRef<HTMLFormElement>(null);
+  const attachments = useConversationAttachments(conversationId, Boolean(library), visible, composerForm);
+  const hasAttachments = attachments.draft.files.length > 0;
   const [composerCursor, setComposerCursor] = useState(0);
   const hasSkills = hasComposerSkills(text);
   const [showSideQuestions, setShowSideQuestions] = useState(false);
@@ -549,7 +553,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const canStartGoal = Boolean(history.data?.contextId && selected?.option.selectable && !busy && !latest.isPending && !latestJob.isPending
     && !goal.isPending && !goal.error && !hasCurrentGoal(goal.data) && !send.isPending && !recover.isPending);
   const referencesReady = !library || (referenceDraft.isSuccess && !editReferenceDraft.isPending);
-  const canSend = referencesReady && !customizationPicker.pinned.some(({ option }) => !option)
+  const canSend = referencesReady && attachments.ready && !attachments.busy && !hasAttachments
+    && !customizationPicker.pinned.some(({ option }) => !option)
     && (composingGoal ? Boolean(!hasReferences && !hasSkills && text.trim() && !startGoal.isPending && (goalInput === "" || canStartGoal))
     : Boolean(text.trim() && selected?.option.selectable && (isSideQuestion
     ? !hasReferences && !hasSkills && Boolean(sideQuestion) && history.data?.contextId && !askSide.isPending
@@ -696,7 +701,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
             </button>
           </div>
         </div>}
-      <form onSubmit={submit} className="conv-composer">
+      <form ref={composerForm} onSubmit={submit} className={`conv-composer ${attachments.hover ? "ring-2 ring-primary" : ""}`}>
+          <ConversationAttachments attachments={attachments} disabled={send.isPending || continueSend.isPending} />
           <ComposerCustomizationPicker picker={customizationPicker} onPick={pickCustomization}
             onRemove={(token) => editDraft(customizationPicker.remove(token))} />
           <ConversationReferenceChips references={references}

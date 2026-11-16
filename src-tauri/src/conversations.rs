@@ -26,6 +26,7 @@ use crate::{
 
 mod approval_evidence;
 pub(crate) mod continuation;
+pub mod draft_files;
 mod history;
 mod library;
 pub mod references;
