@@ -19,6 +19,7 @@ mod iteration;
 mod git_integration;
 mod job_inputs;
 mod launch;
+pub mod maintenance;
 mod merge_execution;
 mod operator;
 mod plan_revision;
@@ -293,6 +294,7 @@ fn compile_resolved_graph<'definition>(
     ensure!(visited == nodes.len(), "workflow graph contains a cycle");
     if enforce_release {
         control::validate_release_wires(&nodes, &graph.wires)?;
+        maintenance::validate_activation_wires(&nodes, &graph.wires)?;
     }
     let revision = digest(&serde_json::to_vec(&(&graph.name, &nodes, &graph.wires))?);
     let definition = WorkflowDefinition {

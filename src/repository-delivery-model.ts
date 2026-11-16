@@ -28,7 +28,7 @@ export type DeliveryArtifact = {
     | { kind: "acceptance"; evidence: { evidence: ScopedEvidence; reviewArtifactId: string; completionCriteria: string[] } };
 };
 
-export type DeliveryRun = { id: string; planRevision: string | null };
+export type DeliveryRun = { id: string; planRevision: string | null; version?: { id: string; revision: string } };
 export type DeliveryJob = { nodeId: DeliveryNode; unitId: string | null; inputs: DeliveryInputs; job: Job };
 export type DeliveryWorkflowDefinition = {
   nodes: { instance: { id: string; kind: string; configuration?: { kind: string; model?: ModelSelection | null } }; definition: { title: string } }[];

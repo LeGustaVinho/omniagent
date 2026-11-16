@@ -24,7 +24,7 @@ use super::{
 
 const OUTPUT_LIMIT: usize = 512 * 1024;
 
-pub(super) fn pin_executable(path: &Path) -> io::Result<(File, String)> {
+pub(crate) fn pin_executable(path: &Path) -> io::Result<(File, String)> {
     let mut executable = open_locked_local_file(path)?;
     let mut hash = Sha256::new();
     io::copy(&mut executable, &mut hash)?;
@@ -51,7 +51,7 @@ pub(super) fn run(
     )
 }
 
-pub(in crate::repository) fn run_in_checkout(
+pub(crate) fn run_in_checkout(
     checkout: &Path,
     action: &CandidateGateAction,
     expected_revision: Option<&str>,

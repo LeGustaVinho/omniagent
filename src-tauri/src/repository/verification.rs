@@ -1,4 +1,4 @@
-pub(super) mod command;
+pub(crate) mod command;
 pub mod ipc;
 pub(super) mod materialize;
 
@@ -15,6 +15,7 @@ use crate::{dispatch::ContextSnapshot, protection, store::Store};
 
 use super::{AttemptWorktreeEvidence, CandidateRevision};
 pub use materialize::MaterializedCandidate;
+pub(crate) use materialize::materialize_maintenance_commit;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

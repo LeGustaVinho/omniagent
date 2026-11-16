@@ -9,6 +9,7 @@ import { queueBlockerReason } from "@/queue-model";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { AttemptStageRequirements } from "@/workflow-stage-requirements";
 import { WorkflowMcpToolRun } from "@/workflow-mcp-tools";
+import { WorkflowMaintenanceDelivery } from "@/workflow-maintenance";
 import type { ExecutionArtifact, ExecutionControl, ExecutionJob, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 
 type Navigation = Pick<WorkspaceProps, "checkout" | "openWorkspace" | "openActivity" | "openQueueJob">;
@@ -165,6 +166,15 @@ export function WorkflowNodeEvidence({ node, snapshot, unitId, control, navigati
     artifact.nodeInstanceId === argumentsWire.from.node && artifact.port === argumentsWire.from.port)?.artifact.id;
   const latestMcpJob = jobs.at(-1);
   const currentMcpJob = latestMcpJob && (latestMcpJob.job.latestAttempt || latestMcpJob.inputs?.arguments === argumentsArtifact) ? latestMcpJob.job : undefined;
+  const maintenanceWire = node.definition.kind === "activate_maintenance" && snapshot.definition.wires.find(({ to }) =>
+    to.node === node.instance.id && to.port === "git");
+  const maintenanceUnit = maintenanceWire && snapshot.units.filter((unit) => unit.planRevision === snapshot.run.planRevision)
+    .reduce<(typeof snapshot.units)[number] | undefined>((latest, unit) =>
+      !latest || unit.unit.ordinal > latest.unit.ordinal ? unit : latest, undefined);
+  const maintenanceGit = maintenanceWire && maintenanceUnit && maintenanceUnit.unit.id === unitId &&
+    snapshot.outputs.find(({ artifact, current }) => current && artifact.unitId === unitId &&
+      artifact.nodeInstanceId === maintenanceWire.from.node && artifact.port === maintenanceWire.from.port && artifact.value.kind === "git")?.artifact;
+  const maintenanceCommit = maintenanceGit ? maintenanceGit.value.evidence as Git : undefined;
   return <div className="pipeline-stack">
     <details><summary>Pinned node configuration</summary>
       <p>Definition version {node.definition.revision} · <code className="break-all">{node.revision}</code></p>
@@ -173,6 +183,9 @@ export function WorkflowNodeEvidence({ node, snapshot, unitId, control, navigati
     {node.definition.kind === "mcp_tool" && navigation.checkout.projectId === projectId && <WorkflowMcpToolRun
       {...scope} checkoutId={navigation.checkout.checkoutId} nodeId={node.instance.id} argumentsArtifact={argumentsArtifact}
       waitsForArguments={Boolean(argumentsWire && !argumentsArtifact)} job={currentMcpJob} />}
+    {maintenanceGit && maintenanceCommit?.task.projectId === projectId && <WorkflowMaintenanceDelivery
+      projectId={projectId} workflowRunId={id} workflowId={snapshot.run.version.id} nodeId={node.instance.id}
+      gitArtifactId={maintenanceGit.id} taskId={maintenanceCommit.task.taskId} commitEvidenceId={maintenanceCommit.id} />}
     {control && <ControlEvidence control={control} snapshot={snapshot} jobs={jobs} navigation={navigation} />}
     {pastControl.map((receipt) => <details key={`${receipt.planRevision ?? ""}:${receipt.unitId ?? ""}`}>
       <summary>Earlier control decision · {text(receipt.state)}{receipt.planRevision && ` · Plan ${receipt.planRevision.slice(0, 12)}`}</summary>

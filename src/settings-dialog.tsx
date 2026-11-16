@@ -21,6 +21,7 @@ import { ProjectSubagentControls } from "@/subagent-quota";
 import { ProjectSubagentAuditControl } from "@/subagent-audit-controls";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowSettingsProposals } from "@/workflow-settings-proposals";
+import { WorkflowMaintenanceSettings } from "@/workflow-maintenance";
 import "./settings-dialog.css";
 
 type SettingsDialogProps = Omit<WorkspaceProps, "checkout"> & {
@@ -251,7 +252,10 @@ function SettingsSession({
           ? <CustomizationExample approved={approvedExample} approve={() => setApprovedExample(true)} />
           : <CustomizationsSettings key={checkout?.checkoutId} checkoutId={checkout?.checkoutId} embedded />;
       case "system":
-        return <SystemSettings simulated={simulation ? maintenance : undefined} startSimulation={simulate} />;
+        return <>
+          <SystemSettings simulated={simulation ? maintenance : undefined} startSimulation={simulate} />
+          {!simulation && checkout && <WorkflowMaintenanceSettings key={checkout.projectId} checkout={checkout} />}
+        </>;
       case "conversation":
         if (simulation || !checkout) return policy("conversation");
         return <>

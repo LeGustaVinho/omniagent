@@ -18,6 +18,7 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowCommandRun } from "@/workflow-command";
 import { workflowRunTarget } from "@/workflow-execution-model";
 import { WorkflowApproval } from "@/workflow-approval";
+import { WorkflowMaintenanceDelivery } from "@/workflow-maintenance";
 
 type Proposal = { sequence: string; text: string };
 type TaskOption = { id: string; title: string };
@@ -95,6 +96,11 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
     unitId === last?.unit.id && nodeInstanceId === (gitNodes.commit ?? "commit") && port === "git" &&
       value.kind === "git" && value.evidence.id === last?.commitEvidenceId,
   );
+  const maintenanceNodes = delivery.definition?.nodes.filter(({ instance }) =>
+    instance.kind === "activate_maintenance" && delivery.definition?.wires.some(({ from, to }) =>
+      from.node === finalGit?.nodeInstanceId && from.port === finalGit?.port && to.node === instance.id && to.port === "git")) ?? [];
+  const maintenanceWorkflowId = delivery.run.version?.id;
+  const commitEvidenceId = last?.commitEvidenceId;
   const result = delivery.artifacts.some(({ nodeInstanceId }) => nodeInstanceId === "result");
   const error = proposals.error ?? tasks.error ?? units.error ?? state.error ?? history.error;
 
@@ -207,6 +213,10 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
       scope={scope} unit={last} gitArtifactId={finalGit.id} actions={actions} automaticOutcome={mergeOutcome}
       mergeNodeId={gitNodes.merge} onOutcome={(outcome) => setMergeState({ unitId: last.unit.id, outcome })} />}
     {archived?.merge && taskId && <SavedDeliveryMerge projectId={projectId} taskId={taskId} workflowRunId={scope.runId} receipt={archived.merge} />}
+    {taskId && commitEvidenceId && finalGit && !awaitingUnit && maintenanceWorkflowId &&
+      maintenanceNodes.map(({ instance }) => <WorkflowMaintenanceDelivery key={instance.id}
+        projectId={projectId} workflowRunId={scope.runId} workflowId={maintenanceWorkflowId} nodeId={instance.id}
+        gitArtifactId={finalGit.id} taskId={taskId} commitEvidenceId={commitEvidenceId} />)}
     {currentTask && linked && last && finalGit && !awaitingUnit && !result && <Button variant="outline" disabled={actions.busy || currentTask.waitingForMerge}
       onClick={() => actions.execute(() => invoke("execute_repository_delivery_unit", {
         input: { ...scope, taskId, unitId: last.unit.id, nodeId: "result",

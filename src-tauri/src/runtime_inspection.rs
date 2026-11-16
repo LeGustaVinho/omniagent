@@ -44,7 +44,7 @@ pub(crate) struct RuntimeInspection {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BuildIdentity {
+pub(crate) struct BuildIdentity {
     version: String,
     target: String,
     profile: String,
@@ -53,7 +53,7 @@ struct BuildIdentity {
 }
 
 impl BuildIdentity {
-    fn running() -> Self {
+    pub(crate) fn running() -> Self {
         let commit = env!("OMNIAGENT_BUILD_COMMIT");
         Self {
             version: env!("CARGO_PKG_VERSION").into(),

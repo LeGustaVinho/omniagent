@@ -75,6 +75,19 @@ pub(super) fn materialize(
     git.materialize_tree(&tree, &[&selected.base_commit], b"Selected candidate\n")
 }
 
+pub(crate) fn materialize_maintenance_commit(
+    git_common_dir: &Path,
+    commit: &str,
+    expected_tree: &str,
+) -> Result<MaterializedCandidate> {
+    let (checkout, tree) = ScratchGit::new(git_common_dir, commit)?.materialize_commit(commit)?;
+    ensure!(
+        tree == expected_tree,
+        "The verified commit no longer matches the accepted tree"
+    );
+    Ok(checkout)
+}
+
 fn replay(
     capture: &CandidateRevision,
     selection: &CandidateSelection,

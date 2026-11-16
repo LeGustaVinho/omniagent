@@ -8,6 +8,7 @@ use super::{
 };
 
 pub(super) const BUILTIN_DELIVERY_ID: &str = "builtin-task-delivery";
+pub(super) const MAINTENANCE_ACTIVATION_ID: &str = "activate-maintenance";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -148,16 +149,42 @@ pub fn builtin_delivery_graph(roles: DeliveryRoles) -> WorkflowGraph {
 }
 
 impl Store {
+    pub(super) async fn builtin_delivery_for_project(
+        &self,
+        project: String,
+        roles: DeliveryRoles,
+    ) -> Result<WorkflowGraph> {
+        let maintenance = self
+            .execute(move |db| super::maintenance::builtin_enabled(db, &project))
+            .await?;
+        let mut graph = builtin_delivery_graph(roles);
+        if maintenance {
+            graph.nodes.push(NodeInstance {
+                id: MAINTENANCE_ACTIVATION_ID.into(),
+                kind: BuiltinNode::ActivateMaintenance,
+                configuration: NodeConfiguration::None,
+            });
+            for (from, to) in [("verified", "ready"), ("git", "git")] {
+                graph.wires.push(Wire {
+                    from: Endpoint { node: "commit".into(), port: from.into() },
+                    to: Endpoint { node: MAINTENANCE_ACTIVATION_ID.into(), port: to.into() },
+                });
+            }
+        }
+        Ok(graph)
+    }
+
     pub async fn start_builtin_delivery(
         &self,
         project: String,
         roles: DeliveryRoles,
     ) -> Result<WorkflowRun> {
+        let graph = self.builtin_delivery_for_project(project.clone(), roles).await?;
         let version = self
             .save_workflow_revision(
                 project.clone(),
                 BUILTIN_DELIVERY_ID.into(),
-                builtin_delivery_graph(roles),
+                graph,
             )
             .await?;
         self.start_workflow_run(project, version).await

@@ -15,7 +15,7 @@ use crate::{
 use super::{
     ArtifactValue, BuiltinNode, DeliveryRoles, WorkflowHostRequest, WorkflowRevision, WorkflowRun,
     artifacts::insert_artifact,
-    builtin_delivery_graph, digest,
+    digest,
     execution::{host_request_revision, record_host_completion},
     registry::supports_pinned_execution,
     runtime::{insert_workflow_run, load_definition, load_workflow_run},
@@ -138,11 +138,12 @@ impl Store {
         project: String,
         source: WorkflowLaunchSource,
     ) -> Result<WorkflowRun> {
+        let graph = self.builtin_delivery_for_project(project.clone(), DeliveryRoles::default()).await?;
         let revision = self
             .save_workflow_revision(
                 project.clone(),
                 super::builtin::BUILTIN_DELIVERY_ID.into(),
-                builtin_delivery_graph(DeliveryRoles::default()),
+                graph,
             )
             .await?;
         self.launch_workflow_manual(ManualWorkflowLaunch {

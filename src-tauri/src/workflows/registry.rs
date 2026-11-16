@@ -20,6 +20,7 @@ pub enum BuiltinNode {
     AcceptCandidate,
     VerifyCommit,
     VerifyMerge,
+    ActivateMaintenance,
     Command,
     McpTool,
     Condition,
@@ -50,6 +51,7 @@ impl BuiltinNode {
                 | Self::AcceptCandidate
                 | Self::VerifyCommit
                 | Self::VerifyMerge
+                | Self::ActivateMaintenance
                 | Self::Result
         )
     }
@@ -157,6 +159,7 @@ pub enum Executor {
     RecordCandidateAcceptance,
     VerifyGitCommit,
     VerifyGitMerge,
+    ActivateMaintenanceFixture,
     ExecuteCommand,
     ExecuteMcpTool,
     EvaluateCondition,
@@ -188,6 +191,7 @@ pub enum Effect {
     RecordAcceptance,
     VerifyRepositoryCommit,
     VerifyRepositoryMerge,
+    RecordMaintenanceActivation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,6 +377,15 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             Effect::VerifyRepositoryMerge,
             &[("ready", Control), ("git", Data(Git))],
             &[("verified", Control), ("integration", Data(Merge))],
+        ),
+        (
+            ActivateMaintenance,
+            "Activate maintenance candidate",
+            Executor::ActivateMaintenanceFixture,
+            ConfigurationKind::None,
+            Effect::RecordMaintenanceActivation,
+            &[("ready", Control), ("git", Data(Git))],
+            &[("activated", Control), ("source", Data(Git))],
         ),
         (
             Command,
