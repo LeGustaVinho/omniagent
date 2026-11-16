@@ -22,6 +22,12 @@ use crate::{
     tasks::TaskDispatchContext,
 };
 
+mod instruction_evidence;
+pub use instruction_evidence::{
+    InstructionDispatch, InstructionDispatchMode, InstructionDispatchStatus, InstructionReceipt,
+    InstructionReview,
+};
+
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextSnapshot {
@@ -107,6 +113,7 @@ pub struct DispatchEvidence {
     pub snapshot: ContextSnapshot,
     pub frames: Vec<Vec<u8>>,
     pub delivery: Delivery,
+    pub instructions: Vec<InstructionDispatch>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -211,7 +218,8 @@ impl Store {
         run_id: String,
     ) -> Result<Option<DispatchEvidence>> {
         self.execute(move |db| {
-            let record = db
+            let tx = db.transaction()?;
+            let record = tx
                 .query_row(
                     "SELECT d.id, d.turn_id, s.payload, d.frames, d.delivery FROM dispatches d
                  JOIN context_snapshots s ON s.id = d.snapshot_id
@@ -231,12 +239,22 @@ impl Store {
                 .optional()?;
             record
                 .map(|(id, turn_id, snapshot, frames, delivery)| {
+                    let snapshot: ContextSnapshot =
+                        serde_json::from_slice(&protection::unprotect(&snapshot)?)?;
+                    let delivery = serde_json::from_value(serde_json::Value::String(delivery))?;
+                    let instructions = instruction_evidence::load(
+                        &tx,
+                        &run_id,
+                        &snapshot.submitted_messages,
+                        delivery,
+                    )?;
                     Ok(DispatchEvidence {
                         id,
                         turn_id,
-                        snapshot: serde_json::from_slice(&protection::unprotect(&snapshot)?)?,
+                        snapshot,
                         frames: serde_json::from_slice(&protection::unprotect(&frames)?)?,
-                        delivery: serde_json::from_value(serde_json::Value::String(delivery))?,
+                        delivery,
+                        instructions,
                     })
                 })
                 .transpose()

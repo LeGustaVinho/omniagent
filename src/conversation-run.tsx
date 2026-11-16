@@ -6,6 +6,7 @@ import type { RunRecord } from "@/bindings/RunRecord";
 import type { SubagentAuditGap } from "@/bindings/SubagentAuditGap";
 import { Button } from "@/components/ui/button";
 import { ConversationChildren, recordChildActivity, type ChildActivity, type ChildLocation, type Delegation } from "@/conversation-children";
+import { ConversationDeliveries, type ConversationInput } from "@/conversation-deliveries";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
 
 type EventData =
@@ -214,7 +215,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
     queryKey: ["conversation-run", run.id, "input"],
     enabled: showInput,
     refetchInterval: showInput && live ? 400 : false,
-    queryFn: () => invoke<{ delivery: string; frames: string[] } | null>("conversation_input", { conversationId, runId: run.id }),
+    queryFn: () => invoke<ConversationInput | null>("conversation_input", { conversationId, runId: run.id }),
   });
   const usage = projection?.usage;
   return (
@@ -269,10 +270,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose,
           {input.isPending && <p className="text-xs text-muted-foreground">Loading input…</p>}
           {input.error && <p role="alert" className="text-sm text-red-300">{String(input.error)}</p>}
           {input.data === null && <p className="text-xs text-muted-foreground">No input has been prepared.</p>}
-          {input.data && <>
-            <p className="text-xs text-muted-foreground">Delivery {input.data.delivery}</p>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{input.data.frames.join("")}</pre>
-          </>}
+          {input.data && <ConversationDeliveries input={input.data} conversationId={conversationId} runId={run.id} live={live} />}
         </section>
       )}
       </div>

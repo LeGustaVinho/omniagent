@@ -546,9 +546,12 @@ pub async fn conversation_events(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConversationInput {
     delivery: omniagent::dispatch::Delivery,
+    turn_id: String,
     frames: Vec<String>,
+    instructions: Vec<omniagent::dispatch::InstructionDispatch>,
 }
 
 #[tauri::command]
@@ -571,7 +574,9 @@ pub async fn conversation_input(
                 .map_err(|_| "The dispatch contains a non-UTF-8 frame".to_owned())?;
             Ok(ConversationInput {
                 delivery: dispatch.delivery,
+                turn_id: dispatch.turn_id,
                 frames,
+                instructions: dispatch.instructions,
             })
         })
         .transpose()

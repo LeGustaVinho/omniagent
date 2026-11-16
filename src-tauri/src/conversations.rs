@@ -2721,6 +2721,7 @@ mod tests {
     async fn steering_preserves_receipts_and_requires_review_for_uncertain_delivery() -> Result<()>
     {
         use crate::{
+            dispatch::{InstructionDispatchMode, InstructionDispatchStatus, InstructionReceipt},
             jobs::{AdmissionEnvironment, InstructionDelivery, JobContext},
             providers::{
                 capabilities::{
@@ -2827,6 +2828,20 @@ mod tests {
                         model: None,
                         effort: None,
                     },
+                },
+            )
+            .await?;
+        store
+            .record_agent_observation(
+                original.run.id.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: ProviderLocation {
+                        session_id: Some(target.session_id.clone()),
+                        turn_id: Some(target.turn_id.clone()),
+                        ..Default::default()
+                    },
+                    data: ProviderEventData::TurnStarted,
                 },
             )
             .await?;
@@ -2969,6 +2984,64 @@ mod tests {
             .await?
             .unwrap();
         assert_eq!(original_dispatch.snapshot.submitted_messages.len(), 1);
+        let [
+            initial_delivery,
+            rejected_delivery,
+            accepted_delivery,
+            uncertain_delivery,
+        ] = original_dispatch.instructions.as_slice()
+        else {
+            anyhow::bail!("Expected the original delivery and three ordered steering attempts");
+        };
+        assert_eq!(initial_delivery.text, "Initial prompt");
+        assert_eq!(initial_delivery.mode, InstructionDispatchMode::Standalone);
+        assert_eq!(
+            initial_delivery.status,
+            InstructionDispatchStatus::Submitted
+        );
+        assert!(matches!(
+            initial_delivery.receipt,
+            Some(InstructionReceipt::TurnStarted { .. })
+        ));
+        assert_eq!(rejected_delivery.text, "Definitively rejected");
+        assert_eq!(
+            rejected_delivery.status,
+            InstructionDispatchStatus::Rejected
+        );
+        assert_eq!(accepted_delivery.revision_id, revision);
+        assert_eq!(accepted_delivery.text, "Accepted revision");
+        assert_eq!(accepted_delivery.mode, InstructionDispatchMode::Steering);
+        assert_eq!(
+            accepted_delivery.status,
+            InstructionDispatchStatus::Accepted
+        );
+        assert_eq!(
+            accepted_delivery.steering_frame.as_deref(),
+            Some("fixture-steer")
+        );
+        assert_eq!(
+            accepted_delivery.provider_turn_id.as_deref(),
+            Some(target.turn_id.as_str())
+        );
+        assert!(matches!(
+            accepted_delivery.receipt,
+            Some(InstructionReceipt::SteeringResponse {
+                outcome: SteerOutcome::Accepted,
+                ..
+            })
+        ));
+        assert_eq!(uncertain_delivery.instruction_id, uncertain.id);
+        assert_eq!(
+            uncertain_delivery.status,
+            InstructionDispatchStatus::Unconfirmed
+        );
+        assert_eq!(uncertain_delivery.receipt, None);
+        assert!(
+            store
+                .agent_dispatch("other-conversation".into(), original.run.id.clone())
+                .await?
+                .is_none()
+        );
         let history = store.conversation_history(conversation.id.clone()).await?;
         assert_eq!(
             history
@@ -2988,13 +3061,24 @@ mod tests {
         assert!(store.claim_next_job(env.clone()).await?.is_none());
         store
             .resolve_uncertain_steering(
-                conversation.id,
+                conversation.id.clone(),
                 uncertain.id,
                 uncertain.revision_id.clone(),
-                original.run.id,
+                original.run.id.clone(),
                 true,
             )
             .await?;
+        let reviewed = store
+            .agent_dispatch(conversation.id, original.run.id)
+            .await?
+            .unwrap();
+        assert_eq!(
+            reviewed
+                .instructions
+                .last()
+                .and_then(|instruction| instruction.review),
+            Some(crate::dispatch::InstructionReview::Undelivered)
+        );
         let retry = store
             .claim_next_job(env)
             .await?
@@ -5359,6 +5443,20 @@ mod tests {
             drop(store);
             let store = Store::open(database)?;
             store.recover_agent_attempts_after_restart().await?;
+            let evidence = store
+                .agent_dispatch(conversation.id.clone(), resumed.run.id.clone())
+                .await?
+                .context("missing uncertain dispatch evidence")?;
+            assert_eq!(
+                evidence.instructions[0].mode,
+                crate::dispatch::InstructionDispatchMode::Continuation
+            );
+            assert_eq!(
+                evidence.instructions[0].status,
+                crate::dispatch::InstructionDispatchStatus::Unconfirmed
+            );
+            assert_eq!(evidence.instructions[0].revision_id, claimed_revision);
+            assert_eq!(evidence.instructions[0].text, "Revised first");
             let pending = store
                 .pending_conversation_instructions(conversation.id.clone(), environment.clone())
                 .await?;
@@ -5385,6 +5483,20 @@ mod tests {
             return Ok(());
         }
         store.settle_dispatch(dispatch, Delivery::Submitted).await?;
+        let evidence = store
+            .agent_dispatch(conversation.id.clone(), resumed.run.id.clone())
+            .await?
+            .context("missing continuation dispatch evidence")?;
+        assert_eq!(
+            evidence.instructions[0].mode,
+            crate::dispatch::InstructionDispatchMode::Continuation
+        );
+        assert_eq!(
+            evidence.instructions[0].status,
+            crate::dispatch::InstructionDispatchStatus::Submitted
+        );
+        assert_eq!(evidence.instructions[0].revision_id, claimed_revision);
+        assert_eq!(evidence.instructions[0].text, "Revised first");
         store
             .finish_agent_attempt(resumed.run.id.clone(), RunStatus::Succeeded, None)
             .await?;
