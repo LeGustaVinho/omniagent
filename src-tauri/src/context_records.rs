@@ -5,6 +5,8 @@ use uuid::Uuid;
 
 use crate::{protection, store::Store};
 
+pub mod assembly;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextRecordKind {
