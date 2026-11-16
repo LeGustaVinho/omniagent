@@ -23,6 +23,7 @@ mod plan_revision;
 #[cfg(test)]
 mod planning_integration;
 mod registry;
+mod subflow;
 pub mod role_templates;
 pub mod triggers;
 mod runtime;
@@ -66,6 +67,7 @@ pub use registry::{
     NodeDefinition, Port, PortType, builtin_registry,
 };
 pub use runtime::{NodeAttempt, NodePin, WorkflowAgentSubmission, WorkflowRun};
+pub use subflow::WorkflowSubflow;
 pub(crate) use runtime::{load_definition as load_workflow_definition, load_node_attempt};
 pub(crate) use unit_execution::validate_unit_acceptance;
 pub use unit_execution::{WorkflowUnitOutcome, WorkflowUnitRequest, WorkflowUnitSubmission};
@@ -126,6 +128,8 @@ pub struct WorkflowDefinition {
     pub name: String,
     pub nodes: Vec<PinnedNode>,
     pub wires: Vec<Wire>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subflows: Vec<WorkflowSubflow>,
 }
 
 fn digest(payload: &[u8]) -> String {
@@ -144,6 +148,17 @@ fn compile_resolved<'definition>(
     id: String,
     graph: WorkflowGraph,
     definition_for: impl Fn(&NodeInstance) -> Option<&'definition NodeDefinition>,
+) -> Result<WorkflowDefinition> {
+    ensure!(graph.nodes.iter().all(|node| node.kind != BuiltinNode::Subflow),
+        "Select a pinned subflow in an authoring package");
+    compile_resolved_graph(id, graph, definition_for, true)
+}
+
+fn compile_resolved_graph<'definition>(
+    id: String,
+    graph: WorkflowGraph,
+    definition_for: impl Fn(&NodeInstance) -> Option<&'definition NodeDefinition>,
+    enforce_release: bool,
 ) -> Result<WorkflowDefinition> {
     ensure!(
         !id.trim().is_empty() && !graph.name.trim().is_empty(),
@@ -247,12 +262,15 @@ fn compile_resolved<'definition>(
         }
     }
     ensure!(visited == nodes.len(), "workflow graph contains a cycle");
-    control::validate_release_wires(&nodes, &graph.wires)?;
+    if enforce_release {
+        control::validate_release_wires(&nodes, &graph.wires)?;
+    }
     let revision = digest(&serde_json::to_vec(&(&graph.name, &nodes, &graph.wires))?);
     Ok(WorkflowDefinition {
         version: WorkflowRevision { id, revision },
         name: graph.name,
         nodes,
         wires: graph.wires,
+        subflows: Vec::new(),
     })
 }

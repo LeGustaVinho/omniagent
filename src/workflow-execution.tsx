@@ -42,15 +42,23 @@ function WorkflowExecutionCanvas({ snapshot, navigation }: {
   const { definition, run } = snapshot;
   const [selected, setSelected] = useState(definition.nodes[0]?.instance.id ?? "");
   const [selectedUnit, setSelectedUnit] = useState<string>();
+  const [subflowPath, setSubflowPath] = useState("");
   const unit = snapshot.units.find(({ unit }) => unit.id === selectedUnit) ?? snapshot.units.find(({ planRevision }) => planRevision === run.planRevision);
-  const stages = definition.nodes.map((node) => ({ node, detail: presentation(snapshot, node, unit) }));
-  const positions = useMemo(() => initialNodePositions({ name: definition.name, nodes: definition.nodes.map(({ instance }) => instance), wires: definition.wires }), [definition]);
+  const subflow = definition.subflows?.find(({ path }) => path === subflowPath);
+  const graph = useMemo(() => ({
+    name: subflow?.name ?? definition.name,
+    nodes: definition.nodes.filter(({ instance }) => !subflow || subflow.nodes.includes(instance.id)).map(({ instance }) => instance),
+    wires: definition.wires.filter(({ from, to }) => !subflow || subflow.nodes.includes(from.node) && subflow.nodes.includes(to.node)),
+  }), [definition, subflow]);
+  const stages = definition.nodes.filter(({ instance }) => graph.nodes.some(({ id }) => id === instance.id))
+    .map((node) => ({ node, detail: presentation(snapshot, node, unit) }));
+  const positions = useMemo(() => initialNodePositions(graph), [graph]);
   const active = stages.find(({ node }) => node.instance.id === selected);
   const nodes: ExecutionNode[] = stages.map(({ node, detail }) => ({
     id: node.instance.id, position: positions[node.instance.id]!, type: "execution", selected: node.instance.id === selected,
     ariaLabel: `${node.definition.title} · ${stateLabel[detail.status]}`, data: { pinned: node, status: detail.status },
   }));
-  const edges: Edge[] = definition.wires.map((wire) => {
+  const edges: Edge[] = graph.wires.map((wire) => {
     const output = definition.nodes.find(({ instance }) => instance.id === wire.from.node)?.definition.outputs.find(({ name }) => name === wire.from.port);
     const control = output?.value.kind === "control";
     const color = control ? "var(--muted-foreground)" : "var(--primary)";
@@ -64,6 +72,23 @@ function WorkflowExecutionCanvas({ snapshot, navigation }: {
         <p>Pinned workflow revision <code className="break-all">{run.version.revision}</code></p></div>
       <Button variant="outline" type="button" onClick={() => navigation.openWorkspace("pipelines", run.id)}>Open delivery controls</Button>
     </header>
+    {!!definition.subflows?.length && <label className="workflow-execution-field">Pinned subflow
+      <select value={subflowPath} onChange={(event) => {
+        const path = event.currentTarget.value;
+        setSubflowPath(path);
+        setSelected(definition.subflows?.find((entry) => entry.path === path)?.nodes[0] ?? definition.nodes[0]?.instance.id ?? "");
+      }}>
+        <option value="">Entire workflow</option>
+        {definition.subflows.map(({ name, path }) => <option key={path} value={path}>{name} · {path}</option>)}
+      </select>
+    </label>}
+    {subflow && <details>
+      <summary>Pinned subflow outputs</summary>
+      <p>Revision <code className="break-all">{subflow.version.revision}</code></p>
+      <ul>{Object.entries(subflow.outputs).map(([port, endpoint]) => <li key={port}>
+        {port} · <code>{endpoint.node}.{endpoint.port}</code>
+      </li>)}</ul>
+    </details>}
     {snapshot.units.length > 0 && <label className="workflow-execution-field">Logical unit
       <select value={unit?.unit.id ?? ""} onChange={(event) => setSelectedUnit(event.currentTarget.value)}>
         {!unit && <option value="">Select a saved unit</option>}
@@ -74,7 +99,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation }: {
     </label>}
     <div className="workflow-execution-layout">
       <div className="workflow-graph-canvas" aria-label="Workflow execution graph">
-        <ReactFlow<ExecutionNode, Edge> nodes={nodes} edges={edges} nodeTypes={executionNodeTypes}
+        <ReactFlow<ExecutionNode, Edge> key={subflowPath} nodes={nodes} edges={edges} nodeTypes={executionNodeTypes}
           nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null}
           onNodeClick={(_, node) => setSelected(node.id)} colorMode={document.documentElement.dataset.appTheme === "light" ? "light" : "dark"}
           fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2}>

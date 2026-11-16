@@ -4,16 +4,17 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::workflows::{
-    BuiltinNode, CommandConfiguration, NodeConfiguration, NodeDefinition, WorkflowDefinition,
-    WorkflowGraph, WorkflowRevision,
+    BuiltinNode, CommandConfiguration, ConfigurationKind, Endpoint, NodeConfiguration,
+    NodeDefinition, WorkflowDefinition, WorkflowGraph, WorkflowRevision,
     command::validate_command_binding,
-    compile_resolved, digest,
+    compile_resolved_graph, digest,
     registry::supports_pinned_execution,
     role_templates::{
         SaveConversationTemplate, TemplateBase, load_revision, save_conversation_template_in_tx,
         validate_conversation_template,
     },
     runtime::load_definition,
+    subflow::{self, BoundSubflow},
 };
 
 use super::*;
@@ -176,7 +177,7 @@ fn stale_member(
     Ok(None)
 }
 
-fn head_revision(
+pub(super) fn head_revision(
     db: &Connection,
     project: &str,
     version: &PackageArtifactVersion,
@@ -301,6 +302,12 @@ fn publish_member(
     }
     let mut body = member.body;
     let kind = body.kind();
+    let interface = match &body {
+        PackageArtifactBody::Subflow {
+            inputs, outputs, ..
+        } => Some((inputs.clone(), outputs.clone())),
+        _ => None,
+    };
     let mut id = member
         .base
         .as_ref()
@@ -343,16 +350,30 @@ fn publish_member(
                     }
                 }
             }
-            let compiled = compile_graph(
-                db,
-                project,
-                &id,
-                graph,
-                pins,
-                &dependencies,
-                named_commands,
-                &mut blockers,
-            )?;
+            let compiled = if let Some(interface) = &interface {
+                GraphCompiler::new(db, project, &|version| load_published(db, project, version))
+                    .compile(
+                        &id,
+                        graph,
+                        pins,
+                        &dependencies,
+                        named_commands,
+                        &mut blockers,
+                        Some(interface),
+                    )?
+                    .0
+            } else {
+                compile_graph(
+                    db,
+                    project,
+                    &id,
+                    graph,
+                    pins,
+                    &dependencies,
+                    named_commands,
+                    &mut blockers,
+                )?
+            };
             if kind == PackageArtifactKind::Pipeline {
                 workflow = Some(compiled);
             }
@@ -443,39 +464,6 @@ fn publish_member(
             &configured_command(&body).context("Invalid Command configuration")?,
         )?;
     }
-    if let PackageArtifactBody::Subflow {
-        graph,
-        inputs,
-        outputs,
-    } = &body
-    {
-        for ((name, endpoint), input) in inputs
-            .iter()
-            .map(|port| (port, true))
-            .chain(outputs.iter().map(|port| (port, false)))
-        {
-            bounded_name(name)?;
-            let definition = pins
-                .get(&endpoint.node)
-                .context("A subflow port points to an unknown node")?;
-            ensure!(
-                definition
-                    .outputs
-                    .iter()
-                    .any(|port| port.name == endpoint.port),
-                "Subflow port {name} points to an unknown output"
-            );
-            if input {
-                ensure!(
-                    graph
-                        .nodes
-                        .iter()
-                        .any(|node| node.id == endpoint.node && node.kind == BuiltinNode::Start),
-                    "A public subflow input binds a Start output"
-                );
-            }
-        }
-    }
     let revision = match role_revision {
         Some(revision) => revision,
         None => digest(&serde_json::to_vec(&(
@@ -541,94 +529,293 @@ fn configured_command(body: &PackageArtifactBody) -> Option<CommandConfiguration
     })
 }
 
-fn compile_graph(
+pub(super) fn compile_graph(
     db: &Connection,
     project: &str,
     id: &str,
     graph: &WorkflowGraph,
     pins: &BTreeMap<String, NodeDefinition>,
     dependencies: &BTreeMap<String, PublishedPackageArtifact>,
-    mut unbound_commands: BTreeSet<String>,
+    unbound_commands: BTreeSet<String>,
     blockers: &mut Vec<String>,
 ) -> Result<WorkflowDefinition> {
-    let mut graph = graph.clone();
-    let mut effective_pins = pins.clone();
-    for (slot, artifact) in dependencies {
-        let node = graph
-            .nodes
-            .iter_mut()
-            .find(|node| node.id == *slot)
-            .with_context(|| format!("The reference {slot} does not identify a graph node"))?;
-        match &artifact.body {
-            PackageArtifactBody::Preset {
-                node_kind,
-                configuration,
-                ..
-            } => {
-                ensure!(
-                    node.kind == *node_kind,
-                    "The preset for {slot} configures a different node type"
-                );
-                node.configuration.clone_from(configuration);
-                effective_pins.insert(
-                    slot.clone(),
-                    artifact
-                        .definitions
-                        .get("$preset")
-                        .context("The pinned preset definition is unavailable")?
-                        .clone(),
-                );
-            }
-            PackageArtifactBody::Command { .. } => {
-                ensure!(
-                    node.kind == BuiltinNode::Command,
-                    "The Command reference for {slot} requires a Command node"
-                );
-                if let Some(configuration) = configured_command(&artifact.body) {
-                    node.configuration = NodeConfiguration::Command(configuration);
-                } else {
-                    unbound_commands.insert(slot.clone());
+    compile_graph_with_loader(
+        db,
+        project,
+        id,
+        graph,
+        pins,
+        dependencies,
+        unbound_commands,
+        blockers,
+        &|version| load_published(db, project, version),
+    )
+}
+
+type ArtifactLoader<'a> =
+    dyn Fn(&PackageArtifactVersion) -> Result<Option<PublishedPackageArtifact>> + 'a;
+pub(super) type Interface = (BTreeMap<String, Endpoint>, BTreeMap<String, Endpoint>);
+
+pub(super) fn compile_graph_with_loader(
+    db: &Connection,
+    project: &str,
+    id: &str,
+    graph: &WorkflowGraph,
+    pins: &BTreeMap<String, NodeDefinition>,
+    dependencies: &BTreeMap<String, PublishedPackageArtifact>,
+    unbound_commands: BTreeSet<String>,
+    blockers: &mut Vec<String>,
+    loader: &ArtifactLoader<'_>,
+) -> Result<WorkflowDefinition> {
+    Ok(GraphCompiler::new(db, project, loader)
+        .compile(
+            id,
+            graph,
+            pins,
+            dependencies,
+            unbound_commands,
+            blockers,
+            None,
+        )?
+        .0)
+}
+
+pub(super) fn compile_simulation_graph(
+    db: &Connection,
+    project: &str,
+    id: &str,
+    graph: &WorkflowGraph,
+    pins: &BTreeMap<String, NodeDefinition>,
+    dependencies: &BTreeMap<String, PublishedPackageArtifact>,
+    blockers: &mut Vec<String>,
+    interface: Option<&Interface>,
+    loader: &ArtifactLoader<'_>,
+) -> Result<WorkflowDefinition> {
+    let mut compiler = GraphCompiler::new(db, project, loader);
+    compiler.validate_bindings = false;
+    Ok(compiler
+        .compile(
+            id,
+            graph,
+            pins,
+            dependencies,
+            BTreeSet::new(),
+            blockers,
+            interface,
+        )?
+        .0)
+}
+
+struct GraphCompiler<'a> {
+    db: &'a Connection,
+    project: &'a str,
+    loader: &'a ArtifactLoader<'a>,
+    stack: BTreeSet<PackageArtifactVersion>,
+    validate_bindings: bool,
+}
+
+impl<'a> GraphCompiler<'a> {
+    fn new(db: &'a Connection, project: &'a str, loader: &'a ArtifactLoader<'a>) -> Self {
+        Self {
+            db,
+            project,
+            loader,
+            stack: BTreeSet::new(),
+            validate_bindings: true,
+        }
+    }
+
+    fn compile(
+        &mut self,
+        id: &str,
+        graph: &WorkflowGraph,
+        pins: &BTreeMap<String, NodeDefinition>,
+        dependencies: &BTreeMap<String, PublishedPackageArtifact>,
+        mut unbound_commands: BTreeSet<String>,
+        blockers: &mut Vec<String>,
+        interface: Option<&Interface>,
+    ) -> Result<(WorkflowDefinition, BTreeMap<String, Endpoint>)> {
+        let mut graph = graph.clone();
+        let mut effective_pins = pins.clone();
+        let mut calls = BTreeMap::new();
+        for (slot, artifact) in dependencies {
+            let node = graph
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == *slot)
+                .with_context(|| format!("The reference {slot} does not identify a graph node"))?;
+            match &artifact.body {
+                PackageArtifactBody::Preset {
+                    node_kind,
+                    configuration,
+                    ..
+                } => {
+                    ensure!(
+                        node.kind == *node_kind,
+                        "The preset for {slot} configures a different node type"
+                    );
+                    node.configuration.clone_from(configuration);
+                    effective_pins.insert(
+                        slot.clone(),
+                        artifact
+                            .definitions
+                            .get("$preset")
+                            .context("The pinned preset definition is unavailable")?
+                            .clone(),
+                    );
+                }
+                PackageArtifactBody::Command { .. } => {
+                    ensure!(
+                        node.kind == BuiltinNode::Command,
+                        "The Command reference for {slot} requires a Command node"
+                    );
+                    if let Some(configuration) = configured_command(&artifact.body) {
+                        node.configuration = NodeConfiguration::Command(configuration);
+                    } else {
+                        unbound_commands.insert(slot.clone());
+                    }
+                }
+                PackageArtifactBody::Role { .. } => {
+                    ensure!(
+                        matches!(node.configuration, NodeConfiguration::AgentRole { .. }),
+                        "The role reference for {slot} requires an Agent node"
+                    );
+                    blockers.push(format!(
+                        "The node {slot} requires the pinned role {}.",
+                        artifact.name
+                    ));
+                }
+                PackageArtifactBody::Subflow { .. } if node.kind == BuiltinNode::Subflow => {
+                    ensure!(
+                        matches!(node.configuration, NodeConfiguration::None),
+                        "The subflow invocation {slot} does not accept native node configuration"
+                    );
+                    calls.insert(slot.clone(), self.child(artifact, blockers)?);
+                }
+                PackageArtifactBody::Subflow { .. } | PackageArtifactBody::McpTool { .. } => {
+                    blockers.push(format!(
+                        "The node {slot} requires the reusable artifact {}.",
+                        artifact.name
+                    ))
+                }
+                PackageArtifactBody::Pipeline { .. } => {
+                    anyhow::bail!("A pipeline reference requires a published subflow")
                 }
             }
-            PackageArtifactBody::Role { .. } => {
+        }
+        for node in &graph.nodes {
+            let pin = effective_pins
+                .get_mut(&node.id)
+                .context("A workflow node lost its reviewed definition")?;
+            if matches!(node.configuration, NodeConfiguration::SubflowEntry { .. }) {
                 ensure!(
-                    matches!(node.configuration, NodeConfiguration::AgentRole { .. }),
-                    "The role reference for {slot} requires an Agent node"
+                    interface.is_some(),
+                    "A root pipeline uses the native Start contract"
                 );
-                blockers.push(format!(
-                    "The node {slot} requires the pinned role {}.",
-                    artifact.name
-                ));
+                *pin = subflow::entry_definition(node, pin)?;
             }
-            PackageArtifactBody::Subflow { .. } | PackageArtifactBody::McpTool { .. } => blockers
-                .push(format!(
-                    "The node {slot} requires the reusable artifact {}.",
-                    artifact.name
-                )),
-            PackageArtifactBody::Pipeline { .. } => {
-                anyhow::bail!("A pipeline reference requires a published subflow")
+            ensure!(
+                supports_pinned_execution(pin)
+                    || node.kind == BuiltinNode::Start
+                        && pin.configuration == ConfigurationKind::SubflowEntry,
+                "The pinned definition for {} is unavailable",
+                node.id
+            );
+            if node.kind == BuiltinNode::Subflow && !calls.contains_key(&node.id) {
+                blockers.push(format!("Select a pinned subflow for {}.", node.id));
+            }
+            if self.validate_bindings
+                && !unbound_commands.contains(&node.id)
+                && let NodeConfiguration::Command(command) = &node.configuration
+            {
+                validate_command_binding(self.db, self.project, command).with_context(|| {
+                    format!("The Command registration for {} is unavailable", node.id)
+                })?;
             }
         }
+        let empty = BTreeMap::new();
+        let expanded = subflow::expand(
+            graph,
+            effective_pins,
+            calls,
+            interface.map_or(&empty, |(_, outputs)| outputs),
+        )?;
+        let mut definition = compile_resolved_graph(
+            id.to_owned(),
+            expanded.graph,
+            |node| expanded.definitions.get(&node.id),
+            interface.is_none(),
+        )?;
+        if let Some((inputs, outputs)) = interface {
+            for name in inputs.keys().chain(outputs.keys()) {
+                bounded_name(name)?;
+            }
+            if !inputs.is_empty() || !outputs.is_empty() {
+                subflow::validate_interface(&definition, inputs, &expanded.outputs)?;
+            }
+        }
+        definition.subflows = expanded.subflows;
+        Ok((definition, expanded.outputs))
     }
-    let definition = compile_resolved(id.to_owned(), graph, |node| effective_pins.get(&node.id))?;
-    for node in &definition.nodes {
+
+    fn child(
+        &mut self,
+        artifact: &PublishedPackageArtifact,
+        blockers: &mut Vec<String>,
+    ) -> Result<BoundSubflow> {
+        let PackageArtifactBody::Subflow {
+            graph,
+            inputs,
+            outputs,
+        } = &artifact.body
+        else {
+            anyhow::bail!("Expected a pinned subflow");
+        };
         ensure!(
-            supports_pinned_execution(&node.definition),
-            "The pinned definition for {} is unavailable",
-            node.instance.id
+            self.stack.len() < 32 && self.stack.insert(artifact.version.clone()),
+            "Nested subflow references contain a cycle or exceed the depth limit"
         );
-        if !unbound_commands.contains(&node.instance.id)
-            && let NodeConfiguration::Command(command) = &node.instance.configuration
-        {
-            validate_command_binding(db, project, command).with_context(|| {
-                format!(
-                    "The Command registration for {} is unavailable",
-                    node.instance.id
-                )
-            })?;
+        let mut dependencies = BTreeMap::new();
+        let mut commands = BTreeSet::new();
+        for (slot, reference) in &artifact.references {
+            match reference {
+                ResolvedPackageReference::Published { version } => {
+                    let target = (self.loader)(version)?
+                        .context("A pinned subflow dependency is unavailable")?;
+                    ensure!(
+                        target.version == *version,
+                        "A subflow dependency resolved to a different revision"
+                    );
+                    dependencies.insert(slot.clone(), target);
+                }
+                ResolvedPackageReference::Parameter { name, kind } => {
+                    blockers.push(format!("Choose the binding for {name}."));
+                    if *kind == PackageArtifactKind::Command {
+                        commands.insert(slot.clone());
+                    }
+                }
+            }
         }
+        let interface = (inputs.clone(), outputs.clone());
+        let (workflow, outputs) = self.compile(
+            &artifact.version.id,
+            graph,
+            &artifact.definitions,
+            &dependencies,
+            commands,
+            blockers,
+            Some(&interface),
+        )?;
+        subflow::validate_interface(&workflow, inputs, &outputs)?;
+        self.stack.remove(&artifact.version);
+        Ok(BoundSubflow {
+            name: artifact.name.clone(),
+            version: artifact.version.clone(),
+            workflow,
+            inputs: inputs.clone(),
+            outputs,
+        })
     }
-    Ok(definition)
 }
 
 fn save_artifact(

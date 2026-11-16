@@ -51,7 +51,7 @@ impl ConditionPredicate {
         }
     }
 
-    fn test(&self, value: &Value) -> bool {
+    pub(crate) fn test(&self, value: &Value) -> bool {
         let found = value.pointer(self.pointer());
         match self {
             Self::Exists { .. } => found.is_some(),

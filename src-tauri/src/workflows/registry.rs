@@ -24,6 +24,7 @@ pub enum BuiltinNode {
     Condition,
     Parallel,
     Join,
+    Subflow,
     Result,
 }
 
@@ -89,6 +90,7 @@ pub enum ConfigurationKind {
     RequiredChecks,
     Command,
     Condition,
+    SubflowEntry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +105,7 @@ pub enum NodeConfiguration {
     RequiredChecks { names: Vec<String> },
     Command(CommandConfiguration),
     Condition { predicate: ConditionPredicate },
+    SubflowEntry { outputs: Vec<Port> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +127,7 @@ pub enum Executor {
     EvaluateCondition,
     FanOut,
     JoinBranches,
+    ExpandSubflow,
     PublishResult,
 }
 
@@ -364,6 +368,15 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             &[("joined", Control)],
         ),
         (
+            Subflow,
+            "Subflow",
+            Executor::ExpandSubflow,
+            ConfigurationKind::None,
+            Effect::None,
+            &[][..],
+            &[][..],
+        ),
+        (
             Result,
             "Result",
             Executor::PublishResult,
@@ -434,6 +447,9 @@ impl NodeConfiguration {
             }
             (Self::Command(config), ConfigurationKind::Command) => config.is_valid(),
             (Self::Condition { predicate }, ConfigurationKind::Condition) => predicate.valid(),
+            (Self::SubflowEntry { outputs }, ConfigurationKind::SubflowEntry) => {
+                super::subflow::valid_entry_ports(outputs)
+            }
             _ => false,
         }
     }

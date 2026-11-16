@@ -26,9 +26,16 @@ export type ExecutionControl = {
   sourceRunId?: string | null;
   dependencies?: { from: WorkflowWire["from"]; toPort: string; selected: boolean; artifactId?: string | null }[];
 };
+export type ExecutionSubflow = {
+  path: string;
+  name: string;
+  version: WorkflowVersion & { destination: "project" | "library"; kind: "subflow" };
+  nodes: string[];
+  outputs: Record<string, WorkflowWire["from"]>;
+};
 export type WorkflowExecutionSnapshot = {
   run: WorkflowRun;
-  definition: { version: WorkflowVersion; name: string; nodes: ExecutionPinnedNode[]; wires: WorkflowWire[] };
+  definition: { version: WorkflowVersion; name: string; nodes: ExecutionPinnedNode[]; wires: WorkflowWire[]; subflows?: ExecutionSubflow[] };
   unitNodeIds: string[];
   units: ExecutionUnit[];
   jobs: ExecutionJob[];

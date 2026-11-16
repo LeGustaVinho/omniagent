@@ -15,6 +15,8 @@ mod model;
 mod publish;
 mod request;
 #[cfg(test)]
+mod subflow_tests;
+#[cfg(test)]
 mod tests;
 pub use model::*;
 pub(crate) use publish::ensure_package_runnable;

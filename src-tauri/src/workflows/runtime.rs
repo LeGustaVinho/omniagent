@@ -67,12 +67,24 @@ pub(super) fn insert_workflow_run(
     workflow: &WorkflowDefinition,
 ) -> Result<WorkflowRun> {
     super::authoring::ensure_package_runnable(db, project, &workflow.version)?;
+    ensure!(workflow.nodes.iter().all(|node| node.instance.kind != super::BuiltinNode::Subflow),
+        "An unbound subflow cannot launch");
     let id = Uuid::new_v4().to_string();
     db.execute("INSERT INTO job_pipeline_runs(id, project_id) VALUES (?1, ?2)", params![id, project])?;
     db.execute(
         "INSERT INTO workflow_run_pins VALUES (?1, ?2, ?3, ?4)",
         params![id, project, workflow.version.id, workflow.version.revision],
     )?;
+    for subflow in &workflow.subflows {
+        let scope = match subflow.version.destination {
+            super::authoring::package::PackageDestination::Project => format!("project:{project}"),
+            super::authoring::package::PackageDestination::Library => "library".into(),
+        };
+        db.execute(
+            "INSERT INTO workflow_subflow_pins VALUES (?1, ?2, ?3, 'subflow', ?4, ?5)",
+            params![id, subflow.path, scope, subflow.version.id, subflow.version.revision],
+        )?;
+    }
     for node in &workflow.nodes {
         let scheduler_kind = if node.definition.executor == Executor::RecordImplementationRelease {
             "implementation_approval"
