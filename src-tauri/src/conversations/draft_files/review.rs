@@ -28,6 +28,9 @@ use super::*;
 
 const MEDIA_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
 
+
+#[cfg(test)]
+mod tests;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentDraftReview {
