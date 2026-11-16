@@ -682,7 +682,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
               }
             }} />
           <div className="conv-composer-toolbar">
-              {library && <ConversationReferencePicker excludeId={conversationId} onOpen={library.open} />}
+              {library && <ConversationReferencePicker projectId={library.projectId} excludeId={conversationId} onOpen={library.open} />}
               <select aria-label="Provider" className={selectorClass} value={provider} onChange={(event) => {
                 setProvider(event.target.value as Provider);
                 setSelection(null);

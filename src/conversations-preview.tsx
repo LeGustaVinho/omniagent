@@ -268,7 +268,7 @@ function PreviewSession(props: WorkspaceProps & { simulation: NonNullable<Worksp
           })}
         </nav>
         {current ? <PreviewConversationPanel key={current.id} {...props} conversation={current}
-          references={library.conversations.filter(({ id, archived }) => id !== current.id && !archived)}
+          references={library.conversations.filter(({ id, project, archived }) => id !== current.id && project === current.project && !archived)}
           update={(update) => updateConversation(current.id, update)}
           onFork={(message) => openDialog("fork", current, message)}
           onRewind={(message) => openDialog("rewind", current, message)} />

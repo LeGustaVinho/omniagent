@@ -198,7 +198,9 @@ export function RealConversations({
       onStart={() => start.mutate()} startPending={start.isPending} startError={start.error} />
     : <p className="work-progress" role="status">Loading conversations…</p>;
   return (
-    <ConversationLibraryNavigation.Provider value={{ checkoutId: checkout.checkoutId, open: openLibraryConversation }}>
+    <ConversationLibraryNavigation.Provider value={{
+      checkoutId: checkout.checkoutId, projectId: checkout.projectId, open: openLibraryConversation,
+    }}>
     <div className="flex h-full min-h-0 min-w-0">
       {!compact && sidebar && <aside className="work-context">{contents}</aside>}
       {compact && <Dialog.Root open={sidebar} onOpenChange={onSidebarChange}>

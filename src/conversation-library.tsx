@@ -20,7 +20,11 @@ type ConversationLibraryEntry = {
 type ConversationIdentity = Pick<Conversation, "id" | "checkoutId" | "title">;
 export type OpenLibraryConversation = (checkout: ProjectCheckout, conversationId: string) => Promise<void>;
 export const conversationLibraryKey = ["conversation-library"];
-export const ConversationLibraryNavigation = createContext<{ checkoutId: string; open: OpenLibraryConversation } | null>(null);
+export const ConversationLibraryNavigation = createContext<{
+  checkoutId: string;
+  projectId: string;
+  open: OpenLibraryConversation;
+} | null>(null);
 
 const titleKey = (checkoutId: string, conversationId: string) => ["checkout-conversation", checkoutId, conversationId];
 
@@ -170,10 +174,12 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   </section>;
 }
 
-export function ConversationReferencePicker({ excludeId, onOpen }: { excludeId: string; onOpen: OpenLibraryConversation }) {
+export function ConversationReferencePicker({ projectId, excludeId, onOpen }: {
+  projectId: string; excludeId: string; onOpen: OpenLibraryConversation;
+}) {
   const [shown, setShown] = useState(false);
   const [query, setQuery] = useState("");
-  const list = useConversationLibrary(query, null, shown);
+  const list = useConversationLibrary(query, projectId, shown);
   const open = useMutation({
     mutationFn: (entry: ConversationLibraryEntry) => openEntry(onOpen, entry),
     onSuccess: () => setShown(false),
@@ -187,7 +193,7 @@ export function ConversationReferencePicker({ excludeId, onOpen }: { excludeId: 
     <Popover.Portal>
       <Popover.Content align="start" sideOffset={6} className="work-project-popover" aria-label="Conversation references">
         <label className="conv-search"><Search aria-hidden />
-          <input type="search" aria-label="Search conversation references" placeholder="Search all projects"
+          <input type="search" aria-label="Search conversation references" placeholder="Search this project"
             value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
         </label>
         {error && <p role="alert" className="conv-alert">{String(error)}</p>}
