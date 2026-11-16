@@ -349,3 +349,6 @@ fn pipeline_reference(version: &WorkflowRevision) -> PackageArtifactVersion {
 
 #[cfg(test)]
 mod protected_review;
+
+#[cfg(test)]
+mod usage_acceptance;
