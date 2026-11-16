@@ -15,6 +15,7 @@ import { useGitSimulation } from "@/git-simulation";
 import { PipelineCatalog } from "@/pipeline-catalog";
 import { PipelineAuthoringEditor, ProjectPipelineDrafts } from "@/workflow-authoring";
 import { WorkflowComparisons } from "@/workflow-comparison";
+import { WorkflowTriggers } from "@/workflow-triggers";
 import { deliveryBranch, deliveryCommitSha, deliveryMergeSha, deliveryRunId } from "@/tasks-demo-data";
 import {
   advancePipelineRun, beginPipelineRun, createDeliveryWorkflow, createStage, declineStage, interruptStage, resolveStage,
@@ -183,16 +184,18 @@ function StageRunDetails({ run, activeId, actions, links }: {
 export default function PipelinesWorkspace(props: WorkspaceProps) {
   if (props.simulation) return <PreviewPipelinesWorkspace {...props} />;
   const draftId = props.target?.startsWith("authoring:") ? props.target.slice("authoring:".length) : undefined;
-  const view = props.target === "compare" || props.target === "templates" ? props.target : draftId || props.target === "drafts" ? "drafts" : "delivery";
+  const view = props.target === "compare" || props.target === "templates" || props.target === "automations" ? props.target : draftId || props.target === "drafts" ? "drafts" : "delivery";
   return <div className="pipelines-workspace">
     <nav className="pipeline-tabs" aria-label="Pipelines views">
       <button type="button" aria-current={view === "delivery" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "delivery")}>Repository delivery</button>
       <button type="button" aria-current={view === "drafts" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "drafts")}>Pipeline drafts</button>
       <button type="button" aria-current={view === "templates" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "templates")}>Roles & templates</button>
       <button type="button" aria-current={view === "compare" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "compare")}>Compare models</button>
+      <button type="button" aria-current={view === "automations" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "automations")}>Automation rules</button>
     </nav>
     {view === "templates" ? <ConversationTemplateEditor key={props.checkout.checkoutId} checkout={props.checkout} />
       : view === "compare" ? <WorkflowComparisons key={props.checkout.checkoutId} {...props} />
+        : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
         : draftId ? <PipelineAuthoringEditor key={draftId} {...props} draftId={draftId} />
           : view === "drafts" ? <ProjectPipelineDrafts {...props} /> : <RepositoryDeliveryWorkspace {...props} />}
   </div>;

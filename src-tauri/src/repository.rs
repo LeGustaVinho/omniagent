@@ -39,7 +39,7 @@ pub use candidates::{AttemptWorktreeEvidence, CandidateRevision, GitChanges, Liv
 pub(crate) use candidates::{
     WorktreeCheckpointMismatch, save_reconciled_native_candidate, save_worktree_candidate,
 };
-pub(crate) use markdown::bind_job_markdown;
+pub(crate) use markdown::{bind_job_markdown, workflow_markdown_revision};
 pub use markdown::{RepositoryMarkdown, RepositoryMarkdownRevision};
 pub use markdown_catalog::RepositoryNoteCatalogEntry;
 pub use worktrees::strategy::{BranchStrategy, TaskBranchStrategy};

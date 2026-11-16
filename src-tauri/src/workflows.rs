@@ -14,6 +14,7 @@ mod execution;
 #[cfg(test)]
 mod git_integration;
 mod job_inputs;
+mod launch;
 mod merge_execution;
 mod operator;
 mod plan_revision;
@@ -21,6 +22,7 @@ mod plan_revision;
 mod planning_integration;
 mod registry;
 pub mod role_templates;
+pub mod triggers;
 mod runtime;
 #[cfg(test)]
 mod tests;
@@ -43,6 +45,10 @@ pub use command::{
 pub(crate) use command::publish_command_result;
 pub use execution::{NodeInputs, WorkflowHostRequest, WorkflowHostSubmission};
 pub(crate) use job_inputs::{WorkflowJobInput, bind_job_input, stage_job_input};
+pub use launch::{
+    ManualWorkflowLaunch, WorkflowLaunchOrigin, WorkflowLaunchReceipt, WorkflowLaunchSource,
+};
+pub(crate) use launch::{launch_workflow_in_tx, validate_workflow_launch_source};
 pub(crate) use operator::waiting_for_delivery_commit;
 pub use operator::{WorkflowAgentTarget, WorkflowOperatorJob, WorkflowPlanProposal};
 pub use plan_revision::{WorkflowPlanHistory, WorkflowPlanRevisionRequest};

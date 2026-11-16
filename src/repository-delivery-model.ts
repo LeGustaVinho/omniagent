@@ -1,6 +1,7 @@
 import type { Job } from "@/bindings/Job";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
+import type { WorkflowLaunchReceipt } from "@/workflow-launch";
 
 export type DeliveryNode = "plan" | "review-plan" | "implement" | "review-candidate";
 export type DeliveryInputs = Record<string, string>;
@@ -36,6 +37,7 @@ export type DeliveryWorkflowDefinition = {
 export type DeliverySnapshot = {
   run: DeliveryRun; artifacts: DeliveryArtifact[]; jobs: DeliveryJob[];
   definition?: DeliveryWorkflowDefinition; hostOutputs?: DeliveryInputs;
+  launch?: WorkflowLaunchReceipt | null;
 };
 export type DeliveryUnit = {
   checkoutId: string;

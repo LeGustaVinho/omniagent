@@ -8,7 +8,7 @@ use crate::{
     repository::AttemptWorktreeEvidence,
     runs::RunStatus,
     workflows::{
-        ArtifactKind, DeliveryRoles, Endpoint, NodeInstance, Wire, builtin_delivery_graph,
+        ArtifactKind, DeliveryRoles, Endpoint, ManualWorkflowLaunch, NodeInstance, Wire, WorkflowLaunchSource, builtin_delivery_graph,
         tests::{approve_delivery_fixture_in_run, approved_delivery_repository},
     },
 };
@@ -158,9 +158,14 @@ switch ($Mode) {
     let version = store
         .save_workflow_revision(repo.project_id.clone(), "command-test".into(), graph)
         .await?;
-    let run = store
-        .start_workflow_run(repo.project_id.clone(), version)
-        .await?;
+    let document = store.capture_repository_markdown(
+        repo.checkout_id.clone(), Path::new(&repo.checkout_root).join("brief.md"),
+    ).await?;
+    let run = store.launch_workflow_manual(ManualWorkflowLaunch {
+        project_id: repo.project_id.clone(), workflow: version,
+        source: WorkflowLaunchSource { checkout_id: repo.checkout_id.clone(), revision_id: document.revision.id },
+        request_id: Uuid::new_v4().to_string(), work_id: None,
+    }).await?;
     assert!(
         store
             .submit_workflow_command(WorkflowCommandSubmission {

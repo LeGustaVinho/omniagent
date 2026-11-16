@@ -6,10 +6,11 @@ import { Button } from "@/components/ui/button";
 type MarkdownRevision = { id: string; relativePath: string; sha256: string };
 type RepositoryMarkdown = { revision: MarkdownRevision; markdown: string };
 
-export function RepositoryMarkdownPicker({ checkoutId, onDeliver, delivering }: {
+export function RepositoryMarkdownPicker({ checkoutId, onDeliver, delivering, launchLabel = "Start repository delivery" }: {
   checkoutId: string;
   onDeliver?: (revisionId: string) => void;
   delivering?: boolean;
+  launchLabel?: string;
 }) {
   const client = useQueryClient();
   const [selected, setSelected] = useState("");
@@ -55,7 +56,7 @@ export function RepositoryMarkdownPicker({ checkoutId, onDeliver, delivering }: 
         <pre className="max-h-80 overflow-auto break-words">{document.data.markdown}</pre>
       </details>}
       {onDeliver && <Button type="button" onClick={() => onDeliver(revisionId)} disabled={!document.data || delivering}>
-        {delivering ? "Starting delivery…" : "Start repository delivery"}
+        {delivering ? "Starting…" : launchLabel}
       </Button>}
       {error && <p role="alert" className="pipeline-note">{String(error)}</p>}
     </section>

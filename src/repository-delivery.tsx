@@ -51,6 +51,9 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
   const release = delivery.artifacts.find(({ value }) => value.kind === "release" && value.evidence.decisionArtifactId === approval?.id);
   const worktree = delivery.artifacts.find(({ id }) => id === delivery.hostOutputs?.prepare);
   const taskId = linked?.value.kind === "task" ? linked.value.evidence.taskId : undefined;
+  const launchOrigin = delivery.launch?.origin;
+  const launchWork = launchOrigin && launchOrigin.kind !== "editor" ? launchOrigin.workId : undefined;
+  const selectedWork = launchWork ?? chosenTask;
   const tasks = useQuery({
     queryKey: ["repository-delivery", projectId, "tasks"],
     queryFn: () => invoke<TaskOption[]>("repository_delivery_tasks", { projectId }),
@@ -127,21 +130,24 @@ function DeliveryRunView({ delivery, projectId, actions, openActivity, openWorks
       }))}>Record plan review</Button>}
     {plan && review && !linked && <div className="pipeline-form pipeline-stack">
       <h3 className="font-medium">Link work</h3>
-      <label className="pipeline-stack">Existing Task or Sub-Task
+      {launchWork ? <p>Selected at launch · {tasks.data?.find(({ id }) => id === launchWork)?.title ?? launchWork}</p> :
+        <label className="pipeline-stack">Existing Task or Sub-Task
         <select value={chosenTask} onChange={(event) => setChosenTask(event.currentTarget.value)}>
           <option value="">Select work</option>
           {tasks.data?.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}
         </select>
-      </label>
-      <Button variant="outline" disabled={!chosenTask || actions.busy}
-        onClick={() => actions.execute(() => host({ plan: plan.id, review: review.id }, { action: "link_existing_task", taskId: chosenTask }))}>
+      </label>}
+      <Button variant="outline" disabled={!selectedWork || actions.busy}
+        onClick={() => actions.execute(() => host({ plan: plan.id, review: review.id }, { action: "link_existing_task", taskId: selectedWork }))}>
         Link work
       </Button>
+      {!launchWork && <>
       <label className="pipeline-stack">New Task title <input value={title} onChange={(event) => setTitle(event.currentTarget.value)} /></label>
       <Button variant="outline" disabled={!title.trim() || actions.busy}
         onClick={() => actions.execute(() => host({ plan: plan.id, review: review.id }, { action: "create_task", title: title.trim() }))}>
         Create and link Task
       </Button>
+      </>}
     </div>}
     {plan && review && linked && !approval && <Button disabled={actions.busy}
       onClick={() => actions.execute(() => host({ plan: plan.id, task: linked.id }, { action: "approve_implementation" }))}>

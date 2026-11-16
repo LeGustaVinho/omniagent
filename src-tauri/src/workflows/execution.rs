@@ -81,7 +81,7 @@ impl Store {
         let (node, inputs) = self
             .workflow_execution_inputs(&project_id, &run_id, &node_id, None, &inputs)
             .await?;
-        let request_revision = digest(&serde_json::to_vec(&(&inputs, &request))?);
+        let request_revision = host_request_revision(&inputs, &request)?;
         let execution_key = inputs
             .get("plan")
             .map(|plan| plan.id.clone())
@@ -220,9 +220,13 @@ impl Store {
                 }
                 let artifact = match action {
                     HostAction::Publish(port, value) => {
+                        if let ArtifactValue::Task(task) = &value {
+                            super::launch::require_launch_work(&tx, &project_id, &run_id, Some(&task.task_id))?;
+                        }
                         insert_artifact(&tx, &project_id, run_id, node_id, port.into(), value)?
                     }
                     HostAction::CreateTask(title) => {
+                        super::launch::require_launch_work(&tx, &project_id, &run_id, None)?;
                         let origin = pipeline_work_origin(&tx, &project_id, &run_id)?;
                         let task = insert_project_work(&tx, project_id.clone(), title, TaskPlacement::Task { epic_id: None }, &origin)?;
                         insert_artifact(
@@ -252,16 +256,7 @@ impl Store {
                         units,
                     )?,
                 };
-                tx.execute(
-                    "INSERT INTO workflow_host_completions VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        artifact.workflow_run_id,
-                        artifact.node_instance_id,
-                        execution_key,
-                        request_revision,
-                        artifact.id
-                    ],
-                )?;
+                record_host_completion(&tx, &artifact, &execution_key, &request_revision)?;
                 tx.commit()?;
                 Ok(artifact)
             })
@@ -381,6 +376,26 @@ impl Store {
         }
         Ok((pinned, resolved))
     }
+}
+
+pub(super) fn host_request_revision(
+    inputs: &BTreeMap<String, WorkflowArtifact>,
+    request: &WorkflowHostRequest,
+) -> Result<String> {
+    Ok(digest(&serde_json::to_vec(&(inputs, request))?))
+}
+
+pub(super) fn record_host_completion(
+    db: &Connection,
+    artifact: &WorkflowArtifact,
+    execution_key: &str,
+    request_revision: &str,
+) -> Result<()> {
+    db.execute(
+        "INSERT INTO workflow_host_completions VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![artifact.workflow_run_id, artifact.node_instance_id, execution_key, request_revision, artifact.id],
+    )?;
+    Ok(())
 }
 
 fn load_host_completion(

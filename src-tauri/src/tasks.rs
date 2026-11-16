@@ -19,7 +19,7 @@ pub use activity::{
 pub use agile_events::{
     AgileEventData, AgileEventOrigin, AgilePipelineLink, AgilePipelineOrigin, ProjectWorkEvent,
 };
-pub(crate) use agile_events::{WorkStateChanges, pipeline_work_origin};
+pub(crate) use agile_events::{WorkStateChanges, bind_workflow_trigger_origin, pipeline_work_origin};
 pub(crate) use checklists::bind_checklist_job_mode;
 pub(crate) use checklists::progress::ChecklistProgressRequest;
 pub use checklists::progress::{

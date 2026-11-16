@@ -685,15 +685,17 @@ pub(super) async fn approve_delivery_fixture_in_run(
         inputs,
         request,
     };
-    let markdown = store
-        .capture_repository_markdown(repo.checkout_id.clone(), root.join("brief.md"))
-        .await?;
+    let document = match store.workflow_launch(project.clone(), run.id.clone()).await? {
+        Some(launch) => launch.source,
+        None => store.capture_repository_markdown(repo.checkout_id.clone(), root.join("brief.md"))
+            .await?.revision,
+    };
     let start = store
         .execute_workflow_host(host(
             "start",
             NodeInputs::new(),
             WorkflowHostRequest::Start {
-                document: markdown.revision,
+                document,
             },
         ))
         .await?;

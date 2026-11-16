@@ -19,6 +19,7 @@ import {
   type WorkflowState, type WorkflowStatus,
 } from "@/project-agile-model";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { WorkflowLaunchPicker } from "@/workflow-launch";
 
 type Change = (operation: () => Promise<unknown>) => void;
 type DeliveryLink = { taskId: string; title: string; deliveryId: string };
@@ -77,6 +78,8 @@ function LiveTaskDetails({
       <TaskJobLinks row={task} openQueueJob={links.openQueueJob} />
     </section>}
     {saved?.activeWorkflowRunId && <Button variant="outline" onClick={() => links.openWorkspace("pipelines", saved.activeWorkflowRunId ?? undefined)}>Open delivery workflow</Button>}
+    {task.kind !== "epic" && <WorkflowLaunchPicker key={task.id} projectId={projectId}
+      checkoutId={links.checkout.checkoutId} workId={task.id} openWorkspace={links.openWorkspace} />}
     <section className="pipeline-form pipeline-stack" aria-label="Task checklist">
       <h4 className="font-medium">Checklist</h4>
       {checklist.data?.items.map((item) => <label key={item.id} className="flex items-center gap-2 break-words">

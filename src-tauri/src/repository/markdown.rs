@@ -246,6 +246,26 @@ fn load_markdown(
     .transpose()
 }
 
+pub(crate) fn workflow_markdown_revision(
+    db: &Connection,
+    project: &str,
+    checkout: &str,
+    revision: &str,
+) -> Result<Option<RepositoryMarkdownRevision>> {
+    if !DocumentKind::Markdown.contains_revision(revision) {
+        return Ok(None);
+    }
+    Ok(db
+        .query_row(
+            "SELECT m.id, m.checkout_id, m.path, m.sha256, m.base_commit
+             FROM repository_markdown_revisions m JOIN checkouts c ON c.id = m.checkout_id
+             WHERE c.project_id = ?1 AND c.id = ?2 AND m.id = ?3",
+            params![project, checkout, revision],
+            decode_revision,
+        )
+        .optional()?)
+}
+
 pub(crate) fn bind_job_markdown(db: &Connection, job: &str, revision: &str) -> Result<()> {
     ensure!(
         DocumentKind::Markdown.contains_revision(revision),

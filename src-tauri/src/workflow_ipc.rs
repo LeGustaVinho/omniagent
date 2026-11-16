@@ -5,8 +5,9 @@ use omniagent::{
     model_catalog::ModelSelection,
     store::Store,
     workflows::{
-        ArtifactValue, DeliveryRoles, NodeInputs, WorkflowAgentSubmission, WorkflowArtifact,
+        ArtifactValue, NodeInputs, WorkflowAgentSubmission, WorkflowArtifact,
         WorkflowDefinition, WorkflowDeliveryUnit, WorkflowHostRequest, WorkflowHostSubmission, WorkflowOperatorJob,
+        WorkflowLaunchReceipt, WorkflowLaunchSource,
         WorkflowPlanHistory, WorkflowPlanProposal, WorkflowPlanRevisionRequest, WorkflowRun,
         WorkflowUnitOutcome, WorkflowUnitRequest, WorkflowUnitSubmission,
     },
@@ -20,7 +21,9 @@ pub mod authoring;
 pub mod command;
 pub mod comparison;
 pub mod graph_editor;
+pub mod launch;
 pub mod role_templates;
+pub mod triggers;
 
 fn report(error: anyhow::Error) -> String {
     diagnostics::preview(&error.to_string())
@@ -34,6 +37,7 @@ pub struct RepositoryDelivery {
     artifacts: Vec<WorkflowArtifact>,
     jobs: Vec<WorkflowOperatorJob>,
     host_outputs: NodeInputs,
+    launch: Option<WorkflowLaunchReceipt>,
 }
 
 #[derive(Serialize)]
@@ -62,35 +66,9 @@ pub async fn start_repository_delivery(
     checkout_id: String,
     revision_id: String,
 ) -> Result<WorkflowRun, String> {
-    async {
-        let document = store
-            .workflow_document_revision(project_id.clone(), checkout_id, revision_id)
-            .await?;
-        let run = store
-            .start_builtin_delivery(project_id.clone(), DeliveryRoles::default())
-            .await?;
-        let source = store
-            .execute_workflow_host(WorkflowHostSubmission {
-                project_id: project_id.clone(),
-                run_id: run.id.clone(),
-                node_id: "start".into(),
-                inputs: NodeInputs::new(),
-                request: WorkflowHostRequest::Start { document },
-            })
-            .await?;
-        store
-            .execute_workflow_host(WorkflowHostSubmission {
-                project_id,
-                run_id: run.id.clone(),
-                node_id: "context".into(),
-                inputs: NodeInputs::from([("document".into(), source.id)]),
-                request: WorkflowHostRequest::LoadContext,
-            })
-            .await?;
-        Ok(run)
-    }
-    .await
-    .map_err(report)
+    store.launch_builtin_repository_delivery(
+        project_id, WorkflowLaunchSource { checkout_id, revision_id },
+    ).await.map_err(report)
 }
 
 #[tauri::command]
@@ -124,6 +102,7 @@ pub async fn inspect_repository_delivery(
         let host_outputs = store
             .current_workflow_host_outputs(project_id.clone(), run_id.clone())
             .await?;
+        let launch = store.workflow_launch(project_id.clone(), run_id.clone()).await?;
         let jobs = store.workflow_operator_jobs(project_id, run_id).await?;
         Ok(Some(RepositoryDelivery {
             run,
@@ -131,6 +110,7 @@ pub async fn inspect_repository_delivery(
             artifacts,
             jobs,
             host_outputs,
+            launch,
         }))
     }
     .await

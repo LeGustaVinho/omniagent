@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { liveModelsQuery, sameModelSelection } from "@/live-models";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { graphProblems, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowGraph, type WorkflowLayout } from "@/workflow-graph-model";
+import { WorkflowLaunchPicker, preferredWorkflowRevision } from "@/workflow-launch";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type Version = { id: string; revision: string };
@@ -147,6 +148,7 @@ export function PipelineAuthoringEditor({ draftId, checkout, openWorkspace, open
     refetchInterval: (record) => record.state.data && pending(record.state.data) ? 1200 : false,
   });
   const draft = query.data;
+  const launchVersion = draft ? preferredWorkflowRevision(draft) : undefined;
   const runId = draft?.request.runId;
   return <section aria-label="Pipeline draft editor" className="pipeline-stack h-full overflow-auto p-4">
     <header className="flex flex-wrap items-center gap-2">
@@ -161,6 +163,8 @@ export function PipelineAuthoringEditor({ draftId, checkout, openWorkspace, open
       <RequestState draft={draft} />
       {draft.base && <p className="text-xs text-muted-foreground">Published base <code>{draft.base.revision}</code></p>}
       {draft.head && <AuthoringRevisionEditor key={draft.head.id} projectId={projectId} draft={draft} revision={draft.head} />}
+      <WorkflowLaunchPicker key={launchVersion?.revision ?? draft.id} projectId={projectId}
+        checkoutId={checkout.checkoutId} preferred={launchVersion} openWorkspace={openWorkspace} />
     </>}
   </section>;
 }

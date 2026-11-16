@@ -47,7 +47,7 @@ pub enum AgileEventData {
 }
 
 impl AgileEventData {
-    fn key(&self) -> &'static str {
+    pub(crate) fn key(&self) -> &'static str {
         match self {
             Self::Created { .. } => "created",
             Self::StateChanged { .. } => "state_changed",
@@ -81,6 +81,15 @@ impl AgileEventOrigin {
             Self::Pipeline { context } => Some(context),
             Self::Agent { pipeline, .. } => pipeline.as_ref(),
         }
+    }
+
+    pub(crate) fn contains_pipeline(&self, pipeline: &str) -> bool {
+        self.pipeline().is_some_and(|origin| {
+            origin
+                .automation_chain
+                .iter()
+                .any(|link| link.pipeline_id == pipeline)
+        })
     }
 }
 
@@ -129,33 +138,11 @@ impl Store {
     ) -> Result<AgilePipelineOrigin> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let current = load_pipeline_origin(&tx, &project, &pipeline_run)?;
-            if let Some(prior) = &current.event_id {
-                ensure!(prior == &event, "this pipeline run already has a different triggering event");
-                return Ok(current);
-            }
-            let source = tx.query_row(
-                "SELECT origin FROM project_work_events WHERE project_id = ?1 AND id = ?2",
-                params![project, event], |row| row.get::<_, String>(0),
-            ).optional()?.context("triggering work event is outside the project")?;
-            let source: AgileEventOrigin = serde_json::from_str(&source)?;
-            let mut chain = source.pipeline().map_or_else(Vec::new, |prior| prior.automation_chain.clone());
-            let tail = current.automation_chain.into_iter().next().context("missing pipeline identity")?;
-            ensure!(!chain.iter().any(|link| link.pipeline_id == tail.pipeline_id), "this pipeline already appears in the originating automation chain");
-            let authored: bool = tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM project_work_events WHERE project_id = ?1 AND (
-                   json_extract(origin, '$.context.runId') = ?2 OR json_extract(origin, '$.pipeline.runId') = ?2))",
-                params![project, pipeline_run], |row| row.get(0),
-            )?;
-            ensure!(!authored, "bind the triggering event before publishing pipeline work changes");
-            chain.push(tail);
-            tx.execute(
-                "INSERT INTO pipeline_work_event_origins (pipeline_run_id, event_id, automation_chain) VALUES (?1, ?2, ?3)",
-                params![pipeline_run, event, serde_json::to_string(&chain)?],
-            )?;
+            let origin = bind_workflow_trigger_origin(&tx, &project, &pipeline_run, &event)?;
             tx.commit()?;
-            Ok(AgilePipelineOrigin { run_id: pipeline_run, event_id: Some(event), automation_chain: chain })
-        }).await
+            Ok(origin)
+        })
+        .await
     }
 }
 
@@ -166,11 +153,68 @@ pub(super) fn publish_event(
     data: AgileEventData,
     origin: &AgileEventOrigin,
 ) -> Result<()> {
+    let event = Uuid::new_v4().to_string();
     db.execute(
         "INSERT INTO project_work_events (id, project_id, task_id, kind, payload, origin) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![Uuid::new_v4().to_string(), project, task, data.key(), serde_json::to_string(&data)?, serde_json::to_string(origin)?],
+        params![event, project, task, data.key(), serde_json::to_string(&data)?, serde_json::to_string(origin)?],
     )?;
-    Ok(())
+    crate::workflows::triggers::activate(db, project, task, &event, &data, origin)
+}
+
+pub(crate) fn bind_workflow_trigger_origin(
+    db: &Connection,
+    project: &str,
+    pipeline_run: &str,
+    event: &str,
+) -> Result<AgilePipelineOrigin> {
+    let current = load_pipeline_origin(db, project, pipeline_run)?;
+    if let Some(prior) = &current.event_id {
+        ensure!(
+            prior == event,
+            "this pipeline run already has a different triggering event"
+        );
+        return Ok(current);
+    }
+    let source = db
+        .query_row(
+            "SELECT origin FROM project_work_events WHERE project_id = ?1 AND id = ?2",
+            params![project, event],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .context("triggering work event is outside the project")?;
+    let source: AgileEventOrigin = serde_json::from_str(&source)?;
+    let tail = current
+        .automation_chain
+        .into_iter()
+        .next()
+        .context("missing pipeline identity")?;
+    ensure!(
+        !source.contains_pipeline(&tail.pipeline_id),
+        "this pipeline already appears in the originating automation chain"
+    );
+    let authored: bool = db.query_row(
+        "SELECT EXISTS (SELECT 1 FROM project_work_events WHERE project_id = ?1 AND (
+           json_extract(origin, '$.context.runId') = ?2 OR json_extract(origin, '$.pipeline.runId') = ?2))",
+        params![project, pipeline_run], |row| row.get(0),
+    )?;
+    ensure!(
+        !authored,
+        "bind the triggering event before publishing pipeline work changes"
+    );
+    let mut chain = source
+        .pipeline()
+        .map_or_else(Vec::new, |prior| prior.automation_chain.clone());
+    chain.push(tail);
+    db.execute(
+        "INSERT INTO pipeline_work_event_origins (pipeline_run_id, event_id, automation_chain) VALUES (?1, ?2, ?3)",
+        params![pipeline_run, event, serde_json::to_string(&chain)?],
+    )?;
+    Ok(AgilePipelineOrigin {
+        run_id: pipeline_run.into(),
+        event_id: Some(event.into()),
+        automation_chain: chain,
+    })
 }
 
 pub(crate) struct WorkStateChanges(Vec<(String, TaskWorkflowState)>);

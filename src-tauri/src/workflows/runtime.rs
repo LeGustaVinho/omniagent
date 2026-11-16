@@ -61,6 +61,52 @@ pub struct WorkflowAgentSubmission {
     pub unit_id: Option<String>,
 }
 
+pub(super) fn insert_workflow_run(
+    db: &Connection,
+    project: &str,
+    workflow: &WorkflowDefinition,
+) -> Result<WorkflowRun> {
+    let id = Uuid::new_v4().to_string();
+    db.execute("INSERT INTO job_pipeline_runs(id, project_id) VALUES (?1, ?2)", params![id, project])?;
+    db.execute(
+        "INSERT INTO workflow_run_pins VALUES (?1, ?2, ?3, ?4)",
+        params![id, project, workflow.version.id, workflow.version.revision],
+    )?;
+    for node in &workflow.nodes {
+        let scheduler_kind = if node.definition.executor == Executor::RecordImplementationRelease {
+            "implementation_approval"
+        } else {
+            "execution"
+        };
+        db.execute(
+            "INSERT INTO job_pipeline_nodes (pipeline_run_id, instance_id, kind) VALUES (?1, ?2, ?3)",
+            params![id, node.instance.id, scheduler_kind],
+        )?;
+        let requires_plan = node.definition.inputs.iter().any(|port| port.value == PortType::Data(ArtifactKind::Plan));
+        db.execute(
+            "INSERT INTO workflow_node_pins VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, node.instance.id, node.revision, node.definition.revision,
+                node.definition.executor.scheduler_profile(), requires_plan],
+        )?;
+    }
+    Ok(WorkflowRun { id, project_id: project.into(), version: workflow.version.clone(), plan_revision: None })
+}
+
+pub(super) fn load_workflow_run(db: &Connection, project: &str, run: &str) -> Result<Option<WorkflowRun>> {
+    Ok(db.query_row(
+        "SELECT p.workflow_id, p.workflow_revision, j.plan_revision
+         FROM workflow_run_pins p JOIN job_pipeline_runs j ON j.id = p.pipeline_run_id
+         WHERE p.project_id = ?1 AND p.pipeline_run_id = ?2",
+        params![project, run],
+        |row| Ok(WorkflowRun {
+            id: run.into(),
+            project_id: project.into(),
+            version: WorkflowRevision { id: row.get(0)?, revision: row.get(1)? },
+            plan_revision: row.get(2)?,
+        }),
+    ).optional()?)
+}
+
 impl Store {
     pub async fn save_workflow_revision(
         &self,
@@ -104,57 +150,14 @@ impl Store {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let workflow = load_definition(&tx, &project, &version)?
                 .context("workflow revision is outside this project")?;
-            let id = Uuid::new_v4().to_string();
-            tx.execute("INSERT INTO job_pipeline_runs(id, project_id) VALUES (?1, ?2)", params![id, project])?;
-            tx.execute(
-                "INSERT INTO workflow_run_pins VALUES (?1, ?2, ?3, ?4)",
-                params![id, project, version.id, version.revision],
-            )?;
-            for node in workflow.nodes {
-                let scheduler_kind = if node.definition.executor == Executor::RecordImplementationRelease {
-                    "implementation_approval"
-                } else {
-                    "execution"
-                };
-                tx.execute(
-                    "INSERT INTO job_pipeline_nodes (pipeline_run_id, instance_id, kind) VALUES (?1, ?2, ?3)",
-                    params![id, node.instance.id, scheduler_kind],
-                )?;
-                let requires_plan = node.definition.inputs.iter().any(|port| port.value == PortType::Data(ArtifactKind::Plan));
-                tx.execute(
-                    "INSERT INTO workflow_node_pins VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![id, node.instance.id, node.revision, node.definition.revision,
-                        node.definition.executor.scheduler_profile(), requires_plan],
-                )?;
-            }
+            let run = insert_workflow_run(&tx, &project, &workflow)?;
             tx.commit()?;
-            Ok(WorkflowRun { id, project_id: project, version, plan_revision: None })
+            Ok(run)
         }).await
     }
 
     pub async fn workflow_run(&self, project: String, run: String) -> Result<Option<WorkflowRun>> {
-        self.execute(move |db| {
-            Ok(db
-                .query_row(
-                    "SELECT p.workflow_id, p.workflow_revision, j.plan_revision
-                 FROM workflow_run_pins p JOIN job_pipeline_runs j ON j.id = p.pipeline_run_id
-                 WHERE p.project_id = ?1 AND p.pipeline_run_id = ?2",
-                    params![project, run],
-                    |row| {
-                        Ok(WorkflowRun {
-                            id: run.clone(),
-                            project_id: project.clone(),
-                            version: WorkflowRevision {
-                                id: row.get(0)?,
-                                revision: row.get(1)?,
-                            },
-                            plan_revision: row.get(2)?,
-                        })
-                    },
-                )
-                .optional()?)
-        })
-        .await
+        self.execute(move |db| load_workflow_run(db, &project, &run)).await
     }
 
     pub async fn submit_workflow_agent(&self, submission: WorkflowAgentSubmission) -> Result<Job> {
