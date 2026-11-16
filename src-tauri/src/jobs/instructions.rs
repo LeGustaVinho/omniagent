@@ -104,12 +104,12 @@ fn save_attachments(
     Ok(())
 }
 
-pub(super) struct FrozenAttachments {
+pub(crate) struct FrozenAttachments {
     payload: Vec<u8>,
     labels: Vec<u8>,
 }
 
-pub(super) async fn freeze_attachments(
+pub(crate) async fn freeze_attachments(
     store: &Store,
     checkout: String,
     root: &Path,

@@ -1,6 +1,10 @@
+use std::{io::Read, path::Path};
+
 use anyhow::{Context, Result, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use ts_rs::TS;
 
 use crate::{repository, store::Store};
@@ -8,6 +12,7 @@ use crate::{repository, store::Store};
 use super::{
     AttachmentBlocker, AttachmentDelivery, AttachmentDispatch, AttachmentFormat, AttachmentInput,
     AttachmentMetadata, AttachmentPreview, AttachmentSource, NativeAttachmentEncoding,
+    authorized_path, inspect,
 };
 use crate::providers::Provider;
 
@@ -248,7 +253,7 @@ impl Default for AttachmentLimits {
 }
 
 impl AttachmentLimits {
-    pub(super) fn check_file(
+    pub(crate) fn check_file(
         self,
         source: &AttachmentSource,
         delivery: AttachmentDelivery,
@@ -274,6 +279,62 @@ impl AttachmentLimits {
             );
         }
         Ok(())
+    }
+}
+
+impl AttachmentPreview {
+    pub(crate) fn describe_draft_file(
+        checkout: &Path,
+        source: &AttachmentSource,
+        excerpt_limit: u64,
+    ) -> Result<(AttachmentMetadata, u64)> {
+        let path = authorized_path(checkout, source)?;
+        let mut file = crate::providers::configuration::open_locked_local_file(&path)?;
+        let metadata = inspect(&mut file, source)?;
+        let mut first = Vec::new();
+        if metadata.format == AttachmentFormat::Text {
+            file.take(excerpt_limit.min(64 * 1024))
+                .read_to_end(&mut first)?;
+        }
+        let end = match std::str::from_utf8(&first) {
+            Ok(text) => text.len(),
+            Err(error) => error.valid_up_to(),
+        };
+        Ok((metadata, end as u64))
+    }
+
+    pub(crate) fn prepare_draft_file(
+        checkout: &Path,
+        metadata: &AttachmentMetadata,
+        delivery: AttachmentDelivery,
+        limits: AttachmentLimits,
+    ) -> Result<Self> {
+        let preview = Self::read_with_limits(checkout, metadata.source.clone(), delivery, limits)?;
+        ensure!(
+            &preview.metadata == metadata,
+            "The file changed. Review it again."
+        );
+        Ok(preview)
+    }
+
+    pub(crate) fn draft_asset(&self, max_bytes: u64) -> Result<Option<String>> {
+        if self.metadata.size > max_bytes || self.metadata.format == AttachmentFormat::Unknown {
+            return Ok(None);
+        }
+        let path = authorized_path(&self.checkout, &self.metadata.source)?;
+        ensure!(
+            path == self.canonical,
+            "The file path changed. Review it again."
+        );
+        let file = crate::providers::configuration::open_locked_local_file(&path)?;
+        let mut bytes = Vec::new();
+        file.take(max_bytes + 1).read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 == self.metadata.size
+                && format!("{:x}", Sha256::digest(&bytes)) == self.metadata.sha256,
+            "The file changed. Review it again."
+        );
+        Ok(Some(STANDARD.encode(bytes)))
     }
 }
 

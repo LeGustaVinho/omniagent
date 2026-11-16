@@ -78,7 +78,6 @@ function PdfAttachment({ base64, title }: { base64: string; title: string }) {
 }
 
 export function RepositoryNoteMedia({ checkoutId, paths, title }: { checkoutId: string; paths: string[]; title: string }) {
-  const [failedFile, setFailedFile] = useState<NoteAttachmentContent>();
   const attachment = useQuery({
     queryKey: ["repository-note-attachment", checkoutId, ...paths],
     enabled: paths.length > 0,
@@ -93,12 +92,21 @@ export function RepositoryNoteMedia({ checkoutId, paths, title }: { checkoutId: 
   const file = attachment.data;
   if (!paths.length || attachment.error || file === null) return <span className="file-help">Attachment unavailable · {title}</span>;
   if (!file) return <span className="file-help" role="status">Loading attachment · {title}</span>;
-  if (failedFile === file) return <span className="file-help">Attachment preview unavailable · {title}</span>;
-  const dataUrl = `data:${file.mimeType};base64,${file.contentBase64}`;
-  const onError = () => setFailedFile(file);
-  if (file.mimeType === "application/pdf") return <PdfAttachment key={file.relativePath} base64={file.contentBase64} title={title} />;
-  if (imageTypes.has(file.mimeType)) return <img className="note-media-image" src={dataUrl} alt={title} loading="lazy" onError={onError} />;
-  if (audioTypes.has(file.mimeType)) return <audio src={dataUrl} aria-label={title} controls preload="metadata" onError={onError} />;
-  if (videoTypes.has(file.mimeType)) return <video src={dataUrl} aria-label={title} controls preload="metadata" onError={onError} />;
+  return <SafeAttachmentMedia key={file.relativePath} base64={file.contentBase64} mimeType={file.mimeType} title={title} />;
+}
+
+export function SafeAttachmentMedia({ base64, mimeType, title }: { base64: string; mimeType: string; title: string }) {
+  const [failed, setFailed] = useState<string>();
+  if (failed === base64) return <span className="file-help">Attachment preview unavailable · {title}</span>;
+  const dataUrl = `data:${mimeType};base64,${base64}`;
+  const onError = () => setFailed(base64);
+  if (mimeType === "application/pdf") return <PdfAttachment base64={base64} title={title} />;
+  if (imageTypes.has(mimeType)) return <img className="note-media-image" src={dataUrl} alt={title} loading="lazy" onError={onError} />;
+  if (audioTypes.has(mimeType)) return <audio src={dataUrl} aria-label={title} controls preload="metadata" onError={onError} />;
+  if (videoTypes.has(mimeType)) return <video src={dataUrl} aria-label={title} controls preload="metadata" onError={onError} />;
+  if (mimeType === "text/plain") {
+    const bytes = Uint8Array.from(atob(base64), (byte) => byte.charCodeAt(0));
+    return <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words">{new TextDecoder().decode(bytes)}</pre>;
+  }
   return <span className="file-help">Attachment preview unavailable · {title}</span>;
 }

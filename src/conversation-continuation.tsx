@@ -38,7 +38,9 @@ export type ConversationContinuationReview = {
 
 type Outcome = { conversation: Conversation; job: Job };
 
-export function submitConversationContinuation(request: ContinuationScope & { expectedContextId: string; text: string; referenceIds?: string[] }) {
+export function submitConversationContinuation(request: ContinuationScope & {
+  expectedContextId: string; text: string; referenceIds?: string[]; attachmentPreviewId?: string; targetCheckoutId?: string;
+}) {
   return invoke<ConversationContinuationReview | { status: "queued"; job: Job }>("submit_conversation_continuation", request);
 }
 

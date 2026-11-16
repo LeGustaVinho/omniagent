@@ -22,6 +22,7 @@ mod history;
 mod inspection;
 mod instruction_delivery;
 mod instructions;
+pub(crate) use instructions::{FrozenAttachments, freeze_attachments};
 mod native_goal_evidence;
 mod native_goal_qualification;
 mod notices;

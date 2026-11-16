@@ -6,8 +6,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use omniagent::{
-    conversations::draft_files::{AttachmentDraft, DraftAttachmentEdit},
-    diagnostics, repository,
+    conversations::draft_files::{AttachmentDraft, AttachmentDraftReview, DraftAttachmentEdit},
+    diagnostics,
+    model_catalog::ModelSelection,
+    providers::SessionMode,
+    repository,
     store::Store,
 };
 use serde::Serialize;
@@ -165,6 +168,34 @@ pub async fn edit_conversation_attachment_draft(
         .edit_conversation_attachment_draft(conversation_id, expected_revision, file_id, edit)
         .await
         .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn review_conversation_attachment_draft(
+    store: State<'_, Store>,
+    conversation_id: String,
+    expected_revision: String,
+    selection: ModelSelection,
+    effort: Option<String>,
+    mode: SessionMode,
+    text: String,
+) -> Result<AttachmentDraftReview, String> {
+    async {
+        let owner = store.conversation(conversation_id.clone()).await?;
+        let scope = crate::conversation_runtime::selected_scope(
+            &store,
+            owner.checkout_id,
+            selection,
+            effort,
+            mode,
+        )
+        .await?;
+        store
+            .review_conversation_attachment_draft(conversation_id, expected_revision, scope, text)
+            .await
+    }
+    .await
+    .map_err(ui_error)
 }
 
 #[cfg(test)]

@@ -3,6 +3,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Paperclip, X } from "lucide-react";
+import type { AttachmentLimits } from "@/bindings/AttachmentLimits";
+import type { ModelSelection } from "@/bindings/ModelSelection";
+import { SafeAttachmentMedia } from "@/repository-note-media";
 
 export type AttachmentDelivery = { kind: "native" | "reference" } | { kind: "excerpt"; start: number; end: number };
 export type AttachmentSource = { kind: "checkout"; relativePath: string } | { kind: "selected_file"; path: string };
@@ -11,6 +14,39 @@ type AttachmentDraft = { revision: string | null; files: Attachment[] };
 type DropReceipt = { id: string; x: number; y: number };
 type Edit = { kind: "remove" } | { kind: "set_delivery"; delivery: AttachmentDelivery | null };
 type AttachmentAction = { kind: "pick" } | { kind: "drop"; dropId: string } | { kind: "edit"; fileId: string; edit: Edit };
+
+type Format = "png" | "jpeg" | "gif" | "webp" | "pdf" | "wav" | "mp3" | "text" | "unknown";
+type FileReview = {
+  id: string;
+  metadata: { source: AttachmentSource; format: Format; size: number; sha256: string } | null;
+  delivery: AttachmentDelivery | null;
+  alternatives: AttachmentDelivery[];
+  nativeUnavailable: string | null;
+  blocker: string | null;
+  excerpt: { start: number; end: number; text: string } | null;
+  reference: { kind: "checkout_path" | "read_only_copy_of"; path: string } | null;
+  media: string | null;
+};
+type Review = {
+  previewId: string | null;
+  files: FileReview[];
+  projectLimits: AttachmentLimits;
+  qualifiedLimits: {
+    filesPerTurn: number | null;
+    encodedRequestBytes: number | null;
+    formats: { format: Format; fileBytes: number | null; inputTokens: number | null }[];
+    context: { windowTokens: number; reservedOutputTokens: number; fixedInputTokens: number } | null;
+  } | null;
+  minimumEncodedBytes: number;
+  estimatedContextInputTokens: number | null;
+};
+type ReviewInput = {
+  conversationId: string; expectedRevision: string; selection: ModelSelection; effort: string | null; mode: "read_only" | "plan"; text: string;
+};
+
+const deliveryLabels = { native: "Native content", excerpt: "Text excerpt", reference: "File reference" };
+const mime: Record<Format, string> = { png: "image/png", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  pdf: "application/pdf", wav: "audio/wav", mp3: "audio/mpeg", text: "text/plain", unknown: "application/octet-stream" };
 
 const empty: AttachmentDraft = { revision: null, files: [] };
 
@@ -86,9 +122,36 @@ export function useConversationAttachments(conversationId: string, enabled: bool
   };
 }
 
-export function ConversationAttachments({ attachments, disabled }: {
+export function useConversationAttachmentReview({ conversationId, revision, contextId, selection, effort, text, mode, enabled }: {
+  conversationId: string; revision: string | null; contextId?: string; selection: ModelSelection | null;
+  effort: string | null; text: string; mode: "read_only" | "plan" | "goal"; enabled: boolean;
+}) {
+  const key = enabled && revision && contextId && selection && mode !== "goal"
+    ? JSON.stringify([revision, contextId, selection.provider, selection.profileId, selection.modelId, effort, mode, text]) : null;
+  const mutation = useMutation({
+    scope: { id: `conversation-attachment-review:${conversationId}` },
+    mutationFn: async ({ input, key }: { input: ReviewInput; key: string }) => ({
+      key, review: await invoke<Review>("review_conversation_attachment_draft", input),
+    }),
+  });
+  const request = useRef<(() => void) | undefined>(undefined);
+  request.current = key && revision && selection && mode !== "goal" ? () => mutation.mutate({ key,
+    input: { conversationId, expectedRevision: revision, selection, effort, mode, text },
+  }) : undefined;
+  useEffect(() => {
+    if (!key) return;
+    const timer = window.setTimeout(() => request.current?.(), 350);
+    return () => window.clearTimeout(timer);
+  }, [key]);
+  const review = mutation.data?.key === key ? mutation.data.review : undefined;
+  return { review, pending: Boolean(key && !review && !mutation.error), eligible: Boolean(key),
+    error: mutation.variables?.key === key ? mutation.error : null, refresh: () => request.current?.() };
+}
+
+export function ConversationAttachments({ attachments, disabled, preview }: {
   attachments: ReturnType<typeof useConversationAttachments>;
   disabled: boolean;
+  preview?: ReturnType<typeof useConversationAttachmentReview>;
 }) {
   if (!attachments.enabled) return null;
   const unavailable = disabled || attachments.busy;
@@ -97,16 +160,81 @@ export function ConversationAttachments({ attachments, disabled }: {
       <Paperclip className="size-3.5" aria-hidden /> Attach files
     </button>
     {attachments.draft.files.length > 0 && <ul aria-label="Draft files" className="grid gap-1">
-      {attachments.draft.files.map(({ id, source }) => {
+      {attachments.draft.files.map((file) => {
+        const { id, source } = file;
         const path = pathOf(source);
         const name = path.split(/[\\/]/).at(-1) ?? path;
-        return <li key={id} className="flex min-w-0 items-center justify-between rounded border border-border px-2 py-1 text-xs">
-          <span title={path} className="truncate">{name} · {source.kind === "checkout" ? "Checkout" : "Selected external file"}</span>
-          <button type="button" className="conv-icon-button" aria-label={`Remove file ${name}`} disabled={unavailable}
-            onClick={() => attachments.change(id, { kind: "remove" })}><X size={14} aria-hidden /></button>
+        const review = preview?.review?.files.find((entry) => entry.id === id);
+        return <li key={id} className="grid min-w-0 gap-1 rounded border border-border px-2 py-1 text-xs">
+          <div className="flex min-w-0 items-center justify-between">
+            <span title={path} className="truncate">{name} · {source.kind === "checkout" ? "Checkout" : "Selected external file"}</span>
+            <button type="button" className="conv-icon-button" aria-label={`Remove file ${name}`} disabled={unavailable}
+              onClick={() => attachments.change(id, { kind: "remove" })}><X size={14} aria-hidden /></button>
+          </div>
+          {review && <ReviewedAttachment key={`${id}:${review.delivery?.kind}:${review.excerpt?.start}:${review.excerpt?.end}`}
+            name={name} path={path} file={file} review={review} disabled={unavailable}
+            onDelivery={(delivery) => attachments.change(id, { kind: "set_delivery", delivery })} />}
         </li>;
       })}
     </ul>}
+    {attachments.draft.files.length > 0 && preview && <>
+      {!preview.eligible && <p className="text-xs">Choose a conversation model to review file delivery.</p>}
+      {preview.pending && <p role="status" className="text-xs">Reviewing files…</p>}
+      {preview.review && <AttachmentLimitsOverview review={preview.review} />}
+      {(preview.error || preview.review?.files.some(({ blocker }) => blocker)) && <button
+        type="button" className="conv-quiet-button w-fit" disabled={unavailable} onClick={preview.refresh}>Review files again</button>}
+      {preview.error && <p role="alert" className="conv-alert">{String(preview.error)}</p>}
+    </>}
     {attachments.error != null && <p role="alert" className="conv-alert">{String(attachments.error)}</p>}
   </div>;
+}
+
+function ReviewedAttachment({ name, path, file, review, disabled, onDelivery }: {
+  name: string; path: string; file: Attachment; review: FileReview; disabled: boolean;
+  onDelivery: (delivery: AttachmentDelivery | null) => void;
+}) {
+  const current = review.delivery;
+  const [start, setStart] = useState(current?.kind === "excerpt" ? String(current.start) : "0");
+  const [end, setEnd] = useState(current?.kind === "excerpt" ? String(current.end) : "");
+  const from = Number(start);
+  const to = Number(end);
+  const alternatives = review.alternatives.filter((candidate) => candidate.kind !== file.delivery?.kind);
+  return <details open={Boolean(review.blocker)} className="min-w-0">
+    <summary className="cursor-pointer">{current ? deliveryLabels[current.kind] : "Delivery unavailable"}
+      {review.metadata && ` · ${review.metadata.size.toLocaleString()} bytes`}</summary>
+    <div className="grid gap-2 py-1">
+      <p className="break-all">{path}{review.metadata && ` · ${mime[review.metadata.format]}`}</p>
+      <label>Delivery for {name} <select disabled={disabled} value={file.delivery?.kind ?? "auto"}
+        onChange={(event) => onDelivery(alternatives.find(({ kind }) => kind === event.currentTarget.value) ?? null)}>
+        <option value="auto">Automatic</option>
+        {file.delivery && <option value={file.delivery.kind}>{deliveryLabels[file.delivery.kind]}</option>}
+        {alternatives.map(({ kind }) => <option key={kind} value={kind}>{deliveryLabels[kind]}</option>)}
+      </select></label>
+      {review.nativeUnavailable && current?.kind !== "native" && <p>{review.nativeUnavailable}</p>}
+      {current?.kind === "excerpt" && <div className="flex flex-wrap items-end gap-2">
+        <label>Start byte <input min={0} type="number" value={start} onChange={(event) => setStart(event.currentTarget.value)} /></label>
+        <label>End byte <input min={1} type="number" value={end} onChange={(event) => setEnd(event.currentTarget.value)} /></label>
+        <button type="button" className="conv-quiet-button" disabled={disabled || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to <= from}
+          onClick={() => onDelivery({ kind: "excerpt", start: from, end: to })}>Use byte range</button>
+      </div>}
+      {review.excerpt && <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words">{review.excerpt.text}</pre>}
+      {review.reference && <p className="break-all">{review.reference.kind === "checkout_path" ? "Reference target" : "Scoped read-only copy of"} {review.reference.path}</p>}
+      {review.media !== null && review.metadata && <SafeAttachmentMedia base64={review.media} mimeType={mime[review.metadata.format]} title={name} />}
+      {current?.kind === "native" && review.media === null && !review.blocker && <p>Inline preview unavailable for this file.</p>}
+      {review.blocker && <p role="alert" className="conv-alert">{review.blocker}</p>}
+    </div>
+  </details>;
+}
+
+function AttachmentLimitsOverview({ review }: { review: Review }) {
+  const { projectLimits: project, qualifiedLimits: provider } = review;
+  return <details className="text-xs">
+    <summary>Attachment limits</summary>
+    <p>{Math.min(project.filesPerTurn, provider?.filesPerTurn ?? project.filesPerTurn)} files per turn · {project.bytesPerFile.toLocaleString()} bytes per file · {project.bytesPerTurn.toLocaleString()} bytes combined</p>
+    <p>{project.utf8BytesPerExcerpt.toLocaleString()} UTF-8 bytes per excerpt</p>
+    {provider?.formats.map(({ format, fileBytes }, index) => fileBytes !== null && <p key={`${format}:${index}`}>{mime[format]} · {Math.min(fileBytes, project.bytesPerFile).toLocaleString()} bytes per native file</p>)}
+    {provider?.encodedRequestBytes != null && <p>Encoded request limit {provider.encodedRequestBytes.toLocaleString()} bytes · at least {review.minimumEncodedBytes.toLocaleString()} bytes estimated</p>}
+    {provider?.context && <p>Context {provider.context.windowTokens.toLocaleString()} tokens · reserve {provider.context.reservedOutputTokens.toLocaleString()} for output
+      {review.estimatedContextInputTokens !== null && ` · ${review.estimatedContextInputTokens.toLocaleString()} input tokens estimated before provider history`}</p>}
+  </details>;
 }

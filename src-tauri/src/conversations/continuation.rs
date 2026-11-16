@@ -2,7 +2,7 @@ use super::{
     Conversation, MessageRevision, MessageRole, SessionScope, activate_context,
     automatic_continuity, check_idle_base, consume_matching_draft, context_entries,
     insert_conversation, insert_message, load_conversation, load_messages, new_id,
-    previous_attempt, reference_delivery,
+    previous_attempt, reference_delivery, draft_files::{consume_attachment_draft, verify_attachment_draft},
 };
 use crate::{
     attachments::{AttachmentDelivery, CapturedPayload, captured_for_revision},
@@ -122,6 +122,8 @@ struct SealedReview {
     seed_digest: [u8; 32],
     #[serde(default)]
     reference_ids: Vec<String>,
+    #[serde(default)]
+    attachment_preview_id: Option<String>,
 }
 
 enum ContinuationRoute {
@@ -203,7 +205,7 @@ impl Store {
             let inspected =
                 match continuation_route(&tx, &conversation, &expected_context_id, &scope)? {
                     ContinuationRoute::Review(reason) => {
-                        seal_review(&tx, &project, &conversation, scope, reason, Vec::new())?
+                        seal_review(&tx, &project, &conversation, scope, reason, Vec::new(), None)?
                     }
                     _ => ContinuationInspection::Automatic,
                 };
@@ -231,21 +233,38 @@ impl Store {
         text: String,
         reference_ids: Vec<String>,
     ) -> Result<ContinuationInspection> {
+        self.submit_conversation_with_files(conversation_id, expected_context_id, scope, text, reference_ids, None).await
+    }
+
+    pub async fn submit_conversation_with_files(
+        &self,
+        conversation_id: String,
+        expected_context_id: String,
+        scope: SessionScope,
+        text: String,
+        reference_ids: Vec<String>,
+        attachment_preview_id: Option<String>,
+    ) -> Result<ContinuationInspection> {
+        let attachments = self.prepare_attachment_draft_submission(
+            conversation_id.clone(), &scope, &text, attachment_preview_id.clone(),
+        ).await?;
         let outcome = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let conversation = load_conversation(&tx, &conversation_id)?;
                 let (project, root) = checkout(&tx, &conversation)?;
                 validate_scope(&scope, &root)?;
+                verify_attachment_draft(&tx, &conversation_id, attachments.as_ref())?;
                 reference_delivery::verify_draft_references(&tx, &conversation_id, &project, &reference_ids)?;
                 let route = continuation_route(&tx, &conversation, &expected_context_id, &scope)?;
                 if let ContinuationRoute::Review(reason) = route {
-                    let reviewed = seal_review(&tx, &project, &conversation, scope, reason, reference_ids)?;
+                    let reviewed = seal_review(&tx, &project, &conversation, scope, reason, reference_ids, attachment_preview_id)?;
                     tx.commit()?;
                     return Ok(reviewed);
                 }
                 consume_matching_draft(&tx, &conversation_id, &text)?;
                 reference_delivery::consume_draft_references(&tx, &conversation_id)?;
+                consume_attachment_draft(&tx, &conversation_id)?;
                 let job = queue_conversation_continuation(
                     &tx,
                     project,
@@ -254,6 +273,7 @@ impl Store {
                     &scope,
                     &text,
                     &reference_ids,
+                    attachments.as_ref().map(|draft| &draft.files),
                 )?;
                 match route {
                     ContinuationRoute::Queue => (),
@@ -287,22 +307,24 @@ impl Store {
         scope: SessionScope,
         text: String,
     ) -> Result<ContinuedConversation> {
+        let attachment_preview_id = self.execute({
+            let conversation_id = conversation_id.clone(); let preview_id = preview_id.clone();
+            move |db| Ok(load_continuation_review(db, &conversation_id, &preview_id)?.1.attachment_preview_id)
+        }).await?;
+        let attachments = self.prepare_attachment_draft_submission(
+            conversation_id.clone(), &scope, &text, attachment_preview_id,
+        ).await?;
         let continued = self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let (context_id, payload): (String, Vec<u8>) = tx
-                .query_row(
-                    "SELECT context_id, payload FROM conversation_continuation_previews WHERE id = ?1 AND conversation_id = ?2",
-                    params![preview_id, conversation_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?
-                .context("This continuation preview is no longer available. Review the conversation again.")?;
+            let (context_id, preview) = load_continuation_review(&tx, &conversation_id, &preview_id)?;
             let source = check_idle_base(&tx, &conversation_id, &context_id)?;
             ensure!(!busy(&tx, &source)?, "The conversation has pending work. Review the continuation after it settles.");
             let (project, root) = checkout(&tx, &source)?;
             validate_scope(&scope, &root)?;
-            let preview: SealedReview = serde_json::from_slice(&protection::unprotect(&payload)?)?;
             ensure!(preview.scope == scope, "The selected profile changed. Review the continuation again.");
+            ensure!(preview.attachment_preview_id.as_deref() == attachments.as_ref().map(|draft| draft.preview_id.as_str()),
+                "The reviewed files changed. Review the continuation again.");
+            verify_attachment_draft(&tx, &conversation_id, attachments.as_ref())?;
             reference_delivery::verify_draft_references(&tx, &conversation_id, &project, &preview.reference_ids)?;
             let entries = context_entries(&tx, &conversation_id, &context_id)?;
             ensure!(
@@ -311,6 +333,7 @@ impl Store {
             );
             consume_matching_draft(&tx, &source.id, &text)?;
             reference_delivery::consume_draft_references(&tx, &source.id)?;
+            consume_attachment_draft(&tx, &source.id)?;
             let conversation = match choice {
                 ContinuationChoice::SameTab => source,
                 ContinuationChoice::ForkWithContext => fork_history(&tx, &source, &entries, format!("{} (fork)", source.title))?,
@@ -318,6 +341,7 @@ impl Store {
             };
             let job = queue_conversation_continuation(
                 &tx, project, &conversation, &conversation.context_id, &scope, &text, &preview.reference_ids,
+                attachments.as_ref().map(|draft| &draft.files),
             )?;
             pin_continuation(&tx, &job.id, &conversation, None)?;
             tx.execute("DELETE FROM conversation_continuation_previews WHERE id = ?1", [&preview_id])?;
@@ -328,6 +352,15 @@ impl Store {
         self.job_signal.send_replace(());
         Ok(continued)
     }
+
+}
+
+fn load_continuation_review(db: &Connection, conversation_id: &str, preview_id: &str) -> Result<(String, SealedReview)> {
+    let (context_id, payload): (String, Vec<u8>) = db.query_row(
+        "SELECT context_id, payload FROM conversation_continuation_previews WHERE id = ?1 AND conversation_id = ?2",
+        params![preview_id, conversation_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?.context("This continuation preview is no longer available. Review the conversation again.")?;
+    Ok((context_id, serde_json::from_slice(&protection::unprotect(&payload)?)?))
 }
 
 fn continuation_route(
@@ -379,6 +412,7 @@ fn seal_review(
     scope: SessionScope,
     reason: ContinuationReason,
     reference_ids: Vec<String>,
+    attachment_preview_id: Option<String>,
 ) -> Result<ContinuationInspection> {
     let entries = context_entries(db, &conversation.id, &conversation.context_id)?;
     let seed = preview_seed(db, conversation, &entries)?;
@@ -387,6 +421,7 @@ fn seal_review(
         scope,
         seed_digest: protected_history_digest(db, conversation)?,
         reference_ids,
+        attachment_preview_id,
     })?)?;
     db.execute(
         "INSERT INTO conversation_continuation_previews VALUES (?1, ?2, ?3, ?4)

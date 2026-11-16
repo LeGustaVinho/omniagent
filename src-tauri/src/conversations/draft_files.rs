@@ -14,6 +14,10 @@ use crate::{
 
 use super::{load_conversation, new_id};
 
+mod review;
+pub use review::{AttachmentDraftReview, AttachmentFileReview};
+pub(crate) use review::{consume_attachment_draft, verify_attachment_draft};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftAttachment {

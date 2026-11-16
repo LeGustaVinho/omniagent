@@ -1,5 +1,8 @@
 use super::*;
 use crate::conversations::tests::setup;
+use crate::{
+    attachments::CapturedPayload, conversations::ContinuationInspection, jobs::AdmissionEnvironment,
+};
 
 #[tokio::test]
 async fn native_selections_keep_individual_sources_and_restore_the_attachment_draft() -> Result<()>
@@ -89,5 +92,99 @@ async fn native_selections_keep_individual_sources_and_restore_the_attachment_dr
         .await?;
     assert_eq!(remaining.files, [selected.files[1].clone()]);
     assert_ne!(remaining.revision, selected.revision);
+    Ok(())
+}
+
+#[tokio::test]
+async fn attachment_review_preserves_the_exact_excerpt_and_rejects_changes_before_queueing()
+-> Result<()> {
+    let (_repo, store, chat, scope) = setup().await?;
+    std::fs::write(&scope.executable, b"fixture")?;
+    let file = scope.checkout.join("excerpt.txt");
+    let original = "Keep café\nIgnore this line.";
+    std::fs::write(&file, original)?;
+    let draft = store
+        .add_conversation_attachment_paths(chat.id.clone(), vec![file.clone()])
+        .await?;
+    let draft = store
+        .edit_conversation_attachment_draft(
+            chat.id.clone(),
+            draft.revision.unwrap(),
+            draft.files[0].id.clone(),
+            DraftAttachmentEdit::SetDelivery {
+                delivery: Some(AttachmentDelivery::Excerpt {
+                    start: 0,
+                    end: "Keep café".len() as u64,
+                }),
+            },
+        )
+        .await?;
+    let prompt = "Report the selected excerpt.";
+    store
+        .save_conversation_draft(chat.id.clone(), prompt.into())
+        .await?;
+    let review = store
+        .review_conversation_attachment_draft(
+            chat.id.clone(),
+            draft.revision.clone().unwrap(),
+            scope.clone(),
+            prompt.into(),
+        )
+        .await?;
+    let preview = review.preview_id.context("Missing reviewed excerpt")?;
+    let row = &review.files[0];
+    assert_eq!(
+        row.excerpt.as_ref().context("Missing preview text")?.text,
+        "Keep café"
+    );
+    assert_eq!(row.metadata.as_ref().unwrap().size, original.len() as u64);
+    assert!(row.alternatives.contains(&AttachmentDelivery::Reference));
+    let submit = |scope, preview| {
+        store.submit_conversation_with_files(
+            chat.id.clone(),
+            chat.context_id.clone(),
+            scope,
+            prompt.into(),
+            Vec::new(),
+            Some(preview),
+        )
+    };
+    let mut changed = scope.clone();
+    changed.model = Some("new-model".into());
+    assert!(submit(changed, preview.clone()).await.is_err());
+    std::fs::write(&file, "Changed at the same path")?;
+    assert!(submit(scope.clone(), preview.clone()).await.is_err());
+    assert_eq!(
+        store.conversation_attachment_draft(chat.id.clone()).await?,
+        draft
+    );
+    assert_eq!(store.conversation_draft(chat.id.clone()).await?, prompt);
+    std::fs::write(&file, original)?;
+    assert!(matches!(
+        submit(scope.clone(), preview).await?,
+        ContinuationInspection::Queued { .. }
+    ));
+    assert!(
+        store
+            .conversation_attachment_draft(chat.id.clone())
+            .await?
+            .files
+            .is_empty()
+    );
+    std::fs::write(file, "Changed after queue admission")?;
+    let plan = store
+        .claim_next_job(AdmissionEnvironment {
+            runner: scope.runner,
+            bridge_available: false,
+        })
+        .await?
+        .context("Reviewed turn was not admitted")?;
+    let [(_, saved)] = plan.attachments.as_slice() else {
+        anyhow::bail!("Expected exactly one attachment")
+    };
+    assert_eq!(saved.metadata, *row.metadata.as_ref().unwrap());
+    assert!(
+        matches!(&saved.payload, CapturedPayload::Excerpt { excerpt } if Some(excerpt) == row.excerpt.as_ref())
+    );
     Ok(())
 }

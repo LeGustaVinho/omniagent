@@ -31,7 +31,7 @@ import { SideQuestionPanel, type SideSubmission, useSideRequests, useSuggestionM
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
 import { ConversationReferenceChips, type ConversationReferencePreview } from "@/conversation-reference";
-import { ConversationAttachments, useConversationAttachments } from "@/conversation-attachments";
+import { ConversationAttachments, useConversationAttachmentReview, useConversationAttachments } from "@/conversation-attachments";
 import { ComposerCustomizationPicker, conversationSkillMessage, hasComposerSkills, useComposerCustomizations,
   type ComposerCustomization } from "@/conversation-customization-picker";
 import {
@@ -398,6 +398,10 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     setDraftError("");
   }
   const effectiveEffort = efforts?.efforts.includes(effort) ? effort : null;
+  const attachmentReview = useConversationAttachmentReview({
+    conversationId, revision: attachments.draft.revision, contextId: history.data?.contextId,
+    selection, effort: effectiveEffort, mode, text, enabled: visible && Boolean(selected?.option.selectable),
+  });
   const customizationPicker = useComposerCustomizations({
     conversationId, selection, effort: effectiveEffort, mode: mode === "goal" ? "read_only" : mode,
     draft: text, cursor: composerCursor, enabled: visible && !composingGoal && !isSideQuestion,
@@ -407,7 +411,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     queryFn: () => invoke<boolean>("preview_conversation_steering", { conversationId, runId: run?.id,
       expectedContextId: history.data?.contextId, selection, effort: effectiveEffort, mode }),
     enabled: visible && live && run?.status === "running" && Boolean(history.data?.contextId && selected?.option.selectable)
-      && Boolean(text.trim()) && !isSideQuestion && !composingGoal && !hasReferences && !hasSkills,
+      && Boolean(text.trim()) && !isSideQuestion && !composingGoal && !hasReferences && !hasSkills && !hasAttachments,
     retry: false,
     refetchInterval: 1250,
   });
@@ -422,9 +426,11 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
       if (!selection || !expectedContextId || mode === "goal") throw new Error("Choose a model and wait for the conversation context.");
       const effective = { selection, effort: effectiveEffort, mode };
       const referenceIds = references.length > 0 ? references.map(({ id }) => id) : undefined;
+      const attachmentPreviewId = attachmentReview.review?.previewId;
+      if (hasAttachments && !attachmentPreviewId) throw new Error("Review the files before sending.");
       await saveDraft(conversationId, submitted);
       const review = await submitConversationContinuation({ conversationId, expectedContextId, ...effective, text: submitted,
-        ...(referenceIds && { referenceIds }) });
+        ...(referenceIds && { referenceIds }), ...(attachmentPreviewId && { attachmentPreviewId }) });
       if (review.status === "review_required") return { review, ...effective, text: submitted } satisfies ReviewedContinuation;
       return { instructionId: review.job.id };
     },
@@ -433,9 +439,12 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
       clearSubmittedDraft(submitted);
       void instructions.refresh();
       if (toRun) steer.mutate({ instructionId: outcome.instructionId, runId: toRun });
-      if (library) await queryClient.invalidateQueries({ queryKey: referenceDraftKey });
+      if (library) await Promise.all([queryClient.invalidateQueries({ queryKey: referenceDraftKey }), attachments.refresh()]);
     },
-    onError: () => { if (library) void queryClient.invalidateQueries({ queryKey: referenceDraftKey }); },
+    onError: () => {
+      if (library) void queryClient.invalidateQueries({ queryKey: referenceDraftKey });
+      if (hasAttachments) attachmentReview.refresh();
+    },
   });
   const continueSend = useMutation({
     mutationFn: ({ choice, intent }: { choice: Parameters<typeof confirmConversationContinuation>[0]["choice"]; intent: ReviewedContinuation }) =>
@@ -447,7 +456,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
       void instructions.refresh();
       void queryClient.invalidateQueries({ queryKey: conversationLibraryKey });
       if (conversation.id !== conversationId) openFork(conversation);
-      if (library) await queryClient.invalidateQueries({ queryKey: referenceDraftKey });
+      if (library) await Promise.all([queryClient.invalidateQueries({ queryKey: referenceDraftKey }), attachments.refresh()]);
     },
     onError: () => { if (library) void queryClient.invalidateQueries({ queryKey: referenceDraftKey }); },
   });
@@ -503,15 +512,15 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const suggestionSource = useRef<string>(undefined);
   useEffect(() => {
     if (run && isLiveRun(run)) suggestionSource.current = run.id;
-    if (!visible || !suggestionsEnabled || busy || hasReferences || text.trim() || !selection || !selected?.option.selectable
+    if (!visible || !suggestionsEnabled || busy || hasReferences || hasAttachments || text.trim() || !selection || !selected?.option.selectable
       || run?.status !== "succeeded" || suggestionSource.current !== run.id) return;
     suggestionSource.current = undefined;
     void invoke<SideSubmission>("enqueue_conversation_side_request", {
       conversationId, expectedSourceRunId: run.id, selection, effort: sideEffort, mode: sideMode,
       purpose: "suggestion", question: "",
     }).then(() => queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "side-requests"] }), () => {});
-  }, [run, visible, suggestionsEnabled, busy, hasReferences, text, selection, selected, conversationId, queryClient, sideEffort, sideMode]);
-  const suggested = suggestionsEnabled && !busy && !hasReferences && !text.trim() ? sideHistory.data?.find((item) =>
+  }, [run, visible, suggestionsEnabled, busy, hasReferences, hasAttachments, text, selection, selected, conversationId, queryClient, sideEffort, sideMode]);
+  const suggested = suggestionsEnabled && !busy && !hasReferences && !hasAttachments && !text.trim() ? sideHistory.data?.find((item) =>
     item.purpose === "suggestion" && item.contextId === history.data?.contextId
     && item.sourceRunId === run?.id && item.provider === selection?.provider && item.profileId === selection?.profileId
     && item.model === selection?.modelId && item.effort === sideEffort && item.mode === sideMode)?.response?.outcome : undefined;
@@ -553,7 +562,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
   const canStartGoal = Boolean(history.data?.contextId && selected?.option.selectable && !busy && !latest.isPending && !latestJob.isPending
     && !goal.isPending && !goal.error && !hasCurrentGoal(goal.data) && !send.isPending && !recover.isPending);
   const referencesReady = !library || (referenceDraft.isSuccess && !editReferenceDraft.isPending);
-  const canSend = referencesReady && attachments.ready && !attachments.busy && !hasAttachments
+  const canSend = referencesReady && attachments.ready && !attachments.busy
+    && (!hasAttachments || (!composingGoal && !isSideQuestion && Boolean(attachmentReview.review?.previewId)))
     && !customizationPicker.pinned.some(({ option }) => !option)
     && (composingGoal ? Boolean(!hasReferences && !hasSkills && text.trim() && !startGoal.isPending && (goalInput === "" || canStartGoal))
     : Boolean(text.trim() && selected?.option.selectable && (isSideQuestion
@@ -561,7 +571,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     : history.data?.contextId && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending)));
   const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
   const historyBusy = live || isLiveRun(attempt) || send.isPending || continueSend.isPending || steer.isPending;
-  const steerRun = canSend && !hasReferences && !hasSkills && !steer.isPending && !isSideQuestion && !composingGoal && run?.status === "running"
+  const steerRun = canSend && !hasReferences && !hasAttachments && !hasSkills && !steer.isPending && !isSideQuestion && !composingGoal && run?.status === "running"
     && steeringPreview.data && !instructions.data.some((item) => item.editable && !item.recordedContext) ? run.id : undefined;
 
   function submit(event: FormEvent) {
@@ -702,7 +712,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           </div>
         </div>}
       <form ref={composerForm} onSubmit={submit} className={`conv-composer ${attachments.hover ? "ring-2 ring-primary" : ""}`}>
-          <ConversationAttachments attachments={attachments} disabled={send.isPending || continueSend.isPending} />
+          <ConversationAttachments attachments={attachments} preview={attachmentReview} disabled={send.isPending || continueSend.isPending} />
           <ComposerCustomizationPicker picker={customizationPicker} onPick={pickCustomization}
             onRemove={(token) => editDraft(customizationPicker.remove(token))} />
           <ConversationReferenceChips references={references}
@@ -809,6 +819,9 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           </p>}
           {hasReferences && (isSideQuestion || composingGoal) && <p className="conv-alert">
             Remove the conversation references to send a side question or start a goal.
+          </p>}
+          {hasAttachments && (isSideQuestion || composingGoal) && <p className="conv-alert">
+            Remove the attached files to send a side question or start a goal.
           </p>}
           {hasSkills && (isSideQuestion || composingGoal) && <p className="conv-alert">
             Remove the selected skills to send a side question or start a goal.

@@ -52,6 +52,7 @@ pub async fn submit_conversation_continuation(
     mode: SessionMode,
     text: String,
     reference_ids: Option<Vec<String>>,
+    attachment_preview_id: Option<String>,
 ) -> Result<ContinuationInspection, String> {
     async {
         let conversation = store.conversation(conversation_id.clone()).await?;
@@ -64,12 +65,13 @@ pub async fn submit_conversation_continuation(
         )
         .await?;
         store
-            .submit_conversation_with_references(
+            .submit_conversation_with_files(
                 conversation_id,
                 expected_context_id,
                 scope,
                 text,
                 reference_ids.unwrap_or_default(),
+                attachment_preview_id,
             )
             .await
     }

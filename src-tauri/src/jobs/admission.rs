@@ -218,6 +218,7 @@ pub(crate) fn queue_conversation_continuation(
     scope: &SessionScope,
     text: &str,
     reference_ids: &[String],
+    attachments: Option<&instructions::FrozenAttachments>,
 ) -> Result<Job> {
     ensure!(
         instructions::preserves_destination(
@@ -239,7 +240,7 @@ pub(crate) fn queue_conversation_continuation(
         context,
         scope,
         text,
-        None,
+        attachments,
     )?;
     if !reference_ids.is_empty() {
         let revision = instructions::load_revision(db, &job.id)?.context("Queued conversation lost its revision")?;
