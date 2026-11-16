@@ -100,6 +100,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/083-agile-work-events.sql"),
     include_str!("../migrations/084-conversation-attachment-drafts.sql"),
     include_str!("../migrations/085-conversation-fork-checkouts.sql"),
+    include_str!("../migrations/086-conversation-compaction.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

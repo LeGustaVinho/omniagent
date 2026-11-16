@@ -30,6 +30,7 @@ import { ConversationHistoryControls, ConversationMessageHistoryActions, type Co
 import { ConversationSubagentControls } from "@/subagent-quota";
 import { SideQuestionPanel, type SideSubmission } from "@/conversation-side-requests";
 import { ConversationSuggestionButton, useConversationSuggestion } from "@/conversation-suggestions";
+import { ConversationCompactionControl, useConversationCompaction } from "@/conversation-compaction";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { ConversationRow } from "@/conversation-menu";
 import { ConversationReferenceChips, type ConversationReferencePreview } from "@/conversation-reference";
@@ -400,6 +401,10 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     setDraftError("");
   }
   const effectiveEffort = efforts?.efforts.includes(effort) ? effort : null;
+  const movingCheckout = continuationCheckoutId && continuationCheckoutId !== checkoutId;
+  const compactionEnabled = Boolean(library && visible && selected?.option.selectable && mode !== "goal" && !movingCheckout);
+  const compaction = useConversationCompaction({ conversationId, selection, effort: effectiveEffort, mode: mode === "goal" ? "read_only" : mode,
+    pendingText: text, enabled: compactionEnabled });
   const attachmentReview = useConversationAttachmentReview({
     conversationId, revision: attachments.draft.revision, contextId: history.data?.contextId,
     selection, effort: effectiveEffort, mode, text, enabled: visible && Boolean(selected?.option.selectable),
@@ -424,9 +429,18 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     onSettled: instructions.refresh,
   });
   const send = useMutation({
-    mutationFn: async ({ text: submitted }: { text: string; toRun?: string }): Promise<ReviewedContinuation | { instructionId: string }> => {
-      const expectedContextId = history.data?.contextId;
+    mutationFn: async ({ text: submitted }: { text: string; toRun?: string }): Promise<ReviewedContinuation | { instructionId: string } | null> => {
+      let expectedContextId = history.data?.contextId;
       if (!selection || !expectedContextId || mode === "goal") throw new Error("Choose a model and wait for the conversation context.");
+      if (compactionEnabled && !busy) {
+        const reviewedContext = await compaction.beforeSend(expectedContextId, submitted);
+        if (!reviewedContext) return null;
+        if (reviewedContext !== expectedContextId) {
+          await queryClient.invalidateQueries({ queryKey: historyKey });
+          if (hasAttachments) return null;
+          expectedContextId = reviewedContext;
+        }
+      }
       const effective = { selection, effort: effectiveEffort, mode };
       const referenceIds = references.length > 0 ? references.map(({ id }) => id) : undefined;
       const attachmentPreviewId = attachmentReview.review?.previewId;
@@ -439,6 +453,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
       return { instructionId: review.job.id };
     },
     onSuccess: async (outcome, { text: submitted, toRun }) => {
+      if (!outcome) return;
       if ("review" in outcome) { setContinuation(outcome); return; }
       clearSubmittedDraft(submitted);
       void instructions.refresh();
@@ -784,6 +799,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
                   } : undefined} />}
                 selection={{ mode: "single", selected: selection, onChange: (model) => { setSelection(model); setEffort(""); } }} />
               <ConversationModeSelect mode={mode} onChange={setMode} />
+              {compactionEnabled && <ConversationCompactionControl compaction={compaction} contextId={history.data?.contextId}
+                disabled={busy || send.isPending || continueSend.isPending} />}
               <EffortSelect capabilities={efforts} loading={Boolean(antigravityModel && modelEfforts.isPending)}
                 className={selectorClass} value={effort} onChange={setEffort} />
               {live && <StopConversation {...activity} />}

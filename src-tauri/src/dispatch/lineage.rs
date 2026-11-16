@@ -19,6 +19,7 @@ use super::{ContextSnapshot, NativeHistory};
 
 mod conversation_artifacts;
 pub(crate) use conversation_artifacts::{load_conversation_artifact, record_conversation_excerpt};
+pub(crate) use conversation_artifacts::{enqueue_summary, reconcile_summary};
 pub use conversation_artifacts::{
     ArtifactSource, ByteRange, ConversationArtifactRevision, ConversationSelection, ExcerptSource,
     QueuedSummary, SelectedMessageSpan, SummaryRun,
@@ -73,6 +74,11 @@ pub enum DispatchSourceRevision {
     },
     SummaryInput {
         request_id: String,
+        source_context_id: String,
+        covered: Vec<ArtifactSource>,
+    },
+    CompactedConversation {
+        artifact_revision_id: String,
         source_context_id: String,
         covered: Vec<ArtifactSource>,
     },
@@ -407,6 +413,15 @@ fn collect(
             request_id,
             source_context_id: request.source_context_id,
             covered: request.covered,
+        });
+    }
+    if let Some(overlay) = crate::conversations::compaction::load_overlay(db, &snapshot.context_id)?
+        && snapshot.submitted_messages.first().is_some_and(|entry| entry == &overlay.seed())
+        && let ConversationArtifactRevision::Summary { id, source_context_id, covered, .. } = overlay.artifact
+    {
+        messages.extend(covered.iter().map(|part| part.origin.revision_id.clone()));
+        sources.push(DispatchSourceRevision::CompactedConversation {
+            artifact_revision_id: id, source_context_id, covered,
         });
     }
     for submitted in &snapshot.conversation_references {

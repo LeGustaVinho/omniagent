@@ -25,6 +25,7 @@ use crate::{
 };
 
 mod approval_evidence;
+pub mod compaction;
 pub(crate) mod continuation;
 pub mod fork_checkout;
 pub mod draft_files;
@@ -1144,11 +1145,12 @@ fn seal_attempt_context(
             response,
         )?);
     }
-    write_context(
+    write_context_from(
         db,
         &active.conversation_id,
         &entries,
         !active.detached_context,
+        Some(&active.context_id),
     )
 }
 
@@ -1532,10 +1534,17 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             .map_or(&base_context_id, |recorded| &recorded.context_id),
     };
     let mut entries = context_entries(db, &conversation_id, input_context_id)?;
+    let compacted = compaction::load_overlay(db, input_context_id)?;
     let previous = previous_attempt(db, &conversation_id)?;
     let eligible = previous
         .as_ref()
         .filter(|prior| prior.matches_allocation(&allocation));
+    let eligible = match eligible {
+        Some(prior) if let Some(cursor) = &prior.cursor => {
+            compaction::same_seed(db, input_context_id, cursor)?.then_some(prior)
+        }
+        prior => prior,
+    };
     let continuity = match (&history, eligible, &recorded) {
         (
             AttemptHistory::Automatic
@@ -1605,7 +1614,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         input_context_id.clone()
     } else if let AttemptHistory::QueuedInstruction { revision_id, .. } = &history {
         entries.push(revision_id.clone());
-        write_context(db, &conversation_id, &entries, recorded.is_none())?
+        write_context_from(db, &conversation_id, &entries, recorded.is_none(), Some(input_context_id))?
     } else {
         let encrypted = if let (Some((_, reply)), Some((_, form))) = (&answer, &answered_request) {
             let values = serde_json::json!({"question": form, "answer": reply.values});
@@ -1632,9 +1641,13 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             );
             entries.push(instruction);
         }
-        write_context(db, &conversation_id, &entries, recorded.is_none())?
+        write_context_from(db, &conversation_id, &entries, recorded.is_none(), Some(input_context_id))?
     };
     let input = load_messages(db, &conversation_id, &entries[consumed..])?;
+    let input = match (consumed, compacted) {
+        (0, Some(overlay)) => compaction::apply_projection(input, &overlay),
+        _ => input,
+    };
     let mut attachments = Vec::new();
     for message in &input {
         attachments.extend(
@@ -1990,12 +2003,30 @@ fn write_context(
     entries: &[String],
     activate: bool,
 ) -> Result<String> {
+    let predecessor: Option<String> = if activate {
+        db.query_row("SELECT active_context_id FROM conversations WHERE id = ?1", [conversation_id], |row| row.get(0))?
+    } else {
+        None
+    };
+    write_context_from(db, conversation_id, entries, activate, predecessor.as_deref())
+}
+
+fn write_context_from(
+    db: &Connection,
+    conversation_id: &str,
+    entries: &[String],
+    activate: bool,
+    predecessor: Option<&str>,
+) -> Result<String> {
     let id = new_id();
     db.execute(
         "INSERT INTO conversation_contexts(id, conversation_id, entries, history_generation)
          SELECT ?1, id, ?3, history_generation FROM conversations WHERE id = ?2",
         params![id, conversation_id, serde_json::to_string(entries)?],
     )?;
+    if let Some(predecessor) = predecessor {
+        compaction::inherit(db, predecessor, &id, entries)?;
+    }
     if activate {
         db.execute(
             "UPDATE conversations SET active_context_id = ?1 WHERE id = ?2",

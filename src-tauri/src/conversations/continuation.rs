@@ -1,7 +1,7 @@
 use super::{
     Conversation, MessageRevision, MessageRole, SessionScope, activate_context,
     automatic_continuity, check_idle_base, consume_matching_draft, context_entries,
-    insert_conversation, insert_message, load_conversation, load_messages, new_id,
+    insert_conversation, insert_message, load_conversation, new_id,
     previous_attempt, reference_delivery, draft_files::{consume_attachment_draft, verify_attachment_draft},
 };
 use crate::{
@@ -460,6 +460,14 @@ fn continuation_route(
     if !prior.matches_allocation(&allocation) {
         return Ok(ContinuationRoute::Review(ContinuationReason::PolicyChanged));
     }
+    if super::compaction::load_overlay(db, &conversation.context_id)?.is_some()
+        && match &prior.cursor {
+            Some(cursor) => !super::compaction::same_seed(db, &conversation.context_id, cursor)?,
+            None => true,
+        }
+    {
+        return Ok(ContinuationRoute::Empty);
+    }
     Ok(
         if automatic_continuity(db, &conversation.id, &entries, &prior, scope, &serialized)?
             .is_some()
@@ -667,7 +675,7 @@ fn preview_seed(
     conversation: &Conversation,
     entries: &[String],
 ) -> Result<Vec<SeedMessage>> {
-    load_messages(db, &conversation.id, entries)?
+    super::compaction::projected_messages(db, conversation, entries)?
         .into_iter()
         .map(
             |MessageRevision {
@@ -795,6 +803,7 @@ pub(super) fn fork_history_at_checkout(
     }
     if !copied.is_empty() {
         fork.context_id = activate_context(db, &fork.id, &copied)?;
+        super::compaction::inherit_fork(db, &source.context_id, &fork.context_id, entries, &copied)?;
     }
     db.execute(
         "INSERT INTO conversation_forks (conversation_id, source_conversation_id,

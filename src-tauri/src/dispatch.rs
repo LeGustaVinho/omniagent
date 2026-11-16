@@ -41,7 +41,10 @@ pub use instruction_evidence::{
     InstructionReview,
 };
 pub use inventory::DispatchInventory;
-pub(crate) use lineage::{load_conversation_artifact, record_conversation_excerpt, record_message_copy};
+pub(crate) use lineage::{
+    enqueue_summary, load_conversation_artifact, reconcile_summary, record_conversation_excerpt,
+    record_message_copy,
+};
 pub use lineage::{
     ArtifactSource, ByteRange, ConversationArtifactRevision, ConversationSelection,
     DispatchIdentity, DispatchLineage, DispatchSourceRevision, DispatchUse, ExcerptSource,
