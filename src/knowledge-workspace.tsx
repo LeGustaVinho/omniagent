@@ -83,6 +83,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const [sidebar, setSidebar] = useFileSidebar();
   const [display, setDisplay] = useState<"tree" | "search">("tree");
   const [query, setQuery] = useState("");
+  const [focusSearch, requestSearchFocus] = useState(0);
   const noteIndex = useRepositoryNoteIndex(checkout.checkoutId, !simulated, query);
   const [graph, setGraph] = useState(false);
   const graphEdges = useQuery({
@@ -373,7 +374,9 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     <section className="file-workspace knowledge-workspace" aria-label="Knowledge workspace" onKeyDown={(event) => {
       if (!event.ctrlKey && !event.metaKey) return;
       if (event.key.toLowerCase() === "s" && active && note) { event.preventDefault(); save(active); }
-      if (event.key.toLowerCase() === "p") { event.preventDefault(); setSidebar(true); setDisplay("search"); }
+      if (event.key.toLowerCase() === "p") {
+        event.preventDefault(); setSidebar(true); setDisplay("search"); requestSearchFocus((before) => before + 1);
+      }
     }}>
       {sidebar && <FileSidebar name="Knowledge navigation">
         <div className="file-sidebar-heading">
@@ -387,7 +390,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           {display === "search" ? simulated ? <FileSearch query={query} setQuery={setQuery} results={matches} unavailable={false}
             placeholder="Find notes and content" onOpen={open} />
             : <KnowledgeSearch query={query} onQueryChange={setQuery} results={noteIndex.hits} pending={noteIndex.searching}
-              error={noteIndex.error ? String(noteIndex.error) : undefined} onOpen={openLocation} />
+              error={noteIndex.error ? String(noteIndex.error) : undefined} focusRequest={focusSearch} onOpen={openLocation} />
             : <FileTree paths={catalog.map(({ path }) => path)} active={active} onOpen={open} />}
         </div>
       </FileSidebar>}
