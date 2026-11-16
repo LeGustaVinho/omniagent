@@ -39,7 +39,26 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
             graph: WorkflowGraph {
                 name: "Load iteration context".into(),
                 nodes: vec![
-                    node("start", BuiltinNode::Start, NodeConfiguration::None),
+                    node(
+                        "start",
+                        BuiltinNode::Start,
+                        NodeConfiguration::SubflowEntry {
+                            outputs: vec![
+                                Port {
+                                    name: "start".into(),
+                                    value: PortType::Control,
+                                },
+                                Port {
+                                    name: "always".into(),
+                                    value: PortType::Control,
+                                },
+                                Port {
+                                    name: "document".into(),
+                                    value: PortType::Data(ArtifactKind::Markdown),
+                                },
+                            ],
+                        },
+                    ),
                     node("load", BuiltinNode::LoadContext, NodeConfiguration::None),
                 ],
                 wires: vec![
@@ -55,6 +74,7 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
             },
             inputs: [
                 ("go".into(), port("start", "start")),
+                ("always".into(), port("start", "always")),
                 ("document".into(), port("start", "document")),
             ]
             .into(),
@@ -67,6 +87,7 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
         &[],
     );
     let mut requests = Vec::new();
+    let mut legacy = None;
     for expected in ["brief.md", "missing.md"] {
         let configuration = RepeatUntilConfiguration {
             max_iterations: 2,
@@ -101,6 +122,10 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
                         Wire {
                             from: port("start", "start"),
                             to: port("repeat", "go"),
+                        },
+                        Wire {
+                            from: port("start", "start"),
+                            to: port("repeat", "always"),
                         },
                         Wire {
                             from: port("start", "document"),
@@ -156,6 +181,16 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
             work_id: None,
         };
         let run = store.launch_workflow_manual(launch.clone()).await?;
+        if legacy.is_none() {
+            let body = publication
+                .members
+                .iter()
+                .find(|item| item.key == "body")
+                .context("Missing repeat body revision")?
+                .artifact
+                .clone();
+            legacy = Some((launch.clone(), run.id.clone(), body));
+        }
         requests.push((launch, run.id));
     }
     drop(store);
@@ -199,6 +234,53 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
             );
         }
     }
+    let (mut launch, previous_run, mut body) = legacy.context("Missing repeat fixture")?;
+    let PackageArtifactBody::Subflow { graph, .. } = &mut body.body else {
+        anyhow::bail!("Expected the published repeat body");
+    };
+    // Represent a saved body accepted by the old compiler. The always-ready input
+    // could start this effect in any copy regardless of the stopping result.
+    graph.nodes.push(node(
+        "unguarded",
+        BuiltinNode::McpTool,
+        NodeConfiguration::McpTool(
+            crate::workflows::mcp_tools::McpToolConfiguration {
+                server_id: uuid::Uuid::new_v4().to_string(),
+                server_revision: "1".repeat(64),
+                tool_name: "send".into(),
+                contract_revision: "2".repeat(64),
+                arguments: Default::default(),
+                argument_mappings: Default::default(),
+                destination_pointer: None,
+            },
+        ),
+    ));
+    graph.wires.push(Wire {
+        from: port("start", "always"),
+        to: port("unguarded", "ready"),
+    });
+    body.definitions.insert(
+        "unguarded".into(),
+        builtin_registry()
+            .into_iter()
+            .find(|definition| definition.kind == BuiltinNode::McpTool)
+            .context("Missing MCP definition")?,
+    );
+    store
+        .execute(move |db| {
+            let changed = db.execute(
+                "UPDATE workflow_package_artifact_revisions SET payload = ?1
+                 WHERE artifact_id = ?2 AND revision = ?3",
+                params![seal(&body)?, body.version.id, body.version.revision],
+            )?;
+            assert_eq!(changed, 1);
+            Ok(())
+        })
+        .await?;
+    launch.request_id = "legacy-body-new-launch".into();
+    let error = store.launch_workflow_manual(launch).await.unwrap_err();
+    assert!(format!("{error:#}").contains("Review and publish revised Repeat body repeat"));
+    assert!(store.inspect_workflow_execution(project, previous_run).await?.is_some());
     Ok(())
 }
 

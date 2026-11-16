@@ -319,7 +319,7 @@ pub(super) fn expand_for_each(
             .all(|name| !matches!(name.as_str(), "ready" | "items")),
         "Public For each ports ready and items are reserved"
     );
-    validate_body(&body, ready, item, completed, result)?;
+    validate_loop_body(&body, ready, Some(item), completed, result)?;
 
     let mut start_ports = vec![
         Port {
@@ -487,13 +487,18 @@ fn wire(source: &str, output: &str, target: &str, input: &str) -> Wire {
     }
 }
 
-fn validate_body(
+pub(super) fn validate_loop_body(
     body: &BoundSubflow,
     ready: &Endpoint,
-    item: &Endpoint,
+    item: Option<&Endpoint>,
     completion: &Endpoint,
     result: &Endpoint,
 ) -> Result<()> {
+    let (loop_name, gate) = if item.is_some() {
+        ("For each", "item")
+    } else {
+        ("Repeat", "ready")
+    };
     let root = ready.node.as_str();
     let kinds: HashMap<_, _> = body
         .workflow
@@ -502,7 +507,7 @@ fn validate_body(
         .map(|node| (node.instance.id.as_str(), &node.definition))
         .collect();
     ensure!(
-        kinds.values().all(|node| !node.kind.per_unit()),
+        item.is_none() || kinds.values().all(|node| !node.kind.per_unit()),
         "For each currently needs a body outside a logical delivery unit"
     );
     let mut incoming: HashMap<&str, Vec<&Wire>> = HashMap::new();
@@ -528,7 +533,10 @@ fn validate_body(
         .collect();
     let mut gated = HashSet::new();
     let source_gated = |source: &Endpoint, gated: &HashSet<&str>| {
-        source == ready || source == item || gated.contains(&(source.node.as_str()))
+        source == ready || Some(source) == item || gated.contains(source.node.as_str())
+    };
+    let has_effect = |definition: &super::NodeDefinition| {
+        !matches!(definition.effect, Effect::None | Effect::ReadEvidence)
     };
     let mut visited = 0;
     while let Some(node) = queue.pop_front() {
@@ -544,26 +552,29 @@ fn validate_body(
             } else {
                 required.any(|wire| source_gated(&wire.from, &gated))
             };
-            ensure!(
-                dominated,
-                "For each body node {node} can run outside its item gate"
-            );
-            gated.insert(node);
+            if dominated {
+                gated.insert(node);
+            } else {
+                ensure!(
+                    item.is_none() && !has_effect(kinds[node]),
+                    "{loop_name} body node {node} can run outside its {gate} gate"
+                );
+            }
         }
         for dependent in outgoing.get(node).into_iter().flatten() {
             let count = remaining
                 .get_mut(dependent)
-                .context("For each body has an unknown node")?;
+                .with_context(|| format!("{loop_name} body has an unknown node"))?;
             *count -= 1;
             if *count == 0 {
                 queue.push_back(dependent);
             }
         }
     }
-    ensure!(visited == kinds.len(), "For each body contains a cycle");
+    ensure!(visited == kinds.len(), "{loop_name} body contains a cycle");
     ensure!(
         source_gated(completion, &gated) && source_gated(result, &gated),
-        "For each outputs need to depend on their item gate"
+        "{loop_name} outputs need to depend on their {gate} gate"
     );
 
     // A selected ordinary output proves that every input was selected. A Join only
@@ -590,10 +601,10 @@ fn validate_body(
         }
     }
     for (node, definition) in kinds {
-        if !matches!(definition.effect, Effect::None | Effect::ReadEvidence) {
+        if has_effect(definition) {
             ensure!(
                 visited.contains(&(node, true)) || visited.contains(&(node, false)),
-                "For each outputs can settle before body operation {node}"
+                "{loop_name} outputs can settle before body operation {node}"
             );
         }
     }

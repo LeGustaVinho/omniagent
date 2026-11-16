@@ -6,8 +6,12 @@ use serde::{Deserialize, Serialize};
 use super::{
     BuiltinNode, ConditionPredicate, Endpoint, NodeConfiguration, NodeInstance, Port, PortType,
     Wire, WorkflowGraph, builtin_registry, compile_resolved_graph,
+    iteration::validate_loop_body,
     subflow::{self, BoundSubflow},
 };
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -101,6 +105,13 @@ pub(super) fn expand_repeat(
             "Repeat feedback needs an input and output of the same data type"
         );
     }
+    validate_loop_body(
+        &body,
+        &body.inputs[&configuration.ready_input],
+        None,
+        &body.outputs[&configuration.completion_output],
+        &body.outputs[&configuration.evidence_output],
+    )?;
 
     let node = |id: &str, kind, configuration| NodeInstance {
         id: id.into(),

@@ -28,7 +28,7 @@ mod subflow_tests;
 mod tests;
 pub use model::*;
 pub use preview::WorkflowPackagePreview;
-pub(crate) use publish::ensure_package_runnable;
+pub(crate) use publish::{ensure_package_repeat_guards, ensure_package_runnable};
 pub use simulation::{WorkflowSimulation, WorkflowSimulationScenario};
 
 const MAX_MEMBERS: usize = 32;

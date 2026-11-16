@@ -147,6 +147,12 @@ pub(crate) fn workflow_release_authorized(
         )?;
         return Ok(typed.then_some(false));
     };
+    let Some(workflow) = super::runtime::load_workflow_run(db, project, run)? else {
+        return Ok(Some(false));
+    };
+    if super::authoring::package::ensure_package_repeat_guards(db, project, &workflow.version).is_err() {
+        return Ok(Some(false));
+    }
     let saved = load_artifact(db, project, run, &decision, ArtifactKind::Approval)?;
     let Some(ArtifactValue::Approval(approval)) = saved.map(|artifact| artifact.value) else {
         return Ok(Some(false));

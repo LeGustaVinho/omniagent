@@ -291,7 +291,9 @@ fn publish_member(
             "Library artifact {} requires a library reference or a named parameter for {slot}",
             member.name
         );
-        check_transitive_references(db, project, &artifact, &mut BTreeSet::new(), false, None)?;
+        check_transitive_references(
+            db, project, &artifact, &mut BTreeSet::new(), ReferenceCheck::Publication, None,
+        )?;
         blockers.extend(dependency_blockers(&member.body, &slot, &artifact));
         references.insert(
             slot.clone(),
@@ -1193,8 +1195,32 @@ pub(crate) fn ensure_package_runnable(
     project: &str,
     workflow: &WorkflowRevision,
 ) -> Result<()> {
+    check_published_workflow(db, project, workflow, ReferenceCheck::Runnable)
+}
+
+pub(crate) fn ensure_package_repeat_guards(
+    db: &Connection,
+    project: &str,
+    workflow: &WorkflowRevision,
+) -> Result<()> {
+    check_published_workflow(db, project, workflow, ReferenceCheck::RepeatGuards)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReferenceCheck {
+    Publication,
+    Runnable,
+    RepeatGuards,
+}
+
+fn check_published_workflow(
+    db: &Connection,
+    project: &str,
+    workflow: &WorkflowRevision,
+    check: ReferenceCheck,
+) -> Result<()> {
     if let Some(artifact) = stored_artifact(db, project, &pipeline_reference(workflow))? {
-        check_transitive_references(db, project, &artifact, &mut BTreeSet::new(), true, None)?;
+        check_transitive_references(db, project, &artifact, &mut BTreeSet::new(), check, None)?;
     }
     Ok(())
 }
@@ -1204,10 +1230,10 @@ fn check_transitive_references(
     project: &str,
     artifact: &PublishedPackageArtifact,
     seen: &mut BTreeSet<PackageArtifactVersion>,
-    runnable: bool,
+    check: ReferenceCheck,
     local_mcp: Option<&McpToolConfiguration>,
 ) -> Result<()> {
-    if runnable {
+    if check == ReferenceCheck::Runnable {
         if let Some(config) = local_mcp {
             check_mcp_declaration(db, project, config, artifact, true, &mut Vec::new())?;
         }
@@ -1231,15 +1257,49 @@ fn check_transitive_references(
                 let dependency = load_published(db, project, version)?
                     .context("A required published dependency is unavailable")?;
                 let local_mcp = configured_mcp_edge(&artifact.body, slot, &dependency);
-                check_transitive_references(db, project, &dependency, seen, runnable, local_mcp)?;
+                if check != ReferenceCheck::Publication {
+                    require_guarded_repeat(db, project, &artifact.body, slot, &dependency)?;
+                }
+                check_transitive_references(db, project, &dependency, seen, check, local_mcp)?;
             }
-            ResolvedPackageReference::Parameter { name, .. } if runnable => {
+            ResolvedPackageReference::Parameter { name, .. } if check == ReferenceCheck::Runnable => {
                 anyhow::bail!("Choose the binding for {name}.")
             }
             _ => (),
         }
     }
     Ok(())
+}
+
+fn require_guarded_repeat(
+    db: &Connection,
+    project: &str,
+    consumer: &PackageArtifactBody,
+    slot: &str,
+    dependency: &PublishedPackageArtifact,
+) -> Result<()> {
+    let graph = match consumer {
+        PackageArtifactBody::Pipeline { graph } | PackageArtifactBody::Subflow { graph, .. } => graph,
+        _ => return Ok(()),
+    };
+    let Some(NodeConfiguration::RepeatUntil(configuration)) = graph.nodes.iter()
+        .find(|node| node.id == slot && node.kind == BuiltinNode::RepeatUntil)
+        .map(|node| &node.configuration)
+    else {
+        return Ok(());
+    };
+    let load = |version: &PackageArtifactVersion| load_published(db, project, version);
+    let mut compiler = GraphCompiler::new(db, project, &load);
+    compiler.validate_bindings = false;
+    let body = compiler.child(dependency, &mut Vec::new())?;
+    let ready = body.inputs.get(&configuration.ready_input)
+        .context("The pinned Repeat ready input is unavailable")?;
+    let completed = body.outputs.get(&configuration.completion_output)
+        .context("The pinned Repeat completion output is unavailable")?;
+    let result = body.outputs.get(&configuration.evidence_output)
+        .context("The pinned Repeat evidence output is unavailable")?;
+    crate::workflows::iteration::validate_loop_body(&body, ready, None, completed, result)
+        .with_context(|| format!("Review and publish revised Repeat body {slot} before execution"))
 }
 
 fn originating_request(
