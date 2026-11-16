@@ -16,6 +16,7 @@ import { AttachmentPreview, noteAttachments, type NoteAttachment } from "@/knowl
 import type { NoteJump } from "@/knowledge-editor";
 import { useRepositoryNotes, type NoteBuffer } from "@/repository-note-buffers";
 import { noteAttachmentCandidates, RepositoryNoteMedia } from "@/repository-note-media";
+import { NotePropertyEditor } from "@/note-property-editor";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const Editor = lazy(() => import("@/knowledge-editor").then(({ MarkdownEditor }) => ({ default: MarkdownEditor })));
@@ -402,9 +403,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                   </section>
                 </>}
                 {inspector === "properties" && <section aria-label="Properties"><h3>Properties</h3>
-                  {getProperties(source).map(({ key, value }) => <label className="note-property-row" key={key}>{key}
-                    <input value={value} onChange={(event) => update(active, updateProperty(source, key, event.target.value))} />
-                  </label>)}
+                  {getProperties(source).map(({ key, value }, index) => simulated
+                    ? <label className="note-property-row" key={`${key}:${index}`}>{key}
+                      <input value={value} onChange={(event) => update(active, updateProperty(source, key, event.target.value))} />
+                    </label>
+                    : <NotePropertyEditor key={`${active}:${key}:${index}`} name={key} value={value}
+                      read={() => getNote(active)?.content} update={(content) => update(active, content)} />)}
                   {getProperties(source).length === 0 && <p className="file-help">This note has no frontmatter properties.</p>}
                 </section>}
                 {inspector === "attachments" && <section aria-label="Attachments"><h3>Attachments</h3>
