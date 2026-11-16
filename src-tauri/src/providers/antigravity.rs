@@ -1420,13 +1420,22 @@ mod tests {
 
     #[test]
     fn answers_opaque_acp_form_values_and_rejects_an_invalid_or_stale_reply() -> Result<()> {
+        assert_acp_form_reply(SessionMode::Plan, "plan")
+    }
+
+    #[test]
+    fn answers_native_forms_during_approved_execution() -> Result<()> {
+        assert_acp_form_reply(SessionMode::ApprovedWrite, "default")
+    }
+
+    fn assert_acp_form_reply(mode: SessionMode, acp_mode: &str) -> Result<()> {
         use crate::providers::questions::QuestionInput;
 
         let checkout = tempfile::tempdir()?;
         let mut session = AntigravityAdapter.create_session(SessionRequest {
             checkout: checkout.path().into(),
             intent: SessionIntent::Start,
-            mode: SessionMode::Plan,
+            mode,
             model: None,
             effort: None,
         })?;
@@ -1441,12 +1450,12 @@ mod tests {
         )?;
         receive(
             &mut *session,
-            json!({"id":2,"result":results("argon","medium","plan")}),
+            json!({"id":2,"result":results("argon","medium",acp_mode)}),
         )?;
         session.send(TurnInput {
             attachments: Vec::new(),
             message_id: "form-turn".into(),
-            text: "Plan with a structured question".into(),
+            text: "Ask for delivery preferences".into(),
         })?;
         let request = json!({
             "id":134, "method":"elicitation/create",

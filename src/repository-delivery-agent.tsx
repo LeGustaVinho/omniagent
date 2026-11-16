@@ -54,8 +54,10 @@ export function DeliveryAgent({ scope, nodeId, inputs, unitId = null, taskId, jo
     option.provider === effectiveSelection.provider && option.profileId === effectiveSelection.profileId && option.modelId === effectiveSelection.modelId);
   return <section className="pipeline-stack" aria-label={label}>
     <h3 className="text-sm font-medium">{label}</h3>
+    {nodeId === "plan" && <p className="text-xs text-muted-foreground">Plan Mode</p>}
     {job && <div className="pipeline-actions">
-      <span role="status">{(attempt?.status ?? job.queueState).replaceAll("_", " ")}</span>
+      <span role="status">{attempt?.status === "waiting_for_input" ? "Waiting for input" :
+        (attempt?.status ?? job.queueState).replaceAll("_", " ")}</span>
       {attempt && <Button variant="outline" onClick={() => openActivity(attempt.runId, attempt.conversationId ?? undefined)}>
         Open {label.toLowerCase()} attempt
       </Button>}

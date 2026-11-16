@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useId, useRef, useState, type FormEvent } from "react";
+import { useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 
 export type RequestId = string | number;
@@ -94,12 +94,13 @@ function FieldControl({ field, value, update }: {
   );
 }
 
-export function PendingInput({ input, conversationId, runId, onResolved, savedReason }: {
+export function PendingInput({ input, conversationId, runId, onResolved, savedReason, questionSource }: {
   input: ConversationPendingInput;
   conversationId: string;
   runId: string;
   onResolved: () => void;
   savedReason?: string;
+  questionSource?: ReactNode;
 }) {
   const request = input.data;
   const form = request.type === "question" ? request.normalized : undefined;
@@ -173,6 +174,7 @@ export function PendingInput({ input, conversationId, runId, onResolved, savedRe
       ) : form ? (
         <form onSubmit={accept} className="grid gap-2">
           <p className="text-sm font-medium">{form.message || "Input requested"}</p>
+          {questionSource}
           {savedReason && <p className="text-xs text-muted-foreground">{savedReason}</p>}
           <fieldset className="grid gap-2" disabled={busy}>
             {form.fields.map((field) => <FieldControl key={field.id} field={field} value={values[field.id]}

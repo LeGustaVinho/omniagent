@@ -12,7 +12,7 @@ import { ConversationInventory } from "@/conversation-inventory";
 import { ConversationProfile } from "@/conversation-profile";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
 import { RunOrchestrationPanel } from "@/run-orchestration";
-import { ConversationQuestionTimeline } from "@/conversation-question-timeline";
+import { ConversationQuestionTimeline, QuestionSource, questionSaveReasons, useConversationQuestions } from "@/conversation-question-timeline";
 import {
   ConversationResponseEvidence, cloneTurnResponseEvidence, newTurnResponseEvidence, recordResponseEvidence,
   type ResponseObservation, type TurnResponseEvidence,
@@ -45,16 +45,8 @@ type Page = {
 type SavedQuestion = {
   event: ConversationPendingInput;
   state: "saving" | "saved" | "needs_review";
-  reason: "timeout" | "provider_expired" | "turn_stopped" | "runtime_restart" | "transport_closed" | "structured_output";
+  reason: keyof typeof questionSaveReasons;
   answerRecorded: boolean;
-};
-const saveReasons: Record<SavedQuestion["reason"], string> = {
-  timeout: "The live reply deadline expired.",
-  provider_expired: "The provider closed the live request.",
-  turn_stopped: "The turn ended with this question open.",
-  runtime_restart: "The runtime restarted with this question open.",
-  transport_closed: "The provider connection closed.",
-  structured_output: "The turn returned a question.",
 };
 type Projection = {
   cursor: string;
@@ -204,6 +196,12 @@ export function ConversationRequests({ activity, conversationId, runId, focusQue
 }) {
   const requests = useRef<HTMLElement>(null);
   const focused = useRef<QuestionFocus>(undefined);
+  const hasQuestions = activity.savedQuestions.length > 0 || activity.inputs.some(({ data }) => data.type === "question");
+  const questions = useConversationQuestions({ conversationId, runId, live: activity.live }, hasQuestions);
+  const sourceFor = (requestId: string | number) => {
+    const match = questions.data?.find(({ origin }) => origin.requestId === requestId);
+    return match && <QuestionSource source={match} />;
+  };
   useEffect(() => {
     if (!focusQuestion || focused.current === focusQuestion || !requests.current) return;
     const id = JSON.stringify(focusQuestion.requestId);
@@ -223,16 +221,18 @@ export function ConversationRequests({ activity, conversationId, runId, focusQue
     <section ref={requests} aria-label="Pending requests" className="conv-requests" tabIndex={-1}>
       <p className="conv-waiting" role="status">{needsReview ? "Question needs review" : answered ? "Waiting to continue" : "Waiting for input"}</p>
       {activity.inputs.filter(({ data }) => !savedIds.has(data.request_id)).map((request) => <PendingInput key={JSON.stringify(request.data.request_id)}
-        input={request} conversationId={conversationId} runId={runId} onResolved={activity.refreshRequests} />)}
+        input={request} conversationId={conversationId} runId={runId} onResolved={activity.refreshRequests}
+        questionSource={request.data.type === "question" ? sourceFor(request.data.request_id) : undefined} />)}
       {activity.savedQuestions.map(({ event, state, reason, answerRecorded }) => event.data.type === "question" && (
         state === "saved" && !answerRecorded
-          ? <PendingInput key={JSON.stringify(event.data.request_id)} input={event} savedReason={saveReasons[reason]}
-              conversationId={conversationId} runId={runId} onResolved={activity.refreshRequests} />
+          ? <PendingInput key={JSON.stringify(event.data.request_id)} input={event} savedReason={questionSaveReasons[reason]}
+              conversationId={conversationId} runId={runId} onResolved={activity.refreshRequests} questionSource={sourceFor(event.data.request_id)} />
           :
         <div key={JSON.stringify(event.data.request_id)} data-question-request={JSON.stringify(event.data.request_id)}
           tabIndex={-1} className="grid gap-2 rounded-md border border-border bg-card p-3">
           <p className="text-sm font-medium">{event.data.normalized?.message || "Input requested"}</p>
-          <p className="text-xs text-muted-foreground">{answerRecorded ? "Answer recorded" : state === "saving" ? "Saving the turn checkpoint…" : saveReasons[reason]}</p>
+          {sourceFor(event.data.request_id)}
+          <p className="text-xs text-muted-foreground">{answerRecorded ? "Answer recorded" : state === "saving" ? "Saving the turn checkpoint…" : questionSaveReasons[reason]}</p>
           {!answerRecorded && event.data.normalized?.fields.map((field) => <div key={field.id} className="grid gap-1 text-sm">
             <p>{field.label}</p>
             {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}

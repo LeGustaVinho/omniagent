@@ -4,6 +4,9 @@ use tokio::sync::watch;
 
 use crate::store::Store;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobNoticeKind {
     JobApproval,

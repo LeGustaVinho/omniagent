@@ -116,6 +116,7 @@ enum PendingInput {
     Question {
         input: Value,
         form: super::questions::QuestionForm,
+        parent_item_id: Option<String>,
     },
 }
 
@@ -463,6 +464,8 @@ impl ClaudeSession {
         );
         let input = request["input"].clone();
         let name = field(request, "tool_name")?;
+        let parent_item_id =
+            string(request, "parent_tool_use_id").or_else(|| string(frame, "parent_tool_use_id"));
         if name == "ExitPlanMode" && self.request.mode == SessionMode::Plan {
             let mut event = self.event(
                 frame,
@@ -471,8 +474,7 @@ impl ClaudeSession {
                 },
             );
             event.location.item_id = string(request, "tool_use_id").or(event.location.item_id);
-            event.location.parent_item_id =
-                string(request, "parent_tool_use_id").or(event.location.parent_item_id);
+            event.location.parent_item_id = parent_item_id;
             if event.location.parent_item_id.is_none() {
                 self.turn.as_mut().expect("checked active turn").plan_review =
                     Some(event.location.clone());
@@ -523,6 +525,7 @@ impl ClaudeSession {
                 PendingInput::Question {
                     input,
                     form: normalized.clone(),
+                    parent_item_id: parent_item_id.clone(),
                 },
             );
             ProviderEventData::Question {
@@ -544,8 +547,7 @@ impl ClaudeSession {
         };
         let mut event = self.event(frame, data);
         event.location.item_id = string(request, "tool_use_id").or(event.location.item_id);
-        event.location.parent_item_id =
-            string(request, "parent_tool_use_id").or(event.location.parent_item_id);
+        event.location.parent_item_id = parent_item_id;
         Ok(events([event]))
     }
 
@@ -773,12 +775,20 @@ impl CliSession for ClaudeSession {
             Some("control_request") => self.request_input(&frame),
             Some("control_cancel_request") => {
                 let id = RequestId::Text(field(&frame, "request_id")?.to_owned());
-                if matches!(self.pending.get(&id), Some(PendingInput::Question { .. })) {
-                    self.pending.remove(&id);
-                    Ok(events([self.event(
+                if let Some(PendingInput::Question { parent_item_id, .. }) = self.pending.get(&id)
+                    && string(&frame, "parent_tool_use_id")
+                        .as_ref()
+                        .is_none_or(|parent| Some(parent) == parent_item_id.as_ref())
+                {
+                    let mut event = self.event(
                         &frame,
-                        ProviderEventData::QuestionClosed { request_id: id },
-                    )]))
+                        ProviderEventData::QuestionClosed {
+                            request_id: id.clone(),
+                        },
+                    );
+                    event.location.parent_item_id = parent_item_id.clone();
+                    self.pending.remove(&id);
+                    Ok(events([event]))
                 } else {
                     Ok(AdapterUpdate::default())
                 }
@@ -916,7 +926,7 @@ impl CliSession for ClaudeSession {
 
     fn respond_question(&mut self, id: &RequestId, answer: Value) -> Result<AdapterUpdate> {
         use super::questions::{QuestionAction, QuestionReply};
-        let Some(PendingInput::Question { input, form }) = self.pending.get(id) else {
+        let Some(PendingInput::Question { input, form, .. }) = self.pending.get(id) else {
             anyhow::bail!("Claude question is stale or absent");
         };
         let reply: QuestionReply = if answer.get("action").is_some() {

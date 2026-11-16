@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use ts_rs::TS;
 
@@ -223,17 +223,28 @@ fn poll_timer(db: &Connection, run: &str, now: i64) -> Result<QuestionTimer> {
     Ok(QuestionTimer::Stop)
 }
 
-pub(crate) fn stage_provider_expiry(db: &Connection, run: &str, key: &[u8]) -> Result<()> {
-    let changed = db.execute(
-        "UPDATE native_question_waits SET state = 'saving', reason = 'provider_expired'
-         WHERE state = 'live' AND request_event_seq IN (
-             SELECT request_event_seq FROM agent_questions WHERE run_id = ?1
-               AND request_key = ?2 AND delivery = 'pending'
-         )",
-        params![run, key],
-    )?;
-    if changed > 0 {
-        stage_remaining(db, run, "turn_stopped")?;
+pub(crate) fn stage_provider_expiry(
+    db: &Connection,
+    run: &str,
+    key: &[u8],
+    parent_item_id: Option<&str>,
+) -> Result<()> {
+    let request: Option<(i64, Vec<u8>)> = db.query_row(
+        "SELECT q.request_event_seq, e.payload FROM agent_questions q
+         JOIN native_question_waits w ON w.request_event_seq = q.request_event_seq
+         JOIN agent_events e ON e.seq = q.request_event_seq
+         WHERE q.run_id = ?1 AND q.request_key = ?2 AND q.delivery = 'pending' AND w.state = 'live'",
+        params![run, key], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    if let Some((sequence, payload)) = request {
+        let event: ProviderEvent = serde_json::from_slice(&protection::unprotect(&payload)?)?;
+        if event.location.parent_item_id.as_deref() == parent_item_id {
+            db.execute(
+                "UPDATE native_question_waits SET state = 'saving', reason = 'provider_expired' WHERE request_event_seq = ?1",
+                [sequence],
+            )?;
+            stage_remaining(db, run, "turn_stopped")?;
+        }
     }
     Ok(())
 }

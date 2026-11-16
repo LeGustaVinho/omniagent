@@ -24,6 +24,7 @@ type TimelineEntry = {
   origin: { runId: string; requestId: RequestId };
   provider: Provider;
   route: "native" | "structured_turn";
+  parentItemId: string | null;
   message: string | null;
   state: keyof typeof states;
   reason: keyof typeof questionSaveReasons | null;
@@ -31,28 +32,40 @@ type TimelineEntry = {
   reply: { action: QuestionAction; fields: { id: string; label: string; value: FieldValue | null }[] } | null;
 };
 
-export function ConversationQuestionTimeline({ conversationId, runId, live }: {
+type QuestionScope = {
   conversationId: string;
   runId: string;
   live: boolean;
-}) {
-  const query = useQuery({
+};
+
+export function useConversationQuestions({ conversationId, runId, live }: QuestionScope, enabled = true) {
+  return useQuery({
     queryKey: ["conversation-run", runId, "question-timeline", conversationId],
     queryFn: () => invoke<TimelineEntry[]>("conversation_question_timeline", { conversationId, runId }),
+    enabled,
     refetchInterval: ({ state }) => live || state.data?.some(({ state, reply }) =>
       state === "saved" || state === "saving" || (state === "recorded" && reply?.action === "accept")) ? 800 : false,
   });
+}
+
+export function QuestionSource({ source }: { source: Pick<TimelineEntry, "provider" | "route" | "parentItemId"> }) {
+  return <p className="text-xs text-muted-foreground">
+    {providers[source.provider]} · {source.route === "native" ? "Native form" : "Structured question"}
+    {source.parentItemId && <> · Subagent <code className="break-all">{source.parentItemId}</code></>}
+  </p>;
+}
+
+export function ConversationQuestionTimeline(scope: QuestionScope) {
+  const query = useConversationQuestions(scope);
   if (!query.error && !query.data?.length) return null;
   return <section aria-label="Question timeline" className="grid gap-2">
     <h2 className="text-sm font-medium">Question timeline</h2>
     {query.error && <p role="alert" className="text-sm text-red-300">{String(query.error)}</p>}
     {query.data?.length ? <ol className="grid gap-2">
-      {query.data.map(({ sequence, provider, route, message, state, reason, continuationRunId, reply }) =>
+      {query.data.map(({ sequence, provider, route, parentItemId, message, state, reason, continuationRunId, reply }) =>
         <li key={sequence} className="grid gap-1 rounded-md border border-border bg-card p-3 text-sm">
           <p className="whitespace-pre-wrap font-medium">{message || "Input requested"}</p>
-          <p className="text-xs text-muted-foreground">
-            {providers[provider]} · {route === "native" ? "Native form" : "Structured question"}
-          </p>
+          <QuestionSource source={{ provider, route, parentItemId }} />
           <p className="text-xs text-muted-foreground">
             {reply && `${actions[reply.action]} · `}{states[state]}
           </p>

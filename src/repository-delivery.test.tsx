@@ -104,6 +104,7 @@ it("starts delivery from a saved Markdown revision and queues planning after reo
   const runs = await screen.findByRole("combobox", { name: "Saved delivery" });
   await user.selectOptions(runs, run.id);
   const planning = await screen.findByRole("region", { name: "Planning" });
+  expect(within(planning).getByText("Plan Mode")).toBeTruthy();
   const queue = within(planning).getByRole<HTMLButtonElement>("button", { name: "Queue planning" });
   expect(queue.disabled).toBe(true);
   await user.click(await within(planning).findByRole("button", { name: model.name }));

@@ -432,13 +432,12 @@ impl TurnExecution {
         {
             native.observe(&event);
         }
-        let question_changed = event.location.parent_item_id.is_none()
-            && matches!(
-                event.data,
-                ProviderEventData::Question { .. }
-                    | ProviderEventData::QuestionClosed { .. }
-                    | ProviderEventData::QuestionReplySettled { .. }
-            );
+        let question_changed = matches!(
+            event.data,
+            ProviderEventData::Question { .. }
+                | ProviderEventData::QuestionClosed { .. }
+                | ProviderEventData::QuestionReplySettled { .. }
+        );
         let delegation_violation = source == EventSource::Provider
             && self.plan.native_subagent_limit == Some(0)
             && event.data.observed_native_subagent();

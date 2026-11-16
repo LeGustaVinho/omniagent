@@ -810,7 +810,7 @@ impl Store {
             }
             match &event.data {
                 ProviderEventData::Question { request_id, normalized: Some(_), route, .. }
-                    if (primary && route.is_native()) || (source == EventSource::Application
+                    if (source == EventSource::Provider && route.is_native()) || (source == EventSource::Application
                         && event.location.parent_item_id.is_none() && !route.is_native()) =>
                 {
                     let request_event_seq = event_seq;
@@ -857,8 +857,10 @@ impl Store {
                     ensure!(changed == 1, "question reply is no longer prepared");
                     crate::jobs::close_live_question(&tx, &run_id, &permission_key(request_id)?)?;
                 }
-                ProviderEventData::QuestionClosed { request_id } if primary => {
-                    crate::jobs::stage_provider_expiry(&tx, &run_id, &permission_key(request_id)?)?;
+                ProviderEventData::QuestionClosed { request_id } if source == EventSource::Provider => {
+                    crate::jobs::stage_provider_expiry(
+                        &tx, &run_id, &permission_key(request_id)?, event.location.parent_item_id.as_deref(),
+                    )?;
                 }
                 _ => {}
             }

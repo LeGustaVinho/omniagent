@@ -31,6 +31,7 @@ pub struct ConversationQuestionTimelineEntry {
     pub origin: QuestionOrigin,
     pub provider: Provider,
     pub route: QuestionRoute,
+    pub parent_item_id: Option<String>,
     pub message: Option<String>,
     pub state: QuestionTimelineState,
     pub reason: Option<String>,
@@ -326,7 +327,7 @@ impl Store {
                     }).collect(),
                 });
                 timeline.push(ConversationQuestionTimelineEntry {
-                    sequence: row.get::<_, i64>(0)?.to_string(), origin, provider, route,
+                    sequence: row.get::<_, i64>(0)?.to_string(), origin, provider, route, parent_item_id: event.location.parent_item_id,
                     message, state, reason: row.get(4)?, continuation_run_id: row.get(6)?, reply,
                 });
             }

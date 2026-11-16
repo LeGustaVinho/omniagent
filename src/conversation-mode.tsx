@@ -13,7 +13,7 @@ export function ConversationModeSelect({ mode, onChange }: {
     <select aria-label="Conversation mode" className="conv-select" value={mode}
       onChange={(event) => onChange(event.currentTarget.value as ConversationMode)}>
       <option value="read_only">Read-only</option>
-      <option value="plan">Planning</option>
+      <option value="plan">Plan Mode</option>
       <option value="goal">Goal Mode</option>
     </select>
   );
