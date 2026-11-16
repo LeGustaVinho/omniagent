@@ -18,6 +18,7 @@ use crate::conversation_runtime::selected_scope;
 
 pub mod authoring;
 pub mod comparison;
+pub mod role_templates;
 
 fn report(error: anyhow::Error) -> String {
     diagnostics::preview(&error.to_string())

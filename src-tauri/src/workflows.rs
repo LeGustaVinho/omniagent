@@ -19,6 +19,7 @@ mod plan_revision;
 #[cfg(test)]
 mod planning_integration;
 mod registry;
+pub mod role_templates;
 mod runtime;
 #[cfg(test)]
 mod tests;

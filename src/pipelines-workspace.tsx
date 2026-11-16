@@ -7,6 +7,7 @@ import { ArrowUpRight, Check, CircleAlert, CirclePlay, GitBranch, GitCommitHoriz
 import { Dialog } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
+import { ConversationTemplateEditor } from "@/conversation-template-editor";
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import { RepositoryDeliveryWorkspace } from "@/repository-delivery";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -183,11 +184,15 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
   if (props.simulation) return <PreviewPipelinesWorkspace {...props} />;
   const draftId = props.target?.startsWith("authoring:") ? props.target.slice("authoring:".length) : undefined;
   return <div className="pipelines-workspace">
-    {props.target === "compare" ? <>
+    {props.target === "templates" ? <>
+      <Button type="button" variant="ghost" className="self-start" onClick={() => props.openWorkspace("pipelines", "delivery")}>Back to pipelines</Button>
+      <ConversationTemplateEditor key={props.checkout.checkoutId} checkout={props.checkout} />
+    </> : props.target === "compare" ? <>
       <Button type="button" variant="ghost" className="self-start" onClick={() => props.openWorkspace("pipelines", "delivery")}>Back to pipelines</Button>
       <WorkflowComparisons key={props.checkout.checkoutId} {...props} />
     </> : draftId ? <PipelineAuthoringEditor {...props} draftId={draftId} /> : <>
       <Button type="button" variant="outline" className="self-start" onClick={() => props.openWorkspace("pipelines", "compare")}>Compare models</Button>
+      <Button type="button" variant="outline" className="self-start" onClick={() => props.openWorkspace("pipelines", "templates")}>Roles & templates</Button>
       <RepositoryDeliveryWorkspace {...props} />
     </>}
   </div>;
