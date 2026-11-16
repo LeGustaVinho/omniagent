@@ -26,6 +26,7 @@ it("submits an explicit authoring request for the selected protected base and op
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "workflow_authoring_bases") return [{ version, name: "Published review" }];
     if (command === "conversation_workflow_authoring") return [];
+    if (command === "list_workflow_packages") return [];
     if (command === "start_workflow_authoring") return draft;
     throw new Error(`Unexpected ${command}`);
   });
@@ -43,6 +44,29 @@ it("submits an explicit authoring request for the selected protected base and op
   });
   await user.click(await screen.findByRole("button", { name: "Open draft" }));
   expect(open).toHaveBeenCalledWith("draft-id");
+});
+
+it("starts package authoring from the selected chat model and exact published base", async () => {
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "workflow_authoring_bases") return [{ version, name: "Published review" }];
+    if (command === "conversation_workflow_authoring" || command === "list_workflow_packages") return [];
+    if (command === "start_workflow_package_authoring") return { id: "package-draft" };
+    throw new Error(command);
+  });
+  const open = vi.fn();
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={new QueryClient()}><ConversationAuthoring projectId="project" conversationId="source-chat"
+    selectedModel={selection} effort="low" onOpenDraft={open} /></QueryClientProvider>);
+  await user.click(screen.getByRole("button", { name: "Create or edit with AI" }));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Starting point" }),
+    await screen.findByRole("option", { name: /Published review/ }));
+  await user.type(screen.getByRole("textbox", { name: "Authoring request" }), "Propose a related role and preset.");
+  await user.click(screen.getByRole("button", { name: "Start package authoring request" }));
+  expect(invoke).toHaveBeenCalledWith("start_workflow_package_authoring", {
+    projectId: "project", conversationId: "source-chat", selection, effort: "low",
+    brief: "Propose a related role and preset.", base: version,
+  });
+  await waitFor(() => expect(open).toHaveBeenCalledWith("package:package-draft"));
 });
 
 it("routes feedback with the loaded draft revision and links the source conversation", async () => {

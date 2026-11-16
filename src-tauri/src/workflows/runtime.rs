@@ -66,6 +66,7 @@ pub(super) fn insert_workflow_run(
     project: &str,
     workflow: &WorkflowDefinition,
 ) -> Result<WorkflowRun> {
+    super::authoring::ensure_package_runnable(db, project, &workflow.version)?;
     let id = Uuid::new_v4().to_string();
     db.execute("INSERT INTO job_pipeline_runs(id, project_id) VALUES (?1, ?2)", params![id, project])?;
     db.execute(

@@ -296,6 +296,7 @@ pub(super) fn require_stage(
 ) -> Result<()> {
     let run =
         load_workflow_run(db, project, run)?.context("workflow run is outside this project")?;
+    super::authoring::ensure_package_runnable(db, project, &run.version)?;
     let definition = load_definition(db, project, &run.version)?
         .context("missing pinned workflow definition")?;
     require_dependencies(db, &definition, &run, node, unit, inputs)?;

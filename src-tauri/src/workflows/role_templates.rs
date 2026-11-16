@@ -134,65 +134,15 @@ impl Store {
         &self,
         project: String,
         base: Option<TemplateBase>,
-        mut template: ConversationTemplate,
+        template: ConversationTemplate,
     ) -> Result<SaveConversationTemplate> {
-        template.name = template.name.trim().to_owned();
-        ensure!(!template.name.is_empty(), "The template needs a name");
-        ensure!(
-            !template.model.profile_id.trim().is_empty()
-                && !template.model.model_id.trim().is_empty(),
-            "The template needs a CLI profile and model"
-        );
-        ensure!(
-            matches!(
-                template.tool_scope,
-                SessionMode::ReadOnly | SessionMode::ApprovedWrite
-            ),
-            "Choose repository read or approved worktree write for this template"
-        );
-        let payload = protection::protect(&serde_json::to_vec(&template)?)?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let revision = Uuid::new_v4().to_string();
-            let (id, ordinal, base_revision) = if let Some(base) = base {
-                let current: Option<String> = tx.query_row(
-                    "SELECT head_revision FROM conversation_templates WHERE project_id = ?1 AND id = ?2",
-                    params![project, base.template_id],
-                    |row| row.get(0),
-                ).optional()?;
-                let current = current.context("The conversation template is unavailable in this project")?;
-                let saved = load_revision(&tx, &project, &base.template_id, &current)?;
-                if current != base.expected_revision {
-                    return Ok(SaveConversationTemplate::Conflict { current: head(saved) });
-                }
-                if saved.template == template {
-                    return Ok(SaveConversationTemplate::Saved { detail: detail(&tx, saved, &project)? });
-                }
-                let ordinal = saved.version.ordinal.checked_add(1).context("Template revision count exceeded")?;
-                tx.execute(
-                    "UPDATE conversation_templates SET head_revision = ?1 WHERE project_id = ?2 AND id = ?3",
-                    params![revision, project, base.template_id],
-                )?;
-                (base.template_id, ordinal, Some(current))
-            } else {
-                let id = Uuid::new_v4().to_string();
-                tx.execute(
-                    "INSERT INTO conversation_templates(project_id, id, head_revision) VALUES (?1, ?2, ?3)",
-                    params![project, id, revision],
-                )?;
-                (id, 1, None)
-            };
-            tx.execute(
-                "INSERT INTO conversation_template_revisions(project_id, template_id, revision, ordinal, base_revision, payload)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![project, id, revision, ordinal, base_revision, payload],
-            )?;
-            let detail = detail(&tx, ConversationTemplateRevision {
-                template_id: id, version: ConversationTemplateVersion { revision, ordinal, base_revision }, template,
-            }, &project)?;
+            let outcome = save_conversation_template_in_tx(&tx, &project, base, template, false)?;
             tx.commit()?;
-            Ok(SaveConversationTemplate::Saved { detail })
-        }).await
+            Ok(outcome)
+        })
+        .await
     }
 
     pub async fn validate_conversation_template_checkout(
@@ -284,6 +234,91 @@ impl Store {
             capabilities,
         })
     }
+}
+
+pub(crate) fn validate_conversation_template(template: &mut ConversationTemplate) -> Result<()> {
+    template.name = template.name.trim().to_owned();
+    ensure!(!template.name.is_empty(), "The template needs a name");
+    ensure!(
+        !template.model.profile_id.trim().is_empty() && !template.model.model_id.trim().is_empty(),
+        "The template needs a CLI profile and model"
+    );
+    ensure!(
+        matches!(
+            template.tool_scope,
+            SessionMode::ReadOnly | SessionMode::ApprovedWrite
+        ),
+        "Choose repository read or approved worktree write for this template"
+    );
+    Ok(())
+}
+
+pub(crate) fn save_conversation_template_in_tx(
+    db: &Connection,
+    project: &str,
+    base: Option<TemplateBase>,
+    mut template: ConversationTemplate,
+    force_revision: bool,
+) -> Result<SaveConversationTemplate> {
+    validate_conversation_template(&mut template)?;
+    let payload = protection::protect(&serde_json::to_vec(&template)?)?;
+    let revision = Uuid::new_v4().to_string();
+    let (id, ordinal, base_revision) = if let Some(base) = base {
+        let current: Option<String> = db.query_row(
+                    "SELECT head_revision FROM conversation_templates WHERE project_id = ?1 AND id = ?2",
+                    params![project, base.template_id],
+                    |row| row.get(0),
+                ).optional()?;
+        let current =
+            current.context("The conversation template is unavailable in this project")?;
+        let saved = load_revision(db, project, &base.template_id, &current)?;
+        if current != base.expected_revision {
+            return Ok(SaveConversationTemplate::Conflict {
+                current: head(saved),
+            });
+        }
+        if !force_revision && saved.template == template {
+            return Ok(SaveConversationTemplate::Saved {
+                detail: detail(db, saved, project)?,
+            });
+        }
+        let ordinal = saved
+            .version
+            .ordinal
+            .checked_add(1)
+            .context("Template revision count exceeded")?;
+        db.execute(
+                    "UPDATE conversation_templates SET head_revision = ?1 WHERE project_id = ?2 AND id = ?3",
+                    params![revision, project, base.template_id],
+                )?;
+        (base.template_id, ordinal, Some(current))
+    } else {
+        let id = Uuid::new_v4().to_string();
+        db.execute(
+            "INSERT INTO conversation_templates(project_id, id, head_revision) VALUES (?1, ?2, ?3)",
+            params![project, id, revision],
+        )?;
+        (id, 1, None)
+    };
+    db.execute(
+                "INSERT INTO conversation_template_revisions(project_id, template_id, revision, ordinal, base_revision, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![project, id, revision, ordinal, base_revision, payload],
+            )?;
+    let detail = detail(
+        db,
+        ConversationTemplateRevision {
+            template_id: id,
+            version: ConversationTemplateVersion {
+                revision,
+                ordinal,
+                base_revision,
+            },
+            template,
+        },
+        project,
+    )?;
+    Ok(SaveConversationTemplate::Saved { detail })
 }
 
 fn head(revision: ConversationTemplateRevision) -> ConversationTemplateHead {

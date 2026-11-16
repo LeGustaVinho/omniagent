@@ -33,6 +33,16 @@ pub(super) async fn finish_request(
     output: String,
     includes: &[&str],
 ) -> Result<String> {
+    finish_background_authoring_job(store, &draft.conversation_id, scope, output, includes).await
+}
+
+pub(super) async fn finish_background_authoring_job(
+    store: &Store,
+    source_conversation: &str,
+    scope: &SessionScope,
+    output: String,
+    includes: &[&str],
+) -> Result<String> {
     let attempt = store
         .claim_next_job(AdmissionEnvironment {
             runner: scope.runner.clone(),
@@ -40,7 +50,7 @@ pub(super) async fn finish_request(
         })
         .await?
         .context("The authoring request did not reach the scheduler")?;
-    assert_ne!(attempt.conversation_id, draft.conversation_id);
+    assert_ne!(attempt.conversation_id, source_conversation);
     let [prompt] = attempt.input.as_slice() else {
         anyhow::bail!("Expected one authoring input")
     };

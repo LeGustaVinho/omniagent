@@ -9,6 +9,7 @@ import { liveModelsQuery, sameModelSelection } from "@/live-models";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { graphProblems, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowGraph, type WorkflowLayout } from "@/workflow-graph-model";
 import { WorkflowPublicationControls, type WorkflowPublication } from "@/workflow-publication";
+import { WorkflowPackageEditor, WorkflowPackageList, type PackageDraft, type PackageSummary } from "@/workflow-authoring-package";
 import { WorkflowLaunchPicker, preferredWorkflowRevision } from "@/workflow-launch";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -68,6 +69,10 @@ function AuthoringDialog({ projectId, conversationId, selectedModel, effort, onO
     queryFn: () => invoke<Draft[]>("conversation_workflow_authoring", { conversationId }),
     refetchInterval: (query) => query.state.data?.some(pending) ? 1200 : false,
   });
+  const packages = useQuery({
+    queryKey: ["workflow-packages", projectId, "conversation", conversationId],
+    queryFn: () => invoke<PackageSummary[]>("list_workflow_packages", { projectId, conversationId }),
+  });
   const canAuthor = selectedModel && (selectedModel.provider === "codex" || selectedModel.provider === "claude");
   const selectedBase = bases.data?.find((item) => baseKey(item.version) === base)?.version;
   const ready = canAuthor && (!base || selectedBase) && brief.trim();
@@ -81,14 +86,24 @@ function AuthoringDialog({ projectId, conversationId, selectedModel, effort, onO
       setBrief("");
     },
   });
+  const startPackage = useMutation({
+    mutationFn: () => invoke<PackageDraft>("start_workflow_package_authoring", {
+      projectId, conversationId, selection: selectedModel, effort, base: selectedBase ?? null, brief: brief.trim(),
+    }),
+    onSuccess: (draft) => {
+      void client.invalidateQueries({ queryKey: ["workflow-packages", projectId] });
+      onOpenDraft(`package:${draft.id}`);
+    },
+  });
+  const busy = start.isPending || startPackage.isPending;
   return <Dialog.Portal>
     <Dialog.Overlay className="conv-dialog-scrim" />
     <Dialog.Content className="conv-dialog">
       <Dialog.Title>Create or edit with AI</Dialog.Title>
-      <Dialog.Description>Ask your selected Codex or Claude model for a pipeline draft.</Dialog.Description>
+      <Dialog.Description>Ask your selected Codex or Claude model for a pipeline draft or a package of related artifacts.</Dialog.Description>
       <form className="conv-dialog-form" onSubmit={(event) => {
         event.preventDefault();
-        if (ready && !start.isPending) start.mutate();
+        if (ready && !busy) start.mutate();
       }}>
         <label>Starting point<select value={base} onChange={(event) => setBase(event.currentTarget.value)}>
           <option value="">New pipeline</option>
@@ -100,10 +115,14 @@ function AuthoringDialog({ projectId, conversationId, selectedModel, effort, onO
         {!canAuthor && <p>Choose a Codex or Claude model in the conversation to start a request.</p>}
         {bases.error && <p role="alert">{String(bases.error)}</p>}
         {start.error && <p role="alert">{String(start.error)}</p>}
+        {startPackage.error && <p role="alert">{String(startPackage.error)}</p>}
         <div className="flex justify-end gap-2">
           <Dialog.Close asChild><Button variant="outline" type="button">Close</Button></Dialog.Close>
-          <Button type="submit" disabled={!ready || start.isPending}>
+          <Button type="submit" disabled={!ready || busy}>
             {start.isPending ? "Starting…" : "Start authoring request"}
+          </Button>
+          <Button type="button" variant="outline" disabled={!ready || busy} onClick={() => startPackage.mutate()}>
+            {startPackage.isPending ? "Starting package…" : "Start package authoring request"}
           </Button>
         </div>
       </form>
@@ -114,6 +133,13 @@ function AuthoringDialog({ projectId, conversationId, selectedModel, effort, onO
           <Button type="button" variant="outline" onClick={() => onOpenDraft(draft.id)}>
             {draft.head ? "Open draft" : "Open authoring request"}
           </Button>
+        </div>)}
+      </section>}
+      {packages.error && <p role="alert">{String(packages.error)}</p>}
+      {!!packages.data?.length && <section aria-label="Linked workflow packages" className="grid gap-2">
+        {packages.data.map((draft) => <div key={draft.id} className="flex items-center justify-between gap-2 border-t border-border pt-2">
+          <div><strong>{draft.name}</strong><p>{draft.published ? "Published" : "Draft"} · {draft.memberCount} artifacts</p></div>
+          <Button type="button" variant="outline" onClick={() => onOpenDraft(`package:${draft.id}`)}>Open linked package</Button>
         </div>)}
       </section>}
     </Dialog.Content>
@@ -139,10 +165,17 @@ export function ProjectPipelineDrafts({ checkout, openWorkspace }: Pick<Workspac
           {draft.revision ? "Open draft" : "Open request"}</Button>
       </li>)}
     </ul>}
+    <WorkflowPackageList checkout={checkout} openWorkspace={openWorkspace} />
   </section>;
 }
 
-export function PipelineAuthoringEditor({ draftId, checkout, openWorkspace, openActivity, openQueueJob }: WorkspaceProps & { draftId: string }) {
+export function PipelineAuthoringEditor(props: WorkspaceProps & { draftId: string }) {
+  return props.draftId.startsWith("package:")
+    ? <WorkflowPackageEditor {...props} draftId={props.draftId.slice("package:".length)} />
+    : <GraphAuthoringEditor {...props} />;
+}
+
+function GraphAuthoringEditor({ draftId, checkout, openWorkspace, openActivity, openQueueJob }: WorkspaceProps & { draftId: string }) {
   const projectId = checkout.projectId;
   const query = useQuery({
     queryKey: editorKey(projectId, draftId),

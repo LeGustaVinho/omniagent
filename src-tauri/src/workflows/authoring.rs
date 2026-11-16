@@ -27,6 +27,8 @@ use editor::{DraftDocument, ProtectedDraft};
 pub use editor::{ProjectWorkflowDraft, WorkflowCanvasEdit, WorkflowNodePosition};
 mod publication;
 pub use publication::{WorkflowPublication, WorkflowPublicationOutcome};
+pub mod package;
+pub(crate) use package::ensure_package_runnable;
 
 #[cfg(test)]
 mod tests;
