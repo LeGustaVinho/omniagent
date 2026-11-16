@@ -213,3 +213,44 @@ fn compiler_rejects_cycles_and_mixed_write_preparation_sources() {
             .contains("cycle")
     );
 }
+
+#[test]
+fn compiler_requires_every_writer_input_and_the_plan_used_by_its_release() {
+    let base = builtin_delivery_graph(DeliveryRoles::default());
+    let mut incomplete = base.clone();
+    incomplete
+        .wires
+        .retain(|wire| wire.to.node != "implement" || wire.to.port != "release");
+    assert!(
+        compile("missing-release".into(), incomplete)
+            .unwrap_err()
+            .to_string()
+            .contains("input release on implement needs a connection")
+    );
+
+    let mut mismatched = base;
+    let mut extra_plan = mismatched
+        .nodes
+        .iter()
+        .find(|node| node.kind == BuiltinNode::Plan)
+        .unwrap()
+        .clone();
+    extra_plan.id = "unapproved-plan".into();
+    mismatched.nodes.push(extra_plan);
+    mismatched.wires.extend([
+        wire("context", "loaded", "unapproved-plan", "ready"),
+        wire("context", "context", "unapproved-plan", "context"),
+    ]);
+    let writer_plan = mismatched
+        .wires
+        .iter_mut()
+        .find(|wire| wire.to.node == "implement" && wire.to.port == "plan")
+        .unwrap();
+    *writer_plan = wire("unapproved-plan", "plan", "implement", "plan");
+    assert!(
+        compile("unapproved-plan".into(), mismatched)
+            .unwrap_err()
+            .to_string()
+            .contains("must use the plan selected by its implementation approval")
+    );
+}

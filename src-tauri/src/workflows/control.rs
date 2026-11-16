@@ -113,7 +113,13 @@ pub(super) fn validate_release_wires(nodes: &[PinnedNode], wires: &[Wire]) -> Re
         wires
             .iter()
             .find(|wire| wire.to.node == node && wire.to.port == port)
-            .map(|wire| wire.from.node.as_str())
+            .map(|wire| &wire.from)
+    };
+    let kind = |id: &str| {
+        nodes
+            .iter()
+            .find(|node| node.instance.id == id)
+            .map(|node| node.instance.kind)
     };
     for step in nodes.iter().filter(|node| {
         matches!(
@@ -123,19 +129,28 @@ pub(super) fn validate_release_wires(nodes: &[PinnedNode], wires: &[Wire]) -> Re
     }) {
         let node = step.instance.id.as_str();
         let provider = source(node, "release").context("writing node requires a pinned release")?;
+        let worktree = source(node, "worktree").context("writing node requires a pinned worktree")?;
         ensure!(
-            Some(provider) == source(node, "worktree"),
+            kind(&provider.node) == Some(BuiltinNode::PrepareWorktree)
+                && provider.port == "release"
+                && worktree.node == provider.node
+                && worktree.port == "worktree",
             "writing node {node} must use release and worktree from the same preparation"
         );
-        let approver = source(provider, "decision")
+        let approver = source(&provider.node, "decision")
             .context("write preparation must consume a pinned implementation approval")?;
         ensure!(
-            source(provider, "task") == source(approver, "task"),
+            kind(&approver.node) == Some(BuiltinNode::ApproveImplementation)
+                && approver.port == "decision",
+            "write preparation must consume a pinned implementation approval"
+        );
+        ensure!(
+            source(&provider.node, "task") == source(&approver.node, "task"),
             "write preparation and implementation approval must use the same work item"
         );
         if step.instance.kind == BuiltinNode::Implement {
             ensure!(
-                source(node, "plan") == source(approver, "plan"),
+                source(node, "plan") == source(&approver.node, "plan"),
                 "writing node {node} must use the plan selected by its implementation approval"
             );
         }
