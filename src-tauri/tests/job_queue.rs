@@ -19,7 +19,11 @@ use omniagent::{
     store::Store,
 };
 
+#[path = "support/schema.rs"]
+mod schema;
+
 fn remove_recent_schema(db: &rusqlite::Connection) -> Result<()> {
+    schema::restore_question_view_before_structured_planning(db)?;
     db.execute_batch(
         "DROP TABLE goal_criterion_evidence;
          ALTER TABLE job_attempt_policies DROP COLUMN evidence;

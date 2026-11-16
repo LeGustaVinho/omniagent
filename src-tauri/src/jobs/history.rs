@@ -201,6 +201,17 @@ fn pinned_release_blocker(db: &Connection, job: &Job) -> Result<Option<ReleaseBl
         .pipeline
         .as_ref()
         .context("Pinned job has no pipeline origin")?;
+    // A structured planner pins a conversation input to produce the plan.
+    // The plan it publishes will be pinned when downstream jobs consume it.
+    if origin.plan_revision.is_none()
+        && db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workflow_structured_planning_jobs WHERE job_id = ?1)",
+            [&job.id],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return release_blocker(db, job);
+    }
     let current: Option<String> = db.query_row(
         "SELECT plan_revision FROM job_pipeline_runs WHERE project_id = ?1 AND id = ?2",
         params![job.project_id, origin.pipeline_run_id],

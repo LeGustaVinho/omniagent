@@ -20,6 +20,9 @@ use omniagent::{
     },
 };
 
+#[path = "support/schema.rs"]
+mod schema;
+
 fn git(checkout: &Path, args: &[&str]) -> Result<()> {
     let output = Command::new("git")
         .current_dir(checkout)
@@ -158,6 +161,7 @@ async fn legacy_task_ids_jobs_and_worktrees_survive_the_hierarchy_migration() ->
     drop(store);
 
     let legacy = rusqlite::Connection::open(&database)?;
+    schema::restore_question_view_before_structured_planning(&legacy)?;
     legacy.execute_batch(
         "DROP TABLE goal_criterion_evidence;
          ALTER TABLE job_attempt_policies DROP COLUMN evidence;

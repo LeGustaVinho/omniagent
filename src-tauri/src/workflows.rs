@@ -12,6 +12,8 @@ mod execution;
 mod git_integration;
 mod job_inputs;
 mod operator;
+#[cfg(test)]
+mod planning_integration;
 mod registry;
 mod runtime;
 #[cfg(test)]
