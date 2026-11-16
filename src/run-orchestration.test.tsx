@@ -102,3 +102,38 @@ it("opens actual routing, context decisions, and saved sources in the same inspe
   await user.click(screen.getByRole("button", { name: "Open workflow" }));
   expect(navigation.openWorkspace).toHaveBeenCalledWith("pipelines", "flow");
 });
+
+it("shows the Epic, Task, and Sub-Task description revisions pinned to the inspected attempt", async () => {
+  const scope = { projectId: "project", conversationId: "chat", runId: "historical-run" };
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command !== "run_orchestration") throw new Error(command);
+    return {
+      job: null, route: null, stagePin: null, policy: null, context: null, document: null, goal: null, unit: null,
+      taskDescriptions: {
+        epic: { id: "epic-revision-at-dispatch", revision: 5, markdown: "Release the original scope" },
+        task: { id: "task-revision-at-dispatch", revision: 7, markdown: "Retain the published API" },
+        subtask: { id: "subtask-revision-at-dispatch", revision: 2, markdown: "- [x] Check the response schema" },
+      },
+    };
+  });
+  render(<QueryClientProvider client={new QueryClient()}>
+    <RunOrchestrationPanel scope={scope} live={false} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(screen.getByText("Orchestration and worktree"));
+  await user.click(await screen.findByText("Saved work descriptions"));
+  for (const [heading, revision, markdown] of [
+    ["Epic description · Revision 5", "epic-revision-at-dispatch", "Release the original scope"],
+    ["Task description · Revision 7", "task-revision-at-dispatch", "Retain the published API"],
+    ["Sub-Task description · Revision 2", "subtask-revision-at-dispatch", "- [x] Check the response schema"],
+  ] as const) {
+    expect(screen.getByRole("heading", { name: heading })).toBeTruthy();
+    expect(screen.getByText(revision).tagName).toBe("CODE");
+    const source = screen.getByText(markdown);
+    expect(source.tagName).toBe("PRE");
+    expect(source.isContentEditable).toBeFalsy();
+  }
+  expect(screen.queryByRole("checkbox")).toBeNull();
+  expect(invoke).toHaveBeenCalledTimes(1);
+  expect(invoke).toHaveBeenCalledWith("run_orchestration", scope);
+});
