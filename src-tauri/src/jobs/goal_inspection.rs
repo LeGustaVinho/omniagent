@@ -17,6 +17,9 @@ use super::{
     question_waits::has_open_questions,
 };
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectedGoal {
@@ -28,6 +31,25 @@ pub struct InspectedGoal {
     checkpoint: Option<GoalCheckpoint>,
     attempt: Option<GoalAttempt>,
     evidence: Option<GoalAttemptEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationGoalOverview {
+    goal: GoalRevision,
+    activity: InspectedGoal,
+    history: Vec<PriorConversationGoal>,
+    managed_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PriorConversationGoal {
+    revision_id: String,
+    objective: String,
+    control_state: GoalControlState,
+    verification: Option<super::GoalVerificationStatus>,
+    run_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +104,51 @@ struct GoalObservation {
 }
 
 impl Store {
+    pub async fn conversation_goal_overview(
+        &self,
+        conversation: String,
+    ) -> Result<Option<ConversationGoalOverview>> {
+        self.execute(move |db| {
+            let mut statement = db.prepare(
+                "SELECT r.id FROM goal_revisions r JOIN goals g ON g.id = r.goal_id
+                 JOIN jobs j ON j.id = r.initial_job_id
+                 LEFT JOIN active_goals active ON active.revision_id = r.id
+                 WHERE g.conversation_id = ?1 AND g.pipeline_run_id IS NULL
+                 ORDER BY active.revision_id IS NOT NULL DESC, j.sequence DESC",
+            )?;
+            let mut revisions =
+                statement.query_map([conversation], |row| row.get::<_, String>(0))?;
+            let Some(current) = revisions.next().transpose()? else {
+                return Ok(None);
+            };
+            let goal = load_revision(db, current)?;
+            let activity = inspect_goal(db, goal.clone(), None)?;
+            let managed_reason = managed_goal_reason(&goal, &activity);
+            let history = revisions
+                .map(|row| {
+                    let previous = load_revision(db, row?)?;
+                    Ok(PriorConversationGoal {
+                        revision_id: previous.id,
+                        objective: previous.definition.objective,
+                        control_state: previous.control_state,
+                        verification: previous.verification.map(|outcome| outcome.status),
+                        run_id: previous
+                            .checkpoint
+                            .map(|checkpoint| checkpoint.run_id)
+                            .or_else(|| previous.job.latest_attempt.map(|attempt| attempt.run_id)),
+                    })
+                })
+                .collect::<Result<_>>()?;
+            Ok(Some(ConversationGoalOverview {
+                goal,
+                activity,
+                history,
+                managed_reason,
+            }))
+        })
+        .await
+    }
+
     pub async fn project_task_goals(
         &self,
         project: String,
@@ -101,6 +168,28 @@ impl Store {
         })
         .await
     }
+}
+
+fn managed_goal_reason(goal: &GoalRevision, activity: &InspectedGoal) -> Option<&'static str> {
+    if goal.continuation_owner != GoalContinuationOwner::Managed {
+        return None;
+    }
+    Some(if goal.provider != Provider::Codex {
+        "The selected provider uses OmniAgent's continuation scheduler."
+    } else if goal.definition.max_turns.is_some() {
+        "OmniAgent enforces the requested turn limit."
+    } else if goal.job.latest_attempt.is_none() {
+        "The scheduler checks native eligibility for the selected profile before dispatch."
+    } else if activity
+        .evidence
+        .as_ref()
+        .and_then(|evidence| evidence.native_start.as_ref())
+        .is_some()
+    {
+        "The provider did not confirm native goal continuation for the current attempt."
+    } else {
+        "The current profile has no applicable native continuation evidence for this attempt."
+    })
 }
 
 pub(super) fn inspect_run_goal(db: &Connection, run: &str) -> Result<Option<InspectedGoal>> {

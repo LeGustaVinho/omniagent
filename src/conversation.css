@@ -209,6 +209,10 @@
 }
 .conv-goal > svg, .conv-goal-note > svg { flex: none; color: var(--primary); }
 .conv-goal-summary { display: grid; flex: 1 1 9rem; min-width: 0; font-size: .8rem; }
+.conv-goal-live { display: grid; max-height: 12rem; overflow: auto; }
+.conv-goal-heading { display: flex; align-items: center; gap: .4rem; font-size: .8rem; }
+.conv-goal-heading svg { flex: none; color: var(--primary); }
+.conv-goal-heading [role="status"] { color: var(--muted-foreground); }
 .conv-goal-objective { display: flex; align-items: center; justify-self: start; gap: .35rem; min-width: 0; max-width: 100%; text-align: start; }
 .conv-goal-objective:hover { color: var(--primary); }
 .conv-goal-objective svg { flex: none; color: var(--muted-foreground); }

@@ -47,7 +47,7 @@ pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
 pub use goal_control::{GoalControlState, GoalStopAction};
-pub use goal_inspection::InspectedGoal;
+pub use goal_inspection::{ConversationGoalOverview, InspectedGoal};
 pub use goal_verification::{
     GoalCriterionEvidence, GoalCriterionStatus, GoalCriterionVerification, GoalEvidenceChoice,
     GoalVerification, GoalVerificationStatus,

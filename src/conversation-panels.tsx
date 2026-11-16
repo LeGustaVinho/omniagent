@@ -18,6 +18,7 @@ import { ModelPicker } from "@/components/model-picker";
 import { ModelCapabilityPreview } from "@/model-capability-preview";
 import { EffortSelect, type EffortSet } from "@/components/effort-select";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
+import { ConversationGoalCard, GoalSettingsDialog, goalDefinition, hasCurrentGoal, useConversationGoal, type GoalDefinition } from "@/conversation-goal";
 import { Button } from "@/components/ui/button";
 import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
 import { ConversationInstructions, useConversationInstructions } from "@/conversation-instructions";
@@ -284,7 +285,10 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
   const text = draft.data ?? "";
   const isSideQuestion = /^\/btw(?:\s|$)/u.test(text.trim());
   const [showSideQuestions, setShowSideQuestions] = useState(false);
-  const goalUnavailable = mode === "goal" || goalCommand(text) !== undefined;
+  const goalInput = goalCommand(text);
+  const composingGoal = !isSideQuestion && (mode === "goal" || goalInput !== undefined);
+  const { overview: goal, refresh: refreshGoal } = useConversationGoal(conversationId, visible);
+  const [goalSettings, setGoalSettings] = useState<{ objective: string; submittedDraft?: string }>();
   const models = useQuery({
     queryKey: ["conversation-models", provider],
     queryFn: () => invoke<DesktopModel[]>("conversation_models", { provider }),
@@ -327,6 +331,10 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
   const activityButton = useRef<HTMLButtonElement>(null);
   const inspector = useContext(RunInspectorNavigation);
   const showingActivity = visible && run && inspectedRun === run.id;
+  const openGoalRun = (runId: string) => {
+    if (inspector) inspector.openActivity(runId, conversationId);
+    else setInspectedRun(runId);
+  };
   useEffect(() => {
     if (!visible) setInspectedRun(undefined);
   }, [visible]);
@@ -343,7 +351,6 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
   const send = useMutation({
     mutationFn: async (submitted: string) => {
       if (!selection) throw new Error("Choose a model");
-      if (mode === "goal" || goalCommand(submitted) !== undefined) throw new Error("Goal Mode is available in simulation.");
       await saveDraft(conversationId, submitted);
       return invoke<Job>("start_conversation_turn", {
         conversationId, selection, effort: efforts?.efforts.includes(effort) ? effort : null, mode, text: submitted,
@@ -356,6 +363,26 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
       setDraftStatus("");
       setDraftError("");
       void instructions.refresh();
+    },
+  });
+  const startGoal = useMutation({
+    mutationFn: async ({ definition, submittedDraft }: { definition: GoalDefinition; submittedDraft?: string }) => {
+      const contextId = history.data?.contextId;
+      if (!selection || !selected?.option.selectable || !contextId) throw new Error("Choose a model and wait for the conversation context.");
+      if (submittedDraft !== undefined) await saveDraft(conversationId, submittedDraft);
+      return invoke("start_conversation_goal", {
+        conversationId, expectedContextId: contextId, selection, effort: efforts?.efforts.includes(effort) ? effort : null,
+        definition, submittedDraft: submittedDraft ?? null,
+      });
+    },
+    onSuccess: async (_, { submittedDraft }) => {
+      if (submittedDraft !== undefined && queryClient.getQueryData(draftKey) === submittedDraft) {
+        activeEdit.current++;
+        queryClient.setQueryData(draftKey, "");
+        setDraftStatus("");
+      }
+      setGoalSettings(undefined);
+      await Promise.all([refreshGoal(), queryClient.invalidateQueries({ queryKey: jobKey }), instructions.refresh()]);
     },
   });
   const cancelQueued = useMutation({
@@ -427,9 +454,12 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
     });
   }
 
-  const canSend = Boolean(text.trim() && selected?.option.selectable && (isSideQuestion
+  const canStartGoal = Boolean(history.data?.contextId && selected?.option.selectable && !busy && !latest.isPending && !latestJob.isPending
+    && !goal.isPending && !goal.error && !hasCurrentGoal(goal.data) && !send.isPending && !recover.isPending);
+  const canSend = composingGoal ? Boolean(text.trim() && !startGoal.isPending && (goalInput === "" || canStartGoal))
+    : Boolean(text.trim() && selected?.option.selectable && (isSideQuestion
     ? text.trim() !== "/btw" && history.data?.contextId && !askSide.isPending
-    : !goalUnavailable && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending));
+    : !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending));
   const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
 
   function submit(event: FormEvent) {
@@ -438,6 +468,15 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
     if (isSideQuestion) {
       setShowSideQuestions(true);
       askSide.mutate(text);
+      return;
+    }
+    if (composingGoal) {
+      if (goalInput === "") {
+        startGoal.reset();
+        setGoalSettings({ objective: "", submittedDraft: text });
+      } else {
+        startGoal.mutate({ definition: goalDefinition(goalInput ?? text.trim()), submittedDraft: text });
+      }
       return;
     }
     stickToEnd.current = true;
@@ -457,6 +496,9 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
               title="Rename conversation" onClick={() => setRenamingTitle(true)}><Pencil aria-hidden /></button>}
           </>}
         <div className="ml-auto flex items-center gap-1">
+        <button type="button" className="conv-quiet-button" onClick={() => { startGoal.reset(); setGoalSettings({ objective: "" }); }}>
+          <Target size={14} aria-hidden /> Goal
+        </button>
         <button type="button" className="conv-quiet-button" aria-expanded={showSideQuestions}
           onClick={() => setShowSideQuestions(!showSideQuestions)}>Side questions</button>
         {run && <button ref={activityButton} type="button" className="conv-quiet-button"
@@ -526,6 +568,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
         </div>
       </div>
       <div className="conv-composer-area">
+        {goal.data && <ConversationGoalCard value={goal.data} refresh={refreshGoal} openRun={openGoalRun} />}
         {showJump && <button type="button" className="conv-jump" onClick={() => {
           stickToEnd.current = true;
           if (historyRegion.current) historyRegion.current.scrollTop = historyRegion.current.scrollHeight;
@@ -553,7 +596,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
           </button>}
           <label htmlFor={`draft-${conversationId}`} className="sr-only">Message draft</label>
           <textarea id={`draft-${conversationId}`} placeholder="Ask about this repository…"
-            value={text} onChange={(event) => editDraft(event.target.value)} disabled={draft.isPending || Boolean(draft.error) || send.isPending}
+            value={text} onChange={(event) => editDraft(event.target.value)} disabled={draft.isPending || Boolean(draft.error) || send.isPending || startGoal.isPending}
             onKeyDown={(event) => {
               if (suggestion && event.key === "Tab" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
@@ -590,12 +633,12 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
               {live && <StopConversation {...activity} />}
                 <Button type="submit" className="conv-send" disabled={!canSend}>
                   {isSideQuestion ? askSide.isPending ? "Queueing…" : "Ask side question"
-                    : send.isPending ? "Queueing…" : goalUnavailable ? "Start goal" : queueNext ? "Queue for next turn" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
+                    : startGoal.isPending ? "Starting goal…" : goalInput === "" ? "Open Goal Mode" : composingGoal ? "Start goal"
+                      : send.isPending ? "Queueing…" : queueNext ? "Queue for next turn" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
                 </Button>
           </div>
-          {goalUnavailable && !isSideQuestion && <p className="conv-goal-note" role="status"><Target size={14} aria-hidden />
-            Goal Mode is available in Simulation while runtime integration is pending.
-          </p>}
+          {goal.error && composingGoal && <p role="alert" className="conv-alert">{String(goal.error)}</p>}
+          {startGoal.error && !goalSettings && <p role="alert" className="conv-alert">{String(startGoal.error)}</p>}
           {models.error && <div className="flex flex-wrap items-center gap-2">
             <p role="alert" className="conv-alert">{String(models.error)}</p>
             <Button type="button" variant="outline" onClick={() => void models.refetch()}>Refresh models</Button>
@@ -619,6 +662,11 @@ function ConversationContent({ conversationId, title, checkoutId, visible }: Pan
           : undefined}
         onClose={() => { validateSide.reset(); setShowSideQuestions(false); }} />}
       </div>
+      {visible && goalSettings && <GoalSettingsDialog objective={goalSettings.objective} options={models.data?.map(({ option }) => option) ?? []}
+        selected={selection} onSelect={(model) => { setSelection(model); setEffort(""); }} value={goal.data} refresh={refreshGoal} openRun={openGoalRun}
+        pending={startGoal.isPending} error={startGoal.error ? String(startGoal.error) : undefined} canStart={canStartGoal}
+        onStart={(definition) => startGoal.mutate({ definition, submittedDraft: goalSettings.submittedDraft })}
+        onClose={() => { setGoalSettings(undefined); startGoal.reset(); }} />}
     </section>
   );
 }

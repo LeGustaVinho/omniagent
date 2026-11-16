@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod conversation_runtime;
+mod conversation_goal_runtime;
 mod desktop;
 mod manual_terminal;
 #[cfg(debug_assertions)]
@@ -340,6 +341,8 @@ fn main() {
             goal_verification_ipc::record_goal_criterion_evidence,
             ipc::list_conversations,
             conversation_runtime::conversation_library,
+            conversation_goal_runtime::conversation_goal_overview,
+            conversation_goal_runtime::start_conversation_goal,
             ipc::checkout_conversation,
             ipc::create_conversation,
             ipc::fork_conversation,
