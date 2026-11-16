@@ -31,6 +31,31 @@ it("applies only the canonical ranges returned for the exact CodeMirror buffer",
   expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "Toggle note task" }).checked).toBe(true);
 });
 
+it("reveals a formatted source range when the cursor enters and keeps the editor across modes", async () => {
+  const source = "# Release 🚀\n\nBefore **revisão** after";
+  const from = source.indexOf("**");
+  const to = source.lastIndexOf("**") + 2;
+  vi.mocked(invoke).mockImplementation(async (_command, args) => ({
+    bufferRevision: (args as { bufferRevision: string }).bufferRevision,
+    nodes: [{ kind: "strong", range: { from, to }, markers: [{ from, to: from + 2 }, { from: to - 2, to }] }],
+  }));
+  const { container, rerender } = render(<MarkdownEditor {...props} mode="live" source={source} analyze />);
+  const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+  await waitFor(() => expect(view.contentDOM.querySelector(".cm-note-strong")?.textContent).toBe("revisão"));
+  select(view, from + 3);
+  expect(view.contentDOM.textContent).toContain("**revisão**");
+  select(view, to + 1);
+  expect(view.contentDOM.textContent).not.toContain("**revisão**");
+
+  rerender(<MarkdownEditor {...props} mode="source" source={source} analyze />);
+  expect(EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)).toBe(view);
+  expect(view.contentDOM.textContent).toContain("**revisão**");
+  rerender(<MarkdownEditor {...props} mode="live" source={source} analyze />);
+  await waitFor(() => expect(view.contentDOM.querySelector(".cm-note-strong")?.textContent).toBe("revisão"));
+  expect(view.state.doc.toString()).toBe(source);
+  expect(props.onChange).not.toHaveBeenCalled();
+});
+
 function openSource(source: string) {
   const onChange = vi.fn();
   function Controlled() {
