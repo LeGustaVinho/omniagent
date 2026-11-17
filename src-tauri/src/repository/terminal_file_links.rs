@@ -18,18 +18,39 @@ pub async fn resolve_terminal_file(
     store: &Store,
     checkout_id: String,
     relative_directory: Option<String>,
+    observed_directory: Option<String>,
     path: String,
 ) -> Result<String> {
     let root = checkout_root(store, checkout_id.clone()).await?;
     let layout = verify_checkout(store, checkout_id, root).await?;
     tokio::task::spawn_blocking(move || {
-        resolve_path(
-            &layout.root,
-            relative_directory.as_deref().unwrap_or(""),
-            &path,
-        )
+        let directory = match observed_directory {
+            Some(observed) if !Path::new(&path).is_absolute() => {
+                observed_directory_in_checkout(&layout.root, &observed)?
+            }
+            _ => relative_directory.unwrap_or_default(),
+        };
+        resolve_path(&layout.root, &directory, &path)
     })
     .await?
+}
+
+fn observed_directory_in_checkout(root: &Path, observed: &str) -> Result<String> {
+    ensure!(
+        !observed.is_empty()
+            && observed.encode_utf16().count() < 32_767
+            && !observed.chars().any(char::is_control),
+        "The terminal is outside the checkout filesystem"
+    );
+    let directory = Path::new(observed);
+    let relative =
+        strip_local_dos_prefix(directory, root).context("The terminal is outside this checkout")?;
+    if relative.as_os_str().is_empty() {
+        return Ok(String::new());
+    }
+    let relative = relative_name(root, &root.join(relative))?;
+    checkout_directory(root, &relative)?;
+    Ok(relative)
 }
 
 fn resolve_path(root: &Path, directory: &str, printed: &str) -> Result<String> {
@@ -120,6 +141,25 @@ mod tests {
             assert!(resolve_path(&root, "", printed).is_err(), "{printed}");
         }
         assert!(resolve_path(&root, "escape", "outside.ts").is_err());
+        assert_eq!(
+            observed_directory_in_checkout(&root, root.to_str().unwrap())?,
+            ""
+        );
+        assert_eq!(
+            observed_directory_in_checkout(&root, root.join("docs").to_str().unwrap())?,
+            "docs"
+        );
+        for observed in [
+            "",
+            "docs",
+            outside.to_str().unwrap(),
+            root.join("escape").to_str().unwrap(),
+        ] {
+            assert!(
+                observed_directory_in_checkout(&root, observed).is_err(),
+                "{observed}"
+            );
+        }
         Ok(())
     }
 }

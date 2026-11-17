@@ -191,13 +191,14 @@ function libraryGroups(entries: ConversationLibraryEntry[], archived: boolean) {
   return [...groups.values()].sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.title.localeCompare(b.title));
 }
 
-export function ConversationLibrary({ checkout, activeId, startPending, startError, onStart, onOpen }: {
+export function ConversationLibrary({ checkout, activeId, startPending, startError, onStart, onOpen, onOpenBeside }: {
   checkout: ProjectCheckout;
   activeId?: string;
   startPending: boolean;
   startError?: Error | null;
   onStart: () => void;
   onOpen: OpenLibraryConversation;
+  onOpenBeside?: OpenLibraryConversation;
 }) {
   const client = useQueryClient();
   const inspector = useContext(RunInspectorNavigation);
@@ -216,7 +217,10 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
     queryKey: [...sectionKey, projectId],
     queryFn: () => invoke<ConversationLibrarySection[]>("conversation_library_sections", { projectId }),
   });
-  const open = useMutation({ mutationFn: (entry: ConversationLibraryEntry) => openEntry(onOpen, entry) });
+  const open = useMutation({
+    mutationFn: ({ entry, beside }: { entry: ConversationLibraryEntry; beside?: boolean }) =>
+      openEntry(beside && onOpenBeside ? onOpenBeside : onOpen, entry),
+  });
   const openFork = useMutation({ mutationFn: ({ source, id }: { source: ProjectCheckout; id: string }) => onOpen(source, id) });
   const inspect = useMutation({
     mutationFn: async ({ conversation, checkout }: ConversationLibraryEntry) => {
@@ -243,7 +247,8 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
 
   function rowAction(action: ConversationAction, entry: ConversationLibraryEntry, sectionId?: string) {
     const { conversation, organization } = entry;
-    if (action === "open") open.mutate(entry);
+    if (action === "open") open.mutate({ entry });
+    if (action === "open-beside" && onOpenBeside && entry.checkout.checkoutId === checkout.checkoutId) open.mutate({ entry, beside: true });
     if (action === "activity") inspect.mutate(entry);
     if (action === "fork") setForking(entry);
     if (action === "export-markdown") exportTranscript.mutate(conversation);
@@ -288,7 +293,9 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
               : <ConversationRow title={conversation.title} {...organization}
                 sections={sections.data?.filter(({ projectId }) => projectId === entry.checkout.projectId)}
                 available={(action) => ["rename", "copy-title", "copy-id", "copy-worktree"].includes(action) ||
-                  (action === "open" && !open.isPending) || (action === "activity" && !inspect.isPending && Boolean(inspector && entry.status && entry.checkout.projectId === checkout.projectId)) ||
+                  (action === "open" && !open.isPending) ||
+                  (action === "open-beside" && !open.isPending && Boolean(onOpenBeside && entry.checkout.checkoutId === checkout.checkoutId)) ||
+                  (action === "activity" && !inspect.isPending && Boolean(inspector && entry.status && entry.checkout.projectId === checkout.projectId)) ||
                   (action === "fork" && !openFork.isPending) ||
                   (action === "export-markdown" && !exportTranscript.isPending) ||
                   (!organize.isPending && ["pin", "unread", "archive", "move", "new-section"].includes(action))}
@@ -296,7 +303,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
                 <button type="button" className="conv-session-button items-start" disabled={open.isPending}
                   data-conversation-id={conversation.id} aria-description={organization.unread ? "Unread" : undefined}
                   aria-label={conversation.title} aria-describedby={organization.unread ? `${unreadId} ${metadataId}` : metadataId}
-                  aria-current={conversation.id === activeId ? "page" : undefined} onClick={() => open.mutate(entry)}>
+                  aria-current={conversation.id === activeId ? "page" : undefined} onClick={() => open.mutate({ entry })}>
                   <MessageSquare className="mt-0.5" aria-hidden />
                   <span className="min-w-0">
                     <span className="block font-medium">{conversation.title}</span>

@@ -29,7 +29,7 @@ fn initialize(db: &Connection) -> Result<()> {
          );",
     )?;
     db.execute_batch(include_str!(
-        "../../../../migrations/128-workflow-delivery-attempts.sql"
+        "../../../../migrations/130-workflow-delivery-attempts.sql"
     ))?;
     Ok(())
 }

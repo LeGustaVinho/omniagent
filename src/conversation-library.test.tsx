@@ -14,6 +14,8 @@ import type { RunRecord } from "@/bindings/RunRecord";
 import { RealConversations } from "@/desktop-dock";
 import { defaultAppearance } from "@/settings-appearance";
 import { useWorkspace } from "@/workspace-state";
+import { RunInspectorNavigation } from "@/run-inspector-navigation";
+import { takeTerminalReview } from "@/terminal-reviewed-input";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -175,6 +177,8 @@ function repository({ leakForeignResults = false, archiveMessages = [] as Messag
         }] };
       case "latest_conversation_job": return null;
       case "composer_suggestion_mode": return "off";
+      case "list_checkout_folders": return ["scripts"];
+      case "create_checkout_item": return "scripts/code.ps1";
       case "conversation_models":
       case "pending_conversation_instructions":
       case "pending_conversation_inputs":
@@ -228,6 +232,61 @@ it("orders recent conversations in the active project, excludes foreign results 
   expect(await screen.findByText("Already running before the tab opened.")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("conversation_events", { conversationId: liveId, runId: "existing-run", after: "0" });
+  expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
+});
+
+it("opens a new conversation beside the active panel only within the selected worktree", async () => {
+  const { layouts } = repository();
+  const { user, onOpenOtherCheckout } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await user.click(await library().findByRole("button", { name: original }));
+  const referenceTab = await screen.findByRole("tab", { name: original });
+  const openBeside = async (title: string) => {
+    fireEvent.contextMenu(await library().findByRole("button", { name: title }));
+    await user.click(await screen.findByRole("menuitem", { name: "Open conversation to the side" }));
+  };
+  await openBeside("Live handoff");
+  const liveTab = await screen.findByRole("tab", { name: "Live handoff" });
+  expect(liveTab.closest(".dv-groupview")).not.toBe(referenceTab.closest(".dv-groupview"));
+  await waitFor(() => expect(layouts.get(`${selected.checkoutId}:conversations`)).toContain(liveId));
+  expect(invoke).toHaveBeenCalledWith("checkout_conversation", { checkoutId: selected.checkoutId, conversationId: liveId });
+
+  await user.click(library().getByRole("button", { name: original }));
+  await openBeside("Live handoff");
+  await waitFor(() => expect(library().getByRole("button", { name: "Live handoff" }).getAttribute("aria-current")).toBe("page"));
+  expect(screen.getAllByRole("tab", { name: "Live handoff" })).toEqual([liveTab]);
+  expect(liveTab.closest(".dv-groupview")).not.toBe(referenceTab.closest(".dv-groupview"));
+
+  await user.selectOptions(library().getByRole("combobox", { name: "Project" }), "");
+  fireEvent.contextMenu(await library().findByRole("button", { name: "Audit details" }));
+  const menu = within(await screen.findByRole("menu"));
+  expect(menu.queryByRole("menuitem", { name: "Open conversation to the side" })).toBeNull();
+  await user.click(menu.getByRole("menuitem", { name: "Open conversation" }));
+  expect(onOpenOtherCheckout).toHaveBeenCalledExactlyOnceWith(other, externalId);
+});
+
+it("moves an already open conversation to the side with the same mounted composer and draft", async () => {
+  repository();
+  const { user } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await user.click(await library().findByRole("button", { name: original }));
+  const input = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" });
+  const edited = `${draft}\nRetain this unsent edit across a split.`;
+  fireEvent.change(input, { target: { value: edited } });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_conversation_draft", { conversationId: archiveId, text: edited }));
+  await user.click(library().getByRole("button", { name: "Live handoff" }));
+  const companion = await screen.findByRole("tab", { name: "Live handoff" });
+  const originalTab = () => screen.getByRole("tab", { name: original });
+  expect(originalTab().closest(".dv-groupview")).toBe(companion.closest(".dv-groupview"));
+
+  const row = library().getByRole("button", { name: original });
+  row.focus();
+  await user.keyboard("{Shift>}{F10}{/Shift}");
+  await user.click(await screen.findByRole("menuitem", { name: "Open conversation to the side" }));
+  await waitFor(() => expect(originalTab().closest(".dv-groupview")).not.toBe(companion.closest(".dv-groupview")));
+  await waitFor(() => expect(screen.getAllByRole("textbox", { name: "Message draft" })).toContain(input));
+  expect(input.value).toBe(edited);
+  expect(screen.getAllByRole("tab", { name: original })).toHaveLength(1);
   expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
 });
 
@@ -337,6 +396,47 @@ it("copies highlighted code and appends its own fenced block to the current draf
   const quoted = `${expected}> ${snippet}\n\n`;
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_conversation_draft", { conversationId: archiveId, text: quoted }));
   expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
+});
+
+it("confirms a checkout file save and stages the same clicked block for the terminal without running it", async () => {
+  const source = '$value = "café";\r\n\r\nWrite-Output $value\r\n';
+  const nested = source.split("\r\n").slice(0, -1).map((line) => `> ${line}\r\n`).join("");
+  repository([{ messageId: "review-code", revisionId: "review-code-revision", role: "assistant", text:
+    `\x60\x60\x60powershell\nGet-Date\n\x60\x60\x60\n\n> \x60\x60\x60powershell\r\n${nested}> \x60\x60\x60` }]);
+  useWorkspace.getState().selectCheckout(selected);
+  const openWorkspace = vi.fn();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><RunInspectorNavigation.Provider value={{ openActivity: vi.fn(), openWorkspace }}>
+    <RealConversations checkout={selected} sidebar compact={false} onSidebarChange={vi.fn()} />
+  </RunInspectorNavigation.Provider></QueryClientProvider>);
+  const user = userEvent.setup();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await user.click(await library().findByRole("button", { name: original }));
+  const code = (await screen.findAllByLabelText("powershell code"))[1]!;
+  fireEvent.contextMenu(code);
+  await user.click(await screen.findByRole("menuitem", { name: "Save code block as file…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Save code block as file" }));
+  expect(dialog.getByLabelText("Code to save").textContent).toBe(source);
+  expect(dialog.getByRole("textbox", { name: "File name" })).toHaveProperty("value", "code.ps1");
+  await dialog.findByRole("option", { name: "scripts" });
+  await user.selectOptions(dialog.getByRole("combobox", { name: "Destination folder" }), "scripts");
+  expect(invoke).not.toHaveBeenCalledWith("create_checkout_item", expect.anything());
+  await user.click(dialog.getByRole("button", { name: "Save new file" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("create_checkout_item", {
+    checkoutId: selected.checkoutId, relativeDirectory: "scripts", name: "code.ps1", directory: false, contents: source,
+  }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Save code block as file" })).toBeNull());
+  expect(openWorkspace).toHaveBeenCalledWith("ide", expect.stringContaining("scripts/code.ps1"));
+
+  fireEvent.contextMenu((await screen.findAllByLabelText("powershell code"))[1]!);
+  await user.click(await screen.findByRole("menuitem", { name: "Insert in terminal for review" }));
+  const [workspace, target] = openWorkspace.mock.lastCall as [string, string];
+  expect(workspace).toBe("ide");
+  expect(target).not.toContain("Write-Output");
+  expect(takeTerminalReview(target, selected.checkoutId)?.text).toBe(source);
+  expect(takeTerminalReview(target, selected.checkoutId)).toBeUndefined();
+  expect(invoke).not.toHaveBeenCalledWith("start_manual_terminal", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("write_manual_terminal", expect.anything());
 });
 
 it("reviews a library fork against the clicked conversation before creating it", async () => {

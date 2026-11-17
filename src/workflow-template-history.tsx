@@ -7,9 +7,9 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import { packageDraftTarget, type PackageDraft } from "@/workflow-authoring-package";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
 import { WorkflowGraphEditor } from "@/workflow-graph-editor";
-import type { WorkflowDefinitions, WorkflowGraph, WorkflowLayout } from "@/workflow-graph-model";
+import type { WorkflowDefinitions, WorkflowGraph, WorkflowLayout, WorkflowReuseSelection } from "@/workflow-graph-model";
 import { WorkflowLaunchPicker } from "@/workflow-launch";
-import { PublishedSubflow, type ReusableReference, type ReusableVersion } from "@/workflow-reusable";
+import { PublishedSubflow, WorkflowReusableDerivationDialog, type ReusableReference, type ReusableVersion } from "@/workflow-reusable";
 
 type PublishedWorkflow = { name: string; version: ReusableVersion };
 type SavedWorkflow = PublishedWorkflow & {
@@ -30,6 +30,7 @@ export function WorkflowTemplateHistory({ checkout, openWorkspace }: Pick<Worksp
   const { projectId, checkoutId } = checkout;
   const client = useQueryClient();
   const [selected, setSelected] = useState<PublishedWorkflow>();
+  const [derivation, setDerivation] = useState<{ graph: SavedWorkflow; selection: WorkflowReuseSelection }>();
   const [initialLaunch, setInitialLaunch] = useState<number>();
   const launchRequest = useRef(0);
   const [message, setMessage] = useState<{ error: boolean; text: string }>();
@@ -45,6 +46,11 @@ export function WorkflowTemplateHistory({ checkout, openWorkspace }: Pick<Worksp
     if (!artifact) throw new Error("This saved revision is unavailable.");
     return artifact;
   }
+  function openDraft(draft: PackageDraft) {
+    client.setQueryData(["workflow-packages", projectId, draft.id], draft);
+    void client.invalidateQueries({ queryKey: ["workflow-packages", projectId], exact: true });
+    openWorkspace("pipelines", packageDraftTarget(draft.id));
+  }
 
   const revise = useMutation({
     mutationFn: async ({ template, duplicate }: { template: PublishedWorkflow; duplicate?: boolean }) => {
@@ -58,11 +64,7 @@ export function WorkflowTemplateHistory({ checkout, openWorkspace }: Pick<Worksp
         }] },
       });
     },
-    onSuccess: (draft) => {
-      client.setQueryData(["workflow-packages", projectId, draft.id], draft);
-      void client.invalidateQueries({ queryKey: ["workflow-packages", projectId], exact: true });
-      openWorkspace("pipelines", packageDraftTarget(draft.id));
-    },
+    onSuccess: openDraft,
   });
 
   function inspect(template: PublishedWorkflow, prepareLaunch = false) {
@@ -127,6 +129,7 @@ export function WorkflowTemplateHistory({ checkout, openWorkspace }: Pick<Worksp
         <WorkflowGraphEditor key={`graph:${saved.version.revision}`} projectId={projectId} checkoutId={checkoutId}
           state={{ graph: saved.body.graph, layout: saved.layout ?? {}, updateDefinitions: {} }}
           setState={() => undefined} definitions={saved.definitions} catalog={[]} disabled problems={[]} allowDefinitionUpdates={false}
+          onDerive={(selection) => setDerivation({ graph: saved, selection })} deriveDisabled={revise.isPending}
           inspectReference={(id) => {
             const reference = saved.references[id];
             return reference?.source === "published" && reference.version.kind === "subflow"
@@ -138,5 +141,8 @@ export function WorkflowTemplateHistory({ checkout, openWorkspace }: Pick<Worksp
           checkoutId={checkoutId} preferred={saved.version} openWorkspace={openWorkspace} initiallyExpanded={initialLaunch !== undefined} />}
       </>}
     </section>}
+    {derivation && <WorkflowReusableDerivationDialog projectId={projectId} graph={derivation.graph.body.graph}
+      source={{ type: "published", version: derivation.graph.version }} selection={derivation.selection}
+      disabled={revise.isPending} onClose={() => setDerivation(undefined)} onSaved={openDraft} />}
   </section>;
 }

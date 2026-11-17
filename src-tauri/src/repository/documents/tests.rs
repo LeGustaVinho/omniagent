@@ -754,3 +754,96 @@ fn junction(link: &Path, target: &Path) -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn reads_closed_file_text_in_the_exact_checkout_without_recording_a_revision() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = init_repository(temp.path())?;
+    let other = temp.path().join("other");
+    fs::create_dir(&other)?;
+    git_query(&git_path()?, &other, &["init", "--quiet"])?;
+    let store = Store::open(temp.path().join("profile.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let other_checkout = register(&store, other.clone()).await?.checkout_id;
+
+    let logical = "editor text\r\n😀\rSaved LF\n";
+    let utf16 = |little: bool| {
+        let mut bytes = if little {
+            vec![0xff, 0xfe]
+        } else {
+            vec![0xfe, 0xff]
+        };
+        bytes.extend(logical.encode_utf16().flat_map(if little {
+            u16::to_le_bytes as fn(u16) -> [u8; 2]
+        } else {
+            u16::to_be_bytes
+        }));
+        bytes
+    };
+    let fixtures = [
+        ("plain.txt", logical.as_bytes().to_vec()),
+        ("bom.txt", format!("\u{feff}{logical}").into_bytes()),
+        ("note.md", utf16(true)),
+        ("data.txt", utf16(false)),
+        ("empty.txt", Vec::new()),
+    ];
+    for (path, bytes) in fixtures {
+        fs::write(root.join(path), &bytes)?;
+        let result = store
+            .read_checkout_file_text(checkout.clone(), path.into())
+            .await?;
+        assert_eq!(
+            result,
+            CheckoutFileText::Text {
+                text: if path == "empty.txt" {
+                    "".into()
+                } else {
+                    logical.into()
+                }
+            }
+        );
+        assert_eq!(fs::read(root.join(path))?, bytes);
+    }
+    fs::write(other.join("plain.txt"), "other worktree text")?;
+    assert_eq!(
+        store
+            .read_checkout_file_text(other_checkout, "plain.txt".into())
+            .await?,
+        CheckoutFileText::Text {
+            text: "other worktree text".into()
+        }
+    );
+    for (path, bytes) in [
+        ("raw.bin", b"abc\0xyz" as &[u8]),
+        ("not-text.pdf", b"%PDF-1.7\n"),
+        ("odd-utf16.txt", &[0xff, 0xfe, 0x61]),
+    ] {
+        fs::write(root.join(path), bytes)?;
+        assert_eq!(
+            store
+                .read_checkout_file_text(checkout.clone(), path.into())
+                .await?,
+            CheckoutFileText::UnsupportedEncoding
+        );
+        assert_eq!(fs::read(root.join(path))?, bytes);
+    }
+    for path in ["../other/plain.txt", ".git/config", "missing.txt"] {
+        assert!(
+            store
+                .read_checkout_file_text(checkout.clone(), path.into())
+                .await
+                .is_err()
+        );
+    }
+    let recorded: i64 = store
+        .execute(move |db| {
+            Ok(db.query_row(
+                "SELECT COUNT(*) FROM repository_markdown_revisions WHERE checkout_id = ?1",
+                [checkout],
+                |row| row.get(0),
+            )?)
+        })
+        .await?;
+    assert_eq!(recorded, 0);
+    Ok(())
+}

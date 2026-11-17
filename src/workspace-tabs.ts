@@ -91,15 +91,23 @@ export function openConversations(api: DockviewApi) {
   api.addPanel({ id: "conversation:list", title: "Conversations", component: "conversations" });
 }
 
-export function openConversation(api: DockviewApi, conversation: Conversation) {
+export function openConversation(api: DockviewApi, conversation: Conversation, beside?: string) {
   const id = `conversation:${conversation.id}`;
   const panel = api.getPanel(id);
-  if (panel) return panel.api.setActive();
+  const reference = beside ? api.getPanel(beside) : undefined;
+  if (panel) {
+    // Dockview moves the mounted panel, keeping its composer and local UI state.
+    if (reference && panel.group === reference.group && reference.group.panels.length > 1) {
+      panel.api.moveTo({ group: reference.group, position: "right" });
+    }
+    return panel.api.setActive();
+  }
   api.addPanel({
     id,
     title: conversation.title,
     component: "conversation",
     renderer: "always",
+    position: reference ? { referencePanel: reference.id, direction: "right" } : undefined,
     params: { conversationId: conversation.id, title: conversation.title, pipeline: conversation.pipeline },
   });
 }

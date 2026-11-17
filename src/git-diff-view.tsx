@@ -1,13 +1,12 @@
-import { ChevronDown, ChevronRight, ChevronUp, Columns2, ExternalLink, FileCode2, FileImage, GitCompare, Rows3, X } from "lucide-react";
+import { ChevronDown, ChevronRight, ChevronUp, CircleCheck, Columns2, ExternalLink, FileCode2, FileImage, GitCompare, Rows3, X } from "lucide-react";
 import type { editor, IRange } from "monaco-editor";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
 import { excerptReference, markdownExcerpt, type EditorExcerpt } from "@/editor-context";
 import { ResizablePanel } from "@/panel-resize";
 import { InlineIssue } from "@/tasks-git-ui";
-import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { CopyFilePath, PathText } from "@/components/ui/file-path";
-import { ContextActions, useContextActionFeedback, type MenuGroups } from "@/components/ui/context-actions";
+import { ContextActions, useContextActionFeedback, type MenuAction, type MenuGroups } from "@/components/ui/context-actions";
 import type { GitReviewAnnotations, GitReviewSide } from "@/git-review-comments";
 
 export type GitTextComparison = {
@@ -20,7 +19,7 @@ export type GitTextComparison = {
   originalPath?: string;
 };
 
-export type GitHunk = { id: string; header: string; patch: string; originalLine: number; modifiedLine: number };
+export type GitHunk = { id: string; header: string; patch: string; originalLine: number; modifiedLine: number; reviewed?: boolean };
 
 type DiffLayout = "auto" | "split" | "unified";
 type DiffSide = GitReviewSide;
@@ -58,7 +57,7 @@ function ChangeCounts({ additions, deletions }: { additions: number; deletions: 
 }
 
 export function GitDiffReview({ source, title, ranges, files, selectedPath, select, comparison, preview, empty, notice,
-  allowSavedPatch, openFile, openLine, addExcerpt, fileActions, hunkActions, reviewAnnotations, reviewPanel, footer, onClose }: {
+  allowSavedPatch, openFile, openLine, addExcerpt, fileActions, hunkActions, hunkReview, reviewAnnotations, reviewPanel, footer, onClose }: {
   source: string;
   title: string;
   ranges: { base: string; revised: string };
@@ -75,6 +74,7 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   addExcerpt?: ExcerptHandler;
   fileActions?: (file: GitDiffRow) => MenuGroups;
   hunkActions?: (hunk: GitHunk) => MenuGroups;
+  hunkReview?: { pending: boolean; change: (hunkId: string, reviewed: boolean) => void };
   reviewAnnotations?: GitReviewAnnotations;
   reviewPanel?: ReactNode;
   footer?: ReactNode;
@@ -87,6 +87,7 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   const [instance, setInstance] = useState<editor.IStandaloneDiffEditor | null>(null);
   const selected = files.find((file) => file.path === selectedPath);
   const hasHunks = Boolean(comparison?.hunks?.length);
+  const reviewedCount = comparison?.hunks?.filter((hunk) => hunk.reviewed).length ?? 0;
   const hasPatch = Boolean(hasHunks || allowSavedPatch && comparison?.patch);
   const patchLineNumbers = useMemo(() => comparison ? {
     original: !/\r(?!\n)/.test(comparison.original),
@@ -175,6 +176,7 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
             {hasPatch && <button className="delivery-tab" type="button" aria-pressed={showingPatch} onClick={() => setPatchPath(showingPatch ? undefined : selected.path)}>
               {showingPatch ? "Compare side by side" : hasHunks ? "Review hunks" : "View saved patch"}
             </button>}
+            {reviewedCount > 0 && <span className="px-2 text-xs text-muted-foreground">{reviewedCount}/{comparison?.hunks?.length} hunks reviewed</span>}
             {openFile && <button className="delivery-tab" type="button" onClick={openFile}>Open file <ExternalLink size={12} aria-hidden className="ml-1 inline-block" /></button>}
           </div>
           {selected.kind === "Binary"
@@ -183,18 +185,25 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
               {preview ?? (comparison && (showingPatch ? (hasHunks ? <div className="grid gap-3 p-3" aria-label="Git hunks">
                 {comparison.hunks!.map((hunk) => {
                   const goToHunk = () => { setRequestedLine(hunk.modifiedLine); setPatchPath(undefined); };
+                  const markReviewed = hunkReview ? {
+                    label: hunk.reviewed ? "Mark hunk as unreviewed" : "Mark hunk as reviewed", disabled: hunkReview.pending,
+                    run: () => hunkReview.change(hunk.id, !hunk.reviewed),
+                  } : undefined;
                   return <section key={hunk.id} className="min-w-0 rounded border border-border" aria-label={hunk.header}>
                     <ContextActions label={hunk.header} className="diff-hunk-menu" groups={[[
                       { label: "Go to hunk in comparison", run: goToHunk },
                       ...(openLine ? [{ label: "Go to hunk in working file", run: () => openLine(Math.max(1, hunk.modifiedLine)) }] : []),
                       { label: "Copy hunk patch", run: () => copy(hunk.patch) },
                       ...(hunk.modifiedLine > 0 ? [{ label: "Copy revised line reference", run: () => copy(`${comparison.path}:${hunk.modifiedLine}`) }] : []),
-                    ], ...(hunkActions?.(hunk) ?? [])]}>
+                    ], markReviewed ? [markReviewed] : [], ...(hunkActions?.(hunk) ?? [])]}>
                       <div className="min-w-0 flex-1">
-                        <button type="button" className="block w-full truncate border-b border-border bg-muted/30 p-2 text-left font-mono text-xs" onClick={goToHunk}>
-                          {hunk.header}
-                        </button>
-                        <HunkPatchLines hunk={hunk} review={reviewAnnotations} lineNumbers={patchLineNumbers} />
+                        <div className="flex items-center gap-2 border-b border-border bg-muted/30">
+                          <button type="button" className="min-w-0 flex-1 truncate p-2 text-left font-mono text-xs" onClick={goToHunk}>
+                            {hunk.header}
+                          </button>
+                          {hunk.reviewed && <span className="flex items-center gap-1 pr-2 text-xs text-[var(--success)]"><CircleCheck size={13} aria-hidden />Reviewed</span>}
+                        </div>
+                        <HunkPatchLines hunk={hunk} review={reviewAnnotations} lineNumbers={patchLineNumbers} markReviewed={markReviewed} />
                       </div>
                     </ContextActions>
                   </section>;
@@ -215,8 +224,8 @@ function PatchLines({ value }: { value: string }) {
   </pre>;
 }
 
-function HunkPatchLines({ hunk, review, lineNumbers }: {
-  hunk: GitHunk; review?: GitReviewAnnotations; lineNumbers?: Record<DiffSide, boolean>;
+function HunkPatchLines({ hunk, review, lineNumbers, markReviewed }: {
+  hunk: GitHunk; review?: GitReviewAnnotations; lineNumbers?: Record<DiffSide, boolean>; markReviewed?: MenuAction;
 }) {
   const value = hunk.patch.slice(hunk.patch.indexOf("\n@@ ") + 1);
   const scope = review?.scope;
@@ -236,7 +245,7 @@ function HunkPatchLines({ hunk, review, lineNumbers }: {
         }));
       const className = prefix === "+" ? "bg-green-500/15" : prefix === "-" ? "bg-red-500/15" : "";
       const label = [originalLine && `Base line ${originalLine}`, modifiedLine && `Revised line ${modifiedLine}`].filter(Boolean).join(" · ");
-      return <ContextActions key={index} label={label} groups={[actions]} className={`diff-patch-line ${className}`}>
+      return <ContextActions key={index} label={label} groups={[actions, markReviewed && actions.length ? [markReviewed] : []]} className={`diff-patch-line ${className}`}>
         <span className={`block min-w-0 flex-1 whitespace-pre ${className}`}>{line || " "}</span>
       </ContextActions>;
     })}

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { useEffect } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { MenuGroups } from "@/components/ui/context-actions";
 import { omniAgentFileLink } from "@/file-links";
@@ -89,13 +90,41 @@ export function containingFolder(path: string) {
   return slash < 0 ? "" : path.slice(0, slash);
 }
 
-export function fileContextActions({ checkout, simulated, status, report }: {
+type CurrentText = (path: string) => string | undefined;
+const checkoutTextReaders = new Map<string, Set<CurrentText>>();
+let textCaptureRequest = 0;
+
+export function useCheckoutTextReader(checkoutId: string, enabled: boolean, read: CurrentText) {
+  useEffect(() => {
+    if (!enabled) return;
+    const readers = checkoutTextReaders.get(checkoutId) ?? new Set<CurrentText>();
+    readers.add(read);
+    checkoutTextReaders.set(checkoutId, readers);
+    return () => {
+      readers.delete(read);
+      if (!readers.size) checkoutTextReaders.delete(checkoutId);
+    };
+  }, [checkoutId, enabled, read]);
+}
+
+function otherEditorText(checkoutId: string, path: string) {
+  for (const read of checkoutTextReaders.get(checkoutId) ?? []) {
+    const text = read(path);
+    if (text !== undefined) return text;
+  }
+}
+
+type CheckoutFileText = { status: "text"; text: string } | { status: "unsupported_encoding" };
+
+export function fileContextActions({ checkout, simulated, status, report, currentText }: {
   checkout: ProjectCheckout;
   simulated: boolean;
   status: (message: string) => void;
   report: (message: string) => void;
+  currentText?: CurrentText;
 }) {
   const copy = (value: string, message: string) => {
+    ++textCaptureRequest;
     report("");
     void Promise.resolve().then(() => navigator.clipboard.writeText(value)).then(() => status(message), (error: unknown) => {
       report(`Could not copy to the clipboard. ${String(error)}`);
@@ -114,11 +143,31 @@ export function fileContextActions({ checkout, simulated, status, report }: {
   const copyOmniAgentLink = (path: string, line?: number, column?: number) => {
     copy(omniAgentFileLink(checkout.checkoutId, path, line, column), "Copied OmniAgent link");
   };
+  function copyTextContents(path: string) {
+    const request = ++textCaptureRequest;
+    const text = currentText?.(path) ?? (simulated ? undefined : otherEditorText(checkout.checkoutId, path));
+    const confirmation = "Copied text contents of " + fileName(path);
+    if (text !== undefined) {
+      copy(text, confirmation);
+      return;
+    }
+    if (simulated) {
+      report("Text contents are unavailable for this example file.");
+      return;
+    }
+    report("");
+    void invoke<CheckoutFileText>("read_checkout_file_text", { checkoutId: checkout.checkoutId, path }).then((file) => {
+      if (request !== textCaptureRequest) return;
+      if (file.status === "text") copy(file.text, confirmation);
+      else report(path + " contains binary data or uses an unsupported text encoding.");
+    }).catch((failure: unknown) => { if (request === textCaptureRequest) report(String(failure)); });
+  }
   function location(target: FileTreeTarget): MenuGroups {
     const { path } = target;
     const absolute = (path ? `${checkout.checkoutRoot.replace(/[\\/]+$/, "")}/${path}` : checkout.checkoutRoot).replaceAll("/", "\\");
     return [[
       ...(path ? [{ label: "Copy relative path", run: () => copy(path, "Copied relative path") }] : []),
+      ...(target.kind === "file" && currentText ? [{ label: "Copy text contents", run: () => copyTextContents(path) }] : []),
       ...(!simulated ? [
         { label: "Show in File Explorer", run: () => shell(path, "reveal") },
         ...(target.kind === "file" ? [

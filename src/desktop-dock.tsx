@@ -7,7 +7,7 @@ import {
   type IDockviewHeaderActionsProps,
 } from "dockview-react";
 import { ArrowLeft, ArrowRight, Columns2, GitBranch } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { ConversationLibrary, ConversationLibraryNavigation, type OpenLibraryConversation, useConversationLibraryRead } from "@/conversation-library";
@@ -157,6 +157,11 @@ export function RealConversations({
   onOpenOtherCheckout?: OpenLibraryConversation;
 }) {
   const dock = useDesktopDock(checkout, "conversations");
+  const activeScope = useRef<{ api?: DockviewApi; checkoutId: string }>(null);
+  useEffect(() => {
+    activeScope.current = { api: dock.api, checkoutId: checkout.checkoutId };
+    return () => { activeScope.current = null; };
+  }, [checkout.checkoutId, dock.api]);
   const [targetError, setTargetError] = useState("");
   const markRead = useConversationLibraryRead();
   useEffect(() => {
@@ -183,26 +188,37 @@ export function RealConversations({
 
   const start = useNewConversation(checkout.checkoutId, open);
 
-  async function openLibraryConversation(source: ProjectCheckout, conversationId: string) {
+  async function openLibraryConversation(source: ProjectCheckout, conversationId: string, beside = false) {
     if (source.projectId !== checkout.projectId) throw new Error("This conversation belongs to another project.");
-    if (!dock.api) return;
+    const scope = activeScope.current;
+    const api = scope?.api;
+    if (!scope || !api || scope.checkoutId !== checkout.checkoutId) return;
     if (source.checkoutId !== checkout.checkoutId) {
-      if (!onOpenOtherCheckout) throw new Error("Switch to the source worktree to open this conversation.");
+      if (beside || !onOpenOtherCheckout) throw new Error("Switch to the source worktree to open this conversation.");
       await onOpenOtherCheckout(source, conversationId);
       return;
     }
-    const panel = dock.api.getPanel("conversation:" + conversationId);
-    if (panel) {
+    const reference = beside ? api.activePanel?.id : undefined;
+    const panel = api.getPanel("conversation:" + conversationId);
+    if (panel && !beside) {
       if (conversationId === dock.activeId) markRead(checkout.checkoutId, conversationId);
       panel.api.setActive();
       if (compact) onSidebarChange(false);
       return;
     }
-    open(await invoke<Conversation>("checkout_conversation", { checkoutId: source.checkoutId, conversationId }));
+    const conversation = await invoke<Conversation>("checkout_conversation", { checkoutId: source.checkoutId, conversationId });
+    if (activeScope.current !== scope) return;
+    if (conversation.checkoutId !== scope.checkoutId || conversation.id !== conversationId) {
+      throw new Error("This conversation is unavailable in the selected worktree.");
+    }
+    openConversation(api, conversation, reference);
+    if (conversationId === dock.activeId) markRead(checkout.checkoutId, conversationId);
+    if (compact) onSidebarChange(false);
   }
 
   const contents = dock.ready
     ? <ConversationLibrary checkout={checkout} onOpen={openLibraryConversation} activeId={dock.activeId}
+      onOpenBeside={dock.hasPanels ? (source, id) => openLibraryConversation(source, id, true) : undefined}
       onStart={start.choose} startPending={start.isPending} />
     : <p className="work-progress" role="status">Loading conversations…</p>;
   return (

@@ -2162,6 +2162,60 @@ test("keeps a line review comment bound to its saved Git snapshot", { timeout: 9
   }
 });
 
+test("discards only the reviewed Git hunk and preserves the staged file", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Discard reviewed hunk checkout");
+  const path = "reviewed-hunk.txt";
+  const context = Array.from({ length: 18 }, (_, index) => `unchanged ${index}\n`).join("");
+  const text = (start, end) => `${start}\n${context}${end}\n`;
+  git(scratch, "init", "-q", "-b", "main", repo);
+  git(repo, "config", "core.autocrlf", "false");
+  await writeFile(join(repo, path), text("committed", "original tail"));
+  git(repo, "add", path);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Commit before edits");
+  await writeFile(join(repo, path), text("staged", "original tail"));
+  git(repo, "add", path);
+  await writeFile(join(repo, path), text("only this edit goes away", "keep this working edit"));
+  const index = await readFile(join(repo, ".git", "index"));
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    await click(browser, '.work-rail button[aria-label="Git"]');
+    const gitView = browser.$('[aria-label="Git workspace"]');
+    await click(gitView, "button=Review hunks");
+    const firstHunk = './/*[@aria-label="Git hunks"]//button[starts-with(normalize-space(.),"@@ -1,")]';
+    const first = gitView.$(firstHunk);
+    await first.waitForDisplayed();
+    await first.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Mark hunk as reviewed"]');
+    const reviewed = '//*[@aria-label="Git hunks"]//span[normalize-space(.)="Reviewed"]';
+    await browser.$(reviewed).waitForDisplayed();
+    assert.deepEqual(await readFile(join(repo, ".git", "index")), index);
+    assert.equal(await readFile(join(repo, path), "utf8"), text("only this edit goes away", "keep this working edit"));
+    await browser.refresh();
+    await click(browser, '.work-rail button[aria-label="Git"]');
+    await click(gitView, "button=Review hunks");
+    await browser.$(reviewed).waitForDisplayed();
+    await gitView.$(firstHunk).click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Discard hunk…"]');
+    const preview = browser.$('[role="dialog"].file-comparison-dialog');
+    await preview.$('[aria-label="Discard preview"]').waitForDisplayed();
+    assert.equal(await readFile(join(repo, path), "utf8"), text("only this edit goes away", "keep this working edit"));
+    await click(preview, "button=Discard reviewed changes");
+    await preview.waitForExist({ reverse: true });
+    assert.equal(await readFile(join(repo, path), "utf8"), text("staged", "keep this working edit"));
+    assert.deepEqual(await readFile(join(repo, ".git", "index")), index);
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
 test("opens Git and local file history and recycles only the clicked checkout file", { timeout: 90_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Explorer context checkout");
@@ -2218,7 +2272,7 @@ test("opens Git and local file history and recycles only the clicked checkout fi
     assert.equal((await invoke(browser, "read_repository_source_draft", source))?.markdown, original);
     assert.equal(await readFile(join(repo, retained), "utf8"), updated);
 
-    const root = ide.$("button=Checkout root");
+    const root = ide.$(".file-tree-root > button.file-tree-row");
     await root.waitForDisplayed();
     await root.click({ button: "right" });
     const templates = browser.$('//*[@role="menuitem"][normalize-space(.)="New from template"]');
@@ -2374,6 +2428,9 @@ test("detaches the selected dirty editor into a native window and returns it wit
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Move tab to new window"]');
     await browser.waitUntil(async () => (await browser.getWindowHandles()).some((handle) => handle !== main));
     const labels = () => invoke(browser, "plugin:window|get_all_windows");
+    const waitForMainOnly = () => browser.waitUntil(async () =>
+      (await browser.getWindowHandles()).length === 1 && (await labels()).every((label) => !label.startsWith("editor-")),
+    { timeoutMsg: "The detached editor's native or browser window stayed open." });
     assert.ok((await labels()).some((label) => label.startsWith("editor-")));
     const popup = (await browser.getWindowHandles()).find((handle) => handle !== main);
     await browser.switchToWindow(popup);
@@ -2394,9 +2451,7 @@ test("detaches the selected dirty editor into a native window and returns it wit
     await popupTab.click({ button: "right" });
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Return editor window to main window"]');
     await browser.switchToWindow(main);
-    await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 1);
-    await browser.waitUntil(async () => (await labels()).every((label) => !label.startsWith("editor-")),
-      { timeoutMsg: "The detached editor's native window stayed open." });
+    await waitForMainOnly();
     await ide.$(`.file-tab-label[title="${file}"]`).waitForDisplayed();
     await browser.waitUntil(async () => (await invoke(browser, "read_repository_source_draft", source))?.markdown === editedInWindow);
     assert.equal(await readFile(join(repo, file), "utf8"), original);
@@ -2411,7 +2466,7 @@ test("detaches the selected dirty editor into a native window and returns it wit
     await browser.$(".file-dock-group-menu").click({ button: "right" });
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Return editor window to main window"]');
     await browser.switchToWindow(main);
-    await browser.waitUntil(async () => (await labels()).every((label) => !label.startsWith("editor-")));
+    await waitForMainOnly();
 
     await ide.$(`button[title="${note}"]`).click({ button: "right" });
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Open in new window"]');
@@ -2429,7 +2484,7 @@ test("detaches the selected dirty editor into a native window and returns it wit
     await noteTab.click({ button: "right" });
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Return editor window to main window"]');
     await browser.switchToWindow(main);
-    await browser.waitUntil(async () => (await labels()).every((label) => !label.startsWith("editor-")));
+    await waitForMainOnly();
     await browser.waitUntil(async () => (await invoke(browser, "read_repository_markdown_draft", {
       checkoutId: checkout.checkoutId, path: note,
     }))?.markdown === "# Meeting notes!\n");
@@ -2477,15 +2532,16 @@ test("filters actual Windows hidden attributes independently from dotfiles in Ex
     await row(hiddenFile).waitForDisplayed();
     await click(ide, '[data-tree-item][title="reports"]');
     await row(hiddenFolder).waitForDisplayed();
+    const checkoutRoot = ide.$(".file-tree-root > button.file-tree-row");
 
-    await ide.$("button=Checkout root").click({ button: "right" });
+    await checkoutRoot.click({ button: "right" });
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Hide Windows hidden items"]');
     await row(ordinary).waitForDisplayed();
     assert.equal(await row(hiddenFile).isExisting(), false);
     assert.equal(await row(hiddenFolder).isExisting(), false);
     await row(dotfile).waitForDisplayed();
 
-    await ide.$("button=Checkout root").click({ button: "right" });
+    await checkoutRoot.click({ button: "right" });
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Show Windows hidden items"]');
     await row(hiddenFile).waitForDisplayed();
     await row(hiddenFolder).waitForDisplayed();

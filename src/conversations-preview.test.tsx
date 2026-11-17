@@ -123,3 +123,18 @@ test("highlights language-tagged code in agent messages and keeps other code rea
   expect([...plainBlocks].map((code) => code.textContent)).toEqual(["const count = 42;\n", "const count = 42;\n"]);
   expect([...plainBlocks].every((code) => code.childElementCount === 0)).toBe(true);
 });
+
+test("keeps exact code endings across indented blocks and an unfinished fence", async () => {
+  const saveFile = vi.fn();
+  const source = "\t```\r\n\tindented\r\n\r\n```powershell\r\nGet-Date";
+  render(<ConversationMarkdown codeActions={{ saveFile }}>{source}</ConversationMarkdown>);
+  const user = userEvent.setup();
+  for (const label of ["Code block", "powershell code"]) {
+    fireEvent.contextMenu(screen.getByLabelText(label));
+    await user.click(await screen.findByRole("menuitem", { name: "Save code block as file…" }));
+  }
+  expect(saveFile.mock.calls).toEqual([
+    [{ text: "```\r\nindented\r\n", language: undefined }],
+    [{ text: "Get-Date", language: "powershell" }],
+  ]);
+});

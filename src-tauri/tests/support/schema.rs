@@ -3,7 +3,10 @@ use rusqlite::Connection;
 
 pub fn remove_pipeline_automation_and_context_tables(db: &Connection) -> Result<()> {
     db.execute_batch(
-        "DROP TABLE git_review_comments;
+        "DROP TABLE git_reviewed_hunks;
+         DROP TABLE workflow_agent_review_reuses;
+         DROP TABLE workflow_delivery_attempts;
+         DROP TABLE git_review_comments;
          DROP TABLE checkout_document_history;
          DROP TABLE workflow_github_source_syncs;
          DROP TABLE workflow_automatic_unit_actions;

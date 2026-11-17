@@ -19,7 +19,12 @@ export type WorkflowDefinition = {
 
 export type WorkflowDefinitions = Record<string, WorkflowDefinition>;
 export type WorkflowLayout = Record<string, { x: number; y: number }>;
-export type WorkflowCanvasEdit = { layout: WorkflowLayout; updateDefinitions: Record<string, number> };
+export type WorkflowCanvasEdit = {
+  layout: WorkflowLayout;
+  updateDefinitions: Record<string, number>;
+  definitionCopies?: Record<string, { sourceId: string; revision: number }>;
+};
+export type WorkflowReuseSelection = { type: "preset"; nodeId: string } | { type: "subflow"; nodeIds: string[] };
 
 export type WorkflowScalar = string | number | boolean | null;
 export type WorkflowPredicate = { op: "exists"; pointer: string }
@@ -49,6 +54,11 @@ export type WorkflowStartField = {
 
 export function isStartNode(kind: string) {
   return kind === "start" || kind === "typed_start";
+}
+
+export function isPresetEligible({ kind, configuration }: WorkflowGraphNode) {
+  return !isStartNode(kind) && configuration.kind !== "preset_overrides"
+    && !["subflow", "repeat_until", "for_each", "for_each_begin", "for_each_gate", "for_each_collect", "repeat_output", "delivery_attempt"].includes(kind);
 }
 
 export function defaultConfiguration(kind: string): WorkflowNodeConfiguration {

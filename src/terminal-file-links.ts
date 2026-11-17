@@ -1,6 +1,6 @@
-import type { IBufferCellPosition, IBufferRange, ILinkProvider, Terminal } from "@xterm/xterm";
+import type { IBufferCellPosition, IBufferRange, ILinkProvider, IMarker, Terminal } from "@xterm/xterm";
 
-export type TerminalFileReference = { path: string; line?: number; column?: number; text: string };
+export type TerminalFileReference = { path: string; line?: number; column?: number; text: string; bufferLine?: number };
 type TerminalFileHit = { range: IBufferRange; reference: TerminalFileReference };
 
 const maximumWrappedRows = 32;
@@ -31,6 +31,7 @@ export function parseTerminalFileReference(text: string): TerminalFileReference 
 
 function fileHits(terminal: Terminal, lineNumber: number): TerminalFileHit[] {
   const { active: buffer } = terminal.buffer;
+  if (buffer.type !== "normal") return [];
   let row = lineNumber - 1;
   let rewound = 0;
   while (row > 0 && buffer.getLine(row)?.isWrapped) {
@@ -69,7 +70,7 @@ function fileHits(terminal: Terminal, lineNumber: number): TerminalFileHit[] {
     if (!reference) continue;
     const start = positions[token.index]?.start;
     const end = positions[token.index + value.length - 1]?.end;
-    if (start && end) hits.push({ range: { start, end }, reference });
+    if (start && end) hits.push({ range: { start, end }, reference: { ...reference, bufferLine: start.y - 1 } });
   }
   return hits;
 }
@@ -92,4 +93,49 @@ export function terminalFileAtPoint(terminal: Terminal, point: { clientX: number
   const y = terminal.buffer.active.viewportY + row;
   return fileHits(terminal, y).find(({ range: { start, end } }) =>
     (y > start.y || (y === start.y && x >= start.x)) && (y < end.y || (y === end.y && x <= end.x)))?.reference;
+}
+
+const promptDirectoryPrefix = "P;OmniAgentCwd=";
+const maximumDirectoryObservations = 2048;
+
+export function trackTerminalDirectories(terminal: Terminal, terminalId: () => string | undefined) {
+  const observations: { marker: IMarker; directory: string }[] = [];
+  let baseline: string | undefined;
+  const handler = terminal.parser.registerOscHandler(633, (data) => {
+    if (!data.startsWith(promptDirectoryPrefix)) return false;
+    const id = terminalId();
+    if (!id || !data.startsWith(`${promptDirectoryPrefix}${id};`) || data.length > 65_536 || terminal.buffer.active.type !== "normal") return true;
+    let directory: string;
+    try {
+      const encoded = data.slice(promptDirectoryPrefix.length + id.length + 1);
+      directory = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(atob(encoded), (byte) => byte.charCodeAt(0)));
+    } catch { return true; }
+    const latest = observations.at(-1);
+    if ((latest?.directory ?? baseline) === directory) return true;
+    if (latest?.marker.line === terminal.buffer.active.baseY + terminal.buffer.active.cursorY) {
+      latest.directory = directory;
+      return true;
+    }
+    const marker = terminal.registerMarker();
+    if (!marker) return true;
+    const observation = { marker, directory };
+    observations.push(observation);
+    marker.onDispose(() => {
+      const index = observations.indexOf(observation);
+      if (index === 0) baseline = observation.directory;
+      if (index >= 0) observations.splice(index, 1);
+    });
+    if (observations.length > maximumDirectoryObservations) observations[0]!.marker.dispose();
+    return true;
+  });
+  return {
+    at(line = terminal.buffer.active.baseY + terminal.buffer.active.cursorY) {
+      if (terminal.buffer.active.type !== "normal") return undefined;
+      return observations.findLast(({ marker }) => marker.line <= line)?.directory ?? baseline;
+    },
+    dispose() {
+      handler.dispose();
+      for (const { marker } of [...observations]) marker.dispose();
+    },
+  };
 }

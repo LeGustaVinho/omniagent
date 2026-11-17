@@ -14,21 +14,35 @@ import { StructuredObjectField } from "@/workflow-structured-fields";
 import { BuildListFields, BuildTextFields, CandidateAcceptanceFields, CompareModelsFields, ConditionFields, FilterMapListFields, IntegratedChecksFields, LoopFields, RequiredChecksFields, RunBacklogFields, SetFieldsFields, StartInputFields, TestPhaseFields } from "@/workflow-node-fields";
 import { AgentRoleFields } from "@/workflow-stage-model";
 import type { StageGoalRoleRevision } from "@/workflow-stage-goal";
+import type { ReusableReference } from "@/workflow-reusable";
 import {
   changedPorts, configurationProblem, connectionProblem, defaultConfiguration, incompatibility,
-  initialNodePositions, isStartNode, outputPort, portType, wireKey,
+  initialNodePositions, isPresetEligible, isStartNode, outputPort, portType, wireKey,
   type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowGraph, type WorkflowGraphNode,
-  type WorkflowEndpoint, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPort, type WorkflowWire,
+  type WorkflowEndpoint, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPort, type WorkflowReuseSelection, type WorkflowWire,
 } from "@/workflow-graph-model";
 import "./workflow-graph-editor.css";
 
-export type WorkflowEditorState = WorkflowCanvasEdit & { graph: WorkflowGraph };
+type WorkflowNodeBinding = {
+  reference: ReusableReference;
+  preset?: {
+    base: WorkflowNodeConfiguration;
+    fields: string[];
+    stored: WorkflowNodeConfiguration;
+    shown: WorkflowNodeConfiguration;
+  };
+};
+export type WorkflowEditorState = WorkflowCanvasEdit & {
+  graph: WorkflowGraph;
+  nodeBindings?: Record<string, WorkflowNodeBinding>;
+};
 
 export function editorDefinitions(state: WorkflowEditorState, pinned: WorkflowDefinitions, catalog: WorkflowDefinition[],
   subflowDefinition?: (nodeId: string) => WorkflowDefinition | undefined): WorkflowDefinitions {
   const available = new Map(catalog.map((entry) => [entry.kind, entry]));
   return Object.fromEntries(state.graph.nodes.flatMap((node) => {
-    const stored = Object.hasOwn(pinned, node.id) ? pinned[node.id] : undefined;
+    const copy = state.definitionCopies && Object.hasOwn(state.definitionCopies, node.id) ? state.definitionCopies[node.id] : undefined;
+    const stored = Object.hasOwn(pinned, node.id) ? pinned[node.id] : copy && pinned[copy.sourceId];
     const current = available.get(node.kind);
     let definition = stored?.kind === node.kind && state.updateDefinitions[node.id] === undefined ? stored : current;
     if (!definition) return [];
@@ -78,13 +92,13 @@ type PortActions = {
   activeOutput?: WorkflowEndpoint;
   activate: (side: PortSide, name: string) => void;
 };
-type CanvasNode = Node<{ definition?: WorkflowDefinition; problem: boolean; readOnly: boolean; portActions?: PortActions }, "workflow">;
+type CanvasNode = Node<{ definition?: WorkflowDefinition; problem: boolean; readOnly: boolean; inspected: boolean; portActions?: PortActions }, "workflow">;
 
 function WorkflowCard({ id, data, selected }: NodeProps<CanvasNode>) {
   const update = useUpdateNodeInternals();
   const definition = data.definition;
   useEffect(() => { update(id); }, [definition, id, update]);
-  return <WorkflowGraphNodeCard title={definition?.title ?? "Unavailable node"} detail={id} selected={selected}
+  return <WorkflowGraphNodeCard title={definition?.title ?? "Unavailable node"} detail={id} selected={selected || data.inspected}
     problem={data.problem} readOnly={data.readOnly} inputs={definition?.inputs ?? []} outputs={definition?.outputs ?? []} portActions={data.portActions} />;
 }
 
@@ -137,10 +151,28 @@ type PendingConnection = { from: WorkflowEndpoint; replacing?: string };
 type EditorHistory = { past: WorkflowEditorState[]; future: WorkflowEditorState[] };
 type CanvasTarget = { kind: "pane" } | { kind: "node" | "edge"; id: string };
 type CanvasMenu = { target: CanvasTarget; point: { x: number; y: number }; origin?: HTMLElement | SVGElement };
+type GraphSelection = {
+  nodes: { node: WorkflowGraphNode; position: { x: number; y: number }; binding?: WorkflowNodeBinding;
+    definition?: NonNullable<WorkflowCanvasEdit["definitionCopies"]>[string] }[];
+  wires: WorkflowWire[];
+};
 const historyLimit = 32;
+const canvasLimit = 1_000_000;
+const duplicateOffset = 36;
+
+function pasteOffset(points: number[], anchor?: number) {
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const shift = anchor === undefined ? (max + duplicateOffset > canvasLimit ? -duplicateOffset : duplicateOffset) : anchor - min;
+  return Math.max(-canvasLimit - min, Math.min(canvasLimit - max, shift));
+}
+
+const bindingFingerprint = (bindings: WorkflowEditorState["nodeBindings"]) =>
+  JSON.stringify(Object.entries(bindings ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([id, binding]) => [id, binding.reference]));
 
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
-  allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode, backlogBound, historyScope }: {
+  allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode,
+  backlogBound, onDerive, deriveDisabled }: {
   projectId: string;
   checkoutId?: string;
   state: WorkflowEditorState;
@@ -155,11 +187,13 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   goalRoleForNode?: (nodeId: string) => { version?: StageGoalRoleRevision; pending?: boolean } | undefined;
   subflowDefinitionForNode?: (nodeId: string) => WorkflowDefinition | undefined;
   backlogBound?: (nodeId: string) => boolean;
-  historyScope?: string;
+  onDerive?: (selection: WorkflowReuseSelection) => void;
+  deriveDisabled?: boolean;
 }) {
   const { graph, layout } = state;
   const [theme, setTheme] = useState(readTheme);
   const [selected, select] = useState(graph.nodes[0]?.id ?? "");
+  const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
   const issuedIds = useRef(new Set(graph.nodes.map(({ id }) => id)));
   const addNodeButton = useRef<HTMLButtonElement>(null);
   const [catalogOpen, showCatalog] = useState(false);
@@ -167,8 +201,11 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingConnection>();
   const [history, setHistory] = useState<EditorHistory>({ past: [], future: [] });
+  const currentBindings = bindingFingerprint(state.nodeBindings);
+  const expectedBindings = useRef(currentBindings);
   const [flow, setFlow] = useState<ReactFlowInstance<CanvasNode, Edge>>();
   const [menu, setMenu] = useState<CanvasMenu>();
+  const [clipboard, setClipboard] = useState<GraphSelection>();
   const canvas = useRef<HTMLDivElement>(null);
   const dragging = useRef<WorkflowLayout>({});
   const [previewPositions, setPreviewPositions] = useState<WorkflowLayout>({});
@@ -197,12 +234,25 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => { setHistory({ past: [], future: [] }); }, [historyScope]);
+  useEffect(() => {
+    if (currentBindings === expectedBindings.current) return;
+    expectedBindings.current = currentBindings;
+    setHistory({ past: [], future: [] });
+  }, [currentBindings]);
+
+  function updateState(next: WorkflowEditorState) {
+    expectedBindings.current = bindingFingerprint(next.nodeBindings);
+    setState(next);
+  }
 
   function apply(next: WorkflowEditorState) {
     if (disabled || next === state) return;
+    if (next.definitionCopies && !Object.keys(next.definitionCopies).length) {
+      const { definitionCopies: _empty, ...withoutCopies } = next;
+      next = withoutCopies;
+    }
     setHistory((previous) => ({ past: [...previous.past, state].slice(-historyLimit), future: [] }));
-    setState(next);
+    updateState(next);
   }
 
   function restore(direction: "undo" | "redo") {
@@ -215,7 +265,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     setPending(undefined);
     setConnectionError(null);
     if (!previous.graph.nodes.some(({ id }) => id === selected)) select(previous.graph.nodes[0]?.id ?? "");
-    setState(previous);
+    updateState(previous);
   }
 
   function patchGraph(patch: (graph: WorkflowGraph) => WorkflowGraph) {
@@ -227,21 +277,78 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     requestAnimationFrame(() => addNodeButton.current?.focus({ preventScroll: true }));
   }
 
-  function add(definition: WorkflowDefinition) {
-    const stem = definition.kind.replaceAll("_", "-");
+  function allocateId(stem: string) {
     let id = stem;
     for (let ordinal = 2; issuedIds.current.has(id) || graph.nodes.some((node) => node.id === id); ordinal += 1) id = `${stem}-${ordinal}`;
     issuedIds.current.add(id);
+    return id;
+  }
+
+  function add(definition: WorkflowDefinition) {
+    const id = allocateId(definition.kind.replaceAll("_", "-"));
     apply({ ...state, layout: catalogPosition ? { ...layout, [id]: catalogPosition } : layout,
       graph: { ...graph, nodes: [...graph.nodes, { id, kind: definition.kind, configuration: defaultConfiguration(definition.configuration) }] } });
+    setSelectedNodes([id]);
     select(id);
     closeCatalog();
     setCatalogPosition(undefined);
   }
 
+  function capture(nodes: WorkflowGraphNode[]): GraphSelection {
+    const ids = new Set(nodes.map(({ id }) => id));
+    return {
+      nodes: nodes.map((node) => {
+        const { id, kind } = node;
+        const position = layout[id] ?? positions[id]!;
+        const binding = state.nodeBindings && Object.hasOwn(state.nodeBindings, id) ? state.nodeBindings[id] : undefined;
+        const current = catalog.find((definition) => definition.kind === kind);
+        const version = definitions[id];
+        const retainsNativePin = !binding?.preset && !["subflow", "repeat_until", "for_each"].includes(kind)
+          && current && version && version.revision !== current.revision;
+        const definition = retainsNativePin ? state.definitionCopies?.[id] ?? { sourceId: id, revision: version.revision } : undefined;
+        return { node, position, binding, definition };
+      }),
+      wires: graph.wires.filter(({ from, to }) => ids.has(from.node) && ids.has(to.node)),
+    };
+  }
+
+  function insert(selection: GraphSelection, anchor?: { x: number; y: number }) {
+    if (disabled || !selection.nodes.length) return;
+    const ids = new Map(selection.nodes.map(({ node }) => [node.id, allocateId(node.id)]));
+    const nextLayout = { ...layout };
+    const definitionCopies = { ...state.definitionCopies };
+    const nodeBindings = { ...state.nodeBindings };
+    const dx = pasteOffset(selection.nodes.map(({ position }) => position.x), anchor?.x);
+    const dy = pasteOffset(selection.nodes.map(({ position }) => position.y), anchor?.y);
+    const copies = selection.nodes.map(({ node, position, binding, definition }) => {
+      const id = ids.get(node.id)!;
+      nextLayout[id] = { x: position.x + dx, y: position.y + dy };
+      if (binding) nodeBindings[id] = binding;
+      if (definition) definitionCopies[id] = definition;
+      return { ...node, id };
+    });
+    const wires = selection.wires.map(({ from, to }) => ({ from: { ...from, node: ids.get(from.node)! }, to: { ...to, node: ids.get(to.node)! } }));
+    apply({ ...state, layout: nextLayout, ...(Object.keys(definitionCopies).length && { definitionCopies }),
+      ...(state.nodeBindings && { nodeBindings }),
+      graph: { ...graph, nodes: [...graph.nodes, ...copies], wires: [...graph.wires, ...wires] } });
+    setSelectedNodes(copies.map(({ id }) => id));
+    select(copies[0]!.id);
+  }
+
   function changeNodes(changes: NodeChange<CanvasNode>[], removedWireIds: string[] = []) {
+    const selectionChanges = changes.filter((change) => change.type === "select" || change.type === "remove");
+    if (selectionChanges.length) setSelectedNodes((previous) => {
+      const next = new Set(previous);
+      for (const change of selectionChanges) {
+        if (change.type === "select" && change.selected) next.add(change.id);
+        else next.delete(change.id);
+      }
+      return [...next];
+    });
     const nextLayout = { ...layout };
     const nextDefinitions = { ...state.updateDefinitions };
+    const definitionCopies = { ...state.definitionCopies };
+    const nodeBindings = { ...state.nodeBindings };
     const removed = new Set<string>();
     let layoutChanged = false;
     let previewChanged = false;
@@ -252,6 +359,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         removed.add(change.id);
         delete nextLayout[change.id];
         delete nextDefinitions[change.id];
+        delete definitionCopies[change.id];
+        delete nodeBindings[change.id];
         if (change.id === selected) select("");
         if (pending?.from.node === change.id) setPending(undefined);
       } else if (change.type === "position") {
@@ -275,7 +384,9 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     if (!removed.size && !layoutChanged && !removedWireIds.length) return;
     const removedWires = new Set(removedWireIds);
     if (pending?.replacing && removedWires.has(pending.replacing)) setPending(undefined);
-    apply({ layout: nextLayout, updateDefinitions: nextDefinitions, graph: removed.size || removedWires.size ? { ...graph,
+    apply({ ...state, layout: nextLayout, updateDefinitions: nextDefinitions,
+      ...(state.definitionCopies && { definitionCopies }), ...(state.nodeBindings && { nodeBindings }),
+      graph: removed.size || removedWires.size ? { ...graph,
       nodes: graph.nodes.filter(({ id }) => !removed.has(id)),
       wires: graph.wires.filter((wire) => !removed.has(wire.from.node) && !removed.has(wire.to.node) && !removedWires.has(wireKey(wire))),
     } : graph });
@@ -317,11 +428,15 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   }
 
   function updateVersion(node: WorkflowGraphNode, version: WorkflowDefinition) {
-    apply({ ...state, updateDefinitions: { ...state.updateDefinitions, [node.id]: version.revision },
+    const definitionCopies = { ...state.definitionCopies };
+    const updateDefinitions = { ...state.updateDefinitions };
+    if (Object.hasOwn(definitionCopies, node.id)) delete definitionCopies[node.id];
+    else updateDefinitions[node.id] = version.revision;
+    apply({ ...state, updateDefinitions, ...(state.definitionCopies && { definitionCopies }),
       graph: { ...graph, nodes: graph.nodes.map((item) => item.id !== node.id
         || definitions[item.id]?.configuration === version.configuration
         || item.configuration.kind === version.configuration
-        || !configurationProblem(item.configuration, version)
+        || !configurationProblem(item.configuration, version, backlogBound?.(item.id))
         ? item : { ...item, configuration: defaultConfiguration(version.configuration) }) } });
   }
 
@@ -352,6 +467,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         showCatalog(true);
       } },
       { label: "Fit graph to view", disabled: !flow, run: () => { void flow?.fitView({ padding: 0.15, maxZoom: 1 }); } },
+      ...(clipboard ? [{ label: clipboard.nodes.length === 1 ? "Paste node here" : `Paste ${clipboard.nodes.length} nodes here`, disabled,
+        run: () => insert(clipboard, menu && flow ? flow.screenToFlowPosition(menu.point) : undefined) }] : []),
       { label: "Copy graph JSON", run: () => copy(JSON.stringify(graph, null, 2)) },
     ], [
       { label: "Undo graph edit", disabled: disabled || !history.past.length, run: () => restore("undo") },
@@ -361,11 +478,24 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     if (target.kind === "node") {
       const clicked = graph.nodes.find(({ id }) => id === target.id);
       if (!clicked) return;
+      const scoped = selectedNodes.includes(clicked.id) ? graph.nodes.filter(({ id }) => selectedNodes.includes(id)) : [clicked];
+      const subflowNodes = scoped.filter(({ kind }) => !isStartNode(kind)).map(({ id }) => id);
+      const duplicable = scoped.every(({ id, kind }) => !isStartNode(kind) && definitions[id] !== undefined);
       return { label: clicked.id, groups: [[
         { label: "Inspect node", run: () => { select(clicked.id); setConnectionError(null); } },
         { label: "Copy node ID", run: () => copy(clicked.id) },
         { label: "Copy node configuration", run: () => copy(JSON.stringify(clicked.configuration, null, 2)) },
+      ], [
+        ...(onDerive && isPresetEligible(clicked) && !editablePresetFields?.[clicked.id] ? [{ label: "Save node as preset…", disabled: deriveDisabled,
+          run: () => onDerive({ type: "preset", nodeId: clicked.id }) }] : []),
+        ...(onDerive && subflowNodes.length ? [{ label: subflowNodes.length > 1
+          ? `Extract ${subflowNodes.length} selected nodes as subflow…` : "Extract node as subflow…", disabled: deriveDisabled,
+          run: () => onDerive({ type: "subflow", nodeIds: subflowNodes }) }] : []),
       ], disabled ? [] : [
+        ...(duplicable ? [
+          { label: scoped.length > 1 ? `Duplicate ${scoped.length} selected nodes` : "Duplicate node", run: () => insert(capture(scoped)) },
+          { label: scoped.length > 1 ? `Copy ${scoped.length} selected nodes` : "Copy node", run: () => setClipboard(capture(scoped)) },
+        ] : []),
         ...(layout[clicked.id] ? [{ label: "Reset node position", run: () => {
           const nextLayout = { ...layout };
           delete nextLayout[clicked.id];
@@ -391,8 +521,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
 
   const canvasNodes: CanvasNode[] = graph.nodes.map((item) => {
     const defined = definitions[item.id];
-    return { id: item.id, type: "workflow", position: previewPositions[item.id] ?? layout[item.id] ?? positions[item.id]!, selected: item.id === selected,
-      ariaLabel: `${defined?.title ?? "Node"} ${item.id}`, data: { definition: defined, readOnly: disabled,
+    return { id: item.id, type: "workflow", position: previewPositions[item.id] ?? layout[item.id] ?? positions[item.id]!, selected: selectedNodes.includes(item.id),
+      ariaLabel: `${defined?.title ?? "Node"} ${item.id}`, data: { definition: defined, readOnly: disabled, inspected: item.id === selected,
         problem: !defined || Boolean(configurationProblem(item.configuration, defined, backlogBound?.(item.id))),
         portActions: { nodeId: item.id, activeOutput: pending?.from, activate: (side, name) => activatePort(item.id, side, name) },
       } };
@@ -451,6 +581,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       }}>
         <PipelineGraphCanvas<CanvasNode, Edge> interactive={!disabled} nodes={canvasNodes} edges={edges} nodeTypes={nodeTypes} colorMode={theme}
           fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2}
+          selectionKeyCode="Shift" multiSelectionKeyCode={["Control", "Meta"]}
           nodesDraggable={!disabled} nodesConnectable={!disabled} edgesReconnectable={!disabled}
           deleteKeyCode={disabled ? null : ["Backspace", "Delete"]}
           onNodesChange={changeNodes}

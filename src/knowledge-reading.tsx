@@ -227,7 +227,10 @@ function readingNoteContext(root: HTMLElement, target: Element, fallbackPath: st
   const nextBlock = target.closest("p, blockquote, pre, table")?.nextElementSibling;
   const marker = nextBlock instanceof HTMLElement && nextBlock.dataset.noteSource === path && nextBlock.dataset.noteReference;
   const standalone = marker && marker.startsWith("^") && nextBlock?.textContent?.trim() === marker ? marker : undefined;
-  const anchor = target.closest<HTMLElement>("[data-note-reference]")?.dataset.noteReference ?? standalone;
+  const anchorHost = target.closest<HTMLElement>("[data-note-reference]");
+  const anchor = anchorHost?.dataset.noteReference ?? standalone;
+  const anchorKind = anchor ? (anchorHost?.matches("h1, h2, h3, h4, h5, h6") ? "heading" : "block") : undefined;
+  const anchorLine = Number(anchorHost?.dataset.noteLine) || line;
   const address = target.closest<HTMLElement>("[data-note-context-link]")?.dataset.noteContextLink;
   const localAnchor = target.closest("a[href^='#']")?.getAttribute("href");
   const parsed = address ? parseReadingAddress(address) : localAnchor ? markdownNoteLink(path, localAnchor, line) : undefined;
@@ -242,7 +245,7 @@ function readingNoteContext(root: HTMLElement, target: Element, fallbackPath: st
   const mermaid = diagram?.dataset.noteMermaid;
   const image = diagram?.querySelector<HTMLImageElement>(".note-diagram img");
   const diagramImage = image?.complete && image.naturalWidth > 0 && image.naturalHeight > 0 ? image : undefined;
-  const hit: NoteContextHit = { path, line, anchor, link: reference, attachment, tag, mermaid, diagramImage,
+  const hit: NoteContextHit = { path, line, anchor, anchorKind, anchorLine, link: reference, attachment, tag, mermaid, diagramImage,
     property: property?.noteProperty ? { name: property.noteProperty, value: property.notePropertyValue ?? "" } : undefined };
   const selection = root.ownerDocument.getSelection();
   if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return hit;
@@ -282,7 +285,10 @@ export function NoteReading(props: ReadingProps) {
     const key = jump.anchor && anchorKey(jump.anchor);
     const anchor = key && [...root.current.querySelectorAll("[data-note-anchor]")].find((entry) =>
       entry.getAttribute("data-note-anchor") === key);
-    const target = anchor || root.current.querySelector("[data-note-line-target]")?.nextElementSibling;
+    const sourceTarget = !anchor && jump.line && [...root.current.querySelectorAll<HTMLElement>(
+      "h1[data-note-line], h2[data-note-line], h3[data-note-line], h4[data-note-line], h5[data-note-line], h6[data-note-line], [data-note-anchor][data-note-line]",
+    )].find((element) => element.dataset.noteSource === path && Number(element.dataset.noteLine) === jump.line);
+    const target = anchor || sourceTarget || root.current.querySelector("[data-note-line-target]")?.nextElementSibling;
     target?.scrollIntoView?.({ block: "start" });
   }, [jump, path, renderedLine]);
 

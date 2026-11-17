@@ -21,6 +21,7 @@ pub struct GitReviewHunk {
     pub patch: String,
     pub original_line: u32,
     pub modified_line: u32,
+    pub reviewed: bool,
 }
 
 pub(super) fn supports(entry: &GitPathStatus, source: GitDiffSource) -> bool {
@@ -96,6 +97,7 @@ pub(super) fn read(
                 modified_line: line('+')?,
                 header: header.to_owned(),
                 patch: format!("{file_header}\n{body}"),
+                reviewed: false,
             })
         })
         .collect()

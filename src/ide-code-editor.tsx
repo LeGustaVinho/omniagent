@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { excerptReference, markdownExcerpt, type EditorExcerpt } from "@/editor-context";
 import { useFileEditorDocument } from "@/file-editor-popout";
 import type { GitPermalinkLines } from "@/git-file-versions";
+import { GitLineBlameDialog, type GitLineBlameRequest } from "@/git-line-blame";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
 
 export interface CodeProblem {
@@ -34,7 +35,7 @@ export interface CodeModel {
 
 const quickFixId = "editor.action.quickFix";
 
-export function CodeEditor({ scope, path, content, models, update, problems, jump, quickFix, onQuickFixShown, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink }: {
+export function CodeEditor({ scope, path, content, models, update, problems, jump, quickFix, onQuickFixShown, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink, blameCheckoutId }: {
   scope: string;
   path: string;
   content: string;
@@ -49,6 +50,7 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
   onExcerpt?: (selection: EditorExcerpt, instruction?: string) => void;
   onPermalink?: (path: string, lines: GitPermalinkLines) => void;
   onOmniAgentLink?: (path: string, line: number, column: number) => void;
+  blameCheckoutId?: string;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const instance = useRef<editor.IStandaloneCodeEditor>(undefined);
@@ -57,6 +59,7 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
   const fresh = useRef({ content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink });
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
+  const [blame, setBlame] = useState<GitLineBlameRequest>();
   useEffect(() => {
     fresh.current = { content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink };
   }, [content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink]);
@@ -158,6 +161,22 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
           fresh.current.onPermalink?.(path, { startLine, endLine, text });
         },
       });
+      if (blameCheckoutId) {
+        let contextLine: number | undefined;
+        const clearContextLine = () => { contextLine = undefined; };
+        subscriptions.push(
+          codeEditor.onContextMenu(({ target }) => { contextLine = target.position?.lineNumber; }),
+          codeEditor.onMouseDown(clearContextLine), codeEditor.onKeyDown(clearContextLine),
+        );
+        codeEditor.addAction({
+          id: "omniagent.git-line-blame", label: "Show Git blame for line…", contextMenuGroupId: "9_omniagent-git",
+          run: () => {
+            const line = contextLine ?? codeEditor.getPosition()?.lineNumber;
+            clearContextLine();
+            if (line !== undefined) setBlame({ checkoutId: blameCheckoutId, path, line, editorText: model.getValue(monaco.editor.EndOfLinePreference.LF) });
+          },
+        });
+      }
       if (fresh.current.onExcerpt) {
         const agentActions = [
           { id: "quote", label: "Add selection to conversation…" },
@@ -210,7 +229,7 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
       instance.current?.dispose();
       instance.current = undefined;
     };
-  }, [models, owner, path, scope]);
+  }, [blameCheckoutId, models, owner, path, scope]);
 
   useEffect(() => {
     const codeEditor = instance.current;
@@ -238,6 +257,8 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
     <div className="code-editor">
       <div ref={mount} className="code-editor-target" />
       {!ready && <p role={error ? "alert" : "status"} className="file-help">{error || "Loading source editor…"}</p>}
+      {blame && blame.checkoutId === blameCheckoutId && blame.path === path && <GitLineBlameDialog request={blame}
+        close={() => setBlame(undefined)} restoreFocus={() => instance.current?.focus()} copy={onCopy} />}
     </div>
   );
 }

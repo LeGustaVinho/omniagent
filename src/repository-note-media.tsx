@@ -61,7 +61,7 @@ function PdfAttachment({ base64, title, relativePath }: { base64: string; title:
         await rendering.promise;
         if (!alive) return;
         setStatus("");
-        void renderedPage.getTextContent().then(({ items }) => {
+        void Promise.resolve().then(() => renderedPage.getTextContent()).then(({ items }) => {
           if (!alive) return;
           const value = items.map((item) => "str" in item ? item.str + (item.hasEOL ? "\n" : "") : "").join("");
           setText({ page, base64, value });

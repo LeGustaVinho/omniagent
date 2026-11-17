@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { invoke } from "@tauri-apps/api/core";
+import userEvent from "@testing-library/user-event";
+import { useCheckoutTextReader } from "@/file-context-actions";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render as renderElement, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
@@ -8,7 +10,9 @@ import IdeWorkspace from "@/ide-workspace";
 import type { FileFormat } from "@/source-file-format";
 import type { ItemEdit } from "@/checkout-item-operations";
 import type { EditorExcerpt } from "@/editor-context";
+import type { FileFormat } from "@/source-file-format";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { reviewTerminalInputTarget } from "@/terminal-reviewed-input";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -30,8 +34,10 @@ vi.mock("@/git-diff-view", () => ({
 const terminalProps = vi.hoisted(() => vi.fn());
 vi.mock("@/ide-terminal", () => ({
   ExampleTerminal: () => null,
-  ManualTerminal: ({ onContextText: _onContextText, onOpenFile: _onOpenFile, ...props }: {
+  ManualTerminal: ({ onContextText: _onContextText, onOpenFile: _onOpenFile, onFocus: _onFocus,
+    sessionActions: _sessionActions, visible: _visible, ...props }: {
     checkoutId: string; active: boolean; clearRevision?: number; onContextText?: unknown; onOpenFile?: unknown;
+    onFocus?: unknown; sessionActions?: unknown; visible?: boolean;
   }) => {
     terminalProps(props);
     return null;
@@ -163,6 +169,47 @@ function fixture(extraSources: Record<string, string> = {}) {
     },
   };
 }
+
+it("previews an exact checkout file format and saves only after confirming the reviewed bytes", async () => {
+  const { disk } = fixture();
+  const source = "fn original() {}\n";
+  disk.set(alternate, documentAt(alternate, "a1", source, file, { utf8Bom: false, encoding: "utf8", lineEndings: "lf" }));
+  const native = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation((command, args) => {
+    if (command === "preview_repository_source_format") return Promise.resolve({
+      originalEncoding: "utf8", originalLineEndings: "lf", encoding: "utf16_le", lineEndings: "lf",
+      originalBytes: 17, convertedBytes: 36, originalPrefix: "66 6E 20", convertedPrefix: "FF FE 66 00 6E 00 20 00", sha256: "reviewed",
+    });
+    if (command === "save_repository_source_format") {
+      const converted = documentAt(alternate, "a2", source, file, { utf8Bom: false, encoding: "utf16_le", lineEndings: "lf" });
+      disk.set(alternate, converted);
+      return Promise.resolve({ ...converted, status: "saved" });
+    }
+    return native(command, args);
+  });
+  render(<IdeWorkspace {...propsFor(alternate)} target={file} />);
+  await screen.findByRole("textbox", { name: editorLabel });
+  const review = async () => {
+    fireEvent.contextMenu(await screen.findByLabelText("Saved file format UTF-8, LF"));
+    fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Change encoding" }), { key: "ArrowRight" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "UTF-16 LE with BOM" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review file format conversion" });
+    await within(dialog).findByText("UTF-16 LE with BOM · LF · 36 bytes");
+    expect(within(dialog).getByLabelText("Converted initial bytes").textContent).toBe("FF FE 66 00 6E 00 20 00");
+    return dialog;
+  };
+  const args = { checkoutId: alternate, path: file, expectedRevision: "a1", change: { encoding: "utf16_le" } };
+  const first = await review();
+  expect(invoke).toHaveBeenCalledWith("preview_repository_source_format", args);
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "save_repository_source_format")).toHaveLength(0);
+  fireEvent.click(within(first).getByRole("button", { name: "Cancel" }));
+  const second = await review();
+  fireEvent.click(within(second).getByRole("button", { name: "Convert and save" }));
+  await screen.findByLabelText("Saved file format UTF-16 LE with BOM, LF");
+  expect(invoke).toHaveBeenCalledWith("save_repository_source_format", { ...args, previewSha256: "reviewed" });
+  expect(disk.get(main)?.document.revision.id).toBe("m1");
+  expect((screen.getByRole("textbox", { name: editorLabel }) as HTMLTextAreaElement).value).toBe(source);
+});
 
 const views = () => screen.getAllByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
 const closeButtons = () => screen.getAllByRole("button", { name: "Close review.rs" });
@@ -419,6 +466,22 @@ it("uses the selected rows for bulk recycling after confirmation", async () => {
   });
 });
 
+it("opens a single reviewed terminal pane only for the matching checkout", async () => {
+  fixture();
+  const text = "Write-Output 'café'\r\n";
+  const wrong = reviewTerminalInputTarget(alternate, text);
+  const mounted = render(<IdeWorkspace {...propsFor(main)} target={wrong} />);
+  await waitFor(() => expect(terminalProps).toHaveBeenCalledWith({ checkoutId: main, active: true, clearRevision: 0 }));
+  expect(screen.queryByRole("button", { name: "PowerShell review" })).toBeNull();
+  const target = reviewTerminalInputTarget(main, text);
+  mounted.rerender(<IdeWorkspace {...propsFor(main)} target={target} />);
+  await waitFor(() => expect(terminalProps).toHaveBeenCalledWith({
+    checkoutId: main, active: true, clearRevision: 0, reviewedInput: text,
+  }));
+  expect(screen.getAllByRole("button", { name: "PowerShell review" })).toHaveLength(1);
+  expect(invoke).not.toHaveBeenCalledWith("start_manual_terminal", expect.anything());
+});
+
 it("opens a folder terminal from the keyboard menu and keeps the root session mounted", async () => {
   fixture();
   render(<IdeWorkspace {...propsFor(main)} />);
@@ -432,7 +495,7 @@ it("opens a folder terminal from the keyboard menu and keeps the root session mo
     checkoutId: main, active: true, relativeDirectory: "src", autoStart: true, clearRevision: 0,
   }));
   expect(terminalProps).toHaveBeenCalledWith({ checkoutId: main, active: false, clearRevision: 0 });
-  expect((screen.getByRole("combobox", { name: "Terminal directory" }) as HTMLSelectElement).value).toBe("src");
+  expect((screen.getByRole("combobox", { name: "Terminal session" }) as HTMLSelectElement).value).toBe("src");
 });
 
 it("creates an empty folder under the clicked parent and refreshes the tree", async () => {
@@ -467,6 +530,55 @@ it("adds the clicked file to the chosen conversation draft and opens the draft",
     checkoutId: alternate, conversationId: "review-chat", paths: ["docs/Guide.md"],
   });
 });
+
+it("copies the exact clicked file from a live buffer or a read-only capture in the selected checkout", async () => {
+  fixture({ "docs/Closed.txt": "closed", "docs/Image.bin": "binary" });
+  const backend = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "read_checkout_file_text") {
+      const request = args as { checkoutId: string; path: string };
+      expect(request.checkoutId).toBe(alternate);
+      if (request.path === "docs/Closed.txt") return { status: "text", text: "Worktree text\r\n😀\r" };
+      if (request.path === "docs/Image.bin") return { status: "unsupported_encoding" };
+      throw new Error("Unexpected text capture path " + request.path);
+    }
+    return backend(command, args);
+  });
+  function OtherWorkspace() {
+    useCheckoutTextReader(main, true, () => "wrong worktree");
+    useCheckoutTextReader(alternate, true, (path) => path === "docs/Guide.md" ? "# Knowledge draft\n" : undefined);
+    return null;
+  }
+  const user = userEvent.setup();
+  const clipboard = vi.spyOn(navigator.clipboard, "writeText");
+  const props = propsFor(alternate);
+  render(<><IdeWorkspace {...props} target={file} /><OtherWorkspace /></>);
+  const editor = await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.change(editor, { target: { value: "fn local_draft() {}" } });
+  const copy = async (name: string) => {
+    fireEvent.contextMenu(await screen.findByRole("button", { name }));
+    await user.click(await screen.findByRole("menuitem", { name: "Copy text contents" }));
+  };
+  await copy("Reveal file review.rs");
+  expect(clipboard).toHaveBeenLastCalledWith("fn local_draft() {}");
+  expect(invoke).not.toHaveBeenCalledWith("read_checkout_file_text", expect.anything());
+  await user.click(await screen.findByRole("button", { name: "docs" }));
+  await copy("Guide.md");
+  expect(clipboard).toHaveBeenLastCalledWith("# Knowledge draft\n");
+  expect(invoke).not.toHaveBeenCalledWith("read_checkout_file_text", expect.anything());
+  await copy("Closed.txt");
+  await waitFor(() => expect(clipboard).toHaveBeenLastCalledWith("Worktree text\r\n😀\r"));
+  expect(invoke).toHaveBeenCalledWith("read_checkout_file_text", { checkoutId: alternate, path: "docs/Closed.txt" });
+  await copy("Image.bin");
+  expect(await screen.findByText("docs/Image.bin contains binary data or uses an unsupported text encoding.")).toBeTruthy();
+  expect(clipboard).toHaveBeenCalledTimes(3);
+  expect(props.openWorkspace).not.toHaveBeenCalled();
+  expect(screen.queryByRole("textbox", { name: "Source editor for docs/Closed.txt" })).toBeNull();
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "open_repository_source_file").every(([, args]) =>
+    (args as { path: string }).path === file)).toBe(true);
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_repository_source_file")).toBe(false);
+});
+
 
 it("saves the open editor buffer as a new file without saving the original", async () => {
   const service = fixture();
@@ -517,6 +629,44 @@ it("exposes the shared Clear terminal control in the active worktree", async () 
   fireEvent.click(screen.getByRole("button", { name: "Problems" }));
   expect(clear.disabled).toBe(true);
   expect(terminalProps).toHaveBeenLastCalledWith({ checkoutId: main, active: false, clearRevision: 1 });
+});
+
+it("splits a scoped terminal, renames and duplicates its sessions, and closes the selected pane", async () => {
+  fixture();
+  const { container } = render(<IdeWorkspace {...propsFor(main)} />);
+  const folder = await screen.findByRole("button", { name: "src" });
+  fireEvent.contextMenu(folder);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Open terminal here" }));
+  const panes = () => within(container.querySelector(".ide-terminal-panes")!);
+  fireEvent.contextMenu(await panes().findByRole("button", { name: "src" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Split terminal" }));
+  expect(panes().getByRole("button", { name: "src" })).toBeTruthy();
+  const split = panes().getByRole("button", { name: "src (2)" });
+  expect(split.getAttribute("aria-pressed")).toBe("true");
+  expect(terminalProps).toHaveBeenCalledWith({ checkoutId: main, active: true, clearRevision: 0, relativeDirectory: "src", autoStart: true });
+  fireEvent.contextMenu(split);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Rename terminal…" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Rename terminal" }));
+  fireEvent.change(dialog.getByRole("textbox", { name: "Terminal name" }), { target: { value: "Checks" } });
+  fireEvent.click(dialog.getByRole("button", { name: "Rename" }));
+  fireEvent.contextMenu(panes().getByRole("button", { name: "Checks" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Duplicate terminal" }));
+  expect(panes().queryByRole("button", { name: "Checks" })).toBeNull();
+  const duplicate = panes().getByRole("button", { name: "src (3)" });
+  expect(duplicate.getAttribute("aria-pressed")).toBe("true");
+
+  fireEvent.contextMenu(duplicate);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Close terminal session" }));
+  expect(panes().queryByRole("button", { name: "src (3)" })).toBeNull();
+  expect(panes().getByRole("button", { name: "src" }).getAttribute("aria-pressed")).toBe("true");
+  fireEvent.change(screen.getByRole("combobox", { name: "Terminal session" }), { target: { value: "omni-terminal:1" } });
+  expect(panes().getByRole("button", { name: "Checks" })).toBeTruthy();
+
+  const terminalButton = container.querySelector(".ide-terminal-pane:not([hidden])");
+  fireEvent.click(screen.getByRole("button", { name: "Toggle bottom panel" }));
+  expect(terminalButton?.isConnected).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Toggle bottom panel" }));
+  expect(panes().getByRole("button", { name: "Checks" })).toBeTruthy();
 });
 
 it("opens the checkout explorer, shares edits across splits, and prompts only on the last dirty close", async () => {

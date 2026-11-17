@@ -392,7 +392,7 @@ impl ScratchGit {
         })
     }
 
-    fn apply(&self, patch: &[u8]) -> Result<()> {
+    pub(in crate::repository) fn apply(&self, patch: &[u8]) -> Result<()> {
         if !patch.is_empty() {
             self.run(
                 &["apply", "--cached", "--binary", "--whitespace=nowarn", "-"],
@@ -402,7 +402,7 @@ impl ScratchGit {
         Ok(())
     }
 
-    fn object(&self, args: &[&str]) -> Result<String> {
+    pub(in crate::repository) fn object(&self, args: &[&str]) -> Result<String> {
         self.object_with_input(args, None)
     }
 
@@ -441,7 +441,7 @@ impl ScratchGit {
         command
     }
 
-    fn run(&self, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
+    pub(in crate::repository) fn run(&self, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
         let mut command = self.command();
         command.args(args);
         if let Some(bytes) = input {

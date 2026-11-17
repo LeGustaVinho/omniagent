@@ -115,6 +115,10 @@ impl IsolatedGit {
         self.scratch.path().join(".git/index")
     }
 
+    pub(super) fn passive_options(&self) -> &[String] {
+        &self.passive_options
+    }
+
     pub(super) fn command(&self) -> Command {
         let mut command = git_command(&self.git, &self.checkout);
         clean_environment(&mut command, self.scratch.path());

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { invoke } from "@tauri-apps/api/core";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { CodeEditor, type EditorSettings } from "@/ide-code-editor";
@@ -8,6 +9,7 @@ import { loadMonaco } from "@/ide-monaco";
 import { IdeProblems, type FileProblem } from "@/ide-problems";
 
 vi.mock("@/ide-monaco", () => ({ loadMonaco: vi.fn(), monacoTheme: () => "test" }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 it("shows Quick Fix only for supported diagnostics and keeps actions on the selected record", async () => {
@@ -72,4 +74,43 @@ it("offers supported model settings and copies the saved byte format reported by
   fireEvent.contextMenu(screen.getByText("UTF-8 with BOM · CRLF"));
   await user.click(screen.getByRole("menuitem", { name: "Copy saved file format" }));
   expect(copy).toHaveBeenCalledWith("src/app.ts · UTF-8 with BOM · CRLF", "Copied saved file format");
+});
+
+it("looks up the right-clicked source line in the editor's exact checkout and uses its unsaved text", async () => {
+  const subscribe = () => ({ dispose: vi.fn() });
+  let context: (event: { target: { position?: { lineNumber: number } } }) => void = () => undefined;
+  let showBlame: (() => void) | undefined;
+  const editorText = "first\nunsaved editor line\n";
+  const getValue = vi.fn(() => editorText);
+  const model = { getLanguageId: () => "typescript", getValue, onDidChangeContent: subscribe, onDidChangeLanguage: subscribe };
+  const instance = {
+    getPosition: () => ({ lineNumber: 1 }),
+    addAction: ({ id, run }: { id: string; run: () => void }) => { if (id === "omniagent.git-line-blame") showBlame = run; },
+    onContextMenu: (listener: typeof context) => { context = listener; return subscribe(); },
+    onMouseDown: subscribe, onKeyDown: subscribe, getAction: () => undefined,
+    focus: vi.fn(), saveViewState: () => null, dispose: vi.fn(),
+  };
+  vi.mocked(loadMonaco).mockResolvedValue({
+    Uri: { from: () => ({ toString: () => "source-uri" }) },
+    editor: { EndOfLinePreference: { LF: 1 }, createModel: () => model, create: () => instance, getModelMarkers: () => [], onDidChangeMarkers: subscribe },
+  } as unknown as Awaited<ReturnType<typeof loadMonaco>>);
+  vi.mocked(invoke).mockResolvedValueOnce({ status: "uncommitted", reason: "This editor line has no matching line in the checkout HEAD." });
+  const copy = vi.fn();
+  render(<CodeEditor scope="test" path="src/app.ts" content="saved" models={new Map()} update={vi.fn()} problems={vi.fn()}
+    blameCheckoutId="linked-checkout" onCopy={copy} />);
+  await waitFor(() => expect(showBlame).toBeTypeOf("function"));
+  act(() => { context({ target: { position: { lineNumber: 2 } } }); showBlame?.(); });
+  expect(await screen.findByText(/no matching line/)).toBeTruthy();
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("git_checkout_line_blame", { checkoutId: "linked-checkout", path: "src/app.ts", line: 2, editorText });
+  expect(getValue).toHaveBeenCalledWith(1);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Close dialog" }));
+  const commit = "f123".repeat(10);
+  vi.mocked(invoke).mockResolvedValueOnce({ status: "committed", commit, head: "00ff".repeat(10), author: "Author Name",
+    summary: "First line", authoredAt: 123_456, headLine: 1, originalLine: 5 });
+  act(() => showBlame?.());
+  expect(await screen.findByText("Author Name")).toBeTruthy();
+  expect(screen.getByText("src/app.ts:1")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Copy commit ID" }));
+  expect(copy).toHaveBeenCalledWith(commit, "Copied commit ID");
 });

@@ -455,6 +455,47 @@ it("stages the exact hunk selected in the live comparison", async () => {
   expect(invoke).not.toHaveBeenCalledWith("set_git_path_staged", expect.anything());
 });
 
+it("marks and unmarks the clicked hunk on its exact Git diff without staging it", async () => {
+  const path = "example.txt";
+  const hunk = { id: "picked-hunk", header: "@@ -12 +12 @@", originalLine: 12, modifiedLine: 12,
+    patch: "diff --git a/example.txt b/example.txt\n--- a/example.txt\n+++ b/example.txt\n@@ -12 +12 @@\n-old\n+changed\n" };
+  const base = { path, sha256: "original-text", lineCount: 12 };
+  const snapshot = "selected-checkout-diff";
+  let reviewed = false;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_checkout_review") return { checkoutId: checkout.checkoutId, worktrees, branches, root: checkout.checkoutRoot,
+      managed: false, revision: originalRevision, changes: [{ path, working: "M", staged: null }] };
+    if (command === "git_checkout_diff") return { path, source: "working", revision: originalRevision, hunks: [{ ...hunk, reviewed }],
+      original: { status: "text", content: "old" }, modified: { status: "text", content: "changed" },
+      commentScope: { snapshot, source: { kind: "checkout", source: "working", revision: originalRevision },
+        original: base, modified: { ...base, sha256: "changed-text" } } };
+    if (command === "git_review_comments") return [];
+    if (command === "set_git_hunk_reviewed") {
+      reviewed = (args as { request: { reviewed: boolean } }).request.reviewed;
+      return;
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  const user = userEvent.setup();
+  openGit();
+  await user.click(await screen.findByRole("button", { name: "Review hunks" }));
+  const region = within(screen.getByRole("region", { name: hunk.header }));
+  fireEvent.contextMenu(region.getByRole("button", { name: hunk.header }));
+  await user.click(within(await screen.findByRole("menu", { name: hunk.header })).getByRole("menuitem", { name: "Mark hunk as reviewed" }));
+  expect(invoke).toHaveBeenCalledWith("set_git_hunk_reviewed", { checkoutId: checkout.checkoutId,
+    request: { path, source: "working", snapshot, hunkId: hunk.id, reviewed: true } });
+  await region.findByText("Reviewed");
+  expect(screen.getByText("1/1 hunks reviewed")).toBeTruthy();
+
+  fireEvent.contextMenu(region.getByText("+changed"));
+  const lineMenu = await screen.findByRole("menu", { name: "Revised line 12" });
+  await user.click(within(lineMenu).getByRole("menuitem", { name: "Mark hunk as unreviewed" }));
+  expect(invoke).toHaveBeenCalledWith("set_git_hunk_reviewed", { checkoutId: checkout.checkoutId,
+    request: { path, source: "working", snapshot, hunkId: hunk.id, reviewed: false } });
+  await waitFor(() => expect(region.queryByText("Reviewed")).toBeNull());
+  expect(invoke).not.toHaveBeenCalledWith("set_git_hunk_staged", expect.anything());
+});
+
 it("reports unavailable saved evidence in the side panel for the exact requested attempt", async () => {
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "git_saved_attempts") return [{ runId: "newer-run", checkoutId: checkout.checkoutId, label: "Later attempt" }];
@@ -494,6 +535,47 @@ it("opens the requested attempt's saved diff without loading live checkout conte
   expect(vi.mocked(invoke).mock.calls.map(([command]) => command).sort()).toEqual(["attempt_worktree_evidence", "git_saved_attempts"]);
   await user.click(screen.getByRole("button", { name: "View attempt" }));
   expect(openActivity).toHaveBeenCalledWith("recorded-run");
+});
+
+it("requires a destination and a fresh reviewed comparison before applying saved evidence", async () => {
+  let previews = 0;
+  const destination = "D:\\fixture\\alternate";
+  const request = { projectId: checkout.projectId, runId: "patch-attempt", captureRevision: "saved-capture", checkoutId: "alternate", part: "committed" };
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_saved_attempts") return [{ runId: request.runId, checkoutId: checkout.checkoutId, label: "Saved attempt" }];
+    if (command === "attempt_worktree_evidence") return { kind: "saved", artifact: { revision: request.captureRevision,
+      start: { worktree: { branch: "attempt" }, starting: { head: "base" } }, candidate: { head: "candidate" }, committedPatchBase64: btoa("patch") } };
+    if (command === "registered_checkouts") return [checkout, { ...checkout, checkoutId: request.checkoutId, checkoutRoot: destination },
+      { ...checkout, projectId: "other-project", checkoutId: "other", checkoutRoot: "Unrelated worktree" }];
+    if (command === "preview_saved_git_patch") return { snapshot: `snapshot-${++previews}`, destination, revision: originalRevision,
+      files: [{ path: "example.txt", before: { status: "text", content: "Original contents" }, after: { status: "text", content: "Result contents" } }] };
+    if (command === "apply_saved_git_patch") {
+      if ((args as { snapshot: string }).snapshot === "snapshot-1") throw "The reviewed destination changed.";
+      return;
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  const user = userEvent.setup();
+  openGit({ target: "attempt:patch-attempt" });
+  await user.click(await screen.findByRole("button", { name: "Apply saved patch…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Apply saved patch" }));
+  const target = await dialog.findByRole<HTMLSelectElement>("combobox", { name: "Destination worktree" });
+  const confirm = dialog.getByRole<HTMLButtonElement>("button", { name: "Apply reviewed patch" });
+  expect(target.value).toBe("");
+  expect(dialog.queryByRole("option", { name: "Unrelated worktree" })).toBeNull();
+  expect(confirm.disabled).toBe(true);
+  await user.selectOptions(target, request.checkoutId);
+  await user.click(dialog.getByRole("button", { name: "Review patch" }));
+  expect(await dialog.findByText("Result contents")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("preview_saved_git_patch", { request });
+  await user.click(confirm);
+  expect(await dialog.findByText("The reviewed destination changed.")).toBeTruthy();
+  expect(confirm.disabled).toBe(true);
+  await user.click(dialog.getByRole("button", { name: "Review patch" }));
+  await waitFor(() => expect(confirm.disabled).toBe(false));
+  await user.click(confirm);
+  expect(await screen.findByText(`Saved patch applied to ${destination}.`)).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("apply_saved_git_patch", { request, snapshot: "snapshot-2" });
 });
 
 it("deletes a workflow attempt's recorded diff using the owning chat and the preview revision", async () => {

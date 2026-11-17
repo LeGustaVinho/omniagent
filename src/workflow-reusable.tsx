@@ -6,8 +6,8 @@ import { Button } from "@/components/ui/button";
 import type { PackageDraft } from "@/workflow-authoring-package";
 import { WorkflowGraphEditor } from "@/workflow-graph-editor";
 import {
-  portType, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowEndpoint,
-  type WorkflowGraph, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPortType, type WorkflowWire,
+  isPresetEligible, isStartNode, portType, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowEndpoint,
+  type WorkflowGraph, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPortType, type WorkflowReuseSelection, type WorkflowWire,
 } from "@/workflow-graph-model";
 
 export type ReusableVersion = { id: string; revision: string; kind: string; destination: "project" | "library" };
@@ -35,8 +35,6 @@ export type ReusableDescription = {
 const endpointKey = ({ node, port }: WorkflowEndpoint) => JSON.stringify([node, port]);
 const endpointLabel = ({ node, port }: WorkflowEndpoint) => `${node}.${port}`;
 const slug = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-const presetEligible = (kind: string) => !["start", "subflow", "repeat_until", "for_each",
-  "for_each_begin", "for_each_gate", "for_each_collect", "repeat_output", "delivery_attempt"].includes(kind);
 
 export function reusableEditableFields(configuration: WorkflowNodeConfiguration) {
   switch (configuration.kind) {
@@ -56,79 +54,109 @@ export function reusableNodeQuery(projectId: string, version: ReusableVersion) {
   };
 }
 
-export function WorkflowReusableDerivation({ projectId, source, graph, disabled, onSaved }: {
+type DerivationProps = {
   projectId: string; source: MatchSource; graph: WorkflowGraph; disabled: boolean; onSaved: (draft: PackageDraft) => void;
-}) {
+};
+
+export function WorkflowReusableDerivation(props: DerivationProps) {
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<Selection["type"]>("preset");
+  return <details className="pipeline-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>Save a reusable node</summary>
+    <ReusableDerivationForm {...props} active={open} />
+  </details>;
+}
+
+export function WorkflowReusableDerivationDialog({ selection, onClose, onSaved, ...props }: DerivationProps & {
+  selection: WorkflowReuseSelection; onClose: () => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  return <Dialog.Root open onOpenChange={(open) => { if (!open && !saving) onClose(); }}>
+    <Dialog.Portal>
+      <Dialog.Overlay className="conv-dialog-scrim" />
+      <Dialog.Content className="conv-dialog">
+        <Dialog.Title>{selection.type === "preset" ? "Save node as preset" : "Extract subflow"}</Dialog.Title>
+        <Dialog.Description>Review the selection from the saved graph revision.</Dialog.Description>
+        <ReusableDerivationForm {...props} active initial={selection} onSaving={setSaving}
+          onSaved={(draft) => { onClose(); onSaved(draft); }} />
+        <Dialog.Close asChild><Button type="button" variant="outline" disabled={saving}>Close</Button></Dialog.Close>
+      </Dialog.Content>
+    </Dialog.Portal>
+  </Dialog.Root>;
+}
+
+function ReusableDerivationForm({ projectId, source, graph, disabled, onSaved, active, initial, onSaving }: DerivationProps & {
+  active: boolean; initial?: WorkflowReuseSelection; onSaving?: (saving: boolean) => void;
+}) {
+  const [mode, setMode] = useState<Selection["type"]>(initial?.type ?? "preset");
   const [name, setName] = useState("");
   const [key, setKey] = useState("");
   const [destination, setDestination] = useState<ReusableVersion["destination"]>("project");
-  const [preset, setPreset] = useState<{ nodeId: string; editableFields: string[] }>({ nodeId: "", editableFields: [] });
-  const [subset, setSubset] = useState<string[] | null>(null);
-  const nodes = graph.nodes.filter(({ kind }) => kind !== "start");
-  const selectedNode = nodes.find(({ id }) => id === preset.nodeId);
+  const [preset, setPreset] = useState<{ nodeId: string; editableFields: string[] }>({
+    nodeId: initial?.type === "preset" ? initial.nodeId : "", editableFields: [],
+  });
+  const [subset, setSubset] = useState<string[] | null>(initial?.type === "subflow" ? initial.nodeIds : null);
+  const nodes = graph.nodes.filter(({ kind }) => !isStartNode(kind));
+  const selectedNode = nodes.find((node) => node.id === preset.nodeId && isPresetEligible(node));
   const boundary = useQuery({
     queryKey: ["workflow-reusable-boundary", projectId, source, subset],
     queryFn: () => invoke<Boundary>("describe_workflow_reusable_boundary", { projectId, source, nodeIds: subset }),
-    enabled: open && mode === "subflow" && (subset === null || subset.length > 0),
+    enabled: active && !disabled && mode === "subflow" && (subset === null || subset.length > 0),
     retry: false,
   });
   const save = useMutation({
     mutationFn: (selection: Selection) => invoke<PackageDraft>("derive_workflow_reusable", {
       projectId, source, request: { key: key.trim() || slug(name), name: name.trim(), destination, selection },
     }),
+    onMutate: () => onSaving?.(true),
     onSuccess: (draft) => onSaved(draft),
+    onSettled: () => onSaving?.(false),
   });
   const locked = disabled || save.isPending;
   const ready = !locked && Boolean(name.trim() && (key.trim() || slug(name)));
-  return <details className="pipeline-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary>Save a reusable node</summary>
-    {open && <fieldset className="pipeline-stack" disabled={locked}>
-      {disabled && <p>Save the current revision before deriving a reusable node.</p>}
-      <label>Reusable type<select value={mode} onChange={(event) => setMode(event.currentTarget.value as Selection["type"])}>
-        <option value="preset">Configured node preset</option><option value="subflow">Subflow</option>
+  return active && <fieldset className="pipeline-stack" disabled={locked}>
+    {disabled && <p>Save the current revision before deriving a reusable node.</p>}
+    <label>Reusable type<select value={mode} onChange={(event) => setMode(event.currentTarget.value as Selection["type"])}>
+      <option value="preset">Configured node preset</option><option value="subflow">Subflow</option>
+    </select></label>
+    <label>Name<input value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
+    <label>Artifact key<input value={key} placeholder={slug(name)} onChange={(event) => setKey(event.currentTarget.value)} /></label>
+    <label>Destination<select value={destination} onChange={(event) => setDestination(event.currentTarget.value as ReusableVersion["destination"])}>
+      <option value="project">This project</option><option value="library">Reusable library</option>
+    </select></label>
+    {mode === "preset" ? <>
+      <label>Configured node<select value={preset.nodeId} onChange={(event) =>
+        setPreset({ nodeId: event.currentTarget.value, editableFields: [] })}>
+        <option value="">Choose a saved node</option>
+          {nodes.filter(isPresetEligible).map(({ id }) => <option key={id} value={id}>{id}</option>)}
       </select></label>
-      <label>Name<input value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
-      <label>Artifact key<input value={key} placeholder={slug(name)} onChange={(event) => setKey(event.currentTarget.value)} /></label>
-      <label>Destination<select value={destination} onChange={(event) => setDestination(event.currentTarget.value as ReusableVersion["destination"])}>
-        <option value="project">This project</option><option value="library">Reusable library</option>
+      {selectedNode && <fieldset className="pipeline-stack">
+        <legend>Editable fields in consuming graphs</legend>
+        {reusableEditableFields(selectedNode.configuration).map((field) => <label key={field}>
+          <input type="checkbox" checked={preset.editableFields.includes(field)} onChange={(event) => {
+            const checked = event.currentTarget.checked;
+            setPreset((previous) => ({ ...previous, editableFields: checked ? [...previous.editableFields, field] :
+              previous.editableFields.filter((item) => item !== field) }));
+          }} /> {field}
+        </label>)}
+      </fieldset>}
+      <Button type="button" variant="outline" disabled={!ready || !selectedNode}
+        onClick={() => save.mutate({ type: "preset", ...preset })}>Save as preset</Button>
+    </> : <>
+      <label>Subflow source<select value={subset === null ? "whole" : "subset"}
+        onChange={(event) => setSubset(event.currentTarget.value === "whole" ? null : [])}>
+        <option value="whole">Entire saved graph</option><option value="subset">Selected nodes</option>
       </select></label>
-      {mode === "preset" ? <>
-        <label>Configured node<select value={preset.nodeId} onChange={(event) =>
-          setPreset({ nodeId: event.currentTarget.value, editableFields: [] })}>
-          <option value="">Choose a saved node</option>
-          {nodes.filter(({ kind }) => presetEligible(kind)).map(({ id }) => <option key={id} value={id}>{id}</option>)}
-        </select></label>
-        {selectedNode && <fieldset className="pipeline-stack">
-          <legend>Editable fields in consuming graphs</legend>
-          {reusableEditableFields(selectedNode.configuration).map((field) => <label key={field}>
-            <input type="checkbox" checked={preset.editableFields.includes(field)} onChange={(event) => {
-              const checked = event.currentTarget.checked;
-              setPreset((previous) => ({ ...previous, editableFields: checked ? [...previous.editableFields, field] :
-                previous.editableFields.filter((item) => item !== field) }));
-            }} /> {field}
-          </label>)}
-        </fieldset>}
-        <Button type="button" variant="outline" disabled={!ready || !selectedNode}
-          onClick={() => save.mutate({ type: "preset", ...preset })}>Save as preset</Button>
-      </> : <>
-        <label>Subflow source<select value={subset === null ? "whole" : "subset"}
-          onChange={(event) => setSubset(event.currentTarget.value === "whole" ? null : [])}>
-          <option value="whole">Entire saved graph</option><option value="subset">Selected nodes</option>
-        </select></label>
-        {subset !== null && <fieldset className="pipeline-stack"><legend>Internal nodes</legend>{nodes.map(({ id }) => <label key={id}>
-          <input type="checkbox" checked={subset.includes(id)} onChange={(event) =>
-            setSubset(event.currentTarget.checked ? [...subset, id] : subset.filter((item) => item !== id))} /> {id}
-        </label>)}</fieldset>}
-        {boundary.error && <p role="alert">{String(boundary.error)}</p>}
-        {boundary.isLoading && <p role="status">Resolving saved ports…</p>}
-        {boundary.data && <BoundaryMappings key={JSON.stringify([source, subset])} boundary={boundary.data}
-          graph={graph} disabled={!ready} save={(inputs, outputs) => save.mutate({ type: "subflow", nodeIds: subset, inputs, outputs })} />}
-      </>}
-      {save.error && <p role="alert">{String(save.error)}</p>}
-    </fieldset>}
-  </details>;
+      {subset !== null && <fieldset className="pipeline-stack"><legend>Internal nodes</legend>{nodes.map(({ id }) => <label key={id}>
+        <input type="checkbox" checked={subset.includes(id)} onChange={(event) =>
+          setSubset(event.currentTarget.checked ? [...subset, id] : subset.filter((item) => item !== id))} /> {id}
+      </label>)}</fieldset>}
+      {boundary.error && <p role="alert">{String(boundary.error)}</p>}
+      {boundary.isLoading && <p role="status">Resolving saved ports…</p>}
+      {boundary.data && <BoundaryMappings key={JSON.stringify([source, subset])} boundary={boundary.data}
+        graph={graph} disabled={!ready} save={(inputs, outputs) => save.mutate({ type: "subflow", nodeIds: subset, inputs, outputs })} />}
+    </>}
+    {save.error && <p role="alert">{String(save.error)}</p>}
+  </fieldset>;
 }
 
 function inputGroups(items: Boundary["inputs"]) {

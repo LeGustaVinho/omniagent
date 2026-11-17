@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { excerptReference, type EditorExcerpt } from "@/editor-context";
 import { GitConflictReview } from "@/git-conflict-review";
-import { GitDiscardDialog } from "@/git-discard-dialog";
+import { GitDiscardDialog, type GitDiscardSelection } from "@/git-discard-dialog";
 import { GitDiffReview, type GitHunk, type GitTextComparison } from "@/git-diff-view";
 import { useGitReviewComments, type GitReviewScope } from "@/git-review-comments";
 import { GitDiffSourceSelect } from "@/git-workspace-frame";
@@ -56,8 +56,15 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
   const [source, setSource] = useState<ReviewSource>(initialSource);
   const [selection, setSelection] = useState(initialPath);
   const [conflict, setConflict] = useState<string>();
-  const [discard, setDiscard] = useState<{ path: string; hunkId?: string }>();
+  const [discard, setDiscard] = useState<GitDiscardSelection>();
+  const [recycled, setRecycled] = useState<string>();
   const changeStage = useChangeStage(review);
+  const client = useQueryClient();
+  const reviewHunk = useMutation({
+    mutationFn: (request: { path: string; source: Source; snapshot: string; hunkId: string; reviewed: boolean }) =>
+      invoke<void>("set_git_hunk_reviewed", { checkoutId: review.checkoutId, request }),
+    onSettled: () => client.invalidateQueries({ queryKey: ["git-live-diff", review.checkoutId] }),
+  });
   const conversationActions = useCheckoutConversationActions(review.checkoutId, !openConversation, (id) => openConversation?.(id));
   const view = useRef<HTMLDivElement>(null);
   const indexTrigger = useRef<HTMLButtonElement>(null);
@@ -83,6 +90,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
     enabled: source !== "branch",
   });
   const diffRevision = diff.data?.revision;
+  const snapshot = diff.data?.commentScope?.snapshot;
   const unavailable = diff.data && [diff.data.original, diff.data.modified].find((side) => side.status === "unavailable");
   const canOpen = source === "working" && comparison && diff.data?.modified.status === "text" && openFile;
   const addDiffExcerpt = openConversation && diffRevision ? (selection: EditorExcerpt, side: string, instruction?: string) => {
@@ -107,7 +115,11 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
         <GitDiffReview key={source} source={source} title={sourceLabels[source]}
           ranges={source === "working" ? { base: "Index", revised: "Worktree" } : { base: "HEAD", revised: "Index" }}
           files={files} selectedPath={path} select={setSelection} comparison={comparison}
-          notice={selection && !path && <p className="p-3 text-sm" role="status">No {source === "working" ? "working" : "staged"} changes for {selection}.</p>}
+          notice={<>
+            {recycled && <p className="p-3 text-sm" role="status">Moved {recycled} to the Recycle Bin.</p>}
+            {selection && !path && <p className="p-3 text-sm" role="status">No {source === "working" ? "working" : "staged"} changes for {selection}.</p>}
+            {reviewHunk.error && <div className="p-3"><InlineIssue>{String(reviewHunk.error)}</InlineIssue></div>}
+          </>}
           preview={path && (unmerged ? <div className="grid justify-items-start gap-2 p-3">
             <p className="text-sm">This file has unmerged Git index stages.</p>
             <Button type="button" variant="outline" onClick={() => setConflict(path)}>Review conflict</Button>
@@ -118,10 +130,12 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
           onClose={onClose} openFile={canOpen ? () => openFile(comparison.path) : undefined}
           openLine={canOpen ? (line) => openFile(comparison.path, line) : undefined} addExcerpt={addDiffExcerpt}
           reviewAnnotations={comments.annotations} reviewPanel={comments.panel}
+          hunkReview={comparison && snapshot ? { pending: reviewHunk.isPending, change: (hunkId, reviewed) =>
+            reviewHunk.mutate({ path: comparison.path, source, snapshot, hunkId, reviewed }) } : undefined}
           hunkActions={(hunk) => [[
             ...(indexActions && comparison && diffRevision ? [{ label: source === "working" ? "Stage hunk" : "Unstage hunk",
               disabled: changeStage.isPending, run: () => changeStage.mutate({ path: comparison.path, source, hunkId: hunk.id, expected: diffRevision }) }] : []),
-            ...(indexActions && source === "working" && comparison ? [{ label: "Discard hunk…", destructive: true,
+            ...(indexActions && source === "working" && comparison && selectedFile?.kind !== "Untracked" ? [{ label: "Discard hunk…", destructive: true,
               run: () => setDiscard({ path: comparison.path, hunkId: hunk.id }) }] : []),
             ...(openConversation && comparison && diffRevision ? [{ label: "Review hunk in conversation…", run: () => {
               const head = diffRevision.head ?? "Unborn";
@@ -142,6 +156,10 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
                 run: () => changeStage.mutate({ path: file.path, staged: true }) }] : []),
               ...(indexActions && entry?.staged ? [{ label: "Unstage file", disabled: changeStage.isPending,
                 run: () => changeStage.mutate({ path: file.path, staged: false }) }] : []),
+              ...(indexActions && source === "working" && entry?.working === "?" && !entry.staged ? [{
+                label: "Move untracked file to Recycle Bin…", destructive: true,
+                run: () => { setRecycled(undefined); setDiscard({ path: file.path, untracked: true }); },
+              }] : []),
               ...(indexActions && source === "working" && (entry?.working === "M" || entry?.working === "D") ? [{
                 label: entry.working === "D" ? "Restore deleted file…" : "Discard file changes…",
                 destructive: entry.working === "M", run: () => setDiscard({ path: file.path }),
@@ -161,7 +179,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
     </div>}
     {source !== "branch" && comments.dialog}
     {conversationActions.dialog}
-    {discard && <GitDiscardDialog checkoutId={review.checkoutId} selection={discard} close={() => setDiscard(undefined)} />}
+    {discard && <GitDiscardDialog checkoutId={review.checkoutId} selection={discard} close={() => setDiscard(undefined)} onRecycled={setRecycled} />}
     {conflict && <GitConflictReview key={conflict} checkoutId={review.checkoutId} checkoutRoot={review.root}
       path={conflict} openFile={openFile} close={() => setConflict(undefined)} />}
   </div>;

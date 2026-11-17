@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { useState, type ComponentType, type MouseEvent } from "react";
+import { useEffect, useState, type ComponentType, type MouseEvent } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -19,27 +19,33 @@ vi.mock("@xyflow/react", async (importOriginal) => {
   type Card = { id: string; position: Position; data: { definition: WorkflowDefinition } };
   type Wire = { id: string };
   const update = () => undefined;
+  const flow = { screenToFlowPosition: (point: Position) => point };
   return {
     ...await importOriginal<typeof import("@xyflow/react")>(),
     Background: () => null,
     Controls: () => null,
     Handle: ({ id, type }: { id: string; type: string }) => <span data-port-handle={`${type}:${id}`} />,
     useUpdateNodeInternals: () => update,
-    ReactFlow: ({ nodes, edges, nodeTypes, onNodesChange, onNodeContextMenu, onEdgeContextMenu, onPaneContextMenu }: {
+    ReactFlow: ({ nodes, edges, nodeTypes, onNodesChange, onNodeContextMenu, onEdgeContextMenu, onPaneContextMenu, onInit }: {
       nodes: Card[]; nodeTypes: { workflow: ComponentType<Card> };
       edges: Wire[];
-      onNodesChange: (changes: { type: "position"; id: string; position: Position }[]) => void;
+      onNodesChange: (changes: ({ type: "position"; id: string; position: Position } | { type: "select"; id: string; selected: boolean })[]) => void;
       onNodeContextMenu?: (event: MouseEvent, node: Card) => void;
       onEdgeContextMenu?: (event: MouseEvent, wire: Wire) => void;
       onPaneContextMenu?: (event: MouseEvent) => void;
-    }) => <div data-testid="test-pipeline-pane" onContextMenu={onPaneContextMenu}>
+      onInit?: (instance: typeof flow) => void;
+    }) => {
+      useEffect(() => { onInit?.(flow); }, [onInit]);
+      return <div data-testid="test-pipeline-pane" onContextMenu={onPaneContextMenu}>
       {nodes.map(({ id, ...card }) => <div key={id} className="react-flow__node" data-id={id} data-testid={`node-${id}`}
         data-position={JSON.stringify(card.position)} onContextMenu={(event) => onNodeContextMenu?.(event, { id, ...card })}>
         <nodeTypes.workflow id={id} {...card} />
         <button type="button" onClick={() => onNodesChange([{ type: "position", id, position: { x: 91, y: -8 } }])}>Move {id}</button>
+        <button type="button" onClick={() => onNodesChange([{ type: "select", id, selected: true }])}>Select {id}</button>
       </div>)}
       {edges?.map((edge) => <div key={edge.id} data-testid={`edge-${edge.id}`} onContextMenu={(event) => onEdgeContextMenu?.(event, edge)} />)}
-    </div>,
+      </div>;
+    },
   };
 });
 
@@ -74,6 +80,7 @@ it("opens actions for the clicked node, connection, and canvas independently", a
   fireEvent.contextMenu(screen.getByTestId("node-context"));
   await user.click(within(await screen.findByRole("menu", { name: "context" })).getByRole("menuitem", { name: "Inspect node" }));
   expect((screen.getByRole("combobox", { name: "Inspect node" }) as HTMLSelectElement).value).toBe("context");
+  expect(screen.getByTestId("node-context").querySelector(".workflow-node-card[data-selected]")).toBeTruthy();
 
   const edge = `edge-${wireKey(connection)}`;
   fireEvent.contextMenu(screen.getByTestId(edge));
@@ -209,6 +216,49 @@ it("explains an example preset without treating its simulation contract as a liv
   expect(dialog.getByText("Compile a candidate")).toBeTruthy();
   expect(dialog.getByText("Registered build command")).toBeTruthy();
   expect(dialog.getByText(/no editable settings in the simulated Builder/)).toBeTruthy();
+});
+
+it("duplicates the selected graph with its internal wires, exact old pin and undo history", async () => {
+  const internal = wire("context", "loaded", "plan", "ready");
+  const original: WorkflowEditorState = { graph: { name: "Pinned stages", nodes: [
+    { id: "start", kind: "start", configuration: { kind: "none" } },
+    { id: "context", kind: "load_context", configuration: { kind: "none" } },
+    { id: "plan", kind: "plan", configuration: { kind: "agent_role", role: "Planner" } },
+  ], wires: [wire("start", "start", "context", "ready"), internal] },
+  layout: { context: { x: 10, y: 20 }, plan: { x: 180, y: 90 } }, updateDefinitions: {} };
+  const catalog = [start, { ...context, revision: 2 }, plan];
+  let observed = original;
+  function Editor() {
+    const [state, setState] = useState(original);
+    observed = state;
+    return <WorkflowGraphEditor projectId="project" state={state} setState={setState}
+      definitions={editorDefinitions(state, { start, context, plan }, catalog)} catalog={catalog} problems={[]} disabled={false} />;
+  }
+  render(<QueryClientProvider client={new QueryClient()}><Editor /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Select context" }));
+  await user.click(screen.getByRole("button", { name: "Select plan" }));
+  fireEvent.contextMenu(screen.getByTestId("node-context"));
+  await user.click(await screen.findByRole("menuitem", { name: "Copy 2 selected nodes" }));
+  fireEvent.contextMenu(screen.getByTestId("node-context"));
+  await user.click(await screen.findByRole("menuitem", { name: "Duplicate 2 selected nodes" }));
+  expect(observed.definitionCopies).toEqual({ "context-2": { sourceId: "context", revision: 1 } });
+  expect(observed.layout["context-2"]).toEqual({ x: 46, y: 56 });
+  expect(observed.graph.nodes.slice(-2)).toEqual([
+    { ...original.graph.nodes[1], id: "context-2" }, { ...original.graph.nodes[2], id: "plan-2" },
+  ]);
+  expect(observed.graph.wires).toEqual([...original.graph.wires, wire("context-2", "loaded", "plan-2", "ready")]);
+  expect(screen.getByText("Version 1 · read evidence")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Undo graph edit" }));
+  expect(observed).toEqual(original);
+  await user.click(screen.getByRole("button", { name: "Redo graph edit" }));
+  expect(observed.graph.wires).toHaveLength(3);
+  fireEvent.contextMenu(screen.getByTestId("test-pipeline-pane"), { clientX: 430, clientY: 240 });
+  await user.click(await screen.findByRole("menuitem", { name: "Paste 2 nodes here" }));
+  expect(observed.layout["context-3"]).toEqual({ x: 430, y: 240 });
+  expect(observed.layout["plan-3"]).toEqual({ x: 600, y: 310 });
+  expect(observed.definitionCopies?.["context-3"]).toEqual({ sourceId: "context", revision: 1 });
+  expect(observed.graph.wires[3]).toEqual(wire("context-3", "loaded", "plan-3", "ready"));
 });
 
 it("opens the graph from the exact saved workflow revision in Roles & templates", async () => {

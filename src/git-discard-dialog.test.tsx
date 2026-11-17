@@ -54,3 +54,48 @@ it("previews only the clicked hunk or inactive file and applies the confirmed sn
   expect(invoke).toHaveBeenCalledWith("git_discard_changes", { checkoutId, path: clicked, hunkId: null, snapshot: "file-snapshot" });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
+
+it("reviews and recycles the clicked untracked file without using the active diff path", async () => {
+  const checkoutId = "selected-worktree";
+  const active = "tracked.txt";
+  const clicked = "notes/[temporary].bin";
+  const revision = { branch: "refs/heads/main", head: "head", index: "index" };
+  const review: CheckoutReview = { checkoutId, root: "C:/temp/checkout", revision, managed: false, branches: [], worktrees: [],
+    changes: [{ path: active, working: "M", staged: "M" }, { path: clicked, working: "?", staged: null }] };
+  const args = { checkoutId, path: clicked, hunkId: null, untracked: true };
+  vi.mocked(invoke).mockImplementation(async (command, input) => {
+    if (command === "git_checkout_diff") return { path: active, revision, original: { status: "text", content: "base" },
+      modified: { status: "text", content: "edited" }, hunks: [] };
+    if (command === "git_review_comments") return [];
+    if (command === "git_discard_preview") {
+      expect(input).toEqual(args);
+      return { path: clicked, snapshot: "untracked-snapshot", hunk: null,
+        before: { status: "bytes", size: 4, sha256: "abc123", reason: "The file is not UTF-8 text." }, after: { status: "missing" } };
+    }
+    if (command === "git_discard_changes") { expect(input).toEqual({ ...args, snapshot: "untracked-snapshot" }); return; }
+    throw new Error("Unexpected " + command);
+  });
+  const updated = vi.fn();
+  window.addEventListener("omniagent:checkout-items-changed", updated);
+  try {
+    const user = userEvent.setup();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><GitCheckoutChanges review={review} indexActions /></QueryClientProvider>);
+    const files = within(screen.getByRole("region", { name: "Changed files" }));
+    fireEvent.contextMenu(files.getByRole("button", { name: /\[temporary\]\.bin\s*Untracked/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Move untracked file to Recycle Bin…" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Move untracked file to Recycle Bin" }));
+    expect(await dialog.findByText("SHA-256 abc123")).toBeTruthy();
+    expect(dialog.getByText("File absent")).toBeTruthy();
+    expect(invoke).not.toHaveBeenCalledWith("git_discard_changes", expect.anything());
+    await user.click(dialog.getByRole("button", { name: "Move reviewed file to Recycle Bin" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(invoke).toHaveBeenCalledWith("git_discard_changes", { ...args, snapshot: "untracked-snapshot" });
+    expect(updated).toHaveBeenCalledWith(expect.objectContaining({
+      detail: expect.objectContaining({ checkoutId, operation: "recycle", completed: [{ source: clicked, directory: false, destination: null }] }),
+    }));
+    expect(screen.getByText("Moved " + clicked + " to the Recycle Bin.")).toBeTruthy();
+  } finally {
+    window.removeEventListener("omniagent:checkout-items-changed", updated);
+  }
+});

@@ -21,6 +21,7 @@ import { RunArtifactEvidence, RunOrchestrationPanel } from "@/run-orchestration"
 import { RunPlanHistory } from "@/run-plan-history";
 import { RunInspectionLayout } from "@/run-inspection-layout";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
+import { SavedRunOutputComparison } from "@/saved-attempt-comparison";
 
 const steps: Record<DeliveryStep, string> = {
   note: "Ready to plan", question: "Waiting for input", plan: "Awaiting implementation approval",
@@ -106,14 +107,15 @@ function RecordedCommandRun({ run, onClose, navigation }: {
     actions={<Button type="button" variant="ghost" onClick={onClose}>Close</Button>}
     pages={live ? undefined : [
       { id: "overview", name: "Overview", content: overview },
-      { id: "output", name: "Command output", content: <RecordedCommandOutput projectId={projectId} runId={runId} /> },
+      { id: "output", name: "Command output", content: <RecordedCommandOutput projectId={projectId} runId={runId} openActivity={navigation.openActivity} /> },
     ]}>
     {overview}
   </RunInspectionLayout>;
 }
 
-function RecordedCommandOutput({ projectId, runId }: Pick<RecordedRunProps, "projectId" | "runId">) {
+function RecordedCommandOutput({ projectId, runId, openActivity }: Pick<RecordedRunProps, "projectId" | "runId" | "openActivity">) {
   const { copy, feedback } = useContextActionFeedback();
+  const [compare, setCompare] = useState(false);
   const outputs = useQuery({
     queryKey: ["command-job-output", projectId, runId],
     queryFn: () => invoke<CommandJobOutput | null>("command_job_output", { projectId, runId }),
@@ -127,12 +129,17 @@ function RecordedCommandOutput({ projectId, runId }: Pick<RecordedRunProps, "pro
     { name: "Standard output", text: stdout },
     { name: "Standard error", text: stderr },
   ].filter(({ text }) => text);
+  const compareOutput = { label: "Compare saved attempt output…", run: () => setCompare(true) };
   return <>
-    {process && <ContextActions label="Command exit code" groups={[[{ label: "Copy exit code", run: () => copy(String(process.code)) }]]}>
+    {process && <ContextActions label="Command exit code" groups={[[compareOutput], [{ label: "Copy exit code", run: () => copy(String(process.code)) }]]}>
       <p>Exit code {process.code}</p>
     </ContextActions>}
-    {truncated && <p>Output capture is incomplete.</p>}
+    {truncated && <ContextActions label="Output capture" groups={process || streams.length ? [] : [[compareOutput]]}>
+      <p>Output capture is incomplete.</p>
+    </ContextActions>}
     {streams.map(({ name, text }) => <ContextActions key={name} label={name} groups={[[
+      compareOutput,
+    ], [
       { label: `Copy ${name.toLowerCase()}`, run: () => copy(text) },
       ...(streams.length > 1 ? [{ label: "Copy captured output", run: () => copy(
         [process && `Exit code ${process.code}`, truncated && "Output capture is incomplete.",
@@ -143,11 +150,13 @@ function RecordedCommandOutput({ projectId, runId }: Pick<RecordedRunProps, "pro
     </ContextActions>)}
     {!process && !truncated && !stdout && !stderr && <p>No output was captured.</p>}
     {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
+    {compare && <SavedRunOutputComparison projectId={projectId} runId={runId} close={() => setCompare(false)} openActivity={openActivity} />}
   </>;
 }
 
 function RecordedConversationRun({ conversationId, projectId, checkoutId, runId, focusQuestion, onClose, openActivity, openWorkspace }: RecordedRunProps) {
   const { copy, feedback, run: perform } = useContextActionFeedback();
+  const [comparedRun, setComparedRun] = useState<string>();
   const current = useQuery({
     queryKey: ["inspect-conversation-run", projectId, conversationId, runId],
     queryFn: () => invoke<[RunRecord, string]>("inspect_conversation_run", { projectId, conversationId, runId }),
@@ -197,7 +206,10 @@ function RecordedConversationRun({ conversationId, projectId, checkoutId, runId,
       { id: "input", name: "Exact input", content: <ConversationExactInput {...scope} checkoutId={run.checkoutId} /> },
       { id: "approvals", name: "Approvals", content: <><h3>Approval history</h3><ConversationApprovalEvidence {...scope} /></> },
       { id: "artifacts", name: "Artifacts", content: <>
-        <h3>Recorded output</h3>
+        <ContextActions label="Recorded output" groups={!live && Boolean(projection?.responses.items.length)
+          ? [[{ label: "Compare saved attempt output…", run: () => setComparedRun(runId) }]] : []}>
+          <h3>Recorded output</h3>
+        </ContextActions>
         <RunInspectorNavigation.Provider value={{ ...navigation, activeRunId: runId, openGitAttempt: (id) => {
           openWorkspace("git", `attempt:${id}`);
           onClose();
@@ -206,6 +218,8 @@ function RecordedConversationRun({ conversationId, projectId, checkoutId, runId,
         </RunInspectorNavigation.Provider>
         {projection && <ObservedConversationResponse evidence={projection} />}
         {projection && !projection.responses.items.length && <p>No response text recorded.</p>}
+        {comparedRun === runId && <SavedRunOutputComparison projectId={projectId} conversationId={owner} runId={runId}
+          close={() => setComparedRun(undefined)} openActivity={openActivity} />}
       </> },
     ]} />;
 }

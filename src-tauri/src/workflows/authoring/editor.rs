@@ -30,6 +30,35 @@ pub struct WorkflowCanvasEdit {
     pub(super) layout: BTreeMap<String, WorkflowNodePosition>,
     #[serde(default)]
     pub(super) update_definitions: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub(super) definition_copies: BTreeMap<String, WorkflowDefinitionCopy>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct WorkflowDefinitionCopy {
+    source_id: String,
+    revision: u32,
+}
+
+pub(super) fn copy_node_definitions(
+    next: &mut BTreeMap<String, NodeDefinition>,
+    previous: &BTreeMap<String, NodeDefinition>,
+    copies: BTreeMap<String, WorkflowDefinitionCopy>,
+) -> Result<()> {
+    for (id, copy) in copies {
+        ensure!(!previous.contains_key(&id), "Node {id} already has a saved definition");
+        let source = previous
+            .get(&copy.source_id)
+            .context("The copied node's saved definition is unavailable")?;
+        let target = next.get_mut(&id).context("The new node is unavailable")?;
+        ensure!(
+            source.kind == target.kind && source.revision == copy.revision,
+            "The copied definition for {id} changed. Duplicate it from the current draft."
+        );
+        target.clone_from(source);
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -99,9 +128,9 @@ impl DraftDocument {
             "The draft exceeds {MAX_GRAPH_BYTES} UTF-8 bytes"
         );
         let mut next = Self::from_graph(graph);
-        let (mut layout, updates) = edit.map_or_else(
-            || (previous.layout, BTreeMap::new()),
-            |edit| (edit.layout, edit.update_definitions),
+        let (mut layout, updates, copies) = edit.map_or_else(
+            || (previous.layout, BTreeMap::new(), BTreeMap::new()),
+            |edit| (edit.layout, edit.update_definitions, edit.definition_copies),
         );
         for (id, revision) in &updates {
             let current = next
@@ -129,6 +158,7 @@ impl DraftDocument {
                 current.clone_from(previous);
             }
         }
+        copy_node_definitions(&mut next.definitions, &previous.definitions, copies)?;
         layout.retain(|id, _| next.definitions.contains_key(id));
         ensure!(
             layout.values().all(|point| point.within_canvas()),
@@ -219,6 +249,7 @@ mod tests {
             Some(WorkflowCanvasEdit {
                 layout: BTreeMap::new(),
                 update_definitions: BTreeMap::from([("start".into(), revision)]),
+                definition_copies: BTreeMap::new(),
             })
         };
         let saved = DraftDocument::update("existing", decode()?, graph.clone(), None)?;
@@ -251,6 +282,33 @@ mod tests {
             DraftDocument::from_graph(graph).definitions["start"].kind,
             BuiltinNode::Start
         );
+        Ok(())
+    }
+
+    #[test]
+    fn copies_only_the_exact_saved_pin_into_a_new_node() -> Result<()> {
+        let current = builtin_registry()
+            .into_iter()
+            .find(|definition| definition.kind == BuiltinNode::Start)
+            .context("Start definition")?;
+        let mut older = current.clone();
+        older.revision -= 1;
+        older.outputs[0].name = "legacy-port".into();
+        let previous = BTreeMap::from([("source".into(), older.clone())]);
+        let mut next = BTreeMap::from([("copy".into(), current)]);
+        let requested = |revision| {
+            BTreeMap::from([(
+                "copy".into(),
+                WorkflowDefinitionCopy {
+                    source_id: "source".into(),
+                    revision,
+                },
+            )])
+        };
+        assert!(copy_node_definitions(&mut next, &previous, requested(older.revision + 1)).is_err());
+        copy_node_definitions(&mut next, &previous, requested(older.revision))?;
+        assert_eq!(next["copy"], older);
+        assert!(copy_node_definitions(&mut next, &BTreeMap::new(), requested(older.revision)).is_err());
         Ok(())
     }
 }

@@ -11,6 +11,15 @@ import { DeliveryAgent } from "@/repository-delivery-agent";
 import { RunPlanHistory } from "@/run-plan-history";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+const goToDiff = vi.hoisted(() => vi.fn());
+vi.mock("@/git-diff-view", async () => {
+  const { useEffect } = await import("react");
+  return { MonacoComparison: ({ file, layout, ready }: { file: { original: string; modified: string }; layout: string;
+    ready?: (instance: { goToDiff: typeof goToDiff } | null) => void }) => {
+    useEffect(() => { ready?.({ goToDiff }); return () => ready?.(null); }, [ready]);
+    return <div data-layout={layout}><pre aria-label="Original text">{file.original}</pre><pre aria-label="Modified text">{file.modified}</pre></div>;
+  } };
+});
 
 afterEach(() => {
   cleanup();
@@ -104,4 +113,21 @@ it("opens frozen plan versions, revision feedback, and the prior release in the 
   await user.click(revised);
   expect(screen.getByText("Revised frozen plan")).toBeTruthy();
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("repository_plan_history", { projectId, runId }));
+
+  fireEvent.contextMenu(revised);
+  await user.click(screen.getByRole("menuitem", { name: "Compare saved plans…" }));
+  const comparison = within(await screen.findByRole("dialog", { name: "Compare saved plans" }));
+  expect((await comparison.findByLabelText("Original text")).textContent).toBe("Original frozen plan");
+  expect(comparison.getByLabelText("Modified text").textContent).toBe("Revised frozen plan");
+  expect(within(comparison.getByRole("region", { name: "Base attempt provenance" })).getByText("version-one")).toBeTruthy();
+  expect(within(comparison.getByRole("region", { name: "Compared attempt provenance" })).getByText("version-two")).toBeTruthy();
+  await user.click(comparison.getByRole("button", { name: "Next change" }));
+  await user.click(comparison.getByRole("button", { name: "Previous change" }));
+  expect(goToDiff.mock.calls).toEqual([["next"], ["previous"]]);
+  await user.selectOptions(comparison.getByRole("combobox", { name: "Diff layout" }), "unified");
+  expect(comparison.getByLabelText("Original text").parentElement?.dataset.layout).toBe("unified");
+  await user.click(comparison.getByRole("button", { name: "Swap attempts" }));
+  expect((await comparison.findByLabelText("Original text")).textContent).toBe("Revised frozen plan");
+  await user.click(comparison.getByRole("button", { name: "Open compared attempt" }));
+  expect(openActivity).toHaveBeenLastCalledWith("original-planner");
 });

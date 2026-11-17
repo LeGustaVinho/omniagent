@@ -21,11 +21,22 @@ pub async fn git_discard_preview(
     checkout_id: String,
     path: String,
     hunk_id: Option<String>,
+    untracked: Option<bool>,
 ) -> Result<omniagent::repository::git_review::GitDiscardPreview, String> {
-    store
-        .git_discard_preview(checkout_id, path, hunk_id)
-        .await
-        .map_err(review_error)
+    if untracked == Some(true) {
+        if hunk_id.is_some() {
+            return Err("Select the whole untracked file.".into());
+        }
+        store
+            .git_recycle_untracked_preview(checkout_id, path)
+            .await
+            .map_err(review_error)
+    } else {
+        store
+            .git_discard_preview(checkout_id, path, hunk_id)
+            .await
+            .map_err(review_error)
+    }
 }
 
 #[tauri::command]
@@ -35,11 +46,22 @@ pub async fn git_discard_changes(
     path: String,
     hunk_id: Option<String>,
     snapshot: String,
+    untracked: Option<bool>,
 ) -> Result<(), String> {
-    store
-        .git_discard_changes(checkout_id, path, hunk_id, snapshot)
-        .await
-        .map_err(review_error)
+    if untracked == Some(true) {
+        if hunk_id.is_some() {
+            return Err("Select the whole untracked file.".into());
+        }
+        store
+            .git_recycle_untracked(checkout_id, path, snapshot)
+            .await
+            .map_err(review_error)
+    } else {
+        store
+            .git_discard_changes(checkout_id, path, hunk_id, snapshot)
+            .await
+            .map_err(review_error)
+    }
 }
 
 #[tauri::command]
@@ -104,6 +126,20 @@ pub async fn git_file_permalink(
 ) -> Result<String, String> {
     store
         .git_file_permalink(checkout_id, path, sha, lines)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_checkout_line_blame(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    line: usize,
+    editor_text: String,
+) -> Result<omniagent::repository::git_review::GitLineBlame, String> {
+    store
+        .git_checkout_line_blame(checkout_id, path, line, editor_text)
         .await
         .map_err(review_error)
 }
@@ -257,6 +293,18 @@ pub async fn set_git_path_staged(
 }
 
 #[tauri::command]
+pub async fn set_git_hunk_reviewed(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: omniagent::repository::git_review::GitHunkReviewRequest,
+) -> Result<(), String> {
+    store
+        .set_git_hunk_reviewed(checkout_id, request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn set_git_hunk_staged(
     store: State<'_, Store>,
     checkout_id: String,
@@ -291,6 +339,29 @@ pub async fn git_saved_attempts(
 ) -> Result<Vec<SavedGitAttempt>, String> {
     store
         .git_saved_attempts(project_id)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn preview_saved_git_patch(
+    store: State<'_, Store>,
+    request: omniagent::repository::git_review::SavedPatchRequest,
+) -> Result<omniagent::repository::git_review::SavedPatchPreview, String> {
+    store
+        .preview_saved_patch(request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn apply_saved_git_patch(
+    store: State<'_, Store>,
+    request: omniagent::repository::git_review::SavedPatchRequest,
+    snapshot: String,
+) -> Result<(), String> {
+    store
+        .apply_saved_patch(request, snapshot)
         .await
         .map_err(review_error)
 }

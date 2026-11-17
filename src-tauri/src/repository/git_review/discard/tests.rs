@@ -130,3 +130,105 @@ async fn discards_only_reviewed_worktree_bytes_and_keeps_staged_and_dirty_data()
     assert_eq!(fs::read(root.join(".git/index"))?, index_before);
     Ok(())
 }
+
+#[tokio::test]
+async fn guards_untracked_recycle_by_original_file_checkout_status_and_protected_draft()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("selected");
+    let other = temp.path().join("other");
+    let path = "notes/[untracked].bin";
+    let bytes = [0, 8, 1, 255];
+    let git = git_path()?;
+    for folder in [&root, &other] {
+        fs::create_dir_all(folder.join("notes"))?;
+        git_query(&git, folder, &["init", "--quiet"])?;
+        fs::write(folder.join("staged.txt"), "keep staged\n")?;
+        git_query(&git, folder, &["add", "--", "staged.txt"])?;
+        fs::write(folder.join(path), bytes)?;
+    }
+    let store = Store::open(temp.path().join("profile.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let other_checkout = register(&store, other.clone()).await?.checkout_id;
+    let index_before = fs::read(root.join(".git/index"))?;
+    let preview = store
+        .git_recycle_untracked_preview(checkout.clone(), path.into())
+        .await?;
+    assert!(matches!(preview.before, PreviewFile::Bytes { size: 4, .. }));
+    assert!(matches!(preview.after, PreviewFile::Missing));
+    assert!(
+        store
+            .git_discard_preview(checkout.clone(), path.into(), None)
+            .await
+            .is_err()
+    );
+
+    let error = store
+        .git_recycle_untracked(other_checkout, path.into(), preview.snapshot.clone())
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("no longer match"));
+    assert_eq!(fs::read(other.join(path))?, bytes);
+
+    fs::rename(root.join(path), root.join("notes/original.bin"))?;
+    fs::write(root.join(path), bytes)?;
+    let error = store
+        .git_recycle_untracked(checkout.clone(), path.into(), preview.snapshot)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("no longer match"));
+    assert_eq!(fs::read(root.join(path))?, bytes);
+
+    let preview = store
+        .git_recycle_untracked_preview(checkout.clone(), path.into())
+        .await?;
+    let owner = checkout.clone();
+    store.execute(move |db| {
+        db.execute("INSERT INTO drafts(kind,owner_id,document,payload) VALUES ('checkout_file',?1,?2,X'00')", params![owner, path])?;
+        Ok(())
+    }).await?;
+    let error = store
+        .git_recycle_untracked(checkout.clone(), path.into(), preview.snapshot.clone())
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("protected editor draft"));
+    assert_eq!(fs::read(root.join(path))?, bytes);
+    assert_eq!(fs::read(root.join(".git/index"))?, index_before);
+
+    git_query(&git, &root, &["--literal-pathspecs", "add", "--", path])?;
+    let staged_index = fs::read(root.join(".git/index"))?;
+    let error = store
+        .git_recycle_untracked(checkout, path.into(), preview.snapshot)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("no longer untracked"));
+    assert_eq!(fs::read(root.join(path))?, bytes);
+    assert_eq!(fs::read(root.join(".git/index"))?, staged_index);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an interactive Windows Recycle Bin"]
+async fn recycles_the_reviewed_original_path_without_changing_the_index() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("checkout");
+    fs::create_dir(&root)?;
+    let git = git_path()?;
+    git_query(&git, &root, &["init", "--quiet"])?;
+    fs::write(root.join("tracked.txt"), "staged fixture\n")?;
+    git_query(&git, &root, &["add", "--", "tracked.txt"])?;
+    let path = "omniagent-recycle-test.txt";
+    fs::write(root.join(path), "untracked fixture\n")?;
+    let store = Store::open(temp.path().join("profile.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let index = fs::read(root.join(".git/index"))?;
+    let preview = store
+        .git_recycle_untracked_preview(checkout.clone(), path.into())
+        .await?;
+    store
+        .git_recycle_untracked(checkout, path.into(), preview.snapshot)
+        .await?;
+    assert!(!root.join(path).exists());
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    Ok(())
+}

@@ -4,4 +4,5 @@
 .file-tree-row[data-git-ignored] { color: var(--muted-foreground); }
 .file-tree-favorites { margin-bottom: .4rem; }
 .file-tree-favorites h3 { padding: .2rem .375rem; color: var(--muted-foreground); font-size: .7rem; font-weight: 600; }
+.file-favorite-group > .file-tree { margin-left: .75rem; }
 .file-tree-favorites small { overflow: hidden; margin-left: auto; color: var(--muted-foreground); text-overflow: ellipsis; }

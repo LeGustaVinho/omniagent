@@ -146,6 +146,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/129-git-review-comments.sql"),
     include_str!("../migrations/130-workflow-delivery-attempts.sql"),
     include_str!("../migrations/131-workflow-agent-review-reuse.sql"),
+    include_str!("../migrations/132-git-reviewed-hunks.sql"),
 ];
 // Branch snapshots used some numbers for different migrations. Table names identify the schema
 // already installed, regardless of the original number stored in user_version.
@@ -157,6 +158,7 @@ const BRANCH_MIGRATIONS: &[(usize, &str)] = &[
     (129, "git_review_comments"),
     (130, "workflow_delivery_attempts"),
     (131, "workflow_agent_review_reuses"),
+    (132, "git_reviewed_hunks"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -424,7 +426,7 @@ mod tests {
 
     #[test]
     fn reconciles_context_menu_database_versions_with_the_pipeline_schema() -> Result<()> {
-        for version in [118, 119] {
+        for version in 118..=120 {
             let mut db = Connection::open_in_memory()?;
             db.pragma_update(None, "foreign_keys", "ON")?;
             migrate(&mut db, 117)?;
@@ -439,16 +441,24 @@ mod tests {
                 params!["0".repeat(64), protected],
             )?;
             db.execute_batch(MIGRATIONS[127])?;
-            if version == 119 {
+            if version >= 119 {
                 db.execute_batch(MIGRATIONS[128])?;
                 db.execute_batch("INSERT INTO git_review_comments (id, checkout_id, surface, path, payload)
                     VALUES ('comment', 'checkout', 'working', 'note.md', x'0102')")?;
+            }
+            if version >= 120 {
+                db.execute_batch(MIGRATIONS[131])?;
+                db.execute_batch(
+                    "INSERT INTO git_reviewed_hunks VALUES ('checkout', 'comparison', 'hunk');",
+                )?;
             }
             db.pragma_update(None, "user_version", version)?;
             migrate(&mut db, MIGRATIONS.len())?;
             migrate(&mut db, MIGRATIONS.len())?;
             assert!(has_table(&db, "workflow_automatic_agents")?);
             assert!(has_table(&db, "workflow_backlog_tasks")?);
+            assert!(has_table(&db, "workflow_backlog_executions")?);
+            assert!(has_table(&db, "workflow_agent_review_reuses")?);
             assert_eq!(db.query_row("SELECT count(*) FROM checkout_document_history WHERE revision_id = 'editor-saved'", [], |row| row.get::<_, i64>(0))?, 1);
             let body: Vec<u8> = db.query_row(
                 "SELECT body FROM repository_markdown_revisions WHERE checkout_id = 'checkout' AND id = 'editor-saved'",
@@ -457,7 +467,51 @@ mod tests {
             )?;
             assert_eq!(body, protected);
             let comment: Option<Vec<u8>> = db.query_row("SELECT payload FROM git_review_comments WHERE id = 'comment'", [], |row| row.get(0)).optional()?;
-            assert_eq!(comment, (version == 119).then_some(vec![1, 2]));
+            assert_eq!(comment, (version >= 119).then_some(vec![1, 2]));
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM git_reviewed_hunks WHERE hunk_id = 'hunk'", [], |row| row.get::<_, i64>(0))?,
+                if version >= 120 { 1 } else { 0 },
+            );
+            assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reconciles_pipeline_database_versions_with_the_context_menu_schema() -> Result<()> {
+        for version in 128..=129 {
+            let mut db = Connection::open_in_memory()?;
+            db.pragma_update(None, "foreign_keys", "ON")?;
+            migrate(&mut db, 127)?;
+            db.execute_batch(MIGRATIONS[129])?;
+            db.execute_batch(
+                "INSERT INTO projects (id, git_common_dir, root) VALUES ('project', 'fixture.git', 'fixture');
+                 INSERT INTO checkouts (id, project_id, git_dir, root) VALUES ('checkout', 'project', 'fixture.git', 'fixture');
+                 INSERT INTO project_tasks (project_id, id, title) VALUES ('project', 'task', 'Saved task');
+                 INSERT INTO job_pipeline_runs (id, project_id) VALUES ('run', 'project');
+                 INSERT INTO job_pipeline_nodes (pipeline_run_id, instance_id, kind) VALUES ('run', 'node', 'execution');
+                 INSERT INTO workflow_revisions VALUES ('project', 'workflow', 'revision', x'00');
+                 INSERT INTO workflow_run_pins VALUES ('run', 'project', 'workflow', 'revision');
+                 INSERT INTO workflow_node_pins (pipeline_run_id, node_instance_id, instance_revision, definition_revision, requires_plan)
+                     VALUES ('run', 'node', 'pinned', 1, 0);
+                 INSERT INTO workflow_artifacts (id, pipeline_run_id, node_instance_id, port_name, kind, payload)
+                     VALUES ('plan', 'run', 'node', 'plan', 'plan', x'01'), ('review', 'run', 'node', 'review', 'review', x'02');
+                 INSERT INTO workflow_delivery_units VALUES ('unit', 'run', 'plan', 'project', 'task', 'checkout', 1, x'00', NULL);
+                 INSERT INTO workflow_delivery_attempts VALUES ('run', 'plan', 'node', 'unit', 1, 1);",
+            )?;
+            if version == 129 {
+                db.execute_batch(MIGRATIONS[130])?;
+                db.execute_batch("INSERT INTO workflow_agent_review_reuses VALUES ('run', 'node', 'plan', 'unit', 'input', 'review', 'plan');")?;
+            }
+            db.pragma_update(None, "user_version", version)?;
+            migrate(&mut db, MIGRATIONS.len())?;
+            migrate(&mut db, MIGRATIONS.len())?;
+            assert!(has_table(&db, "checkout_document_history")?);
+            assert!(has_table(&db, "git_review_comments")?);
+            assert!(has_table(&db, "git_reviewed_hunks")?);
+            assert_eq!(db.query_row("SELECT attempt_number FROM workflow_delivery_attempts WHERE unit_id = 'unit'", [], |row| row.get::<_, i64>(0))?, 1);
+            let reuse: Option<String> = db.query_row("SELECT output_artifact_id FROM workflow_agent_review_reuses WHERE node_instance_id = 'node'", [], |row| row.get(0)).optional()?;
+            assert_eq!(reuse.as_deref(), (version == 129).then_some("review"));
             assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
         }
         Ok(())

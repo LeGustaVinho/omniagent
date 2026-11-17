@@ -9,7 +9,7 @@ use crate::{
     workflows::{NodeDefinition, WorkflowRevision, builtin_registry},
 };
 
-use super::{WorkflowCanvasEdit, WorkflowNodePosition, new_id, open, seal};
+use super::{WorkflowCanvasEdit, WorkflowNodePosition, editor::copy_node_definitions, new_id, open, seal};
 
 #[cfg(test)]
 mod authoring_acceptance;
@@ -122,7 +122,11 @@ impl PackageDocument {
         });
     }
 
-    fn edit_canvases(&mut self, canvases: BTreeMap<String, WorkflowCanvasEdit>) -> Result<()> {
+    fn edit_canvases(
+        &mut self,
+        previous: &Self,
+        canvases: BTreeMap<String, WorkflowCanvasEdit>,
+    ) -> Result<()> {
         let registry = builtin_registry();
         for (key, edit) in canvases {
             ensure!(
@@ -137,6 +141,17 @@ impl PackageDocument {
                 .definitions
                 .get_mut(&key)
                 .context("The graph definitions are unavailable")?;
+            if !edit.definition_copies.is_empty() {
+                let old = previous
+                    .definitions
+                    .get(&key)
+                    .context("The source graph has no saved definitions")?;
+                ensure!(
+                    edit.definition_copies.keys().all(|id| !edit.update_definitions.contains_key(id)),
+                    "Choose one version for each new node"
+                );
+                copy_node_definitions(pins, old, edit.definition_copies)?;
+            }
             for (id, revision) in edit.update_definitions {
                 let pinned = pins
                     .get_mut(&id)
@@ -276,7 +291,7 @@ impl Store {
             }
             let (_, previous) = read_document(&tx, &draft, &expected_revision)?;
             let mut document = PackageDocument::capture(&tx, &project, package, Some(&previous))?;
-            document.edit_canvases(canvases)?;
+            document.edit_canvases(&previous, canvases)?;
             if previous.package != document.package
                 || previous.layouts != document.layouts
                 || previous.definitions != document.definitions
