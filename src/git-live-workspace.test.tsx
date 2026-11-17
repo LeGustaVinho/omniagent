@@ -445,6 +445,39 @@ it("uses the clicked historical commit as the exact starting revision of a new w
   });
 });
 
+it("creates a worktree from a clicked commit in the selected history ref rather than checkout HEAD", async () => {
+  const active = "a".repeat(40);
+  const topic = "b".repeat(40);
+  const earlier = "c".repeat(40);
+  const reference = "refs/heads/feature";
+  const details = { author: "Person", committedAt: "2026-11-17T12:00:00Z" };
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: (payload as { checkoutId: string }).checkoutId, worktrees, root: checkout.checkoutRoot, managed: false, changes: [],
+      revision: { ...originalRevision, head: active }, branches: branches.map((branch) => ({ ...branch, sha: branch.reference === reference ? topic : active })),
+    };
+    if (command === "git_checkout_history") return (payload as { branch: string | null }).branch === reference
+      ? [{ ...details, sha: topic, subject: "Topic tip" }, { ...details, sha: earlier, subject: "Past topic commit" }]
+      : [{ ...details, sha: active, subject: "Main tip" }];
+    if (command === "git_checkout_commit_details") return { message: "Commit details", parents: [], parent: null, files: [] };
+    if (command === "create_git_worktree") return { ...checkout, checkoutId: "topic-worktree" };
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  openGit({ target: "history" });
+  await user.selectOptions(await screen.findByLabelText("History branch"), reference);
+  fireEvent.contextMenu(await screen.findByRole("button", { name: /^Past topic commit/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Create worktree from this commit…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "New worktree" }));
+  expect(dialog.getByRole<HTMLSelectElement>("combobox", { name: "Base revision" }).value).toBe(earlier);
+  await user.type(dialog.getByLabelText("Branch", { exact: true }), "topic-review");
+  await user.click(dialog.getByRole("button", { name: "Create worktree" }));
+  expect(invoke).toHaveBeenCalledWith("create_git_worktree", {
+    projectId: checkout.projectId, checkoutId: checkout.checkoutId,
+    request: { branch: "topic-review", existing: false, baseReference: earlier, expectedHead: earlier, path: null, historyReference: reference },
+  });
+});
+
 it("opens the selected commit and compares the clicked file against the chosen merge parent in its checkout", async () => {
   const path = "notes/new.md";
   const previousPath = "notes/old.md";

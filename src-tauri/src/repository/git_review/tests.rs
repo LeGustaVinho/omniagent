@@ -1498,6 +1498,7 @@ async fn creates_and_registers_manual_worktrees_without_touching_the_source_or_o
         branch: branch.into(),
         existing: false,
         base_reference: Some(first.clone()),
+        history_reference: None,
         expected_head: first.clone(),
         path: Some(path.to_owned()),
     };
@@ -1533,6 +1534,7 @@ async fn creates_and_registers_manual_worktrees_without_touching_the_source_or_o
         branch: "existing".into(),
         existing: true,
         base_reference: None,
+        history_reference: None,
         expected_head: head.clone(),
         path: None,
     })
@@ -1566,6 +1568,67 @@ async fn creates_and_registers_manual_worktrees_without_touching_the_source_or_o
             &["show-ref", "--verify", "refs/heads/failed-registration"]
         )
         .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn creates_manual_worktrees_from_commits_in_the_selected_divergent_history() -> Result<()> {
+    use crate::repository::{ManualGitWorktree, create_git_worktree};
+
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("divergent worktree source");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    fs::write(root.join("README.md"), "common ancestor\n")?;
+    let initial = commit_fixture(&root, "Common revision")?;
+    fs::write(root.join("README.md"), "active main branch\n")?;
+    let main = commit_fixture(&root, "Main revision")?;
+    git(&root, &["switch", "--quiet", "-c", "topic", &initial])?;
+    fs::write(root.join("README.md"), "clicked topic revision\n")?;
+    let clicked = commit_fixture(&root, "Earlier topic revision")?;
+    fs::write(root.join("README.md"), "current topic tip\n")?;
+    let tip = commit_fixture(&root, "Latest topic revision")?;
+    git(&root, &["switch", "--quiet", "main"])?;
+    fs::write(root.join("README.md"), "unsaved main edit\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+    let destination = temporary.path().join("selected commit worktree");
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let source = register(&store, root.clone()).await?;
+    let make = |reference: Option<&str>, expected: &str| {
+        create_git_worktree(
+            &store,
+            temporary.path().join("worktrees"),
+            source.project_id.clone(),
+            source.checkout_id.clone(),
+            ManualGitWorktree {
+                branch: "selected-topic-commit".into(),
+                existing: false,
+                base_reference: Some(clicked.clone()),
+                history_reference: reference.map(str::to_owned),
+                expected_head: expected.into(),
+                path: Some(destination.clone()),
+            },
+        )
+    };
+    for history in [None, Some("refs/heads/main"), Some("refs/heads/missing")] {
+        assert!(make(history, &clicked).await.is_err());
+    }
+    assert!(make(Some("refs/heads/topic"), &tip).await.is_err());
+    assert!(!destination.exists());
+    let created = make(Some("refs/heads/topic"), &clicked).await?;
+    assert_eq!(created.project_id, source.project_id);
+    assert_eq!(git(&destination, &["rev-parse", "HEAD"])?, clicked);
+    assert_eq!(
+        fs::read_to_string(destination.join("README.md"))?,
+        "clicked topic revision\n"
+    );
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, main);
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(
+        fs::read_to_string(root.join("README.md"))?,
+        "unsaved main edit\n"
     );
     Ok(())
 }

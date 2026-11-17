@@ -22,7 +22,7 @@ type CommitFile = { path: string; previousPath: string | null; status: string };
 type CommitDetails = { message: string; parents: string[]; parent: string | null; files: CommitFile[]; comparisonUnavailable?: string | null };
 type CommitReference = { id: string; label: string; sha: string };
 type CommitComparison = { checkoutId: string; base: CommitReference; targets: CommitReference[]; initialTarget?: string };
-type WorktreeBase = { reference: string; label: string; expectedHead: string };
+type WorktreeBase = { reference: string; label: string; expectedHead: string; historyReference?: string };
 
 const commitChangeLabels: Record<string, string> = { A: "Added", C: "Copied", D: "Deleted", M: "Modified", R: "Renamed", T: "Type changed" };
 
@@ -148,7 +148,7 @@ function CreateGitWorktree({ projectId, review, startingPoint, select, close }: 
     ...commits.map(({ sha, subject }) => ({ value: sha, label: `${sha.slice(0, 12)} · ${subject}` })),
   ];
   const mutation = useMutation({
-    mutationFn: (request: { branch: string; existing: boolean; baseReference: string | null; expectedHead: string; path: string | null }) =>
+    mutationFn: (request: { branch: string; existing: boolean; baseReference: string | null; expectedHead: string; path: string | null; historyReference?: string }) =>
       invoke<ProjectCheckout>("create_git_worktree", { projectId, checkoutId, request }),
     onSuccess: (checkout) => {
       void client.invalidateQueries({ queryKey: ["git-review"] });
@@ -178,9 +178,11 @@ function CreateGitWorktree({ projectId, review, startingPoint, select, close }: 
     }}
     create={(draft) => {
       const head = expectedHead(draft);
+      const historyReference = !draft.existing && startingPoint && draft.base === startingPoint.reference ? startingPoint.historyReference : undefined;
       if (head) mutation.mutate({
         branch: draft.branch, existing: draft.existing, baseReference: draft.existing || !draft.base ? null : draft.base,
         expectedHead: head, path: draft.path || null,
+        ...(historyReference ? { historyReference } : {}),
       });
     }}
   />;
@@ -349,6 +351,7 @@ function CommitHistory({ review, createFrom, createBranch }: {
             { label: "Create branch from this commit…", run: () => createBranch(revisionOf(commit)) },
             { label: "Create worktree from this commit…", run: () => createFrom({
               reference: commit.sha, expectedHead: commit.sha, label: `${commit.sha.slice(0, 12)} · ${commit.subject || "Commit"}`,
+              historyReference: branchRef?.reference,
             }) },
           ], [
             { label: "Copy commit SHA", run: () => copy(commit.sha, "Copied commit SHA") },
