@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::workflows::{
-    BuiltinNode, CommandOutputFormat, Endpoint, NodeConfiguration, NodeDefinition, WorkflowGraph,
-    role_templates::ConversationTemplate,
+    ArtifactKind, BuiltinNode, CommandOutputFormat, Endpoint, NodeConfiguration, NodeDefinition,
+    WorkflowDefinition, WorkflowGraph, role_templates::ConversationTemplate,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -117,6 +117,9 @@ pub enum PackageArtifactBody {
         #[serde(default)]
         outputs: BTreeMap<String, Endpoint>,
     },
+    Prompt {
+        prompt: PromptCard,
+    },
     Command {
         binding: PackageCommandBinding,
         arguments: Vec<String>,
@@ -137,11 +140,62 @@ impl PackageArtifactBody {
             Self::Pipeline { .. } => PackageArtifactKind::Pipeline,
             Self::Role { .. } => PackageArtifactKind::Role,
             Self::Preset { .. } => PackageArtifactKind::Preset,
-            Self::Subflow { .. } => PackageArtifactKind::Subflow,
+            Self::Subflow { .. } | Self::Prompt { .. } => PackageArtifactKind::Subflow,
             Self::Command { .. } => PackageArtifactKind::Command,
             Self::McpTool { .. } => PackageArtifactKind::McpTool,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptCard {
+    pub text: String,
+    pub executor: BuiltinNode,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, PromptInput>,
+    #[serde(default)]
+    pub outputs: BTreeMap<String, PromptOutput>,
+    #[serde(default)]
+    pub routes: Vec<String>,
+    #[serde(default)]
+    pub delegates: Vec<PromptDelegate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<NodeConfiguration>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptInput {
+    pub kind: ArtifactKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptOutput {
+    pub kind: ArtifactKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptDelegate {
+    pub alias: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptExpansion {
+    pub workflow: WorkflowDefinition,
+    pub inputs: BTreeMap<String, Endpoint>,
+    pub outputs: BTreeMap<String, Endpoint>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +256,8 @@ pub struct PublishedPackageArtifact {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub layout: BTreeMap<String, super::WorkflowNodePosition>,
     pub blockers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_expansion: Option<PromptExpansion>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -256,6 +312,8 @@ pub struct WorkflowPackageDraft {
 pub struct WorkflowPackageCatalogEntry {
     pub version: PackageArtifactVersion,
     pub name: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub prompt: bool,
     pub blockers: Vec<String>,
 }
 

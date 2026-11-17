@@ -36,6 +36,7 @@ mod operator;
 mod plan_revision;
 #[cfg(test)]
 mod planning_integration;
+pub(crate) mod prompt;
 mod registry;
 mod repetition;
 pub mod role_templates;
@@ -226,12 +227,39 @@ fn compile_resolved_graph<'definition>(
             "invalid configuration for node {}",
             instance.id
         );
+        if let NodeConfiguration::PromptOutcome(config) = &instance.configuration {
+            ensure!(
+                registry::prompt_outcome_matches(config, definition),
+                "invalid Prompt output ports on node {}",
+                instance.id
+            );
+        }
         let revision = digest(&serde_json::to_vec(&(&instance, definition))?);
         let pinned = PinnedNode {
             instance,
             revision,
             definition: definition.clone(),
         };
+        if let NodeConfiguration::AgentRole { requirements, .. } = &pinned.instance.configuration
+            && requirements.prompt_delegate
+        {
+            ensure!(
+                automation::prompt_delegate(&pinned),
+                "Prompt delegates must use a read-only native agent stage"
+            );
+        }
+        if matches!(&pinned.instance.configuration, NodeConfiguration::CandidateAcceptance(config)
+            if config.review_mode == candidate_acceptance::CandidateReviewMode::Selected)
+        {
+            ensure!(
+                pinned
+                    .definition
+                    .inputs
+                    .iter()
+                    .any(|port| port.name == "selected_reviews"),
+                "Use the current candidate acceptance node for selected Prompt reviews"
+            );
+        }
         stage_goal::StageGoalPin::for_stage(&pinned)?;
         stage_plan::StagePlanConfiguration::for_stage(&pinned)?;
         nodes.push(pinned);
@@ -390,9 +418,13 @@ fn compile_resolved_graph<'definition>(
                     "evidence"
                 ) | (BuiltinNode::Agent, "comparison")
                     | (
-                        BuiltinNode::Implement | BuiltinNode::ReviewCandidate,
+                        BuiltinNode::Implement
+                            | BuiltinNode::ReviewCandidate
+                            | BuiltinNode::ReviewDiffCandidate
+                            | BuiltinNode::ReviewPlan,
                         "brief"
                     )
+                    | (BuiltinNode::PromptOutcome, "evidence")
                     | (BuiltinNode::OpenOrUpdatePullRequest, "risk")
                     | (BuiltinNode::MergePullRequest, "approval")
                     | (BuiltinNode::MaterializeBacklog, "design" | "strategy")
@@ -443,6 +475,12 @@ fn compile_resolved_graph<'definition>(
                         node.instance.configuration,
                         NodeConfiguration::CandidateAcceptance(_)
                     ))
+                }
+                (_, "selected_reviews") if node.instance.kind == BuiltinNode::AcceptCandidate => {
+                    Some(
+                        matches!(&node.instance.configuration, NodeConfiguration::CandidateAcceptance(config)
+                        if config.review_mode == candidate_acceptance::CandidateReviewMode::Selected),
+                    )
                 }
                 _ => None,
             };

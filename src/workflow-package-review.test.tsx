@@ -49,6 +49,7 @@ it("reviews an exact prior package revision and simulates the chosen member with
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "Review changes and simulate" }));
   await user.selectOptions(await screen.findByRole("combobox", { name: "Review saved revision" }), await screen.findByRole("option", { name: "older" }));
+  await user.click(screen.getByText("Changes and dependencies"));
   expect(await screen.findByText(member.requirements[0]!)).toBeTruthy();
   await user.click(screen.getByText("Graph changes (1)"));
   expect(screen.getByText("/body/graph/nodes/check")).toBeTruthy();
@@ -65,6 +66,7 @@ it("reviews an exact prior package revision and simulates the chosen member with
   expect(invoke).toHaveBeenCalledWith("simulate_workflow_package_revision", { ...request, memberKey: "pipeline",
     scenario: { inputs: { document: { relativePath: "sample.md" }, inputs: { maxFiles: 3, includeDiff: false } }, outcomes } });
   const trace = within(await screen.findByRole("region", { name: "Simulation trace" }));
+  await user.click(trace.getByText(/Simulated subflows/));
   await user.click(trace.getByText(/Reusable checker/));
   expect(trace.getByText(reference.revision)).toBeTruthy();
   expect(trace.getByText("Waiting for sample approval.")).toBeTruthy();

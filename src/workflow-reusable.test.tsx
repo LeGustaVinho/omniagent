@@ -167,7 +167,7 @@ it("adds pinned reusable nodes, saves an editable override, and opens a child wi
   mount(<WorkflowPackageEditor draftId="draft" checkout={exampleCheckout} simulation={null}
     startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />);
   const user = userEvent.setup();
-  await user.click(await screen.findByText("Add a reusable node"));
+  await user.click(await screen.findByRole("button", { name: "Add a reusable node" }));
   const pick = screen.getByLabelText("Published reusable node");
   await user.selectOptions(pick, await screen.findByRole("option", { name: /Test preset ·/ }));
   await user.click(screen.getByRole("button", { name: "Add pinned node" }));
@@ -185,7 +185,8 @@ it("adds pinned reusable nodes, saves an editable override, and opens a child wi
   expect(screen.queryByRole("button", { name: `Select graph node ${pinnedNode}-2` })).toBeNull();
   await user.click(screen.getByRole("button", { name: "Redo graph edit" }));
   expect(screen.getByRole("button", { name: `Select graph node ${pinnedNode}-2` })).toBeTruthy();
-  await user.selectOptions(pick, screen.getByRole("option", { name: /Review subflow ·/ }));
+  await user.click(screen.getByRole("button", { name: "Add a reusable node" }));
+  await user.selectOptions(screen.getByLabelText("Published reusable node"), screen.getByRole("option", { name: /Review subflow ·/ }));
   await user.click(screen.getByRole("button", { name: "Add pinned node" }));
   await user.selectOptions(inspect, await within(inspect).findByRole("option", { name: /Review subflow · reusable/ }));
   await user.click(within(parent).getByRole("button", { name: "Open pinned subflow" }));

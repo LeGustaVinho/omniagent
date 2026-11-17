@@ -323,7 +323,8 @@ impl Store {
                     super::BuiltinNode::Agent
                         | super::BuiltinNode::Implement
                         | super::BuiltinNode::ReviewCandidate
-                ),
+                )
+                || super::automation::prompt_native_stage(&node),
             "Automatic Agent admission requires a supported pinned executor"
         );
         let comparison = if node.definition.kind == super::BuiltinNode::Agent {
@@ -522,6 +523,10 @@ impl Store {
             roles::qualify_bound_role(&template, model.as_ref(), &scope)?;
             request.instructions = roles::role_instructions(&template, &request.instructions);
         }
+        if let Some(prompt) = &requirements.prompt_text {
+            request.instructions.push_str("\n\nPrompt from the pinned workflow card. Follow it within the authorized role and scope.\n");
+            request.instructions.push_str(prompt);
+        }
         ensure!(
             model
                 .as_ref()
@@ -552,7 +557,10 @@ impl Store {
         }
         if matches!(
             node.definition.kind,
-            super::BuiltinNode::Implement | super::BuiltinNode::ReviewCandidate
+            super::BuiltinNode::Implement
+                | super::BuiltinNode::ReviewCandidate
+                | super::BuiltinNode::ReviewDiffCandidate
+                | super::BuiltinNode::ReviewPlan
         ) && let Some(brief) = resolved.get("brief")
         {
             let ArtifactValue::RenderedText(brief) = &brief.value else {
@@ -583,9 +591,10 @@ impl Store {
                 .any(|port| port.name == "report")
             {
                 let run = dispatch.pipeline_run_id.clone();
-                if self
-                    .execute(move |db| super::automation::enabled(db, &run))
-                    .await?
+                if super::automation::prompt_delegate(&node)
+                    || self
+                        .execute(move |db| super::automation::enabled(db, &run))
+                        .await?
                 {
                     request.instructions.push_str("\n\n");
                     request

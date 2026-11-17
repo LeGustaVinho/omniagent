@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Key, remote } from "webdriverio";
 
-import { verifyAuditFactory, verifyVisualPipelineBuilder } from "./visual-pipeline-builder.mjs";
+import { verifyAuditFactory, verifyVisualPipelineBuilder, verifyVisualPromptBuilder } from "./visual-pipeline-builder.mjs";
 
 const fixtureIdentifier = "io.github.legustavinho.omniagent.desktop-tests";
 const packagedOrigin = "http://tauri.localhost";
@@ -2017,6 +2017,28 @@ test("builds, simulates and executes a real pipeline visually", { timeout: 180_0
         return browser;
       },
     });
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("authors, simulates and runs a pipeline of Prompt cards on Windows", { timeout: 180_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Prompt builder checkout");
+  git(scratch, "init", "-q", repo);
+  await writeFile(join(repo, "README.md"), "# Prompt Builder test\n");
+  git(repo, "add", "README.md");
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Prompt Builder fixture");
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    await invoke(browser, "set_cli_executable", { provider: "codex", executable: application });
+    await verifyVisualPromptBuilder({ browser, checkout, invoke, capture });
   } finally {
     await browser?.deleteSession().catch(() => undefined);
     driver.kill();

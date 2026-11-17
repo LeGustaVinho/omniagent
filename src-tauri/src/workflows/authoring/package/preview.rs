@@ -1,8 +1,8 @@
 use serde_json::{Value, json};
 
 use crate::workflows::{
-    BuiltinNode, NodeConfiguration, PortType, WorkflowDefinition, WorkflowStartSchema,
-    agile_nodes::FindWorkResultMode, command::validate_command_binding,
+    ArtifactKind, BuiltinNode, NodeConfiguration, PortType, WorkflowDefinition,
+    WorkflowStartSchema, agile_nodes::FindWorkResultMode, command::validate_command_binding,
     mcp_tools::validate_mcp_binding,
 };
 
@@ -45,6 +45,16 @@ struct SampleNode {
     outputs: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     failure_ports: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt: Option<PromptSample>,
+}
+
+#[derive(Serialize)]
+struct PromptSample {
+    title: String,
+    routes: Vec<String>,
+    delegates: Vec<PromptDelegate>,
+    outputs: BTreeMap<String, ArtifactKind>,
 }
 
 #[derive(Serialize)]
@@ -188,6 +198,7 @@ impl<'a> ReviewCatalog<'a> {
                     .clone(),
                 layout: self.document.layouts.get(key).cloned().unwrap_or_default(),
                 blockers: Vec::new(),
+                prompt_expansion: None,
             }));
         }
         publish::load_published(self.db, self.project, version)
@@ -198,15 +209,19 @@ impl<'a> ReviewCatalog<'a> {
         member: &PackageMember,
         requirements: &mut Vec<String>,
     ) -> Result<(WorkflowDefinition, BTreeMap<String, NodeDefinition>)> {
-        let (graph, interface) = match &member.body {
-            PackageArtifactBody::Pipeline { graph } => (graph, None),
-            PackageArtifactBody::Subflow {
-                graph,
-                inputs,
-                outputs,
-            } => (graph, Some((inputs.clone(), outputs.clone()))),
-            _ => anyhow::bail!("Choose a pipeline or subflow to simulate a graph"),
-        };
+        let (definition, pins, _) = self.compile_with_exports(member, requirements)?;
+        Ok((definition, pins))
+    }
+
+    pub(super) fn compile_with_exports(
+        &self,
+        member: &PackageMember,
+        requirements: &mut Vec<String>,
+    ) -> Result<(
+        WorkflowDefinition,
+        BTreeMap<String, NodeDefinition>,
+        Option<BTreeMap<String, crate::workflows::Endpoint>>,
+    )> {
         let artifact = self
             .load(&self.draft_version(member))?
             .context("The draft graph is unavailable")?;
@@ -235,6 +250,35 @@ impl<'a> ReviewCatalog<'a> {
                 }
             }
         }
+        if let PackageArtifactBody::Prompt { prompt } = &member.body {
+            let expanded = publish::compile_prompt_graph(
+                self.db,
+                self.project,
+                &artifact.version.id,
+                &member.name,
+                prompt,
+                &dependencies,
+                requirements,
+                &|version| self.load(version),
+                false,
+            )?;
+            let definitions = expanded
+                .workflow
+                .nodes
+                .iter()
+                .map(|node| (node.instance.id.clone(), node.definition.clone()))
+                .collect();
+            return Ok((expanded.workflow, definitions, Some(expanded.outputs)));
+        }
+        let (graph, interface) = match &member.body {
+            PackageArtifactBody::Pipeline { graph } => (graph, None),
+            PackageArtifactBody::Subflow {
+                graph,
+                inputs,
+                outputs,
+            } => (graph, Some((inputs.clone(), outputs.clone()))),
+            _ => anyhow::bail!("Choose a pipeline or subflow to simulate a graph"),
+        };
         if member.destination == PackageDestination::Library {
             for node in &graph.nodes {
                 if let NodeConfiguration::McpTool(tool) = &node.configuration {
@@ -325,7 +369,7 @@ impl<'a> ReviewCatalog<'a> {
                 ));
             }
         }
-        Ok((definition, authoring_definitions))
+        Ok((definition, authoring_definitions, None))
     }
 }
 
@@ -435,6 +479,7 @@ fn preview_member(
             }
         }
         PackageArtifactBody::Subflow { inputs, .. } => inputs.keys().cloned().collect(),
+        PackageArtifactBody::Prompt { prompt } => prompt.inputs.keys().cloned().collect(),
         PackageArtifactBody::McpTool { input_schema, .. } => input_schema
             .get("properties")
             .and_then(Value::as_object)
@@ -451,14 +496,16 @@ fn preview_member(
         .unwrap_or_default();
     let mut start_schema = None;
     let sample_nodes = match &member.body {
-        PackageArtifactBody::Pipeline { .. } | PackageArtifactBody::Subflow { .. } => {
-            match catalog.compile(member, &mut requirements) {
-                Ok((graph, definitions)) => {
-                    if matches!(member.body, PackageArtifactBody::Pipeline { .. }) {
-                        start_schema = WorkflowStartSchema::for_definition(&graph);
-                    }
-                    graph_definitions = definitions;
-                    Some(
+        PackageArtifactBody::Pipeline { .. }
+        | PackageArtifactBody::Subflow { .. }
+        | PackageArtifactBody::Prompt { .. } => match catalog.compile(member, &mut requirements) {
+            Ok((graph, definitions)) => {
+                if matches!(member.body, PackageArtifactBody::Pipeline { .. }) {
+                    start_schema = WorkflowStartSchema::for_definition(&graph);
+                }
+                graph_definitions = definitions;
+                let mut prompts = prompt_samples(&graph);
+                Some(
                         graph
                             .nodes
                             .into_iter()
@@ -467,6 +514,7 @@ fn preview_member(
                                 let single_work = matches!(&node.instance.configuration,
                                     NodeConfiguration::FindWork { query } if query.result == FindWorkResultMode::Single);
                                 SampleNode {
+                                prompt: prompts.remove(&node.instance.id),
                                 node_id: node.instance.id,
                                 title: node.definition.title,
                                 failure_ports: node.definition.outputs.iter()
@@ -486,13 +534,12 @@ fn preview_member(
                             })
                             .collect(),
                     )
-                }
-                Err(error) => {
-                    diagnostics.push(format!("{error:#}"));
-                    None
-                }
             }
-        }
+            Err(error) => {
+                diagnostics.push(format!("{error:#}"));
+                None
+            }
+        },
         PackageArtifactBody::McpTool { binding, .. } => {
             requirements.push(format!("Bind local MCP server {binding} for execution."));
             Some(single_sample(member))
@@ -526,12 +573,65 @@ fn preview_member(
     })
 }
 
+fn prompt_samples(graph: &WorkflowDefinition) -> BTreeMap<String, PromptSample> {
+    let stages: BTreeMap<_, _> = graph
+        .nodes
+        .iter()
+        .map(|node| (node.instance.id.as_str(), &node.instance.configuration))
+        .collect();
+    let names: BTreeMap<_, _> = graph
+        .subflows
+        .iter()
+        .map(|scope| (scope.path.as_str(), scope.name.as_str()))
+        .collect();
+    graph
+        .wires
+        .iter()
+        .filter_map(|wire| {
+            if wire.from.port != "response" || wire.to.port != "response" {
+                return None;
+            }
+            let NodeConfiguration::PromptDecision(config) = stages.get(wire.to.node.as_str())?
+            else {
+                return None;
+            };
+            let prefix = wire.to.node.strip_suffix("decision")?;
+            let outcome = format!("{prefix}outcome");
+            let NodeConfiguration::PromptOutcome(outcome) = stages.get(outcome.as_str())? else {
+                return None;
+            };
+            let title = prefix
+                .strip_suffix("::")
+                .and_then(|path| names.get(path))
+                .copied()
+                .unwrap_or(&graph.name);
+            Some((
+                wire.from.node.clone(),
+                PromptSample {
+                    title: title.to_owned(),
+                    routes: config.routes.clone(),
+                    delegates: config
+                        .delegates
+                        .iter()
+                        .map(|(alias, required)| PromptDelegate {
+                            alias: alias.clone(),
+                            required: *required,
+                        })
+                        .collect(),
+                    outputs: outcome.outputs.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
 fn single_sample(member: &PackageMember) -> Vec<SampleNode> {
     vec![SampleNode {
         node_id: member.key.clone(),
         title: member.name.clone(),
         outputs: vec!["result".into()],
         failure_ports: vec![],
+        prompt: None,
     }]
 }
 

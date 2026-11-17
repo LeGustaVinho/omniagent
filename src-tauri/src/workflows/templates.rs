@@ -15,6 +15,7 @@ use super::{
     builtin_delivery_graph,
 };
 
+mod adaptive;
 pub mod diff;
 mod repair;
 mod super_pipeline;
@@ -33,6 +34,13 @@ pub enum WorkflowFactoryTemplate {
     SuperAiDevelopmentPlanning,
     SuperAiDevelopmentDelivery,
     SuperAiDevelopmentAudit,
+    TaskDeliveryAdaptive,
+    ReviewDiffAdaptive,
+    FixFailedChecksAdaptive,
+    DeliveryLibraryAdaptive,
+    SuperAiDevelopmentPlanningAdaptive,
+    SuperAiDevelopmentDeliveryAdaptive,
+    SuperAiDevelopmentAuditAdaptive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -45,7 +53,7 @@ pub struct WorkflowFactoryEntry {
 }
 
 pub fn workflow_factory_templates() -> Vec<WorkflowFactoryEntry> {
-    vec![
+    let mut entries = vec![
         WorkflowFactoryEntry {
             id: WorkflowFactoryTemplate::TaskDelivery,
             name: "Task delivery",
@@ -118,7 +126,9 @@ pub fn workflow_factory_templates() -> Vec<WorkflowFactoryEntry> {
                 super_pipeline::AUDIT_ROUND,
             ],
         },
-    ]
+    ];
+    entries.extend(adaptive::catalog());
+    entries
 }
 
 impl Store {
@@ -146,6 +156,7 @@ impl Store {
             WorkflowFactoryTemplate::SuperAiDevelopmentAudit => {
                 super_pipeline::package(super_pipeline::Scope::Audit)?
             }
+            adaptive => adaptive::package(adaptive)?,
         };
         self.create_workflow_package(project, None, package).await
     }

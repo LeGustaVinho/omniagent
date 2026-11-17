@@ -435,6 +435,8 @@ fn main() {
             workflow_ipc::authoring::duplicate_workflow_template_draft,
             workflow_ipc::authoring::save_workflow_package,
             workflow_ipc::authoring::request_workflow_package_changes,
+            workflow_ipc::authoring::request_prompt_contract_suggestion,
+            workflow_ipc::authoring::prompt_contract_suggestion,
             workflow_ipc::authoring::start_workflow_package_authoring,
             workflow_ipc::authoring::start_workflow_editor_authoring,
             workflow_ipc::authoring::publish_reviewed_workflow_package,

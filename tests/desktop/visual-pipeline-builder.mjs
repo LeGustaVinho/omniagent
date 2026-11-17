@@ -247,8 +247,8 @@ async function verifyResponsiveView(browser, invoke, capture, emulateDisplay, { 
 }
 
 async function simulateSavedRevision(browser, saved, markdownName) {
+  await click(browser.$("button=Review changes and simulate"));
   const review = browser.$('[aria-label="Review workflow package"]');
-  await click(review.$("button=Review changes and simulate"));
   const samplePath = review.$(".//label[normalize-space(.)='Sample Markdown path']/input");
   await replaceText(browser, samplePath, markdownName);
   await click(review.$("button=Simulate"));
@@ -493,6 +493,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   assert.deepEqual(await listJobs(), previousJobs);
   assert.equal((await invoke(browser, "inspect_workflow_package", draftScope)).publication, null);
   await capture?.(browser, "visual-pipeline-simulated");
+  await click(browser.$('button[aria-label="Close review workflow package"]'));
 
   await click(browser.$("button=Review package publication"));
   const publish = browser.$('[role="dialog"]');
@@ -702,6 +703,179 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   return browser;
 }
 
+export async function verifyVisualPromptBuilder({ browser, checkout, invoke, capture }) {
+  const { projectId, checkoutId } = checkout;
+  const title = "Prompt delivery " + randomUUID().slice(0, 8);
+  const roles = (await invoke(browser, "conversation_models", { provider: "codex" }))
+    .filter(({ option }) => option.selection.modelId === "desktop-fixture" && option.selectable);
+  assert.equal(roles.length, 1, "The test needs the fixture Role model");
+  const fixture = roles[0].option;
+  const { id: draftId, revision: initialRevision } = await invoke(browser, "create_workflow_package", {
+    projectId, conversationId: null, package: {
+      name: title,
+      members: [
+        { key: "pipeline", name: title, body: { kind: "pipeline", graph: {
+          name: title, nodes: [{ id: "start", kind: "typed_start", configuration: { kind: "typed_start", fields: [] } }], wires: [],
+        } } },
+        { key: "fixture-role", name: "Desktop analyst", body: { kind: "role", template: {
+          name: "Desktop analyst", role: "pipeline", model: fixture.selection, effort: null,
+          instructions: "Read the supplied test inputs.", toolScope: "read_only",
+          completionContract: "Return the requested result.", reviewPolicy: "independent",
+        } } },
+      ],
+    },
+  });
+  const draftScope = { projectId, draftId };
+  await setWindow(browser, invoke, 1440, 900);
+  await openBuilder(browser);
+  await click(browser.$(`.//li[.//strong[normalize-space(.)='${title}']]//button[normalize-space(.)='Open package']`));
+  const editor = browser.$(builder);
+  const inspector = editor.$('[aria-label="Node configuration"]');
+  const promptSettings = inspector.$('[aria-label="Prompt settings"]');
+  const addPrompt = async () => {
+    await click(editor.$("button=Add node"));
+    await pressEnter(browser, `${builder} button[aria-label="Add Prompt"]`);
+    await promptSettings.waitForDisplayed({ timeout });
+    await select(promptSettings, "Role revision", JSON.stringify(["draft", "fixture-role"]));
+  };
+  await addPrompt();
+  await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Card title']/input"), "Evaluate changes");
+  await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Prompt']/textarea"), "Evaluate the desktop prompt fixture.");
+  await click(promptSettings.$("summary*=Inputs and outputs"));
+  await click(promptSettings.$("button=Suggest with AI"));
+  const suggestion = browser.$('[role="dialog"].workflow-builder-dialog');
+  await click(suggestion.$('button[aria-label="Suggestion model · Choose model"]'));
+  await click(browser.$(`.model-picker-menu [role="menuitemradio"][aria-label=${JSON.stringify(fixture.name)}]`));
+  await click(suggestion.$("button=Request suggestions"));
+  await textIsVisible(browser, suggestion.$('[aria-label="Proposed Prompt contract"]'), "review, deliver");
+  await click(suggestion.$("button=Apply proposed contract"));
+  await suggestion.waitForDisplayed({ timeout, reverse: true });
+
+  await addPrompt();
+  await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Card title']/input"), "Read summary");
+  await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Prompt']/textarea"), "Read the desktop prompt fixture summary.");
+  await click(promptSettings.$("summary*=Inputs and outputs"));
+  await click(promptSettings.$("button=Add input"));
+  await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Input 1 name']/input"), "summary");
+  await browser.keys("Enter");
+  await select(promptSettings, "Type for summary", "rendered_text");
+  await click(promptSettings.$("summary*=Inputs and outputs"));
+
+  const first = makeWire("start", "start", "prompt", "ready");
+  const reviewed = makeWire("prompt", "review", "prompt-2", "ready");
+  const data = makeWire("prompt", "summary", "prompt-2", "summary");
+  await connectByKeyboard(browser, first);
+  await connectByKeyboard(browser, reviewed);
+  const hints = editor.$('[aria-label="Suggested data connections"]');
+  await hints.waitForDisplayed({ timeout });
+  assert.equal(await browser.$(edge(data)).isExisting(), false, "A suggested data wire needs confirmation");
+  await click(hints.$("button*=summary"));
+  for (const wire of [first, reviewed, data]) await browser.$(edge(wire)).waitForDisplayed({ timeout });
+  await capture?.(browser, "visual-prompt-contract");
+
+  await click(browser.$("button=Save package revision"));
+  let saved;
+  await browser.waitUntil(async () => {
+    saved = await invoke(browser, "inspect_workflow_package", draftScope);
+    return saved.revision !== initialRevision;
+  }, { timeout });
+  const authored = saved.package.members.filter(({ body }) => body.kind === "prompt");
+  assert.deepEqual(authored.map(({ name }) => name), ["Evaluate changes", "Read summary"]);
+  assert.deepEqual(authored[0].body.prompt.routes, ["review", "deliver"]);
+  assert.deepEqual(authored[1].body.prompt.inputs, { summary: { kind: "rendered_text" } });
+  assert.deepEqual(saved.package.members[0].body.graph.wires.map(wireLabel).sort(), [first, reviewed, data].map(wireLabel).sort());
+  const previousQueue = (await invoke(browser, "project_job_queue", { projectId })).jobs;
+
+  await click(browser.$("button=Review changes and simulate"));
+  const review = browser.$('[role="dialog"].workflow-builder-dialog');
+  await click(review.$("summary=Prompt responses"));
+  const chooseRoute = review.$('select[aria-label="Sample route for prompt::execute"]');
+  async function simulateRoute(route) {
+    await click(review.$("button=Simulate"));
+    const trace = review.$('[aria-label="Simulation trace"]');
+    await click(trace.$('[aria-label="Simulated subflows"] > summary'));
+    const evaluate = trace.$(".//details[./summary[contains(normalize-space(.),'Evaluate changes')]]");
+    await click(evaluate.$("./summary"));
+    await textIsVisible(browser, evaluate.$('[aria-label="Forwarded outputs"]'), route + " · selected");
+  }
+  await chooseRoute.selectByAttribute("value", "review");
+  await replaceText(browser, review.$(".//label[normalize-space(.)='summary']/input"), "Ready to review.");
+  await simulateRoute("review");
+  await chooseRoute.selectByAttribute("value", "deliver");
+  await simulateRoute("deliver");
+  assert.deepEqual((await invoke(browser, "project_job_queue", { projectId })).jobs, previousQueue);
+  await capture?.(browser, "visual-prompt-simulation");
+  await click(review.$('button[aria-label="Close review workflow package"]'));
+
+  await click(browser.$("button=Review package publication"));
+  const confirmation = browser.$('[role="dialog"]');
+  await click(confirmation.$("button=Confirm package publication"));
+  const receipt = browser.$('[aria-label="Package publication receipt"]');
+  await textIsVisible(browser, receipt, saved.revision);
+  const { publication } = await invoke(browser, "inspect_workflow_package", draftScope);
+  const pipeline = publication.members.find(({ key }) => key === "pipeline").artifact.version;
+  await click(receipt.$("button=Run published workflow"));
+  const inputs = receipt.$('[aria-label="Start inputs"]');
+  await select(inputs, "Checkout", checkoutId);
+  await click(inputs.$(".//label[contains(normalize-space(.),'Dispatch ready workflow stages automatically')]/input"));
+  await click(inputs.$("button=Start workflow"));
+  const execution = browser.$('[aria-label="Pinned workflow execution"]');
+  await execution.waitForDisplayed({ timeout });
+  const nodeEvidence = execution.$('[aria-label="Execution node evidence"]');
+  await select(nodeEvidence, "Inspect execution node", "prompt::execute");
+  const promptRun = nodeEvidence.$('[aria-label="Prompt route and invited Roles"]');
+  await textIsVisible(browser, promptRun, "Route · review");
+  await textIsVisible(browser, promptRun, "The desktop fixture chose review.");
+  const runs = await invoke(browser, "list_repository_deliveries", { projectId });
+  const launched = runs.find(({ version }) => version.id === pipeline.id && version.revision === pipeline.revision);
+  assert.ok(launched, "The accepted Prompt revision must be launched");
+  const snapshot = await invoke(browser, "inspect_workflow_execution", { projectId, runId: launched.id });
+  assert.equal(snapshot.launch.automatic, true);
+  const outcome = snapshot.outputs.find(({ current, artifact }) => current && artifact.nodeInstanceId === "prompt::outcome"
+    && artifact.port === "outcome");
+  assert.equal(outcome?.artifact.value.evidence.route, "review");
+  await capture?.(browser, "visual-prompt-run");
+
+  const promptVersion = publication.members.find(({ artifact }) => artifact.name === "Evaluate changes").artifact.version;
+  const reuseTitle = title + " reuse";
+  await openBuilder(browser);
+  await click(browser.$("button=New pipeline"));
+  const create = browser.$('[role="dialog"]');
+  const newTitle = create.$(".//input[@aria-label='Pipeline name'] | .//label[normalize-space(.)='Pipeline name']/input");
+  await newTitle.waitForDisplayed({ timeout });
+  await newTitle.setValue(reuseTitle);
+  await click(create.$("button=Create pipeline"));
+  const reuseEditor = browser.$(builder);
+  await reuseEditor.waitForDisplayed({ timeout });
+  const fresh = (await invoke(browser, "list_workflow_packages", { projectId })).find(({ name }) => name === reuseTitle);
+  assert.ok(fresh, "The reuse case needs a separate pipeline draft");
+  await click(reuseEditor.$('button[aria-label="Add a reusable node"]'));
+  const reuse = browser.$('.workflow-reuse-popover');
+  const option = reuse.$("option*=Evaluate changes");
+  await option.waitForExist({ timeout });
+  const optionValue = await option.getAttribute("value");
+  assert.deepEqual(JSON.parse(optionValue), promptVersion);
+  await select(reuse, "Published reusable node", optionValue);
+  await click(reuse.$("button=Add pinned node"));
+  const reuseInspector = reuseEditor.$('[aria-label="Node configuration"]');
+  await reuseInspector.$(".//select/option[@value='reusable-subflow']").waitForExist({ timeout });
+  await select(reuseInspector, "Inspect node", "reusable-subflow");
+  const pinnedPrompt = reuseInspector.$('[aria-label="Prompt settings"] textarea[placeholder="Describe the work and expected result."]');
+  await pinnedPrompt.waitForDisplayed({ timeout });
+  assert.equal(await pinnedPrompt.getValue(), "Evaluate the desktop prompt fixture.");
+  assert.equal(await pinnedPrompt.isEnabled(), false);
+  await connectByKeyboard(browser, makeWire("start", "start", "reusable-subflow", "ready"));
+  await click(browser.$("button=Save package revision"));
+  let reused;
+  await browser.waitUntil(async () => {
+    reused = await invoke(browser, "inspect_workflow_package", { projectId, draftId: fresh.id });
+    return reused.revision !== fresh.revision;
+  }, { timeout });
+  assert.equal(reused.package.members.length, 1, "Reusing a published Prompt keeps its own immutable artifact");
+  assert.deepEqual(reused.package.members[0].references["reusable-subflow"], { source: "published", version: promptVersion });
+  await capture?.(browser, "visual-prompt-reused");
+}
+
 export async function verifyAuditFactory({ browser, application, checkout, invoke, capture }) {
   const { checkoutId, checkoutRoot, projectId } = checkout;
   const nonce = randomUUID().slice(0, 8);
@@ -742,6 +916,31 @@ export async function verifyAuditFactory({ browser, application, checkout, invok
   const build = editor.$('[aria-label="Build workflow"]');
   const graphEditor = build.$(builder);
   await graphEditor.$(canvas).waitForDisplayed({ timeout });
+  await browser.waitUntil(() => browser.execute((selector) => {
+    const graph = document.querySelector(selector);
+    const viewport = graph?.querySelector(".react-flow__viewport");
+    return !!viewport && graph.clientHeight > 450 && new DOMMatrixReadOnly(getComputedStyle(viewport).transform).a >= 0.75;
+  }, canvas), { timeout, timeoutMsg: "The large Audit graph did not open at a readable zoom in the full-height canvas." });
+  await capture?.(browser, "visual-audit-canvas-opening");
+  const inspector = graphEditor.$('[aria-label="Node configuration"]');
+  const dockedWidth = (await graphEditor.$(canvas).getSize()).width;
+  await click(inspector.$('button[aria-label="Hide inspector"]'));
+  await inspector.waitForDisplayed({ timeout, reverse: true });
+  await browser.waitUntil(async () => (await graphEditor.$(canvas).getSize()).width > dockedWidth + 180, { timeout });
+  await click(graphEditor.$("button=Show inspector"));
+  await inspector.waitForDisplayed({ timeout });
+
+  assert.equal(await editor.$('[aria-label="Saved package members"]').isExisting(), false);
+  await click(editor.$("button=Package details"));
+  const packageDetails = browser.$('[role="dialog"].workflow-builder-dialog');
+  const artifactFilter = packageDetails.$('input[aria-label="Filter package artifacts"]');
+  await replaceText(browser, artifactFilter, "Master Plan");
+  const listedArtifacts = packageDetails.$('[aria-label="Saved package members"]');
+  await textIsVisible(browser, listedArtifacts, "Master Plan review");
+  assert.doesNotMatch(await listedArtifacts.getText(), /Repository analyst/);
+  await capture?.(browser, "visual-audit-package-details");
+  await click(packageDetails.$('button[aria-label="Close package details"]'));
+
   await select(graphEditor, "Inspect node", "deliver-backlog");
   await click(graphEditor.$("button=Open draft child workflow"));
   const member = build.$(".//label[starts-with(normalize-space(.), 'Graph member')]/select");
@@ -761,8 +960,8 @@ export async function verifyAuditFactory({ browser, application, checkout, invok
   assert.deepEqual(root.references["deliver-backlog"], { source: "draft", key: "task-delivery" });
   await capture?.(browser, "visual-audit-factory-editor");
 
-  const review = editor.$('[aria-label="Review workflow package"]');
-  await click(review.$("button=Review changes and simulate"));
+  await click(editor.$("button=Review changes and simulate"));
+  const review = browser.$('[aria-label="Review workflow package"]');
   await select(review, "Review artifact", "planning");
   await replaceText(browser, review.$(".//label[normalize-space(.)='Sample prompt']/textarea"), samplePrompt);
   await click(review.$("button=Simulate"));
@@ -777,7 +976,7 @@ export async function verifyAuditFactory({ browser, application, checkout, invok
   assert.deepEqual(await listJobs(), previousJobs);
   assert.equal((await invoke(browser, "inspect_workflow_package", scope)).publication, null);
   await capture?.(browser, "visual-audit-factory-simulation");
-  await click(review.$("button=Review changes and simulate"));
+  await click(browser.$('button[aria-label="Close review workflow package"]'));
 
   await click(editor.$("button=Review package publication"));
   const dialog = browser.$('[role="dialog"]');

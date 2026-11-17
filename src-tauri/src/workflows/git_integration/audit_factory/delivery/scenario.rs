@@ -123,13 +123,14 @@ pub(super) async fn write_candidate(
         "The factory writer lost its worktree capture"
     );
     let id = test_id(child, repair);
-    if node.ends_with("write-failing-tests") {
+    let stage = super::super::authored_stage(node);
+    if stage == "write-failing-tests" {
         fs::create_dir_all(checkout.join("tests"))?;
         fs::write(
             checkout.join("tests").join(format!("{id}.case")),
             "Registered acceptance scenario\n",
         )?;
-    } else if node.ends_with("implement-green") {
+    } else if stage == "implement-green" {
         fs::create_dir_all(checkout.join("behavior"))?;
         fs::write(
             checkout.join("behavior").join(format!("{id}.txt")),
@@ -158,10 +159,7 @@ pub(super) async fn write_candidate(
             )?;
         }
     } else {
-        ensure!(
-            node.ends_with("refactor"),
-            "Unexpected factory writer {node}"
-        );
+        ensure!(stage == "refactor", "Unexpected factory writer {node}");
     }
     repository::save_worktree_candidate(store, run.clone()).await?;
     store
@@ -178,19 +176,55 @@ pub(super) async fn answer_child(
     node: &str,
     repair: u16,
 ) -> Result<Value> {
-    if node.ends_with("specify-red-tests-agent") {
+    use super::super::{authored_stage, prompt_response};
+    let authored = node.ends_with("::execute");
+    let stage = authored_stage(node);
+    if matches!(stage, "specify-red-tests" | "specify-red-tests-agent") {
         let id = test_id(child, repair);
-        return Ok(
-            json!({"paths": [format!("tests/{id}.case")], "tests": [{"id":id,"reason":RED_REASON}]}),
-        );
+        let answer = json!({"paths": [format!("tests/{id}.case")], "tests": [{"id":id,"reason":RED_REASON}]});
+        return Ok(if authored {
+            prompt_response(answer)
+        } else {
+            answer
+        });
     }
-    if node.ends_with("classify-merge-risk-agent") {
-        return Ok(json!({"highRisk": child.key == "B"}));
+    if matches!(stage, "classify-merge-risk" | "classify-merge-risk-agent") {
+        let answer = json!({"highRisk": child.key == "B"});
+        return Ok(if authored {
+            prompt_response(answer)
+        } else {
+            answer
+        });
+    }
+    if stage == "assess-candidate" {
+        ensure!(
+            attempt
+                .input
+                .iter()
+                .any(|message| message.text.contains("Recorded candidate checks")
+                    && message.text.contains("Passed: Pipeline unit")),
+            "The Task owner did not receive the recorded check results for its candidate",
+        );
+        let (role, focus) = if child.key == "B" {
+            (
+                "security",
+                "Check the modified boundary and its failure handling.",
+            )
+        } else {
+            (
+                "maintainability",
+                "Check whether the small export change remains readable.",
+            )
+        };
+        return Ok(json!({
+            "route":"revisar",
+            "reason":"The candidate has one concrete review specialty.",
+            "outputs":{},
+            "delegations":[{"role":role, "focus":focus}],
+        }));
     }
     ensure!(
-        node.rsplit("::")
-            .next()
-            .is_some_and(|name| name.starts_with("review-")),
+        stage.starts_with("review-") || stage.starts_with("delegate-"),
         "Unexpected factory reviewer {node}"
     );
     let source = store
@@ -222,6 +256,7 @@ pub(super) async fn answer_child(
 }
 
 pub(super) fn answer_audit(root: &Path, attempt: &AttemptPlan, node: &str) -> Result<Value> {
+    use super::super::{authored_stage, prompt_response};
     let sha = git(root, &["rev-parse", DESTINATION])?;
     ensure!(
         attempt
@@ -230,27 +265,46 @@ pub(super) fn answer_audit(root: &Path, attempt: &AttemptPlan, node: &str) -> Re
             .any(|message| message.text.contains(&sha)),
         "The auditor did not receive the exact integrated SHA on {node}"
     );
-    let phase = node.rsplit("::").next().unwrap_or(node);
+    let authored = node.ends_with("::execute");
+    let phase = authored_stage(node);
     let has_guide = git(
         root,
         &["cat-file", "-e", &format!("{sha}:integration-guide.txt")],
     )
     .is_ok();
-    Ok(match phase {
-        "audit-requirements-agent" if !has_guide => json!({
+    let answer = match phase {
+        "coordinate-audit" => {
+            return Ok(json!({
+                "route":"concluido",
+                "reason":format!("Review exact integration {sha}."),
+                "outputs":{},
+                "delegations":[
+                    {"role":"requirements","focus":format!("Verify the integration guide at {sha}.")},
+                    {"role":"bdd","focus":format!("Verify the scenario behavior at {sha}.")},
+                    {"role":"architecture","focus":format!("Verify the integration design at {sha}.")},
+                    {"role":"quality","focus":format!("Verify regression evidence at {sha}.")},
+                ],
+            }));
+        }
+        "audit-requirements-agent" | "delegate-requirements" if !has_guide => json!({
             "approved":false,"summary":"The exact integration has no guide", "findings":[{
                 "subject":"REQ-1", "problem":"The integrated revision has no integration-guide.txt",
                 "revision":"Add the integration guide and a test for its presence."
             }]
         }),
         "audit-requirements-agent"
+        | "delegate-requirements"
         | "audit-bdd-agent"
+        | "delegate-bdd"
         | "audit-architecture-agent"
+        | "delegate-architecture"
         | "audit-code-quality-agent"
-        | "review-remediation-backlog-agent" => {
+        | "delegate-quality"
+        | "review-remediation-backlog-agent"
+        | "review-remediation-backlog" => {
             json!({"approved":true,"summary":"Reviewed this exact integration and its pinned evidence","findings":[]})
         }
-        "write-remediation-backlog-agent" => {
+        "write-remediation-backlog-agent" | "write-remediation-backlog" => {
             ensure!(
                 !has_guide,
                 "Remediation was launched after the guide was already merged"
@@ -262,7 +316,7 @@ pub(super) fn answer_audit(root: &Path, attempt: &AttemptPlan, node: &str) -> Re
                 "sddRequirements":["REQ-1"], "bddScenarios":["BDD-1"],
             }]})
         }
-        "review-documentation-cleanup-agent" => {
+        "review-documentation-cleanup-agent" | "review-documentation-cleanup" => {
             ensure!(
                 has_guide,
                 "Documentation review ran before integrating remediation"
@@ -270,5 +324,10 @@ pub(super) fn answer_audit(root: &Path, attempt: &AttemptPlan, node: &str) -> Re
             json!({"documentationAndCleanup":"The integrated guide and product files are present.","needsChanges":false,"findings":[]})
         }
         _ => anyhow::bail!("Unexpected factory audit job {node}"),
+    };
+    Ok(if authored {
+        prompt_response(answer)
+    } else {
+        answer
     })
 }

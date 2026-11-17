@@ -1,0 +1,46 @@
+.workflow-node-card[data-prompt] > header,
+.workflow-graph[data-full-height] .workflow-node-card[data-prompt] > header {
+  background: color-mix(in srgb, var(--primary) 15%, var(--card));
+}
+.workflow-node-card[data-prompt] > header strong { display: flex; align-items: center; gap: .35rem; }
+.workflow-node-card[data-prompt] > header strong > svg { color: var(--primary); flex: none; }
+.workflow-node-card[data-prompt] > header small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-node-card[data-prompt] .workflow-port-column li[data-port="control"] .react-flow__handle {
+  border-radius: 2px;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.workflow-node-card[data-prompt] .workflow-port-column li[data-port="control"] .react-flow__handle-right {
+  transform: translate(50%, -50%) rotate(45deg);
+}
+.workflow-prompt-inspector { min-width: 0; }
+.workflow-prompt-inspector > label, .workflow-prompt-settings-row > label { min-width: 0; }
+.workflow-prompt-inspector textarea { min-height: 6rem; resize: vertical; }
+.workflow-prompt-inspector > p, .workflow-prompt-inspector .workflow-prompt-help { color: var(--muted-foreground); font-size: .75rem; }
+.workflow-prompt-inspector > div, .workflow-prompt-inspector > section { min-width: 0; }
+.workflow-prompt-settings-row {
+  display: grid; grid-template-columns: minmax(0,1fr) auto; gap: .35rem;
+  padding: .45rem; border: 1px solid var(--border); border-radius: .45rem;
+}
+.workflow-prompt-settings-row > label { grid-column: 1 / -1; }
+.workflow-prompt-settings-row > label:first-child { grid-column: 1; }
+.workflow-prompt-settings-row > button { grid-row: 1; grid-column: 2; align-self: end; }
+.workflow-prompt-settings-row label.workflow-check { grid-column: 1 / -1; }
+.workflow-prompt-section-count { color: var(--muted-foreground); font-size: .7rem; }
+.workflow-prompt-revision-view { min-height: 0; overflow-y: auto; padding: .8rem 1rem; }
+.workflow-prompt-revision-view > .workflow-prompt-inspector { max-width: 45rem; }
+.workflow-prompt-technical-list { display: grid; gap: .35rem; }
+.workflow-prompt-technical-list > li { display: grid; gap: .15rem; overflow-wrap: anywhere; }
+.workflow-prompt-technical-list code { color: var(--muted-foreground); font-size: .72rem; }
+.workflow-data-suggestions {
+  pointer-events: auto; max-width: min(34rem, 77vw); max-height: 36vh; overflow: auto;
+  border: 1px solid var(--border); border-radius: .6rem; background: var(--card); box-shadow: var(--shadow-overlay);
+  padding: .4rem .5rem; font-size: .8rem;
+}
+.workflow-data-suggestions header { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.workflow-data-suggestions ul { display: flex; gap: .35rem; flex-wrap: wrap; padding-block: .25rem; }
+.workflow-data-suggestions li { overflow: hidden; }
+.workflow-data-suggestions li > button { max-width: 100%; height: auto; min-height: 1.85rem; white-space: normal; overflow-wrap: anywhere; }
+.workflow-prompt-proposal { min-width: 0; display: grid; gap: .475rem; }
+.workflow-prompt-proposal ul { list-style: disc; padding-inline-start: 1rem; }
+.workflow-prompt-proposal p { overflow-wrap: anywhere; }
+

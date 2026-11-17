@@ -242,6 +242,185 @@ async fn automatic_agent_dispatch_survives_pause_restart_and_duplicate_submissio
 }
 
 #[tokio::test]
+async fn prompt_dispatch_recovers_the_selected_roles_without_duplicate_jobs() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let database = dir.path().join("prompt-dispatch.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, dir.path()).await?;
+    let project = &repo.project_id;
+    let mut graph = standalone_graph(
+        "Choose which reviews the subject needs.",
+        Default::default(),
+    )?;
+    let delegate_config = graph
+        .nodes
+        .iter()
+        .find(|node| node.id == "agent")
+        .unwrap()
+        .configuration
+        .clone();
+    graph.nodes.extend([
+        node(
+            "decision",
+            BuiltinNode::PromptDecision,
+            serde_json::from_value(json!({
+                "kind": "prompt_decision", "routes": ["revisar", "entregar"],
+                "delegates": { "correctness": true, "performance": false, "architecture": false },
+                "outputSchema": { "type": "object", "additionalProperties": false },
+            }))?,
+        ),
+        node(
+            "collect",
+            BuiltinNode::CollectEvidence,
+            NodeConfiguration::None,
+        ),
+        node(
+            "outcome",
+            BuiltinNode::PromptOutcome,
+            serde_json::from_value(json!({
+                "kind": "prompt_outcome", "outputs": {},
+            }))?,
+        ),
+    ]);
+    graph.wires.extend([
+        wire("agent", "completed", "decision", "ready"),
+        wire("agent", "response", "decision", "response"),
+        wire("decision", "completed", "collect", "ready"),
+        wire("decision", "decision", "outcome", "decision"),
+        wire("collect", "completed", "outcome", "ready"),
+        wire("collect", "evidence", "outcome", "evidence"),
+    ]);
+    for role in ["correctness", "performance", "architecture"] {
+        let filter = format!("select-{role}");
+        let delegate = format!("delegate-{role}");
+        graph.nodes.extend([
+            node(
+                &filter,
+                BuiltinNode::Condition,
+                NodeConfiguration::Condition {
+                    predicate: crate::workflows::ConditionPredicate::Exists {
+                        pointer: format!("/evidence/selected/{role}"),
+                    },
+                },
+            ),
+            node(&delegate, BuiltinNode::Agent, delegate_config.clone()),
+        ]);
+        graph.wires.extend([
+            wire("decision", "completed", &filter, "ready"),
+            wire("decision", "decision", &filter, "value"),
+            wire(&filter, "matched", &delegate, "ready"),
+            wire("prompt", "text", &delegate, "prompt"),
+            wire(&delegate, "response", "collect", "evidence"),
+        ]);
+    }
+    let version = store
+        .save_workflow_revision(project.clone(), "prompt-fixture".into(), graph)
+        .await?;
+    let run = store
+        .launch_workflow_request(serde_json::from_value(json!({
+            "projectId": project, "workflow": version, "checkoutId": repo.checkout_id,
+            "requestId": "prompt-fixture", "inputs": {}, "automatic": true,
+        }))?)
+        .await?;
+    let primary = store
+        .next_workflow_agent()
+        .await?
+        .context("missing primary Prompt job")?;
+    assert_eq!(primary.fixture_identity().1, "agent");
+    primary
+        .enqueue(&store, primary.fixture_submission(&store).await?)
+        .await?;
+    let claim = |store: Store| async move {
+        store
+            .claim_next_job(AdmissionEnvironment {
+                runner: "fixture-runner".into(),
+                bridge_available: false,
+            })
+            .await?
+            .context("missing dispatched Prompt stage")
+    };
+    let attempt = claim(store.clone()).await?;
+    complete_response(&store, &attempt, &json!({
+        "route": "revisar", "reason": "This change is on a hot path.",
+        "outputs": {}, "delegations": [{ "role": "performance", "focus": "Inspect iteration cost." }]
+    }).to_string(), None).await?;
+    let first = store
+        .next_workflow_agent()
+        .await?
+        .context("missing mandatory review")?;
+    assert_eq!(first.fixture_identity().1, "delegate-correctness");
+    let submission = first.fixture_submission(&store).await?;
+    first
+        .enqueue(&store, first.fixture_submission(&store).await?)
+        .await?;
+    drop(store);
+
+    let reopened = Store::open(database.clone())?;
+    assert!(first.enqueue(&reopened, submission).await.is_err());
+    assert!(first.reconcile(&reopened).await?);
+    let second = reopened
+        .next_workflow_agent()
+        .await?
+        .context("missing selected review")?;
+    assert_eq!(second.fixture_identity().1, "delegate-performance");
+    second
+        .enqueue(&reopened, second.fixture_submission(&reopened).await?)
+        .await?;
+    assert!(reopened.next_workflow_agent().await?.is_none());
+    let attempt = claim(reopened.clone()).await?;
+    complete_response(&reopened, &attempt, "Correctness review retained.", None).await?;
+    let attempt = claim(reopened.clone()).await?;
+    reopened.mark_agent_running(attempt.run.id.clone()).await?;
+    reopened
+        .finish_agent_attempt(attempt.run.id.clone(), RunStatus::Failed, None)
+        .await?;
+    drop(reopened);
+
+    let reopened = Store::open(database)?;
+    let jobs = reopened
+        .workflow_operator_jobs(project.clone(), run.id.clone())
+        .await?;
+    let job_ids = jobs
+        .iter()
+        .map(|job| job.node_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        job_ids,
+        ["agent", "delegate-correctness", "delegate-performance"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(jobs.len(), 3);
+    let inspection = reopened
+        .inspect_workflow_execution(project.clone(), run.id.clone())
+        .await?
+        .context("missing retained Prompt workflow")?;
+    let state = inspection
+        .control
+        .iter()
+        .find(|receipt| receipt.node_id == "outcome")
+        .context("missing Prompt settlement")?;
+    assert_eq!(state.selected_ports, ["failed"]);
+    let output = inspection
+        .outputs
+        .iter()
+        .find(|entry| {
+            entry.artifact.node_instance_id == "outcome" && entry.artifact.port == "outcome"
+        })
+        .context("missing partial Prompt evidence")?;
+    let ArtifactValue::JsonObject(value) = &output.artifact.value else {
+        unreachable!()
+    };
+    assert_eq!(value["route"], "falhou");
+    assert_eq!(value["calls"][0]["status"], "skipped");
+    assert_eq!(value["calls"][1]["status"], "completed");
+    assert!(value["calls"][1]["artifactId"].is_string());
+    assert_eq!(value["calls"][2]["status"], "failed");
+    assert!(reopened.next_workflow_agent().await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn generic_agent_queues_the_wired_prompt_and_seals_one_read_only_response() -> Result<()> {
     const PROMPT: &str = "  Read the fixture and identify the exact marker.\n";
     const ANSWER: &str = "The exact marker is fixture-blue.";
@@ -372,7 +551,7 @@ async fn generic_agent_queues_the_wired_prompt_and_seals_one_read_only_response(
     Ok(())
 }
 
-async fn complete_response(
+pub(in crate::workflows) async fn complete_response(
     store: &Store,
     attempt: &crate::conversations::AttemptPlan,
     answer: &str,

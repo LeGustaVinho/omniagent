@@ -372,7 +372,7 @@ fn prepare(
         );
         let pins = &document.definitions[&member.key];
         let expanded = match &member.body {
-            PackageArtifactBody::Pipeline { .. } | PackageArtifactBody::Subflow { .. } => {
+            PackageArtifactBody::Pipeline { .. } | PackageArtifactBody::Subflow { .. } | PackageArtifactBody::Prompt { .. } => {
                 match catalog.compile(member, &mut notes) {
                     Ok((_, definitions)) => Some(definitions),
                     Err(error) => {
@@ -535,6 +535,12 @@ fn permissions(document: &PackageDocument) -> BTreeSet<ExchangePermission> {
         }
     }
     for member in &document.package.members {
+        if let PackageArtifactBody::Prompt { prompt } = &member.body {
+            permissions.insert(ExchangePermission::ModelRequiresLocalAuthentication);
+            if prompt.executor == BuiltinNode::Implement {
+                permissions.insert(ExchangePermission::RepositoryWritesRequireRelease);
+            }
+        }
         let permission = match member.body.kind() {
             PackageArtifactKind::Command => ExchangePermission::RepositoryWritesRequireRelease,
             PackageArtifactKind::Role => ExchangePermission::ModelRequiresLocalAuthentication,

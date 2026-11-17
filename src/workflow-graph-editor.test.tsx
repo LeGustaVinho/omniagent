@@ -248,7 +248,8 @@ it("duplicates the selected graph with its internal wires, exact old pin and und
     { ...original.graph.nodes[1], id: "context-2" }, { ...original.graph.nodes[2], id: "plan-2" },
   ]);
   expect(observed.graph.wires).toEqual([...original.graph.wires, wire("context-2", "loaded", "plan-2", "ready")]);
-  expect(screen.getByText("Version 1 · read evidence")).toBeTruthy();
+  expect(screen.getByText("Version 1")).toBeTruthy();
+  expect(screen.getByText("read evidence")).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "Undo graph edit" }));
   expect(observed).toEqual(original);
   await user.click(screen.getByRole("button", { name: "Redo graph edit" }));

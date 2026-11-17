@@ -8,6 +8,8 @@ use super::{ConditionPredicate, command::CommandConfiguration, mcp_tools::McpToo
 #[serde(rename_all = "snake_case")]
 pub enum BuiltinNode {
     Agent,
+    PromptDecision,
+    PromptOutcome,
     ValidateOutput,
     CollectEvidence,
     QualityGate,
@@ -164,6 +166,8 @@ pub struct Port {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationKind {
+    PromptDecision,
+    PromptOutcome,
     CandidateAcceptance,
     SearchPublicRepositories,
     VerifyTestPhase,
@@ -203,6 +207,8 @@ pub enum ConfigurationKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NodeConfiguration {
+    PromptDecision(super::prompt::PromptDecisionConfiguration),
+    PromptOutcome(super::prompt::PromptOutcomeConfiguration),
     CandidateAcceptance(super::candidate_acceptance::CandidateAcceptanceConfiguration),
     SearchPublicRepositories(super::github::SearchConfiguration),
     VerifyTestPhase(crate::repository::verification::test_phase::TestPhaseConfiguration),
@@ -294,6 +300,8 @@ pub enum NodeConfiguration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Executor {
+    PromptDecision,
+    PromptOutcome,
     SearchPublicRepositories,
     OpenOrUpdatePullRequest,
     WaitForCi,
@@ -404,6 +412,40 @@ pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
         current.revision = 1;
         current.inputs.retain(|port| port.name != "review_subject");
     }
+    if pinned.kind == BuiltinNode::PromptOutcome {
+        let outputs = pinned
+            .outputs
+            .iter()
+            .filter_map(|port| {
+                let name = port.name.strip_prefix("value-")?;
+                match port.value {
+                    PortType::Data(kind) => Some((name.to_owned(), kind)),
+                    _ => None,
+                }
+            })
+            .collect();
+        return super::prompt::PromptOutcomeConfiguration { outputs }
+            .definition(current)
+            .is_ok_and(|definition| definition == *pinned);
+    }
+    if pinned.kind == BuiltinNode::ReviewDiffCandidate && pinned.revision == 1 {
+        current.revision = 1;
+        current.inputs.retain(|port| port.name != "brief");
+        current
+            .outputs
+            .retain(|port| !matches!(port.name.as_str(), "failed" | "report"));
+    }
+    if matches!(pinned.kind, BuiltinNode::Plan | BuiltinNode::ReviewPlan) && pinned.revision == 1 {
+        current.revision = 1;
+        current.inputs.retain(|port| port.name != "brief");
+        current.outputs.retain(|port| port.name != "failed");
+    }
+    if pinned.kind == BuiltinNode::AcceptCandidate && pinned.revision <= 3 {
+        current.revision = pinned.revision;
+        current
+            .inputs
+            .retain(|port| port.name != "selected_reviews");
+    }
     if matches!(
         pinned.kind,
         BuiltinNode::Implement | BuiltinNode::ReviewCandidate
@@ -457,12 +499,53 @@ pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
     *current == *pinned
 }
 
+pub(super) fn prompt_outcome_matches(
+    config: &super::prompt::PromptOutcomeConfiguration,
+    pinned: &NodeDefinition,
+) -> bool {
+    builtin_registry()
+        .into_iter()
+        .find(|definition| definition.kind == BuiltinNode::PromptOutcome)
+        .and_then(|base| config.definition(&base).ok())
+        .is_some_and(|definition| definition == *pinned)
+}
+
 pub fn builtin_registry() -> Vec<NodeDefinition> {
     use ArtifactKind::*;
     use BuiltinNode::*;
     use PortType::{Control, Data, Evidence};
 
     let entries = [
+        (
+            PromptDecision,
+            "Resolve prompt decision",
+            Executor::PromptDecision,
+            ConfigurationKind::PromptDecision,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("response", Evidence)][..],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("decision", Data(JsonObject)),
+            ][..],
+        ),
+        (
+            PromptOutcome,
+            "Collect prompt outcome",
+            Executor::PromptOutcome,
+            ConfigurationKind::PromptOutcome,
+            Effect::ReadEvidence,
+            &[
+                ("ready", Control),
+                ("decision", Data(JsonObject)),
+                ("evidence", Data(EvidenceSet)),
+            ],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("outcome", Data(JsonObject)),
+            ],
+        ),
         (
             SearchPublicRepositories,
             "Search public repositories",
@@ -850,7 +933,11 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             ConfigurationKind::AgentRole,
             Effect::InvokeModel,
             &[("ready", Control), ("context", Data(Markdown))],
-            &[("planned", Control), ("plan", Data(ArtifactKind::Plan))],
+            &[
+                ("planned", Control),
+                ("plan", Data(ArtifactKind::Plan)),
+                ("failed", Control),
+            ],
         ),
         (
             ReviewPlan,
@@ -858,8 +945,16 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             Executor::ReadOnlyAgent,
             ConfigurationKind::AgentRole,
             Effect::InvokeModel,
-            &[("ready", Control), ("plan", Data(ArtifactKind::Plan))],
-            &[("reviewed", Control), ("review", Data(Review))],
+            &[
+                ("ready", Control),
+                ("plan", Data(ArtifactKind::Plan)),
+                ("brief", Data(RenderedText)),
+            ],
+            &[
+                ("reviewed", Control),
+                ("review", Data(Review)),
+                ("failed", Control),
+            ],
         ),
         (
             LinkWork,
@@ -959,8 +1054,17 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             Executor::ReadOnlyAgent,
             ConfigurationKind::AgentRole,
             Effect::InvokeModel,
-            &[("ready", Control), ("git", Data(GitInspection))],
-            &[("reviewed", Control), ("review", Data(Review))],
+            &[
+                ("ready", Control),
+                ("git", Data(GitInspection)),
+                ("brief", Data(RenderedText)),
+            ],
+            &[
+                ("reviewed", Control),
+                ("review", Data(Review)),
+                ("failed", Control),
+                ("report", Data(JsonObject)),
+            ],
         ),
         (
             VerifyReviewDiff,
@@ -1015,6 +1119,7 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
                 ("checks", Data(Checks)),
                 ("quality", Data(JsonObject)),
                 ("build", Data(Checks)),
+                ("selected_reviews", Data(JsonObject)),
             ],
             &[
                 ("accepted", Control),
@@ -1250,11 +1355,15 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             |(kind, title, executor, configuration, effect, inputs, outputs)| NodeDefinition {
                 kind,
                 revision: match kind {
-                    BuiltinNode::AcceptCandidate | BuiltinNode::VerifyCandidate => 3,
+                    BuiltinNode::AcceptCandidate => 4,
+                    BuiltinNode::VerifyCandidate => 3,
                     BuiltinNode::Command
                     | BuiltinNode::TypedStart
+                    | BuiltinNode::Plan
+                    | BuiltinNode::ReviewPlan
                     | BuiltinNode::Implement
                     | BuiltinNode::ReviewCandidate
+                    | BuiltinNode::ReviewDiffCandidate
                     | BuiltinNode::RunBacklog
                     | BuiltinNode::MaterializeBacklog
                     | BuiltinNode::VerifyCommit
@@ -1318,6 +1427,8 @@ impl NodeConfiguration {
     pub(super) fn matches(&self, kind: ConfigurationKind) -> bool {
         match (self, kind) {
             (Self::None, ConfigurationKind::None) => true,
+            (Self::PromptDecision(config), ConfigurationKind::PromptDecision) => config.valid(),
+            (Self::PromptOutcome(config), ConfigurationKind::PromptOutcome) => config.valid(),
             (Self::None, ConfigurationKind::CandidateAcceptance) => true,
             (Self::CandidateAcceptance(config), ConfigurationKind::CandidateAcceptance) => {
                 config.valid()

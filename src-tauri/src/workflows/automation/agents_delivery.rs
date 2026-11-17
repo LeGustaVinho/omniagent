@@ -46,6 +46,9 @@ pub(in crate::workflows) fn instructions(kind: BuiltinNode) -> String {
         BuiltinNode::ReviewCandidate => {
             "Review the selected candidate tree for correctness and evaluate the pinned unit criteria."
         }
+        BuiltinNode::ReviewDiffCandidate => {
+            "Review the frozen Git diff and report findings with evidence from the selected comparison."
+        }
         _ => "",
     }.into()
 }
@@ -61,7 +64,7 @@ pub(in crate::workflows) fn enabled_for(
         node.definition.kind,
         BuiltinNode::Implement | BuiltinNode::ReviewCandidate
     ) && has_output(node, "failed")
-        && enabled(db, run)?)
+        && (super::prompt_delegate(node) || enabled(db, run)?))
 }
 
 pub(crate) fn require_unique_admission(
@@ -70,9 +73,6 @@ pub(crate) fn require_unique_admission(
     binding: &PipelineDispatch,
     input: &WorkflowJobInput,
 ) -> Result<()> {
-    if !enabled(db, &binding.pipeline_run_id)? {
-        return Ok(());
-    }
     let node = load_pinned_node(
         db,
         project,
@@ -80,10 +80,14 @@ pub(crate) fn require_unique_admission(
         &binding.node_instance_id,
     )?
     .context("The delivery agent stage is unavailable")?;
+    if !super::prompt_delegate(&node) && !enabled(db, &binding.pipeline_run_id)? {
+        return Ok(());
+    }
     if matches!(
         node.definition.kind,
         BuiltinNode::Implement | BuiltinNode::ReviewCandidate
     ) && has_output(&node, "failed")
+        || super::prompt_native_stage(&node)
     {
         ensure!(
             stage_job(
@@ -150,14 +154,9 @@ pub(in crate::workflows) fn evaluate(
         if !attempt.status.is_terminal() || job.queued_recovery.is_some() {
             return Ok(None);
         }
-        let waiting: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM open_agent_questions WHERE run_id = ?1
-             UNION ALL SELECT 1 FROM job_downstream_waits WHERE parent_run_id = ?1
-               AND state IN ('yielding', 'waiting', 'needs_review'))",
-            [&attempt.run_id],
-            |row| row.get(0),
-        )?;
-        if waiting && !cancelled {
+        if !cancelled
+            && crate::workflows::generic_agent::attempt_has_open_wait(db, &attempt.run_id)?
+        {
             return Ok(None);
         }
         if attempt.status != RunStatus::Succeeded {
@@ -342,7 +341,7 @@ fn reconcile_terminal_jobs(db: &mut Connection) -> Result<()> {
     // The job can settle immediately before shutdown, or be cancelled before its first attempt.
     let possible = db.prepare(
         "SELECT DISTINCT o.project_id, o.pipeline_run_id, o.node_instance_id
-         FROM workflow_automatic_runs auto JOIN job_pipeline_runs w ON w.id = auto.pipeline_run_id
+         FROM job_pipeline_runs w
          JOIN job_pipeline_origins o ON o.pipeline_run_id = w.id AND o.plan_revision = w.plan_revision
          JOIN jobs j ON j.id = o.job_id
          JOIN workflow_job_inputs i ON i.job_id = j.id AND i.unit_id IS NOT NULL
@@ -353,6 +352,10 @@ fn reconcile_terminal_jobs(db: &mut Connection) -> Result<()> {
            SELECT latest.run_id FROM job_attempts latest WHERE latest.job_id = j.id ORDER BY ordinal DESC LIMIT 1)
          LEFT JOIN runs r ON r.id = a.run_id
          WHERE NOT (SELECT paused FROM job_queue_settings WHERE id = 1)
+           AND (EXISTS (SELECT 1 FROM workflow_automatic_runs auto WHERE auto.pipeline_run_id = w.id)
+                OR EXISTS (SELECT 1 FROM workflow_automatic_agents queued
+                   WHERE queued.pipeline_run_id = w.id AND queued.node_instance_id = o.node_instance_id
+                     AND queued.plan_key = w.plan_revision))
            AND (j.queue_state = 'cancelled' OR r.status IN ('succeeded', 'failed', 'cancelled', 'interrupted'))
            AND NOT EXISTS (SELECT 1 FROM job_recoveries recovery WHERE recovery.job_id = j.id)
            AND NOT EXISTS (SELECT 1 FROM workflow_control_receipts c WHERE c.pipeline_run_id = w.id

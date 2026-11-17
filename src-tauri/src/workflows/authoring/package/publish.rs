@@ -141,7 +141,7 @@ impl Store {
             }))?.collect::<rusqlite::Result<Vec<_>>>()?;
             let mut catalog = versions.into_values().chain(legacy).map(|version| {
                 let artifact = load_published(db, &project, &version)?.context("A published catalog revision is unavailable")?;
-                Ok(WorkflowPackageCatalogEntry { version, name: artifact.name, blockers: artifact.blockers })
+                Ok(WorkflowPackageCatalogEntry { version, prompt: matches!(artifact.body, PackageArtifactBody::Prompt { .. }), name: artifact.name, blockers: artifact.blockers })
             }).collect::<Result<Vec<_>>>()?;
             catalog.sort_by(|left, right| left.name.cmp(&right.name).then(left.version.cmp(&right.version)));
             Ok(catalog)
@@ -330,6 +330,7 @@ fn publish_member(
     let mut workflow = None;
     let mut role_revision = None;
     let mut role_execution_revision = None;
+    let mut prompt_expansion = None;
     match &mut body {
         PackageArtifactBody::Pipeline { graph } | PackageArtifactBody::Subflow { graph, .. } => {
             let named_commands = references
@@ -399,6 +400,21 @@ fn publish_member(
             if kind == PackageArtifactKind::Pipeline {
                 workflow = Some(compiled);
             }
+        }
+        PackageArtifactBody::Prompt { prompt } => {
+            let expansion = compile_prompt_graph(
+                db,
+                project,
+                &id,
+                &member.name,
+                prompt,
+                &dependencies,
+                &mut blockers,
+                &|version| load_published(db, project, version),
+                true,
+            )?;
+            role_execution_revision = Some(digest(&serde_json::to_vec(&expansion)?));
+            prompt_expansion = Some(expansion);
         }
         PackageArtifactBody::Role { template } => {
             validate_conversation_template(template)?;
@@ -560,6 +576,7 @@ fn publish_member(
         definitions: pins.clone(),
         layout,
         blockers,
+        prompt_expansion,
     };
     save_artifact(db, project, &artifact)?;
     Ok(PublishedPackageMember {
@@ -782,6 +799,37 @@ pub(super) fn compile_simulation_graph(
     Ok((compiled.definition, compiled.authoring_definitions))
 }
 
+pub(super) fn compile_prompt_graph(
+    db: &Connection,
+    project: &str,
+    id: &str,
+    name: &str,
+    prompt: &PromptCard,
+    dependencies: &BTreeMap<String, PublishedPackageArtifact>,
+    blockers: &mut Vec<String>,
+    loader: &ArtifactLoader<'_>,
+    validate_bindings: bool,
+) -> Result<PromptExpansion> {
+    let lowered = prompt_card::lower(name, prompt, dependencies)?;
+    let interface = (lowered.inputs, lowered.outputs);
+    let mut compiler = GraphCompiler::new(db, project, loader);
+    compiler.validate_bindings = validate_bindings;
+    let compiled = compiler.compile(
+        id,
+        &lowered.graph,
+        &lowered.pins,
+        &lowered.dependencies,
+        BTreeSet::new(),
+        blockers,
+        Some(&interface),
+    )?;
+    Ok(PromptExpansion {
+        workflow: compiled.definition,
+        inputs: interface.0,
+        outputs: compiled.outputs,
+    })
+}
+
 struct CompiledGraph {
     definition: WorkflowDefinition,
     outputs: BTreeMap<String, Endpoint>,
@@ -901,7 +949,9 @@ impl<'a> GraphCompiler<'a> {
                 }
                 PackageArtifactBody::Role { .. } => roles::bind(&mut node.configuration, artifact)
                     .with_context(|| format!("The role reference for {slot} is invalid"))?,
-                PackageArtifactBody::Subflow { .. } if node.kind == BuiltinNode::Subflow => {
+                PackageArtifactBody::Subflow { .. } | PackageArtifactBody::Prompt { .. }
+                    if node.kind == BuiltinNode::Subflow =>
+                {
                     ensure!(
                         matches!(node.configuration, NodeConfiguration::None),
                         "The subflow invocation {slot} does not accept native node configuration"
@@ -948,6 +998,9 @@ impl<'a> GraphCompiler<'a> {
                     )
                     .with_context(|| format!("The reusable MCP binding for {slot} is invalid"))?;
                     declared_mcp.insert(slot.as_str());
+                }
+                PackageArtifactBody::Prompt { .. } => {
+                    anyhow::bail!("The Prompt reference for {slot} needs a Prompt card")
                 }
                 PackageArtifactBody::Subflow { .. } => blockers.push(format!(
                     "The node {slot} requires the reusable artifact {}.",
@@ -1099,14 +1152,15 @@ impl<'a> GraphCompiler<'a> {
         artifact: &PublishedPackageArtifact,
         blockers: &mut Vec<String>,
     ) -> Result<BoundSubflow> {
-        let PackageArtifactBody::Subflow {
-            graph,
-            inputs,
-            outputs,
-        } = &artifact.body
-        else {
-            anyhow::bail!("Expected a pinned subflow");
-        };
+        if let Some(expansion) = &artifact.prompt_expansion {
+            return Ok(BoundSubflow {
+                name: artifact.name.clone(),
+                version: artifact.version.clone(),
+                workflow: expansion.workflow.clone(),
+                inputs: expansion.inputs.clone(),
+                outputs: expansion.outputs.clone(),
+            });
+        }
         ensure!(
             self.stack.len() < 32 && self.stack.insert(artifact.version.clone()),
             "Nested subflow references contain a cycle or exceed the depth limit"
@@ -1132,6 +1186,35 @@ impl<'a> GraphCompiler<'a> {
                 }
             }
         }
+        if let PackageArtifactBody::Prompt { prompt } = &artifact.body {
+            let expansion = compile_prompt_graph(
+                self.db,
+                self.project,
+                &artifact.version.id,
+                &artifact.name,
+                prompt,
+                &dependencies,
+                blockers,
+                self.loader,
+                self.validate_bindings,
+            )?;
+            self.stack.remove(&artifact.version);
+            return Ok(BoundSubflow {
+                name: artifact.name.clone(),
+                version: artifact.version.clone(),
+                workflow: expansion.workflow,
+                inputs: expansion.inputs,
+                outputs: expansion.outputs,
+            });
+        }
+        let PackageArtifactBody::Subflow {
+            graph,
+            inputs,
+            outputs,
+        } = &artifact.body
+        else {
+            anyhow::bail!("Expected a pinned subflow or Prompt");
+        };
         let interface = (inputs.clone(), outputs.clone());
         let compiled = self.compile(
             &artifact.version.id,
@@ -1294,6 +1377,7 @@ pub(super) fn load_published(
         definitions,
         layout,
         blockers: Vec::new(),
+        prompt_expansion: None,
     }))
 }
 

@@ -10,6 +10,7 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
 import { initialNodePositions, wireKey } from "@/workflow-graph-model";
 import { RecordedInputs, WorkflowNodeEvidence } from "@/workflow-execution-evidence";
+import { WorkflowPromptRunPanel } from "@/workflow-prompt-run";
 import { WorkflowExecutionAgent } from "@/workflow-execution-agent";
 import { WorkflowExecutionHost } from "@/workflow-execution-host";
 import { WorkflowExecutionUnitChecks } from "@/workflow-execution-candidate";
@@ -253,6 +254,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
         </PipelineInspectorHeader>
         {active && <div className="pipeline-stack">
           <WorkflowExecutionStateBadge status={active.detail.status} />
+          <WorkflowPromptRunPanel snapshot={snapshot} nodeId={active.node.instance.id} unit={unit} navigation={navigation} />
           {snapshot.rolePins?.filter((pin) => pin.nodeId === active.node.instance.id && pin.nodeRevision === active.node.revision)
             .map((pin) => <PinnedRole key={`${pin.version.destination}:${pin.version.id}:${pin.version.revision}`} pin={pin} />)}
           {approval && <WorkflowApprovalInspector key={`approval:${active.node.instance.id}`}

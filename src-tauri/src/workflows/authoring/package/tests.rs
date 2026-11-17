@@ -779,3 +779,152 @@ async fn visual_data_pipeline_simulates_and_runs_the_same_typed_result() -> Resu
     )));
     Ok(())
 }
+
+#[tokio::test]
+async fn publishes_reuses_and_simulates_the_exact_prompt_contract() -> Result<()> {
+    use crate::workflows::{ArtifactKind, Endpoint, Wire};
+    use serde_json::{Value, json};
+    let temporary = tempfile::tempdir()?;
+    let store = Store::open(temporary.path().join("prompts.sqlite"))?;
+    let project = approved_delivery_repository(&store, temporary.path())
+        .await?
+        .project_id;
+    let mut planner = member("planner", role());
+    planner.destination = PackageDestination::Library;
+    let mut card = member(
+        "evaluate",
+        PackageArtifactBody::Prompt {
+            prompt: PromptCard {
+                text: "Assess the evidence. Literal syntax {{example}} belongs in the prompt."
+                    .into(),
+                executor: BuiltinNode::Agent,
+                inputs: BTreeMap::new(),
+                outputs: BTreeMap::from([(
+                    "summary".into(),
+                    PromptOutput {
+                        kind: ArtifactKind::RenderedText,
+                        source: None,
+                    },
+                )]),
+                routes: vec!["entregar".into(), "corrigir".into()],
+                delegates: vec![],
+                output_schema: None,
+                configuration: None,
+            },
+        },
+    );
+    card.destination = PackageDestination::Library;
+    card.references.insert("role".into(), reference("planner"));
+
+    let mut pipeline = graph();
+    pipeline.nodes.push(NodeInstance {
+        id: "prompt".into(),
+        kind: BuiltinNode::Subflow,
+        configuration: NodeConfiguration::None,
+    });
+    let edge = |node: &str, port: &str, target: &str, input: &str| Wire {
+        from: Endpoint {
+            node: node.into(),
+            port: port.into(),
+        },
+        to: Endpoint {
+            node: target.into(),
+            port: input.into(),
+        },
+    };
+    pipeline
+        .wires
+        .push(edge("start", "start", "prompt", "ready"));
+    for route in ["entregar", "corrigir", "falhou"] {
+        pipeline.nodes.push(NodeInstance {
+            id: route.into(),
+            kind: BuiltinNode::Parallel,
+            configuration: NodeConfiguration::None,
+        });
+        pipeline.wires.push(edge("prompt", route, route, "ready"));
+    }
+    let mut root = member(
+        "pipeline",
+        PackageArtifactBody::Pipeline { graph: pipeline },
+    );
+    root.references
+        .insert("prompt".into(), reference("evaluate"));
+    let draft = store
+        .create_workflow_package(
+            project.clone(),
+            None,
+            package(vec![planner, card, root.clone()]),
+        )
+        .await?;
+    let published = commit(&store, &project, &draft).await?;
+    let evaluation = artifact(&published, "evaluate");
+    let reusable = store
+        .describe_workflow_reusable_node(project.clone(), evaluation.version.clone())
+        .await?;
+    assert_eq!(
+        reusable.artifact.prompt_expansion,
+        evaluation.prompt_expansion
+    );
+    assert_eq!(
+        reusable
+            .definition
+            .outputs
+            .iter()
+            .filter(|port| port.name == "summary")
+            .count(),
+        1
+    );
+
+    root.references.insert(
+        "prompt".into(),
+        PackageReference::Published {
+            version: evaluation.version.clone(),
+        },
+    );
+    let reused = store
+        .create_workflow_package(project.clone(), None, package(vec![root]))
+        .await?;
+    for (route, terminal) in [
+        ("entregar", "entregar"),
+        ("corrigir", "corrigir"),
+        ("invalid", "falhou"),
+    ] {
+        let scenario = serde_json::from_value(json!({
+            "inputs":{"document":"# Simulated request"},
+            "outcomes":{"prompt::execute":{"state":"completed","outputs":{"response":{
+                "route":route,"reason":"Fixture selected path","outputs":{"summary":"Evidence retained"},"delegations":[]
+            }}}}
+        }))?;
+        let result = store
+            .simulate_workflow_package_revision(
+                project.clone(),
+                reused.id.clone(),
+                reused.revision.clone(),
+                "pipeline".into(),
+                scenario,
+            )
+            .await?;
+        let result = serde_json::to_value(result)?;
+        let steps = result["steps"].as_array().context("Missing Prompt trace")?;
+        let find = |id: &str| {
+            steps
+                .iter()
+                .find(|step| step["nodeId"] == Value::String(id.into()))
+        };
+        assert_eq!(
+            find(terminal).context("Missing selected route")?["state"],
+            "completed",
+            "Prompt trace for {route}: {steps:#?}"
+        );
+        for bypassed in ["entregar", "corrigir", "falhou"]
+            .into_iter()
+            .filter(|id| *id != terminal)
+        {
+            assert_eq!(
+                find(bypassed).context("Missing bypassed route")?["state"],
+                "skipped"
+            );
+        }
+    }
+    Ok(())
+}

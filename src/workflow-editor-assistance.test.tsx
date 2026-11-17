@@ -88,6 +88,7 @@ it("uses the role revision selected in the live editor and links the resulting d
   await waitFor(() => expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", `authoring:package:${result.id}`));
   editor.unmount();
   const draft = mount(<WorkflowPackageEditor {...props} draftId={result.id} />);
+  await user.click(await screen.findByRole("button", { name: "Package details" }));
   await user.click(await screen.findByRole("button", { name: "Open source conversation" }));
   expect(props.openWorkspace).toHaveBeenCalledWith("conversations", result.conversationId);
   await user.click(screen.getByRole("button", { name: "Open queued authoring job" }));
@@ -127,6 +128,7 @@ it("preserves the selected published pipeline and reusable artifact revisions", 
   pipeline.unmount();
 
   mount(<WorkflowPackageEditor {...props} draftId="new-package" />);
+  await user.click(await screen.findByRole("button", { name: "Package details" }));
   await user.click(await screen.findByText("Edit package"));
   await user.click(screen.getByText("Published artifacts"));
   await user.selectOptions(screen.getByRole("combobox", { name: "Published artifact" }),

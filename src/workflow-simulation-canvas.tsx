@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { MarkerType, type Edge, type Node, type NodeProps } from "@xyflow/react";
+import { MarkerType, MiniMap, type Edge, type Node, type NodeProps, type ReactFlowInstance } from "@xyflow/react";
 import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader } from "@/pipeline-layout";
 import { WorkflowExecutionStateBadge, workflowExecutionStateLabel } from "@/workflow-execution-state";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
-import { initialNodePositions, wireKey, type WorkflowEndpoint, type WorkflowLayout, type WorkflowPort, type WorkflowWire } from "@/workflow-graph-model";
+import { initialNodePositions, readableGraphViewport, wireKey, type WorkflowEndpoint, type WorkflowLayout, type WorkflowPort, type WorkflowWire } from "@/workflow-graph-model";
 
 type SimulationNode = { id: string; title: string; inputs: WorkflowPort[]; outputs: WorkflowPort[] };
 type Signal = "selected" | "waiting" | "skipped";
@@ -56,6 +56,7 @@ export function WorkflowSimulationCanvas({ graph, steps, renderStep }: {
 }) {
   const [selected, select] = useState(graph.nodes[0]?.id);
   const [theme, setTheme] = useState(readTheme);
+  const [flow, setFlow] = useState<ReactFlowInstance<CanvasNode, CanvasEdge>>();
   const active = graph.nodes.find(({ id }) => id === selected) ?? graph.nodes[0];
   const stepByNode = useMemo(() => new Map(steps.map((step) => [step.nodeId, step])), [steps]);
   const positions = useMemo(() => initialNodePositions(graph), [graph]);
@@ -68,6 +69,16 @@ export function WorkflowSimulationCanvas({ graph, steps, renderStep }: {
       ariaLabel: `${node.title} · ${node.id}${state ? " · " + workflowExecutionStateLabel[state] : ""}`, data: { node, state },
     };
   });
+  const openingViewport = readableGraphViewport(nodes.map(({ position }) => position));
+
+  function focusStage(id: string) {
+    select(id);
+    const node = flow?.getNode?.(id);
+    if (!flow || !node) return;
+    void flow.setCenter(node.position.x + (node.measured?.width ?? 248) / 2,
+      node.position.y + (node.measured?.height ?? 88) / 2,
+      { zoom: Math.max(flow.getZoom(), 0.82), duration: 180 });
+  }
 
   useEffect(() => {
     const observer = new MutationObserver(() => setTheme(readTheme()));
@@ -89,7 +100,9 @@ export function WorkflowSimulationCanvas({ graph, steps, renderStep }: {
       canvasLabel="Simulated workflow graph" inspectorLabel="Simulation node evidence"
       canvas={<div className="absolute inset-0">
         <PipelineGraphCanvas<CanvasNode, CanvasEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} colorMode={theme}
-          fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2}
+          fitView={!openingViewport} defaultViewport={openingViewport} fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.025} maxZoom={2}
+          compactControls onInit={setFlow} canvasTools={openingViewport ?
+            <MiniMap pannable zoomable ariaLabel="Simulation overview" nodeColor="var(--primary)" /> : undefined}
           nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null}
           onNodeClick={(_, node) => select(node.id)}
           onNodesChange={(changes) => {
@@ -100,7 +113,7 @@ export function WorkflowSimulationCanvas({ graph, steps, renderStep }: {
         <PipelineInspectorHeader detail="Simulation details" title={active?.title ?? "No stage selected"}>
           <label className="workflow-execution-field">
             Inspect simulated stage
-            <select value={active?.id} onChange={(event) => select(event.currentTarget.value)}>
+            <select value={active?.id} onChange={(event) => focusStage(event.currentTarget.value)}>
               {nodes.map((node) => <option key={node.id} value={node.id}>{node.ariaLabel}</option>)}
             </select>
           </label>

@@ -3,6 +3,32 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn choose_object_preserves_the_selected_payload_and_rejects_ambiguity() -> Result<()> {
+    let configuration: SetFieldsConfiguration = serde_json::from_value(json!({
+        "mode":"build",
+        "operations":[{"op":"choose_object","pointers":["/revised","/retained"]}]
+    }))?;
+    assert!(configuration.requires_source());
+    let retained = json!({"items":[{"id":"stable","flag":null}],"empty":{}});
+    assert_eq!(
+        Value::Object(configuration.evaluate(Some(&json!({"retained":retained})))?),
+        retained,
+    );
+    assert!(configuration.evaluate(Some(&json!({}))).is_err());
+    assert!(
+        configuration
+            .evaluate(Some(&json!({"revised":"invalid"})))
+            .is_err()
+    );
+    assert!(
+        configuration
+            .evaluate(Some(&json!({"revised":{},"retained":{}})))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn validate_output_requires_one_object_and_a_self_contained_schema() -> Result<()> {
     let output = ValidateOutputConfiguration {
         schema: json!({

@@ -148,7 +148,10 @@ pub(super) async fn run_delivery_and_audit(
             }
             if let Some(pending) = store.next_workflow_agent().await? {
                 let (workflow, node) = pending.fixture_identity();
-                let attempt = script.claim(store, repo, &pending).await?;
+                let attempt = script
+                    .claim(store, repo, &pending)
+                    .await?
+                    .context("Delivery and audit should enqueue their selected specialists")?;
                 if let Some(child) = progress.children.get(workflow) {
                     let repair =
                         scenario::repair_attempt(store, &repo.project_id, workflow).await?;
@@ -164,7 +167,9 @@ pub(super) async fn run_delivery_and_audit(
                             repair,
                         )
                         .await?;
-                        script.complete_response(store, &attempt, &answer).await?;
+                        script
+                            .complete_response(store, repo, &attempt, &answer)
+                            .await?;
                     }
                 } else {
                     ensure!(
@@ -172,7 +177,9 @@ pub(super) async fn run_delivery_and_audit(
                         "Unexpected fixture agent run {workflow}"
                     );
                     let answer = scenario::answer_audit(root, &attempt, node)?;
-                    script.complete_response(store, &attempt, &answer).await?;
+                    script
+                        .complete_response(store, repo, &attempt, &answer)
+                        .await?;
                 }
                 continue;
             }
@@ -212,10 +219,64 @@ pub(super) async fn run_delivery_and_audit(
         "The final readiness summary omitted the evidence approved for {final_sha}"
     );
     progress.prove_history(store, repo, gh).await?;
+    if script.adaptive {
+        progress
+            .prove_adaptive_reviews(store, &repo.project_id)
+            .await?;
+    }
     Ok(())
 }
 
 impl Progress {
+    async fn prove_adaptive_reviews(&self, store: &Store, project: &str) -> Result<()> {
+        for (task_key, specialty) in [("A", "maintainability"), ("B", "security")] {
+            let child = self
+                .children
+                .values()
+                .find(|child| child.key == task_key)
+                .with_context(|| format!("Missing adaptive task {task_key}"))?;
+            let artifacts = store
+                .workflow_run_artifacts(project.into(), child.workflow_run_id.clone())
+                .await?;
+            let decision = artifacts
+                .iter()
+                .find_map(|artifact| {
+                    if artifact
+                        .node_instance_id
+                        .ends_with("::assess-candidate::outcome")
+                        && artifact.port == "outcome"
+                        && let ArtifactValue::JsonObject(proof) = &artifact.value
+                        && proof.get("approved").and_then(Value::as_bool) == Some(true)
+                    {
+                        Some(proof)
+                    } else {
+                        None
+                    }
+                })
+                .with_context(|| format!("Missing reviewed adaptive candidate for {task_key}"))?;
+            let calls = decision["calls"]
+                .as_array()
+                .context("Missing selected review receipts")?;
+            let completed = calls
+                .iter()
+                .filter(|call| call["status"] == "completed")
+                .filter_map(|call| call["role"].as_str())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(completed, BTreeSet::from(["correctness", specialty]));
+            for call in calls {
+                let role = call["role"].as_str().context("Missing role alias")?;
+                if completed.contains(role) {
+                    assert!(call["artifactId"].is_string());
+                    assert_eq!(call["approved"], true);
+                } else {
+                    assert_eq!(call["status"], "skipped");
+                    assert!(call["attemptId"].is_null());
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn failure_evidence(&self, store: &Store, project: &str) -> Result<String> {
         let mut failures = Vec::new();
         for child in self.children.values() {

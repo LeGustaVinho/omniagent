@@ -19,6 +19,14 @@ export type WorkflowDefinition = {
 
 export type WorkflowDefinitions = Record<string, WorkflowDefinition>;
 export type WorkflowLayout = Record<string, { x: number; y: number }>;
+
+export function readableGraphViewport(positions: readonly WorkflowLayout[string][], entry = positions[0]) {
+  if (!entry || positions.length < 2) return;
+  const horizontal = positions.map(({ x }) => x);
+  if (positions.length < 16 && Math.max(...horizontal) - Math.min(...horizontal) < 1900) return;
+  const zoom = 0.86;
+  return { x: 56 - entry.x * zoom, y: 64 - entry.y * zoom, zoom };
+}
 export type WorkflowCanvasEdit = {
   layout: WorkflowLayout;
   updateDefinitions: Record<string, number>;
@@ -32,7 +40,8 @@ export type WorkflowPredicate = { op: "exists"; pointer: string }
   | { op: "candidate_checks_passed" };
 
 export type SetFieldOperation = { op: "set"; path: string; value: { source: "literal"; value: unknown } | { source: "input"; pointer: string } }
-  | { op: "rename"; from: string; path: string };
+  | { op: "rename"; from: string; path: string }
+  | { op: "choose_object"; pointers: string[] };
 
 export const MAX_ITERATION_ITEMS = 32;
 export const ITERATION_PORT_FIELDS = [
@@ -292,7 +301,12 @@ export function configurationProblem(configuration: WorkflowNodeConfiguration, d
         ? null : "Choose the required build check and a minimum of 1 to 32 independent reviews.";
     case "set_fields":
       return (configuration.mode === "build" || configuration.mode === "update") && Array.isArray(configuration.operations) &&
-        setOperations(configuration).every((operation) => validPointer(operation?.path, 1024, false) &&
+        setOperations(configuration).every((operation) => operation?.op === "choose_object"
+          ? configuration.mode === "build" && setOperations(configuration).length === 1 && Array.isArray(operation.pointers)
+            && operation.pointers.length >= 1 && operation.pointers.length <= 8
+            && new Set(operation.pointers).size === operation.pointers.length
+            && operation.pointers.every((pointer) => validPointer(pointer, 1024, true))
+          : validPointer(operation?.path, 1024, false) &&
           (operation.op === "rename" ? validPointer(operation.from, 1024, false) && operation.from !== operation.path
             : operation.op === "set" && (operation.value?.source === "literal" ||
               (operation.value?.source === "input" && validPointer(operation.value.pointer, 1024, true)))))
@@ -376,7 +390,7 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
         }
       } else if (node.kind === "set_fields" && port.name === "source") {
         const needsSource = node.configuration.mode === "update" || setOperations(node.configuration)
-          .some((operation) => operation.op === "set" && operation.value?.source === "input");
+          .some((operation) => operation.op === "choose_object" || operation.op === "set" && operation.value?.source === "input");
         if (needsSource && !wired) problems.push(`${node.id}.source requires a connection for the selected operations.`);
       } else if (node.kind === "verify_candidate" && port.name === "strategy") {
         const selected = node.configuration.strategyChecks;
@@ -384,10 +398,13 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
         if (wired !== required) problems.push(`${node.id}.strategy requires a connection when configured to use approved test strategy.`);
       } else if (node.kind === "agent" && port.name === "review_subject") {
         if (wired && !reuse) problems.push(`${node.id}.review_subject requires review reuse to be enabled.`);
+      } else if (node.kind === "accept_candidate" && port.name === "selected_reviews") {
+        const required = node.configuration.reviewMode === "selected";
+        if (wired !== required) problems.push(`${node.id}.selected_reviews requires a connection when using the selected reviews.`);
       } else if (((node.kind === "approval" || node.kind === "summarize_result") && port.name === "evidence") ||
         (node.kind === "build_text" && port.name === "values") ||
         (node.kind === "agent" && port.name === "comparison") ||
-        (["implement", "review_candidate"].includes(node.kind) && port.name === "brief") ||
+        (["implement", "review_plan", "review_candidate", "review_diff_candidate"].includes(node.kind) && port.name === "brief") ||
         (node.kind === "accept_candidate" && node.configuration.kind === "none" && ["quality", "build"].includes(port.name)) ||
         (node.kind === "open_or_update_pull_request" && port.name === "risk") ||
         (node.kind === "materialize_backlog" && ["design", "strategy"].includes(port.name)) ||

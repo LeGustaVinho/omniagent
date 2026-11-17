@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { Dialog } from "radix-ui";
+import { Dialog, Popover } from "radix-ui";
+import { Layers3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { PackageDraft } from "@/workflow-authoring-package";
 import { WorkflowGraphEditor } from "@/workflow-graph-editor";
+import type { PromptContract, PromptExpansion } from "@/workflow-prompt-model";
 import {
   isPresetEligible, isStartNode, portType, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowEndpoint,
   type WorkflowGraph, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPortType, type WorkflowReuseSelection, type WorkflowWire,
@@ -14,7 +16,7 @@ export type ReusableVersion = { id: string; revision: string; kind: string; dest
 export type ReusableReference = { source: "published"; version: ReusableVersion } | { source: "draft"; key: string }
   | { source: "parameter"; name: string; kind: string };
 export type ReusableBody = { kind: string; graph?: WorkflowGraph; configuration?: WorkflowNodeConfiguration; editableFields?: string[];
-  inputs?: Record<string, WorkflowEndpoint>; outputs?: Record<string, WorkflowEndpoint> };
+  inputs?: Record<string, WorkflowEndpoint>; outputs?: Record<string, WorkflowEndpoint>; prompt?: PromptContract };
 type MatchSource = { type: "package_revision"; draftId: string; revision: string; memberKey: string }
   | { type: "published"; version: ReusableVersion };
 type Boundary = {
@@ -24,9 +26,10 @@ type Boundary = {
 type InputGroup = { key: string; source: WorkflowEndpoint; wires: WorkflowWire[]; value: WorkflowPortType };
 type Selection = { type: "preset"; nodeId: string; editableFields: string[] }
   | { type: "subflow"; nodeIds: string[] | null; inputs: Record<string, WorkflowWire[]>; outputs: Record<string, WorkflowEndpoint> };
-type ArtifactSummary = { version: ReusableVersion; name: string; blockers: string[] };
+type ArtifactSummary = { version: ReusableVersion; name: string; blockers: string[]; prompt?: boolean };
 export type ReusableDescription = {
-  artifact: ArtifactSummary & { body: ReusableBody; references: Record<string, ReusableReference>; layout?: WorkflowLayout };
+  artifact: ArtifactSummary & { body: ReusableBody; references: Record<string, ReusableReference>; layout?: WorkflowLayout;
+    promptExpansion?: PromptExpansion };
   definition: WorkflowDefinition;
   graphDefinitions: WorkflowDefinitions;
   editableOverrides: string[];
@@ -239,23 +242,27 @@ export function ReusableCatalog({ projectId, disabled, onAdd }: {
   const selected = options.find(({ version }) => JSON.stringify(version) === choice);
   const load = useMutation({
     mutationFn: (version: ReusableVersion) => reusableNodeQuery(projectId, version).queryFn(),
-    onSuccess: (description) => onAdd(description),
+    onSuccess: (description) => { onAdd(description); setOpen(false); select(""); },
   });
-  return <details className="pipeline-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary>Add a reusable node</summary>
-    {open && <div className="pipeline-stack">
+  return <Popover.Root open={open} onOpenChange={setOpen}>
+    <Popover.Trigger asChild><Button type="button" variant="outline" disabled={disabled} aria-label="Add a reusable node">
+      <Layers3 size={15} aria-hidden /> Reuse
+    </Button></Popover.Trigger>
+    <Popover.Portal>
+      <Popover.Content align="end" sideOffset={7} className="workflow-reuse-popover pipeline-form pipeline-stack" aria-label="Add a reusable node">
       <label>Published reusable node<select value={choice} disabled={disabled || load.isPending}
         onChange={(event) => select(event.currentTarget.value)}>
-        <option value="">Choose a preset or subflow</option>
-        {options.map(({ name, version }) => <option key={JSON.stringify(version)} value={JSON.stringify(version)}>
-          {name} · {version.kind} · {version.destination} · {version.revision.slice(0, 10)}
+        <option value="">Choose a Prompt, preset, or subflow</option>
+        {options.map(({ name, version, prompt }) => <option key={JSON.stringify(version)} value={JSON.stringify(version)}>
+          {name} · {prompt ? "Prompt" : version.kind} · {version.destination} · {version.revision.slice(0, 10)}
         </option>)}
       </select></label>
       {(catalog.error ?? load.error) && <p role="alert">{String(catalog.error ?? load.error)}</p>}
       <Button type="button" variant="outline" disabled={disabled || !selected || load.isPending}
         onClick={() => { if (selected) load.mutate(selected.version); }}>Add pinned node</Button>
-    </div>}
-  </details>;
+      </Popover.Content>
+    </Popover.Portal>
+  </Popover.Root>;
 }
 
 export function PublishedSubflow({ projectId, checkoutId, version }: {

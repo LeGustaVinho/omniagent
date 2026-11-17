@@ -88,6 +88,7 @@ function mount({ stale = false, publication = null, openWorkspace = vi.fn(), mem
 }
 
 async function addPublishedRevision(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "Package details" }));
   await user.click(await screen.findByText("Edit package"));
   await user.click(screen.getByText("Published artifacts"));
   const candidate = await screen.findByRole("option", { name: /Repository checker/ });
@@ -101,7 +102,7 @@ async function addPublishedRevision(user: ReturnType<typeof userEvent.setup>) {
     projectId: exampleCheckout.projectId, draftId: "draft", expectedRevision: "first-review",
     package: expect.objectContaining({ members: [pipeline, expect.objectContaining({ base: version })] }),
   }));
-  await screen.findByText(published.reviewedRevision);
+  await screen.findByTitle(published.reviewedRevision);
 }
 
 it("opens an editable project draft from the selected factory template revision", async () => {
@@ -135,6 +136,7 @@ it("opens exact published bases, confirms one saved revision and shows every pac
   await user.click(screen.getByRole("button", { name: "Review package publication" }));
   const dialog = within(await screen.findByRole("dialog", { name: "Publish this package revision" }));
   expect(dialog.getByText(published.reviewedRevision)).toBeTruthy();
+  await user.click(dialog.getByText(/Artifacts in this publication/));
   expect(dialog.getByText("Repository checker · library")).toBeTruthy();
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "publish_reviewed_workflow_package")).toBe(false);
   expect(await dialog.findByText("Field changes (1)")).toBeTruthy();
@@ -154,9 +156,12 @@ it("preserves the whole draft and displays the current published revision on con
   await user.click(screen.getByRole("button", { name: "Review package publication" }));
   await screen.findByText("Field changes (1)");
   await user.click(screen.getByRole("button", { name: "Confirm package publication" }));
+  await user.click(await screen.findByRole("button", { name: "Compare published base" }));
   const conflict = within(await screen.findByRole("region", { name: "Current published package artifact" }));
   expect(conflict.getByText("updated-elsewhere")).toBeTruthy();
-  expect(screen.getByText(published.reviewedRevision)).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Close published version changed" }));
+  expect(screen.getByTitle(published.reviewedRevision)).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Package details" }));
   expect(screen.getByRole("list", { name: "Saved package members" }).textContent).toContain("Repository checker");
 });
 
@@ -209,9 +214,11 @@ it("pins the chosen pipeline model on unbound stages and locally edited presets 
   expect(bulk.disabled).toBe(true);
   await user.click(await screen.findByRole("button", { name: "Pipeline stage model · Choose model" }));
   await user.click(await screen.findByRole("menuitemradio", { name: "Fixture model" }));
-  expect(screen.getByRole("button", { name: "Package authoring model · Choose model" })).toBeTruthy();
   await user.click(bulk);
   expect(screen.queryByText("Configure stage models")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Edit with AI" }));
+  expect(await screen.findByRole("button", { name: "Package authoring model · Choose model" })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Close edit with ai" }));
   expect(invoke).not.toHaveBeenCalledWith("save_workflow_package", expect.anything());
   await user.click(screen.getByRole("button", { name: "Save package revision" }));
 

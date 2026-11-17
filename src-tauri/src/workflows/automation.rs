@@ -29,6 +29,52 @@ pub(super) fn enabled(db: &Connection, run: &str) -> Result<bool> {
     )?)
 }
 
+pub(super) fn prompt_native_stage(node: &PinnedNode) -> bool {
+    if !node
+        .definition
+        .outputs
+        .iter()
+        .any(|port| port.name == "failed")
+    {
+        return false;
+    }
+    let NodeConfiguration::AgentRole { requirements, .. } = &node.instance.configuration else {
+        return false;
+    };
+    requirements.bound_role.is_some()
+        && match node.instance.kind {
+            super::BuiltinNode::Plan | super::BuiltinNode::ReviewPlan => {
+                requirements.prompt_text.is_some() || prompt_delegate(node)
+            }
+            super::BuiltinNode::ReviewDiffCandidate => true,
+            _ => false,
+        }
+}
+
+pub(super) fn prompt_delegate(node: &PinnedNode) -> bool {
+    let NodeConfiguration::AgentRole { requirements, .. } = &node.instance.configuration else {
+        return false;
+    };
+    requirements.prompt_delegate
+        && requirements.bound_role.is_some()
+        && node.definition.executor == super::Executor::ReadOnlyAgent
+        && node
+            .definition
+            .outputs
+            .iter()
+            .any(|port| port.name == "failed")
+        && matches!(
+            node.instance.kind,
+            super::BuiltinNode::Agent
+                | super::BuiltinNode::ReviewPlan
+                | super::BuiltinNode::ReviewCandidate
+                | super::BuiltinNode::ReviewDiffCandidate
+        )
+        && requirements.plan.is_none()
+        && requirements.goal.is_none()
+        && !requirements.review_reuse
+}
+
 #[derive(Deserialize, Serialize)]
 struct AgentInputs {
     unit: Option<String>,
@@ -80,17 +126,21 @@ pub(super) fn note_ready_agent(
     unit: Option<&str>,
     inputs: &BTreeMap<String, WorkflowArtifact>,
 ) -> Result<()> {
-    if !enabled(db, &run.id)? {
+    let prompt_delegate = prompt_delegate(node);
+    if !prompt_delegate && !enabled(db, &run.id)? {
         return Ok(());
     }
-    if matches!(
-        node.definition.kind,
-        super::BuiltinNode::Agent | super::BuiltinNode::ReviewCandidate
-    ) && matches!(
-        super::launch::load_workflow_launch(db, &run.project_id, &run.id)?
-            .map(|receipt| receipt.origin),
-        Some(super::WorkflowLaunchOrigin::Conversation { .. })
-    ) {
+    if !prompt_delegate
+        && matches!(
+            node.definition.kind,
+            super::BuiltinNode::Agent | super::BuiltinNode::ReviewCandidate
+        )
+        && matches!(
+            super::launch::load_workflow_launch(db, &run.project_id, &run.id)?
+                .map(|receipt| receipt.origin),
+            Some(super::WorkflowLaunchOrigin::Conversation { .. })
+        )
+    {
         // Conversation turns select the agent's profile and attach the reviewed chat context.
         return Ok(());
     }

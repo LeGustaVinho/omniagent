@@ -34,7 +34,7 @@ use super::{
 
 mod reuse;
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,7 +58,7 @@ pub(super) struct AgentStageOutcome {
 }
 
 impl AgentStageOutcome {
-    fn failed(run_id: Option<String>, reason: &'static str) -> Self {
+    pub(super) fn failed(run_id: Option<String>, reason: &str) -> Self {
         Self {
             state: ControlStageState::Failed,
             port: "failed",
@@ -266,6 +266,16 @@ pub(super) fn stage_job(
     Ok(None)
 }
 
+pub(super) fn attempt_has_open_wait(db: &Connection, attempt: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM open_agent_questions WHERE run_id = ?1
+         UNION ALL SELECT 1 FROM job_downstream_waits WHERE parent_run_id = ?1
+           AND state IN ('yielding', 'waiting', 'needs_review'))",
+        [attempt],
+        |row| row.get(0),
+    )?)
+}
+
 pub(super) fn evaluate(
     db: &Connection,
     run: &WorkflowRun,
@@ -312,14 +322,7 @@ pub(super) fn evaluate(
         if !attempt.status.is_terminal() || job.queued_recovery.is_some() {
             return Ok(None);
         }
-        let waiting: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM open_agent_questions WHERE run_id = ?1
-             UNION ALL SELECT 1 FROM job_downstream_waits WHERE parent_run_id = ?1
-               AND state IN ('yielding', 'waiting', 'needs_review'))",
-            [&attempt.run_id],
-            |row| row.get(0),
-        )?;
-        if waiting && !cancelled {
+        if !cancelled && attempt_has_open_wait(db, &attempt.run_id)? {
             return Ok(None);
         }
         if attempt.status != RunStatus::Succeeded {
@@ -573,6 +576,7 @@ impl Store {
                     let kind = node.definition.kind;
                     if kind == BuiltinNode::Agent
                         || super::automation::agents_delivery::enabled_for(&tx, &workflow, &node)?
+                        || super::automation::prompt_native_stage(&node)
                     {
                         super::control::refresh(&tx, &project, &workflow)?;
                     }

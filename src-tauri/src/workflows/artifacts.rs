@@ -728,6 +728,8 @@ pub(super) fn insert_scoped_artifact(
             | BuiltinNode::FilterMapList
             | BuiltinNode::BuildText
             | BuiltinNode::ValidateOutput
+            | BuiltinNode::PromptDecision
+            | BuiltinNode::PromptOutcome
             | BuiltinNode::CollectEvidence
             | BuiltinNode::QualityGate
             | BuiltinNode::FindWork

@@ -185,6 +185,19 @@ fn visit(
             configuration,
             &mut visit,
         )?,
+        PackageArtifactBody::Prompt { prompt } => {
+            if let Some(configuration) = &mut prompt.configuration {
+                config(
+                    Location {
+                        node: Some("execute"),
+                        reference: reference_kind("role"),
+                        ..local
+                    },
+                    configuration,
+                    &mut visit,
+                )?;
+            }
+        }
         PackageArtifactBody::Role { template } => {
             validate_sources(&template.requirements)?;
             visit(local, Slot::Model(&mut template.model))?;

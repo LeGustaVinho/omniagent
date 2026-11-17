@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowRight, FilePlus2, LayoutTemplate, Package as PackageIcon, Plus, Sparkles, Workflow, X } from "lucide-react";
+import { ArrowRight, Check, CircleAlert, FilePlus2, LayoutTemplate, Package as PackageIcon, Plus, Save, Search, SlidersHorizontal, Sparkles, Upload, Workflow, X } from "lucide-react";
+import type { Viewport } from "@xyflow/react";
 import { Dialog } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
@@ -11,10 +12,12 @@ import { availableModelSelection, LIVE_MODEL_PROVIDERS, useLiveModelOptions } fr
 import type { WorkspaceProps } from "@/workbench-contract";
 import { PackagePublicationPreview, WorkflowPackageGraphEditing, WorkflowPackageReview, usePackagePreview } from "@/workflow-package-review";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
+import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
 import { WorkflowExchangeDownload, WorkflowExchangePanel } from "@/workflow-exchange";
 import { WorkflowLaunchPicker } from "@/workflow-launch";
 import { WorkflowReusableDerivation, type ReusableBody, type ReusableReference } from "@/workflow-reusable";
 import type { WorkflowCanvasEdit, WorkflowGraph, WorkflowLayout, WorkflowNodeConfiguration } from "@/workflow-graph-model";
+import { defaultPromptContract, promptEndpointForRename, type PromptMember, type PromptPortRename } from "@/workflow-prompt-model";
 import "./pipeline-builder-landing.css";
 
 type Version = { kind: string; id: string; revision: string; destination: "project" | "library" };
@@ -63,6 +66,16 @@ function packageGraphs(text: string) {
   } catch {
     return [];
   }
+}
+
+function packagePromptMembers(members: Member[]): PromptMember[] {
+  return members.flatMap((member) => {
+    const prompt = member?.body?.prompt;
+    if (member?.body?.kind !== "prompt" || typeof member.key !== "string" || typeof member.name !== "string" || !prompt
+      || typeof prompt.text !== "string" || typeof prompt.executor !== "string" || !prompt.inputs || !prompt.outputs
+      || !Array.isArray(prompt.routes) || !Array.isArray(prompt.delegates)) return [];
+    return [{ ...member, body: { kind: "prompt", prompt } }];
+  });
 }
 
 function unconfiguredStageModels(text: string) {
@@ -272,6 +285,8 @@ export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWor
     refetchInterval: ({ state }) => pending(state.data) ? 1_000 : false,
   });
   const [editBase, holdEdits] = useState<PackageDraft>();
+  const [graphMember, selectGraphMember] = useState("");
+  const viewports = useRef(new Map<string, Viewport>());
   const draft = editBase ?? query.data;
   function update(next: PackageDraft) {
     holdEdits(undefined);
@@ -285,33 +300,42 @@ export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWor
       void client.invalidateQueries({ queryKey: ["workflow-package-catalog", projectId] });
     }
   }
-  return <section aria-label="Workflow package editor" className="pipeline-stack h-full overflow-auto p-4">
-    <header className="flex flex-wrap items-center justify-between gap-2">
-      <h1 className="text-lg font-semibold">{draft?.package.name ?? "Workflow package"}</h1>
+  const sourceActions = <>
       {draft?.conversationId && <Button variant="outline" onClick={() => openWorkspace("conversations", draft.conversationId!)}>Open source conversation</Button>}
       {draft?.request?.runId && <Button variant="outline" onClick={() => openActivity(draft.request!.runId!)}>Open authoring run</Button>}
       {openQueueJob && draft?.request?.jobId && !draft.request.runId &&
         <Button variant="outline" onClick={() => openQueueJob(draft.request!.jobId!)}>Open queued authoring job</Button>}
-    </header>
+  </>;
+  return <section aria-label="Workflow package editor" className="workflow-builder">
+    {!draft && <header className="workflow-builder-header"><h1>Workflow package</h1></header>}
     {query.isPending && <p role="status">Loading package revision…</p>}
     {query.error && <p role="alert">{String(query.error)}</p>}
     {draft && <PackageRevision key={draft.revision} projectId={projectId} checkoutId={checkoutId} draft={draft} update={update} holdEdits={holdEdits}
-      revisionConflict={!!editBase && !!query.data && editBase.revision !== query.data.revision} openWorkspace={openWorkspace} />}
+      revisionConflict={!!editBase && !!query.data && editBase.revision !== query.data.revision} openWorkspace={openWorkspace}
+      graphMember={graphMember} selectGraphMember={selectGraphMember} viewports={viewports.current} sourceActions={sourceActions} />}
   </section>;
 }
 
-function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revisionConflict, openWorkspace }: {
+function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revisionConflict, openWorkspace, graphMember, selectGraphMember, viewports, sourceActions }: {
   draft: PackageDraft; projectId: string; checkoutId: string; update: (draft: PackageDraft) => void;
   holdEdits: (base: PackageDraft | undefined) => void;
   revisionConflict: boolean;
   openWorkspace: WorkspaceProps["openWorkspace"];
+  graphMember: string;
+  selectGraphMember: (key: string) => void;
+  viewports: Map<string, Viewport>;
+  sourceActions: ReactNode;
 }) {
   const client = useQueryClient();
   const [text, setText] = useState(() => JSON.stringify(draft.package, null, 2));
   const [canvasByMember, setCanvases] = useState<Record<string, WorkflowCanvasEdit>>({});
+  const promptArchive = useRef(new Map<string, Member>());
   const currentText = useRef(text);
   currentText.current = text;
   const [confirmation, setConfirmation] = useState(false);
+  const [packageOpen, setPackageOpen] = useState(false);
+  const [authoringOpen, setAuthoringOpen] = useState(false);
+  const [reusableMember, setReusableMember] = useState("");
   const [feedback, setFeedback] = useState("");
   const [selection, setSelection] = useState<ModelSelection | null>(null);
   const [showStageModels, setShowStageModels] = useState(false);
@@ -319,7 +343,7 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
   const unconfigured = unconfiguredStageModels(text)?.stages.length ?? 0;
   const stageModels = useLiveModelOptions(LIVE_MODEL_PROVIDERS, showStageModels && unconfigured > 0 && !draft.publication);
   const stageModel = availableModelSelection(stageModels.options, stageModelSelection);
-  const models = useLiveModelOptions(providers, !draft.publication);
+  const models = useLiveModelOptions(providers, authoringOpen && !draft.publication);
   const model = availableModelSelection(models.options, selection);
   const scoped = { projectId, draftId: draft.id };
   const save = useMutation({
@@ -353,13 +377,65 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
   useEffect(() => holdEdits(dirty ? draft : undefined), [holdEdits, dirty, draft]);
   const busy = pending(draft) || save.isPending || publish.isPending || request.isPending;
   const stale = publish.data?.status === "stale_base" ? publish.data : null;
+  const graphs = packageGraphs(text);
+  const draftMembers = (() => {
+    try {
+      const members: unknown = JSON.parse(text)?.members;
+      return Array.isArray(members) ? members as Member[] : [];
+    } catch {
+      return [];
+    }
+  })();
+  const promptMembers = packagePromptMembers(draftMembers);
   const savedGraphs = packageGraphs(JSON.stringify(draft.package));
+  const savedReuseGraph = savedGraphs.find(({ key }) => key === (reusableMember || graphMember)) ?? savedGraphs[0];
   const draftPresets = Object.fromEntries(draft.package.members.filter(({ body }) => body.kind === "preset")
     .map(({ key, body }) => [key, body]));
   function openDerived(next: PackageDraft) {
     client.setQueryData(packageKey(projectId, next.id), next);
     void client.invalidateQueries({ queryKey: packagesKey(projectId), exact: true });
     openWorkspace("pipelines", packageDraftTarget(next.id));
+  }
+  function editGraph(key: string, graph: WorkflowGraph, references?: Record<string, ReusableReference>, promptKeys: string[] = []) {
+    const current = JSON.parse(currentText.current) as Package;
+    const previous = current.members.find((member) => member.key === key);
+    if (!previous) return;
+    const removedRefs = new Set(Object.values(previous.references ?? {}).flatMap((ref) => ref.source === "draft" ? [ref.key] : []));
+    const members = current.members.map((item) => item.key === key
+      ? { ...item, ...(references && { references }), body: { ...item.body, graph } } : item);
+    const used = new Set(members.flatMap((member) =>
+      Object.values(member.references ?? {}).flatMap((ref) => ref.source === "draft" ? [ref.key] : [])));
+    for (const promptKey of used) {
+      if (members.some((item) => item.key === promptKey)) continue;
+      const archived = promptArchive.current.get(promptKey);
+      if (archived) members.push(archived);
+      else if (promptKeys.includes(promptKey)) members.push({
+        key: promptKey, name: "Prompt", destination: "project", body: { kind: "prompt", prompt: defaultPromptContract() }, references: {},
+      });
+    }
+    const retained = members.filter((member) => {
+      if (member.body.kind !== "prompt" || member.destination === "library" || member.base
+        || used.has(member.key) || !removedRefs.has(member.key)) return true;
+      promptArchive.current.set(member.key, member);
+      return false;
+    });
+    setText(JSON.stringify({ ...current, members: retained }, null, 2));
+  }
+  function editPrompt(prompt: PromptMember, rename?: PromptPortRename) {
+    const current = JSON.parse(currentText.current) as Package;
+    const members = current.members.map((member) => {
+      if (member.key === prompt.key) return { ...member, ...prompt };
+      const graph = member.body.graph;
+      if (!graph || !rename) return member;
+      const affected = new Set(Object.entries(member.references ?? {}).flatMap(([id, ref]) =>
+        ref.source === "draft" && ref.key === prompt.key ? [id] : []));
+      if (!affected.size) return member;
+      return { ...member, body: { ...member.body, graph: { ...graph, wires: graph.wires.map((wire) => rename.direction === "inputs"
+        ? { ...wire, to: promptEndpointForRename(wire.to, affected, rename) }
+        : { ...wire, from: promptEndpointForRename(wire.from, affected, rename) }),
+      } } };
+    });
+    setText(JSON.stringify({ ...current, members }, null, 2));
   }
   function applyStageModel() {
     if (!stageModel) return;
@@ -368,13 +444,29 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
     for (const stage of missing.stages) stage.model = stageModel;
     setText(JSON.stringify(missing.draft, null, 2));
   }
+  const title = <div className="workflow-builder-title">
+    <span className="workflow-builder-icon"><Workflow size={18} aria-hidden /></span>
+    <div><h1 title={draft.package.name}>{draft.package.name}</h1>
+      <div className="workflow-builder-state" data-dirty={dirty || undefined}>
+        {dirty ? <span className="workflow-builder-dot" /> : <Check size={13} aria-hidden />}
+        <span>{draft.publication ? "Published" : dirty ? "Unsaved changes" : "Saved draft"}</span>
+        <code title={draft.revision}>{draft.revision.slice(0, 12)}</code>
+      </div>
+    </div>
+  </div>;
   if (draft.publication) {
-    return <section aria-label="Package publication receipt" className="pipeline-stack">
+    return <>
+      <header className="workflow-builder-header">{title}<div className="pipeline-actions">{sourceActions}</div></header>
+      <section aria-label="Package publication receipt" className="workflow-builder-results pipeline-stack">
+      <div className="workflow-published-summary">
       <p role="status">Published package revision <code>{draft.publication.reviewedRevision}</code></p>
       <p>Publication receipt <code>{draft.publication.id}</code></p>
-      <WorkflowExchangeDownload projectId={projectId} versions={draft.publication.members.map(({ artifact }) => artifact.version)} />
-      <WorkflowPackageReview projectId={projectId} draftId={draft.id} savedRevision={draft.publication.reviewedRevision} />
       {draft.publication.originatingRunId && <p>Originating run <code>{draft.publication.originatingRunId}</code></p>}
+      <div className="pipeline-actions">
+        <WorkflowExchangeDownload projectId={projectId} versions={draft.publication.members.map(({ artifact }) => artifact.version)} />
+        <WorkflowPackageReview projectId={projectId} draftId={draft.id} savedRevision={draft.publication.reviewedRevision} />
+      </div>
+      </div>
       <ul className="pipeline-stack">
         {draft.publication.members.map(({ key, artifact }) => <li key={key} className="pipeline-evidence">
           <strong>{artifact.name}</strong> · {artifact.version.kind.replaceAll("_", " ")} · {artifact.version.destination}
@@ -391,25 +483,30 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
           </details>}
         </li>)}
       </ul>
-    </section>;
+      </section>
+    </>;
   }
-  return <div className="pipeline-stack">
-    <div className="pipeline-draft-toolbar">
-      <div className="pipeline-draft-revision">
-        <span>{dirty ? "Unsaved changes" : "Saved draft revision"}</span>
-        <code>{draft.revision}</code>
-      </div>
+  return <>
+    <header className="workflow-builder-header">
+      {title}
       <div className="pipeline-actions">
-        <Button type="button" disabled={!dirty || busy} onClick={() => save.mutate()}>Save package revision</Button>
+        <Button type="button" aria-label="Save package revision" title="Save package revision" disabled={!dirty || busy} onClick={() => save.mutate()}>
+          <Save size={15} aria-hidden /> <span className="workflow-builder-action-label">Save package revision</span>
+        </Button>
         <Dialog.Root open={confirmation} onOpenChange={(open) => { if (!publish.isPending) setConfirmation(open); }}>
-          <Dialog.Trigger asChild><Button type="button" variant="outline" disabled={dirty || busy || draft.package.members.length === 0}>Review package publication</Button></Dialog.Trigger>
+          <Dialog.Trigger asChild><Button type="button" variant="outline" aria-label="Review package publication" title="Review package publication"
+            disabled={dirty || busy || draft.package.members.length === 0}>
+            <Upload size={15} aria-hidden /> <span className="workflow-builder-action-label">Review package publication</span>
+          </Button></Dialog.Trigger>
           <Dialog.Portal>
             <Dialog.Overlay className="fixed inset-0 z-50 bg-background/75 backdrop-blur-sm" />
             <Dialog.Content className="fixed left-1/2 top-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-[min(45rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-lg border border-border bg-card p-5 shadow-lg">
               <Dialog.Title className="text-lg font-semibold">Publish this package revision</Dialog.Title>
               <Dialog.Description>Publish all {draft.package.members.length} artifacts from the saved revision in one transaction.</Dialog.Description>
               <code className="break-all">{draft.revision}</code>
-              <ul>{draft.package.members.map((member) => <li key={member.key}>{member.name} · {member.destination ?? "project"}</li>)}</ul>
+              <details className="pipeline-evidence"><summary>Artifacts in this publication ({draft.package.members.length})</summary>
+                <ul className="workflow-publication-members">{draft.package.members.map((member) => <li key={member.key}>{member.name} · {member.destination ?? "project"}</li>)}</ul>
+              </details>
               {review.isPending && <p role="status">Loading changes and dependencies…</p>}
               {review.error && <p role="alert">{String(review.error)}</p>}
               {review.data?.revision === draft.revision && <PackagePublicationPreview preview={review.data} />}
@@ -422,22 +519,17 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
           </Dialog.Portal>
         </Dialog.Root>
       </div>
-    </div>
-    {revisionConflict && <p role="alert">A newer revision is available. Your edits remain here.</p>}
-    {save.error && <p role="alert">{String(save.error)}</p>}
-    {unconfigured > 0 && <details className="pipeline-evidence" onToggle={(event) => setShowStageModels(event.currentTarget.open)}>
-      <summary>Configure stage models</summary>
-      {showStageModels && <div className="pipeline-stack pt-2">
-        <ModelPicker label="Pipeline stage model" options={stageModels.options} loading={stageModels.loading} disabled={busy}
-          selection={{ mode: "single", selected: stageModelSelection, onChange: setStageModelSelection }} />
-        {stageModels.errors[0] && <p role="alert">{String(stageModels.errors[0])}</p>}
-        <Button type="button" variant="outline" className="w-fit" disabled={!stageModel || busy} onClick={applyStageModel}>
-          Apply to {unconfigured} unconfigured {unconfigured === 1 ? "stage" : "stages"}
-        </Button>
-      </div>}
-    </details>}
+    </header>
+    {revisionConflict && <p role="alert" className="workflow-builder-warning">A newer revision is available. Your edits remain here.</p>}
+    {stale && <p role="alert" className="workflow-builder-warning">The published base changed. Open Compare published base to review it.</p>}
+    {save.error && <p role="alert" className="workflow-builder-warning">{String(save.error)}</p>}
     <WorkflowPackageGraphEditing projectId={projectId} checkoutId={checkoutId} draftId={draft.id} savedRevision={draft.revision}
-      graphs={packageGraphs(text)} draftPresets={draftPresets} layouts={draft.layouts} canvasByMember={canvasByMember}
+      graphs={graphs} draftPresets={draftPresets} layouts={draft.layouts} canvasByMember={canvasByMember}
+      promptMembers={promptMembers} memberKeys={draftMembers.flatMap((member) => typeof member?.key === "string" ? [member.key] : [])}
+      draftRoles={draftMembers.flatMap((member) => member?.body?.kind === "role" && typeof member?.key === "string" && typeof member?.name === "string"
+        ? [{ name: member.name + " · This draft", reference: { source: "draft" as const, key: member.key } }] : [])}
+      editPrompt={editPrompt}
+      selection={graphMember} select={selectGraphMember} viewports={viewports}
       deriveDisabled={busy || dirty || revisionConflict} onDerived={update}
       changeCanvas={(key, canvas) => setCanvases((previous) => {
         const next = { ...previous };
@@ -446,59 +538,102 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
         else next[key] = canvas;
         return next;
       })}
-      disabled={busy} edit={(key, graph, references) => {
-        const current = JSON.parse(currentText.current) as Package;
-        setText(JSON.stringify({ ...current, members: current.members.map((member) => member.key === key
-          ? { ...member, ...(references && { references }), body: { ...member.body, graph } } : member) }, null, 2));
-      }} />
-    <WorkflowPackageReview projectId={projectId} draftId={draft.id} savedRevision={draft.revision} />
-    {draft.request && <p role="status">Authoring {draft.request.state.replaceAll("_", " ")}{draft.request.diagnostic && ` · ${draft.request.diagnostic}`}</p>}
-    {draft.package.members.length > 1 && <ul className="pipeline-stack" aria-label="Saved package members">
-      {draft.package.members.map((member) => <li key={member.key}>
-        <strong>{member.name}</strong> · {member.body.kind.replaceAll("_", " ")} · {member.destination ?? "project"}
-        {member.base && <p className="break-all">Base <code>{member.base.revision}</code></p>}
-      </li>)}
-    </ul>}
-    {savedGraphs.map((member) => <section key={member.key} className="pipeline-stack" aria-label={`Reuse ${member.name}`}>
-      {savedGraphs.length > 1 && <strong>{member.name}</strong>}
-      <WorkflowReusableDerivation projectId={projectId} graph={member.graph}
-        source={{ type: "package_revision", draftId: draft.id, revision: draft.revision, memberKey: member.key }}
-        disabled={busy || dirty} onSaved={update} />
-    </section>)}
-    <details className="pipeline-evidence">
-      <summary>Edit package</summary>
-      <PublishedArtifactPicker projectId={projectId} checkoutId={checkoutId} openWorkspace={openWorkspace} disabled={busy} add={(artifact) => {
-        const parsed = JSON.parse(currentText.current) as Package;
-        if (!Array.isArray(parsed.members)) throw new Error("The package needs a members array.");
-        const version = artifact.version;
-        if (parsed.members.some((member) => member.base?.id === version.id && member.base.kind === version.kind
-          && member.base.destination === version.destination)) throw new Error("This artifact is already in the package.");
-        const key = `${version.kind}-${version.id}`;
-        if (parsed.members.some((member) => member.key === key)) throw new Error("Choose a distinct key for the existing package member.");
-        setText(JSON.stringify({ ...parsed, members: [...parsed.members, {
-          key, name: artifact.name, destination: version.destination, base: version, body: artifact.body, references: artifact.references,
-        }] }, null, 2));
-      }} />
-      <textarea aria-label="Package document" autoCapitalize="off" spellCheck={false} className="mt-2 min-h-64 w-full rounded border border-border bg-background p-2 font-mono text-xs"
-        value={text} disabled={busy} onChange={(event) => setText(event.currentTarget.value)} />
-    </details>
-    <div className="pipeline-stack max-w-lg">
-      <ModelPicker label="Package authoring model" options={models.options} loading={models.loading} disabled={busy}
-        selection={{ mode: "single", selected: selection, onChange: setSelection }} />
-      <label>Package authoring request<textarea rows={3} className="w-full rounded border border-border bg-background p-2"
-        value={feedback} disabled={busy} onChange={(event) => setFeedback(event.currentTarget.value)} /></label>
-      <Button type="button" variant="outline" disabled={!model || !feedback.trim() || dirty || busy}
-        onClick={() => request.mutate()}>Request package changes with AI</Button>
-      {request.error && <p role="alert">{String(request.error)}</p>}
-    </div>
-    {stale && <section aria-label="Current published package artifact" className="pipeline-evidence">
-      <p role="alert">The published base for {stale.member} changed. The package draft is preserved.</p>
-      <p>{stale.current.name} · <code>{stale.current.version.revision}</code></p>
-      <details><summary>Compare the current artifact</summary>
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap text-xs">{JSON.stringify(stale.current.body, null, 2)}</pre>
-      </details>
-    </section>}
-  </div>;
+      disabled={busy} edit={editGraph} />
+    <footer className="workflow-builder-tools" aria-label="Package tools">
+      <WorkflowPackageReview projectId={projectId} draftId={draft.id} savedRevision={draft.revision} />
+      {unconfigured > 0 && <WorkflowBuilderDialog title="Configure stage models"
+        description="Apply one model to stages that have no model or role assigned."
+        open={showStageModels} onOpenChange={setShowStageModels}
+        trigger={<Button variant="outline"><SlidersHorizontal size={15} aria-hidden /> Configure stage models</Button>}>
+        <ModelPicker label="Pipeline stage model" options={stageModels.options} loading={stageModels.loading} disabled={busy}
+          selection={{ mode: "single", selected: stageModelSelection, onChange: setStageModelSelection }} />
+        {stageModels.errors[0] && <p role="alert">{String(stageModels.errors[0])}</p>}
+        <Button type="button" variant="outline" className="w-fit" disabled={!stageModel || busy} onClick={applyStageModel}>
+          Apply to {unconfigured} unconfigured {unconfigured === 1 ? "stage" : "stages"}
+        </Button>
+      </WorkflowBuilderDialog>}
+      <WorkflowBuilderDialog title="Package details" description="Browse saved artifacts, reuse a graph, or edit the package document."
+        wide open={packageOpen} onOpenChange={setPackageOpen}
+        trigger={<Button variant="ghost"><PackageIcon size={15} aria-hidden /> Package details</Button>}>
+        <div className="workflow-package-source pipeline-actions"><code>{draft.revision}</code>{sourceActions}</div>
+        <PackageMembers members={draft.package.members} graphs={[...savedGraphs, ...packagePromptMembers(draft.package.members)].map(({ key }) => key)}
+          onOpen={(key) => { selectGraphMember(key); setPackageOpen(false); }} />
+        {savedReuseGraph && <section className="workflow-package-reuse pipeline-form pipeline-stack" aria-label={`Reuse ${savedReuseGraph.name}`}>
+          {savedGraphs.length > 1 && <label>Saved graph<select value={savedReuseGraph.key} onChange={(event) => setReusableMember(event.currentTarget.value)}>
+            {savedGraphs.map(({ key, name }) => <option key={key} value={key}>{name}</option>)}
+          </select></label>}
+          <WorkflowReusableDerivation key={savedReuseGraph.key} projectId={projectId} graph={savedReuseGraph.graph}
+            source={{ type: "package_revision", draftId: draft.id, revision: draft.revision, memberKey: savedReuseGraph.key }}
+            disabled={busy || dirty} onSaved={update} />
+        </section>}
+        <details className="pipeline-evidence">
+          <summary>Edit package</summary>
+          <PublishedArtifactPicker projectId={projectId} checkoutId={checkoutId} openWorkspace={openWorkspace} disabled={busy} add={(artifact) => {
+            const parsed = JSON.parse(currentText.current) as Package;
+            if (!Array.isArray(parsed.members)) throw new Error("The package needs a members array.");
+            const version = artifact.version;
+            if (parsed.members.some((member) => member.base?.id === version.id && member.base.kind === version.kind
+              && member.base.destination === version.destination)) throw new Error("This artifact is already in the package.");
+            const key = `${version.kind}-${version.id}`;
+            if (parsed.members.some((member) => member.key === key)) throw new Error("Choose a distinct key for the existing package member.");
+            setText(JSON.stringify({ ...parsed, members: [...parsed.members, {
+              key, name: artifact.name, destination: version.destination, base: version, body: artifact.body, references: artifact.references,
+            }] }, null, 2));
+          }} />
+          <textarea aria-label="Package document" autoCapitalize="off" spellCheck={false} className="mt-2 min-h-64 w-full rounded border border-border bg-background p-2 font-mono text-xs"
+            value={text} disabled={busy} onChange={(event) => setText(event.currentTarget.value)} />
+        </details>
+        {save.error && <p role="alert">{String(save.error)}</p>}
+        <Button className="w-fit" type="button" disabled={!dirty || busy} onClick={() => save.mutate()}><Save size={15} aria-hidden /> Save package revision</Button>
+      </WorkflowBuilderDialog>
+      <WorkflowBuilderDialog title="Edit with AI" description="Request changes to the saved package revision."
+        open={authoringOpen} onOpenChange={setAuthoringOpen} trigger={<Button variant="ghost"><Sparkles size={15} aria-hidden /> Edit with AI</Button>}>
+        {draft.request && <p role="status">Authoring {draft.request.state.replaceAll("_", " ")}{draft.request.diagnostic && ` · ${draft.request.diagnostic}`}</p>}
+        {dirty && <p>Save the current edits before requesting AI changes.</p>}
+        <ModelPicker label="Package authoring model" options={models.options} loading={models.loading} disabled={busy}
+          selection={{ mode: "single", selected: selection, onChange: setSelection }} />
+        <label>Package authoring request<textarea rows={3} className="w-full rounded border border-border bg-background p-2"
+          value={feedback} disabled={busy} onChange={(event) => setFeedback(event.currentTarget.value)} /></label>
+        <Button type="button" variant="outline" disabled={!model || !feedback.trim() || dirty || busy}
+          onClick={() => request.mutate()}>Request package changes with AI</Button>
+        {request.error && <p role="alert">{String(request.error)}</p>}
+      </WorkflowBuilderDialog>
+      {stale && <WorkflowBuilderDialog title="Published version changed" description={`Review the current published base for ${stale.member}.`}
+        wide trigger={<Button variant="outline"><CircleAlert size={15} aria-hidden /> Compare published base</Button>}>
+        <section aria-label="Current published package artifact" className="pipeline-stack">
+          <p role="alert">The published base for {stale.member} changed. The package draft is preserved.</p>
+          <p>{stale.current.name} · <code>{stale.current.version.revision}</code></p>
+          <details><summary>Compare the current artifact</summary>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap text-xs">{JSON.stringify(stale.current.body, null, 2)}</pre>
+          </details>
+        </section>
+      </WorkflowBuilderDialog>}
+    </footer>
+  </>;
+}
+
+function PackageMembers({ members, graphs, onOpen }: { members: Member[]; graphs: string[]; onOpen: (key: string) => void }) {
+  const [filter, setFilter] = useState("");
+  const search = filter.trim().toLowerCase();
+  const visible = members.filter((member) => [member.name, member.body.kind, member.destination ?? "project"]
+    .some((value) => value.toLowerCase().includes(search)));
+  return <section className="workflow-package-members">
+    <header>
+      <h3>Saved artifacts <span>{members.length}</span></h3>
+      {members.length > 5 && <label className="work-search"><Search size={15} aria-hidden />
+        <input type="search" aria-label="Filter package artifacts" placeholder="Filter artifacts…" value={filter}
+          onChange={(event) => setFilter(event.currentTarget.value)} /></label>}
+    </header>
+    {visible.length === 0 ? <p role="status">{search ? "No matching artifacts." : "No saved artifacts."}</p> :
+      <ul aria-label="Saved package members">{visible.map((member) => <li key={member.key}>
+        <span className="workflow-package-member-icon"><PackageIcon size={15} aria-hidden /></span>
+        <div><strong>{member.name}</strong><small>{member.body.kind.replaceAll("_", " ")} · {member.destination ?? "project"}</small>
+          {member.base && <code title={member.base.revision}>Base {member.base.revision}</code>}</div>
+        {graphs.includes(member.key) && <Button variant="ghost" onClick={() => onOpen(member.key)} aria-label={member.body.kind === "prompt" ? "Open Prompt " + member.name : "Open graph " + member.name}>
+          <ArrowRight size={15} aria-hidden />
+        </Button>}
+      </li>)}</ul>}
+  </section>;
 }
 
 function PublishedArtifactPicker({ projectId, checkoutId, openWorkspace, disabled, add }: {

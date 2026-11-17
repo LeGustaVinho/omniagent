@@ -326,6 +326,29 @@ fn wait_for_file(path: &Path) -> Result<()> {
 }
 
 fn complete(root: &Path, prompt: &str) -> Result<&'static str> {
+    if prompt.contains("OmniAgent Prompt contract suggestion")
+        && prompt.contains("Evaluate the desktop prompt fixture.")
+    {
+        return Ok(
+            r#"{"inputs":{},"outputs":{"summary":{"kind":"rendered_text"}},"routes":["review","deliver"]}"#,
+        );
+    }
+    if prompt.contains("Evaluate the desktop prompt fixture.") {
+        ensure!(
+            prompt.contains("route, reason, outputs and delegations"),
+            "the Prompt executor did not send the published decision contract"
+        );
+        return Ok(
+            r#"{"route":"review","reason":"The desktop fixture chose review.","outputs":{"summary":"Ready to review."},"delegations":[]}"#,
+        );
+    }
+    if prompt.contains("Read the desktop prompt fixture summary.") {
+        ensure!(
+            prompt.contains("Ready to review."),
+            "the downstream Prompt did not receive the typed summary"
+        );
+        return Ok("The desktop fixture read the summary.");
+    }
     if prompt.contains("Run the revised queued instruction") {
         ensure!(
             !prompt.contains("Replace this queued instruction")

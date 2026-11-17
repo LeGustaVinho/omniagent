@@ -471,7 +471,10 @@ impl Store {
             let optional_delivery_input = matches!(
                 (pinned.instance.kind, port.name.as_str()),
                 (
-                    super::BuiltinNode::Implement | super::BuiltinNode::ReviewCandidate,
+                    super::BuiltinNode::Implement
+                        | super::BuiltinNode::ReviewCandidate
+                        | super::BuiltinNode::ReviewDiffCandidate
+                        | super::BuiltinNode::ReviewPlan,
                     "brief"
                 ) | (super::BuiltinNode::OpenOrUpdatePullRequest, "risk")
                     | (super::BuiltinNode::MergePullRequest, "approval")
@@ -483,6 +486,11 @@ impl Store {
                 == super::BuiltinNode::AcceptCandidate
                 && matches!(pinned.instance.configuration, NodeConfiguration::None)
                 && matches!(port.name.as_str(), "quality" | "build")
+                || pinned.instance.kind == super::BuiltinNode::AcceptCandidate
+                    && port.name == "selected_reviews"
+                    && !matches!(&pinned.instance.configuration,
+                        NodeConfiguration::CandidateAcceptance(config)
+                            if config.review_mode == super::candidate_acceptance::CandidateReviewMode::Selected)
                 || pinned.instance.kind == super::BuiltinNode::VerifyCandidate
                     && port.name == "strategy"
                     && !matches!(&pinned.instance.configuration, NodeConfiguration::StagedChecks { strategy_checks, .. }

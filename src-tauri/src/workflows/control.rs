@@ -17,6 +17,7 @@ use super::{
     runtime::{load_definition, load_workflow_run},
 };
 
+mod prompt_context;
 pub(super) mod repair;
 #[cfg(test)]
 mod tests;
@@ -138,6 +139,8 @@ fn is_control(kind: BuiltinNode) -> bool {
             | BuiltinNode::BuildList
             | BuiltinNode::SetFields
             | BuiltinNode::ValidateOutput
+            | BuiltinNode::PromptDecision
+            | BuiltinNode::PromptOutcome
             | BuiltinNode::CollectEvidence
             | BuiltinNode::QualityGate
             | BuiltinNode::FilterMapList
@@ -335,20 +338,29 @@ pub(super) fn conversation_stage_availability(
     let state = Evaluation::new(db, definition, run)?;
     let mut inputs = super::NodeInputs::new();
     let mut pending = false;
-    for wire in definition.wires.iter().filter(|wire| wire.to.node == node.instance.id) {
+    for wire in definition
+        .wires
+        .iter()
+        .filter(|wire| wire.to.node == node.instance.id)
+    {
         match state.dependency(wire, unit)? {
             Arrival::Ignored => return Ok(StageAvailability::Skipped),
             Arrival::Pending => pending = true,
             Arrival::Selected(artifact) => {
-                let data = node.definition.inputs.iter().any(|port|
-                    port.name == wire.to.port && matches!(port.value, PortType::Data(_)));
+                let data = node.definition.inputs.iter().any(|port| {
+                    port.name == wire.to.port && matches!(port.value, PortType::Data(_))
+                });
                 if let (true, Some(artifact)) = (data, artifact) {
                     inputs.insert(wire.to.port.clone(), artifact.id);
                 }
             }
         }
     }
-    Ok(if pending { StageAvailability::Waiting } else { StageAvailability::Ready(inputs) })
+    Ok(if pending {
+        StageAvailability::Waiting
+    } else {
+        StageAvailability::Ready(inputs)
+    })
 }
 
 pub(super) fn require_dependencies(
@@ -839,7 +851,18 @@ impl<'a> Evaluation<'a> {
                             outcome,
                         });
                     }
-                    match evidence_text(&evidence) {
+                    match evidence_text(&evidence).and_then(|mut text| {
+                        prompt_context::append_check_results(
+                            self.db,
+                            self.definition,
+                            self.run,
+                            node_id,
+                            unit,
+                            inputs.values(),
+                            &mut text,
+                        )?;
+                        Ok(text)
+                    }) {
                         Ok(text) => {
                             self.record_stage_artifact(
                                 node_id,
@@ -863,7 +886,58 @@ impl<'a> Evaluation<'a> {
                         }
                     }
                 }
-                SetFields | FilterMapList | BuildText | FindWork | ValidateOutput => {
+                PromptOutcome => {
+                    let inputs = pinned_inputs();
+                    let decision = inputs
+                        .get("decision")
+                        .context("The Prompt lost its decision")?;
+                    let ArtifactValue::JsonObject(value) = &decision.value else {
+                        anyhow::bail!("Expected the recorded Prompt decision");
+                    };
+                    let decision_record: super::prompt::PromptDecision =
+                        serde_json::from_value(serde_json::Value::Object(value.clone()))?;
+                    let NodeConfiguration::PromptOutcome(config) = &node.instance.configuration
+                    else {
+                        anyhow::bail!("Expected the pinned Prompt output configuration");
+                    };
+                    let mut outcome =
+                        self.prompt_outcome(unit, decision_record.clone(), inputs.get("evidence"))?;
+                    if outcome.diagnostic.is_none() {
+                        match config.project(&decision_record, &decision.id) {
+                            Ok(values) => {
+                                for (port, value) in values {
+                                    self.record_stage_artifact(
+                                        node_id, unit, &port, value, &inputs,
+                                    )?;
+                                }
+                            }
+                            Err(error) => {
+                                outcome.route = "falhou".into();
+                                outcome.diagnostic =
+                                    Some(crate::diagnostics::preview(&error.to_string()));
+                            }
+                        }
+                    }
+                    let value = serde_json::to_value(&outcome)?;
+                    let serde_json::Value::Object(value) = value else {
+                        unreachable!("A Prompt outcome is an object");
+                    };
+                    self.record_stage_artifact(
+                        node_id,
+                        unit,
+                        "outcome",
+                        ArtifactValue::JsonObject(value),
+                        &inputs,
+                    )?;
+                    if let Some(reason) = outcome.diagnostic {
+                        diagnostic = Some(reason);
+                        (ControlStageState::Failed, Some("failed"), None, None)
+                    } else {
+                        (ControlStageState::Completed, Some("completed"), None, None)
+                    }
+                }
+                SetFields | FilterMapList | BuildText | FindWork | ValidateOutput
+                | PromptDecision => {
                     let inputs = pinned_inputs();
                     let outputs = self.transform_stage(node, &inputs);
                     match outputs {
@@ -1026,6 +1100,25 @@ impl<'a> Evaluation<'a> {
                     diagnostic = outcome.reason;
                     source_run = outcome.source_run_id;
                     (outcome.state, Some(outcome.port), None, None)
+                }
+                Plan | ReviewPlan | ReviewDiffCandidate
+                    if super::automation::prompt_native_stage(node) =>
+                {
+                    let inputs = pinned_inputs();
+                    let Some(outcome) = self.evaluate_prompt_native_stage(node, unit, &inputs)?
+                    else {
+                        super::automation::note_ready_agent(
+                            self.db, self.run, node, unit, &inputs,
+                        )?;
+                        return Ok(None);
+                    };
+                    diagnostic = outcome.reason;
+                    (
+                        outcome.state,
+                        Some(outcome.port),
+                        None,
+                        outcome.source_run_id,
+                    )
                 }
                 SummarizeResult => {
                     let input = selected_artifact("summary")
@@ -1353,6 +1446,33 @@ impl<'a> Evaluation<'a> {
     ) -> Result<Vec<(&'static str, ArtifactValue)>> {
         use super::data_nodes::data_view;
         let value = match &node.instance.configuration {
+            NodeConfiguration::PromptDecision(config) => {
+                let response = inputs
+                    .get("response")
+                    .context("The Prompt response is missing")?;
+                let value = match &response.value {
+                    ArtifactValue::AgentResponse(receipt) => {
+                        serde_json::from_str(&super::generic_agent::response_text(
+                            self.db,
+                            &self.run.project_id,
+                            &self.run.id,
+                            receipt,
+                        )?)
+                    }
+                    ArtifactValue::RenderedText(text) => serde_json::from_str(text),
+                    ArtifactValue::JsonObject(value) => {
+                        Ok(serde_json::Value::Object(value.clone()))
+                    }
+                    _ => anyhow::bail!("Choose the recorded JSON response from the Prompt stage"),
+                }
+                .context("The Prompt response must be one JSON object")?;
+                let serde_json::Value::Object(decision) =
+                    serde_json::to_value(config.decide(value)?)?
+                else {
+                    unreachable!("A Prompt decision is an object");
+                };
+                ("decision", ArtifactValue::JsonObject(decision))
+            }
             NodeConfiguration::ValidateOutput(config) => {
                 let source = inputs
                     .get("source")
@@ -1454,6 +1574,228 @@ impl<'a> Evaluation<'a> {
             _ => anyhow::bail!("The node configuration does not match the selected operation"),
         };
         Ok(vec![value])
+    }
+
+    fn prompt_outcome(
+        &self,
+        unit: Option<&str>,
+        decision: super::prompt::PromptDecision,
+        evidence: Option<&WorkflowArtifact>,
+    ) -> Result<super::prompt::PromptOutcome> {
+        use super::data_nodes::EvidenceOutcome;
+        use super::prompt::{PromptCall, PromptCallStatus, PromptOutcome, stage_alias};
+
+        let mut calls = Vec::new();
+        if let Some(evidence) = evidence {
+            let ArtifactValue::EvidenceSet(entries) = &evidence.value else {
+                anyhow::bail!("The Prompt call receipts must be collected evidence");
+            };
+            for entry in entries {
+                let stage_id = &entry.source.node;
+                let Some(role) = stage_alias(stage_id) else {
+                    anyhow::bail!("The Prompt evidence references an invalid call stage");
+                };
+                let focus = decision.selected.get(role).cloned();
+                let (status, artifact_id, approved) = match (&entry.outcome, &focus) {
+                    (EvidenceOutcome::Completed { artifact_id, value }, Some(_)) => {
+                        let approved = self
+                            .nodes
+                            .get(stage_id.as_str())
+                            .filter(|node| {
+                                node.instance.kind == BuiltinNode::ReviewCandidate
+                                    && entry.source.port == "report"
+                            })
+                            .map(|_| {
+                                value
+                                    .pointer("/evidence/verdict")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some("approved")
+                            });
+                        (
+                            PromptCallStatus::Completed,
+                            Some(artifact_id.clone()),
+                            approved,
+                        )
+                    }
+                    (EvidenceOutcome::Skipped, None) => (PromptCallStatus::Skipped, None, None),
+                    _ => (PromptCallStatus::Failed, None, None),
+                };
+                let stage_unit = unit.filter(|_| self.unit_nodes.contains(stage_id.as_str()));
+                let attempt_id = self
+                    .receipt(stage_id, stage_unit)
+                    .and_then(|receipt| receipt.source_run_id.clone());
+                calls.push(PromptCall {
+                    role: role.into(),
+                    focus,
+                    status,
+                    artifact_id,
+                    stage_id: stage_id.clone(),
+                    attempt_id,
+                    approved,
+                });
+            }
+        }
+        calls.sort_by(|first, second| first.role.cmp(&second.role));
+        Ok(PromptOutcome::assemble(decision, calls))
+    }
+
+    fn evaluate_prompt_native_stage(
+        &self,
+        node: &PinnedNode,
+        unit: Option<&str>,
+        inputs: &std::collections::BTreeMap<String, WorkflowArtifact>,
+    ) -> Result<Option<super::generic_agent::AgentStageOutcome>> {
+        use super::generic_agent::AgentStageOutcome;
+        use crate::{
+            jobs::{QueueState, load_job},
+            runs::RunStatus,
+        };
+
+        let project = &self.run.project_id;
+        let node_id = &node.instance.id;
+        let (control, output) = if node.instance.kind == BuiltinNode::Plan {
+            ("planned", "plan")
+        } else {
+            ("reviewed", "review")
+        };
+        if node.instance.kind != BuiltinNode::ReviewDiffCandidate
+            && let Some(artifact) = self.source_artifact(
+                &Endpoint {
+                    node: node_id.clone(),
+                    port: output.into(),
+                },
+                unit,
+                false,
+            )?
+            && let ArtifactValue::Plan { run_id, .. } | ArtifactValue::Review { run_id } =
+                artifact.value
+        {
+            return Ok(Some(AgentStageOutcome {
+                state: ControlStageState::Completed,
+                port: control,
+                reason: None,
+                source_run_id: Some(run_id),
+            }));
+        }
+        let ids = inputs
+            .iter()
+            .map(|(port, artifact)| (port.clone(), artifact.id.clone()))
+            .collect();
+        let Some(job_id) =
+            super::generic_agent::stage_job(self.db, project, &self.run.id, node_id, unit, &ids)?
+        else {
+            return Ok(None);
+        };
+        let job =
+            load_job(self.db, project, &job_id)?.context("The Prompt stage job is unavailable")?;
+        let Some(attempt) = job.latest_attempt else {
+            return Ok((job.queue_state == QueueState::Cancelled)
+                .then(|| AgentStageOutcome::failed(None, "The Prompt stage job was cancelled")));
+        };
+        if !attempt.status.is_terminal() || job.queued_recovery.is_some() {
+            return Ok(None);
+        }
+        if job.queue_state != QueueState::Cancelled
+            && super::generic_agent::attempt_has_open_wait(self.db, &attempt.run_id)?
+        {
+            return Ok(None);
+        }
+        if attempt.status != RunStatus::Succeeded {
+            return Ok(Some(AgentStageOutcome::failed(
+                Some(attempt.run_id),
+                "The Prompt stage job did not succeed",
+            )));
+        }
+        let run_id = &attempt.run_id;
+        if node.instance.kind == BuiltinNode::ReviewDiffCandidate {
+            let receipt = (|| -> Result<_> {
+                let git = inputs
+                    .get("git")
+                    .context("The diff review lost its Git inspection")?;
+                let candidate = &super::templates::diff::inspection(git)?.candidate;
+                crate::repository::verification::require_candidate_review_dispatch(
+                    self.db, run_id, candidate,
+                )?;
+                let (dispatch, revision, response) = super::generic_agent::load_response(
+                    self.db,
+                    project,
+                    &job.checkout_id,
+                    &job_id,
+                    run_id,
+                )?;
+                Ok(serde_json::Map::from_iter([
+                    ("response".into(), Value::String(response)),
+                    (
+                        "provenance".into(),
+                        serde_json::json!({
+                            "jobId": job_id, "runId": run_id, "dispatchId": dispatch,
+                            "responseRevisionId": revision, "gitArtifactId": git.id,
+                            "candidateId": candidate.id, "tree": candidate.tree,
+                        }),
+                    ),
+                ]))
+            })();
+            let report = match receipt {
+                Ok(report) => report,
+                Err(error) => {
+                    return Ok(Some(AgentStageOutcome::failed(
+                        Some(run_id.clone()),
+                        &crate::diagnostics::preview(&error.to_string()),
+                    )));
+                }
+            };
+            self.record_stage_artifact(
+                node_id,
+                unit,
+                "report",
+                ArtifactValue::JsonObject(report),
+                inputs,
+            )?;
+            self.record_stage_artifact(
+                node_id,
+                unit,
+                "review",
+                ArtifactValue::Review {
+                    run_id: run_id.clone(),
+                },
+                inputs,
+            )?;
+        } else if node.instance.kind == BuiltinNode::ReviewPlan
+            && super::automation::prompt_delegate(node)
+        {
+            if super::generic_agent::load_response(
+                self.db,
+                project,
+                &job.checkout_id,
+                &job_id,
+                run_id,
+            )
+            .is_err()
+            {
+                return Ok(Some(AgentStageOutcome::failed(
+                    Some(run_id.clone()),
+                    "The plan review returned no recorded response",
+                )));
+            }
+            self.record_stage_artifact(
+                node_id,
+                unit,
+                "review",
+                ArtifactValue::Review {
+                    run_id: run_id.clone(),
+                },
+                inputs,
+            )?;
+        } else {
+            // The native planning/review UI publishes the chosen proposal or review.
+            return Ok(None);
+        }
+        Ok(Some(AgentStageOutcome {
+            state: ControlStageState::Completed,
+            port: control,
+            reason: None,
+            source_run_id: Some(run_id.clone()),
+        }))
     }
 
     fn record_stage_artifact(
@@ -1559,11 +1901,17 @@ impl<'a> Evaluation<'a> {
             .iter()
             .any(|port| port.name == "failed");
         let automatic_unit_action = self.automatic_unit_action(source)?;
+        let prompt_native_stage = super::automation::prompt_native_stage(source);
         if receipt.is_some_and(|receipt| {
             receipt.state == ControlStageState::Skipped
                 || receipt.state == ControlStageState::Failed
-                    && (is_control(source.instance.kind) || delivery_agent || automatic_unit_action)
+                    && (is_control(source.instance.kind)
+                        || delivery_agent
+                        || automatic_unit_action
+                        || prompt_native_stage)
                     && port.value != PortType::Control
+                    && !(source.instance.kind == BuiltinNode::PromptOutcome
+                        && port.name == "outcome")
                     && !(source.instance.kind == BuiltinNode::WaitForCi
                         && port.name == "ci"
                         && receipt.selected_ports.iter().any(|port| port == "failed"))
@@ -1574,6 +1922,7 @@ impl<'a> Evaluation<'a> {
             && (is_control(source.instance.kind)
                 || source.instance.kind == BuiltinNode::McpTool
                 || automatic_unit_action
+                || prompt_native_stage
                 || (source.instance.kind == BuiltinNode::Command || delivery_agent)
                     && receipt.is_some())
         {
@@ -1584,6 +1933,22 @@ impl<'a> Evaluation<'a> {
                 Some(_) => Arrival::Ignored,
                 None => Arrival::Pending,
             });
+        }
+        if matches!(
+            source.instance.kind,
+            BuiltinNode::Plan | BuiltinNode::ReviewPlan | BuiltinNode::ReviewDiffCandidate
+        ) && wire.from.port == "failed"
+        {
+            return Ok(
+                if self
+                    .source_artifact(&wire.from, source_unit, true)?
+                    .is_some()
+                {
+                    Arrival::Ignored
+                } else {
+                    Arrival::Pending
+                },
+            );
         }
         if delivery_agent && wire.from.port == "failed" {
             return Ok(
@@ -1744,6 +2109,12 @@ impl<'a> Evaluation<'a> {
             .nodes
             .get(source.node.as_str())
             .is_some_and(|node| node.instance.kind == BuiltinNode::TypedStart);
+        let prompt_output = self.nodes.get(source.node.as_str()).is_some_and(|node| {
+            matches!(
+                node.instance.kind,
+                BuiltinNode::PromptDecision | BuiltinNode::PromptOutcome
+            )
+        });
         let mut rows = statement.query(params![
             self.run.id,
             source.node,
@@ -1759,6 +2130,9 @@ impl<'a> Evaluation<'a> {
             let host_key: Option<String> = row.get(1)?;
             let exact_receipt: bool = row.get(2)?;
             let launch_receipt: bool = row.get(3)?;
+            if prompt_output && !exact_receipt {
+                continue;
+            }
             let artifact: WorkflowArtifact =
                 serde_json::from_slice(&protection::unprotect(&payload)?)?;
             let valid = match &artifact.value {

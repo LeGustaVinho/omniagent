@@ -171,6 +171,20 @@ impl Store {
                     definition.outputs = named_ports(outputs, &definitions)?;
                     (definition, definitions, vec![])
                 }
+                PackageArtifactBody::Prompt { .. } => {
+                    let expansion = artifact.prompt_expansion.as_ref()
+                        .context("The published Prompt expansion is unavailable")?;
+                    let definitions = expansion.workflow.nodes.iter()
+                        .map(|node| (node.instance.id.clone(), node.definition.clone()))
+                        .collect();
+                    let mut definition = builtin_registry()
+                        .into_iter()
+                        .find(|definition| definition.kind == BuiltinNode::Subflow)
+                        .context("The reusable subflow executor is unavailable")?;
+                    definition.inputs = named_ports(&expansion.inputs, &definitions)?;
+                    definition.outputs = named_ports(&expansion.outputs, &definitions)?;
+                    (definition, definitions, vec![])
+                }
                 _ => anyhow::bail!("Choose a published preset or subflow"),
             };
             definition.title.clone_from(&artifact.name);

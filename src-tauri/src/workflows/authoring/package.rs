@@ -9,7 +9,9 @@ use crate::{
     workflows::{NodeDefinition, WorkflowRevision, builtin_registry},
 };
 
-use super::{WorkflowCanvasEdit, WorkflowNodePosition, editor::copy_node_definitions, new_id, open, seal};
+use super::{
+    WorkflowCanvasEdit, WorkflowNodePosition, editor::copy_node_definitions, new_id, open, seal,
+};
 
 #[cfg(test)]
 mod authoring_acceptance;
@@ -18,6 +20,8 @@ pub(crate) mod mcp;
 mod mcp_binding_acceptance;
 mod model;
 mod preview;
+mod prompt_card;
+mod prompt_suggestions;
 mod publish;
 mod request;
 pub(crate) mod roles;
@@ -28,13 +32,23 @@ mod subflow_tests;
 mod tests;
 pub use model::*;
 pub use preview::WorkflowPackagePreview;
+pub use prompt_suggestions::PromptSuggestionStatus;
 pub(crate) use publish::{
     ensure_package_repeat_guards, ensure_package_runnable, published_pipeline_layout,
 };
 pub use simulation::{WorkflowSimulation, WorkflowSimulationScenario};
 
-const MAX_MEMBERS: usize = 32;
+const MAX_MEMBERS: usize = 96;
 const MAX_PACKAGE_BYTES: usize = 256 * 1024;
+
+pub(in crate::workflows) fn is_published_prompt(
+    db: &Connection,
+    project: &str,
+    version: &PackageArtifactVersion,
+) -> Result<bool> {
+    Ok(publish::load_published(db, project, version)?
+        .is_some_and(|artifact| matches!(artifact.body, PackageArtifactBody::Prompt { .. })))
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,7 +161,9 @@ impl PackageDocument {
                     .get(&key)
                     .context("The source graph has no saved definitions")?;
                 ensure!(
-                    edit.definition_copies.keys().all(|id| !edit.update_definitions.contains_key(id)),
+                    edit.definition_copies
+                        .keys()
+                        .all(|id| !edit.update_definitions.contains_key(id)),
                     "Choose one version for each new node"
                 );
                 copy_node_definitions(pins, old, edit.definition_copies)?;

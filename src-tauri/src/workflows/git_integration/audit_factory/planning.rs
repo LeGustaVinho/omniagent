@@ -3,7 +3,10 @@ use serde_json::{Value, json};
 
 use crate::workflows::{ArtifactValue, WorkflowArtifact, data_nodes::EvidenceOutcome};
 
-use super::{FixtureScript, LocalGithub, ProjectCheckout, Store, WorkflowRun};
+use super::{
+    FixtureScript, LocalGithub, ProjectCheckout, Store, WorkflowRun, authored_stage,
+    prompt_response,
+};
 
 const DESIGN_FINDING: &str = "Pin release evidence to the integrated Git SHA";
 
@@ -23,6 +26,31 @@ pub(super) async fn plan_and_materialize(
             artifact.node_instance_id == "materialize-backlog" && artifact.port == "backlog"
         }) {
             assert_planning(&artifacts, backlog)?;
+            if script.adaptive {
+                let view = store
+                    .inspect_workflow_execution(repo.project_id.clone(), workflow.id.clone())
+                    .await?
+                    .context("The adaptive planning trace is missing")?;
+                assert!(view.jobs.iter().any(|job| {
+                    job.node_id
+                        .ends_with("iteration-2::write-design-draft::execute")
+                }));
+                for stage in [
+                    "write-sdd-draft",
+                    "write-bdd-draft",
+                    "write-test-strategy-draft",
+                    "review-sdd-agent",
+                    "review-bdd-agent",
+                    "review-test-strategy-agent",
+                ] {
+                    assert!(
+                        !view.jobs.iter().any(|job| job
+                            .node_id
+                            .ends_with(&format!("iteration-2::{stage}::execute"))),
+                        "Unexpected repeated {stage}"
+                    );
+                }
+            }
             return Ok(());
         }
         if let Some(action) = store.next_workflow_github_action().await? {
@@ -50,7 +78,9 @@ pub(super) async fn plan_and_materialize(
         assert_eq!(run, workflow.id);
         let answer = response(node)
             .with_context(|| format!("Script the published planning agent {node}"))?;
-        let attempt = script.claim(store, repo, &pending).await?;
+        let Some(attempt) = script.claim(store, repo, &pending).await? else {
+            continue;
+        };
         if second_design(node) {
             ensure!(
                 attempt
@@ -60,14 +90,27 @@ pub(super) async fn plan_and_materialize(
                 "The selective revision did not receive the recorded reviewer finding"
             );
         }
-        script.complete_response(store, &attempt, &answer).await?;
+        script
+            .complete_response(store, repo, &attempt, &answer)
+            .await?;
     }
     anyhow::bail!("The published Audit planning exceeded its scripted stages")
 }
 
 fn response(node: &str) -> Result<Value> {
-    let leaf = node.rsplit("::").next().unwrap_or(node);
-    Ok(match leaf {
+    let authored = node.ends_with("::execute");
+    let reused_contract = authored && authored_stage(node).ends_with("-agent");
+    let logical = if authored {
+        let id = authored_stage(node);
+        if reused_contract {
+            id.into()
+        } else {
+            format!("{}-agent", id.strip_suffix("-draft").unwrap_or(id))
+        }
+    } else {
+        node.rsplit("::").next().unwrap_or(node).into()
+    };
+    let answer = match logical.as_str() {
         "prepare-public-search-agent" => json!({"query":"export testing"}),
         "analyze-repository-agent" => {
             json!({"repositoryAnalysis":"The pinned repository contains brief.md and two tracked export fixture files. Git provides the integration history."})
@@ -80,6 +123,13 @@ fn response(node: &str) -> Result<Value> {
         }
         "write-master-plan-agent" => {
             json!({"masterPlan":"Specify independent export changes, pin regression and acceptance criteria, release prerequisite branches by verified merge, and run an integrated release audit."})
+        }
+        "choose-revisions-agent" => {
+            return Ok(json!({
+                "route":"concluido", "reason":"The recorded finding only affects technical design.",
+                "outputs":{"selection":{"sdd":false,"bdd":false,"design":true,"strategy":false}},
+                "delegations":[],
+            }));
         }
         "write-sdd-agent" => sdd(),
         "write-bdd-agent" => bdd(),
@@ -97,6 +147,11 @@ fn response(node: &str) -> Result<Value> {
         }),
         name if name.starts_with("review-") && name.ends_with("-agent") => approval(),
         _ => anyhow::bail!("Unrecognized planning agent {node}"),
+    };
+    Ok(if authored && !reused_contract {
+        prompt_response(answer)
+    } else {
+        answer
     })
 }
 
@@ -105,7 +160,11 @@ pub(super) fn approval() -> Value {
 }
 
 fn second_design(node: &str) -> bool {
-    node.contains("iteration-2::") && node.ends_with("::write-design-agent")
+    node.contains("iteration-2::")
+        && matches!(
+            authored_stage(node),
+            "write-design-agent" | "write-design-draft"
+        )
 }
 
 fn design(revised: bool) -> Value {
@@ -188,10 +247,13 @@ fn assert_planning(artifacts: &[WorkflowArtifact], backlog: &WorkflowArtifact) -
     ] {
         let get = |round: u8| -> Result<&WorkflowArtifact> {
             let suffix = format!("iteration-{round}::{stage}");
+            let authored = format!("{suffix}::outcome");
             artifacts
                 .iter()
                 .find(|artifact| {
                     artifact.port == "object" && artifact.node_instance_id.ends_with(&suffix)
+                        || artifact.port == "value-object"
+                            && artifact.node_instance_id.ends_with(&authored)
                 })
                 .with_context(|| format!("The published plan lost {suffix} evidence"))
         };

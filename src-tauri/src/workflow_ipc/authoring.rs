@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use omniagent::workflows::authoring::package::{
-    PackageArtifactVersion, PublishedPackageArtifact, WorkflowPackage, WorkflowPackageCatalogEntry,
+    PackageArtifactVersion, PromptCard, PromptSuggestionStatus, PublishedPackageArtifact, WorkflowPackage, WorkflowPackageCatalogEntry,
     WorkflowPackageDraft, WorkflowPackagePreview, WorkflowPackagePublishOutcome,
     WorkflowPackageSummary, WorkflowSimulation, WorkflowSimulationScenario,
     derive_reusable::{ReusableDerivation, ReusableSource, SubflowBoundary, WorkflowReusableNode},
@@ -220,6 +220,30 @@ pub async fn save_workflow_package(
         )
         .await
         .map_err(report)
+}
+
+#[tauri::command]
+pub async fn request_prompt_contract_suggestion(
+    store: State<'_, Store>,
+    project_id: String,
+    checkout_id: String,
+    selection: ModelSelection,
+    effort: Option<String>,
+    prompt: PromptCard,
+) -> Result<String, String> {
+    async {
+        let scope = selected_scope(&store, checkout_id.clone(), selection, effort, SessionMode::ReadOnly).await?;
+        store.request_prompt_contract_suggestion(project_id, checkout_id, scope, prompt).await
+    }.await.map_err(report)
+}
+
+#[tauri::command]
+pub async fn prompt_contract_suggestion(
+    store: State<'_, Store>,
+    project_id: String,
+    job_id: String,
+) -> Result<PromptSuggestionStatus, String> {
+    store.prompt_contract_suggestion(project_id, job_id).await.map_err(report)
 }
 
 #[tauri::command]

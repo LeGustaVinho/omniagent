@@ -472,6 +472,7 @@ fn agents(
                         SessionMode::ReadOnly
                     });
                 let action_eligible = !units.contains(node.instance.id.as_str())
+                    && !super::automation::prompt_delegate(node)
                     && !matches!(
                         node.instance.kind,
                         BuiltinNode::ReviewCandidate | BuiltinNode::ReviewDiffCandidate

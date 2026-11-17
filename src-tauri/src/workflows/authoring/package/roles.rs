@@ -33,6 +33,10 @@ pub(super) fn validate_authoring_body(
                 "Select the role as an exact package reference on the Agent"
             );
             ensure!(
+                !requirements.prompt_delegate,
+                "Set invited Roles on the Prompt card"
+            );
+            ensure!(
                 destination != PackageDestination::Library || requirements.role_template.is_none(),
                 "A library Agent needs a library role reference or a binding parameter"
             );
@@ -46,6 +50,11 @@ pub(super) fn validate_authoring_body(
             }
         }
         PackageArtifactBody::Preset { configuration, .. } => check(configuration)?,
+        PackageArtifactBody::Prompt { prompt } => {
+            if let Some(configuration) = &prompt.configuration {
+                check(configuration)?;
+            }
+        }
         _ => {}
     }
     Ok(())

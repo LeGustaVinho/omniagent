@@ -292,6 +292,15 @@ export function CandidateAcceptanceFields({ configuration, disabled, onChange }:
     {aggregated && <>
       <label>Required build check<input value={text(configuration.buildCheck)}
         onChange={(event) => onChange({ ...configuration, buildCheck: event.currentTarget.value })} /></label>
+      <label>Review requirement<select value={configuration.reviewMode === "selected" ? "selected" : "minimum"}
+        onChange={(event) => {
+          const { reviewMode: _reviewMode, ...remaining } = configuration;
+          onChange(event.currentTarget.value === "selected" ? { ...remaining, reviewMode: "selected" } : remaining);
+        }}>
+        <option value="minimum">Minimum independent reviews</option>
+        <option value="selected">All selected reviews for this candidate</option>
+      </select></label>
+      {configuration.reviewMode === "selected" && <p>Connect a Prompt outcome to Selected reviews.</p>}
       <label>Minimum independent reviews<input type="number" min={1} max={32} step={1}
         value={typeof configuration.minimumReviews === "number" ? configuration.minimumReviews : ""}
         onChange={(event) => onChange({ ...configuration, minimumReviews: event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber })} /></label>
@@ -359,14 +368,28 @@ const emptySetOperation = (): SetFieldOperation => ({ op: "set", path: "", value
 export function SetFieldsFields({ configuration, disabled, onChange }: Fields) {
   const operations: SetFieldOperation[] = Array.isArray(configuration.operations) ? configuration.operations : [];
   const update = (next: SetFieldOperation[]) => onChange({ ...configuration, operations: next });
+  const selection = operations.find((operation) => operation.op === "choose_object");
+  const onSourceChange = (source: string) => {
+    if (source === "choose_object") {
+      onChange({ ...configuration, mode: "build", operations: [{ op: "choose_object", pointers: ["/selected"] }] });
+    } else {
+      onChange({ ...configuration, mode: source, operations: selection ? [] : operations });
+    }
+  };
   return <>
-    <label>Object source<select disabled={disabled} value={configuration.mode === "update" ? "update" : "build"}
-      onChange={(event) => onChange({ ...configuration, mode: event.currentTarget.value })}>
+    <label>Object source<select disabled={disabled} value={selection ? "choose_object" : configuration.mode === "update" ? "update" : "build"}
+      onChange={(event) => onSourceChange(event.currentTarget.value)}>
       <option value="build">Build an object</option><option value="update">Update the source object</option>
+      <option value="choose_object">Choose an object from evidence</option>
     </select></label>
-    <fieldset className="pipeline-stack" disabled={disabled}>
+    {selection ? <label>Source paths
+      <textarea rows={3} disabled={disabled} value={selection.pointers.join("\n")}
+        onChange={(event) => update([{ op: "choose_object", pointers: event.currentTarget.value.split("\n") }])} />
+      <small>Enter one JSON Pointer per line. Exactly one path must contain an object when this step runs.</small>
+    </label> : <fieldset className="pipeline-stack" disabled={disabled}>
       <legend>Field operations</legend>
       {operations.map((operation, index) => {
+        if (operation.op === "choose_object") return null;
         const edit = (value: SetFieldOperation) => update(operations.map((item, i) => i === index ? value : item));
         return <div className="workflow-inspector-item" key={index}>
           <label>Operation {index + 1}<select value={operation.op} onChange={(event) => edit(event.currentTarget.value === "rename"
@@ -391,7 +414,7 @@ export function SetFieldsFields({ configuration, disabled, onChange }: Fields) {
         </div>;
       })}
       <Button type="button" variant="outline" onClick={() => update([...operations, emptySetOperation()])}><Plus size={15} /> Add operation</Button>
-    </fieldset>
+    </fieldset>}
   </>;
 }
 

@@ -114,8 +114,8 @@ export function PipelineToolbar({ children }: { children: ReactNode }) {
   return <div className="pipeline-toolbar">{children}</div>;
 }
 
-export function PipelineGraphCanvas<N extends Node, E extends Edge>({ interactive = false, nodes, onNodesChange, ...props }:
-  Omit<ReactFlowProps<N, E>, "children" | "nodes"> & { nodes: N[]; interactive?: boolean }) {
+export function PipelineGraphCanvas<N extends Node, E extends Edge>({ interactive = false, nodes, onNodesChange, canvasTools, compactControls, ...props }:
+  Omit<ReactFlowProps<N, E>, "children" | "nodes"> & { nodes: N[]; interactive?: boolean; canvasTools?: ReactNode; compactControls?: boolean }) {
   // React Flow needs the dimensions back when a controlled node is rebuilt from workflow state.
   const [measurements, setMeasurements] = useState(() => new Map<string, NonNullable<Node["measured"]>>());
   const measuredNodes = useMemo(() => nodes.map((node) => {
@@ -138,7 +138,8 @@ export function PipelineGraphCanvas<N extends Node, E extends Edge>({ interactiv
 
   return <ReactFlow<N, E> {...props} nodes={measuredNodes} onNodesChange={changeNodes}>
     <Background gap={18} size={1} />
-    <Controls position="bottom-left" showInteractive={interactive} />
+    <Controls position="bottom-left" orientation={compactControls ? "horizontal" : "vertical"} showInteractive={interactive} />
+    {canvasTools}
   </ReactFlow>;
 }
 
@@ -150,11 +151,12 @@ export function PipelineInspectorHeader({ detail, title, children }: { detail: s
   </header>;
 }
 
-export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorLabel, inspectorClassName, palette, paletteLabel, className, inspectorRequest, onClosePalette }: {
+export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorLabel, inspectorClassName, palette, paletteLabel, className, inspectorRequest, onClosePalette, collapsibleInspector }: {
   canvas: ReactNode; canvasLabel: string; inspector: ReactNode; inspectorLabel: string;
   inspectorClassName?: string; palette?: ReactNode; paletteLabel?: string; className?: string;
   inspectorRequest?: number;
   onClosePalette?: () => void;
+  collapsibleInspector?: boolean;
 }) {
   const inspectorId = useId();
   const workspace = useRef<HTMLDivElement>(null);
@@ -165,10 +167,12 @@ export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorL
   const paletteDrawer = width < 1032;
   const [inspectorPreference, setInspectorPreference] = useState(false);
   const [dismissedRequest, setDismissedRequest] = useState(0);
+  const [dockedInspector, setDockedInspector] = useState(true);
   const inspectorOpen = inspectorPreference || Boolean(inspectorRequest && inspectorRequest !== dismissedRequest);
   const inspectorBody = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!inspectorRequest || inspectorRequest === dismissedRequest) return;
+    setDockedInspector(true);
     const focused = document.activeElement;
     if (focused instanceof HTMLElement && !focused.closest(".pipeline-inspector")) inspectorOrigin.current = focused;
     const frame = requestAnimationFrame(() => inspectorBody.current?.focus());
@@ -177,7 +181,11 @@ export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorL
   function closeInspector() {
     setDismissedRequest(inspectorRequest ?? 0);
     setInspectorPreference(false);
-    requestAnimationFrame(() => (inspectorOrigin.current ?? toggle.current)?.focus({ preventScroll: true }));
+    if (!drawer) setDockedInspector(false);
+    requestAnimationFrame(() => {
+      const origin = inspectorOrigin.current;
+      (origin?.isConnected ? origin : toggle.current)?.focus({ preventScroll: true });
+    });
   }
   return <div ref={workspace} className={className ? `pipeline-editor ${className}` : "pipeline-editor"} data-palette={Boolean(palette) && !paletteDrawer}>
     {palette != null && <WorkbenchPanel as="aside" open drawer={paletteDrawer} label={paletteLabel ?? "Node catalog"}
@@ -190,15 +198,20 @@ export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorL
     </WorkbenchPanel>}
     <ResizablePanel className="pipeline-canvas" role="region" aria-label={canvasLabel} edge="bottom"
       resizeKey={canvasLabel} resizeLabel={canvasLabel}>{canvas}</ResizablePanel>
-    {drawer && <Button type="button" ref={toggle} variant="ghost" className="pipeline-compact-inspector"
-      aria-expanded={inspectorOpen} aria-controls={inspectorId} onClick={() => {
+    {(drawer || (collapsibleInspector && !dockedInspector)) && <Button type="button" ref={toggle} variant="ghost"
+      className={drawer ? "pipeline-compact-inspector" : "pipeline-docked-inspector-toggle"}
+      aria-expanded={drawer ? inspectorOpen : dockedInspector} aria-controls={inspectorId} onClick={() => {
         inspectorOrigin.current = toggle.current;
-        if (inspectorOpen) closeInspector();
+        if (!drawer) {
+          setDockedInspector(true);
+          requestAnimationFrame(() => inspectorBody.current?.focus());
+        } else if (inspectorOpen) closeInspector();
         else setInspectorPreference(true);
       }}>
-      <PanelRight size={16} /> {inspectorOpen ? "Hide inspector" : "Show inspector"}
+      <PanelRight size={16} aria-hidden /> {drawer && inspectorOpen ? "Hide inspector" : "Show inspector"}
     </Button>}
-    <WorkbenchPanel as="aside" id={inspectorId} drawer={drawer} open={!drawer || (inspectorOpen && !(paletteDrawer && palette))}
+    <WorkbenchPanel as="aside" id={inspectorId} drawer={drawer}
+      open={drawer ? inspectorOpen && !(paletteDrawer && palette) : !collapsibleInspector || dockedInspector}
       label={inspectorLabel} drawerClass="pipeline-inspector-drawer" onClose={closeInspector}
       className={inspectorClassName ? `pipeline-inspector ${inspectorClassName}` : "pipeline-inspector"} aria-label={inspectorLabel}
       edge="left" resizeKey={inspectorLabel} resizeLabel={inspectorLabel}>
@@ -206,7 +219,13 @@ export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorL
         <ControlTooltip label="Close inspector"><Button type="button" variant="ghost" className="ui-icon-button" aria-label="Close inspector"
           onClick={closeInspector}><X size={16} aria-hidden /></Button></ControlTooltip>
       </div>}
-      <div className="pipeline-inspector-scroll" tabIndex={-1} ref={inspectorBody}>{inspector}</div>
+      <div className="pipeline-inspector-scroll" tabIndex={-1} ref={inspectorBody}>
+        {inspector}
+        {collapsibleInspector && !drawer && <div className="pipeline-docked-inspector-close">
+          <ControlTooltip label="Hide inspector"><Button type="button" variant="ghost" className="ui-icon-button" aria-label="Hide inspector"
+            onClick={closeInspector}><PanelRight size={16} aria-hidden /></Button></ControlTooltip>
+        </div>}
+      </div>
     </WorkbenchPanel>
   </div>;
 }

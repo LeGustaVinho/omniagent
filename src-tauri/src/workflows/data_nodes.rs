@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 
 use super::{ConditionPredicate, Endpoint, iteration::WorkflowJsonList};
 
-const MAX_DATA_BYTES: usize = 192 * 1024;
+pub(super) const MAX_DATA_BYTES: usize = 192 * 1024;
 const MAX_POINTER_BYTES: usize = 2048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -28,12 +28,14 @@ pub enum FieldValue {
 pub enum FieldOperation {
     Set { path: String, value: FieldValue },
     Rename { from: String, path: String },
+    ChooseObject { pointers: Vec<String> },
 }
 
 impl FieldOperation {
-    fn destination(&self) -> &str {
+    fn destination(&self) -> Option<&str> {
         match self {
-            Self::Set { path, .. } | Self::Rename { path, .. } => path,
+            Self::Set { path, .. } | Self::Rename { path, .. } => Some(path),
+            Self::ChooseObject { .. } => None,
         }
     }
 }
@@ -54,14 +56,18 @@ impl SetFieldsConfiguration {
                     FieldOperation::Set {
                         value: FieldValue::Input { .. },
                         ..
-                    }
+                    } | FieldOperation::ChooseObject { .. }
                 )
             })
     }
 
     pub(super) fn validate(&self) -> Result<()> {
         bounded_data(self)?;
-        validate_destinations(self.operations.iter().map(FieldOperation::destination))?;
+        validate_destinations(
+            self.operations
+                .iter()
+                .filter_map(FieldOperation::destination),
+        )?;
         for operation in &self.operations {
             match operation {
                 FieldOperation::Set {
@@ -79,6 +85,20 @@ impl SetFieldsConfiguration {
                     value: FieldValue::Literal { .. },
                     ..
                 } => {}
+                FieldOperation::ChooseObject { pointers } => {
+                    ensure!(
+                        self.mode == SetFieldsMode::Build && self.operations.len() == 1,
+                        "Choose object must be the only operation in Build mode"
+                    );
+                    ensure!(
+                        (1..=8).contains(&pointers.len())
+                            && pointers.iter().collect::<BTreeSet<_>>().len() == pointers.len(),
+                        "Choose object needs one to eight distinct source paths"
+                    );
+                    for pointer in pointers {
+                        validate_pointer(pointer)?;
+                    }
+                }
             }
         }
         Ok(())
@@ -90,6 +110,20 @@ impl SetFieldsConfiguration {
             source.is_some() || !self.requires_source(),
             "Set fields requires a source value"
         );
+        if let [FieldOperation::ChooseObject { pointers }] = self.operations.as_slice() {
+            let input = source.context("Choose object requires a source value")?;
+            let mut selected = pointers.iter().filter_map(|pointer| input.pointer(pointer));
+            let object = selected
+                .next()
+                .and_then(Value::as_object)
+                .context("The selected branch has no valid JSON object")?;
+            ensure!(
+                selected.next().is_none(),
+                "More than one branch supplied an object"
+            );
+            bounded_data(object)?;
+            return Ok(object.clone());
+        }
         let mut object = match self.mode {
             SetFieldsMode::Build => Map::new(),
             SetFieldsMode::Update => {
@@ -118,8 +152,15 @@ impl SetFieldsConfiguration {
                 }
                 FieldOperation::Rename { from, .. } => remove_field(&mut object, from)
                     .with_context(|| format!("Field {from:?} is missing from the object"))?,
+                FieldOperation::ChooseObject { .. } => {
+                    unreachable!("Validated direct object selection")
+                }
             };
-            set_field(&mut object, operation.destination(), value)?;
+            set_field(
+                &mut object,
+                operation.destination().expect("Validated destination"),
+                value,
+            )?;
             bounded_data(&object)?;
         }
         Ok(object)

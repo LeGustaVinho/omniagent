@@ -19,7 +19,7 @@ mod acceptance;
 mod tests;
 
 const MAX_SAMPLE_BYTES: usize = 128 * 1024;
-const MAX_TRACE_NODES: usize = 512;
+const MAX_TRACE_NODES: usize = 4096;
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -147,8 +147,11 @@ impl Store {
             let catalog = ReviewCatalog::new(&tx, &project, &document, &revision);
             let member = catalog.draft_member(&member_key)?;
             let (steps, subflows, outputs, graph) = match &member.body {
-                PackageArtifactBody::Pipeline { .. } | PackageArtifactBody::Subflow { .. } => {
-                    let (definition, _) = catalog.compile(member, &mut Vec::new())?;
+                PackageArtifactBody::Pipeline { .. }
+                | PackageArtifactBody::Subflow { .. }
+                | PackageArtifactBody::Prompt { .. } => {
+                    let (definition, _, prompt_outputs) =
+                        catalog.compile_with_exports(member, &mut Vec::new())?;
                     let steps = simulate_graph(&definition, &member.body, &scenario)?;
                     let recorded: HashMap<_, _> = steps
                         .iter()
@@ -181,6 +184,10 @@ impl Store {
                                 .collect();
                             export(&expanded, &recorded)
                         }
+                        PackageArtifactBody::Prompt { .. } => export(
+                            &prompt_outputs.context("The Prompt lost its published interface")?,
+                            &recorded,
+                        ),
                         _ => BTreeMap::new(),
                     };
                     let graph = TraceGraph {
@@ -404,6 +411,8 @@ pub(super) fn intrinsic(kind: BuiltinNode) -> bool {
             | BuiltinNode::BuildList
             | BuiltinNode::SetFields
             | BuiltinNode::ValidateOutput
+            | BuiltinNode::PromptDecision
+            | BuiltinNode::PromptOutcome
             | BuiltinNode::CollectEvidence
             | BuiltinNode::QualityGate
             | BuiltinNode::FilterMapList
@@ -609,6 +618,107 @@ fn trace_node(
                 "evidence".into(),
                 serde_json::to_value(ArtifactValue::EvidenceSet(evidence))?,
             );
+            Some("completed")
+        }
+        PromptDecision => {
+            let NodeConfiguration::PromptDecision(config) = &node.instance.configuration else {
+                anyhow::bail!("Invalid pinned Prompt decision");
+            };
+            let result: anyhow::Result<_> = (|| {
+                let payload = data
+                    .get("response")
+                    .and_then(|value| value.get("evidence"))
+                    .context("The sample response is missing")?;
+                let value = match payload.as_str() {
+                    Some(text) => serde_json::from_str(text)
+                        .context("The Prompt response must be one JSON object")?,
+                    None => payload.clone(),
+                };
+                Ok(config.decide(value)?)
+            })();
+            match result {
+                Ok(decision) => {
+                    values.insert(
+                        "decision".into(),
+                        json!({"kind":"json_object", "evidence":decision}),
+                    );
+                    Some("completed")
+                }
+                Err(error) => return Ok(failed_iteration(step, &error.to_string())),
+            }
+        }
+        PromptOutcome => {
+            use crate::workflows::{
+                data_nodes::{EvidenceOutcome, WorkflowEvidence},
+                prompt::{
+                    PromptCall, PromptCallStatus, PromptDecision, PromptOutcome, stage_alias,
+                },
+            };
+            let NodeConfiguration::PromptOutcome(config) = &node.instance.configuration else {
+                anyhow::bail!("Invalid pinned Prompt outcome");
+            };
+            let decision: PromptDecision = serde_json::from_value(
+                data.get("decision")
+                    .and_then(|value| value.get("evidence"))
+                    .context("The sample decision is missing")?
+                    .clone(),
+            )?;
+            let evidence: Vec<WorkflowEvidence> = data
+                .get("evidence")
+                .and_then(|value| value.get("evidence"))
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()?
+                .unwrap_or_default();
+            let calls = evidence
+                .into_iter()
+                .filter_map(|entry| {
+                    let role = stage_alias(&entry.source.node)?.to_owned();
+                    let focus = decision.selected.get(&role).cloned();
+                    let (status, artifact_id, approved) = match entry.outcome {
+                        EvidenceOutcome::Completed { artifact_id, value } => (
+                            PromptCallStatus::Completed,
+                            Some(artifact_id),
+                            value
+                                .pointer("/evidence/verdict")
+                                .and_then(Value::as_str)
+                                .map(|verdict| verdict == "approved"),
+                        ),
+                        EvidenceOutcome::Failed => (PromptCallStatus::Failed, None, None),
+                        EvidenceOutcome::Skipped => (PromptCallStatus::Skipped, None, None),
+                    };
+                    Some(PromptCall {
+                        role,
+                        focus,
+                        status,
+                        artifact_id,
+                        stage_id: entry.source.node,
+                        attempt_id: None,
+                        approved,
+                    })
+                })
+                .collect();
+            let projected = config.project(&decision, &format!("simulation:{}", node.instance.id));
+            let outcome = PromptOutcome::assemble(decision, calls);
+            let output = json!({"kind":"json_object", "evidence":outcome});
+            if let Some(reason) = &outcome.diagnostic {
+                let mut step = failed_iteration(step, reason);
+                step.outputs.insert(
+                    "outcome".into(),
+                    TraceOutput {
+                        port_type: PortType::Data(ArtifactKind::JsonObject),
+                        value: Some(output),
+                    },
+                );
+                return Ok(step);
+            }
+            let projected = match projected {
+                Ok(projected) => projected,
+                Err(error) => return Ok(failed_iteration(step, &error.to_string())),
+            };
+            for (port, artifact) in projected {
+                values.insert(port, serde_json::to_value(artifact)?);
+            }
+            values.insert("outcome".into(), output);
             Some("completed")
         }
         SetFields | FilterMapList | BuildText | ValidateOutput => {
@@ -992,6 +1102,10 @@ fn trace_start(
         PackageArtifactBody::Subflow { inputs, .. } => inputs
             .iter()
             .find(|(_, endpoint)| endpoint.node == node.instance.id && endpoint.port == port)
+            .map(|(name, _)| name.as_str()),
+        PackageArtifactBody::Prompt { prompt } => prompt
+            .inputs
+            .get_key_value(port)
             .map(|(name, _)| name.as_str()),
         _ if node.instance.kind == BuiltinNode::TypedStart && port == "inputs" => Some("inputs"),
         _ if node.instance.kind == BuiltinNode::TypedStart && port == "task" => Some("task"),

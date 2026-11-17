@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type MouseEvent, type ReactNode, type SetStateAction } from "react";
-import { Handle, MarkerType, Position, useUpdateNodeInternals,
-  type Connection, type Edge, type Node, type NodeChange, type NodeProps, type ReactFlowInstance } from "@xyflow/react";
-import { Plus, Redo2, Trash2, Undo2 } from "lucide-react";
+import { Handle, MarkerType, MiniMap, Position, useUpdateNodeInternals,
+  type Connection, type Edge, type Node, type NodeChange, type NodeProps, type ReactFlowInstance, type Viewport } from "@xyflow/react";
+import { ChevronRight, CircleAlert, Focus, GitBranch, MessageSquareText, Plus, Redo2, SlidersHorizontal, Trash2, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { PipelineNodeCatalog, workflowRegistryGroups } from "@/pipeline-catalog";
-import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineToolbar } from "@/pipeline-layout";
+import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineToolbar } from "@/pipeline-layout";
 import { WorkflowAgileFields } from "@/workflow-agile-editor";
 import { CommandNodeConfiguration } from "@/workflow-command";
 import { DecisionNodeFields, type WorkflowDecisionConfiguration } from "@/workflow-decision-editor";
@@ -17,7 +18,7 @@ import type { StageGoalRoleRevision } from "@/workflow-stage-goal";
 import type { ReusableReference } from "@/workflow-reusable";
 import {
   changedPorts, configurationProblem, connectionProblem, defaultConfiguration, incompatibility,
-  initialNodePositions, isPresetEligible, isStartNode, outputPort, portType, wireKey,
+  initialNodePositions, isPresetEligible, isStartNode, outputPort, portType, readableGraphViewport, wireKey,
   type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowGraph, type WorkflowGraphNode,
   type WorkflowEndpoint, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPort, type WorkflowReuseSelection, type WorkflowWire,
 } from "@/workflow-graph-model";
@@ -62,8 +63,10 @@ export function editorDefinitions(state: WorkflowEditorState, pinned: WorkflowDe
       definition = { ...definition, inputs: definition.inputs.filter(({ name }) =>
         name === "tests" ? phase === "red" : !["candidate", "prior"].includes(name) || phase !== "baseline") };
     }
-    if (node.kind === "accept_candidate" && node.configuration.kind === "none") {
-      definition = { ...definition, inputs: definition.inputs.filter(({ name }) => name !== "quality" && name !== "build") };
+    if (node.kind === "accept_candidate") {
+      const missing = node.configuration.kind === "none" ? ["quality", "build"] : [];
+      if (node.configuration.reviewMode !== "selected") missing.push("selected_reviews");
+      definition = { ...definition, inputs: definition.inputs.filter(({ name }) => !missing.includes(name)) };
     }
     return [[node.id, definition]];
   }));
@@ -92,24 +95,25 @@ type PortActions = {
   activeOutput?: WorkflowEndpoint;
   activate: (side: PortSide, name: string) => void;
 };
-type CanvasNode = Node<{ definition?: WorkflowDefinition; problem: boolean; readOnly: boolean; inspected: boolean; portActions?: PortActions }, "workflow">;
+type CanvasNode = Node<{ definition?: WorkflowDefinition; promptRole?: string; problem: boolean; readOnly: boolean; inspected: boolean; portActions?: PortActions }, "workflow">;
 
 function WorkflowCard({ id, data, selected }: NodeProps<CanvasNode>) {
   const update = useUpdateNodeInternals();
   const definition = data.definition;
   useEffect(() => { update(id); }, [definition, id, update]);
-  return <WorkflowGraphNodeCard title={definition?.title ?? "Unavailable node"} detail={id} selected={selected || data.inspected}
+  return <WorkflowGraphNodeCard title={definition?.title ?? "Unavailable node"} detail={data.promptRole ?? id} prompt={data.promptRole !== undefined}
+    selected={selected || data.inspected}
     problem={data.problem} readOnly={data.readOnly} inputs={definition?.inputs ?? []} outputs={definition?.outputs ?? []} portActions={data.portActions} />;
 }
 
-export function WorkflowGraphNodeCard({ title, detail, inputs = [], outputs = [], selected, problem, readOnly, headerContent, portActions, compact, handles }: {
+export function WorkflowGraphNodeCard({ title, detail, inputs = [], outputs = [], selected, problem, readOnly, headerContent, portActions, compact, handles, prompt }: {
   title: string; detail?: string; inputs?: WorkflowPort[]; outputs?: WorkflowPort[]; selected?: boolean;
   problem?: boolean; readOnly?: boolean; headerContent?: ReactNode; portActions?: PortActions;
-  compact?: boolean; handles?: ReactNode;
+  compact?: boolean; handles?: ReactNode; prompt?: boolean;
 }) {
-  return <article className="workflow-node-card" data-compact={compact || undefined} data-selected={selected || undefined} data-problem={problem || undefined}>
+  return <article className="workflow-node-card" data-compact={compact || undefined} data-selected={selected || undefined} data-problem={problem || undefined} data-prompt={prompt || undefined}>
     {handles}
-    <header><strong>{title}</strong>{detail && <small>{detail}</small>}{headerContent}</header>
+    <header><strong>{prompt && <MessageSquareText size={14} aria-hidden />}{title}</strong>{detail && <small>{detail}</small>}{headerContent}</header>
     {(inputs.length > 0 || outputs.length > 0) && <div className="workflow-node-ports">
       <WorkflowPortColumn ports={inputs} side="input" readOnly={readOnly} actions={portActions} />
       <WorkflowPortColumn ports={outputs} side="output" readOnly={readOnly} actions={portActions} />
@@ -137,6 +141,19 @@ export function WorkflowPortColumn({ ports, side, readOnly = false, actions }: {
 }
 
 const nodeTypes = { workflow: WorkflowCard };
+
+function suggestedDataWires(graph: WorkflowGraph, definitions: WorkflowDefinitions, flow: WorkflowWire) {
+  const producer = definitions[flow.from.node];
+  const consumer = definitions[flow.to.node];
+  if (!producer || !consumer) return [];
+  return producer.outputs.filter(({ value }) => value.kind === "data").flatMap((output) =>
+    consumer.inputs.flatMap((input) => {
+      if (output.value.kind !== "data" || input.value.kind !== "data" || output.value.artifact !== input.value.artifact
+        || graph.wires.some(({ to }) => to.node === flow.to.node && to.port === input.name)) return [];
+      const wire = { from: { node: flow.from.node, port: output.name }, to: { node: flow.to.node, port: input.name } };
+      return connectionProblem(graph, definitions, wire) ? [] : [wire];
+    }));
+}
 
 function connectionWire(connection: Connection): WorkflowWire | undefined {
   return connection.sourceHandle && connection.targetHandle ? {
@@ -172,7 +189,8 @@ const bindingFingerprint = (bindings: WorkflowEditorState["nodeBindings"]) =>
 
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
   allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode,
-  backlogBound, onDerive, deriveDisabled }: {
+  backlogBound, onDerive, deriveDisabled, fullHeight = false, toolbarStart, toolbarActions, initialViewport, onViewportChange,
+  createPrompt, promptRoles, inspectPrompt }: {
   projectId: string;
   checkoutId?: string;
   state: WorkflowEditorState;
@@ -189,6 +207,14 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   backlogBound?: (nodeId: string) => boolean;
   onDerive?: (selection: WorkflowReuseSelection) => void;
   deriveDisabled?: boolean;
+  fullHeight?: boolean;
+  toolbarStart?: ReactNode;
+  toolbarActions?: ReactNode;
+  initialViewport?: Viewport;
+  onViewportChange?: (viewport: Viewport) => void;
+  createPrompt?: (id: string) => ReusableReference;
+  promptRoles?: Record<string, string>;
+  inspectPrompt?: (id: string) => ReactNode;
 }) {
   const { graph, layout } = state;
   const [theme, setTheme] = useState(readTheme);
@@ -200,10 +226,12 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const [catalogPosition, setCatalogPosition] = useState<{ x: number; y: number }>();
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingConnection>();
+  const [suggestDataFor, setSuggestDataFor] = useState<WorkflowWire>();
   const [history, setHistory] = useState<EditorHistory>({ past: [], future: [] });
   const currentBindings = bindingFingerprint(state.nodeBindings);
   const expectedBindings = useRef(currentBindings);
   const [flow, setFlow] = useState<ReactFlowInstance<CanvasNode, Edge>>();
+  const [inspectorRequest, revealInspector] = useState(0);
   const [menu, setMenu] = useState<CanvasMenu>();
   const [clipboard, setClipboard] = useState<GraphSelection>();
   const canvas = useRef<HTMLDivElement>(null);
@@ -211,10 +239,19 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const [previewPositions, setPreviewPositions] = useState<WorkflowLayout>({});
   const node = graph.nodes.find(({ id }) => id === selected);
   const definition = node && definitions[node.id];
+  const isPrompt = node && !!promptRoles && Object.hasOwn(promptRoles, node.id);
+  const dataSuggestions = !disabled && suggestDataFor && graph.wires.some((wire) => wireKey(wire) === wireKey(suggestDataFor))
+    ? suggestedDataWires(graph, definitions, suggestDataFor) : [];
   const canUpdateDefinition = typeof allowDefinitionUpdates === "function"
     ? !!node && allowDefinitionUpdates(node.id) : allowDefinitionUpdates;
   const available = canUpdateDefinition && definition && catalog.find(({ kind, revision }) => kind === definition.kind && revision > definition.revision);
   const positions = useMemo(() => initialNodePositions(graph), [graph]);
+  const [openingViewport] = useState(() => {
+    if (initialViewport) return initialViewport;
+    if (!fullHeight || !graph.nodes.length) return;
+    const entry = graph.nodes.find(({ kind }) => isStartNode(kind)) ?? graph.nodes[0]!;
+    return readableGraphViewport(graph.nodes.map(({ id }) => layout[id] ?? positions[id]!), layout[entry.id] ?? positions[entry.id]);
+  });
   const edges = useMemo<Edge[]>(() => graph.wires.map((wire) => {
     const invalid = incompatibility(definitions, wire);
     const output = outputPort(definitions, wire.from);
@@ -240,6 +277,18 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     setHistory({ past: [], future: [] });
   }, [currentBindings]);
 
+  function focusNode(id: string) {
+    select(id);
+    setConnectionError(null);
+    if (!id || !flow) return;
+    const selected = flow.getNode?.(id);
+    const position = selected?.position ?? layout[id] ?? positions[id];
+    if (!position) return;
+    void flow.setCenter?.(position.x + (selected?.measured?.width ?? 248) / 2,
+      position.y + (selected?.measured?.height ?? 88) / 2,
+      { zoom: Math.max(flow.getZoom?.() ?? 0.85, 0.85), duration: 180 });
+  }
+
   function updateState(next: WorkflowEditorState) {
     expectedBindings.current = bindingFingerprint(next.nodeBindings);
     setState(next);
@@ -263,6 +312,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     setHistory(direction === "undo" ? { past: past.slice(0, -1), future: [...future, state] }
       : { past: [...past, state], future: future.slice(0, -1) });
     setPending(undefined);
+    setSuggestDataFor(undefined);
     setConnectionError(null);
     if (!previous.graph.nodes.some(({ id }) => id === selected)) select(previous.graph.nodes[0]?.id ?? "");
     updateState(previous);
@@ -290,6 +340,22 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       graph: { ...graph, nodes: [...graph.nodes, { id, kind: definition.kind, configuration: defaultConfiguration(definition.configuration) }] } });
     setSelectedNodes([id]);
     select(id);
+    closeCatalog();
+    setCatalogPosition(undefined);
+  }
+
+  function addPrompt() {
+    if (!createPrompt || disabled) return;
+    const id = allocateId("prompt");
+    apply({
+      ...state,
+      layout: catalogPosition ? { ...layout, [id]: catalogPosition } : layout,
+      nodeBindings: { ...state.nodeBindings, [id]: { reference: createPrompt(id) } },
+      graph: { ...graph, nodes: [...graph.nodes, { id, kind: "subflow", configuration: { kind: "none" } }] },
+    });
+    setSelectedNodes([id]);
+    select(id);
+    revealInspector((request) => request + 1);
     closeCatalog();
     setCatalogPosition(undefined);
   }
@@ -405,6 +471,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     if (issue) return;
     setPending(undefined);
     if (replacing === wireKey(wire)) return;
+    if (promptRoles && Object.hasOwn(promptRoles, wire.from.node) && Object.hasOwn(promptRoles, wire.to.node)
+      && outputPort(definitions, wire.from)?.value.kind === "control") setSuggestDataFor(wire);
     patchGraph((previous) => ({ ...previous, wires: replacing
       ? previous.wires.map((item) => wireKey(item) === replacing ? wire : item) : [...previous.wires, wire] }));
   }
@@ -482,7 +550,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       const subflowNodes = scoped.filter(({ kind }) => !isStartNode(kind)).map(({ id }) => id);
       const duplicable = scoped.every(({ id, kind }) => !isStartNode(kind) && definitions[id] !== undefined);
       return { label: clicked.id, groups: [[
-        { label: "Inspect node", run: () => { select(clicked.id); setConnectionError(null); } },
+        { label: "Inspect node", run: () => { select(clicked.id); setConnectionError(null); revealInspector((request) => request + 1); } },
         { label: "Copy node ID", run: () => copy(clicked.id) },
         { label: "Copy node configuration", run: () => copy(JSON.stringify(clicked.configuration, null, 2)) },
       ], [
@@ -522,23 +590,35 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   const canvasNodes: CanvasNode[] = graph.nodes.map((item) => {
     const defined = definitions[item.id];
     return { id: item.id, type: "workflow", position: previewPositions[item.id] ?? layout[item.id] ?? positions[item.id]!, selected: selectedNodes.includes(item.id),
-      ariaLabel: `${defined?.title ?? "Node"} ${item.id}`, data: { definition: defined, readOnly: disabled, inspected: item.id === selected,
+      ariaLabel: `${defined?.title ?? "Node"} ${item.id}`, data: { definition: defined, promptRole: promptRoles?.[item.id], readOnly: disabled, inspected: item.id === selected,
         problem: !defined || Boolean(configurationProblem(item.configuration, defined, backlogBound?.(item.id))),
         portActions: { nodeId: item.id, activeOutput: pending?.from, activate: (side, name) => activatePort(item.id, side, name) },
       } };
   });
   const entryKind = catalog.some(({ kind }) => kind === "typed_start") && !graph.nodes.some(({ kind }) => kind === "start") ? "typed_start" : "start";
-  const groups = workflowRegistryGroups(catalog.filter(({ kind }) => !isStartNode(kind) || kind === entryKind), (entry) => {
+  const nativeGroups = workflowRegistryGroups(catalog.filter(({ kind }) => !isStartNode(kind) || kind === entryKind), (entry) => {
     const alreadyPresent = isStartNode(entry.kind) && graph.nodes.some(({ kind }) => isStartNode(kind));
     return { action: alreadyPresent || disabled ? undefined : () => add(entry),
       unavailable: alreadyPresent ? "Already on the canvas" : undefined };
   });
 
-  return <section aria-label="Pipeline graph editor" className="workflow-graph" onKeyDown={(event) => {
-    if (event.key === "Escape" && pending) { setPending(undefined); setConnectionError(null); }
+  const settingsAvailable = Boolean(node && definition &&
+    (definition.configuration !== "none" || node.kind === "subflow" || state.nodeBindings?.[node.id]));
+  const groups = createPrompt ? [{
+    title: "Prompt steps", entries: [{ id: "prompt", label: "Prompt", input: "Role and typed data", output: "Flow routes and evidence",
+      detail: "Run instructions with a versioned Role.", action: disabled ? undefined : addPrompt }],
+  }, ...nativeGroups] : nativeGroups;
+  const wireCount = node ? graph.wires.filter(({ from, to }) => from.node === node.id || to.node === node.id).length : 0;
+
+  return <section aria-label="Pipeline graph editor" className="workflow-graph" data-full-height={fullHeight || undefined} onKeyDown={(event) => {
+    if (event.key === "Escape") {
+      if (pending) { setPending(undefined); setConnectionError(null); }
+      setSuggestDataFor(undefined);
+    }
   }}>
     <PipelineToolbar>
-      <label className="pipeline-inline-field workflow-graph-name">Pipeline name<input value={graph.name} disabled={disabled} onChange={(event) => {
+      {toolbarStart}
+      <label className="pipeline-inline-field workflow-graph-name"><span>Pipeline name</span><input aria-label="Pipeline name" value={graph.name} disabled={disabled} onChange={(event) => {
         const name = event.currentTarget.value;
         patchGraph((previous) => ({ ...previous, name }));
       }} /></label>
@@ -548,24 +628,21 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       }}>
         <Plus size={15} /> Add node
       </Button>
+      {toolbarActions}
       <div className="workflow-history" aria-label="Graph edit history" role="group">
         <Button type="button" variant="ghost" aria-label="Undo graph edit" title="Undo graph edit" disabled={disabled || !history.past.length}
           onClick={() => restore("undo")}><Undo2 size={16} /></Button>
         <Button type="button" variant="ghost" aria-label="Redo graph edit" title="Redo graph edit" disabled={disabled || !history.future.length}
           onClick={() => restore("redo")}><Redo2 size={16} /></Button>
       </div>
+      {problems.length > 0 && <details className="workflow-graph-diagnostics">
+        <summary><CircleAlert size={15} aria-hidden /> Draft diagnostics ({problems.length})</summary>
+        <ul>{problems.map((issue, i) => <li key={`${issue}:${i}`}>{issue}</li>)}</ul>
+      </details>}
     </PipelineToolbar>
-    {connectionError && <p className="workflow-graph-error" role="alert">{connectionError}</p>}
-    {pending && <div className="workflow-connection-status">
-      <p role="status">Select an input port for {pending.from.node}.{pending.from.port}.</p>
-      <Button type="button" variant="ghost" onClick={() => { setPending(undefined); setConnectionError(null); }}>Cancel connection</Button>
-    </div>}
-    {problems.length > 0 && <details className="workflow-graph-error"><summary>Draft diagnostics ({problems.length})</summary>
-      <ul>{problems.map((issue, i) => <li key={`${issue}:${i}`}>{issue}</li>)}</ul>
-    </details>}
     <PipelineCanvasFrame className="workflow-graph-frame" canvasLabel="Pipeline graph canvas" inspectorLabel="Node configuration"
-      onClosePalette={closeCatalog}
-      inspectorClassName="workflow-graph-inspector pipeline-form pipeline-stack" palette={catalogOpen && !disabled ?
+      onClosePalette={closeCatalog} collapsibleInspector={fullHeight} inspectorRequest={inspectorRequest}
+      inspectorClassName="workflow-graph-inspector pipeline-form" palette={catalogOpen && !disabled ?
         <section aria-label="Node catalog"><PipelineNodeCatalog groups={groups} searchLabel="Search node catalog" compact /></section> : undefined}
       canvas={<div ref={canvas} tabIndex={0} aria-label="Workflow canvas actions" className="workflow-graph-canvas" onKeyDown={(event) => {
         if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
@@ -579,8 +656,29 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         setMenu({ target: id ? { kind: anchor?.classList.contains("react-flow__edge") ? "edge" : "node", id } : { kind: "pane" },
           point: { x: rect.left + 8, y: rect.top + 8 }, origin });
       }}>
+        {(connectionError || pending || dataSuggestions.length > 0) && <div className="workflow-graph-feedback">
+          {connectionError && <p className="workflow-graph-error" role="alert"><CircleAlert size={15} aria-hidden />{connectionError}</p>}
+          {pending && <div className="workflow-connection-status">
+            <p role="status">Select an input port for {pending.from.node}.{pending.from.port}.</p>
+            <Button type="button" variant="ghost" onClick={() => { setPending(undefined); setConnectionError(null); }}>Cancel connection</Button>
+          </div>}
+          {dataSuggestions.length > 0 && !pending && <section className="workflow-data-suggestions" aria-label="Suggested data connections">
+            <header><span role="status">Connect compatible data</span>
+              <Button type="button" variant="ghost" className="ui-icon-button" aria-label="Dismiss data suggestions"
+                onClick={() => setSuggestDataFor(undefined)}><X size={15} aria-hidden /></Button>
+            </header>
+            <ul>{dataSuggestions.map((wire) => <li key={wireKey(wire)}>
+              <Button type="button" variant="outline" onClick={() => connect(wire)}>
+                {wire.from.port} <span aria-hidden>→</span> {wire.to.port}
+              </Button>
+            </li>)}</ul>
+          </section>}
+        </div>}
         <PipelineGraphCanvas<CanvasNode, Edge> interactive={!disabled} nodes={canvasNodes} edges={edges} nodeTypes={nodeTypes} colorMode={theme}
-          fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2}
+          fitView={!openingViewport} defaultViewport={openingViewport} fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={fullHeight ? 0.025 : 0.08} maxZoom={2}
+          compactControls={fullHeight} canvasTools={fullHeight && graph.nodes.length >= 16 ?
+            <MiniMap pannable zoomable ariaLabel="Pipeline overview" nodeColor="var(--primary)" /> : undefined}
+          onMoveEnd={(_, viewport) => onViewportChange?.(viewport)}
           selectionKeyCode="Shift" multiSelectionKeyCode={["Control", "Meta"]}
           nodesDraggable={!disabled} nodesConnectable={!disabled} edgesReconnectable={!disabled}
           deleteKeyCode={disabled ? null : ["Backspace", "Delete"]}
@@ -603,27 +701,53 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         />
       </div>}
       inspector={<>
-        <PipelineInspectorHeader detail="Configuration" title={definition?.title ?? "Select a node"} />
-        <label>Inspect node<select value={node?.id ?? ""} onChange={(event) => { select(event.currentTarget.value); setConnectionError(null); }}>
-          <option value="">Choose a node</option>
-          {graph.nodes.map(({ id }) => <option key={id} value={id}>{definitions[id]?.title ?? "Unavailable"} · {id}</option>)}
-        </select></label>
+        <header className="workflow-inspector-heading">
+          <span className="workflow-inspector-icon"><SlidersHorizontal size={17} aria-hidden /></span>
+          <div><h2>{definition?.title ?? "Select a node"}</h2>
+            {node && <code title={node.id}>{node.id}</code>}
+          </div>
+        </header>
+        <div className="workflow-inspector-jump">
+          <label>Inspect node<select value={node?.id ?? ""} onChange={(event) => focusNode(event.currentTarget.value)}>
+            <option value="">Choose a node</option>
+            {graph.nodes.map(({ id }) => <option key={id} value={id}>{definitions[id]?.title ?? "Unavailable"} · {id}</option>)}
+          </select></label>
+          <ControlTooltip label="Center selected node">
+            <Button type="button" variant="outline" className="ui-icon-button" aria-label="Center selected node"
+              disabled={!node || !flow} onClick={() => { if (node) focusNode(node.id); }}><Focus size={16} aria-hidden /></Button>
+          </ControlTooltip>
+        </div>
         {node && definition && <>
-          <p className="text-sm text-muted-foreground">Version {definition.revision} · {definition.effect.replaceAll("_", " ")}</p>
-          {inspectReference?.(node.id)}
-          <NodeFields key={node.id} projectId={projectId} checkoutId={checkoutId} node={node} definition={definition}
-            presetFields={editablePresetFields?.[node.id]} goalRole={goalRoleForNode?.(node.id)}
-            subflow={subflowDefinitionForNode?.(node.id)}
-            backlogBound={backlogBound?.(node.id)}
-            disabled={disabled} onChange={(configuration) => configure(node.id, configuration)} />
+          {isPrompt ? inspectPrompt?.(node.id) : <>
+          <div className="workflow-inspector-meta">
+            <span>Version {definition.revision}</span>
+            {definition.effect !== "none" && <span>{definition.effect.replaceAll("_", " ")}</span>}
+          </div>
+          {settingsAvailable && <details key={`settings:${node.id}`} className="workflow-inspector-group" open>
+            <summary><SlidersHorizontal size={15} aria-hidden /> Settings <ChevronRight size={14} aria-hidden /></summary>
+            <div className="pipeline-stack">
+              {inspectReference?.(node.id)}
+              <NodeFields projectId={projectId} checkoutId={checkoutId} node={node} definition={definition}
+                presetFields={editablePresetFields?.[node.id]} goalRole={goalRoleForNode?.(node.id)}
+                subflow={subflowDefinitionForNode?.(node.id)}
+                backlogBound={backlogBound?.(node.id)}
+                disabled={disabled} onChange={(configuration) => configure(node.id, configuration)} />
+            </div>
+          </details>}
           {available && <VersionReview node={node} previous={definition} next={available} wires={graph.wires}
             disabled={disabled} apply={() => updateVersion(node, available)} />}
-          {definition.inputs.length > 0 && <ConnectInput key={`${node.id}:${definition.revision}`} graph={graph} node={node}
-            definitions={definitions} definition={definition} disabled={disabled} connect={connect} />}
-          <NodeConnections node={node} wires={graph.wires} definitions={definitions} disabled={disabled} reconnect={reconnect}
-            remove={(wire) => changeNodes([], [wireKey(wire)])} />
+          </>}
+          {(wireCount > 0 || definition.inputs.length > 0) && <details key={`connections:${node.id}`} className="workflow-inspector-group" open={!settingsAvailable}>
+            <summary><GitBranch size={15} aria-hidden /> Connections <span>{wireCount}</span><ChevronRight size={14} aria-hidden /></summary>
+            <div className="pipeline-stack">
+              <NodeConnections node={node} wires={graph.wires} definitions={definitions} disabled={disabled} reconnect={reconnect}
+                remove={(wire) => changeNodes([], [wireKey(wire)])} />
+              {definition.inputs.length > 0 && <ConnectInput key={`${node.id}:${definition.revision}`} graph={graph} node={node}
+                definitions={definitions} definition={definition} disabled={disabled} connect={connect} />}
+            </div>
+          </details>}
         </>}
-        {node && <Button type="button" variant="outline" disabled={disabled} onClick={() => changeNodes([{ id: node.id, type: "remove" }])}>
+        {node && !disabled && <Button type="button" variant="ghost" className="workflow-remove-node" onClick={() => changeNodes([{ id: node.id, type: "remove" }])}>
           <Trash2 size={14} /> Remove node
         </Button>}
       </>} />
@@ -741,7 +865,6 @@ function NodeConnections({ node, wires, definitions, disabled, reconnect, remove
   const connected = wires.filter(({ from, to }) => from.node === node.id || to.node === node.id);
   if (!connected.length) return null;
   return <section aria-label="Node connections" className="pipeline-stack">
-    <h3>Connections</h3>
     <ul className="workflow-connections">{connected.map((wire) => {
       const name = `${wire.from.node}.${wire.from.port} → ${wire.to.node}.${wire.to.port}`;
       return <li key={wireKey(wire)}>

@@ -48,6 +48,10 @@ pub struct StageRequirementConfiguration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_role: Option<PackageArtifactVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_text: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prompt_delegate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<super::stage_goal::StageGoalConfiguration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<super::stage_plan::StagePlanConfiguration>,
@@ -222,6 +226,8 @@ impl StageRequirementConfiguration {
     pub(crate) fn is_empty(&self) -> bool {
         self.role_template.is_none()
             && self.bound_role.is_none()
+            && self.prompt_text.is_none()
+            && !self.prompt_delegate
             && self.goal.is_none()
             && self.plan.is_none()
             && !self.review_reuse
@@ -236,6 +242,10 @@ impl StageRequirementConfiguration {
                 .is_none_or(|goal| goal.validate().is_ok())
             && self.plan.as_ref().is_none_or(|plan| plan.is_valid())
             && self.bound_role.as_ref().is_none_or(roles::valid_bound_role)
+            && self
+                .prompt_text
+                .as_ref()
+                .is_none_or(|text| !text.trim().is_empty() && text.len() <= 128 * 1024)
             && self.role_template.as_ref().is_none_or(|role| {
                 !role.template_id.trim().is_empty() && !role.revision.trim().is_empty()
             })
