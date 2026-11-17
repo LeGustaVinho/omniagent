@@ -257,12 +257,12 @@ it("opens a new conversation beside the active panel only within the selected wo
   expect(screen.getAllByRole("tab", { name: "Live handoff" })).toEqual([liveTab]);
   expect(liveTab.closest(".dv-groupview")).not.toBe(referenceTab.closest(".dv-groupview"));
 
-  await user.selectOptions(library().getByRole("combobox", { name: "Project" }), "");
-  fireEvent.contextMenu(await library().findByRole("button", { name: "Audit details" }));
+  expect(library().queryByRole("button", { name: "Audit details" })).toBeNull();
+  fireEvent.contextMenu(await library().findByRole("button", { name: "Linked worktree review" }));
   const menu = within(await screen.findByRole("menu"));
   expect(menu.queryByRole("menuitem", { name: "Open conversation to the side" })).toBeNull();
   await user.click(menu.getByRole("menuitem", { name: "Open conversation" }));
-  expect(onOpenOtherCheckout).toHaveBeenCalledExactlyOnceWith(other, externalId);
+  expect(onOpenOtherCheckout).toHaveBeenCalledExactlyOnceWith(linked, linkedId);
 });
 
 it("moves an already open conversation to the side with the same mounted composer and draft", async () => {
@@ -401,8 +401,8 @@ it("copies highlighted code and appends its own fenced block to the current draf
 it("confirms a checkout file save and stages the same clicked block for the terminal without running it", async () => {
   const source = '$value = "café";\r\n\r\nWrite-Output $value\r\n';
   const nested = source.split("\r\n").slice(0, -1).map((line) => `> ${line}\r\n`).join("");
-  repository([{ messageId: "review-code", revisionId: "review-code-revision", role: "assistant", text:
-    `\x60\x60\x60powershell\nGet-Date\n\x60\x60\x60\n\n> \x60\x60\x60powershell\r\n${nested}> \x60\x60\x60` }]);
+  repository({ archiveMessages: [{ messageId: "review-code", revisionId: "review-code-revision", role: "assistant", text:
+    `\x60\x60\x60powershell\nGet-Date\n\x60\x60\x60\n\n> \x60\x60\x60powershell\r\n${nested}> \x60\x60\x60` }] });
   useWorkspace.getState().selectCheckout(selected);
   const openWorkspace = vi.fn();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

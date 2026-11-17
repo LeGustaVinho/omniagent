@@ -82,7 +82,7 @@ it("reviews and recycles the clicked untracked file without using the active dif
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><GitCheckoutChanges review={review} indexActions /></QueryClientProvider>);
     const files = within(screen.getByRole("region", { name: "Changed files" }));
-    fireEvent.contextMenu(files.getByRole("button", { name: /\[temporary\]\.bin\s*Untracked/ }));
+    fireEvent.contextMenu(files.getByRole("button", { name: `${clicked} · Untracked` }));
     await user.click(await screen.findByRole("menuitem", { name: "Move untracked file to Recycle Bin…" }));
     const dialog = within(await screen.findByRole("dialog", { name: "Move untracked file to Recycle Bin" }));
     expect(await dialog.findByText("SHA-256 abc123")).toBeTruthy();

@@ -10,7 +10,6 @@ import IdeWorkspace from "@/ide-workspace";
 import type { FileFormat } from "@/source-file-format";
 import type { ItemEdit } from "@/checkout-item-operations";
 import type { EditorExcerpt } from "@/editor-context";
-import type { FileFormat } from "@/source-file-format";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { reviewTerminalInputTarget } from "@/terminal-reviewed-input";
 

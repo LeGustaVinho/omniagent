@@ -27,8 +27,6 @@ import { ResizablePanel } from "@/panel-resize";
 import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { useWorkspaceSize } from "@/workbench-panel";
 import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
-import { SourceFormatDialog } from "@/source-format-dialog";
-import type { SourceFormatChange } from "@/source-file-format";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const Editor = lazy(() => import("@/ide-code-editor").then(({ CodeEditor }) => ({ default: CodeEditor })));
