@@ -513,6 +513,8 @@ fn main() {
             git_review_runtime::git_checkout_diff,
             git_review_runtime::git_discard_preview,
             git_review_runtime::git_discard_changes,
+            git_review_runtime::git_discard_batch_preview,
+            git_review_runtime::git_discard_batch_changes,
             git_review_runtime::git_conflict_review,
             git_review_runtime::git_mark_conflict_resolved,
             git_review_runtime::git_apply_conflict_resolution,

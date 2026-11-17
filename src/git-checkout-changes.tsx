@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { excerptReference, type EditorExcerpt } from "@/editor-context";
 import { GitConflictReview } from "@/git-conflict-review";
-import { GitDiscardDialog, type GitDiscardSelection } from "@/git-discard-dialog";
+import { GitBatchDiscardDialog, GitDiscardDialog, type GitDiscardSelection } from "@/git-discard-dialog";
 import { GitDiffReview, type GitHunk, type GitTextComparison } from "@/git-diff-view";
 import { useGitReviewComments, type GitReviewScope } from "@/git-review-comments";
 import { GitDiffSourceSelect } from "@/git-workspace-frame";
@@ -55,6 +55,8 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
   const [selection, setSelection] = useState(initialPath);
   const [conflict, setConflict] = useState<string>();
   const [discard, setDiscard] = useState<GitDiscardSelection>();
+  const [discardBatch, setDiscardBatch] = useState<string[]>();
+  const [discardedCount, setDiscardedCount] = useState(0);
   const [recycled, setRecycled] = useState<string>();
   const changeStage = useChangeStage(review);
   const client = useQueryClient();
@@ -104,6 +106,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
           files={files} selectedPath={path} select={setSelection} comparison={comparison}
           notice={<>
             {recycled && <p className="p-3 text-sm" role="status">Moved {recycled} to the Recycle Bin.</p>}
+            {discardedCount > 0 && <p className="p-3 text-sm" role="status">Discarded working changes in {discardedCount} files.</p>}
             {selection && !path && <p className="p-3 text-sm" role="status">No {source === "working" ? "working" : "staged"} changes for {selection}.</p>}
             {reviewHunk.error && <div className="p-3"><InlineIssue>{String(reviewHunk.error)}</InlineIssue></div>}
           </>}
@@ -138,11 +141,17 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
             const statuses = paths.map((path) => review.changes.find((entry) => entry.path === path));
             const hasWorking = statuses.every((entry) => entry && !isUnmerged(entry) && entry.working);
             const hasStaged = statuses.every((entry) => entry && !isUnmerged(entry) && entry.staged);
+            const canDiscard = (entry?: FileStatus) => Boolean(entry && !isUnmerged(entry) && (entry.working === "M" || entry.working === "D"));
             return [[
               ...(hasWorking ? [{ label: `Stage ${paths.length} selected files`, disabled: changeStage.isPending,
                 run: () => changeStage.mutate({ paths, staged: true }) }] : []),
               ...(hasStaged ? [{ label: `Unstage ${paths.length} selected files`, disabled: changeStage.isPending,
                 run: () => changeStage.mutate({ paths, staged: false }) }] : []),
+              ...(source === "working" && statuses.every(canDiscard) ? [{ label: `Discard changes in ${paths.length} selected files…`,
+                destructive: true, disabled: changeStage.isPending,
+                run: () => { setDiscardedCount(0); setDiscardBatch(paths); } }] : []),
+              ...(source === "working" && statuses.some(canDiscard) && statuses.some((entry) => entry?.working === "?")
+                ? [{ label: "Select tracked files separately to discard changes", disabled: true, run: () => {} }] : []),
             ]];
           } : undefined}
           fileActions={(file) => {
@@ -171,6 +180,8 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
     {source !== "branch" && comments.dialog}
     {conversationActions.dialog}
     {discard && <GitDiscardDialog checkoutId={review.checkoutId} selection={discard} close={() => setDiscard(undefined)} onRecycled={setRecycled} />}
+    {discardBatch && <GitBatchDiscardDialog checkoutId={review.checkoutId} paths={discardBatch} close={() => setDiscardBatch(undefined)}
+      discarded={() => { setDiscardedCount(discardBatch.length); setDiscardBatch(undefined); }} />}
     {conflict && <GitConflictReview key={conflict} checkoutId={review.checkoutId} checkoutRoot={review.root}
       path={conflict} openFile={openFile} close={() => setConflict(undefined)} />}
   </div>;

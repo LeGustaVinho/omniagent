@@ -99,3 +99,63 @@ it("reviews and recycles the clicked untracked file without using the active dif
     window.removeEventListener("omniagent:checkout-items-changed", updated);
   }
 });
+
+it("previews every selected tracked file and requires a fresh comparison after a stale batch", async () => {
+  const checkoutId = "selected-worktree";
+  const tracked = "src/edited.txt";
+  const deleted = "notes/deleted.md";
+  const untracked = "local.txt";
+  const revision = { branch: "refs/heads/main", head: "head", index: "index" };
+  const review: CheckoutReview = { checkoutId, root: "C:/temp/checkout", revision, managed: false, branches: [], worktrees: [],
+    changes: [{ path: tracked, working: "M", staged: "M" }, { path: deleted, working: "D", staged: null },
+      { path: untracked, working: "?", staged: null }] };
+  const text = (content: string) => ({ status: "text", content });
+  let preview = 0;
+  const paths = [tracked, deleted];
+  vi.mocked(invoke).mockImplementation(async (command, input) => {
+    if (command === "git_checkout_diff") return { path: tracked, revision, original: text("staged\n"), modified: text("working\n"), hunks: [] };
+    if (command === "git_review_comments") return [];
+    if (command === "git_discard_batch_preview") return { snapshot: `batch-${++preview}`, files: [
+      { path: tracked, before: text("Working edit"), after: text("Staged result") },
+      { path: deleted, before: { status: "missing" }, after: text("Restore the note") },
+    ] };
+    if (command === "git_discard_batch_changes") {
+      if ((input as { snapshot: string }).snapshot === "batch-1") throw "The selected files or their Git comparison changed.";
+      return;
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><GitCheckoutChanges review={review} indexActions /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const files = within(screen.getByRole("region", { name: "Changed files" }));
+  const toggle = (path: string) => user.click(files.getByRole("checkbox", { name: `Select ${path} for batch actions` }));
+  const menu = () => fireEvent.contextMenu(files.getByRole("button", { name: /^src\/edited\.txt/ }));
+  await toggle(tracked);
+  await toggle(untracked);
+  menu();
+  expect((await screen.findByRole("menuitem", { name: "Select tracked files separately to discard changes" })).getAttribute("aria-disabled")).toBe("true");
+  expect(screen.queryByRole("menuitem", { name: "Discard changes in 2 selected files…" })).toBeNull();
+  await user.keyboard("{Escape}");
+  await toggle(untracked);
+  await toggle(deleted);
+  menu();
+  await user.click(await screen.findByRole("menuitem", { name: "Discard changes in 2 selected files…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Discard selected file changes" }));
+  expect(await dialog.findByText("Staged result")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_discard_batch_preview", { checkoutId, paths });
+  const selector = dialog.getByRole("combobox", { name: "File to review" });
+  expect(within(selector).getAllByRole("option").map((option) => option.textContent)).toEqual(paths);
+  await user.selectOptions(selector, deleted);
+  expect(await dialog.findByText("Restore the note")).toBeTruthy();
+  const confirm = dialog.getByRole<HTMLButtonElement>("button", { name: "Discard changes in 2 files" });
+  await user.click(confirm);
+  expect(await dialog.findByText("The selected files or their Git comparison changed.")).toBeTruthy();
+  expect(confirm.disabled).toBe(true);
+  await user.click(dialog.getByRole("button", { name: "Review current changes" }));
+  await waitFor(() => expect(confirm.disabled).toBe(false));
+  await user.click(confirm);
+  expect(await screen.findByText("Discarded working changes in 2 files.")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_discard_batch_changes", { checkoutId, paths, snapshot: "batch-2" });
+  expect(invoke).not.toHaveBeenCalledWith("git_discard_changes", expect.anything());
+});

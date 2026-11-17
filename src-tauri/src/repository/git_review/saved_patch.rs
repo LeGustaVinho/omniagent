@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::{self, Read, Write},
+    io::Read,
     path::Path,
 };
 
@@ -14,19 +14,17 @@ use tokio::runtime::Handle;
 
 use crate::{
     protection,
-    providers::configuration::plain_metadata,
     repository::{
-        AttemptWorktreeEvidence, CandidateRevision,
-        checkout_items::{checkout_directory, validate_name},
-        documents::{file_identity, open_for_rename, rename},
-        verification::materialize::ScratchGit,
+        AttemptWorktreeEvidence, CandidateRevision, checkout_items::validate_name,
+        documents::file_identity, verification::materialize::ScratchGit,
     },
     store::Store,
 };
 
 use super::{
-    GitReviewRevision, LiveReview, ReviewScope, lock_directories, lock_git_file, validate_path,
-    with_managed_worktree_writer,
+    GitReviewRevision, LiveReview, ReviewScope, lock_directories, lock_git_file,
+    reviewed_files::{ReviewedFile, ReviewedFiles, open_target},
+    validate_path, with_managed_worktree_writer,
 };
 
 const MAX_PATCH: usize = 16 * 1024 * 1024;
@@ -122,6 +120,7 @@ impl Store {
                 destination: scope.root.to_string_lossy().into_owned(),
                 revision: review.revision,
                 files: patch
+                    .files
                     .entries
                     .into_iter()
                     .map(|entry| PreviewEntry {
@@ -170,12 +169,7 @@ impl Store {
             runtime.block_on(store.execute(move |db| {
                 let transaction = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 saved_capture(&transaction, &request)?;
-                let mut query = transaction.prepare("SELECT document FROM drafts WHERE kind = 'checkout_file' AND owner_id = ?1")?;
-                for draft in query.query_map([&scope.id], |row| row.get::<_, String>(0))? {
-                    let draft = draft?.to_uppercase();
-                    ensure!(patch.entries.iter().all(|entry| entry.path.to_uppercase() != draft),
-                        "Save or discard protected editor drafts for the affected files before applying the patch.");
-                }
+                patch.files.verify_no_drafts(&transaction, &scope.id)?;
                 review.verify()?;
                 patch.publish(&scope.root)
             }))
@@ -214,18 +208,9 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-struct Entry {
-    path: String,
-    before: Option<Vec<u8>>,
-    after: Option<Vec<u8>>,
-    held: Option<File>,
-}
-
 struct Prepared {
-    entries: Vec<Entry>,
-    missing_folders: BTreeSet<String>,
+    files: ReviewedFiles,
     snapshot: String,
-    _parents: Vec<File>,
 }
 
 fn prepare(
@@ -276,32 +261,11 @@ fn prepare(
     let after = git.object(&["write-tree"])?;
     let paths = changed_paths(&git, &base, &after)?;
     let mut identities = BTreeMap::new();
-    let mut missing_folders = BTreeSet::new();
-    let mut parents = Vec::new();
-    let mut entries = Vec::new();
+    let mut files = ReviewedFiles::default();
     let mut total = 0;
     for path in paths {
-        let (folder, _) = path.rsplit_once('/').unwrap_or(("", &path));
-        let mut nearest = folder;
-        while plain_metadata(&scope.root.join(nearest))?.is_none() {
-            ensure!(
-                !nearest.is_empty(),
-                "The destination worktree was removed during review."
-            );
-            missing_folders.insert(nearest.into());
-            nearest = nearest.rsplit_once('/').map_or("", |(parent, _)| parent);
-        }
-        let checked = checkout_directory(&scope.root, nearest)?;
-        let guards = lock_directories(&checked)?;
-        identities.insert(
-            nearest.to_owned(),
-            file_identity(
-                guards
-                    .last()
-                    .context("missing destination directory handle")?,
-            )?,
-        );
-        parents.extend(guards);
+        let (parent, identity) = files.lock_parent(&scope.root, &path)?;
+        identities.insert(parent, identity);
         let destination = scope.root.join(&path);
         let held = open_target(&destination)?;
         let before = held
@@ -318,7 +282,7 @@ fn prepare(
             fs::create_dir_all(temp_path.parent().context("patch file has no parent")?)?;
             fs::write(temp_path, before)?;
         }
-        entries.push(Entry {
+        files.entries.push(ReviewedFile {
             path,
             before,
             after: None,
@@ -326,15 +290,12 @@ fn prepare(
         });
     }
     ensure!(
-        review
-            .status()?
-            .iter()
-            .all(|status| !status.unmerged()
-                || entries.iter().all(|entry| entry.path != status.path)),
+        review.status()?.iter().all(|status| !status.unmerged()
+            || files.entries.iter().all(|entry| entry.path != status.path)),
         "Resolve conflicts in the affected destination files before applying this patch."
     );
     let attributes =
-        project_checkout_attributes(&scope.root, review, &git, &entries, &mut parents)?;
+        project_checkout_attributes(&scope.root, review, &git, &files.entries, &mut files.guards)?;
     let options = review.view.passive_options();
     let args: Vec<_> = options
         .iter()
@@ -343,7 +304,7 @@ fn prepare(
         .collect();
     git.run(&args, Some(&patch))
         .context("The selected patch does not apply to this destination's current files")?;
-    for entry in &mut entries {
+    for entry in &mut files.entries {
         entry.after = open_target(&git.root().join(&entry.path))?
             .map(read_bytes)
             .transpose()?;
@@ -353,12 +314,13 @@ fn prepare(
             "The before and after comparison exceeds the review limit."
         );
     }
-    entries.retain(|entry| entry.before != entry.after);
+    files.entries.retain(|entry| entry.before != entry.after);
     ensure!(
-        !entries.is_empty(),
+        !files.entries.is_empty(),
         "The selected patch produces no file content changes in this worktree."
     );
-    let fingerprints = entries
+    let fingerprints = files
+        .entries
         .iter()
         .map(|entry| {
             Ok((
@@ -376,22 +338,17 @@ fn prepare(
         options,
         attributes,
         identities,
-        &missing_folders,
+        &files.missing_folders,
         fingerprints,
     ))?);
-    Ok(Prepared {
-        entries,
-        missing_folders,
-        snapshot,
-        _parents: parents,
-    })
+    Ok(Prepared { files, snapshot })
 }
 
 fn project_checkout_attributes(
     root: &Path,
     review: &LiveReview,
     git: &ScratchGit,
-    entries: &[Entry],
+    entries: &[ReviewedFile],
     held: &mut Vec<File>,
 ) -> Result<Vec<(String, Option<String>)>> {
     let index_path = review.view.index_path();
@@ -509,20 +466,6 @@ fn changed_paths(git: &ScratchGit, base: &str, after: &str) -> Result<Vec<String
     Ok(paths)
 }
 
-fn open_target(path: &Path) -> Result<Option<File>> {
-    match open_for_rename(path) {
-        Ok(file) => Ok(Some(file)),
-        Err(error)
-            if error
-                .downcast_ref::<io::Error>()
-                .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(error),
-    }
-}
-
 fn read_bytes(file: File) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.take(MAX_FILE + 1).read_to_end(&mut bytes)?;
@@ -535,100 +478,7 @@ fn read_bytes(file: File) -> Result<Vec<u8>> {
 
 impl Prepared {
     fn publish(self, root: &Path) -> Result<()> {
-        let vault = tempfile::Builder::new()
-            .prefix(".omniagent-patch-")
-            .tempdir_in(root)?;
-        let mut staged = Vec::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            let original = vault.path().join(format!("{index}.before"));
-            let edited = vault.path().join(format!("{index}.after"));
-            let replacement = if let Some(bytes) = &entry.after {
-                let mut file = File::create(&edited)?;
-                file.write_all(bytes)?;
-                file.sync_all()?;
-                drop(file);
-                Some(open_for_rename(&edited)?)
-            } else {
-                None
-            };
-            staged.push((original, edited, replacement));
-        }
-        let mut manifest = File::create(vault.path().join("working-files.json"))?;
-        serde_json::to_writer(
-            &mut manifest,
-            &self
-                .entries
-                .iter()
-                .map(|entry| &entry.path)
-                .collect::<Vec<_>>(),
-        )?;
-        manifest.sync_all()?;
-        drop(manifest);
-        let mut created = Vec::new();
-        let mut created_handles = Vec::new();
-        let mut moved = BTreeSet::new();
-        let mut installed = BTreeSet::new();
-        let result = (|| -> Result<()> {
-            for folder in &self.missing_folders {
-                let directory = root.join(folder);
-                fs::create_dir(&directory)?;
-                let handles = lock_directories(&directory)?;
-                let identity = file_identity(handles.last().context("missing directory handle")?)?;
-                created.push((directory, identity));
-                created_handles.extend(handles);
-            }
-            for (index, entry) in self.entries.iter().enumerate() {
-                let destination = root.join(&entry.path);
-                if let Some(original) = &entry.held {
-                    rename(original, &staged[index].0)?;
-                    moved.insert(index);
-                }
-                if let Some(replacement) = &staged[index].2 {
-                    rename(replacement, &destination)?;
-                    installed.insert(index);
-                }
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            let mut recovery = false;
-            for (index, entry) in self.entries.iter().enumerate().rev() {
-                if installed.contains(&index)
-                    && let Some(replacement) = &staged[index].2
-                {
-                    recovery |= rename(replacement, &staged[index].1).is_err();
-                }
-                if moved.contains(&index)
-                    && let Some(original) = &entry.held
-                {
-                    recovery |= rename(original, &root.join(&entry.path)).is_err();
-                }
-            }
-            drop(created_handles);
-            for (directory, identity) in created.iter().rev() {
-                let observed = lock_directories(directory).and_then(|locks| {
-                    Ok(file_identity(
-                        locks.last().context("missing directory handle")?,
-                    )?)
-                });
-                if observed.as_ref().is_ok_and(|observed| observed == identity) {
-                    let _ = fs::remove_dir(directory);
-                }
-            }
-            if recovery {
-                anyhow::bail!(
-                    "Could not finish or roll back the saved patch: {error:#}. Recovery files: {}",
-                    vault.keep().display()
-                );
-            }
-            return Err(error)
-                .context("Could not apply the saved patch. The affected files were rolled back");
-        }
-        drop(staged);
-        drop(self);
-        vault
-            .close()
-            .context("The patch was applied. Could not remove its temporary recovery copies")
+        self.files.publish(root)
     }
 }
 
@@ -740,13 +590,13 @@ mod tests {
         };
         let review = LiveReview::open(&scope)?;
         let initial = prepare(&scope, &review, &request, &capture)?;
-        assert_eq!(initial.entries.len(), 4);
+        assert_eq!(initial.files.entries.len(), 4);
         assert_eq!(
-            initial.entries[0].before.as_deref(),
+            initial.files.entries[0].before.as_deref(),
             Some(b"original\n".as_slice())
         );
         assert_eq!(
-            initial.entries[0].after.as_deref(),
+            initial.files.entries[0].after.as_deref(),
             Some(b"saved change\n".as_slice())
         );
         assert!(!destination.join("letters").exists());

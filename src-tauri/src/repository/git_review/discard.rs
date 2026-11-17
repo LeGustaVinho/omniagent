@@ -22,7 +22,9 @@ use crate::repository::{
     documents::replace_reviewed_checkout_bytes,
 };
 
+mod batch;
 mod untracked;
+pub use batch::GitDiscardBatchPreview;
 use untracked::ReviewedRecycle;
 
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;

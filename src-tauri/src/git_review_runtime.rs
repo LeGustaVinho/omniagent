@@ -117,6 +117,31 @@ pub async fn git_compare_file_versions(
 }
 
 #[tauri::command]
+pub async fn git_discard_batch_preview(
+    store: State<'_, Store>,
+    checkout_id: String,
+    paths: Vec<String>,
+) -> Result<omniagent::repository::git_review::GitDiscardBatchPreview, String> {
+    store
+        .git_discard_batch_preview(checkout_id, paths)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_discard_batch_changes(
+    store: State<'_, Store>,
+    checkout_id: String,
+    paths: Vec<String>,
+    snapshot: String,
+) -> Result<(), String> {
+    store
+        .git_discard_batch_changes(checkout_id, paths, snapshot)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn git_file_permalink(
     store: State<'_, Store>,
     checkout_id: String,
