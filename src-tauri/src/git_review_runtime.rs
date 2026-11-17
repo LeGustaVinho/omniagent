@@ -138,6 +138,30 @@ pub async fn git_compare_commit_file(
 }
 
 #[tauri::command]
+pub async fn git_compare_commit_checkout(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: omniagent::repository::git_review::GitCommitCheckoutRequest,
+) -> Result<omniagent::repository::git_review::GitCommitCheckoutComparison, String> {
+    store
+        .git_compare_commit_checkout(checkout_id, request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_compare_commit_checkout_file(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: omniagent::repository::git_review::GitCommitCheckoutFileRequest,
+) -> Result<omniagent::repository::git_review::GitHistoryCommitDiff, String> {
+    store
+        .git_compare_commit_checkout_file(checkout_id, request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn git_checkout_file_history(
     store: State<'_, Store>,
     checkout_id: String,

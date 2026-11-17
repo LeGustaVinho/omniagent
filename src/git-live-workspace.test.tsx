@@ -583,6 +583,59 @@ it("compares the clicked whole commit with captured refs and offers the checkout
   expect(invoke).not.toHaveBeenCalledWith("git_checkout_diff", expect.anything());
 });
 
+it("compares the clicked commit with files on disk or the staged index of the selected checkout", async () => {
+  const base = "a".repeat(40);
+  const head = "b".repeat(40);
+  const revision = { branch: "refs/heads/feature", head, index: "checkout-index" };
+  const workingFile = { path: "changed.txt", status: "M", untracked: false, evidence: "before" };
+  const stagedFile = { ...workingFile, evidence: null };
+  const untracked = { path: "new.txt", status: "A", untracked: true, evidence: "new" };
+  let capture = 0;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    const args = payload as { checkoutId: string; request?: { source?: string; comparison?: { source: string }; file?: typeof workingFile } };
+    if (command === "git_checkout_review") return {
+      checkoutId: args.checkoutId, worktrees, root: args.checkoutId === "linked-task" ? "C:/linked" : checkout.checkoutRoot,
+      managed: false, changes: [], revision, branches,
+    };
+    if (command === "git_checkout_history") return [{ sha: base, subject: "Historical commit", author: "Person", committedAt: "2026-11-17T12:00:00Z" }];
+    if (command === "git_checkout_commit_details") return { message: "Committed metadata", parents: [], parent: null, files: [] };
+    if (command === "git_compare_commit_checkout") return {
+      revision, files: args.request?.source === "working" ? [{ ...workingFile, evidence: ++capture === 1 ? "before" : "refreshed" }, untracked] : [stagedFile],
+    };
+    if (command === "git_compare_commit_checkout_file") {
+      const file = args.request?.file;
+      if (file?.evidence === "before") throw new Error("The working file changed. Refresh the comparison.");
+      return {
+        path: file?.path, original: { status: "text", content: "Historical file bytes" },
+        modified: { status: "text", content: args.request?.comparison?.source === "staged" ? "Staged file bytes" : "Disk file bytes" },
+      };
+    }
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  openGit({ target: "history" });
+  const linked = await screen.findByRole("option", { name: /C:\/linked/ });
+  await user.selectOptions(screen.getByLabelText("Git worktree"), linked);
+  fireEvent.contextMenu(await screen.findByRole("button", { name: /^Historical commit/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Compare with local checkout…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Compare commit with local checkout" }));
+  expect(dialog.getByText("C:/linked")).toBeTruthy();
+  expect(await dialog.findByRole("button", { name: /new\.txt.*Untracked/ })).toBeTruthy();
+  expect(await dialog.findByText(/The working file changed/)).toBeTruthy();
+  await user.click(dialog.getByRole("button", { name: "Refresh checkout comparison" }));
+  expect(await dialog.findByText("Disk file bytes")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_compare_commit_checkout_file", {
+    checkoutId: "linked-task", request: { comparison: { base, source: "working" }, revision, file: { ...workingFile, evidence: "refreshed" } },
+  });
+  await user.selectOptions(dialog.getByLabelText("Checkout version"), "staged");
+  expect(await dialog.findByText("Staged file bytes")).toBeTruthy();
+  expect(dialog.queryByRole("button", { name: /new\.txt.*Untracked/ })).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("git_compare_commit_checkout_file", {
+    checkoutId: "linked-task", request: { comparison: { base, source: "staged" }, revision, file: stagedFile },
+  });
+  expect(invoke).not.toHaveBeenCalledWith("git_compare_commits", expect.anything());
+});
+
 it("creates a branch from the exact history ref even if it advances while the name is entered", async () => {
   const ref = "refs/heads/feature";
   const historical = "a".repeat(40);

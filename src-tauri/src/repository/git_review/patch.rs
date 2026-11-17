@@ -63,6 +63,18 @@ pub(super) fn between(view: &IsolatedGit, base: &str, head: &str, path: &str) ->
     GitReviewPatch::result(read(view, &[base, head, "--", path], false))
 }
 
+pub(super) fn checkout_file(
+    view: &IsolatedGit,
+    base: &str,
+    source: GitDiffSource,
+    path: &str,
+) -> GitReviewPatch {
+    let mut args = vec!["--ita-invisible-in-index"];
+    args.extend((source == GitDiffSource::Staged).then_some("--cached"));
+    args.extend([base, "--", path]);
+    GitReviewPatch::result(read(view, &args, false))
+}
+
 pub(super) fn history_file(
     view: &IsolatedGit,
     base: &str,

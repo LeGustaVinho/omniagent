@@ -27,6 +27,7 @@ mod blame;
 mod branch;
 mod comments;
 mod commit;
+mod commit_checkout;
 mod commit_history;
 mod comparison;
 mod conflicts;
@@ -40,6 +41,9 @@ mod permalink;
 mod reviewed_files;
 mod saved_patch;
 pub use blame::GitLineBlame;
+pub use commit_checkout::{
+    GitCommitCheckoutComparison, GitCommitCheckoutFileRequest, GitCommitCheckoutRequest,
+};
 pub use commit_history::{
     GitCommitRange, GitHistoryCommitDetails, GitHistoryCommitDiff, GitHistoryCommitFile,
     GitHistoryCommitRequest,

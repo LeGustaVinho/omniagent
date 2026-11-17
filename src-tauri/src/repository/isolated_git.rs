@@ -16,6 +16,7 @@ pub(super) struct IsolatedGit {
     git: PathBuf,
     checkout: PathBuf,
     common: PathBuf,
+    objects: PathBuf,
     passive_options: Vec<String>,
 }
 
@@ -62,6 +63,7 @@ impl IsolatedGit {
             scratch,
             git,
             checkout: PathBuf::from(&paths.checkout_root),
+            objects: common.join("objects"),
             common,
             passive_options,
         })
@@ -109,6 +111,18 @@ impl IsolatedGit {
         self.scratch.path().join(".git/index")
     }
 
+    pub(super) fn keep_object_writes_in_scratch(&mut self) -> Result<()> {
+        let objects = self.scratch.path().join(".git/objects");
+        let alternate = self
+            .common
+            .join("objects")
+            .to_string_lossy()
+            .replace('\\', "/");
+        fs::write(objects.join("info/alternates"), format!("{alternate}\n"))?;
+        self.objects = objects;
+        Ok(())
+    }
+
     pub(super) fn passive_options(&self) -> &[String] {
         &self.passive_options
     }
@@ -119,7 +133,7 @@ impl IsolatedGit {
         command
             .env("GIT_DIR", self.scratch.path().join(".git"))
             .env("GIT_WORK_TREE", &self.checkout)
-            .env("GIT_OBJECT_DIRECTORY", self.common.join("objects"))
+            .env("GIT_OBJECT_DIRECTORY", &self.objects)
             .args([
                 "-c",
                 "core.fsmonitor=false",

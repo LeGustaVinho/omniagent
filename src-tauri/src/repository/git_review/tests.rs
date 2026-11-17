@@ -986,6 +986,167 @@ async fn creates_a_local_branch_from_the_frozen_commit_without_touching_the_chec
 }
 
 #[tokio::test]
+async fn compares_a_historical_commit_with_frozen_checkout_files_and_index_evidence() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("commit and checkout");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    fs::write(root.join(".gitignore"), "ignored.txt\nignored-shadow.txt\n")?;
+    fs::write(root.join("both.txt"), "historical file\n")?;
+    fs::write(root.join("reverted.txt"), "historical original\n")?;
+    fs::write(root.join("recreated.txt"), "old path\n")?;
+    fs::write(root.join("deleted.txt"), "removed afterwards\n")?;
+    fs::write(root.join("ignored-shadow.txt"), "previously tracked\n")?;
+    git(&root, &["add", "-f", "--", "ignored-shadow.txt"])?;
+    let base = commit_fixture(&root, "Historical commit")?;
+    fs::write(root.join("both.txt"), "later commit\n")?;
+    let head = commit_fixture(&root, "Different checkout HEAD")?;
+    fs::write(root.join("both.txt"), "staged file\n")?;
+    fs::write(root.join("reverted.txt"), "staged only edit\n")?;
+    git(&root, &["add", "--", "both.txt", "reverted.txt"])?;
+    git(
+        &root,
+        &[
+            "rm",
+            "--cached",
+            "--",
+            "recreated.txt",
+            "ignored-shadow.txt",
+        ],
+    )?;
+    fs::write(root.join("both.txt"), "working file\n")?;
+    fs::write(root.join("reverted.txt"), "historical original\n")?;
+    fs::write(root.join("recreated.txt"), "untracked at an old path\n")?;
+    fs::remove_file(root.join("deleted.txt"))?;
+    fs::write(root.join("new [1].txt"), "untracked file\n")?;
+    fs::write(root.join("ignored.txt"), "gitignored file\n")?;
+    fs::write(
+        root.join("ignored-shadow.txt"),
+        "a different ignored file\n",
+    )?;
+    let index = fs::read(root.join(".git/index"))?;
+    let objects = git(&root, &["count-objects", "-v"])?;
+    let store = Store::open(temp.path().join("comparison.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let working = GitCommitCheckoutRequest {
+        base: base.clone(),
+        source: GitDiffSource::Working,
+    };
+    let staged = GitCommitCheckoutRequest {
+        base,
+        source: GitDiffSource::Staged,
+    };
+    let worktree = store
+        .git_compare_commit_checkout(checkout.clone(), working.clone())
+        .await?;
+    let index_view = store
+        .git_compare_commit_checkout(checkout.clone(), staged.clone())
+        .await?;
+    assert_eq!(worktree.revision.head.as_deref(), Some(head.as_str()));
+    assert_eq!(
+        worktree
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.status, f.untracked))
+            .collect::<Vec<_>>(),
+        [
+            ("both.txt", 'M', false),
+            ("deleted.txt", 'D', false),
+            ("ignored-shadow.txt", 'D', false),
+            ("new [1].txt", 'A', true),
+            ("recreated.txt", 'M', true),
+        ]
+    );
+    assert_eq!(
+        index_view
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.status))
+            .collect::<Vec<_>>(),
+        [
+            ("both.txt", 'M'),
+            ("ignored-shadow.txt", 'D'),
+            ("recreated.txt", 'D'),
+            ("reverted.txt", 'M')
+        ]
+    );
+    let request = |comparison: GitCommitCheckoutRequest,
+                   snapshot: &GitCommitCheckoutComparison,
+                   path: &str| GitCommitCheckoutFileRequest {
+        comparison,
+        revision: snapshot.revision.clone(),
+        file: snapshot
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap()
+            .clone(),
+    };
+    let review_file = |request| store.git_compare_commit_checkout_file(checkout.clone(), request);
+    let unstaged = review_file(request(working.clone(), &worktree, "both.txt")).await?;
+    assert_eq!(
+        unstaged.original,
+        GitFileSide::Text {
+            content: "historical file\n".into()
+        }
+    );
+    assert_eq!(
+        unstaged.modified,
+        GitFileSide::Text {
+            content: "working file\n".into()
+        }
+    );
+    assert!(
+        matches!(unstaged.patch, super::patch::GitReviewPatch::Text { content } if content.contains("-historical file\n+working file\n"))
+    );
+    let index_file = review_file(request(staged.clone(), &index_view, "both.txt")).await?;
+    assert_eq!(
+        index_file.modified,
+        GitFileSide::Text {
+            content: "staged file\n".into()
+        }
+    );
+    let recreated = review_file(request(working.clone(), &worktree, "recreated.txt")).await?;
+    assert!(
+        matches!(recreated.patch, super::patch::GitReviewPatch::Text { content } if content.contains("-old path\n+untracked at an old path\n"))
+    );
+    let untracked = review_file(request(working.clone(), &worktree, "new [1].txt")).await?;
+    assert_eq!(untracked.original, GitFileSide::Missing);
+    assert!(
+        matches!(untracked.patch, super::patch::GitReviewPatch::Text { content } if content.contains("new file mode") && content.contains("+untracked file\n"))
+    );
+    let deleted = review_file(request(working.clone(), &worktree, "deleted.txt")).await?;
+    assert_eq!(deleted.modified, GitFileSide::Missing);
+    assert!(
+        matches!(deleted.patch, super::patch::GitReviewPatch::Text { content } if content.contains("deleted file mode"))
+    );
+    let ignored_shadow =
+        review_file(request(working.clone(), &worktree, "ignored-shadow.txt")).await?;
+    assert_eq!(ignored_shadow.modified, GitFileSide::Missing);
+    assert!(
+        matches!(ignored_shadow.patch, super::patch::GitReviewPatch::Text { content } if content.contains("-previously tracked") && !content.contains("a different ignored file"))
+    );
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(git(&root, &["count-objects", "-v"])?, objects);
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, head);
+    assert_eq!(fs::read(root.join("both.txt"))?, b"working file\n");
+
+    fs::write(root.join("both.txt"), "changed file\n")?;
+    let error = review_file(request(working, &worktree, "both.txt"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("working file changed"));
+    git(&root, &["add", "--", "both.txt"])?;
+    let error = review_file(request(staged, &index_view, "both.txt"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("index or HEAD changed"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn compares_frozen_commit_trees_even_after_their_refs_move() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("compared-trees");
