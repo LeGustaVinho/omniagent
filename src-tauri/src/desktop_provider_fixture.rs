@@ -12,12 +12,28 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
 pub const APP_IDENTIFIER: &str = "io.github.legustavinho.omniagent.desktop-tests";
+const PROFILE_ENV: &str = "OMNIAGENT_DESKTOP_TEST_RUN_ID";
 const MODEL: &str = "desktop-fixture";
 const SESSION: &str = "desktop-fixture-session";
 const TURN: &str = "desktop-fixture-turn";
 const RELEASE: &str = "release-desktop-jobs";
 const COMPOSER_PROMPT: &str = "Apply the selected local skill and plugin export.";
 const COMPOSER_PLUGIN: &str = "desktop-formatting@fixture-marketplace";
+
+pub fn isolated_identifier() -> Result<Option<String>> {
+    let Some(run_id) = env::var_os(PROFILE_ENV) else {
+        return Ok(None);
+    };
+    let run_id = run_id.to_str().context("Invalid desktop test run ID")?;
+    ensure!(
+        run_id.len() == 32
+            && run_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "The desktop test run ID must contain 32 lowercase hexadecimal digits"
+    );
+    Ok(Some(format!("{APP_IDENTIFIER}.run-{run_id}")))
+}
 
 pub fn run_from_args() -> Option<i32> {
     let args = env::args_os().skip(1).collect::<Vec<OsString>>();

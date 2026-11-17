@@ -1,16 +1,57 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { remote } from "webdriverio";
 
-const identifier = process.env.OMNIAGENT_DESKTOP_IDENTIFIER ?? "io.github.legustavinho.omniagent.desktop-tests";
+const fixtureIdentifier = "io.github.legustavinho.omniagent.desktop-tests";
 const port = Number(process.env.OMNIAGENT_WEBDRIVER_PORT ?? 4444);
+
+function fixtureRunId(application) {
+  const match = /^omniagent-webdriver-([0-9a-f]{32})-/.exec(basename(dirname(application)));
+  assert.ok(match, "The copied desktop fixture needs an isolated run ID");
+  return match[1];
+}
+
+function testIdentifier(application) {
+  return `${fixtureIdentifier}.run-${fixtureRunId(application)}`;
+}
+
+function fixtureEnvironment(application) {
+  const { WEBVIEW2_USER_DATA_FOLDER: _, ...env } = process.env;
+  return { ...env, OMNIAGENT_DESKTOP_TEST_RUN_ID: fixtureRunId(application) };
+}
+
+let localAppData;
+function fixtureProfile(application) {
+  if (!localAppData) {
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)"],
+    { windowsHide: true, encoding: "utf8" });
+    if (result.error) throw result.error;
+    assert.equal(result.status, 0, result.stderr);
+    localAppData = result.stdout.trim();
+    assert.ok(localAppData, "Windows did not report the local application data directory");
+  }
+  return join(localAppData, testIdentifier(application));
+}
+
+async function removeFixtureProfile(application) {
+  const profile = fixtureProfile(application);
+  const actual = await realpath(profile).catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!actual) return;
+  assert.equal(dirname(actual), await realpath(localAppData));
+  assert.equal(basename(actual), testIdentifier(application));
+  await rm(actual, { recursive: true, force: true, maxRetries: 4, retryDelay: 500 });
+}
 
 async function waitForDriver(driver) {
   for (let attempt = 0; attempt < 60; attempt++) {
@@ -53,6 +94,7 @@ async function startSession(application) {
   await browser.setTimeout({ script: 8_000 });
   try {
     await waitForRuntime(browser);
+    assert.equal(await invoke(browser, "plugin:app|identifier"), testIdentifier(application));
   } catch (error) {
     const state = await browser.execute(async () => {
       let runtime;
@@ -61,7 +103,7 @@ async function startSession(application) {
       } catch (error) {
         runtime = String(error);
       }
-      return { origin: location.origin, readyState: document.readyState, runtime };
+      return { url: location.href, origin: location.origin, title: document.title, readyState: document.readyState, runtime };
     }).catch(() => undefined);
     await browser.deleteSession().catch(() => {});
     throw new Error(`Desktop runtime did not become ready (${JSON.stringify(state)})`, { cause: error });
@@ -80,8 +122,28 @@ async function waitForRuntime(browser) {
   }), { timeout: 15_000 });
 }
 
+async function waitForFixtureResult(browser, projectId, conversationId, label, timeout) {
+  const scope = { conversationId };
+  let run;
+  let pollFailure;
+  try {
+    await browser.waitUntil(async () => {
+      run = await invoke(browser, "latest_conversation_run", scope);
+      return ["succeeded", "failed", "cancelled", "interrupted"].includes(run?.status);
+    }, { timeout });
+  } catch (error) {
+    pollFailure = error;
+  }
+  if (run?.status === "succeeded" && !pollFailure) return run;
+  const job = await invoke(browser, "latest_conversation_job", scope).catch((error) => ({ error: String(error) }));
+  const failure = run && await invoke(browser, "job_failure", { projectId, runId: run.id }).catch(() => undefined);
+  const state = { runId: run?.id, status: run?.status, jobId: job?.job?.id, queueState: job?.job?.queueState,
+    blockers: job?.blockers, inspectionError: job?.error, failure };
+  throw new Error(`${label} did not succeed (${JSON.stringify(state)})`, { cause: pollFailure });
+}
+
 async function showTestApplication(browser, application) {
-  const reopen = spawn(application, [], { stdio: "ignore", windowsHide: true });
+  const reopen = spawn(application, [], { stdio: "ignore", windowsHide: true, env: fixtureEnvironment(application) });
   const stopped = new Promise((resolve, reject) => {
     reopen.once("error", reject);
     reopen.once("exit", resolve);
@@ -128,6 +190,10 @@ async function click(browser, selector, wait) {
   await control.waitForDisplayed(wait);
   await control.waitForEnabled(wait);
   await control.click();
+}
+
+async function clickConversation(browser, title) {
+  await click(browser, `section[aria-label="Conversation library"] button[aria-label=${JSON.stringify(title)}]`);
 }
 
 async function capture(browser, name) {
@@ -270,7 +336,7 @@ async function checkSimulation(browser, checkout) {
   await click(browser, 'button[aria-label="Close queue"]');
   await click(browser, "button=Run verification");
   await click(browser, "button=Review saved diff");
-  await browser.$('[aria-label^="Diff editor for"] .monaco-diff-editor').waitForDisplayed();
+  await browser.$('section[aria-label="Changes"] .monaco-diff-editor').waitForDisplayed({ timeout: 20_000 });
   await click(browser, 'button[aria-label="Expand side panel"]');
   await browser.$('select[aria-label="Diff layout"]').selectByAttribute("value", "split");
   await capture(browser, "02-saved-changes");
@@ -282,7 +348,7 @@ async function checkSimulation(browser, checkout) {
   await click(browser, "button=Accept diff");
   await click(browser, 'button[aria-label="Close changes"]');
   await browser.$(shown).$('[aria-label="Task details"] [role="alert"]').waitForDisplayed();
-  assert.equal(await browser.$(shown).$('[aria-label="Task details"] [role="alert"]').getText(), "Waiting for commit");
+  assert.equal(await browser.$(shown).$('[aria-label="Task details"] [role="alert"]').getText(), "Waiting for Sub-Tasks to finish.");
 
   await click(browser, 'button[aria-label="IDE"]');
   const ide = browser.$(shown);
@@ -330,6 +396,13 @@ async function checkSimulation(browser, checkout) {
   await nodePicker.$("h4=Result").waitForDisplayed();
   assert.equal(await nodePicker.$("button=Add").isExisting(), false);
   await click(nodePicker, 'button[aria-label="Close node catalog"]');
+  await click(browser, 'button[aria-label="Settings"]');
+  await click(browser, "button=Git and delivery");
+  const gitMode = browser.$('select[id="after-acceptance"]');
+  await gitMode.waitForEnabled();
+  assert.equal(await gitMode.getValue(), "automatic_commit_user_merge");
+  await gitMode.selectByAttribute("value", "user_commits_and_merges");
+  await click(browser, 'button[aria-label="Close settings"]');
   const pipeline = browser.$(shown);
   const stageWait = { timeout: 15_000 };
   await click(pipeline, "button=Run pipeline");
@@ -503,7 +576,7 @@ async function verifyDetachedJob(browser, application, scratch) {
 
     async function openConversation() {
       await chooseConversations(browser);
-      await browser.$(`button=${chat.title}`).click();
+      await clickConversation(browser, chat.title);
       return browser.$(`section[aria-label="${chat.title}"]`);
     }
     const before = browser.$(`section[aria-label="${chat.title}"]`);
@@ -521,7 +594,7 @@ async function verifyDetachedJob(browser, application, scratch) {
     // After unloading the application's document, use the test fixture's file gate and
     // committed SQLite rows as witnesses. No app IPC or UI subscriber drives this job.
     await writeFile(release, "");
-    const database = new DatabaseSync(join(process.env.LOCALAPPDATA, identifier, "omniagent.sqlite3"), { readOnly: true });
+    const database = new DatabaseSync(join(fixtureProfile(application), "omniagent.sqlite3"), { readOnly: true });
     let runtime;
     try {
       const attempt = database.prepare(`
@@ -591,7 +664,7 @@ async function verifyPendingInstructions(browser, application, scratch) {
     await invoke(browser, "start_conversation_turn", { ...scope, selection: fixture.option.selection, mode: "read_only", text });
     const open = async () => {
       await chooseConversations(browser);
-      await click(browser, `button=${title}`);
+      await clickConversation(browser, title);
       return browser.$(`section[aria-label="${title}"]`);
     };
     const panel = await open();
@@ -692,7 +765,7 @@ async function verifyQuestionContinuation(browser, application, scratch) {
     const latest = ({ scope }) => invoke(browser, "latest_conversation_run", scope);
     const open = async ({ title }) => {
       await chooseConversations(browser);
-      await click(browser, `button=${title}`);
+      await clickConversation(browser, title);
       return browser.$(`section[aria-label="${title}"]`);
     };
     const reopen = async () => {
@@ -716,10 +789,8 @@ async function verifyQuestionContinuation(browser, application, scratch) {
       return { ...chat.scope, runId: run.id };
     };
     const reply = async (card, value) => {
-      const select = card.$("select");
-      await select.waitForEnabled();
-      await select.selectByAttribute("value", value);
-      await card.$("button=Reply").click();
+      await click(card, `.//label[input[@type="radio"] and contains(normalize-space(.), ${JSON.stringify(value)})]`);
+      await click(card, "button=Reply");
     };
 
     const live = await submit("Live question across window close", "Ask desktop question live");
@@ -727,7 +798,7 @@ async function verifyQuestionContinuation(browser, application, scratch) {
     await reopen();
     assert.equal((await latest(live)).id, liveOrigin.runId);
     const livePanel = await open(live);
-    await reply(livePanel.$('[aria-label="Pending requests"] form'), "Markdown");
+    await reply(livePanel.$('[aria-label="Pending requests"] [data-question-request="71"]'), "Markdown");
     await livePanel.$("p=The live turn received Markdown.").waitForDisplayed({ timeout: 30_000 });
     await assert.rejects(invoke(browser, "answer_conversation_question", {
       ...liveOrigin, requestId: 71, answer: { action: "accept", values: { format: "Markdown" } },
@@ -748,7 +819,7 @@ async function verifyQuestionContinuation(browser, application, scratch) {
 
       // Advance the first request's stored wall-clock timestamps. A second provider
       // request makes the running supervisor re-read both deadlines.
-      const db = new DatabaseSync(join(process.env.LOCALAPPDATA, identifier, "omniagent.sqlite3"));
+      const db = new DatabaseSync(join(fixtureProfile(application), "omniagent.sqlite3"));
       try {
         db.exec("PRAGMA busy_timeout = 5000");
         const deadline = db.prepare(`SELECT w.request_event_seq AS seq, deadline_ms - opened_ms AS duration
@@ -768,11 +839,11 @@ async function verifyQuestionContinuation(browser, application, scratch) {
         [[71, "saved", "timeout"], [72, "saved", "turn_stopped"]]);
       assert.equal((await latest(source)).id, origin.runId);
       const panel = await open(source);
-      const format = panel.$('.//form[.//option[@value="Markdown"]]');
+      const format = panel.$('[data-question-request="71"]');
       await reply(format, "Markdown");
       await panel.$("p=Answer recorded").waitForDisplayed();
       assert.equal((await latest(source)).id, origin.runId);
-      const summary = panel.$('.//form[.//option[@value="Yes"]]');
+      const summary = panel.$('[data-question-request="72"]');
       await reply(summary, "Yes");
       await panel.$("p=The linked planning turn received both answers.").waitForDisplayed({ timeout: 30_000 });
       const followup = (await invoke(browser, "latest_conversation_job", source.scope)).job.latestAttempt;
@@ -878,21 +949,24 @@ async function verifyJobPolicy(browser, application, scratch) {
 async function copyTestApplication(t) {
   assert.equal(process.platform, "win32");
   const root = await realpath(tmpdir());
-  const scratch = await mkdtemp(join(root, "omniagent-webdriver-"));
+  const runId = randomUUID().replaceAll("-", "");
+  const scratch = await mkdtemp(join(root, `omniagent-webdriver-${runId}-`));
+  const application = join(scratch, "omniagent.exe");
+  await assert.rejects(access(fixtureProfile(application)), { code: "ENOENT" });
   t.after(async () => {
+    await removeFixtureProfile(application);
     assert.equal(dirname(await realpath(scratch)), root);
     await rm(scratch, { recursive: true, force: true, maxRetries: 4, retryDelay: 500 });
   });
-  const application = join(scratch, "omniagent.exe");
   await copyFile(resolve(process.env.OMNIAGENT_TEST_APP ?? "src-tauri/target/debug/omniagent.exe"), application);
   return { application, scratch };
 }
 
-function startTestDriver() {
+function startTestDriver(application) {
   const args = ["--port", String(port), "--native-port", String(port + 1)];
   if (process.env.OMNIAGENT_EDGE_DRIVER) args.push("--native-driver", process.env.OMNIAGENT_EDGE_DRIVER);
   return spawn(process.env.OMNIAGENT_TAURI_DRIVER ?? "tauri-driver", args, {
-    windowsHide: true, stdio: "ignore",
+    windowsHide: true, stdio: "ignore", env: fixtureEnvironment(application),
   });
 }
 
@@ -901,14 +975,7 @@ async function connectTestDriver(driver, application) {
     waitForDriver(driver),
     new Promise((_, reject) => driver.once("error", reject)),
   ]);
-  const browser = await startSession(application);
-  try {
-    assert.equal(await invoke(browser, "plugin:app|identifier"), identifier);
-  } catch (error) {
-    await browser.deleteSession().catch(() => undefined);
-    throw error;
-  }
-  return browser;
+  return startSession(application);
 }
 
 test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => {
@@ -929,7 +996,7 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
   }));
   await writeFile(join(repo, ".mcp.json"), JSON.stringify({ mcpServers: { fixture: { command: "node", args: ["./scripts/mcp.js"] } } }));
 
-  const driver = startTestDriver();
+  const driver = startTestDriver(application);
   let browser;
   try {
     browser = await connectTestDriver(driver, application);
@@ -1092,7 +1159,7 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     await conversationHistoryPolicy.waitForEnabled();
     assert.ok((await conversationHistoryPolicy.$('option[value=""]').getText()).includes("Use recorded context"));
     await conversationHistoryPolicy.selectByAttribute("value", "cancel");
-    await click(browser, "button=Clear conversation");
+    await click(browser, "button=Confirm clear");
     await historyDialog.waitForExist({ reverse: true });
     const cleared = await invoke(browser, "conversation_history", { conversationId: conversation.id });
     assert.notEqual(cleared.contextId, conversation.contextId);
@@ -1165,12 +1232,12 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
       throw new Error(`Workspace did not reopen: ${screen}`, { cause: error });
     }
     await chooseConversations(browser);
-    await browser.$("button=Other conversation").click();
+    await clickConversation(browser, otherConversation.title);
     const otherDraft = browser.$(`textarea[id="draft-${otherConversation.id}"]`);
     await otherDraft.waitForEnabled();
     assert.equal(await otherDraft.getValue(), "");
     await chooseConversations(browser);
-    await browser.$(`button=${conversation.title}`).click();
+    await clickConversation(browser, conversation.title);
     const recoveredDraft = browser.$(`textarea[id="draft-${conversation.id}"]`);
     await recoveredDraft.waitForEnabled();
     assert.equal(await recoveredDraft.getValue(), unsent);
@@ -1278,7 +1345,7 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
       await browser.execute((historySelector) => { document.querySelector(historySelector).scrollTop = 60; }, historySelector);
 
       await chooseConversations(browser);
-      await browser.$("button=Other conversation").click();
+      await clickConversation(browser, otherConversation.title);
       const otherText = "Rascunho na segunda conversa";
       await otherDraft.setValue(otherText);
       await browser.$('section[aria-label="Other conversation"]').$("p=Draft saved").waitForDisplayed();
@@ -1287,7 +1354,7 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
       assert.equal(await invoke(browser, "latest_conversation_run", { conversationId: otherConversation.id }), null);
 
       await chooseConversations(browser);
-      await browser.$(`button=${conversation.title}`).click();
+      await clickConversation(browser, conversation.title);
       await panel.$('div[aria-label="Streaming response"]').waitForDisplayed();
       await panel.$("button=Reply").waitForDisplayed({ timeout: 15_000 });
       assert.equal((await readTabs(browser)).active, conversation.title);
@@ -1297,7 +1364,7 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
       await browser.$(".dv-active-group .dv-active-tab .dv-default-tab-action").click();
       await panel.waitForExist({ reverse: true });
       await chooseConversations(browser);
-      await browser.$(`button=${conversation.title}`).click();
+      await clickConversation(browser, conversation.title);
       await panel.$('div[aria-label="Streaming response"]').waitForDisplayed();
       assert.equal((await invoke(browser, "latest_conversation_run", { conversationId: conversation.id })).id, activeRun);
       assert.ok((await invoke(browser, "conversation_messages", { conversationId: conversation.id }))
@@ -1329,6 +1396,8 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
       }, { timeout: 15_000 });
     }
     await checkSimulation(browser, main);
+    await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 1120, height: 760 } } });
+    await browser.waitUntil(() => browser.execute(() => Math.abs(window.innerWidth - 1120) <= 4));
     await t.test("checks the current worktree and required evidence on a linked retry", async () => {
       await verifyJobPolicy(browser, application, scratch);
     });
@@ -1369,7 +1438,7 @@ test("recovers unsent chat and dirty source after a Windows desktop crash and re
   git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
     "-c", "commit.gpgsign=false", "commit", "-q", "-m", "Source fixture");
 
-  const driver = startTestDriver();
+  const driver = startTestDriver(application);
   let browser;
   let previousCheckout;
   let profile;
@@ -1390,16 +1459,7 @@ test("recovers unsent chat and dirty source after a Windows desktop crash and re
     const prompt = "Complete desktop slot probe";
     await invoke(browser, "save_conversation_draft", { ...scope, text: prompt });
     await invoke(browser, "start_conversation_turn", { ...scope, text: prompt, mode: "read_only", selection: fixture.option.selection });
-    let run;
-    try {
-      await browser.waitUntil(async () => {
-        run = await invoke(browser, "latest_conversation_run", scope);
-        return run?.status === "succeeded";
-      }, { timeout: 10_000 });
-    } catch (error) {
-      const job = await invoke(browser, "latest_conversation_job", scope);
-      throw new Error(`The conversation fixture did not settle (${run?.status ?? "no attempt"}, ${JSON.stringify(job?.blockers)})`, { cause: error });
-    }
+    const run = await waitForFixtureResult(browser, checkout.projectId, conversation.id, "The recovery conversation fixture", 10_000);
     const recorded = (await invoke(browser, "conversation_history", scope)).messages.find(({ role }) => role === "user");
     assert.equal(recorded?.text, prompt);
     const attempt = { ...scope, runId: run.id };
@@ -1409,7 +1469,7 @@ test("recovers unsent chat and dirty source after a Windows desktop crash and re
 
     const openChat = async () => {
       await chooseConversations(browser);
-      await click(browser, `button[aria-label="${title}"]`);
+      await clickConversation(browser, title);
       const panel = browser.$(`section[aria-label="${title}"]`);
       const draft = panel.$(`textarea[id="draft-${conversation.id}"]`);
       await draft.waitForEnabled();
@@ -1507,7 +1567,7 @@ test("dispatches a local skill, a plugin export and exact same-project conversat
     skill.revision = createHash("sha256").update(source).digest("hex");
   }
 
-  const driver = startTestDriver();
+  const driver = startTestDriver(application);
   let browser;
   let previousCheckout;
   let configured;
@@ -1526,15 +1586,8 @@ test("dispatches a local skill, a plugin export and exact same-project conversat
     const source = await invoke(browser, "create_conversation", { checkoutId: checkout.checkoutId, title: "Saved customization source" });
     const chat = await invoke(browser, "create_conversation", { checkoutId: checkout.checkoutId, title: "Customization target" });
     const outside = await invoke(browser, "create_conversation", { checkoutId: foreign.checkoutId, title: "Foreign customization source" });
-    const settled = async (conversationId) => {
-      let run;
-      await browser.waitUntil(async () => {
-        run = await invoke(browser, "latest_conversation_run", { conversationId });
-        assert.ok(!run || !["failed", "cancelled", "interrupted"].includes(run.status), `Fixture run ended ${run?.status}`);
-        return run?.status === "succeeded";
-      }, { timeout: 18_000, timeoutMsg: "The customization fixture did not settle" });
-      return run;
-    };
+    const settled = (conversationId) => waitForFixtureResult(browser, checkout.projectId, conversationId,
+      "The customization fixture", 18_000);
     const prompt = "Complete desktop slot probe";
     await invoke(browser, "save_conversation_draft", { conversationId: source.id, text: prompt });
     await invoke(browser, "start_conversation_turn", { conversationId: source.id, selection: model.option.selection, mode: "read_only", text: prompt });
@@ -1548,7 +1601,7 @@ test("dispatches a local skill, a plugin export and exact same-project conversat
     await assert.rejects(invoke(browser, "preview_conversation_reference", { ...foreignScope, selection }), /same project/i);
 
     await chooseConversations(browser);
-    await click(browser, `button[aria-label="${chat.title}"]`);
+    await clickConversation(browser, chat.title);
     const panel = browser.$(`section[aria-label="${chat.title}"]`);
     await click(panel, ".model-picker-trigger");
     await click(browser, `.model-picker-menu [role="menuitemradio"][aria-label="${model.option.name}"]`);

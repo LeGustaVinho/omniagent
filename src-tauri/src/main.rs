@@ -201,11 +201,20 @@ fn main() {
     }
     let context = tauri::generate_context!();
     #[cfg(debug_assertions)]
-    if context.config().identifier == desktop_provider_fixture::APP_IDENTIFIER
-        && let Some(code) = desktop_provider_fixture::run_from_args()
-    {
-        std::process::exit(code);
-    }
+    let context = {
+        let mut context = context;
+        if context.config().identifier == desktop_provider_fixture::APP_IDENTIFIER {
+            if let Some(code) = desktop_provider_fixture::run_from_args() {
+                std::process::exit(code);
+            }
+            if let Some(identifier) = desktop_provider_fixture::isolated_identifier()
+                .expect("invalid desktop fixture profile")
+            {
+                context.config_mut().identifier = identifier;
+            }
+        }
+        context
+    };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
