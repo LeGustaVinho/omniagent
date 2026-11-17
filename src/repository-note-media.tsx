@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { normalizeRepositoryPath } from "@/ide-knowledge-data";
+import { useContextActionFeedback } from "@/components/ui/context-actions";
+import { isContextKey, useNoteContextMenu } from "@/knowledge-context";
 import type { NoteAttachmentContent } from "@/repository-note-buffers";
 
 const fileExtension = /\.(?:avif|bmp|gif|jpe?g|png|svg|webp|aac|flac|m4a|mp3|ogg|opus|wav|m4v|mov|mp4|ogv|webm|pdf)$/i;
@@ -22,11 +24,14 @@ export function noteAttachmentCandidates(target: string, from: string, wiki: boo
   }))];
 }
 
-function PdfAttachment({ base64, title }: { base64: string; title: string }) {
+function PdfAttachment({ base64, title, relativePath }: { base64: string; title: string; relativePath?: string }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [page, setPage] = useState(1);
   const [pageCount, setPageCount] = useState(1);
   const [status, setStatus] = useState("Rendering PDF…");
+  const [text, setText] = useState<{ base64: string; page: number; value: string }>();
+  const { open: openMenu, overlay } = useNoteContextMenu();
+  const { feedback, copy } = useContextActionFeedback();
   useEffect(() => {
     let alive = true;
     let loading: import("pdfjs-dist").PDFDocumentLoadingTask | undefined;
@@ -54,7 +59,13 @@ function PdfAttachment({ base64, title }: { base64: string; title: string }) {
         target.height = Math.max(1, Math.ceil(view.height));
         rendering = renderedPage.render({ canvas: target, viewport: view, background: "#ffffff" });
         await rendering.promise;
-        if (alive) setStatus("");
+        if (!alive) return;
+        setStatus("");
+        void renderedPage.getTextContent().then(({ items }) => {
+          if (!alive) return;
+          const value = items.map((item) => "str" in item ? item.str + (item.hasEOL ? "\n" : "") : "").join("");
+          setText({ page, base64, value });
+        }).catch(() => { if (alive) setText(undefined); });
       } catch {
         if (alive) setStatus("This PDF could not be rendered.");
       }
@@ -66,8 +77,27 @@ function PdfAttachment({ base64, title }: { base64: string; title: string }) {
     };
   }, [base64, page]);
 
+  const pageText = text?.page === page && text.base64 === base64 ? text.value.trim() : "";
+  const quote = (point: { x: number; y: number }) => {
+    if (!pageText || status) return false;
+    return openMenu(title + " · Page " + page, [[{
+      label: "Copy page as quote",
+      run: () => copy(pageText.split(/\r?\n/).map((line) => "> " + line.trimEnd()).join("\n")
+        + "\n\n— " + (relativePath ?? title) + " · Page " + page),
+    }]], point, () => canvas.current?.focus());
+  };
+
   return <span className="note-pdf-preview">
-    <canvas ref={canvas} className="note-pdf" aria-label={`${title} page ${page}`} hidden={Boolean(status)} />
+    <canvas ref={canvas} className="note-pdf" aria-label={title + " page " + page} hidden={Boolean(status)}
+      tabIndex={pageText ? 0 : undefined} onContextMenu={(event) => {
+        if (quote({ x: event.clientX, y: event.clientY })) { event.preventDefault(); event.stopPropagation(); }
+      }} onKeyDown={(event) => {
+        if (!isContextKey(event.nativeEvent)) return;
+        const rect = event.currentTarget.getBoundingClientRect();
+        if (quote({ x: rect.left, y: rect.bottom })) { event.preventDefault(); event.stopPropagation(); }
+      }} />
+    {overlay}
+    {feedback && <span role={feedback.failed ? "alert" : "status"} className="file-help">{feedback.text}</span>}
     {status && <span role="status" className="file-help">{status}</span>}
     {pageCount > 1 && <span className="file-toolbar">
       <button type="button" className="fw-btn" disabled={page === 1} onClick={() => setPage(page - 1)}>Previous page</button>
@@ -92,15 +122,15 @@ export function RepositoryNoteMedia({ checkoutId, paths, title }: { checkoutId: 
   const file = attachment.data;
   if (!paths.length || attachment.error || file === null) return <span className="file-help">Attachment unavailable · {title}</span>;
   if (!file) return <span className="file-help" role="status">Loading attachment · {title}</span>;
-  return <SafeAttachmentMedia key={file.relativePath} base64={file.contentBase64} mimeType={file.mimeType} title={title} />;
+  return <SafeAttachmentMedia key={file.relativePath} base64={file.contentBase64} mimeType={file.mimeType} title={title} relativePath={file.relativePath} />;
 }
 
-export function SafeAttachmentMedia({ base64, mimeType, title }: { base64: string; mimeType: string; title: string }) {
+export function SafeAttachmentMedia({ base64, mimeType, title, relativePath }: { base64: string; mimeType: string; title: string; relativePath?: string }) {
   const [failed, setFailed] = useState<string>();
   if (failed === base64) return <span className="file-help">Attachment preview unavailable · {title}</span>;
   const dataUrl = `data:${mimeType};base64,${base64}`;
   const onError = () => setFailed(base64);
-  if (mimeType === "application/pdf") return <PdfAttachment base64={base64} title={title} />;
+  if (mimeType === "application/pdf") return <PdfAttachment base64={base64} title={title} relativePath={relativePath} />;
   if (imageTypes.has(mimeType)) return <img className="note-media-image" src={dataUrl} alt={title} loading="lazy" onError={onError} />;
   if (audioTypes.has(mimeType)) return <audio src={dataUrl} aria-label={title} controls preload="metadata" onError={onError} />;
   if (videoTypes.has(mimeType)) return <video src={dataUrl} aria-label={title} controls preload="metadata" onError={onError} />;

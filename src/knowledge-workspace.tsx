@@ -23,7 +23,7 @@ import {
   anchorLine, getProperties, headings, noteAnchorExcerpt, parseReadingAddress, readingLocalAddress, repairWikiAddress, resolveWiki, rewriteNoteReferences,
   updateProperty, wikiLinks, type NoteLocation, type NoteTarget,
 } from "@/knowledge-document";
-import { AttachmentPreview, noteAttachments, type NoteAttachment } from "@/knowledge-media";
+import { AttachmentPreview, downloadNoteDiagramPng, noteAttachments, type NoteAttachment } from "@/knowledge-media";
 import { noteWikilink, type NoteContextHit, type NoteSelection } from "@/knowledge-context";
 import { ExtractNoteDialog } from "@/knowledge-note-extraction";
 import { RepositoryNoteMerge } from "@/repository-note-merge";
@@ -585,7 +585,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       label: "Rename tag in checkout…", run: () => setDialog({ kind: "tagRename", tag, ownerPanel }),
     }] : []),
   ];
-  const noteContextActions = ({ path, line, anchor, link, attachment, tag, excerpt, selection: noteSelection, property, mermaid }: NoteContextHit, reading: boolean, ownerPanel?: FilePanelApi): MenuGroups => {
+  const noteContextActions = ({ path, line, anchor, link, attachment, tag, excerpt, selection: noteSelection, property, mermaid, diagramImage }: NoteContextHit, reading: boolean, ownerPanel?: FilePanelApi): MenuGroups => {
     const groups: MenuGroups[number][] = [];
     if (attachment && !simulated) groups.push(...attachmentActions(attachment.paths, attachment.label));
     if (link) {
@@ -627,7 +627,13 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       { label: "Copy property name", run: () => menu.copy(property.name, "Copied property name") },
       { label: "Copy property value", run: () => menu.copy(property.value, "Copied property value") },
     ]);
-    if (mermaid) groups.push([{ label: "Copy Mermaid source", run: () => menu.copy(mermaid, "Copied Mermaid source") }]);
+    if (mermaid) groups.push([
+      { label: "Copy Mermaid source", run: () => menu.copy(mermaid, "Copied Mermaid source") },
+      ...(diagramImage ? [{ label: "Download diagram as PNG", run: () => {
+        const name = fileName(path).replace(/\.(?:md|markdown)$/i, "") + "-diagram" + (line ? "-" + line : "") + ".png";
+        void downloadNoteDiagramPng(diagramImage, name).catch((failure: unknown) => setProblem(String(failure)));
+      } }] : []),
+    ]);
     if (tag) groups.push(tagActions(tag, ownerPanel));
     const selectionSource = repository.notes[path];
     if (excerpt) groups.push([

@@ -17,6 +17,7 @@ export type NoteContextHit = {
   selection?: NoteSelection;
   property?: { name: string; value: string };
   mermaid?: string;
+  diagramImage?: HTMLImageElement;
 };
 
 export type NoteContextActions = (hit: NoteContextHit) => MenuGroups;

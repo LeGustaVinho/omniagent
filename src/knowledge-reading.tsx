@@ -132,7 +132,7 @@ const components: Components = {
     const code = node?.children.find((entry) => entry.type === "element" && entry.tagName === "code");
     if (code?.type === "element" && Array.isArray(code.properties.className) && code.properties.className.includes("language-mermaid")) {
       const source = code.children.map((entry) => entry.type === "text" ? entry.value : "").join("");
-      return <div {...originAttributes(node)} data-note-mermaid={source}><NoteDiagram source={source} /></div>;
+      return <div {...originAttributes(node)} data-note-mermaid={source} tabIndex={0}><NoteDiagram source={source} /></div>;
     }
     return <pre {...props}>{children}</pre>;
   },
@@ -238,8 +238,11 @@ function readingNoteContext(root: HTMLElement, target: Element, fallbackPath: st
   const attachment = file && paths.length ? { paths, label: fileHost?.textContent?.trim() || fileHost?.getAttribute("aria-label") || file[1] } : undefined;
   const tag = target.closest(".note-tag")?.textContent?.slice(1);
   const property = target.closest<HTMLElement>("[data-note-property]")?.dataset;
-  const mermaid = target.closest<HTMLElement>("[data-note-mermaid]")?.dataset.noteMermaid;
-  const hit: NoteContextHit = { path, line, anchor, link: reference, attachment, tag, mermaid,
+  const diagram = target.closest<HTMLElement>("[data-note-mermaid]");
+  const mermaid = diagram?.dataset.noteMermaid;
+  const image = diagram?.querySelector<HTMLImageElement>(".note-diagram img");
+  const diagramImage = image?.complete && image.naturalWidth > 0 && image.naturalHeight > 0 ? image : undefined;
+  const hit: NoteContextHit = { path, line, anchor, link: reference, attachment, tag, mermaid, diagramImage,
     property: property?.noteProperty ? { name: property.noteProperty, value: property.notePropertyValue ?? "" } : undefined };
   const selection = root.ownerDocument.getSelection();
   if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return hit;
