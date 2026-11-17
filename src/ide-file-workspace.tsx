@@ -256,12 +256,15 @@ export function FileSearch({ query, setQuery, results, onOpen, placeholder, unav
   );
 }
 
-export function FileUnavailable({ title, detail, onSimulate }: { title: string; detail: string; onSimulate?: () => void }) {
+export function FileUnavailable({ title, path, detail, onSimulate }: {
+  title: string; path?: string; detail?: string; onSimulate?: () => void;
+}) {
   return (
     <section className="file-unavailable">
       <span className="work-empty-icon"><FileText size={23} aria-hidden="true" /></span>
       <h2>{title}</h2>
-      <p>{detail}</p>
+      {path && <p><code>{path}</code></p>}
+      {detail && <p>{detail}</p>}
       {onSimulate && <button type="button" className="fw-btn fw-primary" onClick={onSimulate}>Simulate</button>}
     </section>
   );

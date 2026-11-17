@@ -124,7 +124,9 @@ it("reviews pinned link edits, applies the sealed partial rename, and reloads th
   const { rerender } = render(workspace());
   const user = userEvent.setup();
   await screen.findByRole("button", { name: "Close Release.md" });
-  await user.click(screen.getByRole("button", { name: "Split Reading view" }));
+  const split = screen.getByRole<HTMLButtonElement>("button", { name: "Split Reading view" });
+  await waitFor(() => expect(split.disabled).toBe(false));
+  await user.click(split);
   await screen.findByLabelText(`Reading view for ${source}`);
   const rename = screen.getByRole("button", { name: "Rename note" });
   await user.click(rename);
@@ -181,7 +183,9 @@ it("reviews pinned link edits, applies the sealed partial rename, and reloads th
 
   const beforeOldRoute = vi.mocked(invoke).mock.calls.length;
   rerender(workspace(source));
-  await screen.findByRole("heading", { name: "Note unavailable" });
+  const unavailable = within((await screen.findByRole("heading", { name: "Note unavailable" })).closest("section")!);
+  expect(unavailable.getByText(source)).toBeTruthy();
+  expect(unavailable.getByText("The note is missing from this checkout.")).toBeTruthy();
   expect(vi.mocked(invoke).mock.calls.slice(beforeOldRoute)).toContainEqual([
     "open_repository_document", { checkoutId, path: source },
   ]);

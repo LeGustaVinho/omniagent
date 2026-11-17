@@ -271,7 +271,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
               const entry = files[path];
               const failure = source.failures[path];
               if (!entry) return simulated || failure
-                ? <FileUnavailable title="File unavailable" detail={failure ?? path} />
+                ? <FileUnavailable title="File unavailable" path={path} detail={failure} />
                 : <p role="status" className="file-help">Loading {path}…</p>;
               const sourceProblem = source.files[path]?.sourceProblem;
               return (

@@ -452,7 +452,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                 if (!entry) {
                   const failure = repository.failures[path];
                   return failure || simulated
-                    ? <FileUnavailable title="Note unavailable" detail={failure ?? path} />
+                    ? <FileUnavailable title="Note unavailable" path={path} detail={failure} />
                     : <p role="status" className="file-help">Loading {path}…</p>;
                 }
                 const selectedMode = view === "reading" ? "reading" : modes[path] ?? "live";

@@ -14,10 +14,12 @@ import { remote } from "webdriverio";
 // A separately named installed product preserves the production and desktop fixture profiles.
 assert.equal(process.platform, "win32");
 assert.equal(process.arch, "x64");
-assert.ok(process.argv[2], "Usage: node tests/desktop/nsis-install-upgrade.mjs <case.json>");
+assert.ok(process.argv[2], "Usage: node tests/desktop/nsis-install-upgrade.mjs <case.json> [--workbench]");
 const caseFile = resolve(process.argv[2]);
+const scenarios = new Set(process.argv.slice(3));
+for (const scenario of scenarios) assert.ok(["--workbench"].includes(scenario), `Unknown NSIS scenario ${scenario}`);
 const scratch = dirname(caseFile);
-const { product, identifier, sourceCommit, requireInstallationIdentity = false } = JSON.parse(await readFile(caseFile, "utf8"));
+const { product, identifier, sourceCommit, sourcePatch, requireInstallationIdentity = false } = JSON.parse(await readFile(caseFile, "utf8"));
 assert.equal(typeof requireInstallationIdentity, "boolean");
 const tag = /^OmniAgent NSIS Test ([a-f0-9]{10})$/.exec(product)?.[1];
 assert.ok(tag, "A unique NSIS test product name is required");
@@ -51,8 +53,8 @@ function registry(hive, key, name, view = "64") {
     ?.trim().split(/\s+REG_\w+\s+/)[1];
 }
 
-function run(executable, args, { cwd = scratch, env = process.env } = {}) {
-  const result = spawnSync(executable, args, { cwd, env, encoding: "utf8", windowsHide: true, timeout: 120_000 });
+function run(executable, args, { cwd = scratch, env = process.env, timeout = 120_000 } = {}) {
+  const result = spawnSync(executable, args, { cwd, env, encoding: "utf8", windowsHide: true, timeout });
   if (result.error) throw result.error;
   assert.equal(result.status, 0, `${basename(executable)} exited with ${result.status}\n${result.stderr}`);
   return result.stdout.trim();
@@ -67,7 +69,15 @@ async function availablePort() {
 }
 
 async function invoke(browser, name, args = {}) {
-  return browser.execute((command, values) => window.__TAURI_INTERNALS__.invoke(command, values), name, args);
+  const result = await browser.execute(async (command, values) => {
+    try {
+      return { data: await window.__TAURI_INTERNALS__.invoke(command, values) };
+    } catch (error) {
+      return { ipcError: String(error) };
+    }
+  }, name, args);
+  if ("ipcError" in result) throw new Error(result.ipcError);
+  return result.data;
 }
 
 async function withInstalledWindow(application, verify) {
@@ -95,7 +105,7 @@ async function withInstalledWindow(application, verify) {
     browser = await remote({
       hostname: "127.0.0.1", port, path: "/", logLevel: "warn", connectionRetryCount: 0,
       connectionRetryTimeout: 20_000,
-      capabilities: { browserName: "webview2", "tauri:options": { application } },
+      capabilities: { browserName: "webview2", "wdio:enforceWebDriverClassic": true, "tauri:options": { application } },
     });
     await browser.waitUntil(async () => {
       return await invoke(browser, "runtime_status").catch(() => undefined) === "Desktop runtime is ready.";
@@ -155,7 +165,7 @@ assert.ok(nativeArchitectures.every((architecture) => architecture === "9"), "A 
 assert.ok(!existsSync(dataRoot) && !existsSync(installedRoot), "NSIS acceptance requires a fresh test product and profile");
 assert.equal(registry("HKCU", uninstallKey, "DisplayName"), undefined);
 const receipt = {
-  sourceCommit, identifier, product,
+  sourceCommit, sourcePatch, identifier, product,
   windows: {
     displayVersion: registry("HKLM", windowsKey, "DisplayVersion"),
     build: registry("HKLM", windowsKey, "CurrentBuildNumber"),
@@ -209,6 +219,15 @@ try {
   }
   assert.equal(await readFile(join(repo, "brief.md"), "utf8"), "# Installer acceptance fixture\n");
   receipt.upgrade = { ...upgrade, build: runningUpgrade, restoredCheckoutId: checkout.checkoutId };
+
+  const installed = {
+    application: upgrade.application, checkout, repo, scratch, dataRoot, sourceCommit, invoke, run,
+    withInstalledWindow: (verify) => withInstalledWindow(upgrade.application, verify),
+  };
+  if (scenarios.has("--workbench")) {
+    const { runInstalledWorkbench } = await import("./installed-workbench.mjs");
+    receipt.workbench = await runInstalledWorkbench(installed);
+  }
 } finally {
   if (registry("HKCU", uninstallKey, "DisplayName") === product) {
     const uninstaller = await realpath(join(installedRoot, "uninstall.exe"));

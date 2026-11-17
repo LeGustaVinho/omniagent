@@ -71,7 +71,7 @@ function fixture() {
       case "save_workbench_layout": layouts.set(id, args.layout!); return;
       case "list_repository_source_files": return [file, "docs/Guide.md"];
       case "list_repository_source_drafts": return drafts.has(id) ? [file] : [];
-      case "open_repository_source_file": return disk.get(id);
+      case "open_repository_source_file": return disk.get(id) ?? { status: "missing", relativePath: file };
       case "read_repository_source_draft": return drafts.get(id) ?? null;
       case "read_repository_source_revision": return revisions.get(args.revisionId!) ?? null;
       case "watch_repository_source": notices.set(id, args.channel!.onmessage); return `watch-${id}`;
@@ -165,6 +165,22 @@ it("restores source splits and drafts, shows an external conflict, and keeps the
   await waitFor(() => expect(service.drafts.has(main)).toBe(false));
   second.rerender(<IdeWorkspace {...propsFor(alternate)} target={file} />);
   await waitFor(() => expect(views().map(({ value }) => value)).toEqual(["fn other_worktree() {}"]));
+});
+
+it("shows the saved checkout path and the failure in a restored file tab", async () => {
+  const service = fixture();
+  const props = propsFor(main);
+  const first = render(<IdeWorkspace {...props} target={file} />);
+  await screen.findByRole("textbox", { name: editorLabel });
+  await waitFor(() => expect(service.layouts.get(main)).toContain(file));
+  first.unmount();
+  service.disk.delete(main);
+
+  render(<IdeWorkspace {...props} />);
+  const heading = await screen.findByRole("heading", { name: "File unavailable" });
+  const unavailable = within(heading.closest("section")!);
+  expect(unavailable.getByText(file)).toBeTruthy();
+  expect(unavailable.getByText("The file is missing from this checkout.")).toBeTruthy();
 });
 
 it("reuses the canonical tab in each checkout and discards the last dirty view without saving", async () => {
