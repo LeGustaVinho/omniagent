@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { remote } from "webdriverio";
+import { Key, remote } from "webdriverio";
 
 const fixtureIdentifier = "io.github.legustavinho.omniagent.desktop-tests";
 const packagedOrigin = "http://tauri.localhost";
@@ -79,10 +79,10 @@ async function invoke(browser, command, args = {}) {
     try {
       return { data: await window.__TAURI_INTERNALS__.invoke(name, parameters) };
     } catch (error) {
-      return { error: String(error) };
+      return { ipcError: String(error) };
     }
   }, command, args);
-  if ("error" in result) throw new Error(result.error);
+  if ("ipcError" in result) throw new Error(result.ipcError);
   return result.data;
 }
 
@@ -90,7 +90,7 @@ async function startSession(application) {
   const browser = await remote({
     hostname: "127.0.0.1", port, path: "/", logLevel: "warn",
     connectionRetryCount: 0, connectionRetryTimeout: 15_000,
-    capabilities: { browserName: "webview2", "tauri:options": { application } },
+    capabilities: { browserName: "webview2", "wdio:enforceWebDriverClassic": true, "tauri:options": { application } },
   });
   await browser.setTimeout({ script: 8_000 });
   try {
@@ -108,7 +108,6 @@ async function startSession(application) {
 
 async function waitForRuntime(browser, { startup = false } = {}) {
   const state = { browserVersion: browser.capabilities.browserVersion };
-  const allowNavigationAt = Date.now() + 4_000;
   try {
     await browser.waitUntil(async () => {
       try {
@@ -116,12 +115,6 @@ async function waitForRuntime(browser, { startup = false } = {}) {
           url: location.href, origin: location.origin, title: document.title,
           readyState: document.readyState, hasInvoke: typeof window.__TAURI_INTERNALS__?.invoke === "function",
         }));
-        if (startup && !state.navigatedFromBlank && Date.now() >= allowNavigationAt && state.document.url === "about:blank") {
-          // WebView2 creates a blank document before Wry can navigate to the bundled assets.
-          state.navigatedFromBlank = true;
-          await browser.navigateTo(`${packagedOrigin}/`);
-          return false;
-        }
         if (state.document.origin !== packagedOrigin || !state.document.hasInvoke) return false;
         state.runtime = await browser.execute(async () => {
           try {
@@ -1512,8 +1505,9 @@ test("recovers unsent chat and dirty source after a Windows desktop crash and re
     };
     const { text } = await openSource();
     await text.click();
-    await browser.keys(["Control", "a"]);
-    await browser.keys(edited);
+    await browser.action("key").down(Key.Control).down("a").up("a").up(Key.Control).perform();
+    // Monaco's EditContext needs to process each insertion before the next keypress.
+    for (const character of edited) await browser.keys(character);
     const source = { checkoutId: checkout.checkoutId, path };
     await browser.waitUntil(async () => (await invoke(browser, "read_repository_source_draft", source))?.markdown === edited,
       { timeout: 10_000, timeoutMsg: "The source editor did not persist its dirty buffer" });
