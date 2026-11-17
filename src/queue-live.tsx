@@ -9,10 +9,11 @@ import type { Provider } from "@/bindings/Provider";
 import type { QueueState } from "@/bindings/QueueState";
 import type { RecoveryAction } from "@/bindings/RecoveryAction";
 import type { SessionMode } from "@/bindings/SessionMode";
+import type { MenuAction } from "@/components/ui/context-actions";
 import { JobFailurePanel } from "@/job-failure";
 import {
-  AddQueueJobButton, PendingQueueJobActions, QueueButton, QueueEmpty, QueueJobActions, QueueJobFacts, QueueJobForm,
-  QueueLayout, QueuePauseButton, QueueRecoveryButton, type QueueJobDraft,
+  AddQueueJobButton, QueueButton, QueueEmpty, QueueJobActions, QueueJobFacts, QueueJobForm,
+  QueueLayout, QueuePauseButton, type QueueJobDraft,
 } from "@/queue-layout";
 import { matchesQueueView, projectQueueQuery, queueBlockerReason, queueJobState, type QueueView } from "@/queue-model";
 import { QueuePolicy } from "@/queue-policy";
@@ -127,6 +128,40 @@ function ApprovalReview({ projectId, approvalId, busy, onAction }: {
   );
 }
 
+type JobCommand = Extract<MenuAction, { run: () => void }>;
+
+function jobControls(inspection: JobInspection, busy: boolean, run: (action: QueueAction) => void): JobCommand[] {
+  const { job } = inspection;
+  const attempt = job.latestAttempt;
+  const pending = job.queueState !== "cancelled" && (!attempt || job.queuedRecovery !== null ||
+    Boolean(job.downstreamWait && job.downstreamWait.state !== "yielding") || inspection.queuedQuestion);
+  const running = activeAttempt(attempt);
+  const savedQuestions = inspection.questionWait && !running && !pending && job.queueState !== "cancelled";
+  const commands: JobCommand[] = [];
+  if (pending) commands.push({ label: job.queueState === "paused" ? "Resume job" : "Pause job", disabled: busy,
+    run: () => run({ type: "pending_state", jobId: job.id, state: job.queueState === "paused" ? "queued" : "paused" }) });
+  if (pending || savedQuestions) commands.push({
+    label: savedQuestions ? "Cancel saved questions" : inspection.queuedQuestion ? "Cancel queued answer" : "Cancel pending job",
+    disabled: busy, destructive: true, run: () => run({ type: "pending_state", jobId: job.id, state: "cancelled" }),
+  });
+  if (running) commands.push({ label: running.cancelRequested ? "Interrupting…" : "Interrupt attempt",
+    disabled: busy || running.cancelRequested, destructive: true,
+    run: () => run({ type: "interrupt", jobId: job.id, runId: running.runId }) });
+  if (attempt) for (const action of inspection.recoveryActions) commands.push({
+    label: action === "retry" ? "Retry saved input" : "Resume from checkpoint", disabled: busy,
+    run: () => run({ type: "recovery", jobId: job.id, runId: attempt.runId, action }),
+  });
+  return commands;
+}
+
+function activeAttempt(attempt: Job["latestAttempt"]) {
+  return attempt && ["starting", "running", "waiting_for_input"].includes(attempt.status) ? attempt : undefined;
+}
+
+function jobConversation(job: Job) {
+  return job.latestAttempt?.conversationId ?? (job.origin.type === "operator" ? job.context?.conversationId : undefined);
+}
+
 function JobDetails({ inspection, checkout, openWorkspace, openActivity, onDependency, onAction, onAddChild, busy }: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace"> & {
   inspection: JobInspection;
   onDependency: (id: string) => void;
@@ -137,13 +172,9 @@ function JobDetails({ inspection, checkout, openWorkspace, openActivity, onDepen
   const { job, blockers } = inspection;
   const attempt = job.latestAttempt;
   const ownCheckout = job.checkoutId === checkout.checkoutId;
-  const conversationId = attempt?.conversationId
-    ?? (job.origin.type === "operator" ? job.context?.conversationId : undefined);
+  const conversationId = jobConversation(job);
   const requestingRunId = job.origin.type === "agent" ? job.origin.runId : undefined;
-  const pending = job.queueState !== "cancelled" && (!attempt || job.queuedRecovery !== null ||
-    Boolean(job.downstreamWait && job.downstreamWait.state !== "yielding") || inspection.queuedQuestion);
-  const running = attempt && ["starting", "running", "waiting_for_input"].includes(attempt.status);
-  const savedQuestions = inspection.questionWait && !running && !pending && job.queueState !== "cancelled";
+  const running = activeAttempt(attempt);
   const pipeline = job.pipeline;
 
   return <>
@@ -200,19 +231,10 @@ function JobDetails({ inspection, checkout, openWorkspace, openActivity, onDepen
           </ul>
         </section>}
         <QueueJobActions>
-          {pending && <PendingQueueJobActions paused={job.queueState === "paused"} queuedAnswer={inspection.queuedQuestion} disabled={busy}
-            onPauseToggle={() => onAction({ type: "pending_state", jobId: job.id, state: job.queueState === "paused" ? "queued" : "paused" })}
-            onCancel={() => onAction({ type: "pending_state", jobId: job.id, state: "cancelled" })} />}
-          {savedQuestions && <QueueButton variant="outline" disabled={busy}
-            onClick={() => onAction({ type: "pending_state", jobId: job.id, state: "cancelled" })}>Cancel saved questions</QueueButton>}
-          {running && <QueueButton variant="outline" disabled={busy || attempt.cancelRequested}
-            onClick={() => onAction({ type: "interrupt", jobId: job.id, runId: attempt.runId })}>
-            {attempt.cancelRequested ? "Interrupting…" : "Interrupt attempt"}
-          </QueueButton>}
+          {jobControls(inspection, busy, onAction).map(({ label, disabled, run }) =>
+            <QueueButton key={label} variant="outline" disabled={disabled} onClick={run}>{label}</QueueButton>)}
           {running && ownCheckout && job.kind === "agent" && <QueueButton variant="outline"
-            disabled={busy || attempt.cancelRequested} onClick={() => onAddChild({ runId: attempt.runId, mode: job.mode })}>Add subagent</QueueButton>}
-          {attempt && inspection.recoveryActions.map((action) => <QueueRecoveryButton key={action} action={action}
-            disabled={busy} onClick={() => onAction({ type: "recovery", jobId: job.id, runId: attempt.runId, action })} />)}
+            disabled={busy || running.cancelRequested} onClick={() => onAddChild({ runId: running.runId, mode: job.mode })}>Add subagent</QueueButton>}
           {conversationId && ownCheckout && <QueueButton variant="outline" onClick={() => openWorkspace("conversations", conversationId)}>Open conversation <ArrowRight size={13} aria-hidden /></QueueButton>}
           {conversationId && !ownCheckout && <p className="w-full text-xs text-muted-foreground">Select the linked worktree to open this conversation.</p>}
           {job.taskId && <QueueButton variant="outline" onClick={() => openWorkspace("tasks", job.taskId ?? undefined)}>Open task <ArrowRight size={13} aria-hidden /></QueueButton>}
@@ -233,6 +255,7 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
   const queryClient = useQueryClient();
   const [view, setView] = useState<QueueView>("All");
   const [selected, setSelected] = useState<string>();
+  const [copyError, setCopyError] = useState("");
   const [setup, setSetup] = useState<{ checkoutId: string; parent?: ParentAttempt }>();
   const showSetup = active && setup?.checkoutId === checkout.checkoutId;
   const query = useQuery({
@@ -257,6 +280,11 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
     mutationFn: (action: QueueAction) => applyQueueAction(checkout.projectId, action),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["project-job-queue"] }),
   });
+  function copyText(text: string) {
+    setCopyError("");
+    void Promise.resolve().then(() => navigator.clipboard.writeText(text)).catch(() => setCopyError("Could not copy to the clipboard."));
+  }
+  const navigate: typeof openWorkspace = (workspace, target) => { openWorkspace(workspace, target); onClose?.(); };
 
   const occupancy = query.data && { active: query.data.active, capacity: query.data.settings.capacity, description: "Scheduler occupancy across projects" };
 
@@ -272,6 +300,7 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
     </>}
     controls={<>
       {control.isError && <div className="px-3 py-2"><InlineIssue>{String(control.error)}</InlineIssue></div>}
+      {copyError && <div className="px-3 py-2"><InlineIssue>{copyError}</InlineIssue></div>}
       {showSetup && <ManagedJobForm key={setup.parent?.runId ?? setup.checkoutId} checkout={checkout} parent={setup.parent}
         onClose={() => setSetup(undefined)} onQueued={(id) => {
           setSetup(undefined);
@@ -286,14 +315,27 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
       {query.isError && <div className="p-3"><InlineIssue>Could not refresh the project queue. {String(query.error)}</InlineIssue></div>}
       {query.data && !visible.length && <QueueEmpty filtered={query.data.jobs.length > 0} />}
     </>}
-    jobs={visible.map((inspection) => ({
-      id: inspection.job.id, title: jobTitle(inspection), requester: jobRequester(inspection), status: queueJobState(inspection),
-      priority: inspection.job.priority, attempt: inspection.job.latestAttempt?.ordinal ?? "—", reason: firstWaitReason(inspection),
-    }))}
+    jobs={visible.map((inspection) => {
+      const { job } = inspection;
+      const { id, priority, latestAttempt, taskId, pipeline } = job;
+      const conversationId = jobConversation(job);
+      return { id, title: jobTitle(inspection), requester: jobRequester(inspection), status: queueJobState(inspection),
+        priority, attempt: latestAttempt?.ordinal ?? "—", reason: firstWaitReason(inspection), menu: [[
+          { label: "Open job details", run: () => setSelected(id) },
+          ...(latestAttempt ? [{ label: "Inspect attempt", run: () => openActivity(latestAttempt.runId, conversationId) }] : []),
+          ...(conversationId && job.checkoutId === checkout.checkoutId ? [{ label: "Open conversation", run: () => navigate("conversations", conversationId) }] : []),
+          ...(taskId ? [{ label: "Open task", run: () => navigate("tasks", taskId) }] : []),
+          ...(pipeline ? [{ label: "Open pipeline run", run: () => navigate("pipelines", `run:${pipeline.pipelineRunId}`) }] : []),
+        ], jobControls(inspection, control.isPending, control.mutate), [
+          { label: "Copy job ID", run: () => copyText(id) },
+          ...(latestAttempt ? [{ label: "Copy run ID", run: () => copyText(latestAttempt.runId) }] : []),
+          ...(inspection.blockers.length ? [{ label: "Copy wait reasons", run: () => copyText(inspection.blockers.map(queueBlockerReason).join("\n")) }] : []),
+        ]] };
+    })}
     selected={selectedJob && {
       id: selectedJob.job.id, title: jobTitle(selectedJob), status: queueJobState(selectedJob),
       content: <JobDetails inspection={selectedJob} checkout={checkout} openActivity={openActivity}
-        openWorkspace={(workspace, target) => { openWorkspace(workspace, target); onClose?.(); }}
+        openWorkspace={navigate}
         onDependency={(id) => { setView("All"); setSelected(id); }}
         onAction={control.mutate} onAddChild={(parent) => setSetup({ checkoutId: checkout.checkoutId, parent })} busy={control.isPending} />,
     }}

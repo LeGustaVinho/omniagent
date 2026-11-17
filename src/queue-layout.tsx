@@ -7,6 +7,7 @@ import type { RecoveryAction } from "@/bindings/RecoveryAction";
 import type { SessionMode } from "@/bindings/SessionMode";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { queueViews, type JobState, type QueueView } from "@/queue-model";
 import { DeliveryDetailPanel, DeliveryStatus } from "@/tasks-git-ui";
 import "@/queue-layout.css";
@@ -19,6 +20,7 @@ export interface QueueJobRow {
   priority: string | number;
   attempt: string | number;
   reason: string;
+  menu?: MenuGroups;
 }
 
 interface QueueSelection {
@@ -202,8 +204,10 @@ export function QueueLayout({
             </tr></thead>
             <tbody role="rowgroup">{jobs.map((job) => <tr key={job.id} role="row">
               <td role="cell" className="queue-job-title">
-                <button type="button" data-queue-job={job.id} className="queue-job-select" aria-pressed={selectedId === job.id}
-                  onClick={(event) => selectJob(job.id, event.detail === 0)}>{job.title}</button>
+                <ContextActions label={`${job.title} ${job.id}`} groups={job.menu ?? []}>
+                  <button type="button" data-queue-job={job.id} className="queue-job-select" aria-pressed={selectedId === job.id}
+                    onClick={(event) => selectJob(job.id, event.detail === 0)}>{job.title}</button>
+                </ContextActions>
                 <div className="queue-job-requester">{job.requester}</div>
               </td>
               <td role="cell" className="queue-job-status"><DeliveryStatus>{job.status}</DeliveryStatus></td>

@@ -81,3 +81,4 @@
   .agile-detail-heading { padding-block: .625rem; }
   .agile-detail-content { padding: .7rem; }
 }
+.agile-column-menu { flex: 1; gap: .4rem; }
