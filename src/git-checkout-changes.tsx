@@ -32,21 +32,23 @@ export function useGitCheckoutReview(checkoutId: string, enabled = true) {
   });
 }
 
-export function GitCheckoutChanges({ review, indexActions, initialSource = "working", openFile, openPanel, onClose }: {
+export function GitCheckoutChanges({ review, indexActions, initialSource = "working", initialPath, openFile, openPanel, onClose }: {
   review: CheckoutReview;
   indexActions?: boolean;
   initialSource?: Source;
+  initialPath?: string;
   openFile?: (path: string) => void;
   openPanel?: () => void;
   onClose?: () => void;
 }) {
   const [source, setSource] = useState<ReviewSource>(initialSource);
-  const [selection, setSelection] = useState<string>();
+  const [selection, setSelection] = useState(initialPath);
+  const changeStage = useChangeStage(review);
   const files = source === "branch" ? [] : review.changes.flatMap((file) => {
     const status = file[source];
     return status ? [{ path: file.path, kind: statusLabels[status] ?? status }] : [];
   });
-  const path = selection === "" ? undefined : files.find((file) => file.path === selection)?.path ?? files[0]?.path;
+  const path = selection === undefined ? files[0]?.path : files.find((file) => file.path === selection)?.path;
   const diff = useQuery({
     queryKey: ["git-live-diff", review.checkoutId, source, path, review.revision.branch, review.revision.head, review.revision.index],
     queryFn: () => invoke<TextDiff>("git_checkout_diff", { checkoutId: review.checkoutId, path, source }),
@@ -65,13 +67,25 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
         <GitDiffReview key={source} source={source} title={sourceLabels[source]}
           ranges={source === "working" ? { base: "Index", revised: "Worktree" } : { base: "HEAD", revised: "Index" }}
           files={files} selectedPath={path} select={setSelection} comparison={comparison}
+          notice={selection && !path && <p className="p-3 text-sm" role="status">No {source === "working" ? "working" : "staged"} changes for {selection}.</p>}
           preview={path && (diff.isPending ? <p role="status" className="p-3 text-sm">Loading diff…</p>
             : diff.error ? <div className="p-3"><InlineIssue>{String(diff.error)}</InlineIssue></div>
             : unavailable && <div className="p-3"><InlineIssue>{unavailable.reason}</InlineIssue></div>)}
           empty={<p>{source === "working" ? "No working changes." : "No staged changes."}</p>}
-          onClose={onClose} openFile={canOpen ? () => openFile(comparison.path) : undefined} />
+          onClose={onClose} openFile={canOpen ? () => openFile(comparison.path) : undefined}
+          fileActions={(file) => {
+            const entry = review.changes.find((change) => change.path === file.path);
+            return [[
+              ...(openFile && source === "working" && file.kind !== "Deleted"
+                ? [{ label: "Open working file", run: () => openFile(file.path) }] : []),
+              ...(indexActions && entry?.working ? [{ label: "Stage file", disabled: changeStage.isPending,
+                run: () => changeStage.mutate({ path: file.path, staged: true }) }] : []),
+              ...(indexActions && entry?.staged ? [{ label: "Unstage file", disabled: changeStage.isPending,
+                run: () => changeStage.mutate({ path: file.path, staged: false }) }] : []),
+            ]];
+          }} />
       </div>
-      {indexActions && <IndexOperations review={review} />}
+      {indexActions && <IndexOperations review={review} changeStage={changeStage} />}
     </div>}
   </div>;
 }
@@ -139,9 +153,9 @@ function GitBranchComparison({ review, onClose }: { review: CheckoutReview; onCl
   </div>;
 }
 
-function IndexOperations({ review }: { review: CheckoutReview }) {
+function useChangeStage(review: CheckoutReview) {
   const client = useQueryClient();
-  const changeStage = useMutation({
+  return useMutation({
     mutationFn: ({ path, staged }: { path: string; staged: boolean }) => invoke("set_git_path_staged", {
       checkoutId: review.checkoutId, path, staged, expected: review.revision,
     }),
@@ -150,6 +164,9 @@ function IndexOperations({ review }: { review: CheckoutReview }) {
       client.invalidateQueries({ queryKey: ["git-live-diff", review.checkoutId] }),
     ]),
   });
+}
+
+function IndexOperations({ review, changeStage }: { review: CheckoutReview; changeStage: ReturnType<typeof useChangeStage> }) {
   const stagedCount = review.changes.filter((file) => file.staged).length;
   return <DeliveryDetailPanel label="Stage files" resizeKey="git-stage">
     <div className="delivery-detail-content grid content-start gap-3 p-3.5">

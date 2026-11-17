@@ -5,6 +5,61 @@ use crate::{
 };
 
 #[tokio::test]
+async fn checkout_context_is_scoped_and_preserves_the_existing_draft() -> Result<()> {
+    let (_repo, store, chat, scope) = setup().await?;
+    std::fs::write(scope.checkout.join("source.txt"), "context")?;
+    store
+        .save_conversation_draft(chat.id.clone(), "Unsent text".into())
+        .await?;
+
+    assert!(
+        store
+            .add_conversation_checkout_paths(
+                chat.id.clone(),
+                "other checkout".into(),
+                vec!["source.txt".into()]
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .add_conversation_checkout_paths(
+                chat.id.clone(),
+                chat.checkout_id.clone(),
+                vec!["source.txt".into(), "../outside.txt".into()]
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .conversation_attachment_draft(chat.id.clone())
+            .await?
+            .files
+            .is_empty()
+    );
+
+    let paths = vec!["source.txt".to_owned()];
+    let added = store
+        .add_conversation_checkout_paths(chat.id.clone(), chat.checkout_id.clone(), paths.clone())
+        .await?;
+    assert_eq!(added.files.len(), 1);
+    assert!(matches!(
+        added.files[0].source,
+        AttachmentSource::Checkout { .. }
+    ));
+    assert_eq!(
+        store
+            .add_conversation_checkout_paths(chat.id.clone(), chat.checkout_id, paths)
+            .await?,
+        added
+    );
+    assert_eq!(store.conversation_draft(chat.id).await?, "Unsent text");
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_selections_keep_individual_sources_and_restore_the_attachment_draft() -> Result<()>
 {
     let (_repo, store, chat, scope) = setup().await?;

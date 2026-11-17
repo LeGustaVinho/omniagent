@@ -364,6 +364,9 @@
   .conv-header-menu > div { inset-inline: 0 auto; }
 }
 .conv-message-actions { margin-top: .35rem; white-space: normal; }
+.conv-message-context { display: block; padding-inline-end: 1.8rem; }
+.conv-message-context > .context-actions-more { position: absolute; inset-block-start: 0; inset-inline-end: 0; }
+.conv-message-context > p { margin: 0; }
 .conv-message-actions, .conv-message-action-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: .1rem .25rem; }
 .conv-message-actions .conv-quiet-button { font-size: .7rem; min-height: 1.65rem; }
 .conv-message-actions .conv-quiet-button svg { width: .8rem; height: .8rem; }

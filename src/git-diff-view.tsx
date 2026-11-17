@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
 import { ResizablePanel } from "@/panel-resize";
 import { InlineIssue } from "@/tasks-git-ui";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 
 export type GitTextComparison = {
   path: string;
@@ -47,7 +48,7 @@ function ChangeCounts({ additions, deletions }: { additions: number; deletions: 
 }
 
 export function GitDiffReview({ source, title, ranges, files, selectedPath, select, comparison, preview, empty, notice,
-  allowSavedPatch, openFile, footer, onClose }: {
+  allowSavedPatch, openFile, fileActions, footer, onClose }: {
   source: string;
   title: string;
   ranges: { base: string; revised: string };
@@ -60,15 +61,21 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   notice?: ReactNode;
   allowSavedPatch?: boolean;
   openFile?: () => void;
+  fileActions?: (file: GitDiffRow) => MenuGroups;
   footer?: ReactNode;
   onClose?: () => void;
 }) {
   const [layout, setLayout] = useState<DiffLayout>("auto");
   const [patchPath, setPatchPath] = useState<string>();
+  const [copyError, setCopyError] = useState("");
   const [instance, setInstance] = useState<editor.IStandaloneDiffEditor | null>(null);
   const selected = files.find((file) => file.path === selectedPath);
   const hasPatch = Boolean(allowSavedPatch && comparison?.patch);
   const showingPatch = hasPatch && Boolean(selected && patchPath === selected.path);
+  function copy(value: string) {
+    setCopyError("");
+    void Promise.resolve().then(() => navigator.clipboard.writeText(value)).catch(() => setCopyError("Could not copy to the clipboard."));
+  }
   const counts = files.reduce<{ additions: number; deletions: number } | undefined>((sum, file) => {
     if (file.additions === undefined || file.deletions === undefined) return sum;
     return { additions: (sum?.additions ?? 0) + file.additions, deletions: (sum?.deletions ?? 0) + file.deletions };
@@ -93,19 +100,31 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
       <span className="font-medium wrap-anywhere text-foreground">{ranges.revised}</span>
     </div>
     {notice}
+    {copyError && <div className="p-3"><InlineIssue>{copyError}</InlineIssue></div>}
     {files.length === 0 ? <div className="delivery-empty"><GitCompare size={22} aria-hidden />{empty}</div>
       : <div className="flex min-h-0 flex-1 flex-col">
         <ResizablePanel as="section" className="diff-files" aria-label="Changed files"
           edge="bottom" resizeKey="git-changed-files" resizeLabel="changed files">
           <div className="diff-files-scroll">
-          {files.map((file) => <button type="button" key={file.path} className="diff-file-row" aria-expanded={selected?.path === file.path}
+          {files.map((file) => <ContextActions key={file.path} label={file.path} groups={[[
+            { label: selected?.path === file.path ? "Collapse diff" : "Open diff", run: () => {
+              select(selected?.path === file.path ? "" : file.path);
+              setPatchPath(undefined);
+            } },
+            { label: "Copy relative path", run: () => copy(file.path) },
+            ...(comparison?.path === file.path && comparison.patch !== undefined ? [
+              { label: "Copy patch", run: () => copy(comparison.patch!) },
+            ] : []),
+          ], ...(fileActions?.(file) ?? [])]}>
+            <button type="button" className="diff-file-row" aria-expanded={selected?.path === file.path}
             onClick={() => { select(selected?.path === file.path ? "" : file.path); setPatchPath(undefined); }}>
             {selected?.path === file.path ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} className="text-muted-foreground" aria-hidden />}
             {file.kind === "Binary" ? <FileImage size={14} className="text-muted-foreground" aria-hidden /> : <FileCode2 size={14} className="text-muted-foreground" aria-hidden />}
             <span className="min-w-0 flex-1 truncate font-mono" title={file.path}>{file.previousPath && `${file.previousPath} → `}{file.path}</span>
             <span className="text-muted-foreground">{file.kind}</span>
             {file.additions !== undefined && file.deletions !== undefined && file.kind !== "Binary" && <ChangeCounts additions={file.additions} deletions={file.deletions} />}
-          </button>)}
+            </button>
+          </ContextActions>)}
           </div>
         </ResizablePanel>
         {selected && <div className="flex min-h-0 flex-1 flex-col">

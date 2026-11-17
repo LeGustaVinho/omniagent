@@ -18,7 +18,7 @@ use crate::{
     store::Store,
 };
 
-use super::{checkout_root, verify_checkout};
+use super::{checkout_items::checkout_directory, checkout_root, verify_checkout};
 
 #[cfg(test)]
 mod tests;
@@ -117,6 +117,16 @@ impl Store {
         checkout_id: String,
         query: String,
     ) -> Result<ProjectSearch> {
+        self.search_repository_files_in(checkout_id, query, String::new())
+            .await
+    }
+
+    pub async fn search_repository_files_in(
+        &self,
+        checkout_id: String,
+        query: String,
+        relative_directory: String,
+    ) -> Result<ProjectSearch> {
         validate_query(&query)?;
         let root = checkout_root(self, checkout_id.clone()).await?;
         let layout = verify_checkout(self, checkout_id, root).await?;
@@ -130,7 +140,9 @@ impl Store {
                         .unwrap_or_else(|| "ripgrep is unavailable".into()),
                 });
             };
-            search(&executable, &layout.root, &query)
+            let directory = checkout_directory(&layout.root, &relative_directory)?;
+            let target = Path::new(".").join(directory.strip_prefix(&layout.root)?);
+            search(&executable, &layout.root, &query, target.as_os_str())
         })
         .await?
     }
@@ -238,7 +250,7 @@ fn probe(executable: &Path) -> Result<String> {
         .context("The selected executable did not report a ripgrep version")
 }
 
-fn search(executable: &Path, root: &Path, query: &str) -> Result<ProjectSearch> {
+fn search(executable: &Path, root: &Path, query: &str, target: &OsStr) -> Result<ProjectSearch> {
     let args = [
         "--no-config",
         "--no-follow",
@@ -254,9 +266,9 @@ fn search(executable: &Path, root: &Path, query: &str) -> Result<ProjectSearch> 
         "!**/.git/**",
         "--",
         query,
-        ".",
     ]
     .map(OsStr::new);
+    let args = [args.as_slice(), &[target]].concat();
     let capture = run_bounded(executable, root, &args, SEARCH_TIMEOUT, SEARCH_OUTPUT_LIMIT)?;
     ensure!(
         capture.truncated || matches!(capture.outcome, TerminalOutcome::Exited(0 | 1)),

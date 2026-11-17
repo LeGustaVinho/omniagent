@@ -9,6 +9,7 @@ import { SavedGitDiffs } from "@/git-saved-diffs";
 import { GitWorkspaceFrame, GitWorkspaceTable } from "@/git-workspace-frame";
 import { GitWorktreeDialog, type WorktreeDraft } from "@/git-worktree-dialog";
 import { DeliveryDetailPanel, DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
+import { readWorkingDiffTarget } from "@/file-context-actions";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type HistoryEntry = { sha: string; author: string; committedAt: string; subject: string };
@@ -24,9 +25,15 @@ export function LiveGitWorkspace(props: WorkspaceProps) {
 
 function GitCheckoutWorkspace(props: WorkspaceProps) {
   const [checkoutId, setCheckout] = useState(props.checkout.checkoutId);
+  const [requestedFile, setRequestedFile] = useState(() => readWorkingDiffTarget(props.target));
   const [tab, setTab] = useState<Tab>(() => tabFor(props.target));
   const [creating, setCreating] = useState(false);
-  useEffect(() => { setTab(tabFor(props.target)); }, [props.target]);
+  useEffect(() => {
+    setTab(tabFor(props.target));
+    const file = readWorkingDiffTarget(props.target);
+    setRequestedFile(file);
+    if (file !== undefined) setCheckout(props.checkout.checkoutId);
+  }, [props.checkout.checkoutId, props.target]);
   const review = useGitCheckoutReview(checkoutId, tab !== "Saved attempts");
   const trees = review.data?.worktrees.filter((tree): tree is Worktree & { checkoutId: string } => tree.checkoutId !== null) ?? [];
   const branch = review.data?.revision.branch?.replace(/^refs\/heads\//, "");
@@ -34,7 +41,10 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
 
   return <GitWorkspaceFrame tabs={tabs} active={tab} select={setTab} controls={tab !== "Saved attempts" && <>
     <label className="ml-auto min-w-0"><span className="sr-only">Git worktree</span>
-      <select className="delivery-filter w-full max-w-60" value={checkoutId} onChange={(event) => setCheckout(event.currentTarget.value)}>
+      <select className="delivery-filter w-full max-w-60" value={checkoutId} onChange={(event) => {
+        setRequestedFile(undefined);
+        setCheckout(event.currentTarget.value);
+      }}>
         {!trees.some(({ checkoutId: id }) => id === checkoutId) && <option value={checkoutId}>{branch ?? (activeCheckout ? props.checkout.checkoutRoot : checkoutId)}</option>}
         {trees.map((tree) => <option key={tree.checkoutId} value={tree.checkoutId}>{tree.branch ?? "Detached HEAD"} · {tree.root}</option>)}
       </select>
@@ -47,7 +57,7 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
       {review.isPending && <p role="status" className="p-4 text-sm text-muted-foreground">Loading Git review…</p>}
       {review.error && <div className="p-4"><InlineIssue>{String(review.error)}</InlineIssue></div>}
       {review.data && !review.error && <>
-        {tab === "Changes" && <GitCheckoutChanges key={checkoutId} review={review.data} indexActions
+        {tab === "Changes" && <GitCheckoutChanges key={JSON.stringify([checkoutId, requestedFile])} review={review.data} indexActions initialPath={requestedFile}
           openFile={activeCheckout ? (path) => props.openWorkspace(/\.(md|markdown)$/i.test(path) ? "knowledge" : "ide", path) : undefined}
           openPanel={activeCheckout ? () => props.openChanges("working") : undefined} />}
         {tab === "Worktrees" && <WorktreeTable review={review.data} select={setCheckout} />}

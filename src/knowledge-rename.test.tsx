@@ -173,7 +173,7 @@ it("reviews pinned link edits, applies the sealed partial rename, and reloads th
   expect(invoke).toHaveBeenCalledWith("unwatch_repository_note", { watchId: `watch-${sourceRevision}` });
   expect(invoke).toHaveBeenCalledWith("watch_repository_note", expect.objectContaining({ checkoutId, baseRevision: movedRevision }));
   const navigation = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
-  await user.click(await navigation.findByText("docs", { selector: "summary" }));
+  await user.click(await navigation.findByRole("button", { name: "docs" }));
   expect(await navigation.findByRole("button", { name: "Lançamento.md" })).toBeTruthy();
   expect(navigation.queryByRole("button", { name: "Release.md" })).toBeNull();
   const afterApply = vi.mocked(invoke).mock.calls.slice(invocationCount);

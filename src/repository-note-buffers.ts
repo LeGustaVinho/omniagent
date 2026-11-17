@@ -95,6 +95,7 @@ function useRepositoryFileBuffers<CatalogEntry>(
   const [error, setError] = useState("");
   const current = useRef(state);
   const mounted = useRef(false);
+  const catalogRequest = useRef(0);
   const requests = useRef(new Map<string, Promise<string | undefined>>()).current;
   const writes = useRef(new Map<string, Promise<unknown>>()).current;
   const watches = useRef(new Map<string, Watch>()).current;
@@ -110,6 +111,11 @@ function useRepositoryFileBuffers<CatalogEntry>(
   const report = useCallback((failure: unknown) => {
     if (mounted.current) setError(String(failure));
   }, []);
+  const refreshCatalog = useCallback(async () => {
+    const request = ++catalogRequest.current;
+    const entries = await invoke<CatalogEntry[]>(commands.catalog, { checkoutId });
+    if (mounted.current && request === catalogRequest.current) setCatalog(entries);
+  }, [checkoutId, commands]);
   const serialize = useCallback(<T,>(path: string, operation: () => Promise<T>) => {
     const next = (writes.get(path) ?? Promise.resolve()).catch(() => undefined).then(operation);
     writes.set(path, next);
@@ -127,16 +133,16 @@ function useRepositoryFileBuffers<CatalogEntry>(
   useEffect(() => {
     mounted.current = true;
     if (enabled) {
-      void invoke<CatalogEntry[]>(commands.catalog, { checkoutId })
-        .then((entries) => { if (mounted.current) setCatalog(entries); }, report);
+      void refreshCatalog().catch(report);
       void invoke<string[]>(commands.drafts, { checkoutId })
         .then((paths) => { if (mounted.current) setDraftPaths(paths); }, report);
     }
     return () => {
       mounted.current = false;
+      catalogRequest.current += 1;
       for (const path of watches.keys()) stopWatching(path);
     };
-  }, [checkoutId, commands, enabled, report, stopWatching, watches]);
+  }, [checkoutId, commands, enabled, refreshCatalog, report, stopWatching, watches]);
 
   const load = useCallback((path: string): Promise<string | undefined> => {
     if (current.current.notes[path]) return Promise.resolve(path);
@@ -321,5 +327,5 @@ function useRepositoryFileBuffers<CatalogEntry>(
     delete failures[path];
     publish({ notes, failures });
   }, [publish, stopWatching]);
-  return { ...state, catalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget };
+  return { ...state, catalog, refreshCatalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget };
 }

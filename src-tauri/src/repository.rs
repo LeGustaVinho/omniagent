@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::{customizations, store::Store};
 
 mod candidates;
+pub mod checkout_items;
 pub(crate) mod comparison;
 pub mod delivery_history;
 pub mod destination_drift;

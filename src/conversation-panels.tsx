@@ -662,6 +662,23 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
         <ol className="conv-messages">
           {history.data?.messages.map((message) => (
             <ConversationMessage key={message.revisionId} role={message.role}
+              menu={[[
+                { label: "Copy message as Markdown", run: () => {
+                  const markdown = message.role === "user" ? conversationSkillMessage(message.text) : message.text;
+                  void Promise.resolve().then(() => navigator.clipboard.writeText(markdown)).catch(() => setDraftError("Could not copy the message."));
+                } },
+                { label: "Quote in draft", disabled: busy || !draft.isSuccess, run: () => {
+                  const markdown = message.role === "user" ? conversationSkillMessage(message.text) : message.text;
+                  const quoted = markdown.split("\n").map((line) => `> ${line}`).join("\n");
+                  editDraft(`${text ? `${text}\n\n` : ""}${quoted}\n\n`);
+                  requestAnimationFrame(() => composer.current?.focus());
+                } },
+              ], [
+                { label: "Rewind here…", disabled: historyBusy, run: () => setHistoryAction({ kind: "rewind", revisionId: message.revisionId }) },
+                { label: "Fork from message…", disabled: historyBusy, run: () => setHistoryAction({ kind: "fork", revisionId: message.revisionId }) },
+                ...(message.role === "user" ? [{ label: "Edit in a fork…", disabled: historyBusy,
+                  run: () => setHistoryAction({ kind: "edit", revisionId: message.revisionId }) }] : []),
+              ]]}
               actions={<ConversationMessageHistoryActions message={message} disabled={historyBusy} onAction={setHistoryAction} />}>
               {message.role === "user" ? <p>{conversationSkillMessage(message.text)}</p> : <ConversationMarkdown>{message.text}</ConversationMarkdown>}
             </ConversationMessage>

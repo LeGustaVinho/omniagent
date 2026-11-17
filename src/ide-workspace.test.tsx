@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { invoke } from "@tauri-apps/api/core";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, cleanup, fireEvent, render as renderElement, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import IdeWorkspace from "@/ide-workspace";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -58,6 +60,7 @@ type Notice = (event: { checkoutId: string; relativePath: string }) => void;
 function fixture() {
   const disk = new Map([[main, documentAt(main, "m1", "fn original() {}")], [alternate, documentAt(alternate, "a1", "fn other_worktree() {}")]]);
   const drafts = new Map<string, Draft>();
+  const folders = new Map<string, string[]>();
   const revisions = new Map([...disk.values()].map(({ document }) => [document.revision.id, document]));
   const layouts = new Map<string, string>();
   const notices = new Map<string, Notice>();
@@ -72,12 +75,23 @@ function fixture() {
     const args = input as {
       checkoutId: string; path?: string; layout?: string; revisionId?: string; baseRevision?: string;
       expectedRevision?: string; expectedDraftRevision?: string | null; markdown?: string; channel?: { onmessage: Notice };
+      relativeDirectory?: string; name?: string; directory?: boolean;
     };
     const id = args.checkoutId;
     switch (command) {
       case "workbench_layout": return layouts.get(id) ?? null;
       case "save_workbench_layout": layouts.set(id, args.layout!); return;
       case "list_repository_source_files": return [file, "docs/Guide.md"];
+      case "list_checkout_folders": return folders.get(id) ?? [];
+      case "create_checkout_item": {
+        const path = [args.relativeDirectory, args.name].filter(Boolean).join("/");
+        if (!args.directory) throw new Error("Expected a folder in this fixture");
+        folders.set(id, [...(folders.get(id) ?? []), path]);
+        return path;
+      }
+      case "open_checkout_item_in_shell": return;
+      case "list_conversations": return [{ id: "review-chat", checkoutId: id, title: "Code review", contextId: "ctx" }];
+      case "add_checkout_files_to_conversation": return { revision: "attached", files: [] };
       case "list_repository_source_drafts": return drafts.has(id) ? [file] : [];
       case "open_repository_source_file": return disk.get(id) ?? { status: "missing", relativePath: file };
       case "read_repository_source_draft": return drafts.get(id) ?? null;
@@ -110,6 +124,79 @@ function fixture() {
 const views = () => screen.getAllByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
 const closeButtons = () => screen.getAllByRole("button", { name: "Close review.rs" });
 
+function render(element: ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return renderElement(element, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
+}
+
+it("uses the clicked row for the Explorer, even with another source file active", async () => {
+  fixture();
+  render(<IdeWorkspace {...propsFor(alternate)} />);
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  fireEvent.click(screen.getByRole("button", { name: "docs" }));
+  fireEvent.click(await screen.findByRole("button", { name: "review.rs" }));
+  await screen.findByRole("textbox", { name: editorLabel });
+
+  fireEvent.contextMenu(screen.getByRole("button", { name: "Guide.md" }));
+  const menu = await screen.findByRole("menu", { name: "docs/Guide.md" });
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Show in File Explorer" }));
+
+  expect(invoke).toHaveBeenCalledWith("open_checkout_item_in_shell", {
+    checkoutId: alternate, relativePath: "docs/Guide.md", action: "reveal",
+  });
+  expect(views()).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "review.rs" }).getAttribute("aria-current")).toBe("page");
+});
+
+it("opens a folder terminal from the keyboard menu and keeps the root session mounted", async () => {
+  fixture();
+  render(<IdeWorkspace {...propsFor(main)} />);
+  const folder = await screen.findByRole("button", { name: "src" });
+  folder.focus();
+  fireEvent.keyDown(folder, { key: "F10", shiftKey: true });
+  const menu = await screen.findByRole("menu", { name: "Actions for src" });
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Open terminal here" }));
+
+  await waitFor(() => expect(terminalProps).toHaveBeenCalledWith({
+    checkoutId: main, active: true, relativeDirectory: "src", autoStart: true, clearRevision: 0,
+  }));
+  expect(terminalProps).toHaveBeenCalledWith({ checkoutId: main, active: false, clearRevision: 0 });
+  expect((screen.getByRole("combobox", { name: "Terminal directory" }) as HTMLSelectElement).value).toBe("src");
+});
+
+it("creates an empty folder under the clicked parent and refreshes the tree", async () => {
+  fixture();
+  render(<IdeWorkspace {...propsFor(main)} />);
+  fireEvent.contextMenu(await screen.findByRole("button", { name: "src" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "New folder…" }));
+  const dialog = await screen.findByRole("dialog", { name: "New folder" });
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "Name" }), { target: { value: "empty" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Create" }));
+
+  expect(await screen.findByRole("button", { name: "empty" })).toHaveProperty("title", "src/empty");
+  expect(invoke).toHaveBeenCalledWith("create_checkout_item", {
+    checkoutId: main, relativeDirectory: "src", name: "empty", directory: true,
+  });
+});
+
+it("adds the clicked file to the chosen conversation draft and opens the draft", async () => {
+  fixture();
+  const props = propsFor(alternate);
+  render(<IdeWorkspace {...props} />);
+  fireEvent.click(await screen.findByRole("button", { name: "docs" }));
+  fireEvent.contextMenu(await screen.findByRole("button", { name: "Guide.md" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Add to conversation…" }));
+  const dialog = await screen.findByRole("dialog", { name: "Add checkout context" });
+  await within(dialog).findByRole("option", { name: "Code review" });
+  fireEvent.change(within(dialog).getByRole("combobox", { name: "Conversation" }), { target: { value: "review-chat" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Add to draft" }));
+
+  await waitFor(() => expect(props.openWorkspace).toHaveBeenCalledWith("conversations", "review-chat"));
+  expect(invoke).toHaveBeenCalledWith("add_checkout_files_to_conversation", {
+    checkoutId: alternate, conversationId: "review-chat", paths: ["docs/Guide.md"],
+  });
+});
+
 it("exposes the shared Clear terminal control in the active worktree", async () => {
   fixture();
   render(<IdeWorkspace {...propsFor(main)} />);
@@ -126,11 +213,11 @@ it("opens the checkout explorer, shares edits across splits, and prompts only on
   const service = fixture();
   const props = propsFor(main);
   render(<IdeWorkspace {...props} />);
-  const folder = await screen.findByText("src", { selector: "summary" });
-  expect((folder.parentElement as HTMLDetailsElement).open).toBe(false);
+  const folder = await screen.findByRole("button", { name: "src" });
+  expect(folder.getAttribute("aria-expanded")).toBe("false");
   expect(screen.queryByRole("button", { name: "review.rs" })).toBeNull();
   fireEvent.click(folder);
-  fireEvent.click(screen.getByText("docs", { selector: "summary" }));
+  fireEvent.click(screen.getByRole("button", { name: "docs" }));
   const tree = await screen.findByRole("button", { name: "review.rs" });
   fireEvent.click(screen.getByRole("button", { name: "Guide.md" }));
   expect(props.openWorkspace).toHaveBeenCalledWith("knowledge", "docs/Guide.md");
@@ -162,8 +249,8 @@ it("restores source splits and drafts, shows an external conflict, and keeps the
   const props = propsFor(main);
   const first = render(<IdeWorkspace {...props} target="SRC/REVIEW.RS" />);
   const editor = await screen.findByRole("textbox", { name: editorLabel });
-  fireEvent.click(await screen.findByText("src", { selector: "summary" }));
-  const docs = screen.getByText("docs", { selector: "summary" });
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  const docs = screen.getByRole("button", { name: "docs" });
   fireEvent.click(docs);
   fireEvent.click(docs);
   expect(invoke).toHaveBeenCalledWith("open_repository_source_file", { checkoutId: main, path: "SRC/REVIEW.RS" });
@@ -225,7 +312,7 @@ it("reuses the canonical tab in each checkout and discards the last dirty view w
     const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
     expect(editor.value).toBe(original.document.markdown);
     expect(invoke).toHaveBeenCalledWith("open_repository_source_file", { checkoutId, path: "SRC/REVIEW.RS" });
-    fireEvent.click(await screen.findByText("src", { selector: "summary" }));
+    fireEvent.click(await screen.findByRole("button", { name: "src" }));
     const treeRow = await screen.findByRole("button", { name: "review.rs" });
     await act(async () => { fireEvent.click(treeRow); });
     expect(views()).toHaveLength(1);

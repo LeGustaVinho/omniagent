@@ -7,8 +7,11 @@ import {
   FileCaption, FileDialog, FileDock, FileSidebar, FileTree, FileUnavailable,
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
-import { ExampleFileSearch, noteSearchTarget, ProjectFileSearch } from "@/ide-file-search";
-import { exampleNotes, exampleSources, fileName, findFileText, normalizeRepositoryPath } from "@/ide-knowledge-data";
+import { ExampleFileSearch, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget } from "@/ide-file-search";
+import { containingFolder, fileContextActions, readTerminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
+import { useCheckoutTreeActions } from "@/checkout-tree-actions";
+import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
+import { exampleNotes, exampleSources, fileName, findFileText, normalizeRepositoryPath, type FileSearchResult } from "@/ide-knowledge-data";
 import type { CodeModel, CodeProblem } from "@/ide-code-editor";
 import { ResizablePanel } from "@/panel-resize";
 import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
@@ -39,19 +42,32 @@ export default function IdeWorkspace(props: WorkspaceProps) {
 
 function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspace, openChanges, scope }: WorkspaceProps & { scope: string }) {
   const simulated = Boolean(simulation);
-  const firstPath = simulated ? target && !markdownPath(target) ? normalizeRepositoryPath(target) : "src/health.ts" : undefined;
+  const requestedFolder = readFolderSearchTarget(target);
+  const requestedTerminal = readTerminalFolderTarget(target);
+  const firstPath = simulated ? target && requestedFolder === undefined && requestedTerminal === undefined && !markdownPath(target) ? normalizeRepositoryPath(target) : "src/health.ts" : undefined;
   const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "ide", simulated, initialPath: firstPath });
   const source = useRepositorySourceBuffers(checkout.checkoutId, !simulated);
   const { load: loadSource, watch: watchSource, update: updateSource } = source;
   const [sidebar, setSidebar] = useFileSidebar();
-  const [navigator, setNavigator] = useState<"files" | "search">("files");
+  const [navigator, setNavigator] = useState<"files" | "search">(requestedFolder === undefined ? "files" : "search");
+  const [searchFolder, setSearchFolder] = useState(requestedFolder);
+  const [reveal, setReveal] = useState<{ path: string }>();
   const [query, setQuery] = useState("");
   const [examples, setExamples] = useState(() => newBuffers(simulated, simulation?.scenario === "recovery"));
   const files: Record<string, NoteBuffer> = simulated ? examples : source.files;
   const [jumps, setJumps] = useState<Record<string, { line: number; token: number }>>({});
   const [markers, setMarkers] = useState<Record<string, CodeProblem[]>>({});
   const [bottom, setBottom] = useState<"terminal" | "problems" | null>("terminal");
-  const [clearRevision, setClearRevision] = useState(0);
+  const [terminalFolders, setTerminalFolders] = useState<string[]>([""]);
+  const [terminalFolder, setTerminalFolder] = useState("");
+  const [autoStartRoot, setAutoStartRoot] = useState(false);
+  const [clearRevisions, setClearRevisions] = useState<Record<string, number>>({});
+  const openTerminal = useCallback((folder: string) => {
+    setBottom("terminal");
+    setTerminalFolder(folder);
+    if (!folder) setAutoStartRoot(true);
+    setTerminalFolders((previous) => previous.includes(folder) ? previous : [...previous, folder]);
+  }, []);
   const [status, setStatus] = useState(simulation?.scenario === "recovery" ? "Recovered unsaved changes in src/health.ts" : "");
   const [problem, setProblem] = useState("");
   const [dialog, setDialog] = useState<IdeDialog>();
@@ -68,7 +84,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     ...Object.entries(examples).map(([path, value]) => ({ path, content: value.content })),
     ...(simulated ? exampleNotes : []),
   ];
-  const results = findFileText(filesForSearch, query, true);
+  const results = findFileText(searchFolder ? filesForSearch.filter(({ path }) => path.startsWith(`${searchFolder}/`)) : filesForSearch, query, true);
   const paths = simulated ? filesForSearch.map(({ path }) => path)
     : [...new Set([...source.catalog, ...source.draftPaths, ...Object.keys(source.files)])];
   const markerEntries = Object.entries(markers).flatMap(([path, items]) => items.map((item) => ({ path, ...item })));
@@ -91,7 +107,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     }
   }, [files, models]);
 
-  const openFile = useCallback((path: string, line?: number) => {
+  const openFile = useCallback((path: string, line?: number, split = false) => {
     const request = ++openRequest.current;
     if (markdownPath(path)) {
       openWorkspace("knowledge", !simulated && line ? noteSearchTarget(path, line, request) : path);
@@ -99,7 +115,8 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     }
     const focus = (file: string) => {
       if (line !== undefined) setJumps((before) => ({ ...before, [file]: { line, token: (before[file]?.token ?? 0) + 1 } }));
-      dock.open(file);
+      if (split) dock.split(file);
+      else dock.open(file);
     };
     if (simulated) {
       focus(path);
@@ -110,7 +127,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       watchSource(canonical);
       focus(canonical);
     });
-  }, [dock.open, loadSource, openWorkspace, simulated, watchSource]);
+  }, [dock.open, dock.split, loadSource, openWorkspace, simulated, watchSource]);
 
   useEffect(() => {
     if (simulated || !dock.ready || !dock.api) return;
@@ -135,12 +152,22 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
 
   useEffect(() => {
     if (!target || !dock.ready) return;
+    if (requestedTerminal !== undefined) {
+      openTerminal(requestedTerminal);
+      return;
+    }
+    if (requestedFolder !== undefined) {
+      setSidebar(true);
+      setSearchFolder(requestedFolder);
+      setNavigator("search");
+      return;
+    }
     const next = normalizeRepositoryPath(target);
     if (next && next !== lastTarget.current) {
       lastTarget.current = next;
       openFile(next);
     }
-  }, [dock.ready, openFile, target]);
+  }, [dock.ready, openFile, openTerminal, requestedFolder, requestedTerminal, setSidebar, target]);
 
   const update = useCallback((path: string, content: string) => {
     content = editorText(content);
@@ -219,6 +246,24 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     if (!dirty(path) || !dock.api || keepOnlyCleanClose(dock.api, path, api)) closeView(path, api);
     else setDialog({ kind: "close", path, api });
   };
+  const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem });
+  const revealFile = (path: string) => { setSidebar(true); setNavigator("files"); setReveal({ path }); };
+  const treeActions = useCheckoutTreeActions({ checkoutId: checkout.checkoutId, simulated, refresh: source.refreshCatalog, report: setProblem,
+    onCreated: (path, kind) => {
+      setStatus(`Created ${path}`);
+      if (kind === "folder") setReveal({ path });
+      else openFile(path);
+    },
+  });
+  const conversationActions = useCheckoutConversationActions(checkout.checkoutId, simulated, (id) => openWorkspace("conversations", id));
+  const searchActions = ({ path, line, excerpt }: FileSearchResult) => [[
+    { label: "Open at match", run: () => openFile(path, line) },
+    ...(!markdownPath(path) ? [{ label: "Open to the side", run: () => openFile(path, line, true) }] : []),
+    { label: "Reveal in Explorer tree", run: () => revealFile(path) },
+  ], [
+    { label: "Copy line reference", run: () => menu.copy(`${path}:${line}`, "Copied line reference") },
+    { label: "Copy matched text", run: () => menu.copy(excerpt, "Copied matched text") },
+  ]];
   const simulateConflict = () => {
     if (!active || !buffer) return;
     const incoming = buffer.external ?? `// Revision ${Number(buffer.revision) + 1} from an external editor\n${buffer.saved}`;
@@ -237,16 +282,30 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
         <div className="file-sidebar-heading"><FolderTree size={16} /><h2>Explorer</h2>
           <div className="file-toolbar">
             <button type="button" className="fw-icon" title="Files" aria-label="Files" aria-pressed={navigator === "files"} onClick={() => setNavigator("files")}><Files size={15} /></button>
-            <button type="button" className="fw-icon" title="Search" aria-label="Search" aria-pressed={navigator === "search"} onClick={() => setNavigator("search")}><FileSearch2 size={15} /></button>
+            <button type="button" className="fw-icon" title="Search" aria-label="Search" aria-pressed={navigator === "search"}
+              onClick={() => { setSearchFolder(undefined); setNavigator("search"); }}><FileSearch2 size={15} /></button>
           </div>
         </div>
         <div className="file-sidebar-scroll">
           {navigator === "search" ? (simulated
-            ? <ExampleFileSearch query={query} setQuery={setQuery} results={results} onOpen={openFile} />
-            : <ProjectFileSearch checkoutId={checkout.checkoutId} onOpen={openFile} />)
+            ? <ExampleFileSearch query={query} setQuery={setQuery} results={results} onOpen={openFile} actions={searchActions} />
+            : <ProjectFileSearch checkoutId={checkout.checkoutId} folder={searchFolder} onOpen={openFile} actions={searchActions} />)
             : <><p className="file-sidebar-note" title={simulated ? undefined : checkout.checkoutRoot}>
               {simulated ? "EXAMPLE WORKTREE" : fileName(checkout.checkoutRoot.replaceAll("\\", "/"))}</p>
-              <FileTree paths={paths} active={active} onOpen={openFile} checkoutId={checkout.checkoutId} workspace="ide" simulated={simulated} /></>}
+              <FileTree paths={paths} folders={treeActions.folders} active={active} onOpen={openFile} checkoutId={checkout.checkoutId} workspace="ide" simulated={simulated} reveal={reveal} actions={(target) => [
+                ...treeActions.actions(target),
+                ...(target.kind !== "file" ? [[{ label: "Find in folder", run: () => {
+                  setSearchFolder(target.path); setNavigator("search");
+                } }]] : []),
+                ...(target.kind === "file" ? [[
+                  { label: "Open", run: () => openFile(target.path) },
+                  ...(!markdownPath(target.path) ? [{ label: "Open to the side", run: () => openFile(target.path, undefined, true) }] : []),
+                  ...(!simulated ? [{ label: "Open working diff", run: () => openWorkspace("git", workingDiffTarget(target.path)) }] : []),
+                ]] : []),
+                ...(!simulated ? [[{ label: "Open terminal here", run: () => openTerminal(target.kind === "file" ? containingFolder(target.path) : target.path) }]] : []),
+                ...menu.location(target),
+                ...conversationActions.actions(target),
+              ]} /></>}
         </div>
       </FileSidebar>}
       <div className="file-workspace-main">
@@ -288,6 +347,16 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
               onSimulate={simulated ? undefined : () => startSimulation()} />,
             dirty,
             requestClose,
+            tabActions: (path, view, api) => [[
+              { label: "Save", disabled: !dirty(path), run: () => { void save(path); } },
+              ...(files[path]?.external !== undefined ? [{ label: "Review external change", run: () => setDialog({ kind: "conflict", path }) }] : []),
+              { label: "Split right", run: () => dock.split(path, view, "right", api.id) },
+              { label: "Split down", run: () => dock.split(path, view, "below", api.id) },
+              { label: "Reveal in Explorer tree", run: () => revealFile(path) },
+              ...(!simulated ? [{ label: "Open working diff", run: () => openWorkspace("git", workingDiffTarget(path)) }] : []),
+            ], ...menu.location({ kind: "file", path }), ...conversationActions.actions({ kind: "file", path }), [
+              { label: "Close tab", run: () => requestClose(path, api) },
+            ]],
           }} />
         </div>
 
@@ -295,16 +364,28 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
           <div className="ide-bottom-toolbar">
             <button type="button" className="fw-btn" aria-pressed={bottom === "terminal"} onClick={() => setBottom("terminal")}><TerminalSquare size={14} /> Terminal</button>
             <button type="button" className="fw-btn" aria-pressed={bottom === "problems"} onClick={() => setBottom("problems")}><CircleAlert size={14} /> Problems{markerEntries.length ? ` (${markerEntries.length})` : ""}</button>
+            {bottom === "terminal" && !simulated && terminalFolders.length > 1 && <>
+              <select aria-label="Terminal directory" className="delivery-filter" value={terminalFolder} onChange={(event) => setTerminalFolder(event.currentTarget.value)}>
+                {terminalFolders.map((folder) => <option key={folder} value={folder}>{folder || "Checkout root"}</option>)}
+              </select>
+              {terminalFolder && <button type="button" className="fw-btn" onClick={() => {
+                setTerminalFolders((previous) => previous.filter((folder) => folder !== terminalFolder));
+                setTerminalFolder("");
+              }}>Close folder terminal</button>}
+            </>}
             <div className="file-toolbar">
               <button type="button" className="fw-icon" title="Clear terminal" aria-label="Clear terminal" disabled={bottom !== "terminal"}
-                onClick={() => setClearRevision((value) => value + 1)}><Trash2 size={14} /></button>
+                onClick={() => setClearRevisions((previous) => ({ ...previous, [terminalFolder]: (previous[terminalFolder] ?? 0) + 1 }))}><Trash2 size={14} /></button>
             </div>
           </div>
           <div className="ide-bottom-body">
             <div className="ide-terminal-container" hidden={bottom !== "terminal"}>
               <Suspense fallback={<p className="file-help">Loading terminal…</p>}>
-                {simulated ? <Terminal clearRevision={clearRevision} />
-                  : <WorktreeTerminal checkoutId={checkout.checkoutId} active={bottom === "terminal"} clearRevision={clearRevision} />}
+                {simulated ? <Terminal clearRevision={clearRevisions[""] ?? 0} />
+                  : terminalFolders.map((folder) => <div key={folder} className="h-full min-h-0" hidden={folder !== terminalFolder}>
+                    <WorktreeTerminal checkoutId={checkout.checkoutId} active={bottom === "terminal" && folder === terminalFolder}
+                      clearRevision={clearRevisions[folder] ?? 0} {...(folder ? { relativeDirectory: folder, autoStart: true } : autoStartRoot ? { autoStart: true } : {})} />
+                  </div>)}
               </Suspense>
             </div>
             {bottom === "problems" && <ul className="ide-problems">
@@ -326,6 +407,8 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
         </footer>}
       </div>
 
+      {treeActions.dialog}
+      {conversationActions.dialog}
       {dialog?.kind === "close" && <FileDialog title="Save changes?" description={`${dialog.path} has unsaved changes.`} onClose={() => setDialog(undefined)}>
         <div className="file-dialog-footer">
           <button type="button" className="fw-btn" onClick={() => setDialog(undefined)}>Cancel</button>

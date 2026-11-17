@@ -122,6 +122,7 @@ async fn open_terminal(
         .start(
             store,
             checkout_id,
+            None,
             terminal_size(100, 28)?,
             None,
             move |notice| send.send(notice).is_ok(),
@@ -188,6 +189,7 @@ async fn powershell_uses_the_verified_worktree_and_streams_input_output_resize_a
             .start(
                 &store,
                 "unknown-checkout".into(),
+                None,
                 terminal_size(80, 24)?,
                 None,
                 |_| false

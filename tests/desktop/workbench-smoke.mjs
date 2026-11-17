@@ -429,7 +429,7 @@ async function checkSimulation(browser, checkout) {
 
   await click(browser, 'button[aria-label="IDE"]');
   const ide = browser.$(shown);
-  if (!await ide.$('details[open] > summary[title="src"]').isExisting()) await click(ide, 'summary[title="src"]');
+  if (!await ide.$('button[aria-expanded="true"][title="src"]').isExisting()) await click(ide, 'button[title="src"][aria-expanded]');
   await click(ide, "button=index.ts");
   await ide.$(".monaco-editor").waitForDisplayed();
   const bottom = ide.$('button[aria-label="Toggle bottom panel"]');

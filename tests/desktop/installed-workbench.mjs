@@ -55,8 +55,8 @@ async function splitFiles(browser, paths, workspace, split) {
     const folders = path.split("/").slice(0, -1);
     for (let depth = 1; depth <= folders.length; depth += 1) {
       const folder = JSON.stringify(folders.slice(0, depth).join("/"));
-      if (!await dock.$(`details[open] > summary[title=${folder}]`).isExisting()) {
-        await click(dock, `summary[title=${folder}]`);
+      if (!await dock.$(`button[aria-expanded="true"][title=${folder}]`).isExisting()) {
+        await click(dock, `button[title=${folder}][aria-expanded]`);
       }
     }
     await click(dock, `button.file-tree-row[title=${JSON.stringify(path)}]`);

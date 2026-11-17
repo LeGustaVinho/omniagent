@@ -72,10 +72,54 @@ impl Store {
                 .collect::<Result<Vec<_>>>()
         })
         .await??;
+        self.add_conversation_attachment_sources(conversation_id, conversation.checkout_id, sources)
+            .await
+    }
+
+    pub async fn add_conversation_checkout_paths(
+        &self,
+        conversation_id: String,
+        checkout_id: String,
+        paths: Vec<String>,
+    ) -> Result<AttachmentDraft> {
+        ensure!(!paths.is_empty(), "Select at least one checkout file.");
+        let conversation = self.conversation(conversation_id.clone()).await?;
+        ensure!(
+            conversation.checkout_id == checkout_id,
+            "The conversation belongs to another checkout."
+        );
+        let checkout = repository::checkout_root(self, checkout_id.clone()).await?;
+        let layout = repository::verify_checkout(self, checkout_id.clone(), checkout).await?;
+        let sources = tokio::task::spawn_blocking(move || {
+            paths
+                .iter()
+                .map(|relative| {
+                    let path =
+                        repository::checkout_items::checkout_regular_file(&layout.root, relative)?;
+                    let source = selected_source(&layout.root, &path)?;
+                    ensure!(
+                        matches!(source, AttachmentSource::Checkout { .. }),
+                        "The selected file left the checkout."
+                    );
+                    Ok(source)
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .await??;
+        self.add_conversation_attachment_sources(conversation_id, checkout_id, sources)
+            .await
+    }
+
+    async fn add_conversation_attachment_sources(
+        &self,
+        conversation_id: String,
+        checkout_id: String,
+        sources: Vec<AttachmentSource>,
+    ) -> Result<AttachmentDraft> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             ensure!(
-                load_conversation(&tx, &conversation_id)?.checkout_id == conversation.checkout_id,
+                load_conversation(&tx, &conversation_id)?.checkout_id == checkout_id,
                 "The conversation checkout changed. Select the files again."
             );
             let draft = load_draft(&tx, &conversation_id)?;

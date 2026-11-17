@@ -9,7 +9,10 @@ import {
   FileCaption, FileDialog, FileDock, FileSidebar, FileTree, FileUnavailable,
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
-import { readNoteSearchTarget } from "@/ide-file-search";
+import { folderSearchTarget, readNoteSearchTarget } from "@/ide-file-search";
+import { containingFolder, fileContextActions, terminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
+import { useCheckoutTreeActions } from "@/checkout-tree-actions";
+import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { deliveryNote, exampleNotes, fileName, findFileText, normalizeRepositoryPath, type ExampleFile } from "@/ide-knowledge-data";
 import {
   anchorLine, getProperties, headings, parseReadingAddress, readingLocalAddress, repairWikiAddress, resolveWiki, rewriteNoteReferences,
@@ -94,6 +97,7 @@ export default function KnowledgeWorkspace(props: WorkspaceProps) {
 
 function KnowledgeSurface({ checkout, target, simulation, startSimulation, openWorkspace }: WorkspaceProps) {
   const simulated = Boolean(simulation);
+  const [reveal, setReveal] = useState<{ path: string }>();
   const initialTarget = target ? readNoteSearchTarget(target) : undefined;
   const initialPath = initialTarget ? normalizeRepositoryPath(initialTarget.path) : simulated ? deliveryNote : undefined;
   const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "knowledge", simulated, initialPath: simulated ? initialPath : undefined });
@@ -205,11 +209,21 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     label: link.label ?? undefined,
   }));
 
-  const open = useCallback((path: string, line?: number, anchor?: string) => {
+  const open = useCallback((path: string, line?: number, anchor?: string, presentation?: NoteMode | "side") => {
     const focus = (file: string, targetLine?: number) => {
       if (targetLine || anchor) setJumps((before) => ({ ...before, [file]: { line: targetLine, anchor, token: (before[file]?.token ?? 0) + 1 } }));
       setGraph(false);
-      dock.open(file);
+      if (presentation === "side") {
+        if (mode === "reading") setEditAlongsideReading((before) => new Set(before).add(file));
+        dock.split(file, "reading");
+      }
+      else {
+        if (presentation) {
+          setMode(presentation);
+          setEditAlongsideReading(new Set());
+        }
+        dock.open(file);
+      }
     };
     if (simulated) { focus(path, line); return; }
     const request = ++lastOpen.current;
@@ -219,7 +233,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       focus(file, anchorTarget ?? line);
       watchNote(file);
     });
-  }, [dock.open, getNote, loadNote, simulated, watchNote]);
+  }, [dock.open, dock.split, getNote, loadNote, mode, simulated, watchNote]);
 
   useEffect(() => {
     if (simulated || !dock.ready || !active) return;
@@ -318,6 +332,63 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const closeDialog = () => { setDialog(undefined); setProblem(""); };
 
   const reviewExternalChange = (path: string, external: string) => setDialog({ kind: "conflict", path, external });
+
+  const requestRename = async (path: string) => {
+    if (simulated) {
+      setDestination(path);
+      setDialog({ kind: "rename", path });
+      return;
+    }
+    const canonical = await loadNote(path);
+    if (!canonical) return;
+    const current = getNote(canonical);
+    if (!current || isDirty(current) || current.sourceProblem) {
+      setProblem("Save the note and resolve external changes before renaming it.");
+      return;
+    }
+    setDialog({ kind: "repositoryRename", path: canonical, revision: current.base.id });
+  };
+
+  const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem });
+  const treeActions = useCheckoutTreeActions({ checkoutId: checkout.checkoutId, simulated, knowledge: true, report: setProblem,
+    refresh: () => Promise.all([repository.refreshCatalog(), noteIndex.index.refetch({ throwOnError: true })]),
+    onCreated: (path, kind) => {
+      setStatus(`Created ${path}`);
+      if (kind === "folder") setReveal({ path });
+      else open(path);
+    },
+  });
+  const conversationActions = useCheckoutConversationActions(checkout.checkoutId, simulated, (id) => openWorkspace("conversations", id));
+  const startFromSavedNote = (path: string, kind: "plan" | "launch") => {
+    void loadNote(path).then((canonical) => {
+      const selected = canonical ? getNote(canonical) : undefined;
+      if (selected && !selected.sourceProblem && !isDirty(selected)) setDialog({ kind, source: selected.base });
+      else setProblem("Save the note and resolve external changes before using its revision.");
+    });
+  };
+  const noteMenu = (path: string) => {
+    const external = notes[path]?.external;
+    return [[
+      { label: "Open", run: () => open(path) },
+      { label: "Open to the side", run: () => open(path, undefined, undefined, "side") },
+      { label: "Open as", items: [
+        { label: "Source", run: () => open(path, undefined, undefined, "source") },
+        { label: "Live Preview", run: () => open(path, undefined, undefined, "live") },
+        { label: "Reading", run: () => open(path, undefined, undefined, "reading") },
+      ] },
+    ], [
+      { label: "Rename note…", disabled: !simulated && isDirty(notes[path]), run: () => { void requestRename(path); } },
+      { label: "Copy wikilink", run: () => menu.copy(`[[${path}]]`, "Copied wikilink") },
+      { label: "Show backlinks and outgoing links", run: () => { setInspector("links"); open(path); } },
+      ...(!simulated ? [{ label: "Open working diff", run: () => openWorkspace("git", workingDiffTarget(path)) }] : []),
+      ...(external === undefined ? [] : [{ label: "Review external change", run: () => reviewExternalChange(path, external) }]),
+    ], [
+      ...(!simulated ? [
+        { label: "Plan from note…", disabled: isDirty(notes[path]), run: () => startFromSavedNote(path, "plan") },
+        { label: "Run workflow from note…", disabled: isDirty(notes[path]), run: () => startFromSavedNote(path, "launch") },
+      ] : []),
+    ]];
+  };
 
   const navigateLocation = ({ path, anchor }: NoteLocation) => {
     const targetSource = notes[path]?.content ?? "";
@@ -436,8 +507,14 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           {display === "search" ? <KnowledgeSearch query={query} onQueryChange={setQuery} results={matches}
             pending={!simulated && noteIndex.searching} error={!simulated && noteIndex.error ? String(noteIndex.error) : undefined}
             focusRequest={focusSearch} onOpen={openLocation} />
-            : <FileTree paths={catalog.map(({ path }) => path)} active={active} onOpen={open}
-              checkoutId={checkout.checkoutId} workspace="knowledge" simulated={simulated} />}
+            : <FileTree paths={catalog.map(({ path }) => path)} folders={treeActions.folders} active={active} onOpen={open} checkoutId={checkout.checkoutId} workspace="knowledge" simulated={simulated} reveal={reveal} actions={(item) => [
+              ...treeActions.actions(item),
+              ...(item.kind === "file" ? noteMenu(item.path) : []),
+              ...(item.kind !== "file" ? [[{ label: "Find in folder", run: () => openWorkspace("ide", folderSearchTarget(item.path)) }]] : []),
+              ...(!simulated ? [[{ label: "Open terminal here", run: () => openWorkspace("ide", terminalFolderTarget(item.kind === "file" ? containingFolder(item.path) : item.path)) }]] : []),
+              ...menu.location(item),
+              ...conversationActions.actions(item),
+            ]} />}
         </div>
       </FileSidebar>}
       <div className="file-workspace-main">
@@ -478,16 +555,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
               }}><SplitSquareHorizontal size={15} /></button>
             <button type="button" className="fw-icon" title="Rename note" aria-label="Rename note"
               disabled={!note || (!simulated && (isDirty(note) || Boolean(active && repository.notes[active]?.sourceProblem)))}
-              onClick={() => {
-                if (!active) return;
-                if (simulated) {
-                  setDestination(active);
-                  setDialog({ kind: "rename", path: active });
-                } else {
-                  const revision = getNote(active)?.base.id;
-                  if (revision) setDialog({ kind: "repositoryRename", path: active, revision });
-                }
-              }}><FilePenLine size={15} /></button>
+              onClick={() => { if (active) void requestRename(active); }}><FilePenLine size={15} /></button>
           </div>
         </div>}
         <div className="note-body">
@@ -531,6 +599,14 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                 onSimulate={simulated ? undefined : () => startSimulation()} />,
               dirty: (path) => isDirty(notes[path]),
               requestClose: close,
+              tabActions: (path, view, api) => [[
+                { label: "Save", disabled: !isDirty(notes[path]), run: () => { void save(path); } },
+                { label: "Split right", run: () => dock.split(path, view, "right", api.id) },
+                { label: "Split down", run: () => dock.split(path, view, "below", api.id) },
+                { label: "Reveal in note tree", run: () => { setSidebar(true); setDisplay("tree"); setReveal({ path }); } },
+              ], ...noteMenu(path).slice(1), ...menu.location({ kind: "file", path }), ...conversationActions.actions({ kind: "file", path }), [
+                { label: "Close tab", run: () => close(path, api) },
+              ]],
             }} />
           </div>
           {graph && <div className="note-graph-host">
@@ -625,6 +701,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           <button type="button" className="fw-btn" onClick={() => { closeDialog(); openWorkspace("tasks", id); }}>{title}</button>
         </li>)}</ul>
       </FileDialog>}
+      {treeActions.dialog}
+      {conversationActions.dialog}
       {dialog?.kind === "launch" && <FileDialog title="Run workflow from note" description={dialog.source.relativePath} onClose={closeDialog}>
         <WorkflowLaunchPicker projectId={checkout.projectId} checkoutId={dialog.source.checkoutId}
           pinnedDocumentRevisionId={dialog.source.id} openWorkspace={(workspace, target) => {

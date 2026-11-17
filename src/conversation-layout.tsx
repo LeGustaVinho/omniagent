@@ -3,6 +3,7 @@ import { Dialog } from "radix-ui";
 import type { KeyboardEventHandler, ReactNode, Ref, UIEventHandler } from "react";
 import type { MessageRole } from "@/bindings/MessageRole";
 import { ResizablePanel } from "@/panel-resize";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import "./conversation.css";
 
 export function ConversationWorkspaceLayout({ navigation, controls, children }: {
@@ -116,15 +117,18 @@ export function ConversationTranscript({ historyRef, contentRef, onScroll, child
   </div>;
 }
 
-export function ConversationMessage({ role, actions, children }: {
+export function ConversationMessage({ role, actions, menu = [], children }: {
   role: MessageRole;
   actions: ReactNode;
+  menu?: MenuGroups;
   children: ReactNode;
 }) {
   return <li className={role === "user" ? "conv-user" : "conv-assistant"}>
     <p className="sr-only">{role === "user" ? "You" : "Assistant"}</p>
-    {children}
-    <div className="conv-message-actions">{actions}</div>
+    <ContextActions label={role === "user" ? "your message" : "assistant message"} groups={menu} className="conv-message-context">
+      {children}
+      <div className="conv-message-actions">{actions}</div>
+    </ContextActions>
   </li>;
 }
 

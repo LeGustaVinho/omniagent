@@ -3,9 +3,10 @@ import {
   DockviewReact, themeDark, themeLight, type DockviewApi, type DockviewReadyEvent,
   type IDockviewPanelHeaderProps, type IDockviewPanelProps, type SerializedDockview,
 } from "dockview-react";
-import { FileCode2, FileText, Folder, FolderOpen, PanelLeftClose, X } from "lucide-react";
+import { FileCode2, FileText, Folder, FolderOpen, FolderTree, PanelLeftClose, Pin, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Dialog } from "radix-ui";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { fileName } from "@/ide-knowledge-data";
 import { ResizablePanel } from "@/panel-resize";
 import "dockview/dist/styles/dockview.css";
@@ -25,6 +26,7 @@ export interface FileDockContextValue {
   empty: ReactNode;
   dirty: (path: string) => boolean;
   requestClose: (path: string, api: FilePanelApi) => void;
+  tabActions: (path: string, view: FileView, api: FilePanelApi) => MenuGroups;
 }
 
 const FileDockContext = createContext<FileDockContextValue | null>(null);
@@ -36,13 +38,34 @@ function FileDockPanel({ params }: IDockviewPanelProps<FilePanelParams>) {
 function FileDockTab({ params, api }: IDockviewPanelHeaderProps<FilePanelParams>) {
   const context = useContext(FileDockContext);
   const title = fileName(params.path) + (params.view === "reading" ? " · Reading" : "");
+  const [pinned, setPinned] = useState(api.isPinned);
+  useEffect(() => {
+    const change = api.onDidChangePinned(({ isPinned }) => setPinned(isPinned));
+    return () => change.dispose();
+  }, [api]);
+  const cleanTabs = api.group.panels.filter((panel) => {
+    const item = panel.params as FilePanelParams | undefined;
+    return panel.id !== api.id && !panel.api.isPinned && item && !context?.dirty(item.path);
+  });
   return (
-    <div className="file-tab-label" title={params.path}>
+    <ContextActions label={title} className="file-tab-label" title={params.path} groups={[
+      ...(context?.tabActions(params.path, params.view, api) ?? []),
+      [
+        { label: pinned ? "Unpin tab" : "Pin tab", run: () => api.setPinned(!api.isPinned) },
+        { label: "Close other saved tabs in group", disabled: !cleanTabs.length, run: () => {
+          for (const panel of cleanTabs) {
+            const item = panel.params as FilePanelParams;
+            if (!panel.api.isPinned && !context?.dirty(item.path)) context?.requestClose(item.path, panel.api);
+          }
+        } },
+      ],
+    ]} stopPointerDown>
+      {pinned && <Pin size={12} aria-label="Pinned" />}
       <span>{title}</span>
       {params.view === "editor" && context?.dirty(params.path) && <i aria-label="Unsaved changes" />}
       <button type="button" aria-label={`Close ${title}`} onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => { event.stopPropagation(); context?.requestClose(params.path, api); }}><X size={13} /></button>
-    </div>
+    </ContextActions>
   );
 }
 
@@ -67,7 +90,7 @@ export function FileDock({ context, onReady }: { context: FileDockContextValue; 
       <DockviewReact className="file-dock" theme={light ? themeLight : themeDark}
         components={filePanelComponents} onReady={onReady}
         watermarkComponent={FileDockEmpty} defaultTabComponent={FileDockTab}
-        getTabContextMenuItems={() => []} disableFloatingGroups />
+        getTabContextMenuItems={() => []} pinnedTabs={{ enabled: true }} disableFloatingGroups />
     </FileDockContext.Provider>
   );
 }
@@ -82,16 +105,17 @@ export function focusFile(dock: DockviewApi, path: string, view: FileView = "edi
   }
 }
 
-export function splitFile(dock: DockviewApi, path: string, view: FileView = "editor") {
-  const active = dock.activePanel;
-  if (!active) return;
-  const id = view === "reading" ? `reading:${path}` : `split:${path}`;
+export function splitFile(dock: DockviewApi, path: string, view: FileView = "editor", direction: "right" | "below" = "right", reference?: string) {
+  const active = reference ? dock.getPanel(reference) : dock.activePanel;
+  if (!active) { focusFile(dock, path, view); return; }
+  const id = view === "reading" ? `reading:${path}` : direction === "below" ? `split-below:${path}` : `split:${path}`;
   const existing = dock.getPanel(id);
   if (existing) {
     existing.api.setActive();
     return;
   }
-  dock.addPanel({ id, component: "file", params: { path, view }, title: fileName(path), position: { referencePanel: active.id, direction: "right" } });
+  dock.addPanel({ id, component: "file", params: { path, view }, title: fileName(path),
+    position: { referencePanel: active.id, direction } });
 }
 
 export function keepOnlyCleanClose(dock: DockviewApi, path: string, api: FilePanelApi) {
@@ -171,7 +195,9 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
   }, [api, checkoutId, simulated, workspace]);
 
   const open = useCallback((file: string) => { if (api && ready) focusFile(api, file); }, [api, ready]);
-  const split = useCallback((file: string, view?: FileView) => { if (api && ready) splitFile(api, file, view); }, [api, ready]);
+  const split = useCallback((file: string, view?: FileView, direction?: "right" | "below", reference?: string) => {
+    if (api && ready) splitFile(api, file, view, direction, reference);
+  }, [api, ready]);
 
   return { api, error, onReady, open, path: file?.path, view: file?.view, ready, split };
 }
@@ -181,50 +207,71 @@ interface FolderNodeData {
   files: string[];
 }
 
-function makeTree(paths: readonly string[]): FolderNodeData {
+function makeTree(paths: readonly string[], folders: readonly string[]): FolderNodeData {
   const root: FolderNodeData = { folders: new Map(), files: [] };
-  for (const path of [...paths].sort((left, right) => left.localeCompare(right))) {
-    const parts = path.split("/");
+  const folderAt = (parts: string[]) => {
     let node = root;
-    for (const name of parts.slice(0, -1)) {
+    for (const name of parts) {
       const folder = node.folders.get(name) ?? { folders: new Map(), files: [] };
       node.folders.set(name, folder);
       node = folder;
     }
-    node.files.push(path);
+    return node;
+  };
+  for (const folder of [...folders].sort((left, right) => left.localeCompare(right))) folderAt(folder.split("/"));
+  for (const path of [...paths].sort((left, right) => left.localeCompare(right))) {
+    folderAt(path.split("/").slice(0, -1)).files.push(path);
   }
   return root;
 }
 
-interface FileTreeState {
+export type FileTreeTarget = { kind: "file" | "folder" | "root"; path: string };
+
+interface TreeRows {
   active?: string;
-  expanded: ReadonlySet<string>;
-  toggleFolder: (path: string) => void;
   onOpen: (path: string) => void;
+  actions: (target: FileTreeTarget) => MenuGroups;
+  expanded: ReadonlySet<string>;
+  toggle: (path: string) => void;
+  setSubtree: (path: string, collapse: boolean) => void;
 }
 
-function FolderBranch({ tree, parent, ...state }: { tree: FolderNodeData; parent: string } & FileTreeState) {
+function folderPaths(tree: FolderNodeData, parent = ""): string[] {
+  return [...tree.folders].flatMap(([name, folder]) => {
+    const path = parent ? `${parent}/${name}` : name;
+    return [path, ...folderPaths(folder, path)];
+  });
+}
+
+function FolderBranch({ tree, parent, rows }: { tree: FolderNodeData; parent: string; rows: TreeRows }) {
   return (
     <ul className="file-tree">
       {[...tree.folders].map(([name, folder]) => {
         const path = parent ? `${parent}/${name}` : name;
-        const open = state.expanded.has(path);
-        const Icon = open ? FolderOpen : Folder;
+        const expanded = rows.expanded.has(path);
+        const Icon = expanded ? FolderOpen : Folder;
         return <li key={name}>
-          <details open={open}>
-            <summary title={path} onClick={(event) => { event.preventDefault(); state.toggleFolder(path); }}><Icon size={15} />{name}</summary>
-            {open && <FolderBranch tree={folder} parent={path} {...state} />}
-          </details>
+          <ContextActions label={path} groups={[...rows.actions({ kind: "folder", path }), [
+            { label: "Expand folder tree", run: () => rows.setSubtree(path, false) },
+            { label: "Collapse folder tree", run: () => rows.setSubtree(path, true) },
+          ]]}>
+            <button type="button" className="file-tree-row" aria-expanded={expanded} title={path} onClick={() => rows.toggle(path)}>
+              <Icon size={15} /><span>{name}</span>
+            </button>
+          </ContextActions>
+          {expanded && <FolderBranch tree={folder} parent={path} rows={rows} />}
         </li>;
       })}
       {tree.files.map((path) => {
         const Icon = path.endsWith(".md") ? FileText : FileCode2;
         return (
           <li key={path}>
-            <button type="button" className="file-tree-row" aria-current={state.active === path ? "page" : undefined}
-              title={path} onClick={() => state.onOpen(path)}>
-              <Icon size={15} /> <span>{fileName(path)}</span>
-            </button>
+            <ContextActions label={path} groups={rows.actions({ kind: "file", path })}>
+              <button type="button" className="file-tree-row" aria-current={rows.active === path ? "page" : undefined}
+                title={path} onClick={() => rows.onOpen(path)}>
+                <Icon size={15} /> <span>{fileName(path)}</span>
+              </button>
+            </ContextActions>
           </li>
         );
       })}
@@ -232,36 +279,70 @@ function FolderBranch({ tree, parent, ...state }: { tree: FolderNodeData; parent
   );
 }
 
-export function FileTree({ paths, active, onOpen, checkoutId, workspace, simulated }: {
+export function FileTree({ paths, folders = [], active, onOpen, actions, reveal, checkoutId, workspace, simulated }: {
   paths: readonly string[];
+  folders?: readonly string[];
   active?: string;
   onOpen: (path: string) => void;
+  actions: TreeRows["actions"];
+  reveal?: { path: string };
   checkoutId: string;
   workspace: "ide" | "knowledge";
   simulated: boolean;
 }) {
+  const tree = makeTree(paths, folders);
   const storageKey = `omniagent:file-tree:${workspace}:${simulated ? "example" : encodeURIComponent(checkoutId)}`;
-  return <PersistentFolderTree key={storageKey} storageKey={storageKey} tree={makeTree(paths)} active={active} onOpen={onOpen} />;
+  return <PersistentFolderTree key={storageKey} {...{ tree, active, onOpen, actions, reveal, storageKey }} />;
 }
 
-function PersistentFolderTree({ storageKey, ...props }: { storageKey: string; tree: FolderNodeData } & Pick<FileTreeState, "active" | "onOpen">) {
+function PersistentFolderTree({ tree, active, onOpen, actions, reveal, storageKey }: {
+  tree: FolderNodeData; reveal?: { path: string }; storageKey: string;
+} & Pick<TreeRows, "active" | "onOpen" | "actions">) {
   const [expanded, setExpanded] = useState(() => {
     try {
       const saved: unknown = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
-      if (Array.isArray(saved)) return new Set<string>(saved.filter((path): path is string => typeof path === "string"));
+      if (Array.isArray(saved)) return new Set<string>(saved.filter((path) => typeof path === "string"));
     } catch { /* Use the default when storage is unavailable. */ }
     return new Set<string>();
   });
-  const toggleFolder = (path: string) => {
-    const next = new Set(expanded);
-    if (next.has(path)) next.delete(path);
-    else next.add(path);
-    setExpanded(next);
-    try {
-      localStorage.setItem(storageKey, JSON.stringify([...next]));
-    } catch { /* Keep the in-memory state when storage is unavailable. */ }
-  };
-  return <FolderBranch {...props} parent="" expanded={expanded} toggleFolder={toggleFolder} />;
+  const container = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    try { localStorage.setItem(storageKey, JSON.stringify([...expanded])); }
+    catch { /* Keep the in-memory state when storage is unavailable. */ }
+  }, [expanded, storageKey]);
+  useEffect(() => {
+    if (!reveal) return;
+    const path = reveal.path;
+    const parents = path.split("/").slice(0, -1).map((_, index, parts) => parts.slice(0, index + 1).join("/"));
+    setExpanded((previous) => new Set([...previous, ...parents]));
+    const frame = requestAnimationFrame(() => {
+      const button = [...(container.current?.querySelectorAll<HTMLButtonElement>(".file-tree-row") ?? [])]
+        .find((item) => item.title === path);
+      button?.focus();
+      button?.scrollIntoView?.({ block: "nearest" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [reveal]);
+  function setSubtree(path: string, collapse: boolean) {
+    const selected = new Set(folderPaths(tree).filter((folder) => !path || folder === path || folder.startsWith(`${path}/`)));
+    setExpanded((previous) => collapse ? new Set([...previous].filter((folder) => !selected.has(folder)))
+      : new Set([...previous, ...selected]));
+  }
+  return <div ref={container} className="file-explorer-tree">
+    <ContextActions label="Checkout root" className="file-tree-root" groups={[...actions({ kind: "root", path: "" }), [
+      { label: "Expand all folders", run: () => setSubtree("", false) },
+      { label: "Collapse all folders", run: () => setSubtree("", true) },
+    ]]}>
+      <button type="button" className="file-tree-row" onClick={(event) => event.currentTarget.focus()}>
+        <FolderTree size={15} /><span>Checkout root</span>
+      </button>
+    </ContextActions>
+    <FolderBranch tree={tree} parent="" rows={{ active, onOpen, actions, expanded, setSubtree, toggle: (path) => setExpanded((previous) => {
+      const next = new Set(previous);
+      if (!next.delete(path)) next.add(path);
+      return next;
+    }) }} />
+  </div>;
 }
 
 export function FileCaption({ path, revision }: { path: string; revision: number | string }) {

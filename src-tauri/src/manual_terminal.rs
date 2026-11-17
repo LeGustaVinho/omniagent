@@ -17,7 +17,7 @@ use omniagent::{
     diagnostics,
     jobs::{ExternalWork, JobScheduler},
     process::create_job,
-    repository::{checkout_root, verify_checkout},
+    repository::{checkout_items::checkout_directory, checkout_root, verify_checkout},
     store::Store,
 };
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -137,6 +137,7 @@ impl ManualTerminals {
         &self,
         store: &Store,
         checkout_id: String,
+        relative_directory: Option<String>,
         size: PtySize,
         work: Option<ExternalWork>,
         send: impl Fn(ManualTerminalEvent) -> bool + Send + Sync + 'static,
@@ -145,7 +146,9 @@ impl ManualTerminals {
         let layout = verify_checkout(store, checkout_id.clone(), root).await?;
         let sessions = self.0.clone();
         tokio::task::spawn_blocking(move || {
-            launch(&sessions, checkout_id, &layout.root, size, work, send)
+            let directory =
+                checkout_directory(&layout.root, relative_directory.as_deref().unwrap_or(""))?;
+            launch(&sessions, checkout_id, &directory, size, work, send)
         })
         .await?
     }
@@ -372,6 +375,7 @@ pub async fn start_manual_terminal(
     terminals: State<'_, ManualTerminals>,
     scheduler: State<'_, JobScheduler>,
     checkout_id: String,
+    relative_directory: Option<String>,
     cols: u16,
     rows: u16,
     channel: Channel<ManualTerminalEvent>,
@@ -379,9 +383,14 @@ pub async fn start_manual_terminal(
     let size = terminal_size(cols, rows).map_err(report)?;
     let work = scheduler.admit_external_work().await.map_err(report)?;
     terminals
-        .start(&store, checkout_id, size, Some(work), move |event| {
-            channel.send(event).is_ok()
-        })
+        .start(
+            &store,
+            checkout_id,
+            relative_directory,
+            size,
+            Some(work),
+            move |event| channel.send(event).is_ok(),
+        )
         .await
         .map_err(report)
 }

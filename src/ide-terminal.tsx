@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { ContextActions } from "@/components/ui/context-actions";
 import "@xterm/xterm/css/xterm.css";
 
 const responses: Record<string, string[]> = {
@@ -101,9 +102,11 @@ type TerminalState = {
 };
 type TerminalAttachment = { terminal: Terminal; layout: (focus: boolean) => void; close: () => void };
 
-export function ManualTerminal({ checkoutId, active, clearRevision = 0 }: {
+export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStart, clearRevision = 0 }: {
   checkoutId: string;
+  relativeDirectory?: string;
   active: boolean;
+  autoStart?: boolean;
   clearRevision?: number;
 }) {
   const mount = useRef<HTMLDivElement>(null);
@@ -112,7 +115,16 @@ export function ManualTerminal({ checkoutId, active, clearRevision = 0 }: {
   const previousClear = useRef(clearRevision);
   const [request, setRequest] = useState<TerminalRequest>();
   const [state, setState] = useState<TerminalState>();
+  const [clipboardError, setClipboardError] = useState("");
   const current = state?.request === request && request?.checkoutId === checkoutId ? state : undefined;
+
+  useEffect(() => {
+    if (!request && autoStart && active) {
+      const next = { checkoutId };
+      setRequest(next);
+      setState({ request: next, status: "starting" });
+    }
+  }, [active, autoStart, checkoutId, request]);
 
   useEffect(() => {
     const element = mount.current;
@@ -181,7 +193,7 @@ export function ManualTerminal({ checkoutId, active, clearRevision = 0 }: {
     size = { cols: terminal.cols, rows: terminal.rows };
     const resize = new ResizeObserver(() => layout(false));
     resize.observe(element);
-    void invoke<Session>("start_manual_terminal", { checkoutId, ...size, channel }).then((opened) => {
+    void invoke<Session>("start_manual_terminal", { checkoutId, ...size, channel, ...(relativeDirectory ? { relativeDirectory } : {}) }).then((opened) => {
       if (disposed) {
         void invoke("close_manual_terminal", opened).catch(() => undefined);
         return;
@@ -205,7 +217,7 @@ export function ManualTerminal({ checkoutId, active, clearRevision = 0 }: {
       attachment.current = undefined;
       if (session && !exited && !stopped) void invoke("close_manual_terminal", session).catch(() => undefined);
     };
-  }, [checkoutId, request]);
+  }, [checkoutId, request, relativeDirectory]);
 
   useEffect(() => {
     activeRef.current = active;
@@ -224,6 +236,12 @@ export function ManualTerminal({ checkoutId, active, clearRevision = 0 }: {
     setRequest(next);
     setState({ request: next, status: "starting" });
   };
+  function clipboard(operation: (terminal: Terminal) => Promise<unknown>) {
+    const terminal = attachment.current?.terminal;
+    if (!terminal) return;
+    setClipboardError("");
+    void Promise.resolve().then(() => operation(terminal)).catch(() => setClipboardError("Could not access the clipboard."));
+  }
   return <div className="flex h-full min-h-0 flex-col gap-2">
     <div className="flex shrink-0 items-center gap-2">
       {(!current || current.status === "exited" || current.status === "failed") && (
@@ -236,6 +254,20 @@ export function ManualTerminal({ checkoutId, active, clearRevision = 0 }: {
       {current?.status === "closing" && <span className="file-help" role="status">Closing PowerShell…</span>}
       {current?.message && <span className="file-help" role={current.status === "exited" ? "status" : "alert"}>{current.message}</span>}
     </div>
-    <div ref={mount} className="ide-terminal-surface" aria-label="Manual PowerShell terminal" />
+    {clipboardError && <p className="file-help" role="alert">{clipboardError}</p>}
+    <ContextActions label="PowerShell terminal" className="min-h-0 flex-1" groups={[[
+      { label: "Copy selection", disabled: !request, run: () => clipboard((terminal) => {
+        const selection = terminal.getSelection();
+        return selection ? navigator.clipboard.writeText(selection) : Promise.resolve();
+      }) },
+      { label: "Paste", disabled: current?.status !== "running", run: () => clipboard(async (terminal) => {
+        const text = await navigator.clipboard.readText();
+        if (attachment.current?.terminal === terminal) terminal.paste(text);
+      }) },
+      { label: "Select all", disabled: !request, run: () => attachment.current?.terminal.selectAll() },
+      { label: "Clear output", disabled: !request, run: () => attachment.current?.terminal.clear() },
+    ]]}>
+      <div ref={mount} className="ide-terminal-surface" aria-label="Manual PowerShell terminal" />
+    </ContextActions>
   </div>;
 }
