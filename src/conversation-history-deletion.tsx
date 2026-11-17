@@ -13,6 +13,8 @@ type Preview = {
   messageRevisionIds: string[];
   artifactIds: string[];
   dispatchIds: string[];
+  attachmentCopyDispatchCount?: number;
+  attachmentCopyRevisionCount?: number;
   referenceIds: string[];
   attemptDiffIds: string[];
   candidateIds: string[];
@@ -61,6 +63,7 @@ export function ConversationHistoryDeletion({ conversationId, history, attemptDi
       await Promise.all([
         client.invalidateQueries({ queryKey: ["conversation"] }),
         client.invalidateQueries({ queryKey: ["conversation-run"] }),
+        client.invalidateQueries({ queryKey: ["saved-attachment-preview"] }),
         client.invalidateQueries({ queryKey: ["conversation-reference-source"] }),
         client.invalidateQueries({ queryKey: ["conversation-library"] }),
         client.invalidateQueries({ queryKey: ["project-job-queue"] }),
@@ -140,6 +143,12 @@ function DeletionImpact({ preview }: { preview: Preview }) {
         <dt className="font-medium">{label} · {ids.length}</dt>
         <dd className="break-all text-xs text-muted-foreground">{ids.join(", ")}</dd>
       </div>)}
+      {(preview.attachmentCopyDispatchCount ?? 0) > 0 && <div>
+        <dt>Dispatches containing reused attachment copies</dt><dd>{preview.attachmentCopyDispatchCount}</dd>
+      </div>}
+      {(preview.attachmentCopyRevisionCount ?? 0) > 0 && <div>
+        <dt>Message revisions containing reused attachment copies</dt><dd>{preview.attachmentCopyRevisionCount}</dd>
+      </div>}
       <div><dt>Sessions revoked</dt><dd>{preview.nativeSessions}</dd></div>
       <div><dt>Affected jobs</dt><dd>{preview.affectedJobs}</dd></div>
     </dl>

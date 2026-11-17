@@ -24,6 +24,7 @@ mod schema;
 
 fn remove_recent_schema(db: &rusqlite::Connection) -> Result<()> {
     schema::restore_question_view_before_structured_planning(db)?;
+    schema::remove_context_menu_schema(db)?;
     db.execute_batch(
         "DROP TABLE workflow_agile_stage_actions;
          DROP TABLE workflow_stage_decisions;

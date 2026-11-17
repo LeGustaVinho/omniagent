@@ -136,6 +136,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/119-git-review-comments.sql"),
     include_str!("../migrations/120-git-reviewed-hunks.sql"),
     include_str!("../migrations/121-conversation-library-section-order.sql"),
+    include_str!("../migrations/122-saved-attachment-reuse-lineage.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

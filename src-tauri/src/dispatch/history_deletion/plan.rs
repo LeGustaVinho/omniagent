@@ -2,6 +2,7 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::conversations::reference_delivery::source_revisions;
+use crate::dispatch::attachment_retention::reused_attachments_for_deleted_revisions;
 use crate::dispatch::{ContextSnapshot, ConversationArtifactRevision, NativeHistory, lineage};
 
 use super::{DeletionPlan, HistoryDeletionMode, HistoryDeletionTarget, ids, unseal};
@@ -141,6 +142,13 @@ fn message(db: &Connection, plan: &mut DeletionPlan, owner: &str, revision: &str
         [serde_json::to_string(&plan.retained_runs)?],
     )?;
     if cascade {
+        plan.attachment_copies = reused_attachments_for_deleted_revisions(db, &plan.revisions)?;
+        plan.sessions
+            .extend(plan.attachment_copies.sessions.iter().cloned());
+        plan.retained_runs
+            .extend(plan.attachment_copies.runs.iter().cloned());
+        plan.unsettled
+            .extend(plan.attachment_copies.unsettled.iter().cloned());
         plan.side_requests = ids(
             db,
             "SELECT side.job_id FROM job_side_requests side JOIN conversation_contexts context ON context.id = side.context_id

@@ -215,7 +215,7 @@ fn archived_attachment(
         .find_map(|(ordinal, attachment)| (ordinal == index).then_some(attachment)))
 }
 
-fn require_archived_native(
+pub(super) fn require_archived_native(
     db: &Connection,
     project_id: &str,
     conversation_id: &str,

@@ -9,7 +9,10 @@ async fn attachment_composer_review_matches_saved_dispatch_after_profile_change(
     use crate::conversations::draft_files::{
         DraftAttachmentEdit, ReuseSavedConversationAttachment,
     };
-    use crate::dispatch::{AttachmentHistoryRemoval, AttachmentHistoryTarget};
+    use crate::dispatch::{
+        AttachmentHistoryRemoval, AttachmentHistoryTarget, HistoryDeletionMode,
+        HistoryDeletionTarget,
+    };
     use crate::jobs::AdmissionEnvironment;
     use base64::{Engine, engine::general_purpose::STANDARD};
 
@@ -381,6 +384,11 @@ async fn attachment_composer_review_matches_saved_dispatch_after_profile_change(
         matches!(&draft.files[0].source, AttachmentSource::SavedNative { conversation_id, run_id, name, .. }
         if conversation_id == &chat.id && run_id == &source_run && name == "image.png")
     );
+    let independent = native_scope.checkout.join("independent-image.png");
+    std::fs::write(&independent, STANDARD.decode(PNG)?)?;
+    let draft = store
+        .add_conversation_attachment_paths(destination.id.clone(), vec![independent])
+        .await?;
     let revision = draft
         .revision
         .context("Missing reused attachment draft revision")?;
@@ -462,10 +470,11 @@ async fn attachment_composer_review_matches_saved_dispatch_after_profile_change(
         .agent_dispatch(destination.id.clone(), reused_run.clone())
         .await?
         .context("The reuse dispatch is missing")?;
-    let [reused_evidence] = reused.attachments.as_slice() else {
-        anyhow::bail!("Expected one reused attachment")
+    let [reused_evidence, independent_evidence] = reused.attachments.as_slice() else {
+        anyhow::bail!("Expected a reused attachment and an independent file")
     };
     assert_eq!(reused_evidence.source_sha256, origin.source_sha256);
+    assert_eq!(independent_evidence.source_sha256, origin.source_sha256);
     assert_eq!(
         reused.snapshot.attachments[0]
             .input
@@ -509,9 +518,44 @@ async fn attachment_composer_review_matches_saved_dispatch_after_profile_change(
         .await?
         .preview_id
         .context("Expected a reviewed derived attachment")?;
+    let waiting = store
+        .create_conversation(
+            chat.checkout_id.clone(),
+            "Queued before attachment removal".into(),
+        )
+        .await?;
+    store
+        .save_conversation_draft(waiting.id.clone(), reuse_prompt.into())
+        .await?;
+    let draft = store
+        .reuse_saved_conversation_attachment(reuse(&waiting.id, origin.source_sha256.clone()))
+        .await?;
+    let approved = store
+        .review_conversation_attachment_draft(
+            waiting.id.clone(),
+            draft.revision.unwrap(),
+            native_scope.clone(),
+            reuse_prompt.into(),
+        )
+        .await?
+        .preview_id
+        .context("The waiting attachment was not reviewed")?;
+    assert!(matches!(
+        store
+            .submit_conversation_with_files(
+                waiting.id,
+                waiting.context_id,
+                native_scope.clone(),
+                reuse_prompt.into(),
+                Vec::new(),
+                Some(approved)
+            )
+            .await?,
+        ContinuationInspection::Queued { .. }
+    ));
     let target = AttachmentHistoryTarget {
         conversation_id: chat.id.clone(),
-        message_revision_id: origin.message_revision_id,
+        message_revision_id: origin.message_revision_id.clone(),
         attachment_ordinal: origin.ordinal,
     };
     let removal = AttachmentHistoryRemoval::Selected;
@@ -519,8 +563,26 @@ async fn attachment_composer_review_matches_saved_dispatch_after_profile_change(
         .preview_attachment_history_removal(target.clone(), removal)
         .await?;
     store
-        .confirm_attachment_history_removal(target, removal, confirmed.revision)
+        .confirm_attachment_history_removal(target.clone(), removal, confirmed.revision)
         .await?;
+    assert_eq!(
+        store
+            .attachment_dispatch_content(chat.id.clone(), source_run.clone(), origin.ordinal)
+            .await?
+            .as_deref(),
+        Some(PNG)
+    );
+    assert_eq!(
+        store
+            .attachment_dispatch_content(
+                destination.id.clone(),
+                reused_run.clone(),
+                reused_evidence.ordinal
+            )
+            .await?
+            .as_deref(),
+        Some(PNG)
+    );
     let stale = store
         .submit_conversation_with_files(
             deferred.id.clone(),
@@ -547,5 +609,60 @@ async fn attachment_composer_review_matches_saved_dispatch_after_profile_change(
             .await
             .is_err()
     );
+    let granular = store
+        .preview_attachment_history_removal(target, AttachmentHistoryRemoval::WithDerivedCopies)
+        .await?;
+    assert_eq!(granular.saved_revisions, 2);
+    assert!(granular.dispatches >= 2);
+
+    let target = HistoryDeletionTarget::Message {
+        conversation_id: chat.id,
+        message_revision_id: origin.message_revision_id,
+    };
+    let cascade = HistoryDeletionMode::WithDerivedCopies;
+    let impact = store
+        .preview_conversation_history_deletion(target.clone(), cascade)
+        .await?;
+    assert_eq!(impact.attachment_copy_dispatch_count, 1);
+    assert_eq!(impact.attachment_copy_revision_count, 2);
+    assert!(impact.dispatch_ids.contains(&reused.id));
+    assert!(
+        !impact
+            .message_revision_ids
+            .contains(&reused_evidence.message_revision_id)
+    );
+    store
+        .confirm_conversation_history_deletion(target, cascade, impact.revision)
+        .await?;
+    assert!(
+        store
+            .attachment_dispatch_content(
+                destination.id.clone(),
+                reused_run.clone(),
+                reused_evidence.ordinal
+            )
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .attachment_dispatch_content(
+                destination.id.clone(),
+                reused_run.clone(),
+                independent_evidence.ordinal
+            )
+            .await?
+            .as_deref(),
+        Some(PNG)
+    );
+    let redacted = store
+        .agent_dispatch(destination.id, reused_run)
+        .await?
+        .context("Missing retained dispatch")?;
+    assert_eq!(redacted.removed_attachment_count, 1);
+    assert_eq!(redacted.attachments, [independent_evidence.clone()]);
+    assert!(redacted.frames.is_empty());
+    assert_eq!(redacted.snapshot.submitted_messages[0].text, reuse_prompt);
+    assert!(admit(&native_scope).await?.is_none());
     Ok(())
 }

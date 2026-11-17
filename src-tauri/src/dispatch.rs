@@ -42,7 +42,9 @@ pub use attachment_evidence::{AttachmentEvidence, AttachmentRead, AttachmentTran
 pub(crate) use attachment_evidence::{
     load_saved_native_attachment, saved_native_from_source, verify_saved_native_metadata,
 };
-pub(crate) use attachment_retention::revoked_history_run;
+pub(crate) use attachment_retention::{
+    has_retired_saved_native_attachment, record_saved_attachment_reuses, revoked_history_run,
+};
 pub use attachment_retention::{
     AttachmentHistoryRemoval, AttachmentHistoryTarget, AttachmentRemovalPreview,
 };

@@ -14,6 +14,8 @@ mod plan;
 #[cfg(test)]
 mod tests;
 
+use super::attachment_retention::AttachmentRemovalImpact;
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(
     tag = "kind",
@@ -45,6 +47,8 @@ pub struct HistoryDeletionPreview {
     pub message_revision_ids: BTreeSet<String>,
     pub artifact_ids: BTreeSet<String>,
     pub dispatch_ids: BTreeSet<String>,
+    pub attachment_copy_revision_count: usize,
+    pub attachment_copy_dispatch_count: usize,
     pub reference_ids: BTreeSet<String>,
     pub attempt_diff_ids: BTreeSet<String>,
     pub candidate_ids: BTreeSet<String>,
@@ -71,6 +75,7 @@ struct DeletionPlan {
     revisions: BTreeSet<String>,
     artifacts: BTreeSet<String>,
     dispatches: BTreeSet<String>,
+    attachment_copies: AttachmentRemovalImpact,
     synthetic_input_runs: BTreeSet<String>,
     answer_runs: BTreeSet<String>,
     references: BTreeSet<String>,
@@ -94,6 +99,7 @@ impl DeletionPlan {
             revisions: BTreeSet::new(),
             artifacts: BTreeSet::new(),
             dispatches: BTreeSet::new(),
+            attachment_copies: AttachmentRemovalImpact::default(),
             synthetic_input_runs: BTreeSet::new(),
             answer_runs: BTreeSet::new(),
             references: BTreeSet::new(),
@@ -114,7 +120,14 @@ impl DeletionPlan {
             revision: format!("{:x}", Sha256::digest(serde_json::to_vec(self)?)),
             message_revision_ids: self.revisions.clone(),
             artifact_ids: self.artifacts.clone(),
-            dispatch_ids: self.dispatches.clone(),
+            dispatch_ids: self
+                .dispatches
+                .iter()
+                .chain(self.attachment_copies.dispatch_ids())
+                .cloned()
+                .collect(),
+            attachment_copy_dispatch_count: self.attachment_copies.dispatch_ids().count(),
+            attachment_copy_revision_count: self.attachment_copies.saved_revision_count(),
             reference_ids: self.references.clone(),
             attempt_diff_ids: self.diffs.clone(),
             candidate_ids: self.candidates.clone(),
