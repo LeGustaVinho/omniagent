@@ -3,14 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { lazy, Suspense, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { FileDialog, type FilePanelApi } from "@/ide-file-workspace";
+import { lineEndingLabels, savedEncoding, sourceEncodingLabels, type FileFormat } from "@/source-file-format";
 
 type HistoryEntry = { position: number; revisionId: string; recordedAt: number; origin: "captured" | "before_save" | "saved" };
 type HistoryPage = { entries: HistoryEntry[]; nextBefore: number | null };
-type HistoryText = { text: string; utf8Bom: boolean; lineEndings: "none" | "lf" | "crlf" | "cr" | "mixed" };
+type HistoryText = FileFormat & { text: string };
 type View = "current" | "previous" | "text";
 
 const origins = { captured: "Previously captured", before_save: "Before saving", saved: "Saved" };
-const endings = { none: "No line breaks", lf: "LF", crlf: "CRLF", cr: "CR", mixed: "Mixed line endings" };
 const timeFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });
 const MonacoComparison = lazy(() => import("@/git-diff-view").then(({ MonacoComparison }) => ({ default: MonacoComparison })));
 
@@ -106,7 +106,7 @@ export function CheckoutDocumentHistory({ checkoutId, path, editorText, readDisk
               <option value="text">View revision text</option>
             </select>
           </label>
-          {shown && <span className="text-xs text-muted-foreground">{shown.utf8Bom ? "UTF-8 BOM · " : "UTF-8 · "}{endings[shown.lineEndings]}</span>}
+          {shown && <span className="text-xs text-muted-foreground">{sourceEncodingLabels[savedEncoding(shown)]} · {lineEndingLabels[shown.lineEndings]}</span>}
           <Button type="button" variant="outline" disabled={!shown} onClick={() => shown && void copyText(shown.text)}>Copy revision text</Button>
           {restore && <Button type="button" variant="outline" disabled={!shown || restoring}
             onClick={() => shown && void load(shown.text)}>Load text into editor</Button>}

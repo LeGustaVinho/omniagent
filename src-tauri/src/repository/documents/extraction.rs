@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::{
-    DocumentKind, EditorFormat, encode, hash, lock_directories, open_for_rename, read_open_file,
+    DocumentKind, EditorFormat, TextEncoding, encode, hash, lock_directories, open_for_rename, read_open_file,
     relative_name, rename,
 };
 
@@ -130,7 +130,7 @@ fn extract(
     } else {
         original
     };
-    let raw = if saved.bom {
+    let raw = if saved.encoding == TextEncoding::Utf8Bom {
         encoded.strip_prefix('\u{feff}').unwrap_or(&encoded)
     } else {
         &encoded

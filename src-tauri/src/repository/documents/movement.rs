@@ -137,6 +137,8 @@ impl Store {
                     return Ok(RepositoryDocumentMove::Conflict { message });
                 }
             };
+            let format =
+                super::RawDocument::from_bytes(DocumentKind::Markdown, &file.bytes)?.format();
             match remember_document(
                 &store,
                 DocumentKind::Markdown,
@@ -144,8 +146,8 @@ impl Store {
                 destination_path.clone(),
                 destination,
                 head,
-                String::from_utf8(file.bytes)?,
-                file.identity,
+                file,
+                format,
                 None,
             )
             .await
