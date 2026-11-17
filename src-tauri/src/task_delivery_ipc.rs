@@ -6,8 +6,9 @@ use omniagent::{
     },
     store::Store,
     tasks::{
-        ChecklistItem, ProjectWorkHierarchy, TaskChecklist, TaskDelivery, TaskDeliveryState,
-        TaskWorkflowState, WorkspaceDraft, WorkspacePlacement, WorkspaceWorkEditor,
+        ChecklistItem, ChecklistOrderAnchor, ProjectWorkHierarchy, TaskChecklist, TaskDelivery,
+        TaskDeliveryState, TaskWorkflowState, WorkspaceDraft, WorkspacePlacement,
+        WorkspaceWorkEditor,
     },
 };
 use tauri::State;
@@ -117,6 +118,20 @@ pub async fn revise_project_checklist_item(
             next.body,
             next.checked,
         )
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn swap_project_checklist_items(
+    store: State<'_, Store>,
+    project_id: String,
+    task_id: String,
+    before: ChecklistOrderAnchor,
+    after: ChecklistOrderAnchor,
+) -> Result<(), String> {
+    store
+        .swap_project_checklist_items(project_id, task_id, before, after)
         .await
         .map_err(report)
 }

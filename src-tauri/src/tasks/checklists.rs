@@ -52,6 +52,20 @@ pub struct ChecklistItem {
     pub checked: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecklistOrderAnchor {
+    pub id: String,
+    pub position: i64,
+    pub revision: i64,
+}
+
+impl ChecklistOrderAnchor {
+    fn matches(&self, item: &ChecklistItem) -> bool {
+        self.id == item.id && self.position == item.position && self.revision == item.revision
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskChecklist {
@@ -304,6 +318,44 @@ impl Store {
             progress::record_operator_check_change(&tx, &project, &task, &current, &revised)?;
             tx.commit()?;
             Ok(revised)
+        })
+        .await
+    }
+
+    pub async fn swap_project_checklist_items(
+        &self,
+        project: String,
+        task: String,
+        before: ChecklistOrderAnchor,
+        after: ChecklistOrderAnchor,
+    ) -> Result<()> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let items = load_checklist_items(&tx, &project, &task, None, None)?;
+            ensure!(
+                items
+                    .windows(2)
+                    .any(|pair| before.matches(&pair[0]) && after.matches(&pair[1])),
+                "The checklist changed. Review the current order and try again."
+            );
+            let spare = items
+                .last()
+                .and_then(|item| item.position.checked_add(1))
+                .context("checklist positions exhausted")?;
+            // Vacate each slot in turn to preserve the unique position constraint.
+            for (id, position) in [
+                (&after.id, spare),
+                (&before.id, after.position),
+                (&after.id, before.position),
+            ] {
+                tx.execute(
+                    "UPDATE project_checklist_items SET position = ?4
+                     WHERE project_id = ?1 AND task_id = ?2 AND id = ?3",
+                    params![project, task, id, position],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
         })
         .await
     }

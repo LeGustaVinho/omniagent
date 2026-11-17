@@ -83,7 +83,7 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
     const scope = args as { projectId: string; taskId: string; evidenceId?: string; expectedState?: WorkflowStatus;
       nextState?: WorkflowStatus; next?: Item; title: string; body: string; placement: { kind: "epic" } | Hierarchy["work"][number]["placement"];
       provider?: ModelSelection["provider"]; selection?: ModelSelection; workId?: string; expected?: string;
-      draft?: WorkspaceWorkInput["draft"] };
+      draft?: WorkspaceWorkInput["draft"]; before?: Pick<Item, "id" | "position" | "revision">; after?: Pick<Item, "id" | "position" | "revision"> };
     const checklist = checklists[scope?.taskId] ?? [];
     switch (name) {
       case "project_work_hierarchy": return { epics: [...hierarchy.epics], work: [...hierarchy.work] };
@@ -154,6 +154,17 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
         const updated = { ...scope.next, revision: previous.revision + 1 };
         checklists[scope.taskId] = checklist.map((item) => item.id === updated.id ? updated : item);
         return updated;
+      }
+      case "swap_project_checklist_items": {
+        const { before, after } = scope;
+        if (!before || !after) throw new Error("Checklist positions missing");
+        expect(scope.taskId).toBe(parent.id);
+        checklists[scope.taskId] = checklist.map((item) => {
+          if (item.id === before.id) return { ...item, position: after.position };
+          if (item.id === after.id) return { ...item, position: before.position };
+          return item;
+        }).sort((left, right) => left.position - right.position);
+        return;
       }
       case "append_project_checklist_item": {
         const item = { id: `item-${checklist.length}`, revision: 1, position: checklist.length, body: scope.body, checked: false };
@@ -600,6 +611,34 @@ it("edits the exact checklist revision from the table and keeps typed text if it
   await user.click(editor.getByRole("button", { name: "Save checklist item" }));
   await table.findByRole("checkbox", { name: "Updated second review", checked: true });
   expect(table.getByRole("checkbox", { name: item.body, checked: false })).toBeTruthy();
+});
+
+it("reorders checklist items in the table and task details with their observed revisions and positions", async () => {
+  const first = { id: "editorial-review", revision: 5, position: 0 };
+  const second = { id: "check-links", revision: 8, position: 1 };
+  const { user } = testWorkspace(true, undefined, undefined, { additionalItem: { ...second, checked: true, body: "Check links" } });
+  await user.click(screen.getByRole("button", { name: "Table" }));
+  const table = within(screen.getByRole("table", { name: "Agile table" }));
+  await user.click(await table.findByRole("button", { name: `Expand ${epic.title}` }));
+  await user.click(table.getByRole("button", { name: `Expand ${parent.title}` }));
+  fireEvent.contextMenu(table.getByRole("checkbox", { name: "Check links", checked: true }));
+  const moveUp = await screen.findByRole("menuitem", { name: "Move checklist item up" });
+  expect(screen.queryByRole("menuitem", { name: "Move checklist item down" })).toBeNull();
+  await user.click(moveUp);
+  expect(invoke).toHaveBeenCalledWith("swap_project_checklist_items", { projectId, taskId: parent.id, before: first, after: second });
+  await waitFor(() => expect(table.getAllByRole("checkbox")[0]).toBe(table.getByRole("checkbox", { name: "Check links", checked: true })));
+
+  await user.click(table.getByRole("button", { name: /^Documentation\s*Task$/ }));
+  const details = within(screen.getByRole("region", { name: "Task checklist" }));
+  fireEvent.contextMenu(details.getByRole("checkbox", { name: "Check links", checked: true }));
+  const moveDown = await screen.findByRole("menuitem", { name: "Move checklist item down" });
+  expect(screen.queryByRole("menuitem", { name: "Move checklist item up" })).toBeNull();
+  await user.click(moveDown);
+  expect(invoke).toHaveBeenCalledWith("swap_project_checklist_items", {
+    projectId, taskId: parent.id, before: { ...second, position: 0 }, after: { ...first, position: 1 },
+  });
+  await waitFor(() => expect(details.getAllByRole("checkbox")[0]).toBe(details.getByRole("checkbox", { name: "Editorial review", checked: false })));
+  expect(details.getByRole("checkbox", { name: "Check links", checked: true })).toBeTruthy();
 });
 
 it.each(["run_by_item", "track_progress"] as const)("opens checklist work for the clicked item in %s mode", async (mode) => {

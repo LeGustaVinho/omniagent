@@ -366,6 +366,7 @@ fn main() {
             task_delivery_ipc::project_task_checklist,
             task_delivery_ipc::append_project_checklist_item,
             task_delivery_ipc::revise_project_checklist_item,
+            task_delivery_ipc::swap_project_checklist_items,
             task_participants_ipc::project_task_runs,
             task_assignment_ipc::project_task_assignments,
             task_assignment_ipc::set_project_task_assignment,

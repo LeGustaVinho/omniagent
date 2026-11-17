@@ -3,6 +3,7 @@ use std::{path::Path, process::Command};
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 
+use super::{ChecklistItem, ChecklistOrderAnchor};
 use crate::{
     conversations::SessionScope,
     dispatch::{ContextSnapshot, Delivery},
@@ -32,6 +33,120 @@ fn git(root: &Path, args: &[&str]) -> Result<()> {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn swaps_only_current_adjacent_checklist_positions_in_the_same_task() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("store.sqlite3"))?;
+    let project = register(&store, &temp.path().join("repo"))
+        .await?
+        .project_id;
+    let task = store
+        .create_project_task(project.clone(), "Order".into())
+        .await?
+        .id;
+    let other = store
+        .create_project_task(project.clone(), "Other work".into())
+        .await?
+        .id;
+    store
+        .ensure_project_checklist(project.clone(), task.clone())
+        .await?;
+    let first = store
+        .append_project_checklist_item(project.clone(), task.clone(), "First".into())
+        .await?;
+    let second = store
+        .append_project_checklist_item(project.clone(), task.clone(), "Second".into())
+        .await?;
+    let third = store
+        .append_project_checklist_item(project.clone(), task.clone(), "Third".into())
+        .await?;
+    let anchor = |item: &ChecklistItem| ChecklistOrderAnchor {
+        id: item.id.clone(),
+        position: item.position,
+        revision: item.revision,
+    };
+    for (scope, before, after) in [(&task, &first, &third), (&other, &first, &second)] {
+        assert!(
+            store
+                .swap_project_checklist_items(
+                    project.clone(),
+                    scope.clone(),
+                    anchor(before),
+                    anchor(after)
+                )
+                .await
+                .is_err()
+        );
+    }
+    store
+        .swap_project_checklist_items(
+            project.clone(),
+            task.clone(),
+            anchor(&first),
+            anchor(&second),
+        )
+        .await?;
+    let current = store
+        .project_checklist(project.clone(), task.clone())
+        .await?
+        .context("checklist unavailable")?
+        .items;
+    assert_eq!(
+        current,
+        vec![
+            ChecklistItem {
+                position: first.position,
+                ..second.clone()
+            },
+            ChecklistItem {
+                position: second.position,
+                ..first.clone()
+            },
+            third,
+        ]
+    );
+    assert!(
+        store
+            .swap_project_checklist_items(
+                project.clone(),
+                task.clone(),
+                anchor(&first),
+                anchor(&second)
+            )
+            .await
+            .is_err()
+    );
+
+    let revised = store
+        .revise_project_checklist_item(
+            project.clone(),
+            task.clone(),
+            first.id,
+            first.revision,
+            "First reviewed".into(),
+            true,
+        )
+        .await?;
+    assert!(
+        store
+            .swap_project_checklist_items(
+                project.clone(),
+                task.clone(),
+                anchor(&current[0]),
+                anchor(&current[1])
+            )
+            .await
+            .is_err()
+    );
+    let saved = store
+        .project_checklist(project, task)
+        .await?
+        .context("checklist unavailable")?
+        .items;
+    assert_eq!(saved, vec![current[0].clone(), revised, current[2].clone()]);
     Ok(())
 }
 

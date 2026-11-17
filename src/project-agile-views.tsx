@@ -146,7 +146,7 @@ export function ProjectAgileTable({ rows, matches, selected, busy, openWork, ope
   workMenu, dependencyMenu, checklistMenu }: Views & {
   matches: ReadonlySet<string>;
   check: (taskId: string, item: Item, checked: boolean) => void;
-  checklistMenu: (taskId: string, item: Item) => MenuGroups;
+  checklistMenu: (taskId: string, item: Item, previous?: Item, next?: Item) => MenuGroups;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const children = new Map<string | undefined, AgileRow[]>();
@@ -198,9 +198,9 @@ export function ProjectAgileTable({ rows, matches, selected, busy, openWork, ope
             <EvidenceLink row={row} reference="integration" merge={merge} openEvidence={openEvidence} />
           </div></td>
         </tr>
-        {open && items.map((item) => <tr key={item.id} className="agile-checklist-row">
+        {open && items.map((item, index) => <tr key={item.id} className="agile-checklist-row">
           <td style={{ paddingInlineStart: `${1 + (depth + 1) * 1.25}rem` }}>
-            <ContextActions label={item.body} groups={checklistMenu(row.id, item)}>
+            <ContextActions label={item.body} groups={checklistMenu(row.id, item, items[index - 1], items[index + 1])}>
               <label className="agile-check"><input type="checkbox" checked={item.checked} disabled={busy}
                 onChange={(event) => check(row.id, item, event.currentTarget.checked)} />{item.body}</label>
             </ContextActions>

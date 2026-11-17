@@ -28,7 +28,7 @@ import { WorkflowLaunchPicker } from "@/workflow-launch";
 
 type Change = (operation: () => Promise<unknown>) => void;
 type DeliveryLink = { taskId: string; title: string; deliveryId: string };
-type ChecklistMenu = (taskId: string, item: Item) => MenuGroups;
+type ChecklistMenu = (taskId: string, item: Item, previous?: Item, next?: Item) => MenuGroups;
 type DependencyMenu = (taskId: string, blockerId: string) => MenuGroups;
 type WorkflowFocus = { kind: "assignment" } | { kind: "checklist"; item: ChecklistRunRequest };
 
@@ -69,6 +69,7 @@ function LiveTaskDetails({
   const [itemText, setItemText] = useState("");
   const state = useQuery(taskStateQuery(projectId, task.id));
   const checklist = useQuery(checklistQuery(projectId, task.id));
+  const checklistItems = checklist.data?.items ?? [];
   const deliveries = useQuery(deliveryQuery(projectId, task.id));
   const units = useQuery(workDeliveryUnitsQuery(projectId, task.id));
   const saved = state.data;
@@ -111,7 +112,8 @@ function LiveTaskDetails({
       </section>}
       <section className="agile-checklist pipeline-form" aria-label="Task checklist">
         <h4 className="font-medium">Checklist</h4>
-        {checklist.data?.items.map((item) => <ContextActions key={item.id} label={item.body} groups={checklistMenu(task.id, item)}>
+        {checklistItems.map((item, index) => <ContextActions key={item.id} label={item.body}
+          groups={checklistMenu(task.id, item, checklistItems[index - 1], checklistItems[index + 1])}>
           <label className="agile-check"><input type="checkbox" checked={item.checked} disabled={busy}
             onChange={(event) => check(task.id, item, event.currentTarget.checked)} /> {item.body}</label>
         </ContextActions>)}
@@ -143,7 +145,7 @@ function LiveTaskDetails({
       {task.kind !== "epic" && <WorkflowLaunchPicker key={task.id} projectId={projectId}
         checkoutId={links.checkout.checkoutId} workId={task.id} openWorkspace={links.openWorkspace} />}
       {task.kind !== "epic" && <TaskWorkSettings scope={args} workKind={task.kind} candidates={relatedWork}
-        items={checklist.data?.items ?? []} openQueueJob={links.openQueueJob}
+        items={checklistItems} openQueueJob={links.openQueueJob}
         checklistRun={workflowFocus?.kind === "checklist" ? workflowFocus.item : undefined} />}
       <TaskAssignment projectId={projectId} taskId={task.id} focusRequest={workflowFocus?.kind === "assignment" ? workflowFocus : undefined} />
       <TaskGoals projectId={projectId} taskId={task.id} openActivity={links.openActivity} />
@@ -379,7 +381,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
       ...(work ? [{ label: "Edit dependencies…", disabled: mutation.isPending, run: () => edit(work, "dependencies") }] : []),
     ]];
   }
-  function checklistMenu(taskId: string, item: Item): MenuGroups {
+  function checklistMenu(taskId: string, item: Item, previous?: Item, next?: Item): MenuGroups {
     return [[
       { label: item.checked ? "Reopen checklist item" : "Check checklist item", disabled: mutation.isPending,
         run: () => check(taskId, item, !item.checked) },
@@ -390,6 +392,9 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
         setChecklistEditing({ projectId, taskId, item });
       } },
       { label: "Run checklist item…", run: () => openWork(taskId, "Workflow", { kind: "checklist", item }) },
+    ], [
+      ...(previous ? [{ label: "Move checklist item up", disabled: mutation.isPending, run: () => swapChecklistItems(taskId, previous, item) }] : []),
+      ...(next ? [{ label: "Move checklist item down", disabled: mutation.isPending, run: () => swapChecklistItems(taskId, item, next) }] : []),
     ], [
       { label: "Copy checklist text", run: () => copyWorkText(item.body) },
       { label: "Open parent work", run: () => openWork(taskId) },
@@ -406,6 +411,14 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
       await invoke("revise_project_checklist_item", { projectId, taskId, next: { ...item, body } });
       setChecklistEditing(undefined);
     });
+  }
+  function swapChecklistItems(taskId: string, before: Item, after: Item) {
+    if (mutation.isPending) return;
+    mutation.mutate(() => invoke("swap_project_checklist_items", {
+      projectId, taskId,
+      before: { id: before.id, position: before.position, revision: before.revision },
+      after: { id: after.id, position: after.position, revision: after.revision },
+    }));
   }
   function move(row: AgileRow, nextState: WorkflowStatus) {
     if (!canMove(row, nextState) || mutation.isPending) return;
