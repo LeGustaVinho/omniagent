@@ -31,6 +31,7 @@ use super::{
 };
 
 pub mod mutations;
+pub mod windows_hidden;
 
 fn item_path(root: &Path, relative: &str) -> Result<PathBuf> {
     if relative.is_empty() {

@@ -460,6 +460,7 @@ fn main() {
             omniagent::repository::checkout_items::open_checkout_item_in_shell,
             omniagent::repository::checkout_items::list_checkout_folders,
             omniagent::repository::checkout_items::list_checkout_ignored_items,
+            omniagent::repository::checkout_items::windows_hidden::list_checkout_windows_hidden_items,
             omniagent::repository::checkout_items::create_checkout_item,
             omniagent::repository::checkout_items::mutations::mutate_checkout_items,
             omniagent::repository::checkout_items::mutations::import_checkout_items,

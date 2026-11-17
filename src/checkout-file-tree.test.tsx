@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ComponentProps } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { reconcileFavoriteItems } from "@/checkout-favorites";
 import { FileTree, type FileTreeTarget } from "@/ide-file-workspace";
@@ -94,4 +95,69 @@ it("persists tree preferences, reveals the active file, and keeps favorites scop
   expect(favorite().getByRole("button", { name: /^renamed\.txt/ })).toBeTruthy();
   expect(screen.queryByRole("button", { name: ".secret" })).toBeNull();
   expect(visibleFileNames()).toEqual(["docs/note.md", "B.md", "a.txt"]);
+});
+
+it("filters Windows attributes separately and reveals a favorite hidden folder without showing its hidden children", async () => {
+  const checkoutId = "hidden-items-worktree";
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command !== "list_checkout_windows_hidden_items") throw new Error("Unexpected checkout request");
+    switch ((args as { folder: string }).folder) {
+      case "": return ["ROOT-SECRET.md"];
+      case "reports": return ["reports/private"];
+      case "reports/private": return ["reports/private/hidden-child.md"];
+      default: throw new Error("Unexpected hidden folder request");
+    }
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const props = { paths: ["root-secret.md", ".dot.md", "reports/ordinary.md", "reports/private/note.md", "reports/private/hidden-child.md"],
+    folders: ["reports", "reports/private"], onOpen: vi.fn(), actions: () => [], checkoutId, workspace: "knowledge" as const, simulated: false };
+  const fixture = (overrides: Partial<ComponentProps<typeof FileTree>> = {}) =>
+    <QueryClientProvider client={client}><FileTree {...props} {...overrides} /></QueryClientProvider>;
+  const mounted = render(fixture());
+  const user = userEvent.setup();
+  const rootCommand = async (name: string) => {
+    fireEvent.contextMenu(root());
+    await user.click(await screen.findByRole("menuitem", { name }));
+  };
+
+  await user.click(screen.getByRole("button", { name: "reports" }));
+  fireEvent.contextMenu(screen.getByRole("button", { name: "private" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Add to favorites" }));
+  expect(invoke).not.toHaveBeenCalled();
+
+  await rootCommand("Hide Windows hidden items");
+  expect(await screen.findByRole("button", { name: "ordinary.md" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "root-secret.md" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "private" })).toBeNull();
+  expect(screen.getByRole("button", { name: ".dot.md" })).toBeTruthy();
+  expect(invoke).not.toHaveBeenCalledWith("list_checkout_windows_hidden_items", { checkoutId, folder: "reports/private" });
+
+  const favorite = within(screen.getByRole("region", { name: "Favorites" }));
+  await user.click(favorite.getByRole("button", { name: /^private/ }));
+  expect(await screen.findByRole("button", { name: "note.md" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "hidden-child.md" })).toBeNull();
+  expect(invoke).toHaveBeenLastCalledWith("list_checkout_windows_hidden_items", { checkoutId, folder: "reports/private" });
+
+  mounted.rerender(fixture({ reveal: { path: "reports/private/hidden-child.md" } }));
+  expect(await screen.findByRole("button", { name: "hidden-child.md" })).toBeTruthy();
+  await rootCommand("Hide dotfiles");
+  expect(screen.queryByRole("button", { name: ".dot.md" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "root-secret.md" })).toBeNull();
+  await rootCommand("Show Windows hidden items");
+  expect(screen.getByRole("button", { name: "root-secret.md" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: ".dot.md" })).toBeNull();
+});
+
+it("reports a Windows-attribute lookup failure while keeping the known checkout files usable", async () => {
+  vi.mocked(invoke).mockRejectedValue(new Error("Permission denied"));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const open = vi.fn();
+  render(<QueryClientProvider client={client}><FileTree paths={["known.md"]} onOpen={open} actions={() => []}
+    checkoutId="unreadable-hidden-items-worktree" workspace="ide" simulated={false} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  fireEvent.contextMenu(root());
+  await user.click(await screen.findByRole("menuitem", { name: "Hide Windows hidden items" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("Permission denied");
+  await user.click(screen.getByRole("button", { name: "known.md" }));
+  expect(open).toHaveBeenCalledWith("known.md");
 });

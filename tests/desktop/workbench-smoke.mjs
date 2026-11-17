@@ -1969,6 +1969,63 @@ test("opens file history with the keyboard and recycles only the clicked checkou
   }
 });
 
+test("filters actual Windows hidden attributes independently from dotfiles in Explorer", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Windows hidden items checkout");
+  git(scratch, "init", "-q", repo);
+  const hiddenFile = "hidden-note.md";
+  const hiddenFolder = "reports/private";
+  const ordinary = "reports/ordinary.md";
+  const dotfile = ".visible-dotfile";
+  await mkdir(join(repo, hiddenFolder), { recursive: true });
+  await writeFile(join(repo, hiddenFile), "A Windows Hidden file\n");
+  await writeFile(join(repo, hiddenFolder, "saved.md"), "An ordinary file under a Windows Hidden folder\n");
+  await writeFile(join(repo, ordinary), "A visible file\n");
+  await writeFile(join(repo, dotfile), "A dotfile without the Windows Hidden attribute\n");
+  for (const relative of [hiddenFile, hiddenFolder]) {
+    const markHidden = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "$fixturePath = $env:OMNIAGENT_HIDDEN_ITEM_FIXTURE\n"
+      + "$attributes = [IO.File]::GetAttributes($fixturePath)\n"
+      + "[IO.File]::SetAttributes($fixturePath, ($attributes -bor [IO.FileAttributes]::Hidden))"], {
+      env: { ...process.env, OMNIAGENT_HIDDEN_ITEM_FIXTURE: join(repo, relative) }, encoding: "utf8", windowsHide: true,
+    });
+    if (markHidden.error) throw markHidden.error;
+    assert.equal(markHidden.status, 0, markHidden.stderr);
+  }
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    assert.deepEqual(await invoke(browser, "list_checkout_windows_hidden_items", { checkoutId: checkout.checkoutId, folder: "" }), [hiddenFile]);
+    assert.deepEqual(await invoke(browser, "list_checkout_windows_hidden_items", { checkoutId: checkout.checkoutId, folder: "reports" }), [hiddenFolder]);
+    await selectCheckout(browser, checkout);
+    await click(browser, '.work-rail button[aria-label="IDE"]');
+    const ide = browser.$('[aria-label="IDE workspace"]');
+    const row = (path) => ide.$(`[data-tree-item][title="${path}"]`);
+    await row(hiddenFile).waitForDisplayed();
+    await click(ide, '[data-tree-item][title="reports"]');
+    await row(hiddenFolder).waitForDisplayed();
+
+    await ide.$("button=Checkout root").click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Hide Windows hidden items"]');
+    await row(ordinary).waitForDisplayed();
+    assert.equal(await row(hiddenFile).isExisting(), false);
+    assert.equal(await row(hiddenFolder).isExisting(), false);
+    await row(dotfile).waitForDisplayed();
+
+    await ide.$("button=Checkout root").click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Show Windows hidden items"]');
+    await row(hiddenFile).waitForDisplayed();
+    await row(hiddenFolder).waitForDisplayed();
+    await row(dotfile).waitForDisplayed();
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
 test("persists real conversation organization through a desktop restart", { timeout: 90_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Conversation library repository");

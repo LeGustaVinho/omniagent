@@ -1,10 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import { queryOptions, useQueries, useQuery } from "@tanstack/react-query";
+import { queryOptions, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fileName } from "@/ide-knowledge-data";
 
 type Sort = "ascending" | "descending" | "type";
-export type TreePreferences = { sort: Sort; dotfiles: boolean; ignored: boolean; autoReveal: boolean };
-const defaults: TreePreferences = { sort: "ascending", dotfiles: true, ignored: false, autoReveal: false };
+export type TreePreferences = { sort: Sort; dotfiles: boolean; windowsHidden: boolean; ignored: boolean; autoReveal: boolean };
+const defaults: TreePreferences = { sort: "ascending", dotfiles: true, windowsHidden: true, ignored: false, autoReveal: false };
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 export function readTreePreferences(key: string): TreePreferences {
@@ -13,6 +13,7 @@ export function readTreePreferences(key: string): TreePreferences {
     return {
       sort: saved.sort === "descending" || saved.sort === "type" ? saved.sort : defaults.sort,
       dotfiles: saved.dotfiles !== false,
+      windowsHidden: saved.windowsHidden !== false,
       ignored: saved.ignored === true,
       autoReveal: saved.autoReveal === true,
     };
@@ -29,8 +30,24 @@ export function treeParents(path: string) {
   return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"));
 }
 
-export function showTreePath(path: string, dotfiles: boolean, reveal?: string) {
-  return dotfiles || path === reveal || reveal?.startsWith(`${path}/`) || !path.split("/").some((part) => part.startsWith("."));
+export type TreeReveal = { path: string; expand?: boolean };
+
+function revealIncludes(path: string, reveal?: TreeReveal) {
+  if (!reveal) return false;
+  const target = reveal.path.toLowerCase();
+  const candidate = path.toLowerCase();
+  return candidate === target || target.startsWith(`${candidate}/`) || Boolean(reveal.expand && candidate.startsWith(`${target}/`));
+}
+
+export function showTreePath(path: string, dotfiles: boolean, reveals: readonly TreeReveal[] = [], windowsHidden?: ReadonlySet<string>) {
+  if (dotfiles && !windowsHidden?.size) return true;
+  const targets = reveals.filter((reveal) => revealIncludes(path, reveal)).map(({ path }) => path.toLowerCase());
+  return [...treeParents(path), path].every((part) => {
+    const hidden = (!dotfiles && fileName(part).startsWith(".")) || windowsHidden?.has(part.toLowerCase());
+    if (!hidden) return true;
+    const candidate = part.toLowerCase();
+    return targets.some((target) => target === candidate || target.startsWith(`${candidate}/`));
+  });
 }
 
 export interface FolderNodeData {
@@ -79,12 +96,12 @@ function ignoredFolderQuery(checkoutId: string, folder: string | null) {
   });
 }
 
-export function useIgnoredTree(checkoutId: string, enabled: boolean, expanded: ReadonlySet<string>, dotfiles: boolean, reveal?: string) {
+export function useIgnoredTree(checkoutId: string, enabled: boolean, expanded: ReadonlySet<string>, dotfiles: boolean, reveals: readonly TreeReveal[]) {
   const root = useQuery({ ...ignoredFolderQuery(checkoutId, null), enabled });
   const rootFolders = root.data?.folders ?? [];
   const underIgnoredRoot = (path: string) => rootFolders.some((root) => path === root || path.startsWith(`${root}/`));
   const openIgnoredFolders = enabled ? [...expanded].filter((path) => underIgnoredRoot(path)
-    && showTreePath(path, dotfiles, reveal) && treeParents(path).every((parent) => expanded.has(parent))) : [];
+    && showTreePath(path, dotfiles, reveals) && treeParents(path).every((parent) => expanded.has(parent))) : [];
   const children = useQueries({ queries: openIgnoredFolders.map((path) => ignoredFolderQuery(checkoutId, path)) });
   if (!enabled) return { files: [], folders: [], pending: false, error: null, load: new Map<string, { pending: boolean; error: Error | null }>() };
   const load = new Map(openIgnoredFolders.map((path, index) => [path, { pending: children[index]!.isPending, error: children[index]!.error }]));
@@ -93,4 +110,48 @@ export function useIgnoredTree(checkoutId: string, enabled: boolean, expanded: R
     folders: [...rootFolders, ...children.flatMap(({ data }) => data?.folders ?? [])],
     pending: root.isPending, error: root.error, load,
   };
+}
+
+export const windowsHiddenTreeKey = (checkoutId: string) => ["checkout-windows-hidden-tree", checkoutId] as const;
+function windowsHiddenFolderQuery(checkoutId: string, folder: string) {
+  return queryOptions({
+    queryKey: [...windowsHiddenTreeKey(checkoutId), folder],
+    queryFn: () => invoke<string[]>("list_checkout_windows_hidden_items", { checkoutId, folder }),
+    staleTime: Infinity,
+    retry: false,
+  });
+}
+
+export function useWindowsHiddenTree({ checkoutId, enabled, expanded, files, folders, dotfiles, reveals }: {
+  checkoutId: string;
+  enabled: boolean;
+  expanded: ReadonlySet<string>;
+  files: readonly string[];
+  folders: readonly string[];
+  dotfiles: boolean;
+  reveals: readonly TreeReveal[];
+}) {
+  const client = useQueryClient();
+  const root = useQuery({ ...windowsHiddenFolderQuery(checkoutId, ""), enabled });
+  const openFolders: string[] = [];
+  if (enabled && !root.isPending && expanded.size > 0) {
+    const known = new Set([...folders, ...[...folders, ...files].flatMap(treeParents)]);
+    for (const path of expanded) {
+      if (!known.has(path) || !showTreePath(path, dotfiles, reveals)) continue;
+      let parent = "";
+      const visible = [...treeParents(path), path].every((part) => {
+        if (!expanded.has(part)) return false;
+        const state = client.getQueryState<string[]>([...windowsHiddenTreeKey(checkoutId), parent]);
+        parent = part;
+        const name = part.toLowerCase();
+        if (!state || state.status === "pending") return false;
+        return !state.data?.some((entry) => entry.toLowerCase() === name) || showTreePath(part, true, reveals, new Set([name]));
+      });
+      if (visible) openFolders.push(path);
+    }
+  }
+  const children = useQueries({ queries: openFolders.map((path) => windowsHiddenFolderQuery(checkoutId, path)) });
+  const hidden = enabled ? [...(root.data ?? []), ...children.flatMap(({ data }) => data ?? [])] : [];
+  const load = new Map(openFolders.map((path, index) => [path, { pending: children[index]!.isPending, error: children[index]!.error }]));
+  return { paths: new Set(hidden.map((path) => path.toLowerCase())), load, pending: enabled && root.isPending, error: enabled ? root.error : null };
 }

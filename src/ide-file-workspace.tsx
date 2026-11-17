@@ -10,7 +10,8 @@ import { Dialog } from "radix-ui";
 import { ContextActions, PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { fileName } from "@/ide-knowledge-data";
 import { setCheckoutFavorites, useCheckoutFavorites, type CheckoutFavorite } from "@/checkout-favorites";
-import { makeTree, readTreePreferences, saveTreePreference, showTreePath, treeParents, useIgnoredTree, type FolderNodeData } from "@/checkout-file-tree";
+import { makeTree, readTreePreferences, saveTreePreference, showTreePath, treeParents, useIgnoredTree, useWindowsHiddenTree,
+  type FolderNodeData, type TreeReveal } from "@/checkout-file-tree";
 import { ResizablePanel } from "@/panel-resize";
 import "dockview/dist/styles/dockview.css";
 import "./ide-knowledge.css";
@@ -392,6 +393,7 @@ interface TreeRows {
   setSubtree: (path: string, collapse: boolean) => void;
   ignored: ReadonlySet<string>;
   ignoredLoad: ReadonlyMap<string, { pending: boolean; error: Error | null }>;
+  windowsHiddenLoad: ReadonlyMap<string, { pending: boolean; error: Error | null }>;
 }
 
 function folderPaths(tree: FolderNodeData, parent = ""): string[] {
@@ -411,6 +413,7 @@ function FolderBranch({ tree, parent, rows }: { tree: FolderNodeData; parent: st
         const target: FileTreeTarget = { kind: "folder", path };
         const selected = rows.selection(path);
         const load = rows.ignoredLoad.get(path);
+        const hidden = rows.windowsHiddenLoad.get(path);
         return <li key={name}>
           <ContextActions label={selected ? `${selected.length} selected items` : path} groups={[...rows.actions(target, selected), ...(!selected ? [[
             { label: "Expand folder tree", run: () => rows.setSubtree(path, false) },
@@ -424,7 +427,9 @@ function FolderBranch({ tree, parent, rows }: { tree: FolderNodeData; parent: st
           </ContextActions>
           {expanded && load?.pending && <p className="file-help" role="status">Loading {name}…</p>}
           {expanded && load?.error && <p className="file-help" role="alert">{String(load.error)}</p>}
-          {expanded && <FolderBranch tree={folder} parent={path} rows={rows} />}
+          {expanded && hidden?.pending && <p className="file-help" role="status">Checking Windows hidden items in {name}…</p>}
+          {expanded && hidden?.error && <p className="file-help" role="alert">Could not check Windows hidden items in {name}: {String(hidden.error)}</p>}
+          {expanded && !hidden?.pending && <FolderBranch tree={folder} parent={path} rows={rows} />}
         </li>;
       })}
       {tree.files.map((path) => {
@@ -479,29 +484,33 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, actions, re
   const container = useRef<HTMLDivElement>(null);
   const rootButton = useRef<HTMLButtonElement>(null);
   const [selected, setSelected] = useState(new Set<string>());
-  const [manualReveal, setManualReveal] = useState<{ path: string; expand?: boolean }>();
-  const [visibilityOverride, setVisibilityOverride] = useState<string>();
+  const [manualReveal, setManualReveal] = useState<TreeReveal>();
+  const [visibilityOverride, setVisibilityOverride] = useState<TreeReveal>();
   const [blankMenu, setBlankMenu] = useState<{ x: number; y: number }>();
   const selectionAnchor = useRef<string>(undefined);
   const lastAutoReveal = useRef<string>(undefined);
   const favoritesId = simulated ? "example" : checkoutId;
   const favorites = useCheckoutFavorites(favoritesId);
   const favoritePaths = new Set(favorites.map(({ path }) => path.toLowerCase()));
-  const revealPath = manualReveal?.path ?? (preferences.autoReveal ? active : undefined);
-  const visibleReveal = revealPath ?? visibilityOverride;
-  const ignored = useIgnoredTree(checkoutId, !simulated && preferences.ignored, expanded, preferences.dotfiles, visibleReveal);
+  const automaticReveal = preferences.autoReveal && active ? { path: active } : undefined;
+  const revealPath = manualReveal?.path ?? automaticReveal?.path;
+  const visibleReveals = [manualReveal ?? visibilityOverride, automaticReveal].filter((reveal) => reveal !== undefined);
+  const ignored = useIgnoredTree(checkoutId, !simulated && preferences.ignored, expanded, preferences.dotfiles, visibleReveals);
   const markdown = (path: string) => /\.(?:md|markdown)$/i.test(path);
-  const visible = (path: string) => showTreePath(path, preferences.dotfiles, visibleReveal);
-  const tree = makeTree([...paths, ...ignored.files.filter((path) => workspace === "ide" || markdown(path))].filter(visible),
-    [...folders, ...ignored.folders].filter(visible), preferences.sort);
+  const allFiles = [...paths, ...ignored.files.filter((path) => workspace === "ide" || markdown(path))];
+  const allFolders = [...folders, ...ignored.folders];
+  const windowsHidden = useWindowsHiddenTree({ checkoutId, enabled: !simulated && !preferences.windowsHidden, expanded,
+    files: allFiles, folders: allFolders, dotfiles: preferences.dotfiles, reveals: visibleReveals });
+  const visible = (path: string) => showTreePath(path, preferences.dotfiles, visibleReveals, windowsHidden.paths);
+  const tree = makeTree(allFiles.filter(visible), allFolders.filter(visible), preferences.sort);
   const ignoredPaths = new Set([...ignored.files, ...ignored.folders]);
   function visibleItems(node: FolderNodeData, parent = ""): FileTreeTarget[] {
     return [...[...node.folders].flatMap(([name, folder]): FileTreeTarget[] => {
       const path = parent ? `${parent}/${name}` : name;
-      return [{ kind: "folder", path }, ...(expanded.has(path) ? visibleItems(folder, path) : [])];
+      return [{ kind: "folder", path }, ...(expanded.has(path) && !windowsHidden.load.get(path)?.pending ? visibleItems(folder, path) : [])];
     }), ...node.files.map((path): FileTreeTarget => ({ kind: "file", path }))];
   }
-  const selection = selected.size > 1 ? visibleItems(tree).filter(({ path }) => selected.has(path)) : [];
+  const selection = selected.size > 1 && !windowsHidden.pending ? visibleItems(tree).filter(({ path }) => selected.has(path)) : [];
   function choose(target: FileTreeTarget, event: MouseEvent<HTMLButtonElement>) {
     const { path, kind } = target;
     if (manualReveal) setManualReveal(undefined);
@@ -540,7 +549,7 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, actions, re
   useEffect(() => {
     if (!reveal) return;
     setManualReveal(reveal);
-    setVisibilityOverride(reveal.path);
+    setVisibilityOverride(reveal);
   }, [reveal]);
   useEffect(() => {
     if (!revealPath) return;
@@ -565,7 +574,7 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, actions, re
       button.scrollIntoView?.({ block: "nearest" });
     });
     return () => cancelAnimationFrame(frame);
-  }, [manualReveal, revealPath, expanded, paths, folders, ignored.files.length, ignored.folders.length]);
+  }, [manualReveal, revealPath, expanded, paths, folders, ignored.files.length, ignored.folders.length, windowsHidden.pending, windowsHidden.load]);
 
   function setSubtree(path: string, collapse: boolean) {
     setExpanded((previous) => collapse
@@ -596,8 +605,15 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, actions, re
         setVisibilityOverride(undefined);
         setPreferences((value) => ({ ...value, dotfiles: !value.dotfiles }));
       } },
-      ...(!simulated ? [{ label: preferences.ignored ? "Hide Git-ignored files" : "Show Git-ignored files",
-        run: () => setPreferences((value) => ({ ...value, ignored: !value.ignored })) }] : []),
+      ...(!simulated ? [
+        { label: preferences.windowsHidden ? "Hide Windows hidden items" : "Show Windows hidden items", run: () => {
+          setManualReveal(undefined);
+          setVisibilityOverride(undefined);
+          setPreferences((value) => ({ ...value, windowsHidden: !value.windowsHidden }));
+        } },
+        { label: preferences.ignored ? "Hide Git-ignored files" : "Show Git-ignored files",
+          run: () => setPreferences((value) => ({ ...value, ignored: !value.ignored })) },
+      ] : []),
       { label: preferences.autoReveal ? "Disable auto-reveal" : "Auto-reveal active file",
         run: () => { setManualReveal(undefined); setPreferences((value) => ({ ...value, autoReveal: !value.autoReveal })); } },
     ]];
@@ -608,8 +624,9 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, actions, re
       if (ignored && !simulated && !folders.includes(path)) {
         setPreferences((value) => ({ ...value, ignored: true }));
       }
-      setVisibilityOverride(path);
-      setManualReveal({ path, expand: true });
+      const reveal = { path, expand: true };
+      setVisibilityOverride(reveal);
+      setManualReveal(reveal);
     }
   }
 
@@ -639,9 +656,12 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, actions, re
     </section>}
     {ignored.pending && <p className="file-help" role="status">Loading Git-ignored files…</p>}
     {ignored.error && <p className="file-help" role="alert">{String(ignored.error)}</p>}
+    {windowsHidden.pending && <p className="file-help" role="status">Checking Windows hidden items…</p>}
+    {windowsHidden.error && <p className="file-help" role="alert">Could not check Windows hidden items: {String(windowsHidden.error)}</p>}
     {selection.length > 1 && <p className="file-selection-count" role="status">{selection.length} selected</p>}
-    <FolderBranch tree={tree} parent="" rows={{ active, actions: rowActions, expanded, setSubtree, selected, choose,
-      selection: (path) => selection.length > 1 && selected.has(path) ? selection : undefined, ignored: ignoredPaths, ignoredLoad: ignored.load }} />
+    {!windowsHidden.pending && <FolderBranch tree={tree} parent="" rows={{ active, actions: rowActions, expanded, setSubtree, selected, choose,
+      selection: (path) => selection.length > 1 && selected.has(path) ? selection : undefined, ignored: ignoredPaths, ignoredLoad: ignored.load,
+      windowsHiddenLoad: windowsHidden.load }} />}
     <div className="file-tree-blank" aria-hidden="true" onContextMenu={(event) => {
       event.preventDefault();
       setBlankMenu({ x: event.clientX, y: event.clientY });

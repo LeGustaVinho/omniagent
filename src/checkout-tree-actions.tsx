@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { FileDialog, type FileTreeTarget } from "@/ide-file-workspace";
 import type { MenuGroups } from "@/components/ui/context-actions";
-import { ignoredTreeKey } from "@/checkout-file-tree";
+import { ignoredTreeKey, windowsHiddenTreeKey } from "@/checkout-file-tree";
 import { containingFolder } from "@/file-context-actions";
 import { fileName } from "@/ide-knowledge-data";
 
@@ -34,7 +34,7 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const refreshTree = () => Promise.all([refresh(), folders.refetch({ throwOnError: true }),
-    client.invalidateQueries({ queryKey: ignoredTreeKey(checkoutId) })]);
+    client.invalidateQueries({ queryKey: ignoredTreeKey(checkoutId) }), client.invalidateQueries({ queryKey: windowsHiddenTreeKey(checkoutId) })]);
 
   function start(next: NonNullable<typeof request>, suggested = "") {
     setName(suggested);
