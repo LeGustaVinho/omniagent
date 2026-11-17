@@ -385,6 +385,9 @@ mod tests {
         let db = Connection::open_in_memory()?;
         db.execute_batch(
             "CREATE TABLE selected_candidate_revisions(id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, payload BLOB);
+             CREATE TABLE history_deleted_candidate_diffs (
+                 candidate_id TEXT PRIMARY KEY REFERENCES selected_candidate_revisions(id)
+             ) STRICT, WITHOUT ROWID;
              CREATE TABLE candidate_verifications(id TEXT PRIMARY KEY, candidate_id TEXT, policy_revision TEXT,
                  started_at TEXT, finished_at TEXT, gates BLOB);
              CREATE TABLE candidate_gate_results(verification_id TEXT, gate_index INTEGER, payload BLOB);
@@ -483,11 +486,30 @@ mod tests {
         )?;
         assert_eq!(
             evaluate_evidence(&db, &scope, &approval)?,
-            (Some(candidate.id), GoalCriterionStatus::Passed)
+            (Some(candidate.id.clone()), GoalCriterionStatus::Passed)
         );
-        scope.run_id = "different checkpoint".into();
-        assert!(evaluate_evidence(&db, &scope, &gate).is_err());
-        assert!(evaluate_evidence(&db, &scope, &approval).is_err());
+        let correct_run = std::mem::replace(&mut scope.run_id, "different checkpoint".into());
+        for evidence in [&gate, &approval] {
+            assert_eq!(
+                evaluate_evidence(&db, &scope, evidence)
+                    .unwrap_err()
+                    .to_string(),
+                "The candidate belongs to a different recorded goal result"
+            );
+        }
+        scope.run_id = correct_run;
+        db.execute(
+            "INSERT INTO history_deleted_candidate_diffs VALUES (?1)",
+            [&candidate.id],
+        )?;
+        for evidence in [&gate, &approval] {
+            assert_eq!(
+                evaluate_evidence(&db, &scope, evidence)
+                    .unwrap_err()
+                    .to_string(),
+                "selected candidate is unavailable in the requested work scope"
+            );
+        }
         Ok(())
     }
 }

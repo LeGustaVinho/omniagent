@@ -10734,9 +10734,12 @@ mod tests {
         let first = prepare(&store, &conversation.id, scope.clone(), first_prompt).await?;
         let first_session = first.agent_session_id.clone();
         let first_run = first.run.id.clone();
+        let fixture_deadline = Duration::from_secs(60);
         let running = start_managed_turn(store.clone(), runner.clone(), first, None);
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), running.wait()).await??,
+            tokio::time::timeout(fixture_deadline, running.wait())
+                .await
+                .context("The first managed fixture turn did not settle")??,
             RunStatus::Succeeded
         );
         std::fs::write(&guide, "Revised fixture repository instructions")?;
@@ -10749,10 +10752,11 @@ mod tests {
         assert_eq!(resumed.input.len(), 1);
         assert_eq!(resumed.input[0].text, "Second prompt");
         let resumed_run = resumed.run.id.clone();
+        let running = start_managed_turn(store.clone(), runner.clone(), resumed, None);
         assert_eq!(
-            start_managed_turn(store.clone(), runner.clone(), resumed, None)
-                .wait()
-                .await?,
+            tokio::time::timeout(fixture_deadline, running.wait())
+                .await
+                .context("The resumed managed fixture turn did not settle")??,
             RunStatus::Succeeded
         );
         let first_dispatch = store

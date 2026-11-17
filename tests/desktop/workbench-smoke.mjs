@@ -10,6 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { remote } from "webdriverio";
 
 const fixtureIdentifier = "io.github.legustavinho.omniagent.desktop-tests";
+const packagedOrigin = "http://tauri.localhost";
 const port = Number(process.env.OMNIAGENT_WEBDRIVER_PORT ?? 4444);
 
 function fixtureRunId(application) {
@@ -93,33 +94,54 @@ async function startSession(application) {
   });
   await browser.setTimeout({ script: 8_000 });
   try {
-    await waitForRuntime(browser);
+    await waitForRuntime(browser, { startup: true });
     assert.equal(await invoke(browser, "plugin:app|identifier"), testIdentifier(application));
   } catch (error) {
-    const state = await browser.execute(async () => {
-      let runtime;
-      try {
-        runtime = await window.__TAURI_INTERNALS__?.invoke?.("runtime_status");
-      } catch (error) {
-        runtime = String(error);
-      }
-      return { url: location.href, origin: location.origin, title: document.title, readyState: document.readyState, runtime };
-    }).catch(() => undefined);
+    const profile = fixtureProfile(application);
+    const files = await Promise.all(["installation.dpapi", "omniagent.sqlite3"].map(async (name) =>
+      [name, await access(join(profile, name)).then(() => true, () => false)]));
     await browser.deleteSession().catch(() => {});
-    throw new Error(`Desktop runtime did not become ready (${JSON.stringify(state)})`, { cause: error });
+    throw new Error(`Desktop fixture did not start (${JSON.stringify(Object.fromEntries(files))})`, { cause: error });
   }
   return browser;
 }
 
-async function waitForRuntime(browser) {
-  await browser.waitUntil(() => browser.execute(async () => {
-    if (location.origin === "null" || typeof window.__TAURI_INTERNALS__?.invoke !== "function") return false;
-    try {
-      return await window.__TAURI_INTERNALS__.invoke("runtime_status") === "Desktop runtime is ready.";
-    } catch {
-      return false;
-    }
-  }), { timeout: 15_000 });
+async function waitForRuntime(browser, { startup = false } = {}) {
+  const state = { browserVersion: browser.capabilities.browserVersion };
+  const allowNavigationAt = Date.now() + 4_000;
+  try {
+    await browser.waitUntil(async () => {
+      try {
+        state.document = await browser.execute(() => ({
+          url: location.href, origin: location.origin, title: document.title,
+          readyState: document.readyState, hasInvoke: typeof window.__TAURI_INTERNALS__?.invoke === "function",
+        }));
+        if (startup && !state.navigatedFromBlank && Date.now() >= allowNavigationAt && state.document.url === "about:blank") {
+          // WebView2 creates a blank document before Wry can navigate to the bundled assets.
+          state.navigatedFromBlank = true;
+          await browser.navigateTo(`${packagedOrigin}/`);
+          return false;
+        }
+        if (state.document.origin !== packagedOrigin || !state.document.hasInvoke) return false;
+        state.runtime = await browser.execute(async () => {
+          try {
+            return await Promise.race([
+              window.__TAURI_INTERNALS__.invoke("runtime_status"),
+              new Promise((resolve) => setTimeout(() => resolve("Runtime command timed out"), 2_000)),
+            ]);
+          } catch (error) {
+            return String(error);
+          }
+        });
+        return state.runtime === "Desktop runtime is ready.";
+      } catch (error) {
+        state.webdriverError = String(error);
+        return false;
+      }
+    }, { timeout: startup ? 30_000 : 15_000 });
+  } catch (error) {
+    throw new Error(`Desktop runtime did not become ready (${JSON.stringify(state)})`, { cause: error });
+  }
 }
 
 async function waitForFixtureResult(browser, projectId, conversationId, label, timeout) {
