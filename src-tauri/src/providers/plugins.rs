@@ -108,12 +108,17 @@ pub fn probe_plugins(configured: ConfiguredExecutable) -> Result<PluginReport> {
         report.version = published_version(provider, &output.stdout)
             .or_else(|| published_version(provider, &output.stderr));
     }
+    let timeout = if provider == Provider::Codex {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(25)
+    };
     read_inventory(
         &mut report,
         |request| DirectWindowsRunner.launch(request),
         &path,
         cwd,
-        Duration::from_secs(25),
+        timeout,
     );
     Ok(report)
 }

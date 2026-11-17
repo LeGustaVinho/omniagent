@@ -7,7 +7,7 @@ import type { ConfiguredExecutable } from "@/bindings/ConfiguredExecutable";
 import type { PluginInventory } from "@/bindings/PluginInventory";
 import type { PluginInventoryStatus } from "@/bindings/PluginInventoryStatus";
 import type { Provider } from "@/bindings/Provider";
-import { ClaudePluginManagement } from "@/cli-plugin-management";
+import { UserPluginManagement } from "@/cli-plugin-management";
 import { Button } from "@/components/ui/button";
 import { desktopCliPrerequisitesKey, ExecutableInstallation, providerExecutableLabels, useDesktopCliPrerequisites, type CliPrerequisite } from "@/desktop-cli-prerequisites";
 import { ExecutionProfileModelSettings } from "@/model-default-settings";
@@ -206,7 +206,7 @@ function ExecutableSettings({ profile, installation }: { profile: ConfiguredExec
       )}
       {inventory.isError && <p role="alert" className="mt-3 text-sm text-red-300">{String(inventory.error)}</p>}
       {inventory.data && <PluginList inventory={inventory.data} />}
-      {provider === "claude" && <ClaudePluginManagement key={configured ?? ""} disabled={pending !== null || requested !== (configured ?? "")} />}
+      <UserPluginManagement key={configured ?? ""} provider={provider} disabled={pending !== null || requested !== (configured ?? "")} />
       <ExecutionProfileModelSettings provider={provider} />
     </section>
   );

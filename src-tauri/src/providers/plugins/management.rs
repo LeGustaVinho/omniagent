@@ -23,6 +23,10 @@ use crate::providers::{configuration, profiles::CommandOutput};
 
 use super::*;
 
+pub mod native;
+mod receipts;
+
+use receipts::{ActionTable, Claim};
 #[cfg(test)]
 mod tests;
 
@@ -34,13 +38,15 @@ const USER_SCOPE: &str = "user";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ClaudeUserPluginAction {
+pub enum UserPluginAction {
     Install,
     Enable,
     Disable,
 }
 
-impl ClaudeUserPluginAction {
+pub type ClaudeUserPluginAction = UserPluginAction;
+
+impl UserPluginAction {
     fn subcommand(self) -> &'static str {
         match self {
             Self::Install => "install",
@@ -165,7 +171,7 @@ impl LocalClaude {
         let cwd = tempfile::Builder::new()
             .prefix("omniagent-claude-plugins-")
             .tempdir()?;
-        let run = |args: &[&str]| run_claude(&executable, cwd.path(), args, READ_TIMEOUT);
+        let run = |args: &[&str]| run_plugin_command(&executable, cwd.path(), args, READ_TIMEOUT);
         let version = run(&["--version"])?;
         let cli_version = published_version(Provider::Claude, &version.stdout)
             .or_else(|| published_version(Provider::Claude, &version.stderr))
@@ -211,7 +217,7 @@ impl LocalClaude {
 
     fn probe(&self, args: &[&str], timeout: Duration) -> Result<CommandOutput> {
         self.verify_root()?;
-        run_claude(&self.profile.executable, self.cwd.path(), args, timeout)
+        run_plugin_command(&self.profile.executable, self.cwd.path(), args, timeout)
     }
 
     fn installed(&self) -> Result<PluginReport> {
@@ -257,7 +263,12 @@ impl LocalClaude {
     }
 }
 
-fn run_claude(path: &Path, cwd: &Path, args: &[&str], timeout: Duration) -> Result<CommandOutput> {
+fn run_plugin_command(
+    path: &Path,
+    cwd: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<CommandOutput> {
     command_probe_with_limits(
         |request| DirectWindowsRunner.launch(request),
         path,
@@ -554,19 +565,9 @@ impl Store {
             installed: evaluation.installed,
             catalog: evaluation.catalog,
         };
-        self.execute(move |db| {
-            db.execute(
-                "INSERT INTO claude_user_plugin_actions(id, state, before_inventory_id, preview)
-                 VALUES (?1, 'ready', ?2, ?3)",
-                params![
-                    sealed.preview.id,
-                    sealed.preview.inventory_before.id,
-                    protected(&sealed)?
-                ],
-            )?;
-            Ok(())
-        })
-        .await?;
+        ActionTable::Claude
+            .save(self, &preview.id, &preview.inventory_before.id, &sealed)
+            .await?;
         Ok(preview)
     }
 
@@ -583,58 +584,22 @@ impl Store {
     }
 }
 
-enum Claim {
-    Ready(SealedPreview),
-    Recorded(ClaudeUserPluginOutcome),
-}
-
 async fn apply(store: &Store, id: String) -> Result<ClaudeUserPluginOutcome> {
-    let claim = store.execute({
-        let id = id.clone();
-        move |db| {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let (preview, outcome): (Vec<u8>, Option<Vec<u8>>) = tx.query_row(
-                "SELECT preview, outcome FROM claude_user_plugin_actions WHERE id = ?1",
-                [&id], |row| Ok((row.get(0)?, row.get(1)?)),
-            ).optional()?.context("The Claude plugin preview is unavailable")?;
-            if let Some(previous) = outcome {
-                return Ok(Claim::Recorded(decode(&previous)?));
-            }
-            let prepared = ClaudeUserPluginOutcome::Unconfirmed {
-                reason: "This operation may have been interrupted. Refresh the CLI inventory before reviewing a new operation.".into(),
-                inventory_after: None,
-            };
-            ensure!(tx.execute(
-                "UPDATE claude_user_plugin_actions SET state = 'applying', outcome = ?2 WHERE id = ?1 AND state = 'ready'",
-                params![id, protected(&prepared)?],
-            )? == 1, "The Claude plugin preview was already consumed");
-            let sealed = decode(&preview)?;
-            tx.commit()?;
-            Ok(Claim::Ready(sealed))
-        }
-    }).await?;
+    let claim = ActionTable::Claude
+        .claim::<SealedPreview>(store, &id)
+        .await?;
     let sealed = match claim {
         Claim::Ready(sealed) => sealed,
         Claim::Recorded(outcome) => return Ok(outcome),
     };
     let configured = store.configured_executable(Provider::Claude).await?;
-    let checked = tokio::task::spawn_blocking(move || apply_native(configured, sealed)).await?;
+    let checked = tokio::task::spawn_blocking(move || apply_native(configured, *sealed)).await?;
     let after = match checked.report {
         Some(report) => Some(store.save_plugin_inventory(report).await?),
         None => None,
     };
     let outcome = checked.result.with_inventory(after);
-    store.execute({
-        let outcome = outcome.clone();
-        move |db| {
-            ensure!(db.execute(
-                "UPDATE claude_user_plugin_actions SET state = 'settled', outcome = ?2, after_inventory_id = ?3
-                 WHERE id = ?1 AND state = 'applying'",
-                params![id, protected(&outcome)?, outcome.inventory_after().map(|item| &item.id)],
-            )? == 1, "The Claude plugin result could not be settled");
-            Ok(())
-        }
-    }).await?;
+    ActionTable::Claude.settle(store, id, &outcome).await?;
     Ok(outcome)
 }
 

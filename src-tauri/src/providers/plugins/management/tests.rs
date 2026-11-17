@@ -162,7 +162,7 @@ async fn exercise_native(root: &Path) -> Result<()> {
         .to_string(),
     )?;
     let executable = dunce::canonicalize(Provider::Claude.adapter().discover(None)?)?;
-    let added = run_claude(
+    let added = run_plugin_command(
         &executable,
         root,
         &[

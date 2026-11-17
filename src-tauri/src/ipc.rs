@@ -20,6 +20,9 @@ use omniagent::{
             PluginInventory,
             management::{
                 ClaudeUserPluginOutcome, ClaudeUserPluginPreview, ClaudeUserPluginRequest,
+                native::{
+                    CodexUserPluginCatalogEntry, NativeUserPluginPreview, NativeUserPluginRequest,
+                },
             },
             probe_plugins,
         },
@@ -612,6 +615,39 @@ pub async fn apply_claude_user_plugin_action(
 ) -> Result<ClaudeUserPluginOutcome, String> {
     store
         .apply_claude_user_plugin_action(preview_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn native_codex_plugin_catalog(
+    store: State<'_, Store>,
+    marketplace: String,
+) -> Result<Vec<CodexUserPluginCatalogEntry>, String> {
+    store
+        .native_codex_plugin_catalog(marketplace)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn preview_native_user_plugin_action(
+    store: State<'_, Store>,
+    request: NativeUserPluginRequest,
+) -> Result<NativeUserPluginPreview, String> {
+    store
+        .preview_native_user_plugin_action(request)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn apply_native_user_plugin_action(
+    store: State<'_, Store>,
+    preview_id: String,
+) -> Result<ClaudeUserPluginOutcome, String> {
+    store
+        .apply_native_user_plugin_action(preview_id)
         .await
         .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
