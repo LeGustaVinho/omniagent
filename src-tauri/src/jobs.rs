@@ -103,6 +103,8 @@ pub(crate) use question_waits::{
 };
 pub use question_waits::{QuestionWaitSummary, SavedConversationQuestion};
 pub use recovery::RecoveryAction;
+pub(crate) use recovery::load_reconciled_writer_start;
+pub use recovery::{InterruptedWriterReview, WriterReconciliationReceipt};
 pub(crate) use recovery::{requeue_rejected_native_goal, requeue_unlaunched_job};
 pub use scheduler::JobScheduler;
 pub(crate) use scheduler::LaunchGate;

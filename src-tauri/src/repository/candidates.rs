@@ -245,6 +245,8 @@ async fn capture_worktree_candidate(store: &Store, run_id: String, reconcile: bo
 pub(super) struct GitCapture {
     pub(super) state: GitStartingState,
     committed_patch_base64: String,
+    #[serde(skip)]
+    pub(super) index_entries_digest: Option<String>,
 }
 
 pub(super) fn capture_git(
@@ -253,8 +255,24 @@ pub(super) fn capture_git(
     common: &str,
     starting_head: Option<&str>,
 ) -> Result<GitCapture> {
-    let first = read_git(worktree, git_dir, common, starting_head)?;
-    let second = read_git(worktree, git_dir, common, starting_head)?;
+    stable_git_capture(worktree, git_dir, common, starting_head, false)
+}
+
+pub(super) fn capture_git_before_writer(
+    worktree: &ManagedWorktree, git_dir: &str, common: &str,
+) -> Result<GitCapture> {
+    stable_git_capture(worktree, git_dir, common, None, true)
+}
+
+fn stable_git_capture(
+    worktree: &ManagedWorktree,
+    git_dir: &str,
+    common: &str,
+    starting_head: Option<&str>,
+    measure_index: bool,
+) -> Result<GitCapture> {
+    let first = read_git(worktree, git_dir, common, starting_head, measure_index)?;
+    let second = read_git(worktree, git_dir, common, starting_head, measure_index)?;
     ensure!(
         first == second,
         "the worktree changed while capturing Git evidence"
@@ -312,6 +330,7 @@ fn read_git(
     git_dir: &str,
     common: &str,
     starting_head: Option<&str>,
+    measure_index: bool,
 ) -> Result<GitCapture> {
     let paths = verify_managed(worktree, git_dir, common)?;
     let head = base_commit(&worktree.root)?.context("the managed branch has no commit")?;
@@ -319,6 +338,9 @@ fn read_git(
     let index_digest = hash_file(&index)?;
     let view = IsolatedGit::open(&paths, &worktree.root, &head)?;
     view.copy_index(&paths)?;
+    let index_entries_digest = measure_index
+        .then(|| view.read(&["ls-files", "--stage", "-v", "-z"]).map(|entries| digest(&entries)))
+        .transpose()?;
     let status = read_status(&view)?;
     let staged = patch(&view, &["--cached"])?;
     let unstaged = patch(&view, &[])?;
@@ -342,6 +364,7 @@ fn read_git(
             }),
         },
         committed_patch_base64: STANDARD.encode(committed),
+        index_entries_digest,
     })
 }
 

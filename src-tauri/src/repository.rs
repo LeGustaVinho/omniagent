@@ -46,7 +46,7 @@ pub use worktrees::strategy::{BranchStrategy, TaskBranchStrategy};
 pub use worktrees::{GitStartingState, ManagedWorktree, WorktreeStart, provision_task_worktree};
 pub(crate) use worktrees::conversation::{ConversationWorktreePreview, inspect_fork_checkout, materialize_fork_checkout};
 pub(crate) use worktrees::{
-    capture_worktree_start, validate_task_worktree_checkout, verify_managed_recovery_candidate,
+    capture_worktree_start, observe_interrupted_writer, validate_task_worktree_checkout, verify_managed_recovery_candidate,
     verify_managed_recovery_checkout,
 };
 pub use writers::with_managed_worktree_writer;

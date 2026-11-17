@@ -15,6 +15,7 @@ import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import { matchesQueueView, projectQueueQuery, queueBlockerReason, queueJobState, queueViews, type QueueView } from "@/queue-model";
 import { QueuePolicy } from "@/queue-policy";
+import { QueueWriterReconciliation } from "@/queue-writer-reconciliation";
 import { DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
 import type { QueueJobFocus, WorkspaceProps } from "@/workbench-contract";
 
@@ -203,6 +204,8 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
           && (attempt.status === "failed" || attempt.status === "interrupted") &&
           <JobFailurePanel projectId={job.projectId} runId={attempt.runId}
             openLogs={() => openActivity(attempt.runId, attempt.conversationId ?? undefined)} />}
+        {attempt?.status === "interrupted" && job.mode === "approved_write" && job.kind === "agent" &&
+          <QueueWriterReconciliation key={attempt.runId} projectId={job.projectId} jobId={job.id} runId={attempt.runId} />}
         {job.downstreamWait && <section className="grid gap-1.5" aria-label="Downstream jobs">
           <h4 className="text-xs font-semibold">Downstream jobs</h4>
           <ul className="divide-y divide-border rounded border border-border">

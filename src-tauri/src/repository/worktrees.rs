@@ -69,6 +69,41 @@ pub struct WorktreeStart {
     pub repository_root: PathBuf,
     pub git_common_dir: PathBuf,
     pub starting: GitStartingState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_entries_digest: Option<String>,
+}
+
+impl WorktreeStart {
+    pub(crate) fn restored_by(&self, observed: &GitStartingState, index_entries: Option<&str>) -> bool {
+        fn untracked(state: &GitStartingState) -> impl Iterator<Item = (&str, &str)> {
+            state.changes.iter().flat_map(|changes| {
+                changes.untracked.iter().map(|entry| (entry.path.as_str(), entry.sha256.as_str()))
+            })
+        }
+        let index_matches = match self.index_entries_digest.as_deref() {
+            Some(expected) => Some(expected) == index_entries,
+            None => self.starting.index_digest == observed.index_digest,
+        };
+        index_matches
+            && self.starting.head == observed.head
+            && self.starting.status == observed.status
+            && self.starting.staged_diff_digest == observed.staged_diff_digest
+            && self.starting.unstaged_diff_digest == observed.unstaged_diff_digest
+            && untracked(&self.starting).eq(untracked(observed))
+    }
+}
+
+pub(crate) fn observe_interrupted_writer(
+    db: &Connection, project: &str, owner: &str, start: &WorktreeStart,
+) -> Result<(GitStartingState, Option<String>)> {
+    let (worktree, git_dir, common) = load_worktree(db, project, owner)?
+        .context("The writer's managed worktree is unavailable")?;
+    ensure!(
+        worktree == start.worktree && start.git_common_dir == Path::new(&common),
+        "The managed worktree identity changed since this writer started"
+    );
+    let observed = super::candidates::capture_git_before_writer(&worktree, &git_dir, &common)?;
+    Ok((observed.state, observed.index_entries_digest))
 }
 
 struct Source {
@@ -662,26 +697,43 @@ pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Res
             } else {
                 None
             };
-            Ok(load_worktree(db, &project, &task)?.map(|identity| (identity, writes, checkpoint)))
+            let reconciled = if writes {
+                crate::jobs::load_reconciled_writer_start(db, &run)?
+            } else {
+                None
+            };
+            Ok(load_worktree(db, &project, &task)?.map(|identity| (identity, writes, checkpoint, reconciled)))
         }
     }).await?;
-    let Some(((worktree, git_dir, common), writes, checkpoint)) = identity else {
+    let Some(((worktree, git_dir, common), writes, checkpoint, reconciled)) = identity else {
         return Ok(false);
     };
     let saved = tokio::task::spawn_blocking(move || {
         let paths = verify_managed(&worktree, &git_dir, &common)?;
-        let starting = match checkpoint {
+        ensure!(checkpoint.is_none() || reconciled.is_none(),
+            "The reconciled writer cannot use a different worktree checkpoint");
+        let (starting, index_entries_digest) = match checkpoint {
             Some((Some(payload), Some(true))) => {
-                super::candidates::recheck_candidate(&worktree, &git_dir, &common, &payload)?
+                (super::candidates::recheck_candidate(&worktree, &git_dir, &common, &payload)?, None)
             }
             Some(_) => anyhow::bail!("The continuation has no confirmed worktree candidate"),
-            None => capture_git(&worktree, &git_dir, &common, None)?.state,
+            None if writes => {
+                let observed = super::candidates::capture_git_before_writer(&worktree, &git_dir, &common)?;
+                if let Some(previous) = reconciled {
+                    ensure!(previous.worktree == worktree && previous.git_common_dir == Path::new(&common)
+                        && previous.restored_by(&observed.state, observed.index_entries_digest.as_deref()),
+                        "The reconciled writer checkout changed before retry");
+                }
+                (observed.state, observed.index_entries_digest)
+            }
+            None => (capture_git(&worktree, &git_dir, &common, None)?.state, None),
         };
         Ok::<_, anyhow::Error>(WorktreeStart {
             worktree,
             repository_root: PathBuf::from(paths.repository_root),
             git_common_dir: PathBuf::from(common),
             starting,
+            index_entries_digest,
         })
     })
     .await??;

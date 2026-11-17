@@ -6,6 +6,7 @@ import { deliveryMergeReceiptQuery } from "@/delivery-merge-model";
 import { JobFailurePanel } from "@/job-failure";
 import { commitQuery } from "@/project-agile-model";
 import { queueBlockerReason } from "@/queue-model";
+import { QueueWriterReconciliation } from "@/queue-writer-reconciliation";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { AttemptStageRequirements } from "@/workflow-stage-requirements";
 import { WorkflowMcpToolRun } from "@/workflow-mcp-tools";
@@ -123,6 +124,8 @@ function WorkflowJobEvidence({ entry, snapshot, scope, navigation }: { entry: Ex
         {job.kind === "command" ? "Open command logs" : "Open prompts and activity"}
       </Button>
       {(attempt.status === "failed" || attempt.status === "interrupted") && <JobFailurePanel projectId={scope.projectId} runId={attempt.runId} />}
+      {attempt.runId === latest?.runId && attempt.status === "interrupted" && job.mode === "approved_write" && job.kind === "agent" &&
+        <QueueWriterReconciliation projectId={scope.projectId} jobId={job.id} runId={attempt.runId} />}
     </li>)}</ol>
   </section>;
 }

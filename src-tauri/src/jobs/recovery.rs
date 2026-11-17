@@ -28,6 +28,10 @@ use super::{
     policy::reconcile_approval,
 };
 
+mod interrupted_writer;
+pub(crate) use interrupted_writer::load_reconciled_writer_start;
+pub use interrupted_writer::{InterruptedWriterReview, WriterReconciliationReceipt};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -73,6 +77,7 @@ pub(super) struct RecoverySource {
     provider_turn_id: Option<String>,
     dispatched: bool,
     launch_requested: bool,
+    reconciled_writer: bool,
 }
 
 #[derive(PartialEq, Eq)]
@@ -261,6 +266,8 @@ fn load_recovery_source(
         provider_turn_id,
         dispatched,
         launch_requested,
+        reconciled_writer: job.mode == SessionMode::ApprovedWrite
+            && interrupted_writer::has_reconciled_writer(db, &attempt.run_id)?,
     }))))
 }
 
@@ -269,7 +276,7 @@ impl RecoverySource {
         // A write may already have affected the candidate even when delivery was uncertain.
         // Keep its recovery pending review until a reconciled worktree checkpoint is available.
         if mode == SessionMode::ApprovedWrite && (self.launch_requested || self.dispatched) {
-            return Vec::new();
+            return if self.reconciled_writer { vec![RecoveryAction::Retry] } else { Vec::new() };
         }
         let mut actions = vec![RecoveryAction::Retry];
         if self.dispatched || self.result_context_id != self.input_context_id {

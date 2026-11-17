@@ -65,6 +65,11 @@ switch ($Mode) {
   'invalid' { [Console]::Write("{ unfinished") }
   'nonzero' { [Console]::Write('{"verified":true}'); exit 23 }
   'changed' { [Console]::Write('{"verified":true}') }
+  'cancel' {
+    Start-Sleep -Seconds 30
+    [IO.File]::WriteAllText((Join-Path (Get-Location) 'late-command-effect'), 'unexpected completion')
+    [Console]::Write('{"verified":true}')
+  }
 }
 "#,
     )?;
@@ -119,6 +124,8 @@ switch ($Mode) {
         ("nonzero", CommandOutputFormat::Json),
         ("changed", CommandOutputFormat::Json),
         ("changed-child", CommandOutputFormat::Json),
+        ("cancel", CommandOutputFormat::Json),
+        ("cancel-child", CommandOutputFormat::Json),
     ];
     let mut graph = builtin_delivery_graph(DeliveryRoles::default());
     for (mode, output) in modes {
@@ -128,7 +135,10 @@ switch ($Mode) {
                 r#"[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $data = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd()); [Console]::Write('text: ' + $data.message)"#.into(),
             ])
         } else {
-            (&registered, vec![if mode == "changed-child" { "changed" } else { mode }.into()])
+            (&registered, vec![match mode {
+                "changed-child" | "cancel-child" => "changed",
+                _ => mode,
+            }.into()])
         };
         graph.nodes.push(NodeInstance {
             id: mode.into(),
@@ -149,6 +159,7 @@ switch ($Mode) {
             let (from_node, source) = match (mode, target) {
                 ("text", "ready") => ("json", "completed"),
                 ("changed-child", "ready") => ("changed", "completed"),
+                ("cancel-child", "ready") => ("cancel", "completed"),
                 _ => ("prepare", source),
             };
             graph.wires.push(Wire {
@@ -387,6 +398,32 @@ switch ($Mode) {
     assert_eq!(recorded.attempts[1].previous_run_id.as_deref(), Some(changed.run_id.as_str()));
     let child = terminal(&store, &submit("changed-child").await?).await?;
     assert_eq!(child.status, RunStatus::Succeeded);
+
+    let cancel_job = submit("cancel").await?;
+    let running = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let current = store.job(fixture.project.clone(), cancel_job.id.clone()).await?
+                .context("Cancellable command disappeared")?;
+            if let Some(attempt) = current.latest_attempt {
+                ensure!(!attempt.status.is_terminal(), "Command ended before interruption");
+                if attempt.status == RunStatus::Running {
+                    break Ok::<_, anyhow::Error>(attempt);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await??;
+    store.request_project_job_interrupt(fixture.project.clone(), cancel_job.id.clone(), running.run_id.clone()).await?;
+    let cancelled = terminal(&store, &cancel_job).await?;
+    assert_eq!(cancelled.run_id, running.run_id);
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
+    let stopped = store.command_job_output(fixture.project.clone(), cancelled.run_id.clone()).await?
+        .context("Missing cancellation outcome")?;
+    assert!(stopped.process.is_some_and(|process| process.cancelled));
+    assert!(!root.join("late-command-effect").exists());
+    assert!(store.workflow_command_result(fixture.project.clone(), cancelled.run_id).await?.is_none());
+    assert!(submit("cancel-child").await.unwrap_err().to_string().contains("control input ready is waiting"));
+
     scheduler.shutdown().await?;
     drop(store);
     assert_eq!(
