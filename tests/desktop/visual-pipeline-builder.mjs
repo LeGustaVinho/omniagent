@@ -574,6 +574,9 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
       }, body: { kind: "pipeline", graph: { name: chatTitle, nodes: [
         { id: "start", kind: "typed_start", configuration: { kind: "typed_start", conversation: true, fields: [] } },
         { id: "context", kind: "load_context", configuration: { kind: "none" } },
+        { id: "feedback", kind: "human", configuration: { kind: "human", interaction: "feedback", message: "Add a note about this revision", fields: [
+          { id: "note", label: "Review note", required: true, input: { kind: "text" } },
+        ] } },
         { id: "answer", kind: "set_fields", configuration: { kind: "set_fields", mode: "build", operations: [
           { op: "set", path: "/reply", value: { source: "literal", value: "Loaded the chosen Markdown revision." } },
         ] } },
@@ -581,7 +584,8 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
         { id: "end", kind: "end", configuration: { kind: "end" } },
       ], wires: [
         makeWire("start", "start", "context", "ready"), makeWire("start", "document", "context", "document"),
-        makeWire("context", "loaded", "answer", "ready"), makeWire("answer", "completed", "checked", "ready"),
+        makeWire("context", "loaded", "feedback", "ready"), makeWire("feedback", "answered", "answer", "ready"),
+        makeWire("answer", "completed", "checked", "ready"),
         makeWire("answer", "object", "checked", "source"), makeWire("checked", "completed", "end", "ready"),
         makeWire("checked", "object", "end", "result"),
       ] } } },
@@ -607,15 +611,41 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const chat = browser.$(`section[aria-label=${JSON.stringify(conversation.title)}]`);
   const composer = chat.$('textarea[id^="draft-"]');
   const turns = () => invoke(browser, "conversation_pipeline_turns", { conversationId: conversation.id });
+  const reply = "Loaded the chosen Markdown revision.";
+  async function finishWaitingTurn(index) {
+    await click(chat.$("button=Open waiting step"));
+    const execution = browser.$('[aria-label="Pinned workflow execution"]');
+    const graph = execution.$('[aria-label="Workflow execution graph"]');
+    const feedback = graph.$('.react-flow__node[data-id="feedback"]');
+    const end = graph.$('.react-flow__node[data-id="end"]');
+    await feedback.$('[data-status="waiting"]').waitForDisplayed({ timeout });
+    const form = execution.$('[aria-label="Workflow input request"]');
+    const note = `Note for turn ${index + 1}`;
+    await replaceText(browser, form.$('input[type="text"]'), note);
+    await click(form.$("button=Send feedback"));
+    await feedback.$('[data-status="completed"]').waitForDisplayed({ timeout });
+    await end.$('[data-status="completed"]').waitForDisplayed({ timeout });
+    const inspector = execution.$('[aria-label="Execution node evidence"]');
+    const response = inspector.$('[aria-label="response output"]');
+    await click(response.$("summary=Open output evidence"));
+    await textIsVisible(browser, response, note);
+    await select(inspector, "Inspect execution node", "end");
+    const result = inspector.$('[aria-label="result output"]');
+    await click(result.$("summary=Open output evidence"));
+    await textIsVisible(browser, result, reply);
+    await click(execution.$("button=Open source conversation"));
+    await browser.waitUntil(async () => (await turns())[index]?.state === "succeeded", { timeout });
+    await textIsVisible(browser, chat, reply);
+  }
   await replaceText(browser, composer, "Read this saved revision once.");
   await click(chat.$("button=Choose inputs"));
   const chatInputs = browser.$('.conversation-pipeline-dialog[role="dialog"]');
   await select(chatInputs, "Saved Markdown revision", sourceRevision.id);
   await click(chatInputs.$("button=Send with these inputs"));
-  await browser.waitUntil(async () => (await turns()).length === 1 && Boolean((await turns())[0].runId), { timeout });
+  await finishWaitingTurn(0);
   await replaceText(browser, composer, "Use the same revision again.");
   await click(chat.$("button=Run pipeline"));
-  await browser.waitUntil(async () => (await turns()).length === 2 && (await turns()).every(({ runId }) => Boolean(runId)), { timeout });
+  await finishWaitingTurn(1);
   const attempts = await turns();
   assert.deepEqual(attempts.map(({ inputs }) => inputs.documentRevisionId), [sourceRevision.id, sourceRevision.id]);
   assert.notEqual(attempts[0].runId, attempts[1].runId);
