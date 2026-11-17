@@ -1,5 +1,8 @@
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { markdownHighlight } from "@/markdown-highlight";
+
+const rehypePlugins = [markdownHighlight];
 
 export function ConversationMarkdown({ children }: { children: string }) {
   return (
@@ -7,6 +10,7 @@ export function ConversationMarkdown({ children }: { children: string }) {
       <Markdown
         skipHtml
         remarkPlugins={[remarkGfm]}
+        rehypePlugins={rehypePlugins}
         components={{
           a: ({ children, href }) => {
             const label = Array.isArray(children) && children.length === 1 ? children[0] : children;

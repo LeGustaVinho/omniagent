@@ -10,12 +10,13 @@ import {
 } from "@/knowledge-document";
 import { fileName, type ExampleFile } from "@/ide-knowledge-data";
 import { NoteDiagram, noteAttachments, type NoteAttachment } from "@/knowledge-media";
+import { markdownHighlight } from "@/markdown-highlight";
 import { noteAttachmentCandidates, RepositoryNoteMedia } from "@/repository-note-media";
 import type { IndexedLinkResolution } from "@/repository-note-links";
 import "katex/dist/katex.css";
 
 const markdownPlugins = [remarkGfm, remarkMath];
-const readingPlugins = [decorateTags, rehypeKatex];
+const readingPlugins = [decorateTags, rehypeKatex, markdownHighlight];
 
 type ReadingNode = {
   type: string;

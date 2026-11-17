@@ -95,3 +95,22 @@ test("renders Markdown links and images as text inside agent messages", () => {
   expect(container.querySelector("a,img,iframe")).toBeNull();
   expect(container.querySelector("strong")?.textContent).toEqual("Check");
 });
+
+test("highlights language-tagged code in agent messages and keeps other code readable", () => {
+  const source = [
+    "Inline `Write-Output`", "",
+    "```ts", "const count = 42;", "```", "",
+    "```powershell", 'Write-Output "hello"', "```", "",
+    "```unregistered", "const count = 42;", "```", "",
+    "```", "const count = 42;", "```",
+  ].join("\n");
+  const { container } = render(<ConversationMarkdown>{source}</ConversationMarkdown>);
+
+  expect(container.querySelector("pre > code.language-ts.hljs .hljs-keyword")?.textContent).toBe("const");
+  expect(container.querySelector("pre > code.language-powershell.hljs .hljs-built_in")?.textContent).toBe("Write-Output");
+  expect(container.querySelector("pre > code.language-powershell")?.textContent).toBe('Write-Output "hello"\n');
+  expect(container.querySelector("p > code")?.outerHTML).toBe("<code>Write-Output</code>");
+  const plainBlocks = container.querySelectorAll("pre > code.language-unregistered, pre > code:not([class])");
+  expect([...plainBlocks].map((code) => code.textContent)).toEqual(["const count = 42;\n", "const count = 42;\n"]);
+  expect([...plainBlocks].every((code) => code.childElementCount === 0)).toBe(true);
+});

@@ -11,7 +11,8 @@ it("renders note syntax on the same source while keeping comments and active HTM
     "> [!TIP] Handoff", "> Confirm the package.", "",
     "| Platform | Status |", "| --- | --- |", "| Windows | ~~queued~~ |", "",
     "- [x] Review artifacts", "", "Equation $x^2$.[^release]", "", "[^release]: Frozen source.", "",
-    "```js", "const flag = '#inside-fence'", "```", "", "%% source-only comment %%", "",
+    "```js", "const flag = '#inside-fence'", "```", "",
+    "```ps1", 'Write-Output "ready"', "```", "", "%% source-only comment %%", "",
     '<script>window.rawMarkup = true</script>', ""].join("\n");
   const { container } = render(<NoteReading path="Release.md" content={source} files={[]} onLink={vi.fn()} onAttachment={vi.fn()} />);
 
@@ -29,7 +30,8 @@ it("renders note syntax on the same source while keeping comments and active HTM
   expect(footnote?.textContent).toContain("Frozen source.");
   expect(within(footnote!).getByRole("link").getAttribute("href")).toBe("#" + reference.id);
   expect(container.querySelector(".katex")).not.toBeNull();
-  expect(container.querySelector("pre code")?.textContent).toContain("#inside-fence");
+  expect(container.querySelector("pre > code.language-js.hljs .hljs-string")?.textContent).toBe("'#inside-fence'");
+  expect(container.querySelector("pre > code.language-ps1.hljs .hljs-built_in")?.textContent).toBe("Write-Output");
   expect(container.textContent).not.toContain("source-only comment");
   expect(container.querySelector("script")).toBeNull();
 });

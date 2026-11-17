@@ -1,0 +1,29 @@
+pre > code.hljs :is(.hljs-comment, .hljs-quote) {
+  color: var(--muted-foreground);
+}
+
+pre > code.hljs :is(.hljs-keyword, .hljs-selector-tag) {
+  color: light-dark(#a21d35, #ff8291);
+}
+
+pre > code.hljs :is(.hljs-string, .hljs-regexp, .hljs-doctag) {
+  color: light-dark(#075987, #a5d6ff);
+}
+
+pre > code.hljs :is(.hljs-title, .hljs-section, .hljs-type, .hljs-built_in, .hljs-selector-class, .hljs-selector-id) {
+  color: light-dark(#6037a0, #d2a8ff);
+}
+
+pre > code.hljs :is(.hljs-number, .hljs-literal, .hljs-symbol, .hljs-variable, .hljs-link, .hljs-attr) {
+  color: light-dark(#015793, #79c0ff);
+}
+
+pre > code.hljs :is(.hljs-attribute, .hljs-name, .hljs-selector-attr, .hljs-selector-pseudo) {
+  color: var(--success);
+}
+
+pre > code.hljs .hljs-meta { color: var(--warning); }
+pre > code.hljs .hljs-addition { color: var(--success); }
+pre > code.hljs .hljs-deletion { color: var(--danger); }
+pre > code.hljs .hljs-emphasis { font-style: italic; }
+pre > code.hljs .hljs-strong { font-weight: bold; }
