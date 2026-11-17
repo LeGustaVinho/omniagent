@@ -600,6 +600,7 @@ fn main() {
             conversation_runtime::conversation_dispatch_inventory,
             conversation_runtime::conversation_profile_evidence,
             conversation_runtime::conversation_generated_image_evidence,
+            conversation_runtime::qualify_conversation_generated_image,
             conversation_runtime::conversation_output_fixture_audio,
             conversation_runtime::conversation_checklist_progress,
             conversation_runtime::set_conversation_checklist_item_checked,

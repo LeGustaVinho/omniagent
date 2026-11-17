@@ -19,7 +19,7 @@ type CapabilitySubject =
 type Verification = {
   id: string;
   checkedAt: string;
-  origin: "protocol_fixture" | "authenticated_fixture";
+  origin: "protocol_fixture" | "authenticated_fixture" | "authenticated_provider_run";
   result: "succeeded" | "failed";
   artifactId: string;
   attachmentLimits?: {

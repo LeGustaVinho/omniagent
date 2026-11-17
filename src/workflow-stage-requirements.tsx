@@ -34,11 +34,18 @@ type Assessment = {
 type RoleHead = { templateId: string; version: { revision: string; ordinal: number }; name: string };
 type RoleDetails = { revision: { template: { requirements?: StageRequirements } } };
 type ProfileMatch = { selection: ModelSelection; attemptId: string | null; checkedAt: string | null; blockers: string[] };
+const codexImageGeneration = { kind: "tool", id: "codex-native/imageGeneration", version: "app-server-v2", operation: "generate_image" } as const;
+
+function isCodexImageGeneration(subject: Subject) {
+  return subject.kind === "tool" && subject.id === codexImageGeneration.id
+    && subject.version === codexImageGeneration.version && subject.operation === codexImageGeneration.operation;
+}
 
 function label(value: Subject | Source): string {
   switch (value.kind) {
     case "protocol": return value.capability.replaceAll("_", " ");
-    case "tool": return `${value.id} · ${value.version} · ${value.operation}`;
+    case "tool": return isCodexImageGeneration(value)
+      ? "Codex image generation" : `${value.id} · ${value.version} · ${value.operation}`;
     case "plugin": return [value.provider, value.identity.id, value.identity.scope,
       value.identity.marketplace, value.identity.sourceLocation ?? value.identity.installPath, value.identity.version].filter(Boolean).join(" · ");
     case "instruction": return `${value.provider} · ${value.path.path} · ${value.revision}`;
@@ -225,6 +232,8 @@ export function WorkflowRequirementsEditor({ projectId, checkoutId, mode, model,
         <Button variant="outline" type="button" disabled={!protocol || capabilities.length >= 32}
           onClick={() => { if (protocol) addCapability({ kind: "protocol", capability: protocol }); }}>Require capability</Button>
       </>}
+      <Button variant="outline" type="button" disabled={capabilities.length >= 32 || capabilities.some(isCodexImageGeneration)}
+        onClick={() => addCapability(codexImageGeneration)}>Require Codex image generation</Button>
       <details><summary>Require an exact tool operation</summary>
         <label>Tool ID <input value={tool.id} maxLength={1024} onChange={(event) => setTool({ ...tool, id: event.currentTarget.value })} /></label>
         <label>Tool version <input value={tool.version} maxLength={1024} onChange={(event) => setTool({ ...tool, version: event.currentTarget.value })} /></label>

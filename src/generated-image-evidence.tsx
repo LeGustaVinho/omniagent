@@ -1,6 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
+import { Button } from "@/components/ui/button";
 
 const captureIssues = {
   generation_not_completed: "The provider did not report a completed generation.",
@@ -27,12 +28,16 @@ type ImageScope = { projectId: string; conversationId: string; runId: string };
 
 function GeneratedImage({ scope, image }: { scope: ImageScope; image: GeneratedImageEvidence }) {
   const [expanded, setExpanded] = useState(false);
+  const [decoded, setDecoded] = useState(false);
   const args = { ...scope, eventSequence: image.eventSequence };
   const preview = useQuery({
     queryKey: ["conversation-generated-image", args],
     enabled: expanded && image.mime !== null,
     staleTime: Infinity,
     queryFn: () => invoke<string | null>("conversation_generated_image_evidence", args),
+  });
+  const qualification = useMutation({
+    mutationFn: () => invoke<{ id: string; checkedAt: string }>("qualify_conversation_generated_image", args),
   });
   return <details className="grid rounded border border-border p-2" onToggle={(event) => setExpanded(event.currentTarget.open)}>
     <summary className="cursor-pointer">Generated image · Event {image.eventSequence}</summary>
@@ -50,7 +55,13 @@ function GeneratedImage({ scope, image }: { scope: ImageScope; image: GeneratedI
       {preview.error && <p role="alert">{String(preview.error)}</p>}
       {preview.data === null && <p>Saved image preview is unavailable.</p>}
       {preview.data && <img className="max-h-80 max-w-full object-contain" alt={`Image generated in event ${image.eventSequence}`}
-        src={`data:${image.mime};base64,${preview.data}`} />}
+        src={`data:${image.mime};base64,${preview.data}`} onLoad={() => setDecoded(true)} onError={() => setDecoded(false)} />}
+      {preview.data && decoded && image.status === "completed" && !qualification.data && <Button type="button" variant="outline"
+        disabled={qualification.isPending} onClick={() => qualification.mutate()}>
+        {qualification.isPending ? "Saving qualification…" : "Qualify image generation for this profile"}
+      </Button>}
+      {qualification.error && <p role="alert">{String(qualification.error)}</p>}
+      {qualification.data && <p role="status">Image generation verified for this saved profile and worktree. Evidence <code>{qualification.data.id}</code></p>}
     </>}
   </details>;
 }

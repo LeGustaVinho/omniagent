@@ -12,6 +12,11 @@ use crate::{
     store::Store,
 };
 
+mod qualification;
+pub(crate) use qualification::{
+    is_current_native_image_qualification, latest_native_image_qualification,
+};
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneratedImageEvidence {

@@ -26,6 +26,9 @@ use super::{
 };
 
 pub const CAPABILITY_SCHEMA_VERSION: u16 = 2;
+const CODEX_IMAGE_TOOL: &str = "codex-native/imageGeneration";
+const CODEX_IMAGE_TOOL_VERSION: &str = "app-server-v2";
+const CODEX_IMAGE_OPERATION: &str = "generate_image";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -47,6 +50,22 @@ pub enum CapabilitySubject {
         encoding: NativeAttachmentEncoding,
     },
     AttachmentLimits,
+}
+
+impl CapabilitySubject {
+    pub(crate) fn codex_image_generation() -> Self {
+        Self::Tool {
+            id: CODEX_IMAGE_TOOL.into(),
+            version: CODEX_IMAGE_TOOL_VERSION.into(),
+            operation: CODEX_IMAGE_OPERATION.into(),
+        }
+    }
+
+    pub(crate) fn is_codex_image_generation(&self) -> bool {
+        matches!(self, Self::Tool { id, version, operation }
+            if id == CODEX_IMAGE_TOOL && version == CODEX_IMAGE_TOOL_VERSION
+                && operation == CODEX_IMAGE_OPERATION)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +109,21 @@ pub struct CapabilityDescriptor {
 }
 
 impl CapabilityDescriptor {
+    pub(crate) fn native_image_generation(provider: Provider) -> Self {
+        Self {
+            subject: CapabilitySubject::codex_image_generation(),
+            source: DeclaredSource::Adapter,
+            availability: if provider == Provider::Codex {
+                Availability::Unknown
+            } else {
+                Availability::Unavailable
+            },
+            observed: None,
+            blocker: None,
+            boundary: EvidenceBoundary::ExactCheckout,
+        }
+    }
+
     pub fn side_request(provider: Provider) -> Self {
         Self {
             subject: CapabilitySubject::Protocol {
@@ -142,6 +176,7 @@ pub enum EvidenceBoundary {
 pub enum EvidenceOrigin {
     ProtocolFixture,
     AuthenticatedFixture,
+    AuthenticatedProviderRun,
 }
 
 impl EvidenceOrigin {
@@ -149,6 +184,7 @@ impl EvidenceOrigin {
         match self {
             Self::ProtocolFixture => "protocol_fixture",
             Self::AuthenticatedFixture => "authenticated_fixture",
+            Self::AuthenticatedProviderRun => "authenticated_provider_run",
         }
     }
 }
@@ -167,8 +203,10 @@ pub struct Verification {
 
 impl Verification {
     pub fn verified(&self) -> bool {
-        self.origin == EvidenceOrigin::AuthenticatedFixture
-            && self.result == ObservedResult::Succeeded
+        matches!(
+            self.origin,
+            EvidenceOrigin::AuthenticatedFixture | EvidenceOrigin::AuthenticatedProviderRun
+        ) && self.result == ObservedResult::Succeeded
     }
 }
 
@@ -340,6 +378,16 @@ impl CapabilityScope {
                 (self.configuration.scoped_launch_revision.as_deref()?, None)
             }
             CapabilitySubject::AttachmentLimits => return None,
+            subject if subject.is_codex_image_generation() => {
+                if self.provider != Provider::Codex
+                    || self.transport != Transport::CodexAppServer
+                    || self.requested_model.as_deref().is_none_or(str::is_empty)
+                    || descriptor.boundary != EvidenceBoundary::ExactCheckout
+                {
+                    return None;
+                }
+                (self.configuration.effective_revision.as_deref()?, None)
+            }
             CapabilitySubject::Tool { id, .. } => (
                 self.configuration.environment_revision.as_deref()?,
                 Some(self.configuration.tool_revisions.get(id)?.as_str()),
@@ -783,6 +831,9 @@ impl ReportedCapabilities {
             }
             descriptors.push(descriptor);
         }
+        descriptors.push(CapabilityDescriptor::native_image_generation(
+            scope.provider,
+        ));
         descriptors.push(CapabilityDescriptor::attachment_limits());
         descriptors
     }
@@ -818,6 +869,11 @@ impl Store {
         ensure!(
             descriptor.subject != CapabilitySubject::AttachmentLimits,
             "attachment limit evidence requires measured limits"
+        );
+        ensure!(
+            !descriptor.subject.is_codex_image_generation()
+                && origin != EvidenceOrigin::AuthenticatedProviderRun,
+            "native image generation requires a saved provider image qualification"
         );
         self.store_capability_evidence(scope, descriptor, origin, result, artifact_id, None)
             .await
@@ -928,7 +984,12 @@ impl Store {
                         && descriptor.availability != Availability::Unavailable
                         && let Some(key) = scope.key(&descriptor)
                     {
-                        latest_evidence(db, &revision(&key)?)?
+                        let hash = revision(&key)?;
+                        if descriptor.subject.is_codex_image_generation() {
+                            crate::dispatch::latest_native_image_qualification(db, &hash)?
+                        } else {
+                            latest_evidence(db, &hash)?
+                        }
                     } else {
                         None
                     };
@@ -946,6 +1007,15 @@ impl Store {
         })
         .await
     }
+}
+
+pub(crate) fn native_image_generation_scope_key(scope: &CapabilityScope) -> Result<Option<String>> {
+    scope
+        .key(&CapabilityDescriptor::native_image_generation(
+            scope.provider,
+        ))
+        .map(|key| revision(&key))
+        .transpose()
 }
 
 fn encoded_capability_evidence(
@@ -1035,13 +1105,17 @@ pub(crate) fn verified_side_profile(
 }
 
 pub(crate) fn verification_still_current(db: &Connection, id: &str) -> Result<bool> {
-    let key: Option<String> = db.query_row(
-        "SELECT qualification_key FROM capability_evidence WHERE id = ?1 AND version = ?2",
-        params![id, CAPABILITY_SCHEMA_VERSION],
-        |row| row.get(0),
-    ).optional()?;
-    Ok(key.map(|key| latest_evidence(db, &key)).transpose()?.flatten()
-        .is_some_and(|evidence| evidence.id == id && evidence.verified()))
+    let key: Option<String> = db
+        .query_row(
+            "SELECT qualification_key FROM capability_evidence WHERE id = ?1 AND version = ?2",
+            params![id, CAPABILITY_SCHEMA_VERSION],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(key) = key else {
+        return crate::dispatch::is_current_native_image_qualification(db, id);
+    };
+    Ok(latest_evidence(db, &key)?.is_some_and(|evidence| evidence.id == id && evidence.verified()))
 }
 
 fn latest_evidence(db: &Connection, hash: &str) -> Result<Option<Verification>> {

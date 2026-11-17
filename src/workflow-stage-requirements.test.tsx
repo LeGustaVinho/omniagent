@@ -81,6 +81,17 @@ it("uses the historical attempt ID to inspect profile and failed requirements", 
   expect(within(screen.getByRole("list")).getByText(/SKILL.md contents changed/)).toBeTruthy();
 });
 
+it("adds the owned Codex image operation as a role capability", () => {
+  const onChange = vi.fn();
+  mount(<WorkflowRequirementsEditor projectId="project" checkoutId="worktree" mode="plan" model={model}
+    options={[]} configuration={{}} disabled={false} onChange={onChange} />);
+  fireEvent.click(screen.getByText("Role requirements"));
+  fireEvent.click(screen.getByRole("button", { name: "Require Codex image generation" }));
+  expect(onChange).toHaveBeenCalledWith({ stage: { capabilities: [
+    { kind: "tool", id: "codex-native/imageGeneration", version: "app-server-v2", operation: "generate_image" },
+  ] } });
+});
+
 it("lists a matching profile and explains why another profile's proof is stale", async () => {
   const alternate = { provider: "claude" as const, profileId: "desktop-direct:claude", modelId: "claude-fixture" };
   const additional = Array.from({ length: 7 }, (_, index) => ({

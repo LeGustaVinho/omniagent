@@ -27,6 +27,7 @@ use crate::{
 mod attachment_evidence;
 mod attachment_retention;
 mod generated_image_evidence;
+pub(crate) use generated_image_evidence::{is_current_native_image_qualification, latest_native_image_qualification};
 mod history_deletion;
 mod instruction_evidence;
 mod inventory;

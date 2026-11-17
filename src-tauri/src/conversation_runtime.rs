@@ -851,6 +851,18 @@ pub async fn conversation_generated_image_evidence(
     store.dispatch_generated_image(project_id, conversation_id, run_id, sequence).await.map_err(ui_error)
 }
 
+#[tauri::command]
+pub async fn qualify_conversation_generated_image(
+    store: State<'_, Store>,
+    project_id: String,
+    conversation_id: String,
+    run_id: String,
+    event_sequence: String,
+) -> Result<omniagent::providers::capabilities::Verification, String> {
+    let sequence = event_sequence.parse::<i64>().map_err(|_| "Invalid event sequence".to_owned())?;
+    store.qualify_conversation_generated_image(project_id, conversation_id, run_id, sequence).await.map_err(ui_error)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationChecklistProgress {

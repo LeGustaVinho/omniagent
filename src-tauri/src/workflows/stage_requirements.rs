@@ -332,6 +332,7 @@ pub(crate) fn check_capability(
         Some(CapabilityStatus::Verified) => None,
         Some(CapabilityStatus::Blocked) => Some("The effective execution policy blocks this capability".into()),
         Some(CapabilityStatus::Unavailable) => Some("The effective CLI or model does not expose this capability".into()),
+        Some(_) if subject.is_codex_image_generation() => Some("No qualified Codex image matches the effective profile, model, mode, settings and worktree".into()),
         Some(_) => Some("No successful authenticated fixture matches the effective CLI, model, settings and worktree".into()),
         None => Some("The effective adapter did not report this exact capability subject".into()),
     };
