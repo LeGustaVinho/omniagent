@@ -9,7 +9,7 @@ use omniagent::{
         RepositoryMarkdown,
         documents::{
             CheckoutDocumentHistoryPage, CheckoutDocumentHistoryText, RepositoryDocumentOpen,
-            RepositoryDocumentSave,
+            RepositoryDocumentSave, SourceFormatChange, SourceFormatPreview,
         },
     },
     store::Store,
@@ -56,6 +56,35 @@ pub async fn save_repository_source_file(
 ) -> Result<RepositoryDocumentSave, String> {
     store
         .save_repository_source_file(checkout_id, path, expected_revision, markdown)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn preview_repository_source_format(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: PathBuf,
+    expected_revision: String,
+    change: SourceFormatChange,
+) -> Result<SourceFormatPreview, String> {
+    store
+        .preview_repository_source_format(checkout_id, path, expected_revision, change)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn save_repository_source_format(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: PathBuf,
+    expected_revision: String,
+    change: SourceFormatChange,
+    preview_sha256: String,
+) -> Result<RepositoryDocumentSave, String> {
+    store
+        .save_repository_source_format(checkout_id, path, expected_revision, change, preview_sha256)
         .await
         .map_err(report)
 }

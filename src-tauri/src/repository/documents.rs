@@ -24,7 +24,9 @@ pub(super) mod history;
 mod movement;
 mod replacement;
 
+use super::markdown::load_document_payload;
 pub use extraction::{ExtractRepositoryNote, ExtractedRepositoryNote};
+pub(super) use format::RawDocument;
 use format::{EditorFormat, encode};
 pub use history::{CheckoutDocumentHistoryPage, CheckoutDocumentHistoryText};
 pub use movement::RepositoryDocumentMove;
@@ -116,6 +118,44 @@ pub enum LineEndings {
     Mixed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextEncoding {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceFormatChange {
+    pub encoding: Option<TextEncoding>,
+    pub line_endings: Option<LineEndings>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceFormatPreview {
+    pub original_encoding: TextEncoding,
+    pub original_line_endings: LineEndings,
+    pub encoding: TextEncoding,
+    pub line_endings: LineEndings,
+    pub original_bytes: usize,
+    pub converted_bytes: usize,
+    pub original_prefix: String,
+    pub converted_prefix: String,
+    pub sha256: String,
+}
+
+enum DocumentEdit {
+    Text(String),
+    Format {
+        change: SourceFormatChange,
+        preview_sha256: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryDocument {
@@ -123,6 +163,7 @@ pub struct RepositoryDocument {
     pub canonical_path: PathBuf,
     pub markdown: String,
     pub utf8_bom: bool,
+    pub encoding: TextEncoding,
     pub line_endings: LineEndings,
     pub file_identity: String,
 }
@@ -208,12 +249,9 @@ impl Store {
         let Some((path, relative, file, head)) = opened else {
             return Ok(RepositoryDocumentOpen::Missing);
         };
-        let Ok(raw_markdown) = String::from_utf8(file.bytes) else {
+        let Ok(raw) = RawDocument::from_bytes(kind, &file.bytes) else {
             return Ok(RepositoryDocumentOpen::UnsupportedEncoding);
         };
-        if raw_markdown.contains('\0') {
-            return Ok(RepositoryDocumentOpen::UnsupportedEncoding);
-        }
         let document = remember_document(
             self,
             kind,
@@ -221,8 +259,8 @@ impl Store {
             path,
             relative,
             head,
-            raw_markdown,
-            file.identity,
+            file,
+            raw.format(),
             None,
         )
         .await?;
@@ -280,30 +318,136 @@ impl Store {
         markdown: String,
         kind: DocumentKind,
     ) -> Result<RepositoryDocumentSave> {
+        self.save_checkout_document_edit(
+            checkout,
+            canonical_relative,
+            expected_revision,
+            DocumentEdit::Text(markdown),
+            kind,
+        )
+        .await
+    }
+
+    pub async fn preview_repository_source_format(
+        &self,
+        checkout: String,
+        path: PathBuf,
+        expected_revision: String,
+        change: SourceFormatChange,
+    ) -> Result<SourceFormatPreview> {
         let (root, max) = editor_checkout(self, &checkout).await?;
+        let kind = DocumentKind::Source;
+        let relative = document_save_path(&root, &path, kind)?;
+        let (expected, original) = self
+            .editor_document_payload(&checkout, &relative, expected_revision, kind)
+            .await?;
+        self.require_no_source_draft(&checkout, &relative).await?;
+        tokio::task::spawn_blocking(move || {
+            let current =
+                read_file(&root.join(path), max)?.context("the source file is missing")?;
+            ensure!(
+                hash(&current.bytes) == expected.sha256,
+                "the file changed; reopen it and review the new bytes"
+            );
+            let converted = convert_source_format(&original, change, max)?;
+            let original_format = RawDocument::from_bytes(kind, &original)?.format();
+            let format = RawDocument::from_bytes(kind, &converted)?.format();
+            let prefix = |bytes: &[u8]| {
+                bytes
+                    .iter()
+                    .take(24)
+                    .map(|byte| format!("{byte:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            Ok(SourceFormatPreview {
+                original_encoding: original_format.encoding,
+                original_line_endings: original_format.endings,
+                encoding: format.encoding,
+                line_endings: format.endings,
+                original_bytes: original.len(),
+                converted_bytes: converted.len(),
+                original_prefix: prefix(&original),
+                converted_prefix: prefix(&converted),
+                sha256: hash(&converted),
+            })
+        })
+        .await?
+    }
+
+    pub async fn save_repository_source_format(
+        &self,
+        checkout: String,
+        path: PathBuf,
+        expected_revision: String,
+        change: SourceFormatChange,
+        preview_sha256: String,
+    ) -> Result<RepositoryDocumentSave> {
+        self.save_checkout_document_edit(
+            checkout,
+            path,
+            expected_revision,
+            DocumentEdit::Format {
+                change,
+                preview_sha256,
+            },
+            DocumentKind::Source,
+        )
+        .await
+    }
+
+    async fn editor_document_payload(
+        &self,
+        checkout: &str,
+        relative: &str,
+        expected_revision: String,
+        kind: DocumentKind,
+    ) -> Result<(RepositoryMarkdownRevision, Vec<u8>)> {
         ensure!(
-            !canonical_relative.has_root(),
-            "save by the checkout-relative document path"
+            kind.contains_revision(&expected_revision),
+            "the expected file revision is not in this checkout"
         );
-        let relative = relative_name(&root, &root.join(&canonical_relative))?;
-        let expected = self
-            .checkout_document_revision(checkout.clone(), expected_revision, kind)
+        let checkout = checkout.to_owned();
+        let (expected, original) = self
+            .execute(move |db| load_document_payload(db, &checkout, &expected_revision))
             .await?
             .context("the expected file revision is not in this checkout")?;
         ensure!(
-            expected.revision.relative_path == relative,
+            expected.relative_path == relative,
             "the expected revision belongs to another document"
         );
         ensure!(
-            !markdown.contains(['\r', '\0']),
-            "the editor buffer must be text with LF line endings"
+            hash(&original) == expected.sha256,
+            "the stored file revision does not match its checksum"
         );
+        Ok((expected, original))
+    }
+
+    async fn require_no_source_draft(&self, checkout: &str, relative: &str) -> Result<()> {
         ensure!(
-            markdown.len() as u64 <= max,
-            "the editor buffer exceeds the project file limit of {max} bytes"
+            self.repository_source_draft(checkout.to_owned(), relative.to_owned())
+                .await?
+                .is_none(),
+            "save or discard the source draft before converting its file format"
         );
+        Ok(())
+    }
+
+    async fn save_checkout_document_edit(
+        &self,
+        checkout: String,
+        canonical_relative: PathBuf,
+        expected_revision: String,
+        edit: DocumentEdit,
+        kind: DocumentKind,
+    ) -> Result<RepositoryDocumentSave> {
+        let (root, max) = editor_checkout(self, &checkout).await?;
+        let relative = document_save_path(&root, &canonical_relative, kind)?;
+        let (expected, original) = self
+            .editor_document_payload(&checkout, &relative, expected_revision, kind)
+            .await?;
         let destination = root.join(canonical_relative);
-        kind.require_path(&destination)?;
+        let converting = matches!(edit, DocumentEdit::Format { .. });
         let managed = self
             .execute({
                 let checkout = checkout.clone();
@@ -316,22 +460,40 @@ impl Store {
                 }
             })
             .await?;
-        let before_save = expected.revision.clone();
+        let before_save = expected.clone();
         let write = move || {
             let head = base_commit(&root)?;
-            let edited = encode(&expected.markdown, &markdown);
+            let edited = match edit {
+                DocumentEdit::Text(markdown) => {
+                    ensure!(
+                        !markdown.contains(['\r', '\0']),
+                        "the editor buffer must be text with LF line endings"
+                    );
+                    ensure!(
+                        markdown.len() as u64 <= max,
+                        "the editor buffer exceeds the project file limit of {max} bytes"
+                    );
+                    RawDocument::from_bytes(kind, &original)?.encode_edit(&markdown)
+                }
+                DocumentEdit::Format {
+                    change,
+                    preview_sha256,
+                } => {
+                    let converted = convert_source_format(&original, change, max)?;
+                    ensure!(
+                        hash(&converted) == preview_sha256,
+                        "the conversion no longer matches the reviewed bytes"
+                    );
+                    converted
+                }
+            };
             ensure!(
                 edited.len() as u64 <= max,
                 "the encoded editor buffer exceeds the project file limit of {max} bytes"
             );
-            let result = replace(
-                &root,
-                &destination,
-                &expected.revision.sha256,
-                &edited,
-                max,
-                |_| Ok(()),
-            )?;
+            let result = replace(&root, &destination, &expected.sha256, &edited, max, |_| {
+                Ok(())
+            })?;
             Ok::<_, anyhow::Error>((head, destination, result))
         };
         // Settle and record the revision even if the caller closes the editor.
@@ -353,6 +515,9 @@ impl Store {
                 })
             };
             let _guard = lock.lock().await;
+            if converting {
+                store.require_no_source_draft(&checkout, &relative).await?;
+            }
             let (head, destination, result) = if let Some((project, owner)) = managed {
                 with_managed_worktree_writer(&store, project, checkout.clone(), owner, move |_| {
                     write()
@@ -371,6 +536,7 @@ impl Store {
                 FileSave::Verified { file, recovery } => (file, recovery),
             };
             let result = async {
+                let format = RawDocument::from_bytes(kind, &file.bytes)?.format();
                 remember_document(
                     &store,
                     kind,
@@ -378,8 +544,8 @@ impl Store {
                     destination,
                     relative,
                     head,
-                    String::from_utf8(file.bytes)?,
-                    file.identity,
+                    file,
+                    format,
                     Some(before_save),
                 )
                 .await
@@ -403,6 +569,28 @@ impl Store {
     }
 }
 
+fn document_save_path(root: &Path, path: &Path, kind: DocumentKind) -> Result<String> {
+    ensure!(
+        !path.has_root(),
+        "save by the checkout-relative document path"
+    );
+    kind.require_path(path)?;
+    relative_name(root, &root.join(path))
+}
+
+fn convert_source_format(original: &[u8], change: SourceFormatChange, max: u64) -> Result<Vec<u8>> {
+    let converted = RawDocument::from_bytes(DocumentKind::Source, original)?.convert(change)?;
+    ensure!(
+        converted != original,
+        "the source file already uses this format"
+    );
+    ensure!(
+        converted.len() as u64 <= max,
+        "the encoded editor buffer exceeds the project file limit of {max} bytes"
+    );
+    Ok(converted)
+}
+
 async fn editor_checkout(store: &Store, checkout: &str) -> Result<(PathBuf, u64)> {
     let root = checkout_root(store, checkout.to_owned()).await?;
     let layout = verify_checkout(store, checkout.to_owned(), root).await?;
@@ -420,19 +608,18 @@ async fn remember_document(
     canonical_path: PathBuf,
     relative: String,
     head: Option<String>,
-    raw_markdown: String,
-    file_identity: String,
+    file: OpenedFile,
+    format: EditorFormat,
     before_save: Option<RepositoryMarkdownRevision>,
 ) -> Result<RepositoryDocument> {
-    let format = EditorFormat::from_raw(&raw_markdown);
     let revision = store
         .remember_editor_document(
             kind,
             checkout,
             relative,
-            hash(raw_markdown.as_bytes()),
+            hash(&file.bytes),
             head,
-            raw_markdown,
+            file.bytes,
             before_save,
         )
         .await?;
@@ -440,9 +627,10 @@ async fn remember_document(
         revision,
         canonical_path,
         markdown: format.markdown,
-        utf8_bom: format.bom,
+        utf8_bom: format.encoding == TextEncoding::Utf8Bom,
+        encoding: format.encoding,
         line_endings: format.endings,
-        file_identity,
+        file_identity: file.identity,
     })
 }
 

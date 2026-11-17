@@ -9,6 +9,248 @@ const EDIT: &str = "new first\nkeep LF\nnew last\nфинал";
 const RESULT: &str = "\u{feff}new first\r\nkeep LF\nnew last\rфинал";
 
 #[tokio::test]
+async fn reviews_byte_exact_source_conversion_and_keeps_ordinary_saves_and_history_compatible()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let profile = temp.path().join("format.sqlite");
+    let store = Store::open(profile.clone())?;
+    let root = init_repository(temp.path())?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let path = "format.txt";
+    let file = root.join(path);
+    let original = "\u{feff}A\r\né\r😀\n";
+    let converted_bytes = [
+        0xfe, 0xff, 0, 0x41, 0, 0x0a, 0, 0xe9, 0, 0x0a, 0xd8, 0x3d, 0xde, 0x00, 0, 0x0a,
+    ];
+    fs::write(&file, original)?;
+    let RepositoryDocumentOpen::Document { document: first } = store
+        .open_repository_source_file(checkout.clone(), path.into())
+        .await?
+    else {
+        anyhow::bail!("UTF-8 source did not open")
+    };
+    assert_eq!(first.encoding, TextEncoding::Utf8Bom);
+    assert_eq!(first.line_endings, LineEndings::Mixed);
+    let change = SourceFormatChange {
+        encoding: Some(TextEncoding::Utf16Be),
+        line_endings: Some(LineEndings::Lf),
+    };
+    let preview = store
+        .preview_repository_source_format(
+            checkout.clone(),
+            path.into(),
+            first.revision.id.clone(),
+            change,
+        )
+        .await?;
+    assert_eq!(preview.original_encoding, TextEncoding::Utf8Bom);
+    assert_eq!(preview.original_line_endings, LineEndings::Mixed);
+    assert_eq!(preview.encoding, TextEncoding::Utf16Be);
+    assert_eq!(preview.line_endings, LineEndings::Lf);
+    assert_eq!(preview.original_bytes, original.len());
+    assert_eq!(preview.converted_bytes, converted_bytes.len());
+    assert_eq!(
+        preview.converted_prefix,
+        "FE FF 00 41 00 0A 00 E9 00 0A D8 3D DE 00 00 0A"
+    );
+    assert_eq!(preview.sha256, hash(&converted_bytes));
+    assert_eq!(fs::read(&file)?, original.as_bytes());
+    assert!(
+        store
+            .save_repository_source_format(
+                checkout.clone(),
+                path.into(),
+                first.revision.id.clone(),
+                change,
+                "unreviewed".into()
+            )
+            .await
+            .is_err()
+    );
+    let RepositoryDocumentSave::Saved {
+        document: converted,
+    } = store
+        .save_repository_source_format(
+            checkout.clone(),
+            path.into(),
+            first.revision.id,
+            change,
+            preview.sha256,
+        )
+        .await?
+    else {
+        anyhow::bail!("conversion failed")
+    };
+    assert_eq!(fs::read(&file)?, converted_bytes);
+    assert_eq!(converted.revision.sha256, hash(&converted_bytes));
+    assert_eq!(converted.markdown, first.markdown);
+    drop(store);
+
+    let store = Store::open(profile)?;
+    let RepositoryDocumentOpen::Document { document: reopened } = store
+        .open_repository_source_file(checkout.clone(), path.into())
+        .await?
+    else {
+        anyhow::bail!("UTF-16 source did not reopen")
+    };
+    assert_eq!(reopened, converted);
+    let RepositoryDocumentSave::Saved { document: edited } = store
+        .save_repository_source_file(
+            checkout.clone(),
+            path.into(),
+            reopened.revision.id,
+            "B\né\n😀\n".into(),
+        )
+        .await?
+    else {
+        anyhow::bail!("ordinary UTF-16 save failed")
+    };
+    let mut edited_bytes = converted_bytes;
+    edited_bytes[3] = 0x42;
+    assert_eq!(fs::read(&file)?, edited_bytes);
+    assert_eq!(edited.encoding, TextEncoding::Utf16Be);
+    assert_eq!(
+        store
+            .repository_source_revision(checkout.clone(), edited.revision.id)
+            .await?
+            .unwrap()
+            .markdown,
+        "\u{feff}B\né\n😀\n"
+    );
+
+    let history = store
+        .checkout_document_history(checkout.clone(), path.into(), None)
+        .await?;
+    assert_eq!(history.entries.len(), 3);
+    for (index, encoding, endings, text) in [
+        (0, TextEncoding::Utf16Be, LineEndings::Lf, "B\né\n😀\n"),
+        (1, TextEncoding::Utf16Be, LineEndings::Lf, "A\né\n😀\n"),
+        (2, TextEncoding::Utf8Bom, LineEndings::Mixed, "A\né\n😀\n"),
+    ] {
+        let entry = store
+            .checkout_document_history_text(
+                checkout.clone(),
+                path.into(),
+                history.entries[index].position,
+            )
+            .await?;
+        assert_eq!(
+            (entry.encoding, entry.line_endings, entry.text.as_str()),
+            (encoding, endings, text)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn format_conversion_preserves_drafts_and_rejects_changed_disk_or_unsupported_bytes()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("profile.sqlite"))?;
+    let root = init_repository(temp.path())?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let path = "format.txt";
+    let file = root.join(path);
+    fs::write(&file, b"left\r\nright\n")?;
+    let RepositoryDocumentOpen::Document { document: first } = store
+        .open_repository_source_file(checkout.clone(), path.into())
+        .await?
+    else {
+        anyhow::bail!("source did not open")
+    };
+    let change = SourceFormatChange {
+        encoding: Some(TextEncoding::Utf16Le),
+        line_endings: None,
+    };
+    let preview = store
+        .preview_repository_source_format(
+            checkout.clone(),
+            path.into(),
+            first.revision.id.clone(),
+            change,
+        )
+        .await?;
+    assert_eq!(
+        preview.converted_prefix,
+        "FF FE 6C 00 65 00 66 00 74 00 0D 00 0A 00 72 00 69 00 67 00 68 00 74 00"
+    );
+    assert_eq!(preview.line_endings, LineEndings::Mixed);
+    let draft = store
+        .save_repository_source_draft(
+            checkout.clone(),
+            first.revision.id.clone(),
+            None,
+            "draft".into(),
+        )
+        .await?;
+    assert!(
+        store
+            .save_repository_source_format(
+                checkout.clone(),
+                path.into(),
+                first.revision.id.clone(),
+                change,
+                preview.sha256.clone()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .repository_source_draft(checkout.clone(), path.into())
+            .await?
+            .unwrap()
+            .markdown,
+        "draft"
+    );
+    assert_eq!(fs::read(&file)?, b"left\r\nright\n");
+    assert!(
+        store
+            .discard_repository_source_draft(checkout.clone(), path.into(), draft.revision)
+            .await?
+    );
+    fs::write(&file, b"third-party edit")?;
+    assert!(
+        store
+            .preview_repository_source_format(
+                checkout.clone(),
+                path.into(),
+                first.revision.id.clone(),
+                change
+            )
+            .await
+            .is_err()
+    );
+    let stale = store
+        .save_repository_source_format(
+            checkout.clone(),
+            path.into(),
+            first.revision.id,
+            change,
+            preview.sha256,
+        )
+        .await?;
+    assert!(matches!(stale, RepositoryDocumentSave::Conflict { .. }));
+    assert_eq!(fs::read(&file)?, b"third-party edit");
+
+    for malformed in [
+        b"\xff\xfeA".as_slice(),
+        b"\xfe\xff\xd8\x00".as_slice(),
+        b"\xff\xfe\0\0".as_slice(),
+        b"\x80".as_slice(),
+    ] {
+        fs::write(&file, malformed)?;
+        assert_eq!(
+            store
+                .open_repository_source_file(checkout.clone(), path.into())
+                .await?,
+            RepositoryDocumentOpen::UnsupportedEncoding
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn records_local_saves_and_keeps_original_and_returned_versions_across_restart() -> Result<()>
 {
     let temp = tempfile::tempdir()?;

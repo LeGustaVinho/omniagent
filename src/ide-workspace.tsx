@@ -20,6 +20,9 @@ import { EditorStatus } from "@/ide-editor-status";
 import { IdeProblems, problemReference, type FileProblem } from "@/ide-problems";
 import { ResizablePanel } from "@/panel-resize";
 import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
+import { SourceFormatDialog } from "@/source-format-dialog";
+import type { SourceFormatChange } from "@/source-file-format";
+import { IdeProblems, problemReference, type FileProblem } from "@/ide-problems";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const Editor = lazy(() => import("@/ide-code-editor").then(({ CodeEditor }) => ({ default: CodeEditor })));
@@ -28,6 +31,7 @@ const WorktreeTerminal = lazy(() => import("@/ide-terminal").then(({ ManualTermi
 
 type IdeDialog =
   | { kind: "close"; path: string; api: FilePanelApi }
+  | { kind: "format"; path: string; change: SourceFormatChange }
   | { kind: "conflict"; path: string };
 
 const markdownPath = (path: string) => /\.(?:md|markdown)$/i.test(path);
@@ -566,7 +570,9 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
           </div>
         </ResizablePanel>}
         {active && buffer && <footer className="ide-statusbar">
-          <EditorStatus path={active} saved={!dirty(active)} settings={editorSettings[active]} format={buffer.format} copy={menu.copy} />
+          <EditorStatus path={active} saved={!dirty(active)} settings={editorSettings[active]} format={buffer.format} copy={menu.copy}
+            canConvert={!dirty(active) && !source.files[active]?.sourceProblem && !source.files[active]?.draftRevision}
+            onChangeFormat={!simulated && buffer.format ? (change) => setDialog({ kind: "format", path: active, change }) : undefined} />
           {buffer.external !== undefined && <button type="button" className="fw-btn" onClick={() => setDialog({ kind: "conflict", path: active })}>Review external change</button>}
           {simulated && buffer.external === undefined && <button type="button" className="fw-btn" onClick={simulateConflict}>Simulate external change</button>}
         </footer>}
@@ -576,6 +582,11 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       {conversationActions.dialog}
       {fileOperations.dialog}
       {comparison.dialog}
+      {dialog?.kind === "format" && <SourceFormatDialog path={dialog.path} change={dialog.change}
+        preview={source.previewFormat} save={source.saveFormat} onClose={() => setDialog(undefined)} onSaved={() => {
+          setStatus(`Converted and saved ${dialog.path}`);
+          setDialog(undefined);
+        }} />}
       {dialog?.kind === "close" && <FileDialog title="Save changes?" description={`${dialog.path} has unsaved changes.`} onClose={cancelClose}
         ownerPanel={dialog.api}>
         <div className="file-dialog-footer">

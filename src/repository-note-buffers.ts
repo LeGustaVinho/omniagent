@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { NoteSelection } from "@/knowledge-context";
+import type { FileFormat, LineEndings, ReviewedSourceFormat, SourceEncoding, SourceFormatChange, SourceFormatPreview } from "@/source-file-format";
 
 export type NoteRevision = {
   id: string;
@@ -9,8 +10,7 @@ export type NoteRevision = {
   sha256: string;
   baseCommit: string | null;
 };
-type LineEndings = "none" | "lf" | "crlf" | "cr" | "mixed";
-type RepositoryDocument = { revision: NoteRevision; markdown: string; fileIdentity: string; utf8Bom?: boolean; lineEndings?: LineEndings };
+type RepositoryDocument = { revision: NoteRevision; markdown: string; fileIdentity: string; utf8Bom?: boolean; encoding?: SourceEncoding; lineEndings?: LineEndings };
 export type DocumentOpen = { status: "document"; document: RepositoryDocument }
   | { status: "missing" | "unsupported_encoding"; relativePath?: string };
 type Recovery = { message: string; editedPath: string | null; displacedPath: string | null };
@@ -30,7 +30,7 @@ export type NoteBuffer = {
   saved: string;
   revision: number | string;
   external?: string;
-  format?: { utf8Bom: boolean; lineEndings: LineEndings };
+  format?: FileFormat;
 };
 type RepositoryBuffer = NoteBuffer & {
   base: NoteRevision;
@@ -83,12 +83,13 @@ function loaded(document: RepositoryDocument, draftRevision: string | null): Rep
   return {
     base: document.revision, fileIdentity: document.fileIdentity,
     revision: document.revision.sha256.slice(0, 12), content: document.markdown, saved: document.markdown, draftRevision,
-    format: document.lineEndings === undefined ? undefined : { utf8Bom: Boolean(document.utf8Bom), lineEndings: document.lineEndings },
+    format: document.lineEndings === undefined ? undefined : { utf8Bom: Boolean(document.utf8Bom), encoding: document.encoding, lineEndings: document.lineEndings },
   };
 }
 
 export function useRepositoryNotes(checkoutId: string, enabled: boolean) {
-  return useRepositoryFileBuffers<NoteCatalogEntry>(checkoutId, enabled, noteCommands, "note");
+  const { previewFormat: _previewFormat, saveFormat: _saveFormat, ...notes } = useRepositoryFileBuffers<NoteCatalogEntry>(checkoutId, enabled, noteCommands, "note");
+  return notes;
 }
 
 export function useRepositorySourceBuffers(checkoutId: string, enabled: boolean) {
@@ -296,21 +297,7 @@ function useRepositoryFileBuffers<CatalogEntry>(
     }
   }), [change, noun, persist, serialize]);
 
-  const save = useCallback((path: string, reviewed?: SavedDraft, onFailure = report) => serialize(path, async () => {
-    const note = current.current.notes[path];
-    if (!note || note.incoming || note.sourceProblem) {
-      if (reviewed) onFailure(path + " is no longer available at the reviewed revision.");
-      return false;
-    }
-    if (reviewed && (note.base.id !== reviewed.base.id || note.draftRevision !== reviewed.revision || note.content !== reviewed.markdown)) {
-      onFailure(path + " has a newer draft. Review it before saving.");
-      return false;
-    }
-    if (note.content === note.saved) return true;
-    await persist(path);
-    const result = await invoke<DocumentSave>(commands.save, {
-      checkoutId, path, expectedRevision: note.base.id, markdown: note.content,
-    });
+  const acceptSave = useCallback(async (path: string, result: DocumentSave, onFailure: (failure: unknown) => void) => {
     if (result.status !== "saved") {
       change(path, (current) => ({ ...current, recovery: result.recovery }));
       if (result.status === "conflict") {
@@ -328,10 +315,52 @@ function useRepositoryFileBuffers<CatalogEntry>(
     }
     change(path, (current) => ({ ...loaded(result.document, current.draftRevision), content: current.content }));
     await persist(path);
+    return true;
+  }, [change, checkoutId, commands, noun, persist]);
+
+  const save = useCallback((path: string, reviewed?: SavedDraft, onFailure = report) => serialize(path, async () => {
+    const note = current.current.notes[path];
+    if (!note || note.incoming || note.sourceProblem) {
+      if (reviewed) onFailure(path + " is no longer available at the reviewed revision.");
+      return false;
+    }
+    if (reviewed && (note.base.id !== reviewed.base.id || note.draftRevision !== reviewed.revision || note.content !== reviewed.markdown)) {
+      onFailure(path + " has a newer draft. Review it before saving.");
+      return false;
+    }
+    if (note.content === note.saved) return true;
+    await persist(path);
+    const result = await invoke<DocumentSave>(commands.save, {
+      checkoutId, path, expectedRevision: note.base.id, markdown: note.content,
+    });
+    if (!await acceptSave(path, result, onFailure)) return false;
     const saved = current.current.notes[path]?.content === current.current.notes[path]?.saved;
     if (reviewed && !saved) onFailure(path + " was saved at the reviewed revision and has a newer draft.");
     return saved;
-  }).catch((failure: unknown) => { onFailure(failure); return false; }), [change, checkoutId, commands, noun, persist, report, serialize]);
+  }).catch((failure: unknown) => { onFailure(failure); return false; }), [acceptSave, checkoutId, commands, persist, report, serialize]);
+
+  const formatRevision = useCallback((path: string) => {
+    const file = current.current.notes[path];
+    if (noun !== "file" || !enabled || !mounted.current || !file || file.incoming || file.sourceProblem
+      || file.draftRevision || file.content !== file.saved) {
+      throw new Error("Open a saved file and resolve external changes before converting its format.");
+    }
+    return file.base.id;
+  }, [enabled, noun]);
+
+  const previewFormat = useCallback((path: string, change: SourceFormatChange) => serialize(path, async (): Promise<ReviewedSourceFormat> => {
+    const expectedRevision = formatRevision(path);
+    const preview = await invoke<SourceFormatPreview>("preview_repository_source_format", { checkoutId, path, expectedRevision, change });
+    if (formatRevision(path) !== expectedRevision) throw new Error("The file changed. Review a new preview.");
+    return { path, expectedRevision, change, preview };
+  }), [checkoutId, formatRevision, serialize]);
+
+  const saveFormat = useCallback(({ path, expectedRevision, change, preview }: ReviewedSourceFormat) => serialize(path, async () => {
+    if (formatRevision(path) !== expectedRevision) throw new Error("The file changed. Review a new preview.");
+    const result = await invoke<DocumentSave>("save_repository_source_format", { checkoutId, path, expectedRevision, change, previewSha256: preview.sha256 });
+    let failure: unknown;
+    if (!await acceptSave(path, result, (problem) => { failure = problem; })) throw new Error(String(failure));
+  }), [acceptSave, checkoutId, formatRevision, serialize]);
 
   const resolve = useCallback((path: string, keepLocal: boolean) => serialize(path, async () => {
     const note = current.current.notes[path];
@@ -443,5 +472,5 @@ function useRepositoryFileBuffers<CatalogEntry>(
     delete failures[path];
     publish({ notes, failures });
   }, [publish, stopWatching]);
-  return { ...state, catalog, refreshCatalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget, extractSelection, loadLocalRevision, mergeReviewed, renameReviewedTags };
+  return { ...state, catalog, refreshCatalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget, extractSelection, loadLocalRevision, mergeReviewed, renameReviewedTags, previewFormat, saveFormat };
 }
