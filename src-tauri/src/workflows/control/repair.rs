@@ -96,10 +96,15 @@ pub(in crate::workflows) fn repair_instruction(
                 && verifies_repair(&definition, &node.instance.id)
         })
     {
-        let NodeConfiguration::RequiredChecks {
+        let (NodeConfiguration::RequiredChecks {
             names,
             parallel_groups,
-        } = &node.instance.configuration
+        }
+        | NodeConfiguration::StagedChecks {
+            names,
+            parallel_groups,
+            ..
+        }) = &node.instance.configuration
         else {
             anyhow::bail!("The pinned repair verification lost its check configuration");
         };
