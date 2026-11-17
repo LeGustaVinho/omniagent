@@ -29,6 +29,7 @@ pub mod maintenance;
 pub mod mcp_tools;
 pub mod role_templates;
 pub mod stage_requirements;
+pub mod templates;
 pub mod triggers;
 
 fn report(error: anyhow::Error) -> String {

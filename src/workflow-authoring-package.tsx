@@ -30,6 +30,7 @@ export type PackageDraft = {
   request: { state: string; runId: string | null; jobId?: string; diagnostic: string | null } | null;
 };
 export type PackageSummary = { id: string; revision: string; name: string; memberCount: number; published: boolean };
+type FactoryTemplate = { id: string; name: string; revision: number; members: string[] };
 type PublicationResult =
   | { status: "published"; publication: Publication }
   | { status: "stale_base"; member: string; current: Artifact };
@@ -65,15 +66,16 @@ export function WorkflowPackageList({ checkout, openWorkspace }: Pick<WorkspaceP
     queryKey: packagesKey(projectId),
     queryFn: () => invoke<PackageSummary[]>("list_workflow_packages", { projectId }),
   });
+  function openDraft(draft: PackageDraft) {
+    client.setQueryData(packageKey(projectId, draft.id), draft);
+    void client.invalidateQueries({ queryKey: packagesKey(projectId), exact: true });
+    openWorkspace("pipelines", packageDraftTarget(draft.id));
+  }
   const create = useMutation({
     mutationFn: () => invoke<PackageDraft>("create_workflow_package", {
       projectId, conversationId: null, package: { name: "New workflow package", members: [] },
     }),
-    onSuccess: async (draft) => {
-      client.setQueryData(packageKey(projectId, draft.id), draft);
-      void client.invalidateQueries({ queryKey: packagesKey(projectId), exact: true });
-      openWorkspace("pipelines", packageDraftTarget(draft.id));
-    },
+    onSuccess: openDraft,
   });
   return <section aria-label="Workflow packages" className="pipeline-stack border-t border-border pt-4">
     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -81,6 +83,7 @@ export function WorkflowPackageList({ checkout, openWorkspace }: Pick<WorkspaceP
       <Button type="button" variant="outline" disabled={create.isPending} onClick={() => create.mutate()}>New workflow package</Button>
     </div>
     {(packages.error ?? create.error) && <p role="alert">{String(packages.error ?? create.error)}</p>}
+    <WorkflowFactoryTemplates key={`factory:${projectId}`} projectId={projectId} openDraft={openDraft} />
     <WorkflowExchangePanel key={projectId} projectId={projectId} openWorkspace={openWorkspace} />
     {!!packages.data?.length && <ul className="workflow-draft-list">
       {packages.data.map((draft) => <li key={draft.id}>
@@ -89,6 +92,39 @@ export function WorkflowPackageList({ checkout, openWorkspace }: Pick<WorkspaceP
       </li>)}
     </ul>}
   </section>;
+}
+
+function WorkflowFactoryTemplates({ projectId, openDraft }: { projectId: string; openDraft: (draft: PackageDraft) => void }) {
+  const [open, setOpen] = useState(false);
+  const templates = useQuery({
+    queryKey: ["workflow-factory-templates"],
+    queryFn: () => invoke<FactoryTemplate[]>("workflow_factory_templates"),
+    enabled: open,
+  });
+  const create = useMutation({
+    mutationFn: ({ id, revision }: FactoryTemplate) => invoke<PackageDraft>("create_workflow_factory_draft", {
+      projectId, template: id, revision,
+    }),
+    onSuccess: openDraft,
+    onError: () => templates.refetch(),
+  });
+  const error = templates.error ?? create.error;
+  return <details className="pipeline-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>Start from a template</summary>
+    {open && <>
+      {error && <p role="alert">{String(error)}</p>}
+      {!error && templates.isPending && <p role="status">Loading workflow templates…</p>}
+      {!!templates.data?.length && <ul className="workflow-draft-list">
+        {templates.data.map((entry) => <li key={entry.id}>
+          <div><strong>{entry.name}</strong>
+            {entry.members.length > 1 && <p>{entry.members.join(" · ")}</p>}
+          </div>
+          <Button type="button" variant="outline" disabled={create.isPending} aria-label={`Create ${entry.name} draft`}
+            onClick={() => create.mutate(entry)}>Create draft</Button>
+        </li>)}
+      </ul>}
+    </>}
+  </details>;
 }
 
 export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWorkspace, openQueueJob }: WorkspaceProps & { draftId: string }) {

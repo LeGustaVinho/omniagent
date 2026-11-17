@@ -369,6 +369,8 @@ fn main() {
             workflow_ipc::authoring::workflow_package_catalog,
             workflow_ipc::authoring::read_published_workflow_package_artifact,
             workflow_ipc::authoring::export_workflow_exchange,
+            workflow_ipc::templates::workflow_factory_templates,
+            workflow_ipc::templates::create_workflow_factory_draft,
             workflow_ipc::authoring::describe_workflow_reusable_boundary,
             workflow_ipc::authoring::derive_workflow_reusable,
             workflow_ipc::authoring::describe_workflow_reusable_node,

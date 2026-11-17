@@ -6,6 +6,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { PipelineAuthoringEditor } from "@/workflow-authoring";
+import { WorkflowPackageList } from "@/workflow-authoring-package";
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -80,6 +81,31 @@ async function addPublishedRevision(user: ReturnType<typeof userEvent.setup>) {
   }));
   await screen.findByText(published.reviewedRevision);
 }
+
+it("opens an editable project draft from the selected factory template revision", async () => {
+  const openWorkspace = vi.fn();
+  vi.mocked(invoke).mockImplementation(async (name) => {
+    switch (name) {
+      case "list_workflow_packages": return [];
+      case "workflow_factory_templates": return [
+        { id: "task_delivery", name: "Task delivery", revision: 1, members: ["Task delivery"] },
+      ];
+      case "create_workflow_factory_draft": return initial;
+      default: throw new Error(name);
+    }
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <WorkflowPackageList checkout={exampleCheckout} openWorkspace={openWorkspace} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(screen.getByText("Start from a template"));
+  await user.click(await screen.findByRole("button", { name: "Create Task delivery draft" }));
+  expect(invoke).toHaveBeenCalledWith("create_workflow_factory_draft", {
+    projectId: exampleCheckout.projectId, template: "task_delivery", revision: 1,
+  });
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "authoring:package:draft"));
+  expect(invoke).not.toHaveBeenCalledWith("publish_reviewed_workflow_package", expect.anything());
+});
 
 it("opens exact published bases, confirms one saved revision and shows every package result", async () => {
   const user = mount();

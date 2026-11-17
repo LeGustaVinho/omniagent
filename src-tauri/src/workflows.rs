@@ -29,6 +29,7 @@ mod registry;
 mod repetition;
 mod subflow;
 pub mod role_templates;
+pub mod templates;
 pub mod triggers;
 mod runtime;
 pub mod settings_proposals;
@@ -242,6 +243,15 @@ fn compile_resolved_graph<'definition>(
             .find(|port| port.name == wire.to.port)
             .context("wire target port is unavailable")?;
         ensure!(input.value.accepts(output.value), "incompatible workflow ports");
+        if wire.to.port == "value" && matches!(
+            nodes[to].instance.configuration,
+            NodeConfiguration::Condition { predicate: ConditionPredicate::CandidateChecksPassed }
+        ) {
+            ensure!(
+                output.value == PortType::Data(ArtifactKind::Checks),
+                "A candidate checks condition needs a checks output"
+            );
+        }
         ensure!(connections.insert((&wire.from, &wire.to)), "workflow wire already exists");
         let accepts_multiple = match nodes[to].instance.kind {
             BuiltinNode::Join => input.name == "branches",

@@ -25,6 +25,7 @@ mod tests;
 pub enum ConditionPredicate {
     Exists { pointer: String },
     Equals { pointer: String, value: Value },
+    CandidateChecksPassed,
 }
 
 impl ConditionPredicate {
@@ -42,12 +43,14 @@ impl ConditionPredicate {
                         && !value.is_array()
                         && serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= 4096)
                 }
+                Self::CandidateChecksPassed => true,
             }
     }
 
     fn pointer(&self) -> &str {
         match self {
             Self::Exists { pointer } | Self::Equals { pointer, .. } => pointer,
+            Self::CandidateChecksPassed => "",
         }
     }
 
@@ -56,6 +59,24 @@ impl ConditionPredicate {
         match self {
             Self::Exists { .. } => found.is_some(),
             Self::Equals { value, .. } => found == Some(value),
+            Self::CandidateChecksPassed => {
+                value.get("kind").and_then(Value::as_str) == Some("checks")
+                    && value.pointer("/evidence/allowsAcceptance").and_then(Value::as_bool) == Some(true)
+            }
+        }
+    }
+
+    fn test_recorded_artifact(&self, db: &Connection, artifact: &ArtifactValue) -> Result<bool> {
+        if matches!(self, Self::CandidateChecksPassed) {
+            let ArtifactValue::Checks(checks) = artifact else {
+                anyhow::bail!("This condition needs a verified candidate checks receipt");
+            };
+            let verified = crate::repository::verification::load_scoped_candidate_verification(
+                db, &checks.task.project_id, &checks.task.task_id, &checks.id,
+            )?.context("The exact candidate verification receipt is unavailable")?;
+            Ok(verified.allows_acceptance())
+        } else {
+            Ok(self.test(&serde_json::to_value(artifact)?))
         }
     }
 }
@@ -576,8 +597,7 @@ impl<'a> Evaluation<'a> {
                                 _ => None,
                             })
                             .context("The condition lost its pinned evidence")?;
-                        let value = serde_json::to_value(&artifact.value)?;
-                        let port = if predicate.test(&value) {
+                        let port = if predicate.test_recorded_artifact(self.db, &artifact.value)? {
                             "matched"
                         } else {
                             "unmatched"
