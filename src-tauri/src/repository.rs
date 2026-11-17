@@ -28,6 +28,7 @@ mod markdown_catalog;
 pub mod markdown_index;
 pub mod markdown_index_watch;
 pub mod markdown_links;
+pub mod markdown_merge;
 pub mod markdown_renames;
 pub mod project_search;
 pub mod source_documents;

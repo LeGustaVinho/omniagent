@@ -278,6 +278,7 @@ fn main() {
             app.manage(scheduler);
             app.manage(ipc::EventSubscriptions::default());
             app.manage(note_runtime::NoteWatches::default());
+            app.manage(note_runtime::NoteMergePreviews::default());
             app.manage(note_index_runtime::NoteIndexWatches::default());
             app.manage(ide_source_runtime::SourceWatches::default());
             app.manage(manual_terminal::ManualTerminals::default());
@@ -525,6 +526,9 @@ fn main() {
             note_runtime::list_repository_markdown_drafts,
             note_runtime::save_repository_markdown_draft,
             note_runtime::discard_repository_markdown_draft,
+            note_runtime::extract_repository_note_selection,
+            note_runtime::preview_markdown_merge,
+            note_runtime::stage_markdown_merge,
             note_runtime::watch_repository_note,
             note_runtime::unwatch_repository_note,
             ipc::active_checkout,

@@ -45,7 +45,7 @@ fn item_path(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub(super) fn validate_name(name: &str) -> Result<()> {
     let device = name
         .split('.')
         .next()
@@ -253,7 +253,7 @@ pub async fn create_checkout_item(
     .map_err(|error| format!("{error:#}"))
 }
 
-async fn write_in_checkout<T: Send + 'static>(
+pub(super) async fn write_in_checkout<T: Send + 'static>(
     store: &Store,
     checkout_id: String,
     write: impl FnOnce(&Path) -> Result<T> + Send + 'static,

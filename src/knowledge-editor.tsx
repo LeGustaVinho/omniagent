@@ -253,8 +253,10 @@ function noteContextAt(editor: EditorView, path: string, offset: number): NoteCo
   }
   const { from, to } = state.selection.main;
   if (from < to && offset >= from && offset <= to) {
-    hit.excerpt = { path, text: state.sliceDoc(from, to), startLine: doc.lineAt(from).number,
+    const text = state.sliceDoc(from, to);
+    hit.excerpt = { path, text, startLine: doc.lineAt(from).number,
       endLine: doc.lineAt(to - 1).number, language: "markdown" };
+    hit.selection = { from, to, text, source: doc.toString() };
   }
   return hit;
 }

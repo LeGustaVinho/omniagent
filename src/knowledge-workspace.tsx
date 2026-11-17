@@ -23,7 +23,9 @@ import {
   updateProperty, wikiLinks, type NoteLocation, type NoteTarget,
 } from "@/knowledge-document";
 import { AttachmentPreview, noteAttachments, type NoteAttachment } from "@/knowledge-media";
-import { noteWikilink, type NoteContextHit } from "@/knowledge-context";
+import { noteWikilink, type NoteContextHit, type NoteSelection } from "@/knowledge-context";
+import { ExtractNoteDialog } from "@/knowledge-note-extraction";
+import { RepositoryNoteMerge } from "@/repository-note-merge";
 import type { NoteJump } from "@/knowledge-editor";
 import { useRepositoryNotes, type NoteBuffer, type NoteRevision } from "@/repository-note-buffers";
 import { RepositoryNoteMedia } from "@/repository-note-media";
@@ -61,6 +63,8 @@ interface RewrittenNote {
 
 type KnowledgeDialog =
   | { kind: "close"; path: string; api: FilePanelApi }
+  | { kind: "extract"; path: string; selection: NoteSelection }
+  | { kind: "merge"; source: string; destination?: string }
   | { kind: "conflict"; path: string; external: string }
   | { kind: "rename"; path: string }
   | { kind: "repositoryRename"; path: string; revision: string }
@@ -456,6 +460,15 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       else setProblem("Save the note and resolve external changes before using its revision.");
     });
   };
+  const mergeActions = (source: string, options?: { destination?: string }): MenuGroups[number] => {
+    const { destination } = options ?? {};
+    return !simulated && catalog.some((note) => note.path !== source) ? [{
+      label: destination ? "Merge selected notes…" : "Merge into another note…",
+      disabled: isDirty(notes[source]) || Boolean(repository.notes[source]?.sourceProblem)
+        || Boolean(destination && (isDirty(notes[destination]) || repository.notes[destination]?.sourceProblem)),
+      run: () => setDialog({ kind: "merge", source, destination }),
+    }] : [];
+  };
   const noteMenu = (path: string) => {
     const external = notes[path]?.external;
     return [[
@@ -468,6 +481,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       ] },
     ], [
       { label: "Rename note…", disabled: !simulated && isDirty(notes[path]), run: () => { void requestRename(path); } },
+      ...mergeActions(path),
       ...(!simulated && notes[path] ? [{ label: "Save a copy…", run: () => treeActions.saveCopy(path, notes[path]!.content) }] : []),
       { label: "Copy wikilink", run: () => menu.copy(`[[${path}]]`, "Copied wikilink") },
       { label: "Show backlinks and outgoing links", run: () => { setInspector("links"); open(path); } },
@@ -553,7 +567,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         : [[{ label: "Copy candidate paths", run: () => menu.copy(paths.join("\n"), "Copied attachment paths") }]])];
   };
 
-  const noteContextActions = ({ path, line, anchor, link, attachment, tag, excerpt, property, mermaid }: NoteContextHit, reading: boolean): MenuGroups => {
+  const noteContextActions = ({ path, line, anchor, link, attachment, tag, excerpt, selection: noteSelection, property, mermaid }: NoteContextHit, reading: boolean): MenuGroups => {
     const groups: MenuGroups[number][] = [];
     if (attachment && !simulated) groups.push(...attachmentActions(attachment.paths, attachment.label));
     if (link) {
@@ -602,10 +616,15 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         setQuery(`#${tag}`); setSidebar(true); setDisplay("search"); requestSearchFocus((before) => before + 1);
       } },
     ]);
+    const selectionSource = repository.notes[path];
     if (excerpt) groups.push([
       { label: "Copy selection", run: () => menu.copy(excerpt.text, "Copied note selection") },
       { label: "Copy selection reference", run: () => menu.copy(`${excerpt.path}:${excerpt.startLine}${excerpt.endLine === excerpt.startLine ? "" : `-${excerpt.endLine}`}`, "Copied note selection reference") },
       ...(!simulated && excerpt.text.trim() ? [{ label: "Add selection to conversation…", run: () => conversationActions.startExcerpt(excerpt) }] : []),
+      ...(!simulated && !reading && selectionSource?.fileIdentity
+        && !selectionSource.incoming && !selectionSource.sourceProblem && noteSelection?.text.trim() ? [{
+        label: "Extract selection to a new note…", run: () => setDialog({ kind: "extract", path, selection: noteSelection }),
+      }] : []),
     ]);
     const startLine = excerpt?.path === path ? excerpt.startLine : anchor ? line : undefined;
     const endLine = excerpt?.path === path ? excerpt.endLine : startLine;
@@ -689,6 +708,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                 { label: "Open selected notes", disabled: !selection.some(({ kind }) => kind === "file"),
                   run: () => { void openSelected(selection.filter(({ kind }) => kind === "file").map(({ path }) => path)); } },
                 ...comparison.selectionActions(selection),
+                ...(selection.length === 2 && selection.every(({ kind }) => kind === "file")
+                  ? mergeActions(item.path, { destination: selection.find(({ path }) => path !== item.path)?.path }) : []),
                 { label: "Copy relative paths", run: () => menu.copy(selection.map(({ path }) => path).join("\n"), "Copied relative paths") },
               ],
               ...conversationActions.actions(item, selection), ...fileOperations.actions(item, selection),
@@ -763,7 +784,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                   <div className="note-file-view">
                     <FileCaption path={path} revision={entry.revision} onReveal={revealNote} actions={(item) => [
                       [{ label: "Reveal in note tree", run: () => revealNote(item.path) },
-                        ...(item.kind === "folder" ? [{ label: "Find in folder", run: () => openWorkspace("ide", folderSearchTarget(item.path)) }] : []),
+                        ...(item.kind === "folder" ? [{ label: "Find in folder", run: () => openWorkspace("ide", folderSearchTarget(item.path)) }] : mergeActions(item.path)),
                         ...(!simulated ? [{ label: "Open terminal here", run: () => openWorkspace("ide", terminalFolderTarget(item.kind === "file" ? containingFolder(item.path) : item.path)) }] : [])],
                       ...menu.location(item),
                     ]} />
@@ -905,6 +926,18 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       </FileDialog>}
       {treeActions.dialog}
       {conversationActions.dialog}
+      {dialog?.kind === "extract" && <ExtractNoteDialog path={dialog.path} selection={dialog.selection} folders={treeActions.folders}
+        onClose={closeDialog} onExtract={(options) => repository.extractSelection(dialog.path, dialog.selection, options)}
+        onCreated={(path, replaced) => {
+          closeDialog();
+          setStatus(replaced ? "Created the new note and added a link to the source draft." : "Created the new note.");
+          void treeActions.refreshTree().catch((failure: unknown) => setProblem(String(failure)));
+          open(path);
+        }} />}
+      {dialog?.kind === "merge" && <RepositoryNoteMerge checkoutId={checkout.checkoutId} source={dialog.source}
+        suggestedDestination={dialog.destination} destinations={catalog.map((note) => note.path).filter((path) => path !== dialog.source)}
+        onClose={closeDialog} onApply={repository.mergeReviewed} onOpen={(path) => { closeDialog(); open(path, undefined, undefined, "source"); }}
+        onSaved={() => { void treeActions.refreshTree().catch((failure: unknown) => setProblem(String(failure))); }} />}
       {fileOperations.dialog}
       {comparison.dialog}
       {dialog?.kind === "launch" && <FileDialog title="Run workflow from note" description={dialog.source.relativePath} onClose={closeDialog}>

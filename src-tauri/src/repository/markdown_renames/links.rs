@@ -19,19 +19,29 @@ use super::{
     FileIdentity, MarkdownRenameEdit, MarkdownRenameFile, MarkdownRenameWarning, RepositoryDocument,
 };
 
+pub(super) struct MergedNoteTexts<'a> {
+    pub combined: &'a str,
+    pub redirect: &'a str,
+}
+
 pub(super) fn planned_references(
     root: &Path,
     source: &str,
     destination: &str,
     documents: &[RepositoryDocument],
     warnings: &mut Vec<MarkdownRenameWarning>,
+    merged_target: Option<MergedNoteTexts<'_>>,
 ) -> (Vec<MarkdownRenameFile>, Vec<FileIdentity>) {
     let before_notes = documents
         .iter()
         .map(|document| source_link_note(&document.revision.relative_path, &document.markdown))
         .collect::<Vec<_>>();
     let mut after_notes = before_notes.clone();
-    if let Some(moved) = after_notes.iter_mut().find(|note| note.path == source) {
+    if let Some(merged) = &merged_target {
+        after_notes.retain(|note| note.path != source && note.path != destination);
+        after_notes.push(source_link_note(destination, merged.combined));
+        after_notes.push(source_link_note(source, merged.redirect));
+    } else if let Some(moved) = after_notes.iter_mut().find(|note| note.path == source) {
         moved.path = destination.to_owned();
     }
     let before = MarkdownLinkResolver::new(&before_notes);
@@ -83,7 +93,26 @@ pub(super) fn planned_references(
                 _ => None,
             };
             let Some(mut query) = query else { continue };
-            let Some(original) = resolved_path(root, before.resolve(&query)) else {
+            let resolution = before.resolve(&query);
+            if merged_target.is_some() {
+                let needs_review = match &resolution {
+                    MarkdownLinkResolution::Ambiguous { candidates } => {
+                        path == source || candidates.iter().any(|candidate| candidate.path == source)
+                    }
+                    MarkdownLinkResolution::MissingAnchor { location } => location.path == source,
+                    MarkdownLinkResolution::Missing | MarkdownLinkResolution::Invalid => path == source,
+                    _ => false,
+                };
+                if needs_review {
+                    warnings.push(MarkdownRenameWarning {
+                        path: path.clone(),
+                        line: Some(link_line(text, span.start)),
+                        message: "The existing local link has an unresolved or ambiguous destination. Review it manually.".into(),
+                    });
+                    continue;
+                }
+            }
+            let Some(original) = resolved_path(root, resolution) else {
                 continue;
             };
             if original != source && effective_path == path {
@@ -101,11 +130,7 @@ pub(super) fn planned_references(
             let Some(raw) = text.get(span.clone()) else {
                 continue;
             };
-            let line = text[..span.start]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
-                .count()
-                + 1;
+            let line = link_line(text, span.start);
             let in_table = tables.iter().any(|table| overlaps(table, &span));
             let target_range = match query.syntax {
                 MarkdownLinkSyntax::Wiki => wiki_target_range(raw, in_table, false),
@@ -169,6 +194,10 @@ pub(super) fn planned_references(
     (preview, identities)
 }
 
+fn link_line(text: &str, start: usize) -> usize {
+    text[..start].bytes().filter(|byte| *byte == b'\n').count() + 1
+}
+
 fn overlaps(left: &Range<usize>, right: &Range<usize>) -> bool {
     left.start < right.end && right.start < left.end
 }
@@ -199,7 +228,15 @@ fn rewrite_address(query: &MarkdownLinkQuery, intended: &str) -> String {
     if raw.starts_with('/') || (query.syntax == MarkdownLinkSyntax::Wiki && !relative_wiki) {
         return format!("/{intended}");
     }
-    let mut source_parent = query.source_path.split('/').collect::<Vec<_>>();
+    let relative = relative_markdown_path(&query.source_path, intended);
+    if (relative_wiki || raw.starts_with("./")) && !relative.starts_with("../") {
+        return format!("./{relative}");
+    }
+    relative
+}
+
+fn relative_markdown_path(source: &str, intended: &str) -> String {
+    let mut source_parent = source.split('/').collect::<Vec<_>>();
     source_parent.pop();
     let target = intended.split('/').collect::<Vec<_>>();
     let shared = source_parent
@@ -208,11 +245,7 @@ fn rewrite_address(query: &MarkdownLinkQuery, intended: &str) -> String {
         .take_while(|(left, right)| left.to_lowercase() == right.to_lowercase())
         .count();
     let prefix = "../".repeat(source_parent.len() - shared);
-    let relative = prefix + &target[shared..].join("/");
-    if (relative_wiki || raw.starts_with("./")) && !relative.starts_with("../") {
-        return format!("./{relative}");
-    }
-    relative
+    prefix + &target[shared..].join("/")
 }
 
 fn wiki_target_range(raw: &str, in_table: bool, include_fragment: bool) -> Option<Range<usize>> {
@@ -531,6 +564,23 @@ fn escape_markdown(path: &str) -> String {
         }
     }
     output
+}
+
+pub(in crate::repository) fn markdown_link(source: &str, target: &str) -> String {
+    let path = relative_markdown_path(source, target);
+    let name = target.rsplit('/').next().unwrap_or(target);
+    let label = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    let mut link = String::from("[");
+    for ch in label.chars() {
+        if ch.is_ascii_punctuation() {
+            link.push('\\');
+        }
+        link.push(ch);
+    }
+    link.push_str("](");
+    link.push_str(&escape_markdown(&path));
+    link.push(')');
+    link
 }
 
 fn valid_replacement(

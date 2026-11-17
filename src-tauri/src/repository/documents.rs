@@ -18,11 +18,13 @@ use super::{
     with_managed_worktree_writer,
 };
 
+mod extraction;
 mod format;
 pub(super) mod history;
 mod movement;
 mod replacement;
 
+pub use extraction::{ExtractRepositoryNote, ExtractedRepositoryNote};
 use format::{EditorFormat, encode};
 pub use history::{CheckoutDocumentHistoryPage, CheckoutDocumentHistoryText};
 pub use movement::RepositoryDocumentMove;

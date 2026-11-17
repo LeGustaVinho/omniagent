@@ -3,6 +3,8 @@ import { PositionedContextActions, type MenuGroups } from "@/components/ui/conte
 import type { EditorExcerpt } from "@/editor-context";
 import type { NoteTarget } from "@/knowledge-document";
 
+export type NoteSelection = { from: number; to: number; text: string; source: string };
+
 export type NoteContextHit = {
   path: string;
   line?: number;
@@ -11,6 +13,7 @@ export type NoteContextHit = {
   attachment?: { paths: readonly string[]; label: string };
   tag?: string;
   excerpt?: EditorExcerpt;
+  selection?: NoteSelection;
   property?: { name: string; value: string };
   mermaid?: string;
 };

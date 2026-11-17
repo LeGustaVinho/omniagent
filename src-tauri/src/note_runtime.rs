@@ -1,11 +1,20 @@
-use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use omniagent::{
     diagnostics,
     markdown_recovery::{
         RepositoryMarkdownDraft, RepositoryMarkdownInvalidation, RepositoryMarkdownWatch,
     },
-    repository::documents::{RepositoryAttachment, RepositoryDocumentOpen, RepositoryDocumentSave},
+    repository::documents::{
+        ExtractRepositoryNote, ExtractedRepositoryNote, RepositoryAttachment,
+        RepositoryDocumentOpen, RepositoryDocumentSave,
+    },
+    repository::markdown_merge::{MarkdownMergePlan, MarkdownMergePreview},
     store::Store,
     workflows::{RepositoryNotePlanning, WorkflowLaunchSource},
 };
@@ -17,6 +26,60 @@ fn report(error: impl std::fmt::Display) -> String {
 
 #[derive(Default)]
 pub struct NoteWatches(Mutex<HashMap<String, RepositoryMarkdownWatch>>);
+
+#[derive(Default)]
+pub struct NoteMergePreviews(Mutex<HashMap<String, (Instant, MarkdownMergePlan)>>);
+
+const MERGE_PREVIEW_TTL: Duration = Duration::from_secs(15 * 60);
+const MAX_MERGE_PREVIEWS: usize = 8;
+
+#[tauri::command]
+pub async fn preview_markdown_merge(
+    store: State<'_, Store>,
+    previews: State<'_, NoteMergePreviews>,
+    checkout_id: String,
+    source: String,
+    destination: String,
+) -> Result<MarkdownMergePreview, String> {
+    let plan = store
+        .preview_markdown_merge(checkout_id, source, destination)
+        .await
+        .map_err(report)?;
+    let preview = plan.preview.clone();
+    let mut previews = previews.0.lock().map_err(report)?;
+    previews.retain(|_, (created, _)| created.elapsed() < MERGE_PREVIEW_TTL);
+    if previews.len() >= MAX_MERGE_PREVIEWS
+        && let Some(oldest) = previews
+            .iter()
+            .min_by_key(|(_, (created, _))| *created)
+            .map(|(id, _)| id.clone())
+    {
+        previews.remove(&oldest);
+    }
+    previews.insert(preview.id.clone(), (Instant::now(), plan));
+    Ok(preview)
+}
+
+#[tauri::command]
+pub async fn stage_markdown_merge(
+    store: State<'_, Store>,
+    previews: State<'_, NoteMergePreviews>,
+    checkout_id: String,
+    preview_id: String,
+) -> Result<Vec<RepositoryMarkdownDraft>, String> {
+    let plan = previews
+        .0
+        .lock()
+        .map_err(report)?
+        .remove(&preview_id)
+        .filter(|(created, _)| created.elapsed() < MERGE_PREVIEW_TTL)
+        .map(|(_, plan)| plan)
+        .ok_or_else(|| "The merge preview expired. Review a new preview.".to_string())?;
+    store
+        .stage_markdown_merge(checkout_id, plan)
+        .await
+        .map_err(report)
+}
 
 #[tauri::command]
 pub async fn repository_note_planning(
@@ -113,6 +176,18 @@ pub async fn save_repository_markdown_draft(
             expected_draft_revision,
             markdown,
         )
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn extract_repository_note_selection(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: ExtractRepositoryNote,
+) -> Result<ExtractedRepositoryNote, String> {
+    store
+        .extract_repository_note_selection(checkout_id, request)
         .await
         .map_err(report)
 }
