@@ -51,10 +51,34 @@ pub(crate) fn stage_job_input_with_repair(
         &binding.node_instance_id,
     )?
     .context("the scheduled workflow node is unavailable")?;
+    let isolated_comparison = pinned.definition.kind == BuiltinNode::CompareModels;
+    let unit_scoped = if isolated_comparison || pinned.definition.kind == BuiltinNode::Agent {
+        let run = super::runtime::load_workflow_run(db, project, &binding.pipeline_run_id)?
+            .context("The agent workflow is unavailable")?;
+        let definition = super::runtime::load_definition(db, project, &run.version)?
+            .context("The pinned agent workflow is unavailable")?;
+        super::control::unit_nodes(&definition).contains(binding.node_instance_id.as_str())
+    } else {
+        pinned.definition.kind.per_unit()
+    };
     ensure!(
-        pinned.definition.kind.per_unit() == input.unit_id.is_some(),
+        unit_scoped == input.unit_id.is_some(),
         "workflow node has the wrong logical unit scope"
     );
+    if isolated_comparison {
+        let context = input.artifacts.get("context").context("The comparison has no pinned context")?;
+        let artifact = load_artifact(db, project, &binding.pipeline_run_id, context, ArtifactKind::Markdown)?
+            .context("The comparison context is unavailable")?;
+        let ArtifactValue::Markdown(document) = artifact.value else {
+            anyhow::bail!("The comparison requires a saved Markdown context");
+        };
+        ensure!(
+            request.mode == crate::providers::SessionMode::ReadOnly
+                && !request.requires_bridge
+                && request.checkout_id.as_deref() == Some(document.checkout_id.as_str()),
+            "The comparison profile must use its recorded source checkout and read-only scope"
+        );
+    }
     if let Some(plan) = &binding.plan_revision {
         require_current_plan(db, project, &binding.pipeline_run_id, plan)?;
     }
@@ -66,6 +90,7 @@ pub(crate) fn stage_job_input_with_repair(
         input.unit_id.as_deref(),
         &input.artifacts,
     )?;
+    super::generic_agent::require_admission(db, project, binding, &pinned, request, input)?;
     if let Some(revision) = &input.plan_revision_request {
         ensure!(
             pinned.definition.kind == BuiltinNode::Plan,
@@ -84,7 +109,7 @@ pub(crate) fn stage_job_input_with_repair(
         ensure!(
             unit.workflow_run_id == binding.pipeline_run_id
                 && binding.plan_revision.as_ref() == Some(&unit.plan_revision)
-                && request.checkout_id.as_ref() == Some(&unit.checkout_id),
+                && (isolated_comparison || request.checkout_id.as_ref() == Some(&unit.checkout_id)),
             "scheduled job differs from its approved logical unit scope"
         );
         ensure!(

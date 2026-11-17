@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Dialog } from "radix-ui";
@@ -7,13 +7,12 @@ import { ModelPicker } from "@/components/model-picker";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { availableModelSelection, useLiveModelOptions } from "@/live-models";
 import type { WorkspaceProps } from "@/workbench-contract";
-import { WorkflowPackageGraphEditing, WorkflowPackageReview } from "@/workflow-package-review";
+import { PackagePublicationPreview, WorkflowPackageGraphEditing, WorkflowPackageReview, usePackagePreview } from "@/workflow-package-review";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
 import { WorkflowExchangeDownload, WorkflowExchangePanel } from "@/workflow-exchange";
-import { workflowRunTarget } from "@/workflow-execution-model";
 import { WorkflowLaunchPicker } from "@/workflow-launch";
 import { WorkflowReusableDerivation, type ReusableBody, type ReusableReference } from "@/workflow-reusable";
-import type { WorkflowGraph } from "@/workflow-graph-model";
+import type { WorkflowCanvasEdit, WorkflowGraph, WorkflowLayout } from "@/workflow-graph-model";
 
 type Version = { kind: string; id: string; revision: string; destination: "project" | "library" };
 type Member = { key: string; name: string; body: ReusableBody; destination?: string; base?: Version | null; references?: Record<string, ReusableReference> };
@@ -29,6 +28,7 @@ type Publication = {
 export type PackageDraft = {
   id: string; revision: string; conversationId: string | null; package: Package;
   publication: Publication | null;
+  layouts?: Record<string, WorkflowLayout>;
   request: { state: string; runId: string | null; jobId?: string; diagnostic: string | null } | null;
 };
 export type PackageSummary = { id: string; revision: string; name: string; memberCount: number; published: boolean };
@@ -54,7 +54,8 @@ function packageGraphs(text: string) {
         || !graph.nodes.every((node) => typeof node?.id === "string" && typeof node.kind === "string" && typeof node.configuration?.kind === "string")
         || !graph.wires.every((wire) => typeof wire?.from?.node === "string" && typeof wire.from.port === "string"
           && typeof wire?.to?.node === "string" && typeof wire.to.port === "string")) return [];
-      return [{ key: member.key, name: member.name, graph, kind: member.body.kind, references: member.references ?? {} }];
+      return [{ key: member.key, name: member.name, graph, kind: member.body.kind, references: member.references ?? {},
+        inputs: member.body.inputs, outputs: member.body.outputs }];
     });
   } catch {
     return [];
@@ -73,18 +74,54 @@ export function WorkflowPackageList({ checkout, openWorkspace }: Pick<WorkspaceP
     void client.invalidateQueries({ queryKey: packagesKey(projectId), exact: true });
     openWorkspace("pipelines", packageDraftTarget(draft.id));
   }
+  const [creatingPipeline, showCreatePipeline] = useState(false);
+  const [pipelineName, setPipelineName] = useState("");
   const create = useMutation({
-    mutationFn: () => invoke<PackageDraft>("create_workflow_package", {
-      projectId, conversationId: null, package: { name: "New workflow package", members: [] },
-    }),
-    onSuccess: openDraft,
+    mutationFn: (name: string | null) => {
+      const packageDocument: Package = name === null ? { name: "New workflow package", members: [] } : {
+        name,
+        members: [{
+          key: "pipeline", name, destination: "project",
+          body: { kind: "pipeline", graph: { name, nodes: [{ id: "start", kind: "typed_start", configuration: { kind: "typed_start", fields: [] } }], wires: [] } },
+        }],
+      };
+      return invoke<PackageDraft>("create_workflow_package", { projectId, conversationId: null, package: packageDocument });
+    },
+    onSuccess: (draft) => { showCreatePipeline(false); openDraft(draft); },
   });
   return <section aria-label="Workflow packages" className="pipeline-stack border-t border-border pt-4">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h2 className="font-semibold">Workflow packages</h2>
-      <Button type="button" variant="outline" disabled={create.isPending} onClick={() => create.mutate()}>New workflow package</Button>
+      <div className="pipeline-actions">
+        <Button type="button" variant="outline" disabled={create.isPending} onClick={() => create.mutate(null)}>New workflow package</Button>
+        <Dialog.Root open={creatingPipeline} onOpenChange={(open) => {
+          if (create.isPending) return;
+          if (open) { setPipelineName(""); create.reset(); }
+          showCreatePipeline(open);
+        }}>
+          <Dialog.Trigger asChild><Button type="button">New pipeline</Button></Dialog.Trigger>
+          <Dialog.Portal>
+            <Dialog.Overlay className="fixed inset-0 z-50 bg-background/75 backdrop-blur-sm" />
+            <Dialog.Content className="fixed left-1/2 top-1/2 z-50 grid w-[min(28rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border border-border bg-card p-5 shadow-lg">
+              <Dialog.Title className="text-lg font-semibold">New pipeline</Dialog.Title>
+              <form className="pipeline-form grid gap-3" onSubmit={(event) => {
+                event.preventDefault();
+                if (pipelineName.trim() && !create.isPending) create.mutate(pipelineName.trim());
+              }}>
+                <label>Pipeline name<input autoFocus required maxLength={120} value={pipelineName} disabled={create.isPending}
+                  onChange={(event) => setPipelineName(event.currentTarget.value)} /></label>
+                {create.error && <p role="alert">{String(create.error)}</p>}
+                <div className="pipeline-actions justify-end">
+                  <Dialog.Close asChild><Button variant="outline" type="button" disabled={create.isPending}>Cancel</Button></Dialog.Close>
+                  <Button type="submit" disabled={!pipelineName.trim() || create.isPending}>Create pipeline</Button>
+                </div>
+              </form>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
+      </div>
     </div>
-    {(packages.error ?? create.error) && <p role="alert">{String(packages.error ?? create.error)}</p>}
+    {(packages.error ?? (!creatingPipeline && create.error)) && <p role="alert">{String(packages.error ?? create.error)}</p>}
     <WorkflowFactoryTemplates key={`factory:${projectId}`} projectId={projectId} openDraft={openDraft} />
     <WorkflowExchangePanel key={projectId} projectId={projectId} openWorkspace={openWorkspace} />
     {!!packages.data?.length && <ul className="workflow-draft-list">
@@ -137,8 +174,10 @@ export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWor
     queryFn: () => invoke<PackageDraft>("inspect_workflow_package", { projectId, draftId }),
     refetchInterval: ({ state }) => pending(state.data) ? 1_000 : false,
   });
-  const draft = query.data;
+  const [editBase, holdEdits] = useState<PackageDraft>();
+  const draft = editBase ?? query.data;
   function update(next: PackageDraft) {
+    holdEdits(undefined);
     client.setQueryData(packageKey(projectId, draftId), next);
     void client.invalidateQueries({ queryKey: packagesKey(projectId), exact: true });
     if (next.conversationId && next.conversationId !== draft?.conversationId) {
@@ -159,16 +198,20 @@ export function WorkflowPackageEditor({ draftId, checkout, openActivity, openWor
     </header>
     {query.isPending && <p role="status">Loading package revision…</p>}
     {query.error && <p role="alert">{String(query.error)}</p>}
-    {draft && <PackageRevision key={draft.revision} projectId={projectId} checkoutId={checkoutId} draft={draft} update={update} openWorkspace={openWorkspace} />}
+    {draft && <PackageRevision key={draft.revision} projectId={projectId} checkoutId={checkoutId} draft={draft} update={update} holdEdits={holdEdits}
+      revisionConflict={!!editBase && !!query.data && editBase.revision !== query.data.revision} openWorkspace={openWorkspace} />}
   </section>;
 }
 
-function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }: {
+function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revisionConflict, openWorkspace }: {
   draft: PackageDraft; projectId: string; checkoutId: string; update: (draft: PackageDraft) => void;
+  holdEdits: (base: PackageDraft | undefined) => void;
+  revisionConflict: boolean;
   openWorkspace: WorkspaceProps["openWorkspace"];
 }) {
   const client = useQueryClient();
   const [text, setText] = useState(() => JSON.stringify(draft.package, null, 2));
+  const [canvasByMember, setCanvases] = useState<Record<string, WorkflowCanvasEdit>>({});
   const currentText = useRef(text);
   currentText.current = text;
   const [confirmation, setConfirmation] = useState(false);
@@ -180,8 +223,13 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
   const save = useMutation({
     mutationFn: () => invoke<PackageDraft>("save_workflow_package", {
       ...scoped, expectedRevision: draft.revision, package: JSON.parse(text) as unknown,
+      ...(Object.keys(canvasByMember).length > 0 && { canvasByMember }),
     }),
-    onSuccess: (next) => { setText(JSON.stringify(next.package, null, 2)); update(next); },
+    onSuccess: (next) => {
+      setText(JSON.stringify(next.package, null, 2));
+      setCanvases({});
+      update(next);
+    },
   });
   const request = useMutation({
     mutationFn: () => invoke<PackageDraft>("request_workflow_package_changes", {
@@ -198,7 +246,9 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
       if (result.status === "published") update({ ...draft, publication: result.publication });
     },
   });
-  const dirty = text !== JSON.stringify(draft.package, null, 2);
+  const dirty = text !== JSON.stringify(draft.package, null, 2) || Object.keys(canvasByMember).length > 0;
+  const review = usePackagePreview(projectId, draft.id, draft.revision, confirmation);
+  useEffect(() => holdEdits(dirty ? draft : undefined), [holdEdits, dirty, draft]);
   const busy = pending(draft) || save.isPending || publish.isPending || request.isPending;
   const stale = publish.data?.status === "stale_base" ? publish.data : null;
   const savedGraphs = packageGraphs(JSON.stringify(draft.package));
@@ -223,7 +273,7 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
           <WorkflowEditorAssistance projectId={projectId} checkoutId={checkoutId} artifact={artifact} openWorkspace={openWorkspace} />
           {artifact.version.kind === "pipeline" && artifact.version.destination === "project" && !artifact.blockers.length &&
             <WorkflowLaunchPicker projectId={projectId} checkoutId={checkoutId} preferred={artifact.version}
-              openWorkspace={(workspace, target) => openWorkspace(workspace, target && workflowRunTarget(target))} />}
+              openWorkspace={openWorkspace} />}
           {artifact.body.graph && <WorkflowReusableDerivation projectId={projectId} graph={artifact.body.graph}
             source={{ type: "published", version: artifact.version }} disabled={false} onSaved={openDerived} />}
           {artifact.blockers.map((blocker) => <p key={blocker}>{blocker}</p>)}
@@ -235,29 +285,67 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
     </section>;
   }
   return <div className="pipeline-stack">
-    <p className="break-all">Saved package revision <code>{draft.revision}</code></p>
+    <div className="pipeline-draft-toolbar">
+      <div className="pipeline-draft-revision">
+        <span>{dirty ? "Unsaved changes" : "Saved draft revision"}</span>
+        <code>{draft.revision}</code>
+      </div>
+      <div className="pipeline-actions">
+        <Button type="button" disabled={!dirty || busy} onClick={() => save.mutate()}>Save package revision</Button>
+        <Dialog.Root open={confirmation} onOpenChange={(open) => { if (!publish.isPending) setConfirmation(open); }}>
+          <Dialog.Trigger asChild><Button type="button" variant="outline" disabled={dirty || busy || draft.package.members.length === 0}>Review package publication</Button></Dialog.Trigger>
+          <Dialog.Portal>
+            <Dialog.Overlay className="fixed inset-0 z-50 bg-background/75 backdrop-blur-sm" />
+            <Dialog.Content className="fixed left-1/2 top-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-[min(45rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-lg border border-border bg-card p-5 shadow-lg">
+              <Dialog.Title className="text-lg font-semibold">Publish this package revision</Dialog.Title>
+              <Dialog.Description>Publish all {draft.package.members.length} artifacts from the saved revision in one transaction.</Dialog.Description>
+              <code className="break-all">{draft.revision}</code>
+              <ul>{draft.package.members.map((member) => <li key={member.key}>{member.name} · {member.destination ?? "project"}</li>)}</ul>
+              {review.isPending && <p role="status">Loading changes and dependencies…</p>}
+              {review.error && <p role="alert">{String(review.error)}</p>}
+              {review.data?.revision === draft.revision && <PackagePublicationPreview preview={review.data} />}
+              {publish.error && <p role="alert">{String(publish.error)}</p>}
+              <div className="flex justify-end gap-2">
+                <Dialog.Close asChild><Button type="button" variant="outline" disabled={publish.isPending}>Cancel</Button></Dialog.Close>
+                <Button type="button" disabled={busy || dirty || review.data?.revision !== draft.revision} onClick={() => publish.mutate()}>Confirm package publication</Button>
+              </div>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
+      </div>
+    </div>
+    {revisionConflict && <p role="alert">A newer revision is available. Your edits remain here.</p>}
+    {save.error && <p role="alert">{String(save.error)}</p>}
+    <WorkflowPackageGraphEditing projectId={projectId} checkoutId={checkoutId} draftId={draft.id} savedRevision={draft.revision}
+      graphs={packageGraphs(text)} draftPresets={draftPresets} layouts={draft.layouts} canvasByMember={canvasByMember}
+      changeCanvas={(key, canvas) => setCanvases((previous) => {
+        const next = { ...previous };
+        if (JSON.stringify(canvas.layout) === JSON.stringify(draft.layouts?.[key] ?? {})
+          && Object.keys(canvas.updateDefinitions).length === 0) delete next[key];
+        else next[key] = canvas;
+        return next;
+      })}
+      disabled={busy} edit={(key, graph, references) => {
+        const current = JSON.parse(currentText.current) as Package;
+        setText(JSON.stringify({ ...current, members: current.members.map((member) => member.key === key
+          ? { ...member, ...(references && { references }), body: { ...member.body, graph } } : member) }, null, 2));
+      }} />
     <WorkflowPackageReview projectId={projectId} draftId={draft.id} savedRevision={draft.revision} />
     {draft.request && <p role="status">Authoring {draft.request.state.replaceAll("_", " ")}{draft.request.diagnostic && ` · ${draft.request.diagnostic}`}</p>}
-    <ul className="pipeline-stack" aria-label="Saved package members">
+    {draft.package.members.length > 1 && <ul className="pipeline-stack" aria-label="Saved package members">
       {draft.package.members.map((member) => <li key={member.key}>
         <strong>{member.name}</strong> · {member.body.kind.replaceAll("_", " ")} · {member.destination ?? "project"}
         {member.base && <p className="break-all">Base <code>{member.base.revision}</code></p>}
       </li>)}
-    </ul>
+    </ul>}
     {savedGraphs.map((member) => <section key={member.key} className="pipeline-stack" aria-label={`Reuse ${member.name}`}>
-      <strong>{member.name}</strong>
+      {savedGraphs.length > 1 && <strong>{member.name}</strong>}
       <WorkflowReusableDerivation projectId={projectId} graph={member.graph}
         source={{ type: "package_revision", draftId: draft.id, revision: draft.revision, memberKey: member.key }}
         disabled={busy || dirty} onSaved={update} />
     </section>)}
     <details className="pipeline-evidence">
       <summary>Edit package</summary>
-      <WorkflowPackageGraphEditing projectId={projectId} checkoutId={checkoutId} draftId={draft.id} savedRevision={draft.revision}
-        graphs={packageGraphs(text)} draftPresets={draftPresets} disabled={busy} edit={(key, graph, references) => {
-          const current = JSON.parse(currentText.current) as Package;
-          setText(JSON.stringify({ ...current, members: current.members.map((member) => member.key === key
-            ? { ...member, ...(references && { references }), body: { ...member.body, graph } } : member) }, null, 2));
-        }} />
       <PublishedArtifactPicker projectId={projectId} checkoutId={checkoutId} openWorkspace={openWorkspace} disabled={busy} add={(artifact) => {
         const parsed = JSON.parse(currentText.current) as Package;
         if (!Array.isArray(parsed.members)) throw new Error("The package needs a members array.");
@@ -272,8 +360,6 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
       }} />
       <textarea aria-label="Package document" autoCapitalize="off" spellCheck={false} className="mt-2 min-h-64 w-full rounded border border-border bg-background p-2 font-mono text-xs"
         value={text} disabled={busy} onChange={(event) => setText(event.currentTarget.value)} />
-      <Button type="button" disabled={!dirty || busy} onClick={() => save.mutate()}>Save package revision</Button>
-      {save.error && <p role="alert">{String(save.error)}</p>}
     </details>
     <div className="pipeline-stack max-w-lg">
       <ModelPicker label="Package authoring model" options={models.options} loading={models.loading} disabled={busy}
@@ -284,23 +370,6 @@ function PackageRevision({ draft, projectId, checkoutId, update, openWorkspace }
         onClick={() => request.mutate()}>Request package changes with AI</Button>
       {request.error && <p role="alert">{String(request.error)}</p>}
     </div>
-    <Dialog.Root open={confirmation} onOpenChange={(open) => { if (!publish.isPending) setConfirmation(open); }}>
-      <Dialog.Trigger asChild><Button type="button" disabled={dirty || busy || draft.package.members.length === 0}>Review package publication</Button></Dialog.Trigger>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-background/75 backdrop-blur-sm" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 grid w-[min(34rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border border-border bg-card p-5 shadow-lg">
-          <Dialog.Title className="text-lg font-semibold">Publish this package revision</Dialog.Title>
-          <Dialog.Description>Publish all {draft.package.members.length} artifacts from the saved revision in one transaction.</Dialog.Description>
-          <code className="break-all">{draft.revision}</code>
-          <ul>{draft.package.members.map((member) => <li key={member.key}>{member.name} · {member.destination ?? "project"}</li>)}</ul>
-          {publish.error && <p role="alert">{String(publish.error)}</p>}
-          <div className="flex justify-end gap-2">
-            <Dialog.Close asChild><Button type="button" variant="outline" disabled={publish.isPending}>Cancel</Button></Dialog.Close>
-            <Button type="button" disabled={busy || dirty} onClick={() => publish.mutate()}>Confirm package publication</Button>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
     {stale && <section aria-label="Current published package artifact" className="pipeline-evidence">
       <p role="alert">The published base for {stale.member} changed. The package draft is preserved.</p>
       <p>{stale.current.name} · <code>{stale.current.version.revision}</code></p>

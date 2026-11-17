@@ -13,6 +13,7 @@ type FixtureTerminal = {
   write: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
   dispose: ReturnType<typeof vi.fn>;
+  clear: ReturnType<typeof vi.fn>;
 };
 type TerminalChannel = { onmessage: (event: { kind: "output"; data: string } | { kind: "exited"; exitCode: number }) => void };
 
@@ -109,12 +110,17 @@ it("starts a manual checkout shell on request and preserves byte output, input o
   expect(terminal.write).toHaveBeenNthCalledWith(1, Uint8Array.of(0xc3));
   expect(terminal.write).toHaveBeenNthCalledWith(2, Uint8Array.of(0xa9));
 
-  rerender(<ManualTerminal checkoutId={session.checkoutId} active={false} />);
+  const commands = vi.mocked(invoke).mock.calls.length;
+  rerender(<ManualTerminal checkoutId={session.checkoutId} active clearRevision={1} />);
+  expect(terminal.clear).toHaveBeenCalledTimes(1);
+  expect(invoke).toHaveBeenCalledTimes(commands);
+
+  rerender(<ManualTerminal checkoutId={session.checkoutId} active={false} clearRevision={1} />);
   fixture.dimensions = { cols: 110, rows: 32 };
   fixture.onResize[0]?.();
   expect(invoke).not.toHaveBeenCalledWith("close_manual_terminal", session);
   expect(invoke).not.toHaveBeenCalledWith("resize_manual_terminal", expect.anything());
-  rerender(<ManualTerminal checkoutId={session.checkoutId} active />);
+  rerender(<ManualTerminal checkoutId={session.checkoutId} active clearRevision={1} />);
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("resize_manual_terminal", { ...session, cols: 110, rows: 32 }));
   expect(terminal.focus).toHaveBeenCalledTimes(2);
 

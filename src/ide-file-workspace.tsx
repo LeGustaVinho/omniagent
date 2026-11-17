@@ -3,10 +3,10 @@ import {
   DockviewReact, themeDark, themeLight, type DockviewApi, type DockviewReadyEvent,
   type IDockviewPanelHeaderProps, type IDockviewPanelProps, type SerializedDockview,
 } from "dockview-react";
-import { FileCode2, FileText, FolderOpen, PanelLeftClose, Search, X } from "lucide-react";
+import { FileCode2, FileText, FolderOpen, PanelLeftClose, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Dialog } from "radix-ui";
-import { fileName, type FileSearchResult } from "@/ide-knowledge-data";
+import { fileName } from "@/ide-knowledge-data";
 import "dockview/dist/styles/dockview.css";
 import "./ide-knowledge.css";
 
@@ -225,35 +225,12 @@ export function FileTree({ paths, active, onOpen }: { paths: readonly string[]; 
   return <FolderBranch tree={makeTree(paths)} active={active} onOpen={onOpen} />;
 }
 
-export function FileSearch({ query, setQuery, results, onOpen, placeholder, unavailable }: {
-  query: string;
-  setQuery: (query: string) => void;
-  results: readonly FileSearchResult[];
-  onOpen: (path: string, line: number) => void;
-  placeholder: string;
-  unavailable?: boolean;
-}) {
-  return (
-    <div className="file-search">
-      <label className="file-field">
-        <Search size={15} />
-        <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={placeholder} aria-label={placeholder} />
-      </label>
-      {unavailable ? <p className="file-help">Search integration is pending for this checkout.</p> : (
-        <>
-          {query.trim() && <p className="file-help">{results.length ? `${results.length} matches` : "No files match your search"}</p>}
-          <ul className="file-search-results">
-            {results.map(({ path, line, excerpt }, index) => <li key={`${path}:${line}:${index}`}>
-              <button type="button" onClick={() => onOpen(path, line)} title={path}>
-                <strong>{fileName(path)} <span>· {line}</span></strong>
-                <span>{excerpt}</span>
-              </button>
-            </li>)}
-          </ul>
-        </>
-      )}
-    </div>
-  );
+export function FileCaption({ path, revision }: { path: string; revision: number | string }) {
+  const label = typeof revision === "number" ? `r${revision}` : revision;
+  return <div className="ide-file-caption">
+    <span title={path}>{path.replaceAll("/", " / ")}</span>
+    <span title={`Revision ${label}`}>{label}</span>
+  </div>;
 }
 
 export function FileUnavailable({ title, path, detail, onSimulate }: {

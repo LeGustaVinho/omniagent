@@ -4,7 +4,10 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod agile_nodes;
 mod approval;
+mod data_nodes;
+pub mod decision_nodes;
 mod artifacts;
 pub mod authoring;
 mod builtin;
@@ -14,6 +17,7 @@ mod control;
 mod execution;
 #[cfg(test)]
 mod git_integration;
+mod generic_agent;
 pub mod inspection;
 mod iteration;
 mod job_inputs;
@@ -74,7 +78,8 @@ pub(crate) use job_inputs::{
     WorkflowJobInput, bind_job_input, load_workflow_job_input, stage_job_input,
 };
 pub use launch::{
-    ManualWorkflowLaunch, WorkflowLaunchOrigin, WorkflowLaunchReceipt, WorkflowLaunchSource,
+    ManualWorkflowLaunch, TypedStartConfiguration, WorkflowLaunchEvent, WorkflowLaunchOrigin,
+    WorkflowLaunchReceipt, WorkflowLaunchRequest, WorkflowLaunchSource, WorkflowStartSchema,
 };
 pub(crate) use launch::{launch_workflow_in_tx, validate_workflow_launch_source};
 pub(crate) use launch::{pinned_workflow_checklist_for_job, require_launch_checklist_item};
@@ -234,7 +239,7 @@ fn compile_resolved_graph<'definition>(
     ensure!(
         nodes
             .iter()
-            .filter(|node| node.instance.kind == BuiltinNode::Start)
+            .filter(|node| matches!(node.instance.kind, BuiltinNode::Start | BuiltinNode::TypedStart))
             .count()
             == 1,
         "a workflow needs one Start node"
@@ -280,11 +285,22 @@ fn compile_resolved_graph<'definition>(
             );
         }
         ensure!(
+            !matches!(&nodes[from].instance.configuration, NodeConfiguration::FindWork { query }
+                if query.result == agile_nodes::FindWorkResultMode::List && matches!(wire.from.port.as_str(), "task" | "target")),
+            "Find work needs Single mode to connect a work target"
+        );
+        if wire.from.port == "event"
+            && let NodeConfiguration::TypedStart(start) = &nodes[from].instance.configuration
+        {
+            ensure!(start.accepts_automation(), "Make Start fields optional to connect the event port");
+        }
+        ensure!(
             connections.insert((&wire.from, &wire.to)),
             "workflow wire already exists"
         );
         let accepts_multiple = match nodes[to].instance.kind {
             BuiltinNode::Join => input.name == "branches",
+            BuiltinNode::SummarizeResult => input.name == "evidence",
             BuiltinNode::ForEachCollect => matches!(input.name.as_str(), "finished" | "result"),
             _ => false,
         };
@@ -298,7 +314,18 @@ fn compile_resolved_graph<'definition>(
     for node in &nodes {
         for port in &node.definition.inputs {
             let connected = incoming.contains(&(node.instance.id.as_str(), port.name.as_str()));
+            if matches!((node.instance.kind, port.name.as_str()),
+                (BuiltinNode::Approval | BuiltinNode::SummarizeResult, "evidence") | (BuiltinNode::Agent, "comparison")) {
+                continue;
+            }
+            use agile_nodes::ManageWorkConfiguration as Work;
             let conditionally_required = match (&node.instance.configuration, port.name.as_str()) {
+                (NodeConfiguration::ManageWork { action }, "task") => Some(matches!(action, Work::Link | Work::CreateSubtask)),
+                (NodeConfiguration::ManageWork { action }, "title") => Some(matches!(action, Work::CreateTask | Work::CreateSubtask)),
+                (NodeConfiguration::LoadWorkContext { mode }, "task") => Some(mode.needs_task()),
+                (NodeConfiguration::LoadWorkContext { mode }, "document") => Some(mode.needs_document()),
+                (NodeConfiguration::SetFields(configuration), "source") => Some(configuration.requires_source()),
+                (NodeConfiguration::BuildText(configuration), "values") => Some(configuration.requires_values()),
                 (NodeConfiguration::McpTool(configuration), "arguments") => {
                     Some(!configuration.argument_mappings.is_empty())
                 }

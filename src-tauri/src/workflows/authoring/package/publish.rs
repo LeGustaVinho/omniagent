@@ -214,7 +214,7 @@ pub(super) fn head_revision(
 fn resolve_package(
     db: &Connection,
     project: &str,
-    document: PackageDocument,
+    mut document: PackageDocument,
 ) -> Result<Vec<PublishedPackageMember>> {
     let keys = document
         .package
@@ -249,7 +249,8 @@ fn resolve_package(
             .definitions
             .get(&member.key)
             .context("The reviewed catalog definitions are missing")?;
-        let result = publish_member(db, project, member, pins, &resolved)?;
+        let layout = document.layouts.remove(&member.key).unwrap_or_default();
+        let result = publish_member(db, project, member, pins, layout, &resolved)?;
         resolved.insert(result.key.clone(), result);
     }
     Ok(keys
@@ -263,6 +264,7 @@ fn publish_member(
     project: &str,
     member: PackageMember,
     pins: &BTreeMap<String, NodeDefinition>,
+    layout: BTreeMap<String, WorkflowNodePosition>,
     resolved: &BTreeMap<String, PublishedPackageMember>,
 ) -> Result<PublishedPackageMember> {
     let mut references = BTreeMap::new();
@@ -524,6 +526,11 @@ fn publish_member(
             pins,
         ))?),
     };
+    let revision = if layout.is_empty() {
+        revision
+    } else {
+        digest(&serde_json::to_vec(&(&revision, &layout))?)
+    };
     let version = PackageArtifactVersion {
         destination: member.destination,
         kind,
@@ -551,6 +558,7 @@ fn publish_member(
         body,
         references,
         definitions: pins.clone(),
+        layout,
         blockers,
     };
     save_artifact(db, project, &artifact)?;
@@ -1245,14 +1253,48 @@ pub(super) fn load_published(
         }
         _ => return Ok(None),
     };
+    let layout = if version.kind == PackageArtifactKind::Pipeline {
+        super::super::publication::published_layout(
+            db,
+            project,
+            &WorkflowRevision {
+                id: version.id.clone(),
+                revision: version.revision.clone(),
+            },
+        )?
+    } else {
+        BTreeMap::new()
+    };
     Ok(Some(PublishedPackageArtifact {
         version: version.clone(),
         name,
         body,
         references: BTreeMap::new(),
         definitions,
+        layout,
         blockers: Vec::new(),
     }))
+}
+
+pub(crate) fn published_pipeline_layout(
+    db: &Connection,
+    project: &str,
+    workflow: &WorkflowRevision,
+) -> Result<BTreeMap<String, WorkflowNodePosition>> {
+    let mut version = PackageArtifactVersion {
+        destination: PackageDestination::Project,
+        kind: PackageArtifactKind::Pipeline,
+        id: workflow.id.clone(),
+        revision: workflow.revision.clone(),
+    };
+    if let Some(artifact) = stored_artifact(db, project, &version)? {
+        return Ok(artifact.layout);
+    }
+    version.destination = PackageDestination::Library;
+    if let Some(artifact) = stored_artifact(db, project, &version)? {
+        return Ok(artifact.layout);
+    }
+    super::super::publication::published_layout(db, project, workflow)
 }
 
 pub(crate) fn ensure_package_runnable(

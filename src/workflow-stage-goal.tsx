@@ -80,10 +80,11 @@ function Result({ assessment }: { assessment: StageGoalAssessment }) {
 }
 
 export function WorkflowStageGoal({ projectId, checkoutId, node, mode, model, roleRevision, roleReferencePending,
-  disabled, goal, malformed, onChange }: {
+  disabled, goal, malformed, planModeEnabled, onChange }: {
   projectId: string; checkoutId?: string; node: WorkflowGraphNode; mode: SessionMode; model: ModelSelection | null;
   roleRevision?: StageGoalRoleRevision; roleReferencePending?: boolean;
-  disabled: boolean; goal?: StageGoalConfiguration; malformed?: boolean; onChange: (next: StageGoalConfiguration | undefined) => void;
+  disabled: boolean; goal?: StageGoalConfiguration; malformed?: boolean; planModeEnabled?: boolean;
+  onChange: (next: StageGoalConfiguration | undefined) => void;
 }) {
   const [open, setOpen] = useState(false);
   const role = useQuery({
@@ -93,7 +94,8 @@ export function WorkflowStageGoal({ projectId, checkoutId, node, mode, model, ro
     retry: false,
   });
   const selection = model ?? role.data?.body.template?.model ?? null;
-  const unsupported = node.kind === "review_candidate" ? "Candidate review runs in an isolated checkout without the Goal bridge." : undefined;
+  const unsupported = planModeEnabled ? "Turn off Plan Mode to use Goal Mode."
+    : node.kind === "review_candidate" ? "Candidate review runs in an isolated checkout without the Goal bridge." : undefined;
   const request = checkoutId && goal && selection ? { projectId, checkoutId, node, selection } : undefined;
   const preview = useMutation({
     mutationFn: (args: RouteRequest) => invoke<StageGoalAssessment | null>("preview_workflow_stage_goal", args),
@@ -112,8 +114,11 @@ export function WorkflowStageGoal({ projectId, checkoutId, node, mode, model, ro
   return <details className="pipeline-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary>Goal Mode{goal && " · enabled"}</summary>
     {open && <div className="pipeline-stack">
-      <label><input type="checkbox" checked={Boolean(goal)} disabled={disabled || Boolean(unsupported && !goal && !malformed)} onChange={(event) =>
-        onChange(event.currentTarget.checked ? { objective: "", criteria: [blankCriterion()] } : undefined)} /> Use Goal Mode for this stage</label>
+      <label><input type="checkbox" checked={Boolean(goal) || Boolean(planModeEnabled && malformed)}
+        disabled={disabled || Boolean(unsupported && !goal && !malformed)} onChange={(event) => {
+          if (!event.currentTarget.checked) onChange(undefined);
+          else if (!planModeEnabled) onChange({ objective: "", criteria: [blankCriterion()] });
+        }} /> Use Goal Mode for this stage</label>
       {unsupported && <p role="alert">{unsupported}</p>}
       {malformed && <p role="alert">The saved goal settings are incomplete. Review the stage configuration.</p>}
       {goal && <>

@@ -3,12 +3,12 @@
 import { EditorView } from "@codemirror/view";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import KnowledgeWorkspace from "@/knowledge-workspace";
 import type { NoteRevision } from "@/repository-note-buffers";
-import type { WorkspaceProps } from "@/workbench-contract";
+import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -189,6 +189,87 @@ it("opens an unopened note from the checkout-wide full-text index", async () => 
   await user.keyboard("{Enter}");
   expect((await editor(checklist)).state.doc.toString()).toBe(checklistSource);
   expect(screen.getAllByRole("button", { name: "Close Checklist.md" })).toHaveLength(1);
+});
+
+it("reviews and launches the exact saved note through the published workflow form", async () => {
+  mockRepository();
+  const ipc = vi.mocked(invoke);
+  const repository = ipc.getMockImplementation()!;
+  const openWorkspace = vi.fn();
+  const saved = documentAt(release, "release-1-saved", releaseSource + "\nReview the pinned note.\n");
+  const version = { id: "review-release", revision: "published-revision" };
+  ipc.mockImplementation(async (command, args) => {
+    if (command === "workflow_authoring_bases") return [{ version, name: "Review release", start: {
+      fields: [{ name: "Reviewer", valueType: "text", required: true }],
+      requiresDocument: false, requiresWork: false, requiresEvent: false,
+    } }];
+    if (command === "registered_checkouts") return [props.checkout, { ...props.checkout, checkoutId: "another-checkout" }];
+    if (command === "project_work_hierarchy") return { work: [] };
+    if (command === "read_repository_markdown") {
+      expect(args).toEqual({ checkoutId, revisionId: saved.revision.id });
+      return saved;
+    }
+    if (command === "launch_workflow_manual") return { id: "review-run" };
+    return repository(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} openWorkspace={openWorkspace} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(release);
+  const button = screen.getByRole<HTMLButtonElement>("button", { name: "Run workflow from note" });
+  act(() => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: saved.markdown } }));
+  await waitFor(() => expect(button.disabled).toBe(true));
+  await user.click(screen.getByRole("button", { name: "Save note" }));
+  await waitFor(() => expect(button.disabled).toBe(false));
+  await user.click(button);
+
+  const review = within(await screen.findByRole("dialog", { name: "Run workflow from note" }));
+  const checkout = await review.findByRole<HTMLSelectElement>("combobox", { name: "Checkout" });
+  expect(checkout.disabled).toBe(true);
+  expect(checkout.value).toBe(checkoutId);
+  const start = await review.findByRole<HTMLButtonElement>("button", { name: "Start workflow" });
+  expect(start.disabled).toBe(true);
+  await user.click(await review.findByText("Read saved Markdown"));
+  expect(review.getByText(/Review the pinned note/).textContent).toBe(saved.markdown);
+  expect(ipc.mock.calls.map(([command]) => command)).not.toContain("list_repository_markdown_revisions");
+  expect(ipc.mock.calls.map(([command]) => command)).not.toContain("launch_workflow_manual");
+
+  await user.type(review.getByRole("textbox", { name: "Reviewer" }), "Release team");
+  await user.click(start);
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "run:review-run"));
+  expect(ipc).toHaveBeenCalledWith("launch_workflow_manual", { request: {
+    projectId: props.checkout.projectId, workflow: version, checkoutId,
+    documentRevisionId: saved.revision.id, workId: null, inputs: { Reviewer: "Release team" }, requestId: expect.any(String),
+  } });
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("uses the same link and keyboard search controls with simulated notes", async () => {
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "analyze_note_markdown") return { bufferRevision: (args as { bufferRevision: string }).bufferRevision, nodes: [] };
+    throw new Error(`Unexpected IPC command ${command}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  const simulated = { scenario: "delivery", epoch: 1, delivery: "note", advanceDelivery: vi.fn() } as const;
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} checkout={exampleCheckout} simulation={simulated} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const workspace = screen.getByRole("region", { name: "Knowledge workspace" });
+  await editor("docs/release.md");
+  if (!screen.queryByRole("button", { name: "Links" })) await user.click(screen.getByRole("button", { name: "Note details" }));
+  await user.click(screen.getByRole("button", { name: "Links" }));
+  const links = within(screen.getByRole("region", { name: "Outgoing links" }));
+  await user.click(links.getByRole("button", { name: "runner diagnostics" }));
+  const runner = await editor("docs/runner.md");
+  await waitFor(() => expect(runner.state.doc.lineAt(runner.state.selection.main.head).text).toBe("## Startup checks"));
+
+  fireEvent.keyDown(workspace, { key: "p", ctrlKey: true });
+  const search = screen.getByRole("combobox", { name: "Find notes and content" });
+  expect(document.activeElement).toBe(search);
+  await user.type(search, "Operations runbook");
+  expect(screen.getByRole("option", { name: /docs\/ops\/runbook.md/ })).toBeTruthy();
+  await user.keyboard("{Enter}");
+  expect((await editor("docs/ops/runbook.md")).state.doc.toString()).toContain("# Operations runbook");
+  expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).not.toContain("search_repository_note_index");
 });
 
 it("reuses canonical tabs, shares edits with Reading, and offers Cancel, Save and Discard on the last editor", async () => {

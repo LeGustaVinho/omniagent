@@ -6,20 +6,24 @@ import { Button } from "@/components/ui/button";
 type MarkdownRevision = { id: string; relativePath: string; sha256: string };
 type RepositoryMarkdown = { revision: MarkdownRevision; markdown: string };
 
-export function RepositoryMarkdownPicker({ checkoutId, onDeliver, delivering, launchLabel = "Start repository delivery" }: {
+export function RepositoryMarkdownPicker({ checkoutId, pinnedRevisionId, onDeliver, delivering, launchDisabled, launchLabel = "Start repository delivery" }: {
   checkoutId: string;
+  pinnedRevisionId?: string;
   onDeliver?: (revisionId: string) => void;
   delivering?: boolean;
+  launchDisabled?: boolean;
   launchLabel?: string;
 }) {
   const client = useQueryClient();
   const [selected, setSelected] = useState("");
+  const pinned = pinnedRevisionId !== undefined;
   const revisionsKey = ["repository-markdown-revisions", checkoutId] as const;
   const revisions = useQuery({
     queryKey: revisionsKey,
     queryFn: () => invoke<MarkdownRevision[]>("list_repository_markdown_revisions", { checkoutId }),
+    enabled: !pinned,
   });
-  const revisionId = selected || revisions.data?.[0]?.id || "";
+  const revisionId = pinnedRevisionId ?? (selected || revisions.data?.[0]?.id || "");
   const document = useQuery({
     queryKey: ["repository-markdown", checkoutId, revisionId],
     queryFn: () => invoke<RepositoryMarkdown | null>("read_repository_markdown", { checkoutId, revisionId }),
@@ -38,24 +42,29 @@ export function RepositoryMarkdownPicker({ checkoutId, onDeliver, delivering, la
       void client.invalidateQueries({ queryKey: revisionsKey });
     },
   });
-  const error = pick.error ?? revisions.error ?? document.error;
+  const error = (pinned ? undefined : pick.error ?? revisions.error) ?? document.error;
   return (
     <section className="pipeline-form pipeline-stack" aria-label="Repository Markdown source">
-      <Button type="button" variant="outline" onClick={() => pick.mutate()} disabled={pick.isPending}>
+      {!pinned && <Button type="button" variant="outline" onClick={() => pick.mutate()} disabled={pick.isPending}>
         {pick.isPending ? "Selecting Markdown…" : "Select Markdown file"}
-      </Button>
-      {!!revisions.data?.length && <label>Saved source revision
+      </Button>}
+      {!pinned && !!revisions.data?.length && <label>Saved source revision
         <select value={revisionId} onChange={(event) => setSelected(event.currentTarget.value)}>
           {revisions.data.map((revision) => (
             <option key={revision.id} value={revision.id}>{revision.relativePath} · {revision.sha256.slice(0, 12)}</option>
           ))}
         </select>
       </label>}
+      {pinned && document.isPending && <p role="status">Loading the saved note…</p>}
+      {pinned && document.data === null && <p role="alert">This saved note revision is unavailable.</p>}
+      {pinned && document.data && <p className="pipeline-meta break-all">
+        {document.data.revision.relativePath} · {document.data.revision.sha256.slice(0, 12)}
+      </p>}
       {document.data && <details className="pipeline-evidence">
         <summary>Read saved Markdown</summary>
         <pre className="max-h-80 overflow-auto break-words">{document.data.markdown}</pre>
       </details>}
-      {onDeliver && <Button type="button" onClick={() => onDeliver(revisionId)} disabled={!document.data || delivering}>
+      {onDeliver && <Button type="button" onClick={() => onDeliver(revisionId)} disabled={!document.data || delivering || launchDisabled}>
         {delivering ? "Starting…" : launchLabel}
       </Button>}
       {error && <p role="alert" className="pipeline-note">{String(error)}</p>}

@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Search } from "lucide-react";
 import { useState } from "react";
+import type { FileSearchResult } from "@/ide-knowledge-data";
 
 export type RipgrepStatus = {
   configuredExecutable: string | null;
@@ -10,9 +11,9 @@ export type RipgrepStatus = {
   issue: string | null;
 };
 
-type SearchMatch = { path: string; line: number; excerpt: string };
-type ProjectSearch = { status: "results"; matches: SearchMatch[]; truncated: boolean }
+type ProjectSearch = { status: "results"; matches: FileSearchResult[]; truncated: boolean }
   | { status: "unavailable"; reason: string };
+type OpenMatch = (path: string, line: number) => void;
 
 export const ripgrepStatusKey = ["ripgrep-status"] as const;
 const noteLinePrefix = "omni-note-line:";
@@ -42,7 +43,36 @@ export function useRipgrepStatus() {
   });
 }
 
-export function ProjectFileSearch({ checkoutId, onOpen }: { checkoutId: string; onOpen: (path: string, line?: number) => void }) {
+function FileSearchResults({ results, onOpen }: { results: readonly FileSearchResult[]; onOpen: OpenMatch }) {
+  if (!results.length) return null;
+  return <ul className="file-search-results">
+    {results.map(({ path, line, excerpt }, index) => <li key={`${path}:${line}:${index}`}>
+      <button type="button" onClick={() => onOpen(path, line)} title={`${path} · Line ${line}`}>
+        <strong>{path} <span>· {line}</span></strong>
+        <span>{excerpt}</span>
+      </button>
+    </li>)}
+  </ul>;
+}
+
+export function ExampleFileSearch({ query, setQuery, results, onOpen }: {
+  query: string;
+  setQuery: (query: string) => void;
+  results: readonly FileSearchResult[];
+  onOpen: OpenMatch;
+}) {
+  return <div className="file-search">
+    <label className="file-field">
+      <Search size={15} aria-hidden />
+      <input type="search" autoFocus value={query} onChange={(event) => setQuery(event.currentTarget.value)}
+        placeholder="Search files and content" aria-label="Search files and content" />
+    </label>
+    {query.trim() && <p className="file-help" role="status">{results.length ? `${results.length} matches` : "No files match your search"}</p>}
+    <FileSearchResults results={results} onOpen={onOpen} />
+  </div>;
+}
+
+export function ProjectFileSearch({ checkoutId, onOpen }: { checkoutId: string; onOpen: OpenMatch }) {
   const [query, setQuery] = useState("");
   const [submitted, setSubmitted] = useState<{ checkoutId: string; query: string; sequence: number }>();
   const ripgrep = useRipgrepStatus();
@@ -79,14 +109,7 @@ export function ProjectFileSearch({ checkoutId, onOpen }: { checkoutId: string; 
         {found.matches.length === 0 && !found.truncated ? "No matching lines." : `${found.matches.length} matching lines.`}
         {found.truncated && " Search stopped early. Narrow the query for more complete results."}
       </p>
-      <ul className="file-search-results">
-        {found.matches.map(({ path, line, excerpt }) => <li key={`${path}:${line}`}>
-          <button type="button" onClick={() => onOpen(path, line)} title={path}>
-            <strong>{path} <span>· {line}</span></strong>
-            <span>{excerpt}</span>
-          </button>
-        </li>)}
-      </ul>
+      <FileSearchResults results={found.matches} onOpen={onOpen} />
     </>}
   </form>;
 }

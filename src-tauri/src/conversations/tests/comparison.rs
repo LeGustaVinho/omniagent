@@ -633,3 +633,198 @@ async fn finish_comparison_review(store: &Store, review: &AttemptPlan) -> Result
         )
         .await
 }
+
+#[tokio::test]
+async fn pinned_workflow_comparison_uses_candidate_slots_and_recovers_partial_results() -> Result<()>
+{
+    use crate::workflows::{
+        ArtifactValue, BuiltinNode, Endpoint, ManualWorkflowLaunch, NodeConfiguration,
+        NodeInstance, Wire, WorkflowGraph, WorkflowLaunchSource,
+        comparison::{WorkflowComparisonConfiguration, stage::WorkflowComparisonOutcome},
+    };
+
+    let (_directory, store, repo, scope, commit) = comparison_repository().await?;
+    let comparison_folder = tempfile::tempdir()?;
+    let storage = comparison_folder.path().to_path_buf();
+    let markdown = scope.checkout.join("brief.md");
+    std::fs::write(&markdown, "Use this saved Markdown revision.")?;
+    let source = store
+        .capture_repository_markdown(repo.checkout_id.clone(), markdown.clone())
+        .await?;
+    std::fs::write(markdown, "A later edit must stay outside the request.")?;
+    let mut second = scope.clone();
+    second.model = Some("second-codex-model".into());
+    let profiles = vec![scope.clone(), second];
+    let selections = profiles
+        .iter()
+        .map(|profile| crate::model_catalog::ModelSelection {
+            provider: profile.provider,
+            profile_id: profile.profile_id.clone(),
+            model_id: profile.model.clone().unwrap(),
+        })
+        .collect::<Vec<_>>();
+    let node = |id: &str, kind, configuration| NodeInstance {
+        id: id.into(),
+        kind,
+        configuration,
+    };
+    let wire = |from: &str, output: &str, to: &str, input: &str| Wire {
+        from: Endpoint {
+            node: from.into(),
+            port: output.into(),
+        },
+        to: Endpoint {
+            node: to.into(),
+            port: input.into(),
+        },
+    };
+    let workflow = store
+        .save_workflow_revision(
+            repo.project_id.clone(),
+            "compare-stage".into(),
+            WorkflowGraph {
+                name: "Compare the saved request".into(),
+                nodes: vec![
+                    node("start", BuiltinNode::Start, NodeConfiguration::None),
+                    node(
+                        "text",
+                        BuiltinNode::BuildText,
+                        NodeConfiguration::BuildText(serde_json::from_value(
+                            serde_json::json!({"template":"Compare the recorded source."}),
+                        )?),
+                    ),
+                    node(
+                        "compare",
+                        BuiltinNode::CompareModels,
+                        NodeConfiguration::CompareModels(WorkflowComparisonConfiguration {
+                            selections: selections.clone(),
+                        }),
+                    ),
+                ],
+                wires: vec![
+                    wire("start", "start", "text", "ready"),
+                    wire("text", "completed", "compare", "ready"),
+                    wire("text", "text", "compare", "request"),
+                    wire("start", "document", "compare", "context"),
+                ],
+            },
+        )
+        .await?;
+    let pipeline = store
+        .launch_workflow_manual(ManualWorkflowLaunch {
+            project_id: repo.project_id.clone(),
+            workflow,
+            source: WorkflowLaunchSource {
+                checkout_id: repo.checkout_id.clone(),
+                revision_id: source.revision.id,
+            },
+            request_id: "compare-stage-launch".into(),
+            work_id: None,
+        })
+        .await?;
+    store
+        .set_job_queue_settings(QueueSettings {
+            paused: false,
+            capacity: 1,
+        })
+        .await?;
+    let pending = store
+        .next_workflow_comparison()
+        .await?
+        .context("Missing comparison activation")?;
+    let first = pending
+        .prepare_with_fixture_profiles(&store, storage.clone(), profiles.clone())
+        .await?;
+    let replay = pending
+        .prepare_with_fixture_profiles(&store, storage, profiles)
+        .await?;
+    pending.clone().commit(&store, first).await?;
+    pending.commit(&store, replay).await?;
+    assert!(store.next_workflow_comparison().await?.is_none());
+    let mut groups = store.model_comparisons(repo.project_id.clone()).await?;
+    assert_eq!(groups.len(), 1);
+    let group = groups.pop().unwrap();
+    assert_eq!(group.commit, commit);
+    assert!(group.prompt.contains("Use this saved Markdown revision."));
+    assert!(!group.prompt.contains("A later edit"));
+    let environment = AdmissionEnvironment {
+        bridge_available: false,
+        runner: scope.runner.clone(),
+    };
+    let candidate = store
+        .claim_next_job(environment.clone())
+        .await?
+        .context("Missing first candidate")?;
+    let first_run = candidate.run.id.clone();
+    let runner = Arc::new(FixtureRunner(WireLog {
+        store: store.clone(),
+        runtime: tokio::runtime::Handle::current(),
+        conversation: candidate.conversation_id.clone(),
+        frames: Arc::default(),
+    }));
+    assert!(store.claim_next_job(environment.clone()).await?.is_none());
+    assert_eq!(
+        start_managed_turn(store.clone(), runner, candidate, None)
+            .wait()
+            .await?,
+        RunStatus::Succeeded
+    );
+    store.refresh_workflow_comparisons().await?;
+    let snapshot = store
+        .inspect_workflow_execution(repo.project_id.clone(), pipeline.id.clone())
+        .await?
+        .unwrap();
+    assert_eq!(snapshot.comparison_stages[0].state, "running");
+    assert!(
+        snapshot
+            .outputs
+            .iter()
+            .all(|record| record.artifact.node_instance_id != "compare")
+    );
+    let candidate = store
+        .claim_next_job(environment)
+        .await?
+        .context("Missing second candidate")?;
+    store
+        .finish_agent_attempt(candidate.run.id.clone(), RunStatus::Failed, None)
+        .await?;
+    store.refresh_workflow_comparisons().await?;
+
+    let database = scope.checkout.join("store.sqlite");
+    drop(store);
+    let reopened = Store::open(database)?;
+    reopened.refresh_workflow_comparisons().await?;
+    let snapshot = reopened
+        .inspect_workflow_execution(repo.project_id.clone(), pipeline.id.clone())
+        .await?
+        .unwrap();
+    assert_eq!(reopened.model_comparisons(repo.project_id).await?.len(), 1);
+    assert_eq!(
+        snapshot.comparison_stages[0].group_id.as_deref(),
+        Some(group.id.as_str())
+    );
+    assert_eq!(snapshot.comparison_stages[0].state, "settled");
+    assert_eq!(snapshot.jobs.len(), 2);
+    assert!(snapshot.jobs.iter().all(|candidate| {
+        candidate.node_id == "compare"
+            && candidate
+                .job
+                .pipeline
+                .as_ref()
+                .is_some_and(|origin| origin.pipeline_run_id == pipeline.id)
+    }));
+    let output = snapshot
+        .outputs
+        .iter()
+        .find(|record| record.artifact.node_instance_id == "compare")
+        .context("Missing comparison evidence")?;
+    let ArtifactValue::ComparisonResults(results) = &output.artifact.value else {
+        anyhow::bail!("The comparison has the wrong output kind");
+    };
+    assert_eq!(results.state, WorkflowComparisonOutcome::Partial);
+    assert_eq!(results.candidates[0].selection, selections[0]);
+    assert_eq!(results.candidates[1].selection, selections[1]);
+    assert_eq!(results.successful_selection().run_ids, vec![first_run]);
+    assert!(!output.input_receipts.is_empty());
+    Ok(())
+}

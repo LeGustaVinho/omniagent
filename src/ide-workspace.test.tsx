@@ -13,7 +13,14 @@ vi.mock("@/ide-code-editor", () => ({
   CodeEditor: ({ path, content, update }: { path: string; content: string; update: (path: string, text: string) => void }) =>
     <textarea aria-label={`Source editor for ${path}`} value={content} onChange={(event) => update(path, event.target.value)} />,
 }));
-vi.mock("@/ide-terminal", () => ({ ExampleTerminal: () => null, ManualTerminal: () => null }));
+const terminalProps = vi.hoisted(() => vi.fn());
+vi.mock("@/ide-terminal", () => ({
+  ExampleTerminal: () => null,
+  ManualTerminal: (props: { checkoutId: string; active: boolean; clearRevision?: number }) => {
+    terminalProps(props);
+    return null;
+  },
+}));
 
 beforeEach(() => vi.stubGlobal("ResizeObserver", class {
   observe() {}
@@ -101,6 +108,18 @@ function fixture() {
 
 const views = () => screen.getAllByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
 const closeButtons = () => screen.getAllByRole("button", { name: "Close review.rs" });
+
+it("exposes the shared Clear terminal control in the active worktree", async () => {
+  fixture();
+  render(<IdeWorkspace {...propsFor(main)} />);
+  await waitFor(() => expect(terminalProps).toHaveBeenLastCalledWith({ checkoutId: main, active: true, clearRevision: 0 }));
+  const clear = screen.getByRole<HTMLButtonElement>("button", { name: "Clear terminal" });
+  fireEvent.click(clear);
+  expect(terminalProps).toHaveBeenLastCalledWith({ checkoutId: main, active: true, clearRevision: 1 });
+  fireEvent.click(screen.getByRole("button", { name: "Problems" }));
+  expect(clear.disabled).toBe(true);
+  expect(terminalProps).toHaveBeenLastCalledWith({ checkoutId: main, active: false, clearRevision: 1 });
+});
 
 it("opens the checkout explorer, shares edits across splits, and prompts only on the last dirty close", async () => {
   const service = fixture();

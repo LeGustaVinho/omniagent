@@ -1,10 +1,124 @@
 use std::path::Path;
 
+use serde_json::json;
+
 use super::*;
 use crate::{
     tasks::TaskPlacement,
-    workflows::{DeliveryRoles, builtin_delivery_graph, tests::approved_delivery_repository},
+    workflows::{
+        ArtifactValue, DeliveryRoles, WorkflowGraph, WorkflowLaunchRequest, builtin_delivery_graph,
+        tests::approved_delivery_repository,
+    },
 };
+
+#[tokio::test]
+async fn typed_start_rules_bind_the_real_agile_event_without_a_markdown_source() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("typed-rules.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, directory.path()).await?;
+    let project = repo.project_id;
+    let graph = |required| {
+        serde_json::from_value::<WorkflowGraph>(json!({
+            "name": "Handle work creation",
+            "nodes": [
+                {"id":"entry","kind":"typed_start","configuration":{"kind":"typed_start","fields":[
+                    {"name":"extra","valueType":"text","required":required}
+                ]}},
+                {"id":"text","kind":"build_text","configuration":{"kind":"build_text","template":"Task created"}},
+                {"id":"result","kind":"summarize_result","configuration":{"kind":"none"}}
+            ],
+            "wires": [
+                {"from":{"node":"entry","port":"start"},"to":{"node":"text","port":"ready"}},
+                {"from":{"node":"text","port":"completed"},"to":{"node":"result","port":"ready"}},
+                {"from":{"node":"text","port":"text"},"to":{"node":"result","port":"summary"}},
+                {"from":{"node":"entry","port":"event"},"to":{"node":"result","port":"evidence"}}
+            ]
+        }))
+    };
+    let accepted = store
+        .save_workflow_revision(project.clone(), "rules".into(), graph(false)?)
+        .await?;
+    let mut manual = graph(true)?;
+    let invalid_graph = store
+        .save_workflow_revision(project.clone(), "invalid-start".into(), manual.clone())
+        .await
+        .expect_err("An event wire requires a Start whose fields can all be omitted");
+    assert!(invalid_graph.to_string().contains("event port"));
+    manual.wires.retain(|wire| wire.from.port != "event");
+    let manual_only = store
+        .save_workflow_revision(project.clone(), "manual".into(), manual)
+        .await?;
+    let spec = |pipeline| WorkflowTriggerSpec {
+        name: "Watch task creation".into(),
+        enabled: true,
+        event: WorkflowTriggerEvent::Created,
+        work: TriggerWorkKind::Task,
+        target_state: None,
+        pipeline,
+        source: WorkflowTriggerSource {
+            checkout_id: repo.checkout_id.clone(),
+            revision_id: None,
+        },
+    };
+    let invalid = store.save_workflow_trigger_rule(project.clone(), None, None, spec(manual_only)).await
+        .expect_err("A rule must be rejected before its required manual inputs can cause a failed activation");
+    assert!(invalid.to_string().contains("manual launch"));
+    let manual_request: WorkflowLaunchRequest = serde_json::from_value(json!({
+        "projectId": project,
+        "workflow": accepted,
+        "checkoutId": repo.checkout_id,
+        "requestId": "cannot-spoof-an-event"
+    }))?;
+    assert!(
+        store
+            .launch_workflow_request(manual_request)
+            .await
+            .expect_err("The event is service-owned")
+            .to_string()
+            .contains("Agile event")
+    );
+    let rule = store
+        .save_workflow_trigger_rule(project.clone(), None, None, spec(accepted))
+        .await?;
+    let task = store
+        .create_project_task(project.clone(), "Typed rule Task".into())
+        .await?;
+    let activations = store.workflow_trigger_activations(project.clone()).await?;
+    assert_eq!(activations.len(), 1);
+    let activation = &activations[0];
+    assert_eq!(activation.outcome, "launched", "{:?}", activation.detail);
+    let run = activation
+        .run_id
+        .clone()
+        .context("The rule did not produce a run")?;
+    let event = store
+        .project_work_events(project.clone(), None, 10)
+        .await?
+        .into_iter()
+        .find(|event| event.id == activation.event_id)
+        .context("The activation lost the Agile event")?;
+    drop(store);
+    let reopened = Store::open(database)?;
+    let rules = reopened.workflow_trigger_rules(project.clone()).await?;
+    assert_eq!(rules[0].id, rule.id);
+    assert_eq!(rules[0].spec.source.checkout_id, repo.checkout_id);
+    assert!(rules[0].spec.source.revision_id.is_none());
+    let execution = reopened
+        .inspect_workflow_execution(project, run)
+        .await?
+        .context("Missing rule execution")?;
+    let receipt = execution.launch.context("Missing rule launch receipt")?;
+    assert!(receipt.source.is_none());
+    let pinned = receipt.event.context("The launch did not pin its event")?;
+    assert_eq!(pinned.id, event.id);
+    assert_eq!(pinned.work.task_id, task.id);
+    assert_eq!(pinned.data, event.data);
+    assert!(execution.outputs.into_iter().any(|output| output.current
+        && output.artifact.port == "event"
+        && output.artifact.value == ArtifactValue::AgileEvent(pinned.clone())));
+    Ok(())
+}
 
 #[tokio::test]
 async fn rules_pin_activation_deduplicate_and_stop_a_cycle_after_restart() -> Result<()> {
@@ -44,7 +158,7 @@ async fn rules_pin_activation_deduplicate_and_stop_a_cycle_after_restart() -> Re
         work,
         target_state: None,
         pipeline,
-        source: source.clone(),
+        source: source.clone().into(),
     };
     let a = store
         .save_workflow_trigger_rule(
@@ -78,7 +192,10 @@ async fn rules_pin_activation_deduplicate_and_stop_a_cycle_after_restart() -> Re
         .await?
         .context("missing run receipt")?;
     assert_eq!(activation.version, first);
-    assert_eq!(activation.source.id, source.revision_id);
+    assert_eq!(
+        activation.source.as_ref().map(|source| source.id.as_str()),
+        Some(source.revision_id.as_str())
+    );
     assert_eq!(
         activation.origin,
         WorkflowLaunchOrigin::Rule {
@@ -214,7 +331,8 @@ async fn status_and_checklist_rules_isolate_a_failed_launch_from_the_work_change
                     source: WorkflowLaunchSource {
                         checkout_id: repo.checkout_id.clone(),
                         revision_id: document.revision.id.clone(),
-                    },
+                    }
+                    .into(),
                 },
             )
             .await?;
@@ -375,7 +493,8 @@ async fn checklist_trigger_replays_the_exact_subtask_and_item_revision() -> Resu
                 source: WorkflowLaunchSource {
                     checkout_id: repo.checkout_id.clone(),
                     revision_id: source.revision.id,
-                },
+                }
+                .into(),
             },
         )
         .await?;

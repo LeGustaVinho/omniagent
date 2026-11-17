@@ -154,8 +154,6 @@ it("keeps the authored package reference when the graph editor saves the Goal se
       startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
-  await user.click(await screen.findByText("Edit package"));
-  await user.click(screen.getByText("Edit member graph"));
   await user.click(await screen.findByText("Goal Mode · enabled"));
   fireEvent.change(screen.getByLabelText("Goal objective"), { target: { value: "Deliver the change" } });
   await user.click(screen.getByRole("button", { name: "Check Goal route" }));

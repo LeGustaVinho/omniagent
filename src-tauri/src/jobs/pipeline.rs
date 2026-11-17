@@ -722,7 +722,7 @@ impl Store {
                     history::bind_pipeline_context(&tx, &job.id, &context.context_id, *route)?;
                     if let Some(plan) = plan {
                         stage_plan::bind_conversation(
-                            &tx, &job.id, &context.conversation_id, &binding, plan,
+                            &tx, &job, &context.conversation_id, &binding, plan,
                         )?;
                     }
                     if let Some(definition) = &goal {

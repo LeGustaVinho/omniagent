@@ -93,6 +93,7 @@ it("records manual completion after resolving the checklist and preserves histor
   await waitFor(() => expect(complete.disabled).toBe(false));
   await user.click(complete);
   await details.findByText("Completed");
+  await user.click(details.getByRole("button", { name: "Work history" }));
   const originalDelivery = await within(await details.findByRole("region", { name: "Delivery history" }))
     .findByText(/^Manual completion ·/);
 
@@ -102,7 +103,9 @@ it("records manual completion after resolving the checklist and preserves histor
   await user.selectOptions(screen.getByRole("combobox", { name: "Kanban level" }), "task");
   await user.click(await screen.findByRole("button", { name: task.title }));
   details = within(screen.getByRole("region", { name: task.title }));
-  await details.findByText(/^Manual completion ·/);
+  await user.click(details.getByRole("button", { name: "Work history" }));
+  await within(details.getByRole("region", { name: "Delivery history" })).findByText(/^Manual completion ·/);
+  await user.click(details.getByRole("button", { name: "Overview" }));
   const readsBeforeReopening = historyReads();
   const reopen = await details.findByRole<HTMLButtonElement>("button", { name: "Reopen work" });
   await waitFor(() => expect(reopen.disabled).toBe(false));
@@ -110,6 +113,7 @@ it("records manual completion after resolving the checklist and preserves histor
   await details.findByText("Ready");
   await waitFor(() => expect(historyReads()).toBeGreaterThan(readsBeforeReopening));
   expect(details.queryByRole("button", { name: "Reopen work" })).toBeNull();
+  await user.click(details.getByRole("button", { name: "Work history" }));
   const retainedDelivery = within(details.getByRole("region", { name: "Delivery history" }))
     .getByText(/^Manual completion ·/);
   expect(retainedDelivery.textContent).toBe(originalDelivery.textContent);

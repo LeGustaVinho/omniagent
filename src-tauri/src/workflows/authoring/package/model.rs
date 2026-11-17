@@ -182,7 +182,7 @@ pub enum ResolvedPackageReference {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishedPackageArtifact {
     pub version: PackageArtifactVersion,
@@ -190,10 +190,12 @@ pub struct PublishedPackageArtifact {
     pub body: PackageArtifactBody,
     pub references: BTreeMap<String, ResolvedPackageReference>,
     pub definitions: BTreeMap<String, NodeDefinition>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub layout: BTreeMap<String, super::WorkflowNodePosition>,
     pub blockers: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishedPackageMember {
     pub key: String,
@@ -201,7 +203,7 @@ pub struct PublishedPackageMember {
     pub previous: Option<PackageArtifactVersion>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowPackagePublication {
     pub id: String,
@@ -214,7 +216,7 @@ pub struct WorkflowPackagePublication {
     pub members: Vec<PublishedPackageMember>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum WorkflowPackagePublishOutcome {
     Published {
@@ -226,7 +228,7 @@ pub enum WorkflowPackagePublishOutcome {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowPackageDraft {
     pub id: String,
@@ -234,6 +236,8 @@ pub struct WorkflowPackageDraft {
     pub revision: String,
     pub parent_revision: Option<String>,
     pub package: WorkflowPackage,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub layouts: BTreeMap<String, BTreeMap<String, super::WorkflowNodePosition>>,
     pub publication: Option<WorkflowPackagePublication>,
     pub request: Option<WorkflowPackageRequest>,
 }

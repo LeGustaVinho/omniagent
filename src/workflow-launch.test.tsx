@@ -46,11 +46,65 @@ it.each([undefined, "selected-subtask"])("launches the selected immutable versio
   fireEvent.click(screen.getByRole("button", { name: "Start workflow" }));
   expect((await screen.findByRole("alert")).textContent).toContain("Response interrupted");
   fireEvent.click(screen.getByRole("button", { name: "Start workflow" }));
-  await waitFor(() => expect(target).toHaveBeenCalledWith("pipelines", "run"));
+  await waitFor(() => expect(target).toHaveBeenCalledWith("pipelines", "run:run"));
   expect(submitted).toHaveLength(2);
   expect(submitted[0]).toMatchObject({
     request: { projectId: "project", workflow: published, workId: workId ?? null,
       source: { checkoutId: "checkout", revisionId: note.id }, requestId: expect.any(String) },
   });
   expect(submitted[1]).toEqual(submitted[0]);
+});
+
+it("launches typed inputs in the selected project without a Markdown revision and reuses the retry identity", async () => {
+  const submitted: unknown[] = [];
+  ipc.mockImplementation(async (command, args) => {
+    if (command === "workflow_authoring_bases") return [{ version: published, name: "Typed pipeline", start: {
+      fields: [
+        { name: "title", valueType: "text", required: true },
+        { name: "enabled", valueType: "boolean", required: true },
+        { name: "empty", valueType: "null", required: false },
+      ],
+      requiresDocument: false, requiresWork: true, requiresEvent: false,
+    } }];
+    if (command === "registered_checkouts") return [
+      { projectId: "project", checkoutId: "checkout", checkoutRoot: "Current checkout" },
+      { projectId: "project", checkoutId: "other-checkout", checkoutRoot: "Second checkout" },
+      { projectId: "foreign", checkoutId: "foreign", checkoutRoot: "Foreign checkout" },
+    ];
+    if (command === "project_work_hierarchy") return { work: [
+      { task: { id: "scoped-work", title: "Scoped work" }, placement: { kind: "task", epicId: null } },
+    ] };
+    if (command === "launch_workflow_manual") {
+      submitted.push(args);
+      if (submitted.length === 1) throw new Error("Response interrupted");
+      return { id: "typed-run" };
+    }
+    throw new Error(command);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const target = vi.fn();
+  render(<QueryClientProvider client={client}>
+    <WorkflowLaunchPicker projectId="project" checkoutId="checkout" openWorkspace={target} />
+  </QueryClientProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Run published workflow" }));
+  await screen.findByRole("option", { name: "Second checkout" });
+  expect(screen.queryByRole("option", { name: "Foreign checkout" })).toBeNull();
+  const start = screen.getByRole<HTMLButtonElement>("button", { name: "Start workflow" });
+  expect(start.disabled).toBe(true);
+  fireEvent.change(screen.getByRole("combobox", { name: "Checkout" }), { target: { value: "other-checkout" } });
+  await screen.findByRole("option", { name: "Task · Scoped work" });
+  fireEvent.change(screen.getByRole("combobox", { name: "Task or Sub-Task" }), { target: { value: "scoped-work" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "title" }), { target: { value: "Pinned text" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "enabled" }), { target: { value: "false" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Provide empty" }));
+  expect(start.disabled).toBe(false);
+  fireEvent.click(start);
+  expect((await screen.findByRole("alert")).textContent).toContain("Response interrupted");
+  fireEvent.click(start);
+  await waitFor(() => expect(target).toHaveBeenCalledWith("pipelines", "run:typed-run"));
+  expect(submitted).toEqual([{
+    request: { projectId: "project", workflow: published, checkoutId: "other-checkout", documentRevisionId: null,
+      workId: "scoped-work", inputs: { title: "Pinned text", enabled: false, empty: null }, requestId: expect.any(String) },
+  }, submitted[0]]);
+  expect(ipc.mock.calls.some(([command]) => command === "list_repository_markdown_revisions")).toBe(false);
 });

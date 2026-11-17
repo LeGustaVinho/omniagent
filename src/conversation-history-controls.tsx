@@ -62,7 +62,7 @@ export function ConversationMessageHistoryActions({ message, disabled, onAction 
   message: MessageRevision; disabled: boolean; onAction: (action: ConversationMessageHistoryAction) => void;
 }) {
   const run = (kind: ConversationMessageHistoryAction["kind"]) => onAction({ kind, revisionId: message.revisionId });
-  return <div className="mt-2 flex flex-wrap gap-2" aria-label="Message history actions">
+  return <div className="conv-message-action-buttons" aria-label="Message history actions">
     <button type="button" className="conv-quiet-button" disabled={disabled} onClick={() => run("rewind")}><RotateCcw aria-hidden /> Rewind here</button>
     <button type="button" className="conv-quiet-button" disabled={disabled} onClick={() => run("fork")}><GitFork aria-hidden /> Fork from message</button>
     {message.role === "user" && <button type="button" className="conv-quiet-button" disabled={disabled} onClick={() => run("edit")}><Pencil aria-hidden /> Edit in a fork</button>}

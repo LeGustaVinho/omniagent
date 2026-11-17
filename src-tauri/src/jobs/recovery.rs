@@ -566,6 +566,7 @@ impl Store {
                     ensure!(job.downstream_wait.is_none(), "The job is waiting for downstream results");
                     ensure!(effective_release_blocker(db, &job)?.is_none(),
                         "The pipeline job needs an accepted release for the current plan and worktree");
+                    Self::require_generic_agent_recovery(db, &job)?;
                     let scope = recovery_scope(db, &job)?;
                     let refresh = (job.origin == JobOrigin::Operator || job.operator_requested == Some(true))
                         && matches!(&scope, RecoveryProfile::Agent(profile)
@@ -653,6 +654,7 @@ impl Store {
                     effective_release_blocker(&tx, &job)?.is_none(),
                     "The pipeline job needs an accepted release for the current plan and worktree"
                 );
+                Self::require_generic_agent_recovery(&tx, &job)?;
                 let checkpoint = load_recovery_source(&tx, &job, goal_revision.as_deref())?
                     .context("The job no longer has a recoverable checkpoint")?;
                 ensure!(

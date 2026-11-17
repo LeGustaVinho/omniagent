@@ -329,8 +329,14 @@ impl Store {
             supports_pinned_execution(&pinned.definition),
             "the pinned executor definition is unavailable"
         );
+        let unit_nodes = super::control::unit_nodes(&definition);
+        let agent_stage = pinned.definition.kind == super::BuiltinNode::Agent;
         ensure!(
-            pinned.definition.kind.per_unit() == unit_id.is_some(),
+            (if agent_stage {
+                unit_nodes.contains(node)
+            } else {
+                pinned.definition.kind.per_unit()
+            }) == unit_id.is_some(),
             "workflow node has the wrong logical unit scope"
         );
         let control_checked = if super::control::uses_control(&definition) {
@@ -366,7 +372,9 @@ impl Store {
                     &pinned.instance.configuration,
                     NodeConfiguration::McpTool(_)
                 );
-            if source.is_none() && mcp_arguments {
+            let optional_agent_input =
+                agent_stage && super::generic_agent::optional_input(&port.name);
+            if source.is_none() && (mcp_arguments || optional_agent_input) {
                 continue;
             }
             let source = source.context("pinned workflow input has no source")?;
@@ -375,7 +383,7 @@ impl Store {
                 .iter()
                 .find(|pinned| pinned.instance.id == source.from.node)
                 .context("pinned workflow input producer is unavailable")?;
-            let producer_unit = if producer.definition.kind.per_unit() {
+            let producer_unit = if unit_nodes.contains(producer.instance.id.as_str()) {
                 unit_id
             } else {
                 None

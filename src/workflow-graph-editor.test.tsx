@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { WorkflowGraphEditor, type WorkflowEditorState } from "@/workflow-graph-editor";
-import { defaultConfiguration, graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
+import { connectionProblem, defaultConfiguration, graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -78,9 +78,13 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
   const props = { checkout: exampleCheckout, simulation: null, startSimulation: vi.fn(),
     openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn() };
   const client = () => new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const mount = (target: string) => render(<QueryClientProvider client={client()}><PipelinesWorkspace {...props} target={target} /></QueryClientProvider>);
+  const mount = (target?: string) => render(<QueryClientProvider client={client()}><PipelinesWorkspace {...props} target={target} /></QueryClientProvider>);
   const user = userEvent.setup();
-  const list = mount("drafts");
+  const list = mount();
+  const builder = screen.getByRole("button", { name: "Builder" });
+  expect(builder.getAttribute("aria-current")).toBe("page");
+  await user.click(builder);
+  expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", "drafts");
   await user.click(screen.getByRole("button", { name: "Repository delivery" }));
   expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", "delivery");
   await user.click(await screen.findByRole("button", { name: "Open draft" }));
@@ -109,8 +113,8 @@ it("opens a protected draft, reviews an affected port upgrade, wires typed nodes
   await user.click(screen.getByRole("button", { name: "Add node" }));
   const catalog = within(screen.getByRole("region", { name: "Node catalog" }));
   await user.type(catalog.getByRole("searchbox"), "plan");
-  expect(catalog.queryByRole("button", { name: "Load context" })).toBeNull();
-  await user.click(catalog.getByRole("button", { name: "Plan" }));
+  expect(catalog.queryByRole("button", { name: "Add Load context" })).toBeNull();
+  await user.click(catalog.getByRole("button", { name: "Add Plan" }));
   expect(screen.getByText(/Agent role is required/)).toBeTruthy();
   await user.type(inspector.getByRole("textbox", { name: "Agent role" }), "Qualified planner");
   await connect("context", "context", "ready");
@@ -145,6 +149,9 @@ it("configures a typed list and a bounded iteration in the package graph", async
     kind: "for_each", title: "For each", revision: 1, configuration: "for_each", executor: "expand_for_each", effect: "none",
     inputs: [control("ready"), data("items", "json_list")], outputs: [control("completed"), data("results", "iteration_results")],
   };
+  const subflow: WorkflowDefinition = { ...iteration, kind: "subflow", configuration: "none", title: "Check result",
+    inputs: [control("ready"), data("item", "json_item"), data("wrong", "markdown")],
+    outputs: [control("completed"), data("result", "markdown"), data("check", "checks")] };
   const catalog = [start, list, iteration, { ...iteration, kind: "for_each_begin", title: "Pin iteration list" }];
   let edited: WorkflowGraph = { name: "Iteration", nodes: [
     { id: "start", kind: "start", configuration: { kind: "none" } },
@@ -155,27 +162,31 @@ it("configures a typed list and a bounded iteration in the package graph", async
     edited = state.graph;
     const definitions = Object.fromEntries(edited.nodes.map((node) => [node.id, catalog.find(({ kind }) => kind === node.kind)!]));
     return <WorkflowGraphEditor projectId="project" state={state} setState={setState} definitions={definitions} catalog={catalog}
-      problems={graphProblems(edited, definitions)} disabled={false} allowDefinitionUpdates={false} />;
+      problems={graphProblems(edited, definitions)} disabled={false} allowDefinitionUpdates={false}
+      subflowDefinitionForNode={(id) => id === "for-each" ? subflow : undefined} />;
   }
 
   render(<Editor />);
   const user = userEvent.setup();
   const inspector = within(screen.getByRole("complementary", { name: "Node configuration" }));
   await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect node" }), "list");
-  expect(inspector.getByRole<HTMLTextAreaElement>("textbox", { name: "Items (JSON array)" }).value).toBe("[]");
-  fireEvent.change(inspector.getByRole("textbox", { name: "Items (JSON array)" }), { target: { value: "[0, false]" } });
+  await user.click(inspector.getByRole("button", { name: "Add item" }));
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Item 1 type" }), "number");
+  await user.click(inspector.getByRole("button", { name: "Add item" }));
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Item 2 type" }), "boolean");
   expect(edited.nodes.find(({ id }) => id === "list")?.configuration).toEqual({ kind: "build_list", source: "values", values: [0, false] });
   await user.selectOptions(inspector.getByRole("combobox", { name: "List source" }), "evidence");
-  fireEvent.change(inspector.getByRole("textbox", { name: /Array pointer/ }), { target: { value: "/evidence/items" } });
+  fireEvent.change(inspector.getByRole("textbox", { name: /Array path/ }), { target: { value: "/evidence/items" } });
   expect(edited.nodes.find(({ id }) => id === "list")?.configuration).toEqual({ kind: "build_list", source: "evidence", pointer: "/evidence/items" });
   expect(screen.getByText(/list.value requires a connection/)).toBeTruthy();
 
   await user.click(screen.getByRole("button", { name: "Add node" }));
   const nodes = within(screen.getByRole("region", { name: "Node catalog" }));
-  expect(nodes.queryByRole("button", { name: "Pin iteration list" })).toBeNull();
-  await user.click(nodes.getByRole("button", { name: "For each" }));
+  expect(nodes.queryByRole("button", { name: "Add Pin iteration list" })).toBeNull();
+  await user.click(nodes.getByRole("button", { name: "Add For each" }));
   fireEvent.change(inspector.getByRole("spinbutton", { name: "Maximum items" }), { target: { value: "12" } });
-  fireEvent.change(inspector.getByRole("textbox", { name: "Subflow result output" }), { target: { value: "check" } });
+  expect(within(inspector.getByRole("combobox", { name: "Subflow item input" })).queryByRole("option", { name: /wrong/ })).toBeNull();
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Subflow result output" }), "check");
   await user.selectOptions(inspector.getByRole("combobox", { name: "Source node" }), "list");
   await user.selectOptions(inspector.getByRole("combobox", { name: "Output port" }), "items");
   await user.selectOptions(inspector.getByRole("combobox", { name: "Input port" }), "items");
@@ -184,4 +195,98 @@ it("configures a typed list and a bounded iteration in the package graph", async
     kind: "for_each", maxItems: 12, readyInput: "ready", itemInput: "item", completionOutput: "completed", resultOutput: "check",
   });
   expect(edited.wires).toContainEqual(wire("list", "items", "for-each", "items"));
+});
+
+it("connects named ports with the keyboard, validates replacements, and restores the exact graph on undo", async () => {
+  const included = [start, context];
+  const existing = wire("start", "document", "context", "document");
+  let edited: WorkflowGraph = { name: "Keyboard connections", nodes: [
+    { id: "start", kind: "start", configuration: { kind: "none" } },
+    { id: "context", kind: "load_context", configuration: { kind: "none" } },
+    { id: "other", kind: "load_context", configuration: { kind: "none" } },
+  ], wires: [existing] };
+  function Editor() {
+    const [state, setState] = useState<WorkflowEditorState>({ graph: edited, layout: {}, updateDefinitions: {} });
+    edited = state.graph;
+    return <WorkflowGraphEditor projectId="project" state={state} setState={setState} definitions={{ start, context, other: context }}
+      catalog={included} problems={[]} disabled={false} />;
+  }
+  render(<Editor />);
+  const user = userEvent.setup();
+  async function press(name: string) {
+    screen.getByRole("button", { name }).focus();
+    await user.keyboard("{Enter}");
+  }
+
+  await press("Connect from start.start");
+  await press("Connect to context.ready");
+  const first = wire("start", "start", "context", "ready");
+  expect(edited.wires).toEqual([existing, first]);
+
+  await press("Reconnect start.document → context.document");
+  await press("Connect to other.ready");
+  expect(screen.getByRole("alert").textContent).toContain("cannot connect");
+  expect(edited.wires).toEqual([existing, first]);
+  await press("Connect to other.document");
+  const moved = wire("start", "document", "other", "document");
+  expect(edited.wires).toEqual([moved, first]);
+
+  await press("Undo graph edit");
+  expect(edited.wires).toEqual([existing, first]);
+  await press("Redo graph edit");
+  expect(edited.wires).toEqual([moved, first]);
+});
+
+it("edits typed launch fields and a branch condition without raw configuration", async () => {
+  const entry: WorkflowDefinition = { ...start, kind: "typed_start", configuration: "typed_start" };
+  const condition: WorkflowDefinition = { ...context, kind: "condition", title: "Condition", configuration: "condition" };
+  let edited: WorkflowGraph = { name: "Typed values", nodes: [
+    { id: "start", kind: "typed_start", configuration: defaultConfiguration("typed_start") },
+    { id: "condition", kind: "condition", configuration: defaultConfiguration("condition") },
+  ], wires: [] };
+  function Editor() {
+    const [state, setState] = useState<WorkflowEditorState>({ graph: edited, layout: {}, updateDefinitions: {} });
+    edited = state.graph;
+    return <WorkflowGraphEditor projectId="project" state={state} setState={setState} definitions={{ start: entry, condition }}
+      catalog={[start, entry, condition]} problems={[]} disabled={false} />;
+  }
+  render(<Editor />);
+  const user = userEvent.setup();
+  const inspector = within(screen.getByRole("complementary", { name: "Node configuration" }));
+  await user.click(inspector.getByRole("button", { name: "Add input" }));
+  fireEvent.change(inspector.getByRole("textbox", { name: "Input 1 name" }), { target: { value: "approved" } });
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Input 1 type" }), "boolean");
+  expect(edited.nodes[0]?.configuration).toEqual({ kind: "typed_start", fields: [{ name: "approved", valueType: "boolean", required: true }] });
+
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect node" }), "condition");
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Test" }), "equals");
+  fireEvent.change(inspector.getByRole("textbox", { name: "Field path" }), { target: { value: "/approved" } });
+  await user.selectOptions(inspector.getByRole("combobox", { name: "Expected value type" }), "boolean");
+  expect(edited.nodes[1]?.configuration).toEqual({ kind: "condition", predicate: { op: "equals", pointer: "/approved", value: false } });
+  expect(inspector.queryByRole("textbox", { name: "Node parameters" })).toBeNull();
+});
+
+it("matches the backend rules for Start events and optional or multiple Result evidence", () => {
+  const definitions: Record<string, WorkflowDefinition> = {
+    entry: { ...start, kind: "typed_start", configuration: "typed_start", outputs: [...start.outputs, data("event", "agile_event")] },
+    text: { kind: "build_text", title: "Build text", revision: 1, configuration: "build_text", executor: "build_text",
+      effect: "read_evidence", inputs: [control("ready")], outputs: [control("completed"), data("text", "rendered_text")] },
+    result: { kind: "summarize_result", title: "Result", revision: 1, configuration: "none", executor: "summarize_result",
+      effect: "read_evidence", inputs: [control("ready"), data("summary", "rendered_text"), { name: "evidence", value: { kind: "evidence" } }], outputs: [] },
+  };
+  const event = wire("entry", "event", "result", "evidence");
+  const otherEvidence = wire("entry", "document", "result", "evidence");
+  const graph: WorkflowGraph = { name: "Work results", nodes: [
+    { id: "entry", kind: "typed_start", configuration: { kind: "typed_start", fields: [{ name: "owner", valueType: "text", required: true }] } },
+    { id: "text", kind: "build_text", configuration: { kind: "build_text", template: "Result text" } },
+    { id: "result", kind: "summarize_result", configuration: { kind: "none" } },
+  ], wires: [wire("entry", "start", "text", "ready"), wire("text", "completed", "result", "ready"), wire("text", "text", "result", "summary")] };
+  expect(graphProblems(graph, definitions)).toEqual([]);
+  const diagnostic = "Make Start fields optional to connect the event port.";
+  expect(connectionProblem(graph, definitions, event)).toBe(diagnostic);
+  graph.wires.push(event);
+  expect(graphProblems(graph, definitions)).toEqual([diagnostic]);
+  graph.nodes[0]!.configuration = defaultConfiguration("typed_start");
+  expect(graphProblems(graph, definitions)).toEqual([]);
+  expect(connectionProblem(graph, definitions, otherEvidence)).toBeNull();
 });

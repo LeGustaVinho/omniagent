@@ -9,6 +9,8 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Key, remote } from "webdriverio";
 
+import { verifyVisualPipelineBuilder } from "./visual-pipeline-builder.mjs";
+
 const fixtureIdentifier = "io.github.legustavinho.omniagent.desktop-tests";
 const packagedOrigin = "http://tauri.localhost";
 const port = Number(process.env.OMNIAGENT_WEBDRIVER_PORT ?? 4444);
@@ -218,33 +220,34 @@ async function capture(browser, name) {
   await browser.saveScreenshot(join(directory, name + ".png"));
 }
 
-async function checkDisplayPreferences(browser) {
+async function emulateDisplay(browser, cmd, params = {}) {
   const endpoint = "http://127.0.0.1:" + (port + 1) + "/session/" + encodeURIComponent(browser.sessionId) + "/ms/cdp/execute";
-  async function emulate(cmd, params = {}) {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cmd, params }),
-      signal: AbortSignal.timeout(5000),
-    });
-    assert.ok(response.ok, cmd + ": " + await response.text());
-  }
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ cmd, params }),
+    signal: AbortSignal.timeout(5000),
+  });
+  assert.ok(response.ok, cmd + ": " + await response.text());
+}
+
+async function checkDisplayPreferences(browser) {
   await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 1120, height: 760 } } });
   for (const factor of [1.25, 1.5]) {
-    await emulate("Emulation.setDeviceMetricsOverride", {
+    await emulateDisplay(browser, "Emulation.setDeviceMetricsOverride", {
       width: Math.floor(1120 / factor), height: Math.floor(760 / factor), deviceScaleFactor: factor, mobile: false,
     });
     assert.equal(await browser.execute(() => window.devicePixelRatio), factor);
     assert.equal(await browser.execute(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true);
     await capture(browser, "06-scale-" + factor * 100);
   }
-  await emulate("Emulation.clearDeviceMetricsOverride");
-  await emulate("Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "active" }] });
+  await emulateDisplay(browser, "Emulation.clearDeviceMetricsOverride");
+  await emulateDisplay(browser, "Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "active" }] });
   assert.equal(await browser.execute(() => matchMedia("(forced-colors: active)").matches), true);
   assert.equal(await browser.execute(() =>
     getComputedStyle(document.querySelector('.work-rail-button[aria-current="page"]')).borderTopWidth), "1px");
   await capture(browser, "07-high-contrast");
-  await emulate("Emulation.setEmulatedMedia", { features: [] });
+  await emulateDisplay(browser, "Emulation.setEmulatedMedia", { features: [] });
 }
 
 async function checkSimulation(browser, checkout) {
@@ -349,19 +352,20 @@ async function checkSimulation(browser, checkout) {
   await click(browser, "button=Start attempt");
   await click(browser, "button=Capture candidate");
   await click(browser, 'button[aria-label="Close queue"]');
-  await click(browser, "button=Run verification");
-  await click(browser, "button=Review saved diff");
-  await browser.$('section[aria-label="Changes"] .monaco-diff-editor').waitForDisplayed({ timeout: 20_000 });
-  await click(browser, 'button[aria-label="Expand side panel"]');
-  await browser.$('select[aria-label="Diff layout"]').selectByAttribute("value", "split");
+  await click(browser.$(shown), "button=Run verification");
+  await click(browser.$(shown), "button=Review saved diff");
+  const changes = () => browser.$('.work-inspector[data-kind="changes"]');
+  await changes().$('.monaco-diff-editor').waitForDisplayed({ timeout: 20_000 });
+  await click(changes(), 'button[aria-label="Expand side panel"]');
+  await changes().$('select[aria-label="Diff layout"]').selectByAttribute("value", "split");
   await capture(browser, "02-saved-changes");
-  await browser.$('select[aria-label="Diff layout"]').selectByAttribute("value", "unified");
+  await changes().$('select[aria-label="Diff layout"]').selectByAttribute("value", "unified");
   await capture(browser, "02-unified-changes");
-  await click(browser, 'button[aria-label="Close changes"]');
+  await click(changes(), 'button[aria-label="Close changes"]');
   await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent === "Review saved diff"));
-  await click(browser, "button=Review saved diff");
-  await click(browser, "button=Accept diff");
-  await click(browser, 'button[aria-label="Close changes"]');
+  await click(browser.$(shown), "button=Review saved diff");
+  await click(changes(), "button=Accept diff");
+  await click(changes(), 'button[aria-label="Close changes"]');
   await browser.$(shown).$('[aria-label="Task details"] [role="alert"]').waitForDisplayed();
   assert.equal(await browser.$(shown).$('[aria-label="Task details"] [role="alert"]').getText(), "Waiting for Sub-Tasks to finish.");
 
@@ -1027,12 +1031,22 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     assert.equal(await realpath(checkout.checkoutRoot), await realpath(linked));
     await selectCheckout(browser, checkout);
     await browser.$('button[aria-label="Diagnostics"]').click();
+    await browser.$("h2=Current installation").waitForDisplayed();
+    await browser.$("button=System settings").click();
+    await browser.$('.settings-dialog [data-setting="environment"]').waitForDisplayed();
+    await browser.keys("Escape");
+    await browser.waitUntil(() => browser.execute(() => document.activeElement?.textContent?.trim() === "System settings"));
+    await browser.$("button=Fixture runs").click();
     await browser.$("button=Start fixture").waitForDisplayed();
 
     await browser.$("button=Start fixture").click();
     const input = await browser.$("form input");
     await input.waitForDisplayed();
     await input.setValue("Entrada de validação");
+    await click(browser, "button=Desktop");
+    await click(browser, "button=Fixture runs");
+    await input.waitForDisplayed();
+    assert.equal(await input.getValue(), "Entrada de validação");
     await browser.$("button=Send input").click();
     const events = () => browser.$('ol[aria-label="Run events"]');
     await browser.waitUntil(async () => (await events().getText()).includes("Succeeded"));
@@ -1064,6 +1078,7 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
     browser = null;
     browser = await startSession(application);
     await click(browser, 'button[aria-label="Diagnostics"]');
+    await click(browser, "button=Fixture runs");
     await browser.waitUntil(async () => (await readTabs(browser)).groups.length === 2);
     assert.deepEqual(await readTabs(browser), expectedTabs);
     assert.equal(await browser.$("header span[title]").getAttribute("title"), checkout.checkoutRoot);
@@ -1506,13 +1521,27 @@ test("recovers unsent chat and dirty source after a Windows desktop crash and re
     const { text } = await openSource();
     await text.click();
     await browser.action("key").down(Key.Control).down("a").up("a").up(Key.Control).perform();
-    // Monaco's EditContext needs to process each insertion before the next keypress.
-    for (const character of edited) await browser.keys(character);
+    // Send the focused WebView editor one text input so EditContext receives the replacement in a single event.
+    const endpoint = `http://127.0.0.1:${port + 1}/session/${encodeURIComponent(browser.sessionId)}/ms/cdp/execute`;
+    const inserted = await fetch(endpoint, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cmd: "Input.insertText", params: { text: edited } }), signal: AbortSignal.timeout(5_000),
+    });
+    assert.ok(inserted.ok, await inserted.text());
+    let rendered;
+    await browser.waitUntil(async () => {
+      rendered = await text.getText();
+      return rendered.replaceAll("\u00a0", " ").trimEnd() === edited;
+    }, { timeout: 5_000 }).catch((cause) => {
+      throw new Error(`The source editor did not render the complete edit (${JSON.stringify(rendered)})`, { cause });
+    });
     const source = { checkoutId: checkout.checkoutId, path };
-    await browser.waitUntil(async () => (await invoke(browser, "read_repository_source_draft", source))?.markdown === edited,
-      { timeout: 10_000, timeoutMsg: "The source editor did not persist its dirty buffer" });
+    let sourceDraft;
+    await browser.waitUntil(async () => {
+      sourceDraft = await invoke(browser, "read_repository_source_draft", source);
+      return sourceDraft?.markdown === edited;
+    }, { timeout: 10_000, timeoutMsg: "The source editor did not persist its dirty buffer" });
     assert.equal(await readFile(join(repo, path), "utf8"), original);
-    const sourceDraft = await invoke(browser, "read_repository_source_draft", source);
 
     killTestApplication(application);
     await browser.deleteSession().catch(() => undefined);
@@ -1696,5 +1725,35 @@ test("dispatches a local skill, a plugin export and exact same-project conversat
     } finally {
       driver.kill();
     }
+  }
+});
+
+test("builds, simulates and executes a real pipeline visually", { timeout: 180_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Visual pipeline checkout");
+  git(scratch, "init", "-q", repo);
+  await writeFile(join(repo, "README.md"), "# Visual pipeline test\n");
+  git(repo, "add", "README.md");
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Visual pipeline fixture");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    await verifyVisualPipelineBuilder({
+      browser, application, checkout, invoke, capture, emulateDisplay,
+      restart: async (current) => {
+        killTestApplication(application);
+        await current.deleteSession().catch(() => undefined);
+        browser = await startSession(application);
+        return browser;
+      },
+    });
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
   }
 });

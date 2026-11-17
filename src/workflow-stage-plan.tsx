@@ -12,32 +12,37 @@ export function stagePlanMode(plan: StagePlanConfiguration | undefined): Session
   return plan?.questionRoute === "structured_turn" ? "read_only" : "plan";
 }
 
-export function WorkflowStagePlan({ plan, disabled, onChange }: {
+export function WorkflowStagePlan({ plan, optional = false, goalEnabled = false, disabled, onChange }: {
   plan?: StagePlanConfiguration;
+  optional?: boolean;
+  goalEnabled?: boolean;
   disabled: boolean;
   onChange: (plan: StagePlanConfiguration | undefined) => void;
 }) {
   const hint = useId();
+  const limitHint = "The limit caps app-managed subagents. Under Strict total, it also caps qualified native subagents.";
+  const description = goalEnabled ? "Turn off Goal Mode to enable Plan Mode." : optional
+    ? plan && limitHint : `The planner proposes a plan for approval. ${limitHint}`;
 
-  return <fieldset disabled={disabled} aria-describedby={hint}>
+  return <fieldset disabled={disabled} aria-describedby={description ? hint : undefined}>
     <legend>Plan Mode</legend>
-    <label>Planning questions<select value={plan?.questionRoute ?? "default"} onChange={(event) => {
+    <label>Planning questions<select value={plan?.questionRoute ?? "default"} disabled={goalEnabled && !plan} onChange={(event) => {
       const route = event.currentTarget.value;
       if (route === "native" || route === "structured_turn") {
-        onChange({ questionRoute: route, maxSubagents: plan?.maxSubagents ?? 0 });
+        if (!goalEnabled) onChange({ questionRoute: route, maxSubagents: plan?.maxSubagents ?? 0 });
       } else onChange(undefined);
     }}>
-      <option value="default">Use workflow defaults</option>
-      <option value="native">Require verified CLI planning questions</option>
-      <option value="structured_turn">Use app-managed questions in a read-only turn</option>
+      <option value="default">{optional ? "Plan Mode off" : "Use workflow defaults"}</option>
+      <option value="native" disabled={goalEnabled}>Require verified CLI planning questions</option>
+      <option value="structured_turn" disabled={goalEnabled}>Use app-managed questions in a read-only turn</option>
     </select></label>
-    {plan && <label>Maximum subagents<input type="number" min={0} max={MAX_SUBAGENTS} step={1}
+    {plan && <label>Maximum subagents<input type="number" min={0} max={MAX_SUBAGENTS} step={1} disabled={goalEnabled}
       value={plan.maxSubagents} onChange={(event) => {
         const value = event.currentTarget.valueAsNumber;
         if (Number.isInteger(value) && value >= 0 && value <= MAX_SUBAGENTS) {
           onChange({ ...plan, maxSubagents: value });
         }
       }} /></label>}
-    <p className="text-sm text-muted-foreground" id={hint}>The planner proposes a plan for approval. The limit caps app-managed subagents. Under Strict total, it also caps qualified native subagents.</p>
+    {description && <p className="text-sm text-muted-foreground" id={hint}>{description}</p>}
   </fieldset>;
 }

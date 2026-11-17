@@ -1,4 +1,4 @@
-import { ArrowDownToLine, ArrowRight, ChevronDown, FileDiff, GitBranch, GitCommitHorizontal, GitMerge, History, Layers3, Plus, RefreshCw, X } from "lucide-react";
+import { ArrowDownToLine, ArrowRight, ChevronDown, FileDiff, GitBranch, GitCommitHorizontal, GitMerge, Plus, RefreshCw, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useEffect, useState, type FormEvent } from "react";
 import ChangesPanel from "@/changes-panel";
@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { deliveryGitModes, deliveryGitSetting, deliveryGitWait, type DeliveryGitPolicy } from "@/delivery-git-policy";
 import { releaseCommits, revisionMessage, workingChanges, type ChangesSource } from "@/git-demo-data";
 import { useGitSimulation } from "@/git-simulation";
+import { GitWorkspaceFrame, GitWorkspaceTable } from "@/git-workspace-frame";
 import { deliveryBase, deliveryBranch, deliveryCommit, deliveryCommitSha, deliveryMergeSha, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
 import { DeliveryStatus, InlineIssue, IntegrationNotice } from "@/tasks-git-ui";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -75,10 +76,8 @@ function Worktrees({ props }: { props: WorkspaceProps }) {
         <div><h3 className="text-sm font-semibold">Registered worktrees</h3><p className="mt-1 text-xs text-muted-foreground">Writer reservations and captured candidates</p></div>
         <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs" onClick={() => props.openWorkspace("tasks", deliveryTaskId)}>Open linked task <ArrowRight size={14} /></Button>
       </div>
-      <div className="overflow-auto rounded-lg border border-border">
-        <table className="delivery-table">
-          <thead><tr><th>Branch / worktree</th><th>Base</th><th>Writer</th><th>State</th><th>Action</th></tr></thead>
-          <tbody>{git.worktrees.map((tree) => {
+      <GitWorkspaceTable label="Git worktrees" columns={["Branch / worktree", "Base", "Writer", "State", "Action"]}>
+        {git.worktrees.map((tree) => {
             const activeWriter = tree.id === "release" && simulation.delivery === "running";
             const interrupted = tree.id === "release" && simulation.delivery === "interrupted";
             const state = activeWriter ? "Running" : interrupted ? "Interrupted" : git.checkout === tree.id ? "Selected" : "Ready";
@@ -91,9 +90,8 @@ function Worktrees({ props }: { props: WorkspaceProps }) {
                 ? <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs" onClick={() => simulation.advanceDelivery("resume")}>Resume interrupted writer</Button>
                 : <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs" disabled={git.checkout === tree.id} onClick={() => git.setCheckout(tree.id)}>{git.checkout === tree.id ? "Selected" : "Use worktree"}</Button>}</td>
             </tr>;
-          })}</tbody>
-        </table>
-      </div>
+        })}
+      </GitWorkspaceTable>
       {simulation.delivery === "interrupted" && <div className="mt-4 grid gap-2"><InlineIssue>The release writer disconnected. Resume from its retained checkpoint to avoid an ambiguous write.</InlineIssue><Button type="button" variant="outline" className="justify-self-start px-2.5 py-1.5 text-xs" onClick={() => props.openActivity(deliveryRunId)}>Review checkpoint</Button></div>}
     </div>
   );
@@ -114,12 +112,12 @@ function GitHistory({ props }: { props: WorkspaceProps }) {
     <div className="delivery-body">
       <div className="delivery-main p-4">
         <h3 className="mb-3 text-sm font-semibold">Commit history</h3>
-        <div className="overflow-auto rounded-lg border border-border">
-          <table className="delivery-table">
-            <thead><tr><th>Commit</th><th>Branch</th><th>Author</th><th>Recorded</th></tr></thead>
-            <tbody>{commits.map((entry) => <tr key={entry.id}><td><button type="button" onClick={() => setSelected(entry.id)} aria-pressed={entry.id === selected} className="grid gap-1 text-left font-medium hover:underline">{entry.title}<span className="text-xs text-muted-foreground font-mono">{entry.id}</span></button></td><td className="whitespace-nowrap">{entry.branch}</td><td>{entry.author}</td><td className="whitespace-nowrap text-muted-foreground">{entry.date}</td></tr>)}</tbody>
-          </table>
-        </div>
+        <GitWorkspaceTable label="Repository commit history" columns={["Commit", "Branch", "Author", "Recorded"]}>
+          {commits.map((entry) => <tr key={entry.id}>
+            <td><button type="button" onClick={() => setSelected(entry.id)} aria-pressed={entry.id === commit?.id} className="grid gap-1 text-left font-medium hover:underline">{entry.title}<span className="text-xs text-muted-foreground font-mono">{entry.id}</span></button></td>
+            <td className="whitespace-nowrap">{entry.branch}</td><td>{entry.author}</td><td className="whitespace-nowrap text-muted-foreground">{entry.date}</td>
+          </tr>)}
+        </GitWorkspaceTable>
       </div>
       {commit && <aside className="delivery-detail" aria-label="Selected commit">
         <div className="delivery-detail-content grid content-start gap-3 p-3.5">
@@ -226,14 +224,10 @@ function SimulatedGitWorkspace(props: WorkspaceProps) {
   }, [target]);
 
   return (
-    <section className="delivery-view" aria-label="Git workspace">
-      <header className="delivery-toolbar">
-        <GitBranch className="text-muted-foreground" size={16} />
-        <h2 className="mr-2">Git</h2>
-        {gitViews.map((entry) => <button type="button" className="delivery-tab" key={entry} aria-pressed={entry === view} onClick={() => setView(entry)}>{entry === "History" ? <History size={14} className="mr-1 inline-block" /> : entry === "Worktrees" ? <Layers3 size={14} className="mr-1 inline-block" /> : <FileDiff size={14} className="mr-1 inline-block" />}{entry}</button>)}
+    <GitWorkspaceFrame tabs={gitViews} active={view} select={setView} controls={<>
         {simulation && <label className="relative ml-auto"><span className="sr-only">Git worktree</span><select className="delivery-filter appearance-none pr-7" value={git.checkout} onChange={(event) => git.setCheckout(event.target.value)}>{git.worktrees.map((tree) => <option key={tree.id} value={tree.id}>{tree.branch}</option>)}</select><ChevronDown size={13} className="pointer-events-none absolute right-2 top-2 text-muted-foreground" /></label>}
         {view === "Worktrees" && <Button type="button" variant="outline" className="ml-auto px-2.5 py-1.5 text-xs" disabled={!simulation} title={simulation ? undefined : "Worktree integration pending"} onClick={() => setCreatingWorktree(true)}><Plus size={14} /> New worktree</Button>}
-      </header>
+    </>}>
       {view === "Changes" && <div className="delivery-toolbar min-h-0 py-2">
         <label><span className="sr-only">Diff source</span><select className="delivery-filter" value={source} onChange={(event) => setSource(event.target.value as ChangesSource)}>{sources.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}</select></label>
         {source === "branch" && <label><span className="sr-only">Base reference</span><select className="delivery-filter" value={baseRef} onChange={(event) => setBaseRef(event.target.value)}><option>origin/main</option><option>main</option></select></label>}
@@ -243,6 +237,6 @@ function SimulatedGitWorkspace(props: WorkspaceProps) {
       {view === "Worktrees" && <Worktrees props={props} />}
       {view === "History" && <GitHistory props={props} />}
       {simulation && creatingWorktree && <WorktreeDialog onClose={() => setCreatingWorktree(false)} />}
-    </section>
+    </GitWorkspaceFrame>
   );
 }

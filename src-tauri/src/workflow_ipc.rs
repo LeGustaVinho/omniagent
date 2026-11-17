@@ -19,6 +19,7 @@ use crate::conversation_runtime::selected_scope;
 
 pub mod approval;
 pub mod authoring;
+pub mod decisions;
 pub mod command;
 pub mod comparison;
 pub mod goal;
@@ -235,6 +236,19 @@ pub async fn submit_repository_delivery_agent(
     .map_err(report)
 }
 
+#[tauri::command]
+pub async fn workflow_agent_response(
+    store: State<'_, Store>,
+    project_id: String,
+    run_id: String,
+    artifact_id: String,
+) -> Result<String, String> {
+    store
+        .workflow_agent_response(project_id, run_id, artifact_id)
+        .await
+        .map_err(report)
+}
+
 async fn delivery_agent_submission(
     store: &Store,
     input: DeliveryAgentInput,
@@ -254,6 +268,7 @@ async fn delivery_agent_submission(
         ""
     } else {
         match target.kind {
+            BuiltinNode::Agent => "",
             BuiltinNode::Plan => {
                 "Propose an implementation plan for the selected repository document. Ask for missing decisions using the planning interface."
             }

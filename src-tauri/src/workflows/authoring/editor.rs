@@ -18,12 +18,18 @@ pub struct WorkflowNodePosition {
     y: f64,
 }
 
+impl WorkflowNodePosition {
+    pub(super) fn within_canvas(self) -> bool {
+        self.x.abs() <= 1_000_000.0 && self.y.abs() <= 1_000_000.0
+    }
+}
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowCanvasEdit {
-    layout: BTreeMap<String, WorkflowNodePosition>,
+    pub(super) layout: BTreeMap<String, WorkflowNodePosition>,
     #[serde(default)]
-    update_definitions: BTreeMap<String, u32>,
+    pub(super) update_definitions: BTreeMap<String, u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -125,9 +131,7 @@ impl DraftDocument {
         }
         layout.retain(|id, _| next.definitions.contains_key(id));
         ensure!(
-            layout
-                .values()
-                .all(|point| point.x.abs() <= 1_000_000.0 && point.y.abs() <= 1_000_000.0),
+            layout.values().all(|point| point.within_canvas()),
             "A node position is outside the canvas limits"
         );
         next.layout = layout;

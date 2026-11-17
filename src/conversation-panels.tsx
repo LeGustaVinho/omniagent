@@ -41,12 +41,12 @@ import {
   ConversationLibraryNavigation, ConversationReferencePicker, ConversationTitleEditor,
   conversationLibraryKey, useConversationRename, useConversationTitle,
 } from "@/conversation-library";
+import { ConversationComposerToolbar, ConversationEmptyState, ConversationMessage, ConversationTitleBar, ConversationTranscript } from "@/conversation-layout";
 import { WorktreeEvidence } from "@/worktree-evidence";
 import { openConversation } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import { ConversationAuthoring, workflowAuthoringTarget } from "@/workflow-authoring";
-import "./conversation.css";
 
 const draftWrites = new Map<string, Promise<void>>();
 const historyOffsets = new Map<string, number>();
@@ -616,15 +616,11 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
 
   return (
     <section className="conv-pane" aria-label={title}>
-      <header className="conv-heading">
-        <MessageSquare aria-hidden />
-        {renamingTitle && checkoutId ? <ConversationTitleEditor conversation={{ id: conversationId, checkoutId, title }}
-          onClose={() => { setRenamingTitle(false); requestAnimationFrame(() => renameTrigger.current?.focus()); }} />
-          : <><h1>{title}</h1>
-            {checkoutId && <button ref={renameTrigger} className="conv-icon-button" type="button" aria-label="Rename conversation"
-              title="Rename conversation" onClick={() => setRenamingTitle(true)}><Pencil aria-hidden /></button>}
-          </>}
-        <div className="ml-auto flex items-center gap-1">
+      <ConversationTitleBar title={title}
+        editor={renamingTitle && checkoutId ? <ConversationTitleEditor conversation={{ id: conversationId, checkoutId, title }}
+          onClose={() => { setRenamingTitle(false); requestAnimationFrame(() => renameTrigger.current?.focus()); }} /> : undefined}
+        rename={checkoutId && <button ref={renameTrigger} className="conv-icon-button" type="button" aria-label="Rename conversation"
+          title="Rename conversation" onClick={() => setRenamingTitle(true)}><Pencil aria-hidden /></button>}>
         {library && inspector?.openWorkspace && <ConversationAuthoring projectId={library.projectId} conversationId={conversationId}
           selectedModel={selected?.option.selectable ? selection : null} effort={sideEffort}
           onOpenDraft={(draftId) => inspector.openWorkspace?.("pipelines", workflowAuthoringTarget(draftId))} />}
@@ -634,7 +630,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           <Target size={14} aria-hidden /> Goal
         </button>
         <button type="button" className="conv-quiet-button" aria-expanded={showSideQuestions}
-          onClick={() => setShowSideQuestions(!showSideQuestions)}>Side questions</button>
+          onClick={() => setShowSideQuestions(!showSideQuestions)}><MessageSquare aria-hidden /> Side questions</button>
         {run && <button ref={activityButton} type="button" className="conv-quiet-button"
           aria-expanded={inspector ? inspector.activeRunId === run.id : Boolean(showingActivity)}
           onClick={() => {
@@ -648,11 +644,10 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           disabled={historyBusy} openFork={openFork} mode={mode} selection={selection ?? undefined}
           effort={sideEffort ?? undefined} requestedAction={historyAction} onRequestedActionClose={dismissHistoryAction} />
         <ConversationSubagentControls conversationId={conversationId} runId={attempt?.runId} />
-        </div>
-      </header>
+      </ConversationTitleBar>
       <div className="conv-layout">
       <div className="conv-chat">
-      <div ref={historyRegion} className="conv-history" role="region" aria-label="Conversation history"
+      <ConversationTranscript historyRef={historyRegion} contentRef={historyContents}
         onScroll={(event) => {
           const region = event.currentTarget;
           if (!visible || !region.clientHeight) return;
@@ -660,21 +655,16 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           stickToEnd.current = region.scrollHeight - region.clientHeight - region.scrollTop < 32;
           setShowJump(!stickToEnd.current);
         }}>
-        <div ref={historyContents} className="conv-reading">
         {history.isPending && <p role="status" className="text-sm text-muted-foreground">Loading messages…</p>}
         {history.error && <p role="alert" className="conv-alert">{String(history.error)}</p>}
-        {history.data?.messages.length === 0 && !live && !queued && <div className="conv-empty">
-          <MessageSquare aria-hidden />
-          <h2>Start a conversation</h2>
-          <p>Choose a model and ask about this repository.</p>
-        </div>}
+        {history.data?.messages.length === 0 && !live && !queued && <ConversationEmptyState title="Start a conversation"
+          description="Choose a model and ask about this repository." />}
         <ol className="conv-messages">
           {history.data?.messages.map((message) => (
-            <li key={message.revisionId} className={message.role === "user" ? "conv-user" : "conv-assistant"}>
-              <p className="sr-only">{message.role === "user" ? "You" : "Assistant"}</p>
+            <ConversationMessage key={message.revisionId} role={message.role}
+              actions={<ConversationMessageHistoryActions message={message} disabled={historyBusy} onAction={setHistoryAction} />}>
               {message.role === "user" ? <p>{conversationSkillMessage(message.text)}</p> : <ConversationMarkdown>{message.text}</ConversationMarkdown>}
-              <ConversationMessageHistoryActions message={message} disabled={historyBusy} onAction={setHistoryAction} />
-            </li>
+            </ConversationMessage>
           ))}
         </ol>
         {(latestJob.error || cancelQueued.error || recover.error) && <p role="alert" className="conv-alert">{String(latestJob.error || cancelQueued.error || recover.error)}</p>}
@@ -701,8 +691,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
             </div>
           </section>
         )}
-        </div>
-      </div>
+      </ConversationTranscript>
       <div className="conv-composer-area">
         {goal.data && <ConversationGoalCard value={goal.data} refresh={refreshGoal} openRun={openRunEvidence} />}
         {showJump && <button type="button" className="conv-jump" onClick={() => {
@@ -781,7 +770,17 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
                 event.currentTarget.form?.requestSubmit();
               }
             }} />
-          <div className="conv-composer-toolbar">
+          <ConversationComposerToolbar actions={<>
+            {live && <StopConversation {...activity} />}
+            {steerRun && <Button type="button" variant="outline" onClick={() => { steer.reset(); send.mutate({ text, toRun: steerRun }); }}>
+              Send to active turn
+            </Button>}
+            <button type="submit" className="conv-primary-button conv-send" disabled={!canSend}>
+              {isSideQuestion ? askSide.isPending ? "Queueing…" : "Ask side question"
+                : startGoal.isPending ? "Starting goal…" : goalInput === "" ? "Open Goal Mode" : composingGoal ? "Start goal"
+                  : send.isPending ? "Queueing…" : queueNext ? "Queue for next turn" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
+            </button>
+          </>}>
               {library && <ConversationReferencePicker projectId={library.projectId} excludeId={conversationId} onOpen={library.open}
                 onAttach={referencesReady && !send.isPending && !continueSend.isPending
                   ? ({ id }) => editReferenceDraft.mutate({ previewId: id, attach: true }) : undefined} />}
@@ -807,16 +806,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
                 disabled={busy || send.isPending || continueSend.isPending} />}
               <EffortSelect capabilities={efforts} loading={Boolean(antigravityModel && modelEfforts.isPending)}
                 className={selectorClass} value={effort} onChange={setEffort} />
-              {live && <StopConversation {...activity} />}
-              {steerRun && <Button type="button" variant="outline" onClick={() => { steer.reset(); send.mutate({ text, toRun: steerRun }); }}>
-                Send to active turn
-              </Button>}
-                <Button type="submit" className="conv-send" disabled={!canSend}>
-                  {isSideQuestion ? askSide.isPending ? "Queueing…" : "Ask side question"
-                    : startGoal.isPending ? "Starting goal…" : goalInput === "" ? "Open Goal Mode" : composingGoal ? "Start goal"
-                      : send.isPending ? "Queueing…" : queueNext ? "Queue for next turn" : "Send"} <ArrowUp className="size-3.5" aria-hidden />
-                </Button>
-          </div>
+          </ConversationComposerToolbar>
           {goal.error && composingGoal && <p role="alert" className="conv-alert">{String(goal.error)}</p>}
           {startGoal.error && !goalSettings && <p role="alert" className="conv-alert">{String(startGoal.error)}</p>}
           {models.error && <div className="flex flex-wrap items-center gap-2">

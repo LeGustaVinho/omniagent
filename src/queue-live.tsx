@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowRight, ListTodo, Pause, Play, Plus, RefreshCw, X } from "lucide-react";
+import { ArrowRight, Pause, Play, Plus, RefreshCw } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import type { Job } from "@/bindings/Job";
 import type { JobInspection } from "@/bindings/JobInspection";
@@ -13,10 +13,11 @@ import type { SessionMode } from "@/bindings/SessionMode";
 import { JobFailurePanel } from "@/job-failure";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
-import { matchesQueueView, projectQueueQuery, queueBlockerReason, queueJobState, queueViews, type QueueView } from "@/queue-model";
+import { QueueEmpty, QueueLayout } from "@/queue-layout";
+import { matchesQueueView, projectQueueQuery, queueBlockerReason, queueJobState, type QueueView } from "@/queue-model";
 import { QueuePolicy } from "@/queue-policy";
 import { QueueWriterReconciliation } from "@/queue-writer-reconciliation";
-import { DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
+import { InlineIssue } from "@/tasks-git-ui";
 import type { QueueJobFocus, WorkspaceProps } from "@/workbench-contract";
 
 type QueueAction =
@@ -156,9 +157,8 @@ function ApprovalReview({ projectId, approvalId, busy, onAction }: {
   );
 }
 
-function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity, onDependency, onAction, onAddChild, busy }: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace"> & {
+function JobDetails({ inspection, checkout, openWorkspace, openActivity, onDependency, onAction, onAddChild, busy }: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace"> & {
   inspection: JobInspection;
-  onClose: () => void;
   onDependency: (id: string) => void;
   onAction: (action: QueueAction) => void;
   onAddChild: (parent: ParentAttempt) => void;
@@ -175,11 +175,7 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
   const running = attempt && ["starting", "running", "waiting_for_input"].includes(attempt.status);
   const savedQuestions = inspection.questionWait && !running && !pending && job.queueState !== "cancelled";
 
-  return (
-    <aside className="delivery-detail" aria-label="Selected job">
-      <div className="delivery-detail-content grid content-start gap-3 p-3.5">
-        <div className="flex items-start justify-between gap-2"><h3 className="text-sm font-semibold">{jobTitle(inspection)}</h3><button type="button" aria-label="Close job details" className="rounded p-1 text-muted-foreground hover:bg-muted" onClick={onClose}><X size={15} /></button></div>
-        <DeliveryStatus>{queueJobState(inspection)}</DeliveryStatus>
+  return <>
         {attempt?.cancelRequested && <InlineIssue>Cancellation requested. Waiting for the runtime to confirm the outcome.</InlineIssue>}
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-sm">
           <dt className="text-muted-foreground">Job ID</dt><dd className="break-all font-mono text-xs">{job.id}</dd>
@@ -264,9 +260,7 @@ function JobDetails({ inspection, checkout, onClose, openWorkspace, openActivity
           {attempt?.previousRunId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(attempt.previousRunId!, conversationId)}>Inspect previous attempt</Button>}
           {requestingRunId && <Button className={buttonClass} type="button" variant="outline" onClick={() => openActivity(requestingRunId, job.context?.conversationId)}>{job.operatorRequested ? "Open parent run" : "Open requesting run"}</Button>}
         </div>
-      </div>
-    </aside>
-  );
+  </>;
 }
 
 export default function LiveQueue({ checkout, openActivity, openWorkspace, onClose, active = true, focusJob }: WorkspaceProps & {
@@ -302,24 +296,23 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["project-job-queue"] }),
   });
 
-  return (
-    <section className="delivery-view" aria-label="Execution queue">
-      <header className="delivery-toolbar">
-        <ListTodo size={16} className="text-muted-foreground" aria-hidden="true" /><h2>Queue</h2>
-        {query.data && <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground tabular-nums" title="Scheduler occupancy across projects">{query.data.active} / {query.data.settings.capacity} slots</span>}
-        {query.data?.settings.paused && <DeliveryStatus>Paused</DeliveryStatus>}
-        <div className="ml-auto flex items-center gap-1.5">
-          {active && <Button type="button" className={buttonClass} disabled={showSetup} onClick={() => setSetup({ checkoutId: checkout.checkoutId })}>
-            <Plus size={14} aria-hidden="true" /> Add job
-          </Button>}
-          {settings && <Button type="button" variant="outline" className={buttonClass} disabled={control.isPending}
-            onClick={() => control.mutate({ type: "pause_queue", paused: !settings.paused })}>
-            {settings.paused ? <><Play size={14} aria-hidden="true" /> Resume queue</> : <><Pause size={14} aria-hidden="true" /> Pause queue</>}
-          </Button>}
-          <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs" disabled={query.isFetching} onClick={() => void query.refetch()} aria-label="Refresh queue"><RefreshCw size={14} aria-hidden="true" /> Refresh</Button>
-          {onClose && <button type="button" aria-label="Close queue" className="rounded p-1 text-muted-foreground hover:bg-muted" onClick={onClose}><X size={17} /></button>}
-        </div>
-      </header>
+  const occupancy = query.data && { active: query.data.active, capacity: query.data.settings.capacity, description: "Scheduler occupancy across projects" };
+
+  return <QueueLayout occupancy={occupancy} paused={settings?.paused ?? false} onClose={onClose}
+    view={view} onViewChange={setView} onSelect={setSelected} onDeselect={() => setSelected(undefined)}
+    actions={<>
+      {active && <Button type="button" className={buttonClass} disabled={showSetup} onClick={() => setSetup({ checkoutId: checkout.checkoutId })}>
+        <Plus size={14} aria-hidden="true" /> Add job
+      </Button>}
+      {settings && <Button type="button" variant="outline" className={buttonClass} disabled={control.isPending}
+        onClick={() => control.mutate({ type: "pause_queue", paused: !settings.paused })}>
+        {settings.paused ? <><Play size={14} aria-hidden="true" /> Resume queue</> : <><Pause size={14} aria-hidden="true" /> Pause queue</>}
+      </Button>}
+      <Button type="button" variant="outline" className={buttonClass} disabled={query.isFetching} onClick={() => void query.refetch()} aria-label="Refresh queue">
+        <RefreshCw size={14} aria-hidden="true" /> Refresh
+      </Button>
+    </>}
+    controls={<>
       {control.isError && <div className="px-3 py-2"><InlineIssue>{String(control.error)}</InlineIssue></div>}
       {showSetup && <ManagedJobForm key={setup.parent?.runId ?? setup.checkoutId} checkout={checkout} parent={setup.parent}
         onClose={() => setSetup(undefined)} onQueued={(id) => {
@@ -329,35 +322,22 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
           void queryClient.invalidateQueries({ queryKey: ["project-job-queue", checkout.projectId] });
         }} />}
       {settings && <QueuePolicy key={checkout.projectId} projectId={checkout.projectId} checkoutId={checkout.checkoutId} capacity={settings.capacity} />}
-      <nav className="flex gap-0.5 overflow-x-auto border-b border-border px-3 py-1" aria-label="Queue states">
-        {queueViews.map((entry) => <button type="button" key={entry} className="delivery-tab" aria-pressed={view === entry} onClick={() => setView(entry)}>{entry}</button>)}
-      </nav>
-      <div className="delivery-body">
-        <div className="delivery-main">
-          {query.isPending && active && <p className="px-4 py-3 text-sm text-muted-foreground" role="status">Loading project queue…</p>}
-          {query.isError && <div className="p-3"><InlineIssue>Could not refresh the project queue. {String(query.error)}</InlineIssue></div>}
-          {visible.length > 0 && <table className="delivery-table"><thead><tr><th>Job</th><th>Status</th><th>Priority</th><th>Attempt</th><th>Wait reason</th></tr></thead>
-            <tbody>{visible.map((inspection) => (
-              <tr key={inspection.job.id}>
-                <td><button type="button" onClick={() => setSelected(inspection.job.id)} className="text-left font-medium hover:underline" aria-pressed={selected === inspection.job.id}>{jobTitle(inspection)}</button><div className="mt-0.5 break-all text-xs text-muted-foreground">{jobRequester(inspection)}</div></td>
-                <td><DeliveryStatus>{queueJobState(inspection)}</DeliveryStatus></td>
-                <td className="tabular-nums">{inspection.job.priority}</td>
-                <td className="tabular-nums">{inspection.job.latestAttempt?.ordinal ?? "—"}</td>
-                <td className="break-words text-muted-foreground">{firstWaitReason(inspection)}</td>
-              </tr>
-            ))}</tbody>
-          </table>}
-          {query.data && !visible.length && <div className="delivery-empty">
-            <span className="work-empty-icon"><ListTodo size={20} aria-hidden="true" /></span>
-            <h3>{query.data.jobs.length ? "No matching jobs" : "No jobs in this project"}</h3>
-            <p>{query.data.jobs.length ? "Choose another status to see more jobs." : "Conversation turns appear here when you send a message."}</p>
-          </div>}
-        </div>
-        {selectedJob && <JobDetails inspection={selectedJob} checkout={checkout} onClose={() => setSelected(undefined)}
-          openActivity={openActivity} openWorkspace={(workspace, target) => { openWorkspace(workspace, target); onClose?.(); }}
-          onDependency={(id) => { setView("All"); setSelected(id); }}
-          onAction={control.mutate} onAddChild={(parent) => setSetup({ checkoutId: checkout.checkoutId, parent })} busy={control.isPending} />}
-      </div>
-    </section>
-  );
+    </>}
+    state={<>
+      {query.isPending && active && <p className="px-4 py-3 text-sm text-muted-foreground" role="status">Loading project queue…</p>}
+      {query.isError && <div className="p-3"><InlineIssue>Could not refresh the project queue. {String(query.error)}</InlineIssue></div>}
+      {query.data && !visible.length && <QueueEmpty filtered={query.data.jobs.length > 0} />}
+    </>}
+    jobs={visible.map((inspection) => ({
+      id: inspection.job.id, title: jobTitle(inspection), requester: jobRequester(inspection), status: queueJobState(inspection),
+      priority: inspection.job.priority, attempt: inspection.job.latestAttempt?.ordinal ?? "—", reason: firstWaitReason(inspection),
+    }))}
+    selected={selectedJob && {
+      id: selectedJob.job.id, title: jobTitle(selectedJob), status: queueJobState(selectedJob),
+      content: <JobDetails inspection={selectedJob} checkout={checkout} openActivity={openActivity}
+        openWorkspace={(workspace, target) => { openWorkspace(workspace, target); onClose?.(); }}
+        onDependency={(id) => { setView("All"); setSelected(id); }}
+        onAction={control.mutate} onAddChild={(parent) => setSetup({ checkoutId: checkout.checkoutId, parent })} busy={control.isPending} />,
+    }}
+  />;
 }

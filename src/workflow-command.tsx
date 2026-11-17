@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import type { Job } from "@/bindings/Job";
 import type { CommandJobOutput } from "@/bindings/CommandJobOutput";
+import { StructuredObjectField } from "@/workflow-structured-fields";
 
 export type CommandNodeConfigurationValue = { kind: string; [field: string]: unknown };
 
@@ -44,7 +45,7 @@ export function CommandNodeConfiguration({ projectId, configuration, onChange, d
   const [file, setFile] = useState("");
   const [interpreter, setInterpreter] = useState("");
   const [prefix, setPrefix] = useState("");
-  const [inputText, setInputText] = useState(() => JSON.stringify(configuration.input === undefined ? {} : configuration.input, null, 2));
+  const [inputDraft, setInputDraft] = useState<{ text: string; parsed: Record<string, unknown> | null }>();
   const update = (fields: Partial<CommandNodeConfigurationValue>) => onChange({ ...configuration, ...fields });
   const registrations = useQuery({
     queryKey,
@@ -72,7 +73,10 @@ export function CommandNodeConfiguration({ projectId, configuration, onChange, d
   const available = registrations.data ?? [];
   const hasRegistration = available.some((entry) => bindingKey(entry) === selected);
   const missing = selected !== ":" && !hasRegistration;
-  const validInput = parseInput(inputText) !== null;
+  const validInput = configuration.input !== null;
+  const currentInput = JSON.stringify(configuration.input);
+  const inputText = inputDraft && JSON.stringify(inputDraft.parsed) === currentInput ? inputDraft.text
+    : JSON.stringify(configuration.input ?? {}, null, 2);
 
   return <div className="grid gap-3">
     <label className="grid gap-1 text-sm">
@@ -115,15 +119,20 @@ export function CommandNodeConfiguration({ projectId, configuration, onChange, d
       <textarea className={field} disabled={disabled || fixedInvocation} rows={3} value={Array.isArray(configuration.arguments) ? configuration.arguments.join("\n") : ""}
         onChange={(event) => update({ arguments: splitArguments(event.target.value) })} />
     </label>
-    <label className="grid gap-1 text-sm">Standard input JSON
-      <textarea className={`${field} font-mono`} disabled={disabled || fixedInvocation} rows={5} value={inputText}
-        aria-invalid={!validInput} aria-describedby={validInput ? undefined : producer}
-        onChange={(event) => {
-          const value = event.target.value;
-          setInputText(value);
-          update({ input: parseInput(value) });
-        }} />
-    </label>
+    <StructuredObjectField label="Standard input fields" value={configuration.input} disabled={disabled || fixedInvocation}
+      onChange={(input) => { setInputDraft(undefined); update({ input }); }} />
+    <details className="pipeline-evidence"><summary>Input JSON</summary>
+      <label className="grid gap-1 text-sm">Standard input JSON
+        <textarea className={`${field} font-mono`} disabled={disabled || fixedInvocation} rows={5} value={inputText}
+          aria-invalid={!validInput} aria-describedby={validInput ? undefined : producer}
+          onChange={(event) => {
+            const text = event.target.value;
+            const parsed = parseInput(text);
+            setInputDraft({ text, parsed });
+            update({ input: parsed });
+          }} />
+      </label>
+    </details>
     {!validInput && <p role="alert" id={producer}>Enter a JSON object.</p>}
     <label className="grid gap-1 text-sm">Standard output
       <select className={field} disabled={disabled} value={configuration.output === "json" ? "json" : "text"}

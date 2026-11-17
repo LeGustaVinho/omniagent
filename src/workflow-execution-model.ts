@@ -2,7 +2,9 @@ import type { Job } from "@/bindings/Job";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { RunStatus } from "@/bindings/RunStatus";
 import type { SessionMode } from "@/bindings/SessionMode";
-import type { WorkflowDefinition, WorkflowGraphNode, WorkflowWire } from "@/workflow-graph-model";
+import type { WorkflowDefinition, WorkflowGraphNode, WorkflowLayout, WorkflowWire } from "@/workflow-graph-model";
+import type { WorkflowPendingDecision } from "@/workflow-stage-decisions";
+import type { ExecutionComparisonStage, RecordedComparison } from "@/workflow-execution-comparison";
 
 export const workflowRunTarget = (runId: string) => `run:${runId}`;
 
@@ -54,6 +56,7 @@ export type WorkflowExecutionSnapshot = {
     origin: { kind: "editor" } | { kind: "agile" | "rule"; workId: string };
     checklistItem?: { itemId: string; revision: number; checked: boolean };
   } | null;
+  layout?: WorkflowLayout;
   definition: { version: WorkflowVersion; name: string; nodes: ExecutionPinnedNode[]; wires: WorkflowWire[]; subflows?: ExecutionSubflow[] };
   rolePins?: ExecutionRolePin[];
   unitNodeIds: string[];
@@ -61,6 +64,8 @@ export type WorkflowExecutionSnapshot = {
   jobs: ExecutionJob[];
   outputs: ExecutionOutput[];
   control: ExecutionControl[];
+  pendingDecisions?: WorkflowPendingDecision[];
+  comparisonStages?: ExecutionComparisonStage[];
 };
 
 export function controlForNode(snapshot: WorkflowExecutionSnapshot, nodeId: string, unit?: ExecutionUnit) {
@@ -76,7 +81,10 @@ export function wiredExecutionInputs(snapshot: WorkflowExecutionSnapshot, node: 
   const inputs: Inputs = {};
   for (const port of node.definition.inputs) {
     const wire = snapshot.definition.wires.find(({ to }) => to.node === node.instance.id && to.port === port.name);
-    if (!wire) return null;
+    if (!wire) {
+      if (node.definition.kind === "agent" && port.name === "comparison") continue;
+      return null;
+    }
     const sourceForUnit = snapshot.unitNodeIds.includes(wire.from.node);
     const selected = controlForNode(snapshot, wire.from.node, unit);
     if (selected?.state === "skipped") return null;
@@ -91,6 +99,25 @@ export function wiredExecutionInputs(snapshot: WorkflowExecutionSnapshot, node: 
     if (port.value.kind === "data") inputs[port.name] = output.artifact.id;
   }
   return inputs;
+}
+
+export function comparisonForNode(snapshot: WorkflowExecutionSnapshot, node: ExecutionPinnedNode, unit?: ExecutionUnit) {
+  const unitScoped = snapshot.unitNodeIds.includes(node.instance.id);
+  if (unitScoped && !unit) return undefined;
+  const scopedUnit = unitScoped ? unit : undefined;
+  const stages = snapshot.comparisonStages?.filter(({ nodeId, nodeRevision }) =>
+    nodeId === node.instance.id && nodeRevision === node.revision);
+  if (!stages?.length) return undefined;
+  const inputs = wiredExecutionInputs(snapshot, node, scopedUnit);
+  if (!inputs) return undefined;
+  const stage = stages.findLast((stage) => stage.unitId === (scopedUnit?.unit.id ?? null) &&
+    stage.planRevision === (scopedUnit?.planRevision ?? null) && Object.keys(stage.inputs).length === Object.keys(inputs).length &&
+    Object.entries(stage.inputs).every(([port, artifactId]) => inputs[port] === artifactId));
+  if (!stage) return undefined;
+  const recorded = snapshot.outputs.filter(({ artifact }) => artifact.nodeInstanceId === node.instance.id &&
+    artifact.unitId === stage.unitId && artifact.value.kind === "comparison_results")
+    .map(({ artifact }) => artifact.value.evidence as RecordedComparison).find(({ groupId }) => groupId === stage.groupId);
+  return { stage, recorded };
 }
 
 export function presentation(snapshot: WorkflowExecutionSnapshot, node: ExecutionPinnedNode, unit?: ExecutionUnit): {

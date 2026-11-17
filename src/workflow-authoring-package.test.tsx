@@ -48,6 +48,15 @@ function mount({ stale = false, publication = null, openWorkspace = vi.fn() }: {
       case "inspect_workflow_package": return draft;
       case "conversation_models": return [];
       case "workflow_package_catalog": return [artifact];
+      case "preview_workflow_package_revision": return {
+        revision: (input as { revision: string }).revision, revisions: [draft.revision, initial.revision],
+        members: [
+          { key: "pipeline", name: "Pipeline", kind: "pipeline", changes: [], dependencies: {}, affectedUses: [], diagnostics: [], requirements: [] },
+          { key: "command-local-command", name: artifact.name, kind: artifact.version.kind,
+            changes: [{ path: "/body/output", change: "changed", before: "text", after: "json" }],
+            dependencies: {}, affectedUses: [], diagnostics: [], requirements: artifact.blockers },
+        ],
+      };
       case "read_published_workflow_package_artifact": return artifact;
       case "workflow_authoring_bases": return [
         { name: "Earlier version", version: { id: "different-pipeline", revision: "earlier" } },
@@ -125,6 +134,7 @@ it("opens exact published bases, confirms one saved revision and shows every pac
   expect(dialog.getByText(published.reviewedRevision)).toBeTruthy();
   expect(dialog.getByText("Repository checker · library")).toBeTruthy();
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "publish_reviewed_workflow_package")).toBe(false);
+  expect(await dialog.findByText("Field changes (1)")).toBeTruthy();
   await user.click(dialog.getByRole("button", { name: "Confirm package publication" }));
   expect(invoke).toHaveBeenCalledWith("publish_reviewed_workflow_package", {
     projectId: exampleCheckout.projectId, draftId: "draft", reviewedRevision: published.reviewedRevision,
@@ -139,6 +149,7 @@ it("preserves the whole draft and displays the current published revision on con
   const user = mount({ stale: true });
   await addPublishedRevision(user);
   await user.click(screen.getByRole("button", { name: "Review package publication" }));
+  await screen.findByText("Field changes (1)");
   await user.click(screen.getByRole("button", { name: "Confirm package publication" }));
   const conflict = within(await screen.findByRole("region", { name: "Current published package artifact" }));
   expect(conflict.getByText("updated-elsewhere")).toBeTruthy();
@@ -165,4 +176,31 @@ it("runs the exact pipeline from its package receipt and opens its execution gra
     },
   });
   await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "run:published-run"));
+});
+
+it("starts a named pipeline directly in the visual Builder", async () => {
+  const openWorkspace = vi.fn();
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "list_workflow_packages") return [];
+    if (command === "create_workflow_package") return { id: "visual-draft", revision: "new", package: (args as { package: unknown }).package };
+    throw Error(command);
+  });
+  const projectId = exampleCheckout.projectId;
+  render(<QueryClientProvider client={new QueryClient()}>
+    <WorkflowPackageList checkout={exampleCheckout} openWorkspace={openWorkspace} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "New pipeline" }));
+  const dialog = within(screen.getByRole("dialog", { name: "New pipeline" }));
+  await user.type(dialog.getByRole("textbox", { name: "Pipeline name" }), "Visual review");
+  await user.click(dialog.getByRole("button", { name: "Create pipeline" }));
+  expect(invoke).toHaveBeenCalledWith("create_workflow_package", {
+    projectId, conversationId: null, package: { name: "Visual review", members: [{
+      key: "pipeline", name: "Visual review", destination: "project",
+      body: { kind: "pipeline", graph: { name: "Visual review", nodes: [
+        { id: "start", kind: "typed_start", configuration: { kind: "typed_start", fields: [] } },
+      ], wires: [] } },
+    }] },
+  });
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "authoring:package:visual-draft"));
 });

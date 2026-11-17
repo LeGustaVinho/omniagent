@@ -1001,6 +1001,7 @@ impl Store {
             .filter(|text| !text.is_empty())
             .map(|text| protection::protect(text.as_bytes()))
             .transpose()?;
+        let workflow_attempt = run_id.clone();
         let outcome = self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let active = active_attempt(&tx, &run_id)?;
@@ -1071,6 +1072,7 @@ impl Store {
             tx.commit()?;
             Ok(outcome)
         }).await?;
+        self.settle_generic_agent_after_attempt(workflow_attempt).await;
         self.job_signal.send_replace(());
         Ok(outcome)
     }

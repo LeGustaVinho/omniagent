@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "@/app";
 import type { Conversation } from "@/bindings/Conversation";
@@ -252,4 +253,24 @@ it("opens an all-project result in its own worktree from the actual application 
   expect(invoke).toHaveBeenCalledWith("select_active_checkout", { checkoutId: other.checkoutId });
   expect(invoke).toHaveBeenCalledWith("checkout_conversation", { checkoutId: other.checkoutId, conversationId: externalId });
   expect(invoke).not.toHaveBeenCalledWith("checkout_conversation", { checkoutId: selected.checkoutId, conversationId: externalId });
+});
+
+it("opens saved conversations from the compact library and returns space to the transcript", async () => {
+  repository();
+  function CompactWorkspace() {
+    const [sidebar, setSidebar] = useState(false);
+    return <RealConversations checkout={selected} compact sidebar={sidebar} onSidebarChange={setSidebar} />;
+  }
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><CompactWorkspace /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Show conversations" }));
+  const drawer = screen.getByRole("dialog", { name: "Conversation navigation" });
+  const search = within(drawer).getByRole("searchbox", { name: "Search conversation titles" });
+  await waitFor(() => expect(document.activeElement).toBe(search));
+  await user.type(search, "Archive");
+  await user.click(await within(drawer).findByRole("button", { name: original }));
+  expect(await screen.findByText("Saved conversation before provider shutdown.")).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "Conversation navigation" })).toBeNull();
+  expect((await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" })).value).toBe(draft);
 });

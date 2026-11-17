@@ -9,7 +9,7 @@ use crate::{
     workflows::{NodeDefinition, WorkflowRevision, builtin_registry},
 };
 
-use super::{new_id, open, seal};
+use super::{WorkflowCanvasEdit, WorkflowNodePosition, new_id, open, seal};
 
 #[cfg(test)]
 mod authoring_acceptance;
@@ -28,7 +28,9 @@ mod subflow_tests;
 mod tests;
 pub use model::*;
 pub use preview::WorkflowPackagePreview;
-pub(crate) use publish::{ensure_package_repeat_guards, ensure_package_runnable};
+pub(crate) use publish::{
+    ensure_package_repeat_guards, ensure_package_runnable, published_pipeline_layout,
+};
 pub use simulation::{WorkflowSimulation, WorkflowSimulationScenario};
 
 const MAX_MEMBERS: usize = 32;
@@ -39,6 +41,8 @@ const MAX_PACKAGE_BYTES: usize = 192 * 1024;
 struct PackageDocument {
     package: WorkflowPackage,
     definitions: BTreeMap<String, BTreeMap<String, NodeDefinition>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    layouts: BTreeMap<String, BTreeMap<String, WorkflowNodePosition>>,
 }
 
 impl PackageDocument {
@@ -53,6 +57,9 @@ impl PackageDocument {
             .into_iter()
             .map(|definition| (definition.kind, definition))
             .collect();
+        let mut layouts = previous
+            .map(|saved| saved.layouts.clone())
+            .unwrap_or_default();
         let definitions = package
             .members
             .iter()
@@ -73,6 +80,12 @@ impl PackageDocument {
                     .map(|version| publish::load_published(db, project, version))
                     .transpose()?
                     .flatten();
+                if previous.is_none_or(|saved| !saved.definitions.contains_key(&member.key))
+                    && let Some(base) = &base
+                    && !base.layout.is_empty()
+                {
+                    layouts.insert(member.key.clone(), base.layout.clone());
+                }
                 let old = previous
                     .and_then(|saved| saved.definitions.get(&member.key))
                     .or_else(|| base.as_ref().map(|saved| &saved.definitions));
@@ -90,10 +103,64 @@ impl PackageDocument {
                 Ok((member.key.clone(), pinned))
             })
             .collect::<Result<_>>()?;
-        Ok(Self {
+        let mut next = Self {
             package,
             definitions,
-        })
+            layouts,
+        };
+        next.retain_layouts();
+        Ok(next)
+    }
+
+    fn retain_layouts(&mut self) {
+        self.layouts.retain(|key, layout| {
+            let Some(nodes) = self.definitions.get(key) else {
+                return false;
+            };
+            layout.retain(|id, _| nodes.contains_key(id));
+            !layout.is_empty()
+        });
+    }
+
+    fn edit_canvases(&mut self, canvases: BTreeMap<String, WorkflowCanvasEdit>) -> Result<()> {
+        let registry = builtin_registry();
+        for (key, edit) in canvases {
+            ensure!(
+                self.package.members.iter().any(|member| member.key == key
+                    && matches!(
+                        member.body,
+                        PackageArtifactBody::Pipeline { .. } | PackageArtifactBody::Subflow { .. }
+                    )),
+                "The canvas belongs to an unavailable graph member"
+            );
+            let pins = self
+                .definitions
+                .get_mut(&key)
+                .context("The graph definitions are unavailable")?;
+            for (id, revision) in edit.update_definitions {
+                let pinned = pins
+                    .get_mut(&id)
+                    .context("The node to update is unavailable")?;
+                let current = registry
+                    .iter()
+                    .find(|definition| {
+                        definition.kind == pinned.kind
+                            && definition.revision == revision
+                            && revision > pinned.revision
+                    })
+                    .context(
+                        "The requested node version is unavailable. Review the current registry.",
+                    )?;
+                pinned.clone_from(current);
+            }
+            ensure!(
+                edit.layout.values().all(|point| point.within_canvas()),
+                "A node position is outside the canvas limits"
+            );
+            self.layouts.insert(key, edit.layout);
+        }
+        self.retain_layouts();
+        Ok(())
     }
 }
 
@@ -130,6 +197,24 @@ impl Store {
         expected_revision: String,
         package: WorkflowPackage,
     ) -> Result<WorkflowPackageDraft> {
+        self.save_workflow_package_canvas(
+            project,
+            draft,
+            expected_revision,
+            package,
+            BTreeMap::new(),
+        )
+        .await
+    }
+
+    pub async fn save_workflow_package_canvas(
+        &self,
+        project: String,
+        draft: String,
+        expected_revision: String,
+        package: WorkflowPackage,
+        canvases: BTreeMap<String, WorkflowCanvasEdit>,
+    ) -> Result<WorkflowPackageDraft> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let stored = load_draft(&tx, &project, &draft)?;
@@ -144,8 +229,12 @@ impl Store {
                 anyhow::bail!("The package changed. Review the latest revision before saving.");
             }
             let (_, previous) = read_document(&tx, &draft, &expected_revision)?;
-            let document = PackageDocument::capture(&tx, &project, package, Some(&previous))?;
-            if previous.package != document.package {
+            let mut document = PackageDocument::capture(&tx, &project, package, Some(&previous))?;
+            document.edit_canvases(canvases)?;
+            if previous.package != document.package
+                || previous.layouts != document.layouts
+                || previous.definitions != document.definitions
+            {
                 persist_revision(&tx, &draft, Some(&expected_revision), None, &document)?;
             }
             let saved = load_draft(&tx, &project, &draft)?;
@@ -346,6 +435,7 @@ fn load_draft(db: &Connection, project: &str, draft: &str) -> Result<WorkflowPac
         revision,
         parent_revision,
         package: document.package,
+        layouts: document.layouts,
         publication,
         request,
     })

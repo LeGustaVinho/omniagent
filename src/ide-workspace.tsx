@@ -4,10 +4,10 @@ import {
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
-  FileDialog, FileDock, FileSearch, FileSidebar, FileTree, FileUnavailable,
+  FileCaption, FileDialog, FileDock, FileSidebar, FileTree, FileUnavailable,
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
-import { noteSearchTarget, ProjectFileSearch } from "@/ide-file-search";
+import { ExampleFileSearch, noteSearchTarget, ProjectFileSearch } from "@/ide-file-search";
 import { exampleNotes, exampleSources, fileName, findFileText, normalizeRepositoryPath } from "@/ide-knowledge-data";
 import type { CodeModel, CodeProblem } from "@/ide-code-editor";
 import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
@@ -242,7 +242,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
         </div>
         <div className="file-sidebar-scroll">
           {navigator === "search" ? (simulated
-            ? <FileSearch query={query} setQuery={setQuery} results={results} onOpen={openFile} placeholder="Search files and content" />
+            ? <ExampleFileSearch query={query} setQuery={setQuery} results={results} onOpen={openFile} />
             : <ProjectFileSearch checkoutId={checkout.checkoutId} onOpen={openFile} />)
             : <><p className="file-sidebar-note" title={simulated ? undefined : checkout.checkoutRoot}>
               {simulated ? "EXAMPLE WORKTREE" : fileName(checkout.checkoutRoot.replaceAll("\\", "/"))}</p>
@@ -276,10 +276,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
               const sourceProblem = source.files[path]?.sourceProblem;
               return (
                 <div className="ide-file-view">
-                  <div className="ide-file-caption">
-                    <span>{path.replaceAll("/", " / ")}</span>
-                    <span>{typeof entry.revision === "number" ? `r${entry.revision}` : entry.revision}</span>
-                  </div>
+                  <FileCaption path={path} revision={entry.revision} />
                   {sourceProblem && <p role="alert" className="file-help">{sourceProblem}</p>}
                   <Suspense fallback={<p role="status" className="file-help">Loading source editor…</p>}>
                     <Editor scope={scope} path={path} content={entry.content} models={models} update={update} problems={report} jump={jumps[path]} />
@@ -300,14 +297,15 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
             <button type="button" className="fw-btn" aria-pressed={bottom === "problems"} onClick={() => setBottom("problems")}><CircleAlert size={14} /> Problems{markerEntries.length ? ` (${markerEntries.length})` : ""}</button>
             <input aria-label="Resize bottom panel" title="Resize bottom panel" type="range" min={23} max={55} value={terminalHeight} onChange={(event) => setTerminalHeight(Number(event.target.value))} />
             <div className="file-toolbar">
-              {simulated && <button type="button" className="fw-icon" title="Clear terminal" aria-label="Clear terminal" onClick={() => setClearRevision((value) => value + 1)}><Trash2 size={14} /></button>}
+              <button type="button" className="fw-icon" title="Clear terminal" aria-label="Clear terminal" disabled={bottom !== "terminal"}
+                onClick={() => setClearRevision((value) => value + 1)}><Trash2 size={14} /></button>
             </div>
           </div>
           <div className="ide-bottom-body">
             <div className="ide-terminal-container" hidden={bottom !== "terminal"}>
               <Suspense fallback={<p className="file-help">Loading terminal…</p>}>
                 {simulated ? <Terminal clearRevision={clearRevision} />
-                  : <WorktreeTerminal checkoutId={checkout.checkoutId} active={bottom === "terminal"} />}
+                  : <WorktreeTerminal checkoutId={checkout.checkoutId} active={bottom === "terminal"} clearRevision={clearRevision} />}
               </Suspense>
             </div>
             {bottom === "problems" && <ul className="ide-problems">

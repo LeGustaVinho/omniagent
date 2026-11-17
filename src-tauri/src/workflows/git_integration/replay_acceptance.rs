@@ -323,7 +323,7 @@ async fn restart_holds_an_effectful_writer_without_a_confirmed_capture_for_recon
                 source: WorkflowLaunchSource {
                     checkout_id: repo.checkout_id.clone(),
                     revision_id: document.revision.id,
-                },
+                }.into(),
             },
         )
         .await?;

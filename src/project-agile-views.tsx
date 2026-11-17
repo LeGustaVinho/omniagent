@@ -1,6 +1,7 @@
 import { DndContext, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { ChevronDown, ChevronRight, GitBranch, GitCommitHorizontal, GripVertical } from "lucide-react";
 import { Fragment, useState } from "react";
+import { AgileKanbanColumn, AgileWorkCard } from "@/agile-layout";
 import { DeliveryStatus } from "@/tasks-git-ui";
 import type { VerifiedMerge } from "@/delivery-merge-model";
 import { canMove, questionBlockerLabel, recordedMergeForCommit, statusLabel, workLabel, workflowStates, type AgileRow, type EvidenceTarget, type Item, type TaskQuestionBlocker, type WorkflowStatus } from "@/project-agile-model";
@@ -13,6 +14,7 @@ type Views = {
   selected?: string;
   busy: boolean;
   openWork: (id: string) => void;
+  openHistory: (id: string) => void;
   openEvidence: (evidence: EvidenceTarget) => void;
   openQuestion: (question: TaskQuestionBlocker) => void;
   openActivity: WorkspaceProps["openActivity"];
@@ -48,7 +50,7 @@ export function TaskJobLinks({ row, openQueueJob }: Pick<Views, "openQueueJob"> 
   });
 }
 
-function WorkParticipation({ row, openActivity, openWork }: Pick<Views, "openActivity" | "openWork"> & { row: AgileRow }) {
+function WorkParticipation({ row, openActivity, openHistory }: Pick<Views, "openActivity" | "openHistory"> & { row: AgileRow }) {
   const working = row.attempts?.filter(({ status }) => activeParticipant(status)) ?? [];
   const past = (row.attempts?.length ?? 0) - working.length;
   return <>
@@ -62,7 +64,7 @@ function WorkParticipation({ row, openActivity, openWork }: Pick<Views, "openAct
       </p>)}
     </section>}
     {past > 0 && <button type="button" className="justify-self-start text-primary hover:underline"
-      aria-label={`Work history for ${row.title}`} onClick={() => openWork(row.id)}>Work history · {past}</button>}
+      aria-label={`Work history for ${row.title}`} onClick={() => openHistory(row.id)}>Work history · {past}</button>}
   </>;
 }
 
@@ -90,37 +92,30 @@ function EvidenceLink({ row, reference, merge, openEvidence }: {
   </button>;
 }
 
-function KanbanCard({ row, selected, busy, openWork, openEvidence, openQuestion, openActivity, openQueueJob }: Omit<Views, "rows"> & { row: AgileRow }) {
+function KanbanCard({ row, selected, busy, openWork, openHistory, openEvidence, openQuestion, openActivity, openQueueJob }: Omit<Views, "rows"> & { row: AgileRow }) {
   const allowed = !busy && workflowStates.some(({ value }) => canMove(row, value));
   const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, isDragging } = useDraggable({ id: row.id, disabled: !allowed });
-  return <article ref={setNodeRef} className="delivery-card relative" data-selected={selected === row.id} data-dragging={isDragging}
-    style={transform ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`, zIndex: 2 } : undefined}>
-    <div className="flex items-start justify-between gap-2">
-      <button type="button" onClick={() => openWork(row.id)} aria-pressed={selected === row.id} className="min-w-0 flex-1 break-words text-left text-sm font-medium hover:underline">{row.title}</button>
-      {allowed && <button type="button" ref={setActivatorNodeRef} {...attributes} {...listeners} aria-label={`Drag ${row.title}`}
-        className="shrink-0 cursor-grab rounded p-0.5 text-muted-foreground hover:text-foreground"><GripVertical size={16} aria-hidden /></button>}
-    </div>
-    <div className="mt-1.5 grid gap-1 text-xs text-muted-foreground">
+  return <AgileWorkCard nodeRef={setNodeRef} title={row.title} identity={workLabel(row.kind)} dragging={isDragging}
+    selected={selected === row.id} onOpen={() => openWork(row.id)}
+    style={transform ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`, zIndex: 2 } : undefined}
+    handle={allowed && <button type="button" ref={setActivatorNodeRef} {...attributes} {...listeners} aria-label={`Drag ${row.title}`}
+      className="shrink-0 cursor-grab rounded p-0.5 text-muted-foreground hover:text-foreground"><GripVertical size={16} aria-hidden /></button>}>
       <ChecklistProgress items={row.checklist} />
       <WorkBlockers row={row} openWork={openWork} openQuestion={openQuestion} />
       <TaskJobLinks row={row} openQueueJob={openQueueJob} />
-      <WorkParticipation row={row} openWork={openWork} openActivity={openActivity} />
+      <WorkParticipation row={row} openHistory={openHistory} openActivity={openActivity} />
       {row.commit && <div className="flex flex-wrap gap-x-2 gap-y-1">
         <EvidenceLink row={row} reference="branch" openEvidence={openEvidence} />
         <EvidenceLink row={row} reference="commit" openEvidence={openEvidence} />
       </div>}
-    </div>
-  </article>;
+  </AgileWorkCard>;
 }
 
 function KanbanColumn({ status, label, rows, ...views }: Views & { status: WorkflowStatus; label: string }) {
   const { setNodeRef, isOver } = useDroppable({ id: status });
-  return <section ref={setNodeRef} className="delivery-column" aria-label={label} data-over={isOver}>
-    <header className="flex items-center justify-between px-1 py-1">
-      <DeliveryStatus>{label}</DeliveryStatus><span className="text-xs tabular-nums text-muted-foreground">{rows.length}</span>
-    </header>
+  return <AgileKanbanColumn nodeRef={setNodeRef} label={label} count={rows.length} over={isOver}>
     {rows.map((row) => <KanbanCard key={row.id} row={row} {...views} />)}
-  </section>;
+  </AgileKanbanColumn>;
 }
 
 export function ProjectKanban({ move, rows, ...views }: Views & { move: (row: AgileRow, next: WorkflowStatus) => void }) {
@@ -138,7 +133,7 @@ export function ProjectKanban({ move, rows, ...views }: Views & { move: (row: Ag
   </DndContext>;
 }
 
-export function ProjectAgileTable({ rows, matches, selected, busy, openWork, openEvidence, openQuestion, openActivity, openQueueJob, check }: Views & {
+export function ProjectAgileTable({ rows, matches, selected, busy, openWork, openHistory, openEvidence, openQuestion, openActivity, openQueueJob, check }: Views & {
   matches: ReadonlySet<string>;
   check: (taskId: string, item: Item, checked: boolean) => void;
 }) {
@@ -178,7 +173,7 @@ export function ProjectAgileTable({ rows, matches, selected, busy, openWork, ope
             <div className="mt-1 grid gap-1 text-xs text-muted-foreground">
               <WorkBlockers row={row} openWork={openWork} openQuestion={openQuestion} />
               <TaskJobLinks row={row} openQueueJob={openQueueJob} />
-              <WorkParticipation row={row} openWork={openWork} openActivity={openActivity} />
+              <WorkParticipation row={row} openHistory={openHistory} openActivity={openActivity} />
             </div></td>
           <td><ChecklistProgress items={items} /></td>
           <td><div className="grid gap-1">

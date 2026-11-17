@@ -129,6 +129,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/112-workflow-goal-requalification.sql"),
     include_str!("../migrations/113-workflow-signed-activation.sql"),
     include_str!("../migrations/114-native-user-plugin-actions.sql"),
+    include_str!("../migrations/115-visual-pipeline-executors.sql"),
+    include_str!("../migrations/116-workflow-trigger-optional-markdown.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -284,7 +286,7 @@ pub(crate) fn open_database(path: &Path) -> Result<Connection> {
 }
 
 fn migrate(db: &mut Connection, target: usize) -> Result<()> {
-    const TABLE_REBUILDS: [usize; 2] = [30, 106];
+    const TABLE_REBUILDS: [usize; 3] = [30, 106, 115];
     let installed: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     for rebuild in TABLE_REBUILDS {
         if rebuild <= installed as usize || rebuild > target {

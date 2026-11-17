@@ -1641,9 +1641,13 @@ impl TurnExecution {
                 );
             }
         };
-        let task_context = self
-            .app
-            .block_on(self.store.task_dispatch_context(self.plan.run.id.clone()))?;
+        // A workflow comparison can link a task while keeping the same frozen request for every candidate.
+        let task_context = if self.comparison.is_some() {
+            None
+        } else {
+            self.app
+                .block_on(self.store.task_dispatch_context(self.plan.run.id.clone()))?
+        };
         if let Some(context) = &task_context {
             context.append_to_prompt(&mut input.text)?;
         }

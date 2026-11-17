@@ -1,0 +1,19 @@
+.settings-facts {
+  display: grid;
+  grid-template-columns: minmax(5.5rem, 30%) minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 10px 0;
+}
+
+.settings-facts dt {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.settings-facts dd {
+  overflow-wrap: anywhere;
+}
+
+.settings-facts code {
+  font-size: 12px;
+}

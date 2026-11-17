@@ -436,7 +436,7 @@ pub(crate) fn bind_checklist_job_mode(
     Ok(())
 }
 
-pub(super) fn load_checklist_items(
+pub(crate) fn load_checklist_items(
     db: &Connection,
     project: &str,
     task: &str,
@@ -451,7 +451,7 @@ pub(super) fn load_checklist_items(
              WHERE project_id = i.project_id AND task_id = i.task_id AND item_id = i.id
          ))
          WHERE i.project_id = ?1 AND i.task_id = ?2 AND (?3 IS NULL OR i.id = ?3)
-         ORDER BY i.position",
+         ORDER BY i.position, i.id",
     )?;
     let mut rows = query.query(params![project, task, item, revision])?;
     let mut items = Vec::new();

@@ -160,27 +160,17 @@ impl Store {
     ) -> Result<ChecklistProgressReceipt> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let origin = pipeline_work_origin(&tx, &project, &pipeline_run)?;
-            crate::workflows::require_launch_checklist_item(
+            let receipt = set_pipeline_checklist_item_checked_in_transaction(
                 &tx,
                 &project,
                 &pipeline_run,
                 &task,
-                Some(&item),
-            )?;
-            let current =
-                item_at_expected_revision(&tx, &project, &task, &item, expected_revision)?;
-            let revised = revise_checklist_item(
-                &tx,
-                &project,
-                &task,
-                &current,
-                current.body.clone(),
+                &item,
+                expected_revision,
                 checked,
-                &origin,
             )?;
             tx.commit()?;
-            Ok(ChecklistProgressReceipt::from(&revised))
+            Ok(receipt)
         })
         .await
     }
@@ -435,6 +425,30 @@ pub(super) fn item_at_expected_revision(
         }
     );
     Ok(current)
+}
+
+pub(crate) fn set_pipeline_checklist_item_checked_in_transaction(
+    db: &Connection,
+    project: &str,
+    pipeline_run: &str,
+    task: &str,
+    item: &str,
+    expected_revision: i64,
+    checked: bool,
+) -> Result<ChecklistProgressReceipt> {
+    let origin = pipeline_work_origin(db, project, pipeline_run)?;
+    crate::workflows::require_launch_checklist_item(db, project, pipeline_run, task, Some(item))?;
+    let current = item_at_expected_revision(db, project, task, item, expected_revision)?;
+    let revised = revise_checklist_item(
+        db,
+        project,
+        task,
+        &current,
+        current.body.clone(),
+        checked,
+        &origin,
+    )?;
+    Ok(ChecklistProgressReceipt::from(&revised))
 }
 
 pub(super) fn record_operator_check_change(

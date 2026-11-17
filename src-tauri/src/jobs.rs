@@ -528,6 +528,43 @@ pub(crate) fn insert_selected_operator_job(
     Ok(job)
 }
 
+pub(crate) fn insert_workflow_comparison_candidate(
+    db: &Connection,
+    project: String,
+    scope: SessionScope,
+    request: JobRequest,
+    binding: &PipelineDispatch,
+    input: &crate::workflows::WorkflowJobInput,
+) -> Result<Job> {
+    let checkout = request
+        .checkout_id
+        .as_deref()
+        .context("Comparison checkout is unavailable")?;
+    ensure!(
+        scope.mode == SessionMode::ReadOnly
+            && request.mode == SessionMode::ReadOnly
+            && !request.requires_bridge,
+        "A comparison candidate needs an isolated read-only profile"
+    );
+    validate_operator_scope(db, &project, checkout, &scope)?;
+    crate::workflows::stage_job_input(db, &project, binding, &request, input)?;
+    let job = insert_job(
+        db,
+        project,
+        None,
+        JobOrigin::Pipeline,
+        request,
+        0,
+        Some(binding),
+    )?;
+    db.execute(
+        "UPDATE jobs SET operator_scope = ?2 WHERE id = ?1",
+        params![job.id, protection::protect(&serde_json::to_vec(&scope)?)?],
+    )?;
+    crate::workflows::bind_job_input(db, &job.id, binding, input)?;
+    Ok(job)
+}
+
 fn validate_operator_scope(
     db: &Connection,
     project: &str,

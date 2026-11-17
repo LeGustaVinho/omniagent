@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
+import type { WorkflowStartSchema } from "@/workflow-launch-fields";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type Version = { id: string; revision: string };
-type Source = { checkoutId: string; revisionId: string };
+type Source = { checkoutId: string; revisionId?: string | null };
 const events = {
   created: "Work created",
   state_changed: "Status changed",
@@ -25,8 +27,9 @@ type Activation = {
   ruleId: string; ruleName: string; ruleRevision: number; eventId: string; workId: string;
   runId: string | null; outcome: keyof typeof outcomes; detail: string | null; recordedAt: string;
 };
-type Base = { version: Version; name: string };
+type Base = { version: Version; name: string; start?: WorkflowStartSchema | null };
 const versionKey = ({ id, revision }: Version) => JSON.stringify([id, revision]);
+const needsManualInputs = (base: Base) => base.start?.fields.some((field) => field.required) ?? false;
 
 export function WorkflowTriggers({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
   const { projectId, checkoutId } = checkout;
@@ -81,12 +84,24 @@ function RuleEditor({ rule, projectId, checkoutId, onClose, onSaved }: {
   const [work, setWork] = useState<Spec["work"]>(rule?.spec.work ?? "all");
   const [targetState, setTargetState] = useState(rule?.spec.targetState ?? "");
   const [version, setVersion] = useState(rule ? versionKey(rule.spec.pipeline) : "");
-  const [source, setSource] = useState<Source | null>(rule?.spec.source ?? null);
+  const [source, setSource] = useState<Source>(rule?.spec.source ?? { checkoutId });
+  const [includeDocument, setIncludeDocument] = useState(Boolean(rule?.spec.source.revisionId));
   const bases = useQuery({
     queryKey: ["workflow-authoring-bases", projectId],
     queryFn: () => invoke<Base[]>("workflow_authoring_bases", { projectId }),
   });
-  const pipeline = bases.data?.find((base) => versionKey(base.version) === version)?.version ?? null;
+  const base = bases.data?.find((choice) => versionKey(choice.version) === version);
+  const start = base?.start;
+  const checkouts = useQuery({
+    queryKey: ["registered-checkouts"],
+    queryFn: () => invoke<ProjectCheckout[]>("registered_checkouts"),
+    enabled: Boolean(start),
+  });
+  const available = (checkouts.data ?? []).filter((entry) => entry.projectId === projectId);
+  const checkoutAvailable = start ? available.some((entry) => entry.checkoutId === source.checkoutId) : Boolean(source.checkoutId);
+  const usesDocument = !start || start.requiresDocument || includeDocument;
+  const revisionId = usesDocument ? source.revisionId : undefined;
+  const canSave = base && !needsManualInputs(base) && checkoutAvailable && (!usesDocument || revisionId) && name.trim();
   const save = useMutation({
     mutationFn: (spec: Spec) => invoke<Rule>("save_workflow_trigger_rule", {
       projectId, ruleId: rule?.id ?? null, expectedRevision: rule?.revision ?? null, spec,
@@ -95,8 +110,9 @@ function RuleEditor({ rule, projectId, checkoutId, onClose, onSaved }: {
   });
   return <form className="pipeline-form pipeline-stack pipeline-evidence" onSubmit={(form) => {
     form.preventDefault();
-    if (source && pipeline && name.trim()) save.mutate({
-      name, enabled, event, work, targetState: event === "state_changed" ? targetState || null : null, pipeline, source,
+    if (canSave && !save.isPending) save.mutate({
+      name, enabled, event, work, targetState: event === "state_changed" ? targetState || null : null,
+      pipeline: base.version, source: { checkoutId: source.checkoutId, ...(revisionId ? { revisionId } : {}) },
     });
   }}>
     <h3>{rule ? "Edit " + rule.spec.name : "New automation rule"}</h3>
@@ -113,14 +129,26 @@ function RuleEditor({ rule, projectId, checkoutId, onClose, onSaved }: {
     </select></label>}
     <label>Pipeline revision<select value={version} onChange={(input) => setVersion(input.currentTarget.value)}>
       <option value="">Choose a revision</option>
-      {bases.data?.map((base) => <option key={versionKey(base.version)} value={versionKey(base.version)}>{base.name} · {base.version.revision.slice(0, 12)}</option>)}
+      {bases.data?.map((choice) => <option key={versionKey(choice.version)} value={versionKey(choice.version)} disabled={needsManualInputs(choice)}>
+        {choice.name} · {choice.version.revision.slice(0, 12)}{needsManualInputs(choice) && " · Manual launch only"}
+      </option>)}
     </select></label>
     {bases.error && <p role="alert">{String(bases.error)}</p>}
-    <RepositoryMarkdownPicker checkoutId={checkoutId} launchLabel="Use this Markdown revision" onDeliver={(revisionId) => setSource({ checkoutId, revisionId })} />
-    {source && <p>Selected Markdown revision <code>{source.revisionId}</code>{source.checkoutId !== checkoutId && " · another worktree in this project"}</p>}
+    {base && needsManualInputs(base) && <p className="pipeline-note">This revision needs inputs supplied at manual launch.</p>}
+    {start && <label>Checkout<select value={checkoutAvailable ? source.checkoutId : ""}
+      disabled={checkouts.isPending || save.isPending} onChange={(input) => setSource({ checkoutId: input.currentTarget.value })}>
+      {!checkoutAvailable && <option value="">{checkouts.isPending ? "Loading project checkouts…" : "Select a project checkout"}</option>}
+      {available.map(({ checkoutId, checkoutRoot }) => <option key={checkoutId} value={checkoutId}>{checkoutRoot}</option>)}
+    </select></label>}
+    {start && checkouts.error && <p role="alert">{String(checkouts.error)}</p>}
+    {start && !start.requiresDocument && <label className="pipeline-checkline"><input type="checkbox" checked={includeDocument}
+      disabled={save.isPending} onChange={(input) => setIncludeDocument(input.currentTarget.checked)} />Include a Markdown revision</label>}
+    {base && checkoutAvailable && usesDocument && <RepositoryMarkdownPicker key={source.checkoutId} checkoutId={source.checkoutId}
+      launchLabel="Use this Markdown revision" onDeliver={(selected) => setSource({ ...source, revisionId: selected })} />}
+    {revisionId && <p>Selected Markdown revision <code>{revisionId}</code></p>}
     <label className="pipeline-checkline"><input type="checkbox" checked={enabled} onChange={(input) => setEnabled(input.currentTarget.checked)} />Enable rule</label>
     {save.error && <p role="alert">{String(save.error)}</p>}
-    <div className="pipeline-actions"><Button type="submit" disabled={!name.trim() || !pipeline || !source || save.isPending}>Save rule</Button>
+    <div className="pipeline-actions"><Button type="submit" disabled={!canSave || save.isPending}>Save rule</Button>
       <Button type="button" variant="outline" onClick={onClose}>Cancel</Button></div>
   </form>;
 }

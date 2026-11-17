@@ -153,6 +153,29 @@ it("saves Git automation independently of its completion milestone and destinati
   });
 });
 
+it("focuses the matching control when the same settings search result is opened again", async () => {
+  openSettings({ simulation: { epoch: 1, scenario: "windows", delivery: "note", advanceDelivery: unusedAction } });
+  const user = userEvent.setup();
+  const search = screen.getByRole("searchbox", { name: "Search settings" });
+  await user.type(search, "motion");
+  const motion = screen.getByLabelText("Motion");
+  const result = screen.getByRole("button", { name: "Motion in Appearance" });
+  for (let visit = 0; visit < 2; visit += 1) {
+    result.focus();
+    await user.keyboard("{Enter}");
+    expect(document.activeElement).toBe(motion);
+  }
+  await user.click(screen.getByRole("button", { name: "Clear settings search" }));
+  expect(document.activeElement).toBe(search);
+  expect(screen.getByRole("button", { name: "Appearance" }).getAttribute("aria-current")).toBe("page");
+});
+
+it("opens the backup section from its settings link", () => {
+  openSettings({ initialPage: "backup", simulation: { epoch: 1, scenario: "windows", delivery: "note", advanceDelivery: unusedAction } });
+  expect(screen.getByRole("heading", { name: "System" })).toBeTruthy();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Create backup" }));
+});
+
 it("checks a backup profile and recovers a failed simulated update without desktop commands", async () => {
   const user = userEvent.setup();
   openSettings({

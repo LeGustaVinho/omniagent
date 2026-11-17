@@ -22,6 +22,7 @@ use crate::{
     },
     runner::Runner,
     store::Store,
+    workflows::comparison::stage::PendingWorkflowComparison,
 };
 
 use super::{
@@ -161,6 +162,24 @@ impl Worker {
 
 impl JobScheduler {
     pub fn start(store: Store, runner: Arc<dyn Runner>, bridge: Option<PathBuf>) -> Self {
+        Self::start_inner(store, runner, bridge, None)
+    }
+
+    pub fn start_with_comparison_storage(
+        store: Store,
+        runner: Arc<dyn Runner>,
+        bridge: Option<PathBuf>,
+        comparison_storage: PathBuf,
+    ) -> Self {
+        Self::start_inner(store, runner, bridge, Some(comparison_storage))
+    }
+
+    fn start_inner(
+        store: Store,
+        runner: Arc<dyn Runner>,
+        bridge: Option<PathBuf>,
+        comparison_storage: Option<PathBuf>,
+    ) -> Self {
         let (stop, stopping) = watch::channel(false);
         let admission = LaunchGate {
             boundary: Arc::new(AsyncMutex::new(())),
@@ -174,6 +193,7 @@ impl JobScheduler {
             bridge.clone(),
             active.clone(),
             admission.clone(),
+            comparison_storage,
         ));
         Self {
             runner,
@@ -384,20 +404,25 @@ async fn drive(
     bridge: Option<PathBuf>,
     active: ActiveTurns,
     admission: LaunchGate,
+    comparison_storage: Option<PathBuf>,
 ) {
     let mut signal = store.job_signal.subscribe();
     let mut stopping = admission.stopping.clone();
     let mut workers = JoinSet::new();
+    let mut comparison_worker = JoinSet::new();
     loop {
         stopping.borrow_and_update();
         let stop = admission.is_closed();
         if stop {
-            if workers.is_empty() {
+            if workers.is_empty() && comparison_worker.is_empty() {
                 break;
             }
         } else {
             // Observe changes before reading, so a submission between the read and wait wakes us.
             signal.borrow_and_update();
+            if let Err(error) = store.refresh_workflow_comparisons().await {
+                report(&error);
+            }
             match pending_stops(&store).await {
                 Ok(stops) => {
                     let mut live = active.lock().expect("job scheduler lock");
@@ -412,6 +437,34 @@ async fn drive(
                 Err(error) => report(&error),
             }
             if let Some(_boundary) = admission.enter_admission().await {
+                let mut agile_progress = false;
+                match store.settle_ready_agile_stages().await {
+                    Ok(count) => agile_progress = count > 0,
+                    Err(error) => report(&error),
+                }
+                if comparison_worker.is_empty()
+                    && let Some(storage) = &comparison_storage
+                {
+                    match store.next_workflow_comparison().await {
+                        Ok(Some(stage)) => {
+                            let gate = admission.clone();
+                            gate.maintenance
+                                .external_work
+                                .fetch_add(1, Ordering::AcqRel);
+                            let external = ExternalWork(gate.maintenance.clone());
+                            comparison_worker.spawn(prepare_workflow_comparison(
+                                store.clone(),
+                                stage,
+                                storage.clone(),
+                                runner.identity().into(),
+                                gate,
+                                external,
+                            ));
+                        }
+                        Ok(None) => {}
+                        Err(error) => report(&error),
+                    }
+                }
                 match store
                     .claim_scheduled_attempt(environment(runner.as_ref(), bridge.as_ref()), true)
                     .await
@@ -486,15 +539,47 @@ async fn drive(
                     Ok(None) => {}
                     Err(error) => report(&error),
                 }
+                if agile_progress {
+                    continue;
+                }
             }
         }
         tokio::select! {
             _ = stopping.changed(), if !stop => {}
             _ = signal.changed(), if !stop => {},
             _ = workers.join_next(), if !workers.is_empty() => {},
+            result = comparison_worker.join_next(), if !comparison_worker.is_empty() => {
+                if let Some(Err(error)) = result {
+                    report(&error.into());
+                }
+            }
             // Recheck local executable and runner readiness after external changes.
             _ = tokio::time::sleep(Duration::from_secs(1)) => {},
         }
+    }
+}
+
+async fn prepare_workflow_comparison(
+    store: Store,
+    stage: PendingWorkflowComparison,
+    storage: PathBuf,
+    runner: String,
+    admission: LaunchGate,
+    _external: ExternalWork,
+) {
+    let prepared = stage.prepare(&store, storage, runner).await;
+    let Some(_boundary) = admission.enter_admission().await else {
+        return;
+    };
+    let recorded = match prepared {
+        Ok(prepared) => match stage.clone().commit(&store, prepared).await {
+            Ok(()) => Ok(()),
+            Err(error) => stage.fail(&store, &error).await,
+        },
+        Err(error) => stage.fail(&store, &error).await,
+    };
+    if let Err(error) = recorded {
+        report(&error);
     }
 }
 

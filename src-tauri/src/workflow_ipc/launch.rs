@@ -1,16 +1,16 @@
 use omniagent::{
     store::Store,
-    workflows::{ManualWorkflowLaunch, WorkflowLaunchReceipt, WorkflowRun},
+    workflows::{WorkflowLaunchReceipt, WorkflowLaunchRequest, WorkflowRun},
 };
 use tauri::State;
 
 #[tauri::command]
 pub async fn launch_workflow_manual(
     store: State<'_, Store>,
-    request: ManualWorkflowLaunch,
+    request: WorkflowLaunchRequest,
 ) -> Result<WorkflowRun, String> {
     store
-        .launch_workflow_manual(request)
+        .launch_workflow_request(request)
         .await
         .map_err(super::report)
 }

@@ -58,6 +58,15 @@ pub struct ApprovalReference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "evidence", rename_all = "snake_case")]
 pub enum ArtifactValue {
+    AgentResponse(super::generic_agent::WorkflowAgentResponse),
+    AgileEvent(super::launch::WorkflowLaunchEvent),
+    ResultSummary { summary: String, artifacts: Vec<String> },
+    WorkflowContext(super::agile_nodes::WorkflowContext),
+    JsonObject(serde_json::Map<String, serde_json::Value>),
+    RenderedText(String),
+    ComparisonResults(super::comparison::stage::WorkflowComparisonResults),
+    AgileTarget(super::agile_nodes::AgileTarget),
+    AgileProgressReceipt(super::agile_nodes::AgileProgressReceipt),
     Markdown(RepositoryMarkdownRevision),
     Plan {
         run_id: String,
@@ -91,6 +100,15 @@ impl ArtifactValue {
     pub fn kind(&self) -> ArtifactKind {
         match self {
             Self::Markdown(_) => ArtifactKind::Markdown,
+            Self::AgentResponse(_) => ArtifactKind::AgentResponse,
+            Self::AgileEvent(_) => ArtifactKind::AgileEvent,
+            Self::ResultSummary { .. } => ArtifactKind::ResultSummary,
+            Self::WorkflowContext(_) => ArtifactKind::WorkflowContext,
+            Self::JsonObject(_) => ArtifactKind::JsonObject,
+            Self::RenderedText(_) => ArtifactKind::RenderedText,
+            Self::ComparisonResults(_) => ArtifactKind::ComparisonResults,
+            Self::AgileTarget(_) => ArtifactKind::AgileTarget,
+            Self::AgileProgressReceipt(_) => ArtifactKind::AgileProgressReceipt,
             Self::Plan { .. } => ArtifactKind::Plan,
             Self::Review { .. } => ArtifactKind::Review,
             Self::Task(_) => ArtifactKind::Task,
@@ -511,7 +529,16 @@ impl Store {
                 );
             }
             ArtifactValue::JsonList(list) => list.validate()?,
-            ArtifactValue::JsonItem(_) | ArtifactValue::IterationResults(_) => {
+            ArtifactValue::AgentResponse(_)
+            | ArtifactValue::AgileEvent(_)
+            | ArtifactValue::ResultSummary { .. }
+            | ArtifactValue::WorkflowContext(_)
+            | ArtifactValue::JsonObject(_)
+            | ArtifactValue::RenderedText(_)
+            | ArtifactValue::ComparisonResults(_)
+            | ArtifactValue::AgileTarget(_)
+            | ArtifactValue::AgileProgressReceipt(_)
+            | ArtifactValue::JsonItem(_) | ArtifactValue::IterationResults(_) => {
                 // These values are issued only by the control scheduler for a pinned port.
             }
         }
@@ -647,10 +674,29 @@ pub(super) fn insert_scoped_artifact(
         }),
         "artifact kind does not match the pinned output port"
     );
-    ensure!(
-        pinned.definition.kind.per_unit() == unit_id.is_some(),
-        "artifact must use its pinned unit scope"
-    );
+    let stage_scoped = matches!(pinned.definition.kind, BuiltinNode::RequestInput | BuiltinNode::Approval
+        | BuiltinNode::SetFields | BuiltinNode::FilterMapList | BuiltinNode::BuildText
+        | BuiltinNode::FindWork | BuiltinNode::UpdateProgress | BuiltinNode::CompareModels
+        | BuiltinNode::Agent | BuiltinNode::SummarizeResult | BuiltinNode::LoadWorkContext | BuiltinNode::ManageWork);
+    if stage_scoped {
+        let workflow = super::runtime::load_workflow_run(db, project, &run)?
+            .context("The workflow owning the artifact is unavailable")?;
+        let definition = super::runtime::load_definition(db, project, &workflow.version)?
+            .context("The workflow definition owning the artifact is unavailable")?;
+        ensure!(super::control::unit_nodes(&definition).contains(node.as_str()) == unit_id.is_some(),
+            "artifact must use its derived unit scope");
+        if let Some(unit) = &unit_id {
+            let current: bool = db.query_row(
+                "SELECT EXISTS (SELECT 1 FROM workflow_delivery_units
+                 WHERE unit_id = ?1 AND pipeline_run_id = ?2 AND project_id = ?3 AND plan_revision IS ?4)",
+                params![unit, run, project, workflow.plan_revision], |row| row.get(0),
+            )?;
+            ensure!(current, "artifact must use the active plan's unit scope");
+        }
+    } else {
+        ensure!(pinned.definition.kind.per_unit() == unit_id.is_some(),
+            "artifact must use its pinned unit scope");
+    }
     let bytes = serde_json::to_vec(&(&run, &node, &port, &unit_id, &value))?;
     let artifact = WorkflowArtifact {
         id: digest(&bytes),

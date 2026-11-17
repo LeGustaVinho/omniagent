@@ -1,0 +1,156 @@
+.queue-layout .delivery-toolbar {
+  justify-content: space-between;
+  padding: .55rem .85rem;
+  background: var(--card);
+}
+
+.queue-heading,
+.queue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .45rem;
+}
+
+.queue-heading-icon {
+  display: grid;
+  width: 1.85rem;
+  height: 1.85rem;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: .45rem;
+  color: var(--primary);
+  background: var(--background);
+}
+
+.queue-occupancy {
+  border-radius: .3rem;
+  padding: .15rem .4rem;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: .72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-actions { margin-inline-start: auto; }
+.queue-layout .queue-icon-button { width: 2rem; padding: 0; }
+
+.queue-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+}
+
+.queue-filters {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: .2rem;
+  padding: .35rem .75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.queue-controls { flex: none; }
+.queue-body { min-block-size: 11rem; }
+.queue-job-table { overflow-wrap: anywhere; }
+
+.queue-job-select {
+  border-radius: .2rem;
+  color: var(--foreground);
+  cursor: pointer;
+  font-weight: 600;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.queue-job-select:hover { text-decoration: underline; }
+.queue-job-select:focus-visible,
+.queue-detail-header h3:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.queue-job-requester {
+  margin-top: .2rem;
+  color: var(--muted-foreground);
+  font-size: .73rem;
+}
+
+.queue-job-priority, .queue-job-attempt { font-variant-numeric: tabular-nums; }
+.queue-job-reason { color: var(--muted-foreground); }
+.queue-compact-label { display: none; }
+.queue-layout .delivery-status { white-space: normal; }
+.queue-layout .delivery-status::before { flex: none; }
+
+.queue-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: .6rem;
+  padding: .65rem .8rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card), var(--muted) 38%);
+}
+
+.queue-detail-header h3 {
+  margin: 0 0 .2rem;
+  font-size: .875rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.queue-detail-content {
+  display: grid;
+  align-content: start;
+  gap: .8rem;
+  padding: .85rem;
+  overflow-wrap: anywhere;
+}
+
+.queue-detail-content > * { min-width: 0; }
+
+@container delivery-view (max-width: 50rem) {
+  .queue-body { min-block-size: 17rem; }
+  .queue-body .queue-detail { flex-basis: 55%; }
+}
+
+@container delivery-view (max-width: 42rem) {
+  .queue-job-table { display: block; padding: .65rem; }
+  .queue-job-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .queue-job-table tbody { display: grid; gap: .45rem; }
+  .queue-job-table tbody tr {
+    display: grid;
+    grid-template-areas: "job status" "priority attempt" "reason reason";
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: .4rem .7rem;
+    padding: .6rem .65rem;
+    border: 1px solid var(--border);
+    border-radius: .45rem;
+  }
+  .queue-job-table td { padding: 0; border: 0; }
+  .queue-job-table tbody tr:has(button[aria-pressed="true"]) { border-color: var(--primary); }
+  .queue-job-table tbody tr:has(button[aria-pressed="true"]) > :first-child { border: 0; box-shadow: none; }
+  .queue-job-title { grid-area: job; }
+  .queue-job-status { grid-area: status; justify-self: end; align-self: start; }
+  .queue-job-priority { grid-area: priority; }
+  .queue-job-attempt { grid-area: attempt; }
+  .queue-job-reason { grid-area: reason; }
+  .queue-compact-label {
+    display: block;
+    font-size: .68rem;
+    color: var(--muted-foreground);
+  }
+  .queue-body .queue-detail {
+    flex: 0 0 auto;
+    max-height: 58%;
+  }
+}
+
+@media (forced-colors: active) {
+  .queue-job-table tbody tr:has(button[aria-pressed="true"]) { border-color: Highlight; }
+}

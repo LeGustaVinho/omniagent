@@ -1,0 +1,82 @@
+.agile-workspace .agile-workspace-heading { min-height: 3.25rem; gap: .75rem; }
+.agile-view-switch { display: flex; flex-wrap: wrap; gap: .15rem; align-items: center; }
+.agile-view-switch .delivery-tab { display: inline-flex; align-items: center; gap: .35rem; }
+.agile-view-switch svg { flex-shrink: 0; }
+.agile-workspace-action { margin-inline-start: auto; }
+.agile-workspace .agile-filters { gap: .5rem; }
+.agile-search { position: relative; flex: 1 1 10rem; min-width: min(100%, 9rem); max-width: 17rem; }
+.agile-search > svg { position: absolute; inset-inline-start: .6rem; top: 50%; transform: translateY(-50%); color: var(--muted-foreground); pointer-events: none; }
+.agile-search > input { width: 100%; }
+
+.agile-column-heading { display: flex; align-items: center; justify-content: space-between; gap: .35rem; padding: .2rem .25rem; }
+.agile-column-count { color: var(--muted-foreground); font-size: .75rem; font-variant-numeric: tabular-nums; }
+.agile-work-card { position: relative; }
+.agile-work-card-meta { display: flex; align-items: center; justify-content: space-between; gap: .4rem; color: var(--muted-foreground); }
+.agile-work-card-meta small { font-size: .69rem; line-height: 1.3; }
+.agile-work-card-title { display: block; width: 100%; padding-block: .36rem; text-align: start; font-size: .875rem; font-weight: 600; overflow-wrap: anywhere; }
+.agile-work-card-title:hover { text-decoration: underline; }
+.agile-work-card-content { display: grid; gap: .3rem; min-width: 0; color: var(--muted-foreground); font-size: .75rem; line-height: 1.45; }
+.agile-work-card-content:empty { display: none; }
+
+.agile-detail-frame { display: flex; flex: 1; min-height: 0; min-width: 0; flex-direction: column; }
+.agile-detail-heading { display: flex; flex: none; align-items: flex-start; justify-content: space-between; gap: .75rem; padding: .8rem .9rem; border-bottom: 1px solid var(--border); }
+.agile-detail-heading h3 { margin-block: .2rem; font-size: .95rem; font-weight: 650; line-height: 1.4; overflow-wrap: anywhere; }
+.agile-detail-identity, .agile-detail-status { color: var(--muted-foreground); font-size: .75rem; }
+.agile-detail-tabs { display: flex; flex: none; gap: .15rem; padding: .3rem .5rem; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.agile-detail-tabs .delivery-tab { flex: none; padding-inline: .42rem; font-size: .75rem; }
+.agile-detail-content { display: grid; flex: 1; align-content: start; gap: .9rem; padding: .85rem; }
+.agile-detail-content > [hidden] { display: none; }
+.agile-detail-content > * { min-width: 0; }
+.agile-detail-content .agile-checklist { padding: .65rem; }
+.agile-detail-content .agile-checklist form > input { flex: 1 1 8rem; }
+.agile-workspace .pipeline-stack:not([hidden]), .agile-create-form { display: grid; align-content: start; gap: .55rem; min-width: 0; }
+.agile-detail-content .pipeline-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; }
+.agile-detail-content .pipeline-evidence {
+  padding: .65rem;
+  border: 1px solid var(--border);
+  border-radius: .45rem;
+  background: var(--background);
+  overflow-wrap: anywhere;
+}
+.agile-detail-content .pipeline-evidence summary { cursor: pointer; font-weight: 550; }
+.agile-detail-content .pipeline-evidence[open] > summary { margin-block-end: .4rem; }
+.agile-workspace .pipeline-form label { display: grid; gap: .3rem; min-width: 0; }
+.agile-workspace .pipeline-form :is(input:not([type="checkbox"], [type="radio"]), select, textarea) {
+  min-width: 0;
+  padding: .375rem .625rem;
+  border: 1px solid var(--border);
+  border-radius: .375rem;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: .8125rem;
+}
+.agile-workspace .pipeline-form label.agile-check { display: flex; }
+.agile-workspace :is(button, input, select, textarea, summary):focus-visible,
+.agile-dialog :is(button, input, select):focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.agile-icon-button { flex: none; padding: .25rem; border-radius: .3rem; color: var(--muted-foreground); }
+.agile-icon-button:hover:not(:disabled) { background: var(--muted); color: var(--foreground); }
+.agile-icon-button:disabled { opacity: .5; }
+.agile-dialog-overlay { position: fixed; z-index: 50; inset: 0; background: rgb(0 0 0 / .6); }
+.agile-dialog {
+  position: fixed;
+  z-index: 50;
+  inset-block-start: 50%;
+  inset-inline-start: 50%;
+  transform: translate(-50%, -50%);
+  width: min(36rem, calc(100vw - 2rem));
+  max-height: min(47rem, calc(100dvh - 2rem));
+  overflow: auto;
+  padding: 1.1rem 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: .75rem;
+  background: var(--card);
+  box-shadow: 0 16px 38px rgb(0 0 0 / .28);
+}
+.agile-dialog-heading { display: flex; justify-content: space-between; align-items: center; gap: .7rem; margin-block-end: 1rem; font-size: 1rem; font-weight: 650; }
+.agile-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; margin-block-start: .5rem; }
+
+@container delivery-view (max-width: 50rem) {
+  .agile-detail-heading { padding-block: .625rem; }
+  .agile-detail-content { padding: .7rem; }
+}

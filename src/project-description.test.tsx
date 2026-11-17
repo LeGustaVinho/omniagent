@@ -106,6 +106,7 @@ async function openDescription(user: User, item: Work) {
   await user.selectOptions(screen.getByRole("combobox", { name: "Kanban level" }), item === epic ? "epic" : item === subtask ? "subtask" : "task");
   await user.click(await screen.findByRole("button", { name: item.title }));
   const details = within(screen.getByRole("region", { name: item.title }));
+  if (item !== epic) await user.click(details.getByRole("button", { name: "Context" }));
   await user.click(details.getByRole("button", { name: "Open description" }));
   const panel = within(await details.findByRole("region", { name: "Work description" }));
   const editorLabel = `Markdown editor for ${item.id}.md`;
@@ -130,9 +131,14 @@ it.each([epic, task, subtask])("edits and saves $title through Source, Live Prev
   expect(invoke).toHaveBeenCalledWith("repository_note_catalog", { checkoutId });
   expect(editor.state.doc.toString()).toBe(savedBefore?.markdown ?? "");
 
-  const checklist = item === epic ? undefined : within(details.getByRole("region", { name: "Task checklist" }));
-  const checkboxes = () => checklist?.getAllByRole<HTMLInputElement>("checkbox").map(({ checked }) => checked);
-  if (checklist) await waitFor(() => expect(checkboxes()).toEqual([false, true]));
+  const expectChecklistUnchanged = async () => {
+    if (item === epic) return;
+    await user.click(details.getByRole("button", { name: "Overview" }));
+    const checklist = within(details.getByRole("region", { name: "Task checklist" }));
+    await waitFor(() => expect(checklist.getAllByRole<HTMLInputElement>("checkbox").map(({ checked }) => checked)).toEqual([false, true]));
+    await user.click(details.getByRole("button", { name: "Context" }));
+  };
+  await expectChecklistUnchanged();
 
   await user.click(panel.getByRole("button", { name: "Source" }));
   const source = `# ${item.title}\n\nSource edit for this description.\n\n- [ ] Confirm description details\n`;
@@ -149,7 +155,7 @@ it.each([epic, task, subtask])("edits and saves $title through Source, Live Prev
   const final = source.replace("[ ]", "[x]");
   expect(editor.state.doc.toString()).toBe(final);
   await waitFor(() => expect(states.get(item.id)!.draft?.markdown).toBe(final));
-  if (checklist) expect(checkboxes()).toEqual([false, true]);
+  await expectChecklistUnchanged();
   expect(invoke).not.toHaveBeenCalledWith("revise_project_checklist_item", expect.anything());
 
   await user.click(panel.getByRole("button", { name: "Reading" }));
@@ -170,7 +176,7 @@ it.each([epic, task, subtask])("edits and saves $title through Source, Live Prev
     ...owner, expectedRevision: savedBefore?.id ?? null, expectedDraftRevision: draft.revision, markdown: final,
   });
   await waitFor(() => expect(panel.queryByText("Unsaved changes")).toBeNull());
-  if (checklist) expect(checkboxes()).toEqual([false, true]);
+  await expectChecklistUnchanged();
 });
 
 it("restores a persisted draft after remount and rebases it only after the saved revision conflicts", async () => {

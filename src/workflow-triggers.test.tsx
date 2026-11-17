@@ -56,3 +56,51 @@ it("activates a project rule for a selected immutable workflow and shows its exe
       work: "subtask", pipeline, source: { checkoutId: "worktree", revisionId: note.id } },
   }));
 });
+
+it("allows a scoped checkout without a note for event workflows and labels manual-only revisions", async () => {
+  const pipeline = { id: "workflow", revision: "event-revision" };
+  const manual = { id: "workflow", revision: "manual-revision" };
+  const start = { fields: [], requiresDocument: false, requiresWork: false, requiresEvent: true };
+  ipc.mockImplementation(async (command, args) => {
+    switch (command) {
+      case "workflow_trigger_rules": return [];
+      case "workflow_trigger_activations": return [];
+      case "workflow_authoring_bases": return [
+        { version: pipeline, name: "Event pipeline", start },
+        { version: manual, name: "Manual pipeline", start: { ...start, requiresEvent: false,
+          fields: [{ name: "title", valueType: "text", required: true }],
+        } },
+      ];
+      case "registered_checkouts": return [
+        { projectId: "current", checkoutId: "worktree", checkoutRoot: "Current checkout" },
+        { projectId: "current", checkoutId: "other", checkoutRoot: "Other checkout" },
+        { projectId: "foreign", checkoutId: "foreign", checkoutRoot: "Foreign checkout" },
+      ];
+      case "save_workflow_trigger_rule": return args;
+      default: throw new Error(command);
+    }
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}>
+    <WorkflowTriggers checkout={{ projectId: "current", checkoutId: "worktree", repositoryRoot: ".", checkoutRoot: "." }}
+      openWorkspace={vi.fn()} />
+  </QueryClientProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "New rule" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Rule name" }), { target: { value: "Run when created" } });
+  const unavailable = await screen.findByRole<HTMLOptionElement>("option", { name: /Manual pipeline.*Manual launch only/ });
+  expect(unavailable.disabled).toBe(true);
+  fireEvent.change(screen.getByRole("combobox", { name: "Pipeline revision" }), {
+    target: { value: JSON.stringify([pipeline.id, pipeline.revision]) },
+  });
+  await screen.findByRole("option", { name: "Other checkout" });
+  expect(screen.queryByRole("option", { name: "Foreign checkout" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "Repository Markdown source" })).toBeNull();
+  fireEvent.change(screen.getByRole("combobox", { name: "Checkout" }), { target: { value: "other" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Enable rule" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save rule" }));
+  await waitFor(() => expect(ipc).toHaveBeenCalledWith("save_workflow_trigger_rule", {
+    projectId: "current", ruleId: null, expectedRevision: null,
+    spec: { name: "Run when created", enabled: true, event: "created", targetState: null,
+      work: "all", pipeline, source: { checkoutId: "other" } },
+  }));
+});

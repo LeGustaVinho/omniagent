@@ -206,8 +206,8 @@
 
 .ide-file-view, .code-editor { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; flex: 1; }
 .ide-file-caption { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: 6px 13px; color: var(--muted-foreground); font-size: 11px; min-height: 27px; border-bottom: 1px solid var(--border); }
-.ide-file-caption > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ide-file-caption > :last-child { flex: none; }
+.ide-file-caption > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ide-file-caption > :last-child { flex: 0 1 auto; max-width: 40%; font-variant-numeric: tabular-nums; }
 .code-editor-target { flex: 1; min-height: 0; min-width: 0; }
 .code-editor > p { position: absolute; top: 16px; left: 16px; margin: 0; }
 .ide-bottom { min-height: 100px; display: flex; flex-direction: column; border-top: 1px solid var(--border); background: var(--background); }
@@ -241,6 +241,8 @@
 .cm-note-code { background: var(--muted); }
 .note-editor-tools { display: flex; gap: 2px; align-items: center; padding: 3px 8px; min-height: 35px; border-bottom: 1px solid var(--border); background: var(--background); }
 .note-editor-mount { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.note-statusbar { flex-wrap: wrap; gap: 4px 12px; }
+.note-status-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .note-statusbar .fw-primary { padding-inline: 9px; }
 
 .note-inspector { display: flex; flex-direction: column; width: 216px; flex: 0 0 216px; min-height: 0; border-left: 1px solid var(--border); background: var(--card); overflow: hidden; }

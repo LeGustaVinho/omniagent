@@ -1,7 +1,8 @@
 use serde_json::{Value, json};
 
 use crate::workflows::{
-    NodeConfiguration, PortType, WorkflowDefinition, command::validate_command_binding,
+    BuiltinNode, NodeConfiguration, PortType, WorkflowDefinition, WorkflowStartSchema,
+    agile_nodes::FindWorkResultMode, command::validate_command_binding,
     mcp_tools::validate_mcp_binding,
 };
 
@@ -30,6 +31,8 @@ struct MemberPreview {
     requirements: Vec<String>,
     simulatable: bool,
     sample_inputs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_schema: Option<WorkflowStartSchema>,
     sample_nodes: Vec<SampleNode>,
     graph_definitions: BTreeMap<String, NodeDefinition>,
 }
@@ -181,6 +184,7 @@ impl<'a> ReviewCatalog<'a> {
                     .get(key)
                     .context("The reviewed node definitions are unavailable")?
                     .clone(),
+                layout: self.document.layouts.get(key).cloned().unwrap_or_default(),
                 blockers: Vec::new(),
             }));
         }
@@ -302,6 +306,8 @@ fn preview_member(
                 artifact.version.destination,
                 &artifact.body,
                 &artifact.references,
+                &artifact.layout,
+                Some(&artifact.definitions),
             )
         })
         .transpose()?;
@@ -310,6 +316,12 @@ fn preview_member(
         member.destination,
         &member.body,
         &member.references,
+        catalog
+            .document
+            .layouts
+            .get(&member.key)
+            .unwrap_or(&BTreeMap::new()),
+        catalog.document.definitions.get(&member.key),
     )?;
     diff.compare("", before.as_ref(), Some(&after));
     let affected_uses = member
@@ -343,7 +355,33 @@ fn preview_member(
         }
     }
     let sample_inputs = match &member.body {
-        PackageArtifactBody::Pipeline { .. } => vec!["document".into()],
+        PackageArtifactBody::Pipeline { graph } => {
+            if let Some(start) = graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == BuiltinNode::TypedStart)
+            {
+                let mut inputs = Vec::new();
+                if matches!(&start.configuration, NodeConfiguration::TypedStart(config) if config.has_fields())
+                {
+                    inputs.push("inputs".into());
+                }
+                inputs.extend(
+                    ["document", "task", "event"]
+                        .into_iter()
+                        .filter(|port| {
+                            graph
+                                .wires
+                                .iter()
+                                .any(|wire| wire.from.node == start.id && wire.from.port == *port)
+                        })
+                        .map(str::to_owned),
+                );
+                inputs
+            } else {
+                vec!["document".into()]
+            }
+        }
         PackageArtifactBody::Subflow { inputs, .. } => inputs.keys().cloned().collect(),
         PackageArtifactBody::McpTool { input_schema, .. } => input_schema
             .get("properties")
@@ -359,26 +397,36 @@ fn preview_member(
         .get(&member.key)
         .cloned()
         .unwrap_or_default();
+    let mut start_schema = None;
     let sample_nodes = match &member.body {
         PackageArtifactBody::Pipeline { .. } | PackageArtifactBody::Subflow { .. } => {
             match catalog.compile(member, &mut requirements) {
                 Ok((graph, definitions)) => {
+                    if matches!(member.body, PackageArtifactBody::Pipeline { .. }) {
+                        start_schema = WorkflowStartSchema::for_definition(&graph);
+                    }
                     graph_definitions = definitions;
                     Some(
                         graph
                             .nodes
                             .into_iter()
                             .filter(|node| !simulation::intrinsic(node.instance.kind))
-                            .map(|node| SampleNode {
+                            .map(|node| {
+                                let single_work = matches!(&node.instance.configuration,
+                                    NodeConfiguration::FindWork { query } if query.result == FindWorkResultMode::Single);
+                                SampleNode {
                                 node_id: node.instance.id,
                                 title: node.definition.title,
                                 outputs: node
                                     .definition
                                     .outputs
                                     .into_iter()
-                                    .filter(|port| port.value != PortType::Control)
+                                    .filter(|port| port.value != PortType::Control
+                                        && (node.instance.kind != BuiltinNode::FindWork || single_work
+                                            || !matches!(port.name.as_str(), "task" | "target")))
                                     .map(|port| port.name)
                                     .collect(),
+                                }
                             })
                             .collect(),
                     )
@@ -416,6 +464,7 @@ fn preview_member(
         requirements,
         simulatable: sample_nodes.is_some(),
         sample_inputs,
+        start_schema,
         sample_nodes: sample_nodes.unwrap_or_default(),
         graph_definitions,
     })
@@ -525,6 +574,8 @@ fn fields(
     destination: PackageDestination,
     body: &PackageArtifactBody,
     references: &impl Serialize,
+    layout: &BTreeMap<String, WorkflowNodePosition>,
+    definitions: Option<&BTreeMap<String, crate::workflows::NodeDefinition>>,
 ) -> Result<Value> {
     let mut value = serde_json::to_value(body)?;
     if let PackageArtifactBody::Pipeline { graph } | PackageArtifactBody::Subflow { graph, .. } =
@@ -545,7 +596,15 @@ fn fields(
             .collect();
         value["graph"] = json!({ "name": graph.name, "nodes": nodes, "wires": wires });
     }
-    Ok(json!({ "name": name, "destination": destination, "body": value, "references": references }))
+    let definition_versions: BTreeMap<_, _> = definitions
+        .into_iter()
+        .flat_map(|pins| pins.iter())
+        .map(|(id, definition)| (id, definition.revision))
+        .collect();
+    Ok(
+        json!({ "name": name, "destination": destination, "body": value, "references": references,
+        "layout": layout, "definitionVersions": definition_versions }),
+    )
 }
 
 #[derive(Default)]

@@ -258,10 +258,11 @@ fn main() {
                 );
             }
             let scheduler = tauri::async_runtime::block_on(async {
-                JobScheduler::start(
+                JobScheduler::start_with_comparison_storage(
                     store.clone(),
                     Arc::new(DirectWindowsRunner),
                     std::env::current_exe().ok(),
+                    root.join("comparison-checkouts"),
                 )
             });
             let monitor = AutomaticUpdateMonitor::start(
@@ -404,7 +405,9 @@ fn main() {
             workflow_ipc::authoring::list_workflow_packages,
             workflow_ipc::authoring::inspect_workflow_package,
             workflow_ipc::authoring::preview_workflow_package_revision,
+            workflow_ipc::workflow_agent_response,
             workflow_ipc::authoring::simulate_workflow_package_revision,
+            workflow_ipc::decisions::resolve_workflow_stage_decision,
             workflow_ipc::authoring::create_workflow_package,
             workflow_ipc::authoring::save_workflow_package,
             workflow_ipc::authoring::request_workflow_package_changes,

@@ -170,6 +170,7 @@ impl Store {
         ordinal: usize,
         evidence: GoalCriterionEvidence,
     ) -> Result<GoalVerification> {
+        let workflow_attempt = run.clone();
         let updated = self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let scope = result_scope(&tx, &project, &run)?
@@ -198,6 +199,7 @@ impl Store {
             tx.commit()?;
             Ok(updated)
         }).await?;
+        self.settle_generic_agent_after_attempt(workflow_attempt).await;
         self.job_signal.send_replace(());
         Ok(updated)
     }

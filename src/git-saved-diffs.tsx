@@ -1,9 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
+import type { editor as MonacoEditor } from "monaco-editor";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ConversationHistoryDeletion } from "@/conversation-history-deletion";
+import { GitDiffFrame } from "@/git-diff-view";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
+import { InlineIssue } from "@/tasks-git-ui";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type SavedAttempt = { runId: string; checkoutId: string; label: string; conversationId?: string; historyDeleted?: boolean };
@@ -17,40 +20,55 @@ type ChangeArtifact = {
 type Evidence = { kind: "saved"; artifact: ChangeArtifact } | { kind: "unavailable"; reason: string };
 type Part = { id: string; label: string; encoded?: string; language: "diff" | "plaintext"; sha?: string };
 
-export function SavedGitDiffs({ projectId, target, openActivity }: { projectId: string; target?: string; openActivity: WorkspaceProps["openActivity"] }) {
-  const requested = target?.startsWith("attempt:") ? target.slice("attempt:".length) : "";
+type SavedGitDiffsProps = {
+  projectId: string; target?: string; openActivity: WorkspaceProps["openActivity"]; onClose?: () => void;
+};
+
+export function SavedGitDiffs(props: SavedGitDiffsProps) {
+  return <RecordedAttempts key={`${props.projectId}:${props.target ?? ""}`} {...props} />;
+}
+
+function RecordedAttempts({ projectId, target, openActivity, onClose }: SavedGitDiffsProps) {
+  const requested = target?.startsWith("attempt:") ? target.slice("attempt:".length) : undefined;
   const [selected, select] = useState(requested);
-  useEffect(() => { if (requested) select(requested); }, [requested]);
   const attempts = useQuery({ queryKey: ["git-saved-attempts", projectId], queryFn: () => invoke<SavedAttempt[]>("git_saved_attempts", { projectId }), retry: false });
-  const runId = selected || attempts.data?.[0]?.runId || "";
+  const runId = selected ?? attempts.data?.[0]?.runId ?? "";
   const evidence = useQuery({
     queryKey: ["git-attempt-diff", projectId, runId],
     queryFn: () => invoke<Evidence | null>("attempt_worktree_evidence", { projectId, runId }), enabled: !!runId, retry: false,
   });
   const attemptOptions = attempts.data ?? [];
   const attempt = attemptOptions.find((item) => item.runId === runId);
-  return <div className="delivery-main flex min-w-0 flex-col gap-3 p-4">
-    <div className="flex flex-wrap items-end gap-2">
-      <label className="delivery-field flex-1">Recorded attempt
+  const artifact = !evidence.error && !attempt?.historyDeleted && evidence.data?.kind === "saved" ? evidence.data.artifact : undefined;
+  return <GitDiffFrame source="saved" title="Saved diff" onClose={onClose}>
+    <div className="delivery-toolbar delivery-filters items-end">
+      <label className="delivery-field min-w-0 flex-1">Recorded attempt
         <select className="delivery-filter" value={runId} onChange={(event) => select(event.target.value)} disabled={!runId}>
-          {!runId && <option value="">No saved attempts</option>}
+          {!runId && <option value="">Select an attempt</option>}
           {runId && !attemptOptions.some(({ runId: id }) => id === runId) && <option value={runId}>{runId}</option>}
           {attemptOptions.map((attempt) => <option key={attempt.runId} value={attempt.runId}>{attempt.label} · {attempt.runId.slice(0, 8)}</option>)}
         </select>
       </label>
-      {runId && <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs" onClick={() => openActivity(runId)}>View attempt</Button>}
+      {(attempt || evidence.data) && <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs"
+        onClick={() => attempt?.conversationId ? openActivity(runId, attempt.conversationId) : openActivity(runId)}>View attempt</Button>}
     </div>
-    {(attempts.error || evidence.error) && <p role="alert">{String(attempts.error ?? evidence.error)}</p>}
-    {(attempts.isPending || (runId && evidence.isPending)) && <p role="status">Loading recorded Git evidence…</p>}
-    {evidence.data === null && <p>Saved Git evidence is unavailable for this attempt.</p>}
-    {evidence.data?.kind === "unavailable" && <p>{evidence.data.reason}</p>}
-    {evidence.data?.kind === "saved" && <RecordedArtifact key={`evidence:${runId}`} artifact={evidence.data.artifact} />}
-    {attempt?.conversationId && (evidence.data?.kind === "saved" || attempt.historyDeleted) && <details key={`delete:${runId}`}>
+    {artifact ? <RecordedArtifact key={`${runId}:${artifact.revision}`} artifact={artifact} />
+      : <div className="delivery-empty">
+        {(attempts.error || evidence.error) && <InlineIssue>{String(attempts.error ?? evidence.error)}</InlineIssue>}
+        {((!runId && attempts.isPending) || (runId && evidence.isPending)) && <p role="status">Loading recorded Git evidence…</p>}
+        {!runId && !attempts.isPending && !attempts.error && <h3>No saved attempts</h3>}
+        {evidence.data?.kind === "unavailable" ? <p>{evidence.data.reason}</p>
+          : attempt?.historyDeleted ? <p>The recorded diff was removed from history.</p>
+          : evidence.data === null && <p>Saved Git evidence is unavailable for this attempt.</p>}
+      </div>}
+    {attempt?.conversationId && (artifact || attempt.historyDeleted) && <details className="shrink-0 border-t border-border px-3 py-2" key={`delete:${runId}`}>
       <summary className="cursor-pointer text-sm">Delete recorded diff</summary>
-      <ConversationHistoryDeletion conversationId={attempt.conversationId}
-        attemptDiffs={[{ runId, label: attempt.label, deleted: attempt.historyDeleted }]} />
+      <div className="max-h-60 overflow-auto pt-2">
+        <ConversationHistoryDeletion conversationId={attempt.conversationId}
+          attemptDiffs={[{ runId, label: attempt.label, deleted: attempt.historyDeleted }]} />
+      </div>
     </details>}
-  </div>;
+  </GitDiffFrame>;
 }
 
 function RecordedArtifact({ artifact }: { artifact: ChangeArtifact }) {
@@ -65,21 +83,37 @@ function RecordedArtifact({ artifact }: { artifact: ChangeArtifact }) {
   const [choice, select] = useState("");
   const part = parts.find((entry) => entry.id === choice) ?? parts[0];
   const text = decode(part?.encoded);
-  return <>
-    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 break-all font-mono text-xs" aria-label="Recorded comparison identity">
-      <dt>Branch</dt><dd>{artifact.start.worktree.branch}</dd>
-      <dt>Starting HEAD</dt><dd>{artifact.start.starting.head}</dd>
-      <dt>Captured HEAD</dt><dd>{artifact.candidate.head}</dd>
-      <dt>Capture revision</dt><dd>{artifact.revision}</dd>
-    </dl>
-    {part ? <>
-      <label className="delivery-field">Recorded diff source<select className="delivery-filter" value={part.id} onChange={(event) => select(event.target.value)}>
-        {parts.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}
-      </select></label>
-      {part.sha && <p className="break-all font-mono text-xs">SHA-256 {part.sha}</p>}
-      {text === undefined ? <p>Recorded text is unavailable for this file.</p> : <RecordedMonaco key={part.id} label={part.label} text={text} language={part.language} />}
-    </> : <p>No patch was recorded for this attempt.</p>}
-  </>;
+  return <div className="delivery-body">
+    <div className="delivery-main flex min-w-0 flex-col">
+      {part ? <>
+        <div className="delivery-toolbar delivery-filters">
+          <label className="delivery-field min-w-0">Recorded diff source
+            <select className="delivery-filter" value={part.id} onChange={(event) => select(event.target.value)}>
+              {parts.map((entry) => <option key={entry.id} value={entry.id}>{entry.label}</option>)}
+            </select>
+          </label>
+          {part.sha && <p className="wrap-anywhere font-mono text-xs">SHA-256 {part.sha}</p>}
+        </div>
+        {text === undefined ? <p className="p-3 text-sm">Recorded text is unavailable for this file.</p>
+          : <RecordedMonaco key={part.id} label={part.label} text={text} language={part.language} />}
+      </> : <p className="p-3 text-sm">No patch was recorded for this attempt.</p>}
+    </div>
+    <aside className="delivery-detail" aria-label="Recorded comparison identity">
+      <div className="delivery-detail-content grid content-start gap-3 p-3.5">
+        <h3 className="text-sm font-semibold">Capture details</h3>
+        <dl className="grid gap-2 text-xs">
+          {([
+            ["Branch", artifact.start.worktree.branch],
+            ["Starting HEAD", artifact.start.starting.head],
+            ["Captured HEAD", artifact.candidate.head],
+            ["Capture revision", artifact.revision],
+          ] as const).map(([label, value]) => <div key={label}>
+            <dt className="text-muted-foreground">{label}</dt><dd className="wrap-anywhere font-mono">{value}</dd>
+          </div>)}
+        </dl>
+      </div>
+    </aside>
+  </div>;
 }
 
 function decode(encoded?: string) {
@@ -95,19 +129,29 @@ function RecordedMonaco({ label, text, language }: { label: string; text: string
   const host = useRef<HTMLDivElement>(null);
   const [error, setError] = useState(false);
   useEffect(() => {
-    let close: (() => void) | undefined;
     let active = true;
+    let model: MonacoEditor.ITextModel | undefined;
+    let editor: MonacoEditor.IStandaloneCodeEditor | undefined;
+    let observer: MutationObserver | undefined;
     void loadMonaco().then((monaco) => {
       if (!active || !host.current) return;
-      const model = monaco.editor.createModel(text, language);
-      const editor = monaco.editor.create(host.current, {
-        model, ariaLabel: label, readOnly: true, automaticLayout: true, theme: monacoTheme(),
+      const theme = () => monaco.editor.setTheme(monacoTheme());
+      model = monaco.editor.createModel(text, language);
+      editor = monaco.editor.create(host.current, {
+        model, ariaLabel: label, readOnly: true, automaticLayout: true,
         minimap: { enabled: false }, scrollBeyondLastLine: false,
       });
-      close = () => { editor.dispose(); model.dispose(); };
+      theme();
+      observer = new MutationObserver(theme);
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-app-theme", "data-app-motion", "style", "class"] });
     }).catch(() => { if (active) setError(true); });
-    return () => { active = false; close?.(); };
+    return () => {
+      active = false;
+      observer?.disconnect();
+      editor?.dispose();
+      model?.dispose();
+    };
   }, [label, language, text]);
-  return error ? <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all text-xs" aria-label={label}>{text}</pre>
-    : <div ref={host} className="min-h-64 flex-1" aria-label={label} />;
+  return error ? <pre className="min-h-40 flex-1 overflow-auto whitespace-pre-wrap wrap-anywhere p-3 text-xs" aria-label={label}>{text}</pre>
+    : <div ref={host} className="min-h-45 flex-1" aria-label={label} />;
 }

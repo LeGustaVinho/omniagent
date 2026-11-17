@@ -1,7 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { Plus } from "lucide-react";
+import { Dialog } from "radix-ui";
 import type { JobInspection } from "@/bindings/JobInspection";
+import { AgileDetailFrame, AgileDetailTabs, AgileSearch, AgileWorkDialog, AgileWorkspaceFrame, type WorkDetailView } from "@/agile-layout";
 import { Button } from "@/components/ui/button";
 import { TaskGoals } from "@/goal-evidence";
 import { TaskParticipants, taskParticipantsQuery } from "@/task-participants";
@@ -14,7 +17,7 @@ import { projectQueueQuery } from "@/queue-model";
 import { SavedDeliveryMerge, VerifiedDeliveryHistory } from "@/repository-delivery-history";
 import {
   canComplete, canMove, checklistQuery, commitQuery, deliveryQuery, epicStateQuery, latestEvidence, questionBlockerLabel, recordedMergeForCommit, statusLabel,
-  taskStateQuery, terminalStatus, workflowStates, workDeliveryUnitsQuery, workLevels,
+  taskStateQuery, terminalStatus, workflowStates, workDeliveryUnitsQuery, workLabel, workLevels,
   type AgileRow, type EvidenceTarget, type Hierarchy, type Item, type TaskQuestionBlocker, type Work, type WorkKind,
   type WorkflowState, type WorkflowStatus,
 } from "@/project-agile-model";
@@ -25,12 +28,14 @@ type Change = (operation: () => Promise<unknown>) => void;
 type DeliveryLink = { taskId: string; title: string; deliveryId: string };
 
 function LiveTaskDetails({
-  projectId, task, change, busy, links, selectedEvidence, selectedDeliveryId, contributors, openDelivery, openWork, move, check, relatedWork,
+  projectId, task, change, busy, links, selectedEvidence, selectedDeliveryId, contributors, openDelivery, openWork, move, check,
+  relatedWork, parentWork, childWork, view, selectView, close,
 }: {
   projectId: string; task: AgileRow; change: Change; busy: boolean; links: WorkspaceProps; contributors: DeliveryLink[];
   selectedEvidence?: EvidenceTarget; selectedDeliveryId?: string; openDelivery: (link: DeliveryLink) => void; openWork: (id: string) => void;
   move: (row: AgileRow, state: WorkflowStatus) => void; check: (id: string, item: Item, checked: boolean) => void;
-  relatedWork: Work[];
+  relatedWork: Work[]; parentWork?: AgileRow; childWork: AgileRow[];
+  view: WorkDetailView; selectView: (view: WorkDetailView) => void; close: () => void;
 }) {
   const args = { projectId, taskId: task.id };
   const [itemText, setItemText] = useState("");
@@ -47,136 +52,170 @@ function LiveTaskDetails({
   const recordedUnits = new Set(deliveries.data?.flatMap(({ evidence }) => evidence.kind === "verified_commit" ? evidence.unitEvidenceIds : []));
   const unitHistory = new Map(units.data?.map((entry) => [entry.commit.id, entry]));
   const independentUnits = units.data?.filter(({ commit }) => !recordedUnits.has(commit.id));
-  const selectedCommit = selectedEvidence ? unitHistory.get(selectedEvidence.evidenceId)?.commit ??
-    (task.commit?.id === selectedEvidence.evidenceId ? task.commit : undefined) : undefined;
+  const inspectedEvidence = selectedEvidence ?? task.evidence;
+  const selectedCommit = inspectedEvidence ? unitHistory.get(inspectedEvidence.evidenceId)?.commit ??
+    (task.commit?.id === inspectedEvidence.evidenceId ? task.commit : undefined) : undefined;
   const selectedMerge = selectedCommit && recordedMergeForCommit(selectedCommit, deliveries.data ?? task.deliveries ?? [], saved?.completion);
   const waiting = saved?.waitingForMerge ? "Waiting for merge" : saved?.waitingForCommit ? "Waiting for commit" : undefined;
-  return <section className="pipeline-stack" aria-label={task.title}>
-    <h3 className="font-medium break-words">{task.title}</h3>
-    {saved && <p role="status">{waiting && !question ? `${statusLabel(saved.state)} · ${waiting}` : statusLabel(saved.state)}</p>}
-    {feasible.length > 0 && <label className="delivery-field">Move work to <select className="delivery-filter" value="" disabled={busy} onChange={(event) => {
-      const next = feasible.find(({ value }) => value === event.currentTarget.value)?.value;
-      if (next) move({ ...task, workflow: saved }, next);
-    }}><option value="">Choose a state</option>{feasible.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}</select></label>}
-    {selectedEvidence && <section className="pipeline-form pipeline-stack" aria-label="Recorded Git evidence">
-      <h4>Recorded Git evidence</h4><VerifiedDeliveryHistory {...args} evidenceId={selectedEvidence.evidenceId}
-        history={unitHistory.get(selectedEvidence.evidenceId)} openActivity={links.openActivity} openWorkspace={links.openWorkspace} showPatch />
-      {selectedMerge && <SavedDeliveryMerge {...args} workflowRunId={selectedMerge.workflowRunId} receipt={selectedMerge} />}
-    </section>}
-    <ProjectDescription kind="work" id={task.id} links={links} />
-    {question && <section className="pipeline-form pipeline-stack" aria-label="Task question blocker">
-      <p role="status">{questionBlockerLabel(question)}</p>
-      <Button type="button" variant="outline"
-        onClick={() => links.openActivity(question.runId, question.conversationId, question.requestId)}>Open originating question</Button>
-    </section>}
-    {Boolean(saved?.prerequisiteBlockers?.length) && <section className="pipeline-form pipeline-stack" aria-label="Task dependency blockers">
-      <h4>Waiting for dependencies</h4>
-      {saved?.prerequisiteBlockers?.map(({ taskId, title }) => <Button key={taskId} type="button" variant="outline" onClick={() => openWork(taskId)}>{title}</Button>)}
-    </section>}
-    {Boolean(task.blockedJobs?.length) && <section className="pipeline-form pipeline-stack" aria-label="Task job blockers">
-      <h4>Job blockers</h4>
-      <TaskJobLinks row={task} openQueueJob={links.openQueueJob} />
-    </section>}
-    {saved?.activeWorkflowRunId && <Button variant="outline" onClick={() => links.openWorkspace("pipelines", saved.activeWorkflowRunId ?? undefined)}>Open delivery workflow</Button>}
-    {task.kind !== "epic" && <WorkflowLaunchPicker key={task.id} projectId={projectId}
-      checkoutId={links.checkout.checkoutId} workId={task.id} openWorkspace={links.openWorkspace} />}
-    <section className="pipeline-form pipeline-stack" aria-label="Task checklist">
-      <h4 className="font-medium">Checklist</h4>
-      {checklist.data?.items.map((item) => <label key={item.id} className="flex items-center gap-2 break-words">
-        <input type="checkbox" checked={item.checked} disabled={busy}
-          onChange={(event) => check(task.id, item, event.currentTarget.checked)} /> {item.body}
-      </label>)}
-      <form className="pipeline-actions" onSubmit={(event) => {
-        event.preventDefault();
-        if (!itemText.trim()) return;
-        change(async () => {
-          await invoke("append_project_checklist_item", { ...args, body: itemText.trim() });
-          setItemText("");
-        });
-      }}>
-        <input aria-label="New checklist item" value={itemText} onChange={(event) => setItemText(event.currentTarget.value)} />
-        <Button type="submit" variant="outline" disabled={busy || !itemText.trim()}>Add checklist item</Button>
-      </form>
-    </section>
-    {task.kind !== "epic" && <TaskWorkSettings scope={args} workKind={task.kind} candidates={relatedWork}
-      items={checklist.data?.items ?? []} openQueueJob={links.openQueueJob} />}
-    {saved?.pendingRepositoryChanges && <p>Additional repository changes are assigned to this work item.</p>}
-    <div className="pipeline-actions">
-      {mayCompleteManually && <Button disabled={busy} onClick={() => change(() =>
-        invoke("record_manual_task_delivery", { ...args, note: null }))}>Record manual completion</Button>}
-      {closed && (saved?.hasDirectWork || !task.hasChildren) && <Button variant="outline" disabled={busy}
-        onClick={() => change(() => invoke("reopen_task_delivery", args))}>Reopen work</Button>}
-      {saved && !closed && <Button variant="outline" disabled={busy}
-        onClick={() => change(() => invoke("cancel_task_delivery", args))}>Cancel work</Button>}
+  return <AgileDetailFrame label="Work detail" title={task.title} identity={workLabel(task.kind)}
+    state={saved ? statusLabel(saved.state) : undefined} note={question ? undefined : waiting}
+    closeLabel="Close detail" close={close} navigation={<AgileDetailTabs view={view} onViewChange={selectView} />}>
+    <div className="pipeline-stack" hidden={view !== "Overview"}>
+      <WorkRelations parent={parentWork} children={childWork} openWork={openWork} />
+      {feasible.length > 0 && <label className="delivery-field">Move work to <select className="delivery-filter" value="" disabled={busy} onChange={(event) => {
+        const next = feasible.find(({ value }) => value === event.currentTarget.value)?.value;
+        if (next) move({ ...task, workflow: saved }, next);
+      }}><option value="">Choose a state</option>{feasible.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}</select></label>}
+      {question && <section className="pipeline-form pipeline-stack" aria-label="Task question blocker">
+        <p role="status">{questionBlockerLabel(question)}</p>
+        <Button type="button" variant="outline"
+          onClick={() => links.openActivity(question.runId, question.conversationId, question.requestId)}>Open originating question</Button>
+      </section>}
+      {Boolean(saved?.prerequisiteBlockers?.length) && <section className="pipeline-form pipeline-stack" aria-label="Task dependency blockers">
+        <h4>Waiting for dependencies</h4>
+        {saved?.prerequisiteBlockers?.map(({ taskId, title }) => <Button key={taskId} type="button" variant="outline" onClick={() => openWork(taskId)}>{title}</Button>)}
+      </section>}
+      {Boolean(task.blockedJobs?.length) && <section className="pipeline-form pipeline-stack" aria-label="Task job blockers">
+        <h4>Job blockers</h4>
+        <TaskJobLinks row={task} openQueueJob={links.openQueueJob} />
+      </section>}
+      <section className="agile-checklist pipeline-form" aria-label="Task checklist">
+        <h4 className="font-medium">Checklist</h4>
+        {checklist.data?.items.map((item) => <label key={item.id} className="agile-check">
+          <input type="checkbox" checked={item.checked} disabled={busy}
+            onChange={(event) => check(task.id, item, event.currentTarget.checked)} /> {item.body}
+        </label>)}
+        <form className="pipeline-actions" onSubmit={(event) => {
+          event.preventDefault();
+          if (!itemText.trim()) return;
+          change(async () => {
+            await invoke("append_project_checklist_item", { ...args, body: itemText.trim() });
+            setItemText("");
+          });
+        }}>
+          <input aria-label="New checklist item" value={itemText} onChange={(event) => setItemText(event.currentTarget.value)} />
+          <Button type="submit" variant="outline" disabled={busy || !itemText.trim()}>Add checklist item</Button>
+        </form>
+      </section>
+      {saved?.pendingRepositoryChanges && <p>Additional repository changes are assigned to this work item.</p>}
+      <div className="pipeline-actions">
+        {mayCompleteManually && <Button disabled={busy} onClick={() => change(() =>
+          invoke("record_manual_task_delivery", { ...args, note: null }))}>Record manual completion</Button>}
+        {closed && (saved?.hasDirectWork || !task.hasChildren) && <Button variant="outline" disabled={busy}
+          onClick={() => change(() => invoke("reopen_task_delivery", args))}>Reopen work</Button>}
+        {saved && !closed && <Button variant="outline" disabled={busy}
+          onClick={() => change(() => invoke("cancel_task_delivery", args))}>Cancel work</Button>}
+      </div>
     </div>
-    <TaskAssignment projectId={projectId} taskId={task.id} />
-    <TaskGoals projectId={projectId} taskId={task.id} openActivity={links.openActivity} />
-    <TaskParticipants projectId={projectId} taskId={task.id} openActivity={links.openActivity} />
-    {saved?.pendingMerge && <section className="pipeline-evidence grid gap-1" aria-label="Committed delivery awaiting integration">
-      <h4 className="font-medium">Committed delivery awaiting integration</h4>
-      <p>Completion SHA <code className="break-all">{saved.pendingMerge.sourceSha}</code></p>
-      <p>Working branch <code className="break-all">{saved.pendingMerge.sourceBranch}</code></p>
-      <p>Destination branch <code className="break-all">{saved.pendingMerge.destinationBranch}</code></p>
-      <Button type="button" variant="outline" onClick={() => links.openWorkspace("pipelines", saved.pendingMerge?.workflowRunId)}>
-        Open workflow awaiting merge
-      </Button>
-    </section>}
-    {Boolean(independentUnits?.length) && <section className="pipeline-stack" aria-label="Other committed units">
-      <h4 className="font-medium">Other committed units</h4>
-      {independentUnits?.map((history) => <details key={history.commit.id} className="pipeline-evidence">
-        <summary>{history.commit.purpose}</summary>
-        <VerifiedDeliveryHistory {...args} evidenceId={history.commit.id} history={history}
-          openActivity={links.openActivity} openWorkspace={links.openWorkspace} />
-      </details>)}
-    </section>}
-    {Boolean(deliveries.data?.length) && <section className="pipeline-stack" aria-label="Delivery history">
-      <h4 className="font-medium">{task.kind === "task" ? "Task delivery history" : "Sub-Task delivery history"}</h4>
-      {deliveries.data?.map(({ id, evidence, recordedAt, merge }) => <details key={id} className="pipeline-evidence" open={id === selectedDeliveryId || undefined}>
-        <summary>{evidence.kind === "manual" ? "Manual completion" : "Verified delivery"} · {new Date(recordedAt).toLocaleString()}</summary>
-        {evidence.kind === "manual" ? (evidence.note && <p>{evidence.note}</p>) : <>
-          <p>Completion SHA <code className="break-all">{evidence.completionSha}</code></p>
-          <SavedDeliveryMerge {...args} workflowRunId={evidence.workflowRunId} receipt={merge} />
-          {saved?.activeWorkflowRunId !== evidence.workflowRunId && <Button type="button" variant="outline"
-            onClick={() => links.openWorkspace("pipelines", evidence.workflowRunId)}>Open saved workflow</Button>}
-          <ul className="pipeline-stack">{evidence.unitEvidenceIds.map((evidenceId) =>
-            <li key={evidenceId}><VerifiedDeliveryHistory {...args} evidenceId={evidenceId} history={unitHistory.get(evidenceId)}
-              openActivity={links.openActivity} openWorkspace={links.openWorkspace} /></li>)}</ul>
-        </>}
-      </details>)}
-    </section>}
-    {contributors.length > 0 && <section className="pipeline-stack" aria-label="Contributing Sub-Task deliveries">
-      <h4 className="font-medium">Contributing Sub-Task deliveries</h4>
-      <ul className="pipeline-stack">{contributors.map((link) => <li key={link.taskId}>
-        <Button type="button" variant="outline" onClick={() => openDelivery(link)}
-          aria-label={`Open Sub-Task delivery for ${link.title}`}>{link.title}</Button>
-      </li>)}</ul>
-    </section>}
+    <div className="pipeline-stack" hidden={view !== "Workflow"}>
+      {saved?.activeWorkflowRunId && <Button variant="outline" onClick={() => links.openWorkspace("pipelines", saved.activeWorkflowRunId ?? undefined)}>Open delivery workflow</Button>}
+      {task.kind !== "epic" && <WorkflowLaunchPicker key={task.id} projectId={projectId}
+        checkoutId={links.checkout.checkoutId} workId={task.id} openWorkspace={links.openWorkspace} />}
+      {task.kind !== "epic" && <TaskWorkSettings scope={args} workKind={task.kind} candidates={relatedWork}
+        items={checklist.data?.items ?? []} openQueueJob={links.openQueueJob} />}
+      <TaskAssignment projectId={projectId} taskId={task.id} />
+      <TaskGoals projectId={projectId} taskId={task.id} openActivity={links.openActivity} />
+    </div>
+    <div className="pipeline-stack" hidden={view !== "Context"}>
+      <ProjectDescription kind="work" id={task.id} links={links} />
+    </div>
+    <div className="pipeline-stack" hidden={view !== "Changes"}>
+      {inspectedEvidence && view === "Changes" && <section className="pipeline-form pipeline-stack" aria-label="Recorded Git evidence">
+        <h4>Recorded Git evidence</h4><VerifiedDeliveryHistory {...args} evidenceId={inspectedEvidence.evidenceId}
+          history={unitHistory.get(inspectedEvidence.evidenceId)} openActivity={links.openActivity} openWorkspace={links.openWorkspace} showPatch />
+        {selectedMerge && <SavedDeliveryMerge {...args} workflowRunId={selectedMerge.workflowRunId} receipt={selectedMerge} />}
+      </section>}
+      {saved && !inspectedEvidence && !saved.pendingMerge && <p className="text-sm text-muted-foreground">No verified repository changes recorded.</p>}
+      {saved?.pendingMerge && <section className="pipeline-evidence grid gap-1" aria-label="Committed delivery awaiting integration">
+        <h4 className="font-medium">Committed delivery awaiting integration</h4>
+        <p>Completion SHA <code className="break-all">{saved.pendingMerge.sourceSha}</code></p>
+        <p>Working branch <code className="break-all">{saved.pendingMerge.sourceBranch}</code></p>
+        <p>Destination branch <code className="break-all">{saved.pendingMerge.destinationBranch}</code></p>
+        <Button type="button" variant="outline" onClick={() => links.openWorkspace("pipelines", saved.pendingMerge?.workflowRunId)}>
+          Open workflow awaiting merge
+        </Button>
+      </section>}
+    </div>
+    <div className="pipeline-stack" hidden={view !== "Work history"}>
+      <TaskParticipants projectId={projectId} taskId={task.id} openActivity={links.openActivity} />
+      {Boolean(independentUnits?.length) && <section className="pipeline-stack" aria-label="Other committed units">
+        <h4 className="font-medium">Other committed units</h4>
+        {independentUnits?.map((history) => <details key={history.commit.id} className="pipeline-evidence">
+          <summary>{history.commit.purpose}</summary>
+          <VerifiedDeliveryHistory {...args} evidenceId={history.commit.id} history={history}
+            openActivity={links.openActivity} openWorkspace={links.openWorkspace} />
+        </details>)}
+      </section>}
+      {Boolean(deliveries.data?.length) && <section className="pipeline-stack" aria-label="Delivery history">
+        <h4 className="font-medium">{task.kind === "task" ? "Task delivery history" : "Sub-Task delivery history"}</h4>
+        {deliveries.data?.map(({ id, evidence, recordedAt, merge }) => <details key={id} className="pipeline-evidence" open={id === selectedDeliveryId || undefined}>
+          <summary>{evidence.kind === "manual" ? "Manual completion" : "Verified delivery"} · {new Date(recordedAt).toLocaleString()}</summary>
+          {evidence.kind === "manual" ? (evidence.note && <p>{evidence.note}</p>) : <>
+            <p>Completion SHA <code className="break-all">{evidence.completionSha}</code></p>
+            <SavedDeliveryMerge {...args} workflowRunId={evidence.workflowRunId} receipt={merge} />
+            {saved?.activeWorkflowRunId !== evidence.workflowRunId && <Button type="button" variant="outline"
+              onClick={() => links.openWorkspace("pipelines", evidence.workflowRunId)}>Open saved workflow</Button>}
+            <ul className="pipeline-stack">{evidence.unitEvidenceIds.map((evidenceId) =>
+              <li key={evidenceId}><VerifiedDeliveryHistory {...args} evidenceId={evidenceId} history={unitHistory.get(evidenceId)}
+                openActivity={links.openActivity} openWorkspace={links.openWorkspace} /></li>)}</ul>
+          </>}
+        </details>)}
+      </section>}
+      {contributors.length > 0 && <section className="pipeline-stack" aria-label="Contributing Sub-Task deliveries">
+        <h4 className="font-medium">Contributing Sub-Task deliveries</h4>
+        <ul className="pipeline-stack">{contributors.map((link) => <li key={link.taskId}>
+          <Button type="button" variant="outline" onClick={() => openDelivery(link)}
+            aria-label={`Open Sub-Task delivery for ${link.title}`}>{link.title}</Button>
+        </li>)}</ul>
+      </section>}
+    </div>
     {error && <p role="alert">{String(error)}</p>}
-  </section>;
+  </AgileDetailFrame>;
 }
 
-function EpicState({ projectId, epic, links }: { projectId: string; epic: Work; links: WorkspaceProps }) {
+function WorkRelations({ parent, children, openWork }: { parent?: AgileRow; children: AgileRow[]; openWork: (id: string) => void }) {
+  return <>
+    {parent && <button type="button" className="agile-ref justify-self-start" onClick={() => openWork(parent.id)}>
+      {workLabel(parent.kind)} · {parent.title}
+    </button>}
+    {children.length > 0 && <section aria-label="Child work" className="pipeline-stack">
+      <h4 className="text-xs font-semibold">Child work</h4>
+      <ul className="divide-y divide-border">{children.map((child) => <li key={child.id} className="py-1.5">
+        <button type="button" className="agile-ref" aria-label={`Open ${workLabel(child.kind)} ${child.title}`}
+          onClick={() => openWork(child.id)}>{child.title}</button>
+      </li>)}</ul>
+    </section>}
+  </>;
+}
+
+function EpicState({ projectId, epic, links, children, openWork, close }: {
+  projectId: string; epic: Work; links: WorkspaceProps; children: AgileRow[]; openWork: (id: string) => void; close: () => void;
+}) {
   const state = useQuery(epicStateQuery(projectId, epic.id));
-  return <section className="pipeline-stack" aria-label={epic.title}>
-    <h3 className="font-medium">{epic.title}</h3>
-    {state.data && <p role="status">{statusLabel(state.data)}</p>}
+  return <AgileDetailFrame label="Work detail" title={epic.title} identity="Epic"
+    state={state.data ? statusLabel(state.data) : undefined} closeLabel="Close detail" close={close}>
+    <WorkRelations children={children} openWork={openWork} />
     <ProjectDescription kind="epic" id={epic.id} links={links} />
     {state.error && <p role="alert">{String(state.error)}</p>}
-  </section>;
+  </AgileDetailFrame>;
 }
 
 export function ProjectTasksWorkspace(props: WorkspaceProps) {
   const { projectId } = props.checkout;
   const client = useQueryClient();
   const [selected, setSelected] = useState(props.target);
+  const [detailView, setDetailView] = useState<WorkDetailView>("Overview");
   const [selectedEvidence, setSelectedEvidence] = useState<EvidenceTarget>();
   const [selectedDelivery, setSelectedDelivery] = useState<DeliveryLink>();
-  useEffect(() => { setSelected(props.target); setSelectedEvidence(undefined); setSelectedDelivery(undefined); }, [props.target]);
+  useEffect(() => {
+    setSelected(props.target); setDetailView("Overview"); setSelectedEvidence(undefined); setSelectedDelivery(undefined);
+  }, [props.target]);
   const [view, setView] = useState<"kanban" | "table">("kanban");
   const [level, setLevel] = useState<WorkKind>("task");
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [participantFilter, setParticipantFilter] = useState<ParticipantFilter>({ agent: "", provider: "", model: null });
+  const [createOpen, setCreateOpen] = useState(false);
   const [kind, setKind] = useState<WorkKind>("task");
   const [parent, setParent] = useState("");
   const [title, setTitle] = useState("");
@@ -228,20 +267,28 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   }) : [];
   const normalizedSearch = search.trim().toLocaleLowerCase();
   const byParticipant = hasParticipantFilter(participantFilter);
+  const hasFilters = Boolean(search || filterStatus || byParticipant);
   const matched = rows.filter(({ title, status, attempts }) => (!filterStatus || status === filterStatus) &&
     title.toLocaleLowerCase().includes(normalizedSearch) && (!byParticipant || attempts?.some((attempt) => matchesParticipant(attempt, participantFilter))));
   const kanbanRows = matched.filter(({ kind }) => kind === level);
   const matchIds = new Set(matched.map(({ id }) => id));
   const readError = [...states, ...epicStates, ...deliveries, ...checklists, ...commitReads, ...participants, queue].find(({ error }) => error)?.error;
-  function openWork(id: string) {
+  function openWork(id: string, view: WorkDetailView = "Overview") {
     setSelected(id);
+    setDetailView(view);
+    setSelectedEvidence(undefined);
+    setSelectedDelivery(undefined);
+  }
+  function closeWork() {
+    setSelected(undefined);
     setSelectedEvidence(undefined);
     setSelectedDelivery(undefined);
   }
   const views = {
     selected, busy: mutation.isPending, openWork,
+    openHistory: (id: string) => openWork(id, "Work history"),
     openActivity: props.openActivity, openQueueJob: props.openQueueJob,
-    openEvidence: (target: EvidenceTarget) => { openWork(target.taskId); setSelectedEvidence(target); },
+    openEvidence: (target: EvidenceTarget) => { openWork(target.taskId, "Changes"); setSelectedEvidence(target); },
     openQuestion: ({ runId, conversationId, requestId }: TaskQuestionBlocker) => props.openActivity(runId, conversationId, requestId),
   };
   function check(taskId: string, item: Item, checked: boolean) {
@@ -266,63 +313,79 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
       openWork(id);
       setLevel(kind);
       setTitle("");
+      setCreateOpen(false);
     });
   };
-  return <section className="delivery-view" aria-label="Tasks workspace">
-    <header className="delivery-toolbar flex-wrap">
-      <h2>Tasks</h2>
-      <nav className="flex items-center gap-1" aria-label="Agile view">
-        <button type="button" className="delivery-tab" aria-pressed={view === "kanban"} onClick={() => setView("kanban")}>Kanban</button>
-        <button type="button" className="delivery-tab" aria-pressed={view === "table"} onClick={() => setView("table")}>Table</button>
-      </nav>
+  function changeCreationOpen(next: boolean) {
+    if (mutation.isPending) return;
+    if (next) {
+      mutation.reset();
+      if (!title.trim()) { setKind(view === "kanban" ? level : "task"); setParent(""); }
+    }
+    setCreateOpen(next);
+  }
+  const related = current ? rows.filter(({ parentId }) => parentId === current.id) : [];
+  return <Dialog.Root open={createOpen} onOpenChange={changeCreationOpen}>
+    <AgileWorkspaceFrame title="Tasks" view={view} onViewChange={setView}
+      action={<Dialog.Trigger asChild><Button type="button" className="px-3 py-1.5 text-xs aria-disabled:opacity-50" aria-disabled={mutation.isPending}>
+        <Plus size={15} aria-hidden="true" /> New work
+      </Button></Dialog.Trigger>} filters={<>
       {view === "kanban" && <select aria-label="Kanban level" className="delivery-filter" value={level} onChange={(event) => setLevel(event.currentTarget.value as WorkKind)}>
         {workLevels.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
       </select>}
-      <input aria-label="Search work" placeholder="Search work" className="delivery-filter" value={search} onChange={(event) => setSearch(event.currentTarget.value)} />
+      <AgileSearch label="Search work" value={search} onChange={setSearch} />
       <select aria-label="Filter by state" className="delivery-filter" value={filterStatus} onChange={(event) => setFilterStatus(event.currentTarget.value)}>
         <option value="">All states</option>{workflowStates.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
       </select>
       <AgileParticipantFilters key={projectId} attempts={participants.flatMap(({ data }) => data ?? [])}
         value={participantFilter} onChange={setParticipantFilter} />
-    </header>
-    <div className="delivery-body">
-      <div className="delivery-main">
-        <ProjectWorkModes projectId={projectId} />
-        <details className="pipeline-form m-4"><summary className="cursor-pointer font-medium">New work</summary>
-        <form className="pipeline-stack mt-3" onSubmit={add}>
-          <label>Work type <select value={kind} onChange={(event) => {
-            setKind(event.currentTarget.value as typeof kind);
-            setParent("");
-          }}><option value="task">Task</option><option value="epic">Epic</option><option value="subtask">Sub-Task</option></select></label>
-          {kind !== "epic" && <label>{kind === "task" ? "Epic" : "Parent Task"} <select value={parent} onChange={(event) => setParent(event.currentTarget.value)}>
+      {hasFilters && <button type="button" className="delivery-tab" onClick={() => {
+        setSearch(""); setFilterStatus(""); setParticipantFilter({ agent: "", provider: "", model: null });
+      }}>Clear filters</button>}
+    </>}>
+      <div className="delivery-body">
+        <div className="delivery-main">
+          <ProjectWorkModes projectId={projectId} />
+          {(mutation.error || hierarchy.error || readError) && <p className="mx-4" role="alert">{String(mutation.error ?? hierarchy.error ?? readError)}</p>}
+          {hierarchy.isPending && <p className="delivery-empty" role="status">Loading project work…</p>}
+          {hierarchy.data && !rows.length && <p className="delivery-empty">No project work yet.</p>}
+          {byParticipant && participants.some(({ isPending }) => isPending) && <p className="delivery-empty" role="status">Loading work participants…</p>}
+          {hierarchy.data && rows.length > 0 && (!byParticipant || !participants.some(({ isPending }) => isPending)) &&
+            !(view === "kanban" ? kanbanRows.length : matched.length) && <p className="delivery-empty">No matching work.</p>}
+          {view === "kanban" ? <ProjectKanban {...views} rows={kanbanRows} move={move} /> :
+            <ProjectAgileTable {...views} rows={rows} matches={matchIds} check={check} />}
+        </div>
+        {current && (current.kind === "epic" ?
+          <EpicState key={current.id} projectId={projectId} epic={current} links={props} children={related} openWork={openWork} close={closeWork} /> :
+          <LiveTaskDetails key={current.id} projectId={projectId} task={current} busy={mutation.isPending} relatedWork={all.map(({ task }) => task)}
+            view={detailView} selectView={setDetailView} close={closeWork} links={props} openWork={openWork} move={move} check={check}
+            parentWork={rows.find(({ id }) => id === current.parentId)} childWork={related}
+            change={(operation) => mutation.mutate(operation)}
+            contributors={contributors} selectedDeliveryId={selectedDelivery?.taskId === current.id ? selectedDelivery.deliveryId : undefined}
+            openDelivery={(link) => { openWork(link.taskId, "Work history"); setSelectedDelivery(link); }}
+            selectedEvidence={selectedEvidence?.taskId === current.id ? selectedEvidence : undefined} />)}
+      </div>
+    </AgileWorkspaceFrame>
+    <AgileWorkDialog title="New work" description="Choose the work type, parent, and title." closeLabel="Close work editor"
+      busy={mutation.isPending}>
+      <form className="agile-create-form" onSubmit={add}>
+        <label className="delivery-field">Work type <select className="delivery-filter" value={kind} disabled={mutation.isPending} onChange={(event) => {
+          setKind(event.currentTarget.value as WorkKind);
+          setParent("");
+        }}><option value="task">Task</option><option value="epic">Epic</option><option value="subtask">Sub-Task</option></select></label>
+        {kind !== "epic" && <label className="delivery-field">{kind === "task" ? "Epic" : "Parent Task"}
+          <select className="delivery-filter" value={parent} required={kind === "subtask"} disabled={mutation.isPending} onChange={(event) => setParent(event.currentTarget.value)}>
             <option value="">{kind === "task" ? "Standalone Task" : "Select a Task"}</option>
             {(kind === "task" ? epics : tasks.map(({ task }) => task)).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
           </select></label>}
-          <label>Title <input value={title} onChange={(event) => setTitle(event.currentTarget.value)} /></label>
+        <label className="delivery-field">Title <input className="delivery-filter" value={title} required disabled={mutation.isPending}
+          onChange={(event) => setTitle(event.currentTarget.value)} /></label>
+        {mutation.error && <p role="alert">{String(mutation.error)}</p>}
+        <div className="agile-dialog-actions">
+          <Dialog.Close asChild><Button type="button" variant="outline" disabled={mutation.isPending}>Cancel</Button></Dialog.Close>
           <Button type="submit" disabled={mutation.isPending || !title.trim() || (kind === "subtask" && !parent)}>Create work</Button>
-        </form>
-        </details>
-        {(mutation.error || hierarchy.error || readError) && <p className="mx-4" role="alert">{String(mutation.error ?? hierarchy.error ?? readError)}</p>}
-        {hierarchy.data && !rows.length && <p className="mx-4 text-muted-foreground">No project work yet.</p>}
-        {byParticipant && participants.some(({ isPending }) => isPending) && <p className="mx-4" role="status">Loading work participants…</p>}
-        {hierarchy.data && rows.length > 0 && (!byParticipant || !participants.some(({ isPending }) => isPending)) &&
-          !(view === "kanban" ? kanbanRows.length : matched.length) &&
-          <p className="mx-4 text-muted-foreground">No matching work.</p>}
-        {view === "kanban" ? <ProjectKanban {...views} rows={kanbanRows} move={move} /> :
-          <ProjectAgileTable {...views} rows={rows} matches={matchIds} check={check} />}
-      </div>
-      {current && <aside className="delivery-detail" aria-label="Work detail">
-        <div className="delivery-detail-content grid gap-3 p-4">
-          <button type="button" className="justify-self-end text-xs text-muted-foreground hover:underline"
-            onClick={() => { setSelected(undefined); setSelectedEvidence(undefined); setSelectedDelivery(undefined); }}>Close detail</button>
-          {current.kind === "epic" ? <EpicState key={current.id} projectId={projectId} epic={current} links={props} /> :
-            <LiveTaskDetails key={current.id} projectId={projectId} task={current} busy={mutation.isPending} relatedWork={all.map(({ task }) => task)}
-              change={(operation) => mutation.mutate(operation)} links={props} openWork={openWork} move={move} check={check}
-              contributors={contributors} selectedDeliveryId={selectedDelivery?.taskId === current.id ? selectedDelivery.deliveryId : undefined}
-              openDelivery={(link) => { openWork(link.taskId); setSelectedDelivery(link); }}
-              selectedEvidence={selectedEvidence?.taskId === current.id ? selectedEvidence : undefined} />}
         </div>
-      </aside>}
-    </div>
-  </section>;
+      </form>
+    </AgileWorkDialog>
+  </Dialog.Root>;
 }

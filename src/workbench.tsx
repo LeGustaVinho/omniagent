@@ -261,7 +261,7 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
             <RunInspectorNavigation.Provider value={{ openActivity: real.openActivity, openWorkspace: real.openWorkspace, activeRunId: realSide?.type === "activity" ? realSide.runId : undefined,
               openGitAttempt: (runId) => real.openWorkspace("git", `attempt:${runId}`) }}>
               <WorkspaceViews nav={realNavigation} context={real} sidebar={!preview && sidebar} onSidebarChange={changeSidebar} compact={compact}
-                onOpenOtherCheckout={onSelectCheckout} />
+                onOpenOtherCheckout={onSelectCheckout} openSystem={() => showSettings("system")} />
             </RunInspectorNavigation.Provider>
           </div>
           {preview && simulated && <div className="work-deck" key={"simulation-workspaces:" + preview.epoch}>
@@ -308,12 +308,12 @@ function WorkspaceViews({ nav, context, sidebar, onSidebarChange, compact, openS
     return <div key={id} className="work-view" hidden={!visible}>
       <Suspense fallback={loading}>
         {workspace === "conversations" ? context.simulation
-          ? <ConversationsPreview {...context} target={target} />
+          ? <ConversationsPreview {...context} target={target} compact={compact} />
           : <RealConversations checkout={context.checkout} target={target} sidebar={visible && sidebar} onSidebarChange={onSidebarChange}
             compact={compact} onOpenOtherCheckout={onOpenOtherCheckout} />
           : workspace === "diagnostics" ? context.simulation
             ? <SimulationDiagnostics {...context} openSystem={openSystem} />
-            : <RealDiagnostics checkout={context.checkout} />
+            : <RealDiagnostics checkout={context.checkout} openSystem={openSystem} />
             : View && <View {...context} target={target} />}
       </Suspense>
     </div>;

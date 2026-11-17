@@ -53,8 +53,26 @@ pub struct WorkflowSimulation {
     member_key: String,
     inputs: BTreeMap<String, Value>,
     steps: Vec<TraceStep>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph: Option<TraceGraph>,
     subflows: Vec<TraceSubflow>,
     outputs: BTreeMap<String, TraceExport>,
+}
+
+#[derive(Serialize)]
+struct TraceGraph {
+    nodes: Vec<TraceGraphNode>,
+    wires: Vec<crate::workflows::Wire>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    layout: BTreeMap<String, WorkflowNodePosition>,
+}
+
+#[derive(Serialize)]
+struct TraceGraphNode {
+    id: String,
+    title: String,
+    inputs: Vec<crate::workflows::Port>,
+    outputs: Vec<crate::workflows::Port>,
 }
 
 #[derive(Serialize)]
@@ -124,7 +142,7 @@ impl Store {
             let document = review_document(&tx, &project, &draft, &revision)?;
             let catalog = ReviewCatalog::new(&tx, &project, &document, &revision);
             let member = catalog.draft_member(&member_key)?;
-            let (steps, subflows, outputs) = match &member.body {
+            let (steps, subflows, outputs, graph) = match &member.body {
                 PackageArtifactBody::Pipeline { .. } | PackageArtifactBody::Subflow { .. } => {
                     let (definition, _) = catalog.compile(member, &mut Vec::new())?;
                     let steps = simulate_graph(&definition, &member.body, &scenario)?;
@@ -161,17 +179,37 @@ impl Store {
                         }
                         _ => BTreeMap::new(),
                     };
-                    (steps, subflows, outputs)
+                    let graph = TraceGraph {
+                        nodes: definition
+                            .nodes
+                            .into_iter()
+                            .map(|node| TraceGraphNode {
+                                id: node.instance.id,
+                                title: node.definition.title,
+                                inputs: node.definition.inputs,
+                                outputs: node.definition.outputs,
+                            })
+                            .collect(),
+                        wires: definition.wires,
+                        layout: document
+                            .layouts
+                            .get(&member_key)
+                            .cloned()
+                            .unwrap_or_default(),
+                    };
+                    (steps, subflows, outputs, Some(graph))
                 }
                 PackageArtifactBody::Command { output, .. } => (
                     vec![simulate_single(member, &scenario, Some(*output))?],
                     Vec::new(),
                     BTreeMap::new(),
+                    None,
                 ),
                 PackageArtifactBody::McpTool { .. } => (
                     vec![simulate_single(member, &scenario, None)?],
                     Vec::new(),
                     BTreeMap::new(),
+                    None,
                 ),
                 _ => anyhow::bail!("The selected artifact has no simulation entry point"),
             };
@@ -180,6 +218,7 @@ impl Store {
                 member_key,
                 inputs: scenario.inputs,
                 steps,
+                graph,
                 subflows,
                 outputs,
             })
@@ -336,6 +375,11 @@ pub(super) fn intrinsic(kind: BuiltinNode) -> bool {
             | BuiltinNode::Result
             | BuiltinNode::IterationLimit
             | BuiltinNode::BuildList
+            | BuiltinNode::SetFields
+            | BuiltinNode::FilterMapList
+            | BuiltinNode::BuildText
+            | BuiltinNode::TypedStart
+            | BuiltinNode::SummarizeResult
     ) || kind.generated_iteration()
 }
 
@@ -402,7 +446,7 @@ fn trace_node(
     }
     let mut values = BTreeMap::new();
     let control = match kind {
-        Start => return trace_start(step, node, body, scenario),
+        Start | TypedStart => return trace_start(step, node, body, scenario),
         LoadContext => {
             values.insert("context".into(), (*data["document"]).clone());
             Some("loaded")
@@ -410,6 +454,70 @@ fn trace_node(
         Result => {
             values.insert("delivery".into(), (*data["git"]).clone());
             Some("completed")
+        }
+        SummarizeResult => {
+            let summary = super::super::super::data_nodes::data_view(data["summary"])
+                .as_str()
+                .context("Result requires text")?;
+            let artifacts = step
+                .inputs
+                .iter()
+                .filter(|input| input.port == "evidence" && input.state == Signal::Selected)
+                .map(|input| simulation_artifact_id(&input.from))
+                .collect();
+            values.insert(
+                "summary".into(),
+                serde_json::to_value(ArtifactValue::ResultSummary {
+                    summary: summary.into(),
+                    artifacts,
+                })?,
+            );
+            Some("completed")
+        }
+        SetFields | FilterMapList | BuildText => {
+            use super::super::super::data_nodes::data_view;
+            let transformed = match &node.instance.configuration {
+                NodeConfiguration::SetFields(config) => config
+                    .evaluate(data.get("source").copied().map(data_view))
+                    .map(|value| ("object", ArtifactValue::JsonObject(value))),
+                NodeConfiguration::FilterMapList(config) => (|| {
+                    let items = simulated_list(&step.inputs, data)?
+                        .context("The list input is unavailable")?;
+                    Ok((
+                        "items",
+                        ArtifactValue::JsonList(
+                            config.evaluate(iteration::list_value(&items)?, &items.id)?,
+                        ),
+                    ))
+                })(),
+                NodeConfiguration::BuildText(config) => (|| {
+                    let fields = data
+                        .get("values")
+                        .map(|fields| {
+                            data_view(fields)
+                                .as_object()
+                                .context("The named template inputs must be an object")
+                        })
+                        .transpose()?;
+                    Ok((
+                        "text",
+                        ArtifactValue::RenderedText(config.evaluate(fields)?),
+                    ))
+                })(),
+                _ => anyhow::bail!("The node has an invalid transform configuration"),
+            };
+            match transformed {
+                Ok((port, value)) => {
+                    values.insert(port.into(), serde_json::to_value(value)?);
+                    Some("completed")
+                }
+                Err(error) => {
+                    step.state = TraceState::Failed;
+                    step.reason = Some(crate::diagnostics::preview(&error.to_string()));
+                    step.outputs.insert("failed".into(), control_output());
+                    return Ok(step);
+                }
+            }
         }
         Condition => {
             let NodeConfiguration::Condition { predicate } = &node.instance.configuration else {
@@ -552,11 +660,15 @@ fn trace_node(
                 return Ok(step);
             }
             values.clone_from(&outcome.outputs);
-            node.definition
-                .outputs
-                .iter()
-                .find(|port| port.value == PortType::Control && port.name != "failed")
-                .map(|port| port.name.as_str())
+            if matches!(kind, RequestInput | Approval) {
+                Some(super::super::super::decision_nodes::simulate_stage_decision(node, &values)?)
+            } else {
+                node.definition
+                    .outputs
+                    .iter()
+                    .find(|port| port.value == PortType::Control && port.name != "failed")
+                    .map(|port| port.name.as_str())
+            }
         }
     };
     step.state = TraceState::Completed;
@@ -565,6 +677,11 @@ fn trace_node(
     }
     for port in &node.definition.outputs {
         if let PortType::Data(kind) = port.value {
+            if matches!(&node.instance.configuration, NodeConfiguration::FindWork { query }
+                if query.result == super::super::super::agile_nodes::FindWorkResultMode::List && matches!(port.name.as_str(), "task" | "target"))
+            {
+                continue;
+            }
             let mut value = values.remove(&port.name).with_context(|| {
                 format!(
                     "Sample outcome for {} needs output {}",
@@ -647,9 +764,34 @@ fn trace_start(
             .iter()
             .find(|(_, endpoint)| endpoint.node == node.instance.id && endpoint.port == port)
             .map(|(name, _)| name.as_str()),
+        _ if node.instance.kind == BuiltinNode::TypedStart
+            && matches!(port, "inputs" | "task" | "event") =>
+        {
+            match port {
+                "inputs" => Some("inputs"),
+                "task" => Some("task"),
+                _ => Some("event"),
+            }
+        }
         _ if port == "document" => Some("document"),
         _ => None,
     };
+    let empty = serde_json::Map::new();
+    let mut typed_values = None;
+    if let NodeConfiguration::TypedStart(config) = &node.instance.configuration {
+        let values = scenario
+            .inputs
+            .get("inputs")
+            .map(|value| {
+                value
+                    .as_object()
+                    .context("Sample inputs must be a named object")
+            })
+            .transpose()?
+            .unwrap_or(&empty);
+        config.validate_values(values)?;
+        typed_values = Some(Value::Object(values.clone()));
+    }
     for name in scenario.inputs.keys() {
         ensure!(
             node.definition
@@ -660,7 +802,14 @@ fn trace_start(
         );
     }
     for port in &node.definition.outputs {
-        let sample = input_name(&port.name).map(|name| (name, scenario.inputs.get(name)));
+        let sample = input_name(&port.name).map(|name| {
+            let value = if name == "inputs" {
+                typed_values.as_ref().or_else(|| scenario.inputs.get(name))
+            } else {
+                scenario.inputs.get(name)
+            };
+            (name, value)
+        });
         match (port.value, sample) {
             (PortType::Control, None | Some((_, Some(Value::Bool(true))))) => {
                 step.outputs.insert(port.name.clone(), control_output());
@@ -678,6 +827,7 @@ fn trace_start(
                     },
                 );
             }
+            (_, Some((_, None))) if node.instance.kind == BuiltinNode::TypedStart => {}
             (_, Some((name, None))) => {
                 step.outputs.clear();
                 step.reason = Some(format!("Waiting for sample input {name}."));

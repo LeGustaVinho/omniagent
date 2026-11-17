@@ -17,6 +17,7 @@ import { PipelineAuthoringEditor, ProjectPipelineDrafts } from "@/workflow-autho
 import { WorkflowExecutionWorkspace } from "@/workflow-execution";
 import { WorkflowComparisons } from "@/workflow-comparison";
 import { WorkflowTriggers } from "@/workflow-triggers";
+import { PipelineCanvasFrame, PipelineInspectorHeader, PipelineTabs, PipelineToolbar, PipelineWorkspaceFrame } from "@/pipeline-layout";
 import { deliveryBranch, deliveryCommitSha, deliveryMergeSha, deliveryRunId } from "@/tasks-demo-data";
 import {
   advancePipelineRun, beginPipelineRun, createDeliveryWorkflow, createStage, declineStage, interruptStage, resolveStage,
@@ -25,10 +26,19 @@ import {
 import type { PipelineRun, Stage, StageEdge, StageKind, StageStatus, WorkflowRevision } from "./pipelines-model";
 import { ComparisonView, PendingPipeline, PipelineMaintenance, RoleEditor, TemplateHistory } from "./pipelines-secondary";
 import "@xyflow/react/dist/style.css";
-import "./pipelines-workspace.css";
 
 const panels = ["Builder", "Runs", "Roles & templates", "Library", "Compare", "Maintenance"] as const;
 type View = typeof panels[number];
+const previewTabs = panels.map((id) => ({ id, label: id }));
+const productionTabs = [
+  { id: "drafts", label: "Builder" },
+  { id: "delivery", label: "Repository delivery" },
+  { id: "runs", label: "Runs" },
+  { id: "templates", label: "Roles & templates" },
+  { id: "compare", label: "Compare models" },
+  { id: "automations", label: "Automation rules" },
+] as const;
+type ProductionView = (typeof productionTabs)[number]["id"];
 type RenderNode = Node<Stage & { status?: StageStatus; inputSide?: Position; outputSide?: Position }, "stage">;
 
 const stageIcons = {
@@ -66,6 +76,13 @@ function handleSide(node: Pick<Node, "position">, other: Pick<Node, "position"> 
 }
 
 const viewTargets: Record<string, View> = { comparison: "Compare", compare: "Compare", maintenance: "Maintenance", runs: "Runs", roles: "Roles & templates", builder: "Builder", library: "Library" };
+
+function productionRoute(target = ""): { view: ProductionView; draftId?: string; runId?: string } {
+  if (target.startsWith("run:")) return { view: "runs", runId: target.slice("run:".length) };
+  if (target.startsWith("authoring:")) return { view: "drafts", draftId: target.slice("authoring:".length) };
+  const tab = productionTabs.find(({ id }) => id === target);
+  return { view: tab?.id ?? (target === "" || target === "builder" ? "drafts" : "delivery") };
+}
 
 function StageConfiguration({ draft, activeId, onPatch, onConnect }: {
   draft: WorkflowRevision; activeId: string; onPatch: (patch: Partial<Stage>) => void;
@@ -184,26 +201,18 @@ function StageRunDetails({ run, activeId, actions, links }: {
 
 export default function PipelinesWorkspace(props: WorkspaceProps) {
   if (props.simulation) return <PreviewPipelinesWorkspace {...props} />;
-  const draftId = props.target?.startsWith("authoring:") ? props.target.slice("authoring:".length) : undefined;
-  const runId = props.target?.startsWith("run:") ? props.target.slice("run:".length) : undefined;
-  const view = props.target === "compare" || props.target === "templates" || props.target === "automations" ? props.target
-    : runId || props.target === "runs" ? "runs" : draftId || props.target === "drafts" ? "drafts" : "delivery";
-  return <div className="pipelines-workspace">
-    <nav className="pipeline-tabs" aria-label="Pipelines views">
-      <button type="button" aria-current={view === "delivery" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "delivery")}>Repository delivery</button>
-      <button type="button" aria-current={view === "drafts" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "drafts")}>Pipeline drafts</button>
-      <button type="button" aria-current={view === "runs" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "runs")}>Runs</button>
-      <button type="button" aria-current={view === "templates" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "templates")}>Roles & templates</button>
-      <button type="button" aria-current={view === "compare" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "compare")}>Compare models</button>
-      <button type="button" aria-current={view === "automations" ? "page" : undefined} onClick={() => props.openWorkspace("pipelines", "automations")}>Automation rules</button>
-    </nav>
-    {view === "templates" ? <ConversationTemplateEditor key={props.checkout.checkoutId} checkout={props.checkout} openWorkspace={props.openWorkspace} />
-      : view === "compare" ? <WorkflowComparisons key={props.checkout.checkoutId} {...props} />
-        : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
-        : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} />
-        : draftId ? <PipelineAuthoringEditor key={draftId} {...props} draftId={draftId} />
-          : view === "drafts" ? <ProjectPipelineDrafts {...props} /> : <RepositoryDeliveryWorkspace {...props} />}
-  </div>;
+  const { view, draftId, runId } = productionRoute(props.target);
+  return <PipelineWorkspaceFrame>
+    <PipelineTabs views={productionTabs} active={view} onSelect={(tab) => props.openWorkspace("pipelines", tab)} />
+    <div className="pipeline-view">
+      {view === "templates" ? <ConversationTemplateEditor key={props.checkout.checkoutId} checkout={props.checkout} openWorkspace={props.openWorkspace} />
+        : view === "compare" ? <WorkflowComparisons key={props.checkout.checkoutId} {...props} />
+          : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
+          : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} />
+          : draftId ? <PipelineAuthoringEditor key={draftId} {...props} draftId={draftId} />
+            : view === "drafts" ? <ProjectPipelineDrafts {...props} /> : <RepositoryDeliveryWorkspace {...props} />}
+    </div>
+  </PipelineWorkspaceFrame>;
 }
 
 function PreviewPipelinesWorkspace(props: WorkspaceProps) {
@@ -371,16 +380,13 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
   }) ?? [], [graph, selectedId, inspectingRun]);
 
   return (
-    <section className="pipelines-workspace" aria-label="Pipelines workspace">
-      <header className="pipeline-workspace-heading">
-        <div className="pipeline-title"><div className="pipeline-heading-icon"><Workflow size={18} aria-hidden="true" /></div><h1>Pipelines</h1></div>
-        {view === "Builder" && <div className="pipeline-actions"><Button variant="outline" onClick={save} disabled={!draft}><Save size={15} /> Save revision</Button><Button onClick={start} disabled={!draft || Boolean(live)}><CirclePlay size={15} /> Run pipeline</Button></div>}
-      </header>
-      <nav className="pipeline-tabs" aria-label="Pipelines views">
-        {panels.map((panel) => <button key={panel} type="button" aria-current={view === panel ? "page" : undefined} onClick={() => setView(panel)}>{panel}</button>)}
-      </nav>
+    <PipelineWorkspaceFrame actions={view === "Builder" && <>
+      <Button variant="outline" onClick={save} disabled={!draft}><Save size={15} /> Save revision</Button>
+      <Button onClick={start} disabled={!draft || Boolean(live)}><CirclePlay size={15} /> Run pipeline</Button>
+    </>}>
+      <PipelineTabs views={previewTabs} active={view} onSelect={setView} />
       <div className="pipeline-view" hidden={!canvasView}>
-        <div className="pipeline-toolbar">
+        <PipelineToolbar>
           {view === "Runs" ? <label className="pipeline-inline-field">Execution
             <select value={runId ?? ""} onChange={(event) => {
               const id = Number(event.currentTarget.value);
@@ -408,12 +414,11 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
             {failedStage && <Button variant="outline" onClick={() => setSelectedId(failedStage.id)}>View failed stage</Button>}
             <span className="pipeline-status" data-status={runStatus(inspectingRun)}>{runStatus(inspectingRun)}</span>
           </div>}
-        </div>
+        </PipelineToolbar>
         {(status || resultLinks.length > 0) && <p className="pipeline-banner" role="status">{status}{resultLinks.length > 0 ? " Comparison inputs · " + resultLinks.join(", ") : ""}</p>}
         {issues.length > 0 && <div className="pipeline-banner pipeline-warning" role="alert"><CircleAlert size={17} /><ul>{issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul></div>}
-        <div className="pipeline-editor">
-          <div className="pipeline-canvas">
-            {graph && (view === "Builder" || inspectingRun) ? (
+        <PipelineCanvasFrame canvasLabel="Simulation graph canvas" inspectorLabel="Stage inspector"
+          canvas={graph && (view === "Builder" || inspectingRun) ? (
               <ReactFlow<RenderNode, StageEdge>
                 key={view}
                 nodes={nodes}
@@ -453,15 +458,14 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
                   : <PendingPipeline label={view === "Runs" ? "No pipeline runs" : "No pipeline selected"} onSimulate={simulate} />}
               </div>
             )}
-          </div>
-          <aside className="pipeline-inspector" aria-label="Stage inspector">
-            <header>
-              <small>{view === "Runs" ? "Execution details" : "Stage properties"}</small><h2>{activeNode?.data.title || "No stage selected"}</h2>
+          inspector={<>
+            <PipelineInspectorHeader detail={view === "Runs" ? "Execution details" : "Stage properties"}
+              title={activeNode?.data.title || "No stage selected"}>
               {graph && graph.nodes.length > 0 && <label className="pipeline-stage-jump"><span className="sr-only">Inspect stage</span><select value={activeNode?.id ?? ""} onChange={(event) => setSelectedId(event.currentTarget.value)}>
                 {!activeNode && <option value="">Select a stage</option>}
                 {graph.nodes.map((stage) => <option value={stage.id} key={stage.id}>{stage.data.title || "Untitled stage"}</option>)}
               </select></label>}
-            </header>
+            </PipelineInspectorHeader>
             {inspectingRun ? (
               <StageRunDetails key={inspectingRun.id + ":" + selectedId} run={inspectingRun} activeId={selectedId} links={props}
                 actions={{ resolve: (migration) => updateRun((run) => resolveStage(run, selectedId, migration)), decline: () => updateRun((run) => declineStage(run, selectedId)), retry: () => updateRun((run) => retryStage(run, selectedId)), interrupt: () => updateRun((run) => interruptStage(run, selectedId)) }} />
@@ -472,8 +476,7 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
             ) : view === "Builder" && !simulation ? (
               <RepositoryMarkdownPicker key={props.checkout.checkoutId} checkoutId={props.checkout.checkoutId} />
             ) : <p className="pipeline-note">Stage properties appear here when a workflow is open.</p>}
-          </aside>
-        </div>
+          </>} />
       </div>
       <div className="pipeline-view pipeline-view-content" hidden={view !== "Roles & templates"}>
         <div className="pipeline-section-heading"><div><h2>Roles & templates</h2><p>Set reusable instructions, tools and review requirements.</p></div><Layers3 size={20} /></div>
@@ -496,6 +499,6 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
       <div className="pipeline-view pipeline-view-content" hidden={view !== "Maintenance"}>
         <PipelineMaintenance simulation={simulation} startSimulation={startSimulation} openWorkspace={props.openWorkspace} openChanges={props.openChanges} />
       </div>
-    </section>
+    </PipelineWorkspaceFrame>
   );
 }

@@ -3,6 +3,8 @@ import { Blocks, FolderGit2, Settings } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
+import { CheckoutSelector } from "@/checkout-selector";
+import "@/launch-workspace.css";
 import { useAppAppearance } from "@/settings-appearance";
 import { useWorkspace } from "@/workspace-state";
 
@@ -62,21 +64,27 @@ export function App() {
       {!checkout && <header className="work-titlebar"><div className="work-wordmark">
         <span className="work-mark" aria-hidden="true"><Blocks size={15} /></span>OmniAgent
       </div><Button className="ml-auto" variant="ghost" onClick={() => setSettingsOpen(true)}><Settings size={16} />Settings</Button></header>}
-      {error && <p role="alert" className="work-banner">{error}</p>}
+      {error && !!checkout && <p role="alert" className="work-banner">{error}</p>}
       {restoring ? (
-        <p role="status" className="p-6 text-sm text-muted-foreground">Restoring workspace…</p>
+        <div className="launch-workspace"><p role="status" className="launch-status">Restoring workspace…</p></div>
       ) : checkout ? (
         <Suspense fallback={<p role="status" className="p-6 text-sm text-muted-foreground">Loading workspace…</p>}>
           <Workbench key={checkout.checkoutId} checkout={checkout} openRepository={openRepository} onSelectCheckout={activateCheckout}
             initialConversationId={libraryTarget?.checkoutId === checkout.checkoutId ? libraryTarget.conversationId : undefined} />
         </Suspense>
       ) : (
-        <section className="work-onboarding">
-          <div className="work-start">
+        <section className="launch-workspace" aria-labelledby="launch-title">
+          <div className="launch-card">
             <span className="work-start-icon" aria-hidden="true"><FolderGit2 size={24} /></span>
-            <h1>Open a Git repository</h1>
-            <p>Choose a repository or one of its linked worktrees.</p>
-            {openRepository}
+            <div>
+              <h1 id="launch-title">Open a Git repository</h1>
+              <p>Choose a repository folder or resume a registered worktree.</p>
+            </div>
+            <div className="launch-actions">
+              {openRepository}
+              <CheckoutSelector checkout={null} disabled={choosing} onSelect={activateCheckout} />
+            </div>
+            {error && <p role="alert" className="launch-error">{error}</p>}
           </div>
         </section>
       )}

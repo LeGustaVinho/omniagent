@@ -1,0 +1,143 @@
+.diagnostics-workspace {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  background: var(--background);
+}
+
+.diagnostics-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 16px clamp(12px, 2.5vw, 24px) 12px;
+}
+
+.diagnostics-heading h1 {
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -.025em;
+}
+
+.diagnostics-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
+  border-radius: 8px;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, var(--card));
+}
+
+.diagnostics-nav {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  padding: 0 clamp(12px, 2.5vw, 24px) 7px;
+}
+
+.diagnostics-nav button[aria-current="page"] {
+  border: 1px solid var(--border);
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.diagnostics-nav button[aria-current="page"] svg {
+  color: var(--primary);
+}
+
+.diagnostics-view {
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+}
+
+.diagnostics-view[hidden] {
+  display: none;
+}
+
+.diagnostics-desktop {
+  overflow: auto;
+  padding: clamp(12px, 2.5vw, 24px);
+}
+
+.diagnostics-fixtures {
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.diagnostics-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr));
+  align-items: stretch;
+  gap: 12px;
+  max-width: 1150px;
+  margin: 0 auto;
+}
+
+.diagnostics-fixtures > .diagnostics-card {
+  margin: clamp(12px, 2.5vw, 24px);
+}
+
+.diagnostics-card {
+  display: grid;
+  gap: 12px;
+  grid-template-rows: auto 1fr auto;
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  font-size: 13px;
+}
+
+.diagnostics-card-heading {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  min-width: 0;
+}
+
+.diagnostics-card-heading h2 {
+  font-size: 15px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.diagnostics-card-heading .diagnostics-icon {
+  width: 29px;
+  height: 29px;
+}
+
+.diagnostics-card-body {
+  min-width: 0;
+}
+
+.diagnostics-card-body > p {
+  color: var(--muted-foreground);
+}
+
+.diagnostics-card-body .settings-facts {
+  margin-top: 0;
+}
+
+.diagnostics-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.diagnostics-card pre {
+  max-width: 100%;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}

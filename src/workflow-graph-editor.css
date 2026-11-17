@@ -1,33 +1,47 @@
-.workflow-graph { display: grid; min-width: 0; gap: .7rem; }
-.workflow-graph-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem; }
-.workflow-graph-toolbar label { flex: 1 1 14rem; }
-.workflow-node-catalog { display: grid; gap: .6rem; padding: .75rem; border: 1px solid var(--border); border-radius: .6rem; }
-.workflow-node-catalog ul { display: flex; flex-wrap: wrap; gap: .4rem; max-height: 10rem; overflow: auto; }
-.workflow-graph-error { font-size: .8125rem; padding: .5rem .7rem; border: 1px solid var(--destructive); border-radius: .45rem; }
+.workflow-graph { min-width: 0; border: 1px solid var(--border); border-radius: .65rem; overflow: hidden; }
+.workflow-graph-name { flex: 1 1 12rem; }
+.workflow-graph-name input { width: min(100%, 30rem); }
+.workflow-history { display: flex; gap: .2rem; }
+.workflow-history button { padding-inline: .45rem; }
+.workflow-graph-error { margin: .6rem 1rem; font-size: .8125rem; padding: .5rem .7rem; border: 1px solid var(--destructive); border-radius: .45rem; }
 .workflow-graph-error ul, .workflow-version-review ul { padding: .35rem 0 .15rem 1.1rem; list-style: disc; }
-.workflow-graph-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(14rem, 17rem); min-width: 0; gap: .75rem; }
-.workflow-graph-canvas { min-width: 0; height: clamp(27rem, 62vh, 48rem); overflow: hidden; border: 1px solid var(--border); border-radius: .65rem; background: var(--background); }
-.workflow-graph-canvas .react-flow { background: var(--background); }
-.workflow-graph-inspector { min-width: 0; padding: .8rem; border: 1px solid var(--border); border-radius: .65rem; background: var(--card); }
-.workflow-graph-inspector fieldset { border-top: 1px solid var(--border); margin-top: .25rem; padding-top: .5rem; }
+.workflow-connection-status { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .4rem 1rem; border-bottom: 1px solid var(--border); font-size: .8125rem; }
+.workflow-graph-frame { height: clamp(29rem, 64vh, 48rem); min-width: 0; }
+.workflow-graph-canvas { position: absolute; inset: 0; overflow: hidden; background: var(--background); }
+.workflow-graph-inspector { min-width: 0; align-content: start; }
+.workflow-graph-inspector :is(fieldset, .workflow-inspector-item) { min-width: 0; border-top: 1px solid var(--border); margin-top: .25rem; padding-top: .5rem; }
 .workflow-graph-inspector legend, .workflow-graph-inspector h3, .workflow-version-review summary { font-size: .8125rem; font-weight: 600; }
+.workflow-graph-inspector .workflow-check { display: flex; align-items: center; gap: .5rem; }
+.workflow-graph-inspector .workflow-check input { width: auto; }
 .workflow-version-review { border: 1px solid var(--border); border-radius: .4rem; padding: .5rem; font-size: .75rem; }
 .workflow-version-review p, .workflow-version-review ul { margin: .35rem 0; }
-.workflow-node-card { width: 248px; min-height: 5.25rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--card); color: var(--card-foreground); font-size: .75rem; }
+.workflow-node-card { width: 248px; min-height: 5.25rem; border: 1px solid var(--border); border-radius: .6rem; background: var(--card); color: var(--card-foreground); font-size: .75rem; box-shadow: 0 3px 10px #0002; }
 .workflow-node-card[data-selected] { outline: 2px solid var(--primary); }
 .workflow-node-card[data-problem] { border-color: var(--destructive); }
-.workflow-node-card header { display: grid; padding: .55rem .65rem; border-bottom: 1px solid var(--border); gap: .1rem; }
+.workflow-node-card header { display: grid; padding: .6rem .7rem; border-bottom: 1px solid var(--border); gap: .15rem; }
 .workflow-node-card header small, .workflow-port-column small { color: var(--muted-foreground); }
 .workflow-node-ports { display: grid; grid-template-columns: 1fr 1fr; }
 .workflow-port-column { display: grid; align-content: start; }
 .workflow-port-column li { position: relative; display: grid; min-height: 2.25rem; padding: .25rem .6rem; overflow-wrap: anywhere; }
 .workflow-port-column li[data-side="output"] { text-align: right; }
-.workflow-port-column .react-flow__handle { width: .6rem; height: .6rem; border: 1px solid var(--card); background: var(--primary); }
+.workflow-port-column .react-flow__handle { width: .75rem; height: .75rem; border: 1px solid var(--card); background: var(--primary); }
 .workflow-port-column li[data-port="control"] .react-flow__handle { background: var(--muted-foreground); }
+.workflow-port-action { display: grid; min-width: 0; border-radius: .2rem; padding: .12rem .18rem; text-align: inherit; cursor: pointer; }
+.workflow-port-action:hover, .workflow-port-action[aria-pressed="true"] { background: var(--muted); }
+.workflow-port-action:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.workflow-structured-fields, .workflow-structured-value, .workflow-inspector-item { display: grid; gap: .5rem; }
+.workflow-structured-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: .35rem; min-width: 0; }
+.workflow-structured-entry > button { align-self: end; }
+.workflow-structured-entry > :is(label, div) { min-width: 0; overflow-wrap: anywhere; }
+.workflow-structured-fields .workflow-structured-fields { display: grid; border-inline-start: 1px solid var(--border); padding-inline-start: .5rem; }
+.workflow-model-order, .workflow-connections { min-width: 0; }
+.workflow-model-order li { display: grid; grid-template-columns: minmax(0, 1fr) repeat(3, auto); align-items: center; overflow-wrap: anywhere; }
+.workflow-model-order button, .workflow-wire-actions button { padding-inline: .35rem; }
 .workflow-connections { font-size: .75rem; }
-.workflow-connections li { display: flex; justify-content: space-between; align-items: center; gap: .4rem; overflow-wrap: anywhere; }
+.workflow-connections li { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .3rem; overflow-wrap: anywhere; }
+.workflow-wire-actions { display: flex; margin-inline-start: auto; }
 .workflow-draft-list { display: grid; gap: .65rem; }
 .workflow-draft-list li { display: flex; justify-content: space-between; align-items: center; gap: .6rem; border-bottom: 1px solid var(--border); padding: .5rem 0; }
-@container pipelines (max-width: 735px) {
-  .workflow-graph-split { grid-template-columns: minmax(0, 1fr); }
+@container pipelines (max-width: 700px) {
+  .workflow-graph-frame { height: auto; }
 }

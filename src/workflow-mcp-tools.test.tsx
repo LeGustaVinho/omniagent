@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -48,10 +48,21 @@ it("builds typed, required, and mapped fields from the selected pinned tool sche
   expect(priority.required).toBe(true);
   expect(priority.step).toBe("1");
   expect(screen.queryByRole("combobox", { name: "enabled" })).toBeNull();
-  await user.click(screen.getByText("Argument JSON"));
-  const fixedJson = screen.getByRole("textbox", { name: "Fixed arguments JSON" });
-  await user.clear(fixedJson);
-  await user.paste('{"options":{"quiet":true},"extra":[1,2]}');
+  await user.click(screen.getByRole("button", { name: "Set options" }));
+  const options = within(screen.getByText("options", { selector: "legend" }).closest("fieldset")!);
+  await user.type(options.getByLabelText("Field name"), "quiet");
+  await user.click(options.getByRole("button", { name: "Add field" }));
+  await user.selectOptions(options.getByLabelText("quiet type"), "boolean");
+  await user.selectOptions(options.getByLabelText("quiet"), "true");
+  const additional = within(screen.getByRole("group", { name: "Additional fixed arguments" }));
+  await user.type(additional.getByLabelText("Field name"), "extra");
+  await user.click(additional.getByRole("button", { name: "Add field" }));
+  await user.selectOptions(additional.getByLabelText("extra type"), "array");
+  for (const position of [1, 2]) {
+    await user.click(additional.getByRole("button", { name: "Add item" }));
+    await user.selectOptions(additional.getByLabelText(`Item ${position} type`), "number");
+    fireEvent.change(additional.getByLabelText(`Item ${position}`), { target: { value: String(position) } });
+  }
   await user.type(destination, "initial");
   await user.type(priority, "0");
   await user.selectOptions(screen.getByRole("combobox", { name: "toggle" }), "1");

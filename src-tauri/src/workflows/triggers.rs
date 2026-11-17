@@ -6,11 +6,14 @@ use uuid::Uuid;
 use crate::{
     diagnostics,
     store::Store,
-    tasks::{AgileEventData, AgileEventOrigin, TaskWorkflowState, bind_workflow_trigger_origin},
+    tasks::{AgileEventData, AgileEventOrigin, TaskWorkflowState},
 };
 
 use super::{
-    WorkflowLaunchOrigin, WorkflowLaunchSource, WorkflowRevision, launch_workflow_in_tx,
+    WorkflowLaunchOrigin, WorkflowLaunchSource, WorkflowRevision,
+    launch::{WorkflowStartSchema, validate_workflow_launch_checkout},
+    launch_workflow_in_tx,
+    runtime::load_definition,
     validate_workflow_launch_source,
 };
 
@@ -72,7 +75,24 @@ pub struct WorkflowTriggerSpec {
     pub work: TriggerWorkKind,
     pub target_state: Option<TaskWorkflowState>,
     pub pipeline: WorkflowRevision,
-    pub source: WorkflowLaunchSource,
+    pub source: WorkflowTriggerSource,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowTriggerSource {
+    pub checkout_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+}
+
+impl From<WorkflowLaunchSource> for WorkflowTriggerSource {
+    fn from(source: WorkflowLaunchSource) -> Self {
+        Self {
+            checkout_id: source.checkout_id,
+            revision_id: Some(source.revision_id),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -136,11 +156,18 @@ impl Store {
         );
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            ensure!(tx.query_row(
-                "SELECT EXISTS (SELECT 1 FROM workflow_revisions WHERE project_id = ?1 AND workflow_id = ?2 AND revision = ?3)",
-                params![project, spec.pipeline.id, spec.pipeline.revision], |row| row.get::<_, bool>(0))?,
-                "Choose an exact pipeline revision from this project");
-            validate_workflow_launch_source(&tx, &project, &spec.source)?;
+            let definition = load_definition(&tx, &project, &spec.pipeline)?
+                .context("Choose an exact pipeline revision from this project")?;
+            let start = WorkflowStartSchema::for_definition(&definition);
+            ensure!(start.as_ref().is_none_or(WorkflowStartSchema::accepts_automation),
+                "This pipeline requires inputs supplied at manual launch");
+            let requires_document = start.as_ref().is_none_or(|start| start.requires_document);
+            validate_workflow_launch_checkout(&tx, &project, &spec.source.checkout_id)?;
+            if let Some(revision) = &spec.source.revision_id {
+                validate_workflow_launch_source(&tx, &project, &spec.source.checkout_id, revision)?;
+            } else {
+                ensure!(!requires_document, "Select a saved Markdown revision for the Start document port");
+            }
             let (id, revision) = match (rule_id, expected_revision) {
                 (Some(id), Some(expected)) => {
                     let current = tx.query_row(
@@ -240,21 +267,18 @@ pub(crate) fn activate(
                 db,
                 project,
                 &rule.spec.pipeline,
-                &rule.spec.source,
+                &rule.spec.source.checkout_id,
+                rule.spec.source.revision_id.as_deref(),
                 &WorkflowLaunchOrigin::Rule {
                     rule_id: rule.id.clone(),
                     event_id: event.into(),
                     work_id: task.into(),
                 },
-            )
-            .and_then(|run| {
-                bind_workflow_trigger_origin(db, project, &run.id, event)?;
-                Ok(run.id)
-            });
+            );
             match result {
                 Ok(run) => {
                     db.execute_batch("RELEASE workflow_trigger_launch")?;
-                    ("launched", Some(run), None)
+                    ("launched", Some(run.id), None)
                 }
                 Err(error) => {
                     db.execute_batch(
@@ -287,7 +311,7 @@ type RuleRow = (
     String,
     String,
     String,
-    String,
+    Option<String>,
 );
 
 fn read_rule(row: &Row<'_>) -> rusqlite::Result<RuleRow> {
@@ -337,7 +361,7 @@ fn decode_rule(
                 id: workflow,
                 revision: workflow_revision,
             },
-            source: WorkflowLaunchSource {
+            source: WorkflowTriggerSource {
                 checkout_id,
                 revision_id,
             },

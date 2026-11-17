@@ -21,6 +21,14 @@ export type WorkflowDefinitions = Record<string, WorkflowDefinition>;
 export type WorkflowLayout = Record<string, { x: number; y: number }>;
 export type WorkflowCanvasEdit = { layout: WorkflowLayout; updateDefinitions: Record<string, number> };
 
+export type WorkflowScalar = string | number | boolean | null;
+export type WorkflowPredicate = { op: "exists"; pointer: string }
+  | { op: "equals"; pointer: string; value: WorkflowScalar }
+  | { op: "candidate_checks_passed" };
+
+export type SetFieldOperation = { op: "set"; path: string; value: { source: "literal"; value: unknown } | { source: "input"; pointer: string } }
+  | { op: "rename"; from: string; path: string };
+
 export const MAX_ITERATION_ITEMS = 32;
 export const ITERATION_PORT_FIELDS = [
   ["readyInput", "Subflow ready input"],
@@ -28,6 +36,13 @@ export const ITERATION_PORT_FIELDS = [
   ["completionOutput", "Subflow completion output"],
   ["resultOutput", "Subflow result output"],
 ] as const;
+
+export const START_VALUE_TYPES = ["text", "number", "boolean", "null", "object", "array"] as const;
+export type WorkflowStartField = { name: string; valueType: typeof START_VALUE_TYPES[number]; required: boolean };
+
+export function isStartNode(kind: string) {
+  return kind === "start" || kind === "typed_start";
+}
 
 export function defaultConfiguration(kind: string): WorkflowNodeConfiguration {
   switch (kind) {
@@ -38,6 +53,21 @@ export function defaultConfiguration(kind: string): WorkflowNodeConfiguration {
     case "mcp_tool": return { kind, serverId: "", serverRevision: "", toolName: "", contractRevision: "", arguments: {}, argumentMappings: {}, destinationPointer: null };
     case "build_list": return { kind, source: "values", values: [] };
     case "for_each": return { kind, maxItems: 8, readyInput: "ready", itemInput: "item", completionOutput: "completed", resultOutput: "result" };
+    case "repeat_until": return {
+      kind, maxIterations: 3, readyInput: "ready", completionOutput: "completed", evidenceOutput: "result",
+      until: { op: "exists", pointer: "/evidence" },
+    };
+    case "set_fields": return { kind, mode: "build", operations: [] };
+    case "filter_map_list": return { kind, predicate: null, mappings: [] };
+    case "build_text": return { kind, template: "" };
+    case "compare_models": return { kind, selections: [] };
+    case "request_input": return { kind, message: "Input requested", fields: [{ id: "answer", label: "Answer", required: true, input: { kind: "text" } }] };
+    case "approval": return { kind, message: "Does this stage have your approval?" };
+    case "typed_start": return { kind, fields: [] };
+    case "find_work": return { kind, query: { kind: "work", result: "list" } };
+    case "update_progress": return { kind, action: { kind: "checklist", checked: true } };
+    case "manage_work": return { kind, action: { kind: "link" } };
+    case "load_work_context": return { kind, mode: "work" };
     default: return { kind };
   }
 }
@@ -72,10 +102,22 @@ export function incompatibility(definitions: WorkflowDefinitions, { from, to }: 
     : `${from.node}.${from.port} (${portType(output.value)}) cannot connect to ${to.node}.${to.port} (${portType(input.value)}).`;
 }
 
+function wireProblem(graph: WorkflowGraph, definitions: WorkflowDefinitions, wire: WorkflowWire) {
+  const config = graph.nodes.find(({ id }) => id === wire.from.node)?.configuration;
+  if (wire.from.port === "event" && config?.kind === "typed_start" && Array.isArray(config.fields)
+    && config.fields.some((field) => field?.required === true)) {
+    return "Make Start fields optional to connect the event port.";
+  }
+  return incompatibility(definitions, wire);
+}
+
 export function connectionProblem(graph: WorkflowGraph, definitions: WorkflowDefinitions, wire: WorkflowWire) {
-  const incompatible = incompatibility(definitions, wire);
+  const incompatible = wireProblem(graph, definitions, wire);
   if (incompatible) return incompatible;
-  const multiple = definitions[wire.to.node]?.kind === "join" && wire.to.port === "branches";
+  const target = definitions[wire.to.node]?.kind;
+  const multiple = (target === "join" && wire.to.port === "branches") ||
+    (target === "summarize_result" && wire.to.port === "evidence") ||
+    (target === "for_each_collect" && (wire.to.port === "finished" || wire.to.port === "result"));
   if (graph.wires.some((existing) => wireKey(existing) === wireKey(wire))) return "These ports are already connected.";
   if (!multiple && graph.wires.some(({ to }) => to.node === wire.to.node && to.port === wire.to.port)) {
     return `Input ${wire.to.node}.${wire.to.port} accepts one connection.`;
@@ -92,22 +134,41 @@ export function connectionProblem(graph: WorkflowGraph, definitions: WorkflowDef
   return null;
 }
 
+function validPointer(value: unknown, maxLength: number, allowRoot: boolean): value is string {
+  return typeof value === "string" && (value.startsWith("/") || (allowRoot && value === "")) &&
+    new TextEncoder().encode(value).length <= maxLength && !/~(?![01])/.test(value);
+}
+
+function predicateProblem(input: unknown, allowChecks = true) {
+  const predicate = input as { op?: unknown; pointer?: unknown; value?: unknown } | undefined;
+  if (allowChecks && predicate?.op === "candidate_checks_passed") return null;
+  if (!predicate || !validPointer(predicate.pointer, 1024, true)) return "Enter a valid field path.";
+  if (predicate.op === "exists") return null;
+  const { value } = predicate;
+  if (predicate.op !== "equals" || !(value === null || typeof value === "string" || typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value)))) return "Choose an equality value with a matching type.";
+  return new TextEncoder().encode(JSON.stringify(value)).length <= 4096 ? null : "The equality value is too long.";
+}
+
+function namedPort(value: unknown) {
+  return typeof value === "string" && Boolean(value.trim());
+}
+
+function validIterationLimit(limit: unknown) {
+  return typeof limit === "number" && Number.isInteger(limit) && limit >= 1 && limit <= MAX_ITERATION_ITEMS;
+}
+
+function setOperations(configuration: WorkflowNodeConfiguration): SetFieldOperation[] {
+  return Array.isArray(configuration.operations) ? configuration.operations : [];
+}
+
 export function configurationProblem(configuration: WorkflowNodeConfiguration, definition: WorkflowDefinition) {
   if (configuration.kind !== definition.configuration) return "Review the parameters for this node version.";
   switch (configuration.kind) {
     case "agent_role": return typeof configuration.role === "string" && configuration.role.trim() ? null : "Agent role is required.";
     case "required_checks": return Array.isArray(configuration.names) && configuration.names.every((name) => typeof name === "string" && name.trim())
       ? null : "Check names must contain text.";
-    case "condition": {
-      const predicate = configuration.predicate as { op?: unknown; pointer?: unknown; value?: unknown } | undefined;
-      if (typeof predicate?.pointer !== "string" || predicate.pointer.length > 1024 ||
-        (predicate.pointer !== "" && !predicate.pointer.startsWith("/")) || /~(?![01])/.test(predicate.pointer)) {
-        return "Enter a valid JSON Pointer.";
-      }
-      if (predicate.op === "exists") return null;
-      return predicate.op === "equals" && (predicate.value === null || ["string", "number", "boolean"].includes(typeof predicate.value))
-        ? null : "Choose existence or equality with a JSON scalar.";
-    }
+    case "condition": return predicateProblem(configuration.predicate);
     case "command":
       if (!configuration.registrationId || !configuration.registrationRevision) return "A registered command revision is required.";
       return configuration.input && typeof configuration.input === "object" && !Array.isArray(configuration.input)
@@ -119,20 +180,57 @@ export function configurationProblem(configuration: WorkflowNodeConfiguration, d
     case "build_list": {
       if (configuration.source === "values") {
         return Array.isArray(configuration.values) && configuration.values.length <= MAX_ITERATION_ITEMS
-          ? null : `Enter a JSON array with at most ${MAX_ITERATION_ITEMS} items.`;
+          ? null : `Add at most ${MAX_ITERATION_ITEMS} items.`;
       }
       const pointer = configuration.pointer;
-      return configuration.source === "evidence" && typeof pointer === "string" && pointer.startsWith("/") &&
-        pointer.length <= 2048 && !/~(?![01])/.test(pointer) ? null : "Enter a JSON Pointer to an array in the source artifact.";
+      return configuration.source === "evidence" && validPointer(pointer, 2048, false) ? null : "Enter the path to a list in the source artifact.";
     }
     case "for_each": {
       const { maxItems, readyInput, itemInput, completionOutput, resultOutput } = configuration;
-      if (typeof maxItems !== "number" || !Number.isInteger(maxItems) || maxItems < 1 || maxItems > MAX_ITERATION_ITEMS) {
+      if (!validIterationLimit(maxItems)) {
         return `Enter a maximum between 1 and ${MAX_ITERATION_ITEMS} items.`;
       }
-      return ITERATION_PORT_FIELDS.every(([field]) => typeof configuration[field] === "string" && configuration[field].trim()) &&
+      return ITERATION_PORT_FIELDS.every(([field]) => namedPort(configuration[field])) &&
         readyInput !== itemInput && completionOutput !== resultOutput ? null : "Choose distinct input and output ports on the pinned subflow.";
     }
+    case "repeat_until": {
+      const { maxIterations, readyInput, completionOutput, evidenceOutput, until } = configuration;
+      if (!validIterationLimit(maxIterations)) return `Enter a maximum between 1 and ${MAX_ITERATION_ITEMS} iterations.`;
+      if (![readyInput, completionOutput, evidenceOutput].every(namedPort)) return "Select the required subflow ports.";
+      const feedback = configuration.feedback as { input?: unknown; output?: unknown } | undefined;
+      if (feedback && (!namedPort(feedback.input) || !namedPort(feedback.output) || feedback.input === readyInput)) {
+        return "Choose matching feedback ports.";
+      }
+      return predicateProblem(until);
+    }
+    case "set_fields":
+      return (configuration.mode === "build" || configuration.mode === "update") && Array.isArray(configuration.operations) &&
+        setOperations(configuration).every((operation) => validPointer(operation?.path, 1024, false) &&
+          (operation.op === "rename" ? validPointer(operation.from, 1024, false) && operation.from !== operation.path
+            : operation.op === "set" && (operation.value?.source === "literal" ||
+              (operation.value?.source === "input" && validPointer(operation.value.pointer, 1024, true)))))
+        ? null : "Review the source and destination of each field operation.";
+    case "filter_map_list":
+      return (configuration.predicate === null ? null : predicateProblem(configuration.predicate, false)) ??
+        (Array.isArray(configuration.mappings) && configuration.mappings.every((mapping) =>
+          validPointer(mapping?.from, 1024, true) && validPointer(mapping?.path, 1024, false)) ? null : "Review the field mappings.");
+    case "build_text": return typeof configuration.template === "string" ? null : "Enter a text template.";
+    case "compare_models": {
+      const selections = Array.isArray(configuration.selections) ? configuration.selections : [];
+      const keys = selections.flatMap((entry) => entry && typeof entry.provider === "string" && typeof entry.profileId === "string"
+        && typeof entry.modelId === "string" ? [JSON.stringify([entry.provider, entry.profileId, entry.modelId])] : []);
+      return keys.length === selections.length && keys.length >= 2 && new Set(keys).size === keys.length ? null : "Select at least two distinct models.";
+    }
+    case "typed_start": {
+      const fields = Array.isArray(configuration.fields) ? configuration.fields : null;
+      return fields?.every((field) => typeof field?.name === "string" && /^[A-Za-z_][A-Za-z0-9_-]*$/.test(field.name) &&
+        START_VALUE_TYPES.includes(field.valueType) && typeof field.required === "boolean") &&
+        new Set(fields.map(({ name }) => name)).size === fields.length ? null : "Use unique input names starting with a letter or underscore.";
+    }
+    case "request_input":
+      return typeof configuration.message === "string" && configuration.message.trim() && Array.isArray(configuration.fields) && configuration.fields.length
+        ? null : "Enter a question and add at least one answer field.";
+    case "approval": return typeof configuration.message === "string" && configuration.message.trim() ? null : "Describe what needs approval.";
     default: return null;
   }
 }
@@ -140,7 +238,7 @@ export function configurationProblem(configuration: WorkflowNodeConfiguration, d
 export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinitions) {
   const problems: string[] = [];
   if (!graph.name.trim()) problems.push("Enter a pipeline name.");
-  if (graph.nodes.filter(({ kind }) => kind === "start").length !== 1) problems.push("The pipeline needs one Start node.");
+  if (graph.nodes.filter(({ kind }) => isStartNode(kind)).length !== 1) problems.push("The pipeline needs one Start node.");
   for (const node of graph.nodes) {
     const definition = definitions[node.id];
     if (!definition) {
@@ -160,13 +258,28 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
         if (wired !== (node.configuration.source === "evidence")) {
           problems.push(`${node.id}.value requires a connection in source artifact mode.`);
         }
+      } else if (node.kind === "set_fields" && port.name === "source") {
+        const needsSource = node.configuration.mode === "update" || setOperations(node.configuration)
+          .some((operation) => operation.op === "set" && operation.value?.source === "input");
+        if (needsSource && !wired) problems.push(`${node.id}.source requires a connection for the selected operations.`);
+      } else if (((node.kind === "approval" || node.kind === "summarize_result") && port.name === "evidence") ||
+        (node.kind === "build_text" && port.name === "values") ||
+        (node.kind === "agent" && port.name === "comparison")) {
+        continue;
+      } else if (node.kind === "manage_work" && (port.name === "task" || port.name === "title")) {
+        const action = node.configuration.action as { kind?: string } | undefined;
+        const required = port.name === "task" ? action?.kind !== "create_task" : action?.kind !== "link";
+        if (required && !wired) problems.push(`${node.id}.${port.name} requires a connection for the selected work action.`);
+      } else if (node.kind === "load_work_context" && (port.name === "task" || port.name === "document")) {
+        const required = port.name === "task" ? node.configuration.mode !== "markdown" : node.configuration.mode !== "work";
+        if (required && !wired) problems.push(`${node.id}.${port.name} requires a connection for the selected context source.`);
       } else if (!wired) {
         problems.push(`${node.id}.${port.name} (${portType(port.value)}) requires a connection.`);
       }
     }
   }
   for (const wire of graph.wires) {
-    const issue = incompatibility(definitions, wire);
+    const issue = wireProblem(graph, definitions, wire);
     if (issue) problems.push(issue);
   }
   return problems;
@@ -189,7 +302,7 @@ export function changedPorts(node: string, previous: WorkflowDefinition, next: W
   });
 }
 
-export function initialNodePositions(graph: WorkflowGraph): WorkflowLayout {
+export function initialNodePositions(graph: { nodes: readonly { id: string }[]; wires: readonly WorkflowWire[] }): WorkflowLayout {
   const remaining = new Map(graph.nodes.map(({ id }) => [id, new Set<string>()]));
   const next = new Map(graph.nodes.map(({ id }) => [id, new Set<string>()]));
   for (const { from, to } of graph.wires) {

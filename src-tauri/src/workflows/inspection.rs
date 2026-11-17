@@ -14,8 +14,15 @@ use crate::{
 use super::{
     ArtifactValue, ControlStageReceipt, NodeInputs, WorkflowArtifact, WorkflowDefinition,
     WorkflowJobInput, WorkflowPlanUnit, WorkflowRevision, WorkflowRun,
-    authoring::package::roles::{WorkflowRolePin, role_pins},
+    authoring::{
+        WorkflowNodePosition,
+        package::{
+            published_pipeline_layout,
+            roles::{WorkflowRolePin, role_pins},
+        },
+    },
     control::{recorded_control, unit_nodes},
+    decision_nodes::{WorkflowPendingDecision, pending_decisions},
     digest,
     launch::{WorkflowLaunchReceipt, load_workflow_launch},
     runtime::load_definition,
@@ -27,12 +34,16 @@ pub struct WorkflowExecutionInspection {
     pub run: WorkflowRun,
     pub launch: Option<WorkflowLaunchReceipt>,
     pub definition: WorkflowDefinition,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub layout: BTreeMap<String, WorkflowNodePosition>,
     pub role_pins: Vec<WorkflowRolePin>,
     pub unit_node_ids: Vec<String>,
     pub units: Vec<WorkflowExecutionUnit>,
     pub jobs: Vec<WorkflowExecutionJob>,
     pub outputs: Vec<WorkflowExecutionOutput>,
     pub control: Vec<ControlStageReceipt>,
+    pub pending_decisions: Vec<WorkflowPendingDecision>,
+    pub comparison_stages: Vec<super::comparison::WorkflowComparisonStage>,
 }
 
 #[derive(Serialize)]
@@ -144,6 +155,7 @@ impl Store {
             let Some(run) = run else { return Ok(None) };
             let definition = load_definition(&tx, &project, &run.version)?
                 .context("The pinned workflow definition is unavailable")?;
+            let layout = published_pipeline_layout(&tx, &project, &run.version)?;
             let role_pins = role_pins(&tx, &project, &definition)?;
             let launch = load_workflow_launch(&tx, &project, &run_id)?;
             let scoped_nodes = unit_nodes(&definition);
@@ -157,16 +169,21 @@ impl Store {
             let jobs = load_jobs(&tx, &run)?;
             let outputs = load_outputs(&tx, &run, &jobs, &units)?;
             let control = recorded_control(&tx, &run)?;
+            let pending_decisions = pending_decisions(&tx, &run, &definition)?;
+            let comparison_stages = super::comparison::stage::load_stages(&tx, &run)?;
             Ok(Some(WorkflowExecutionInspection {
                 run,
                 launch,
                 definition,
+                layout,
                 role_pins,
                 unit_node_ids,
                 units,
                 jobs,
                 outputs,
                 control,
+                pending_decisions,
+                comparison_stages,
             }))
         })
         .await

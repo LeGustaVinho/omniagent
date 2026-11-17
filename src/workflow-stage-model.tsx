@@ -5,7 +5,7 @@ import { sameModelSelection, useLiveModelOptions } from "@/live-models";
 import type { WorkflowNodeConfiguration } from "@/workflow-graph-model";
 import { WorkflowRequirementsEditor, type RequirementConfiguration } from "@/workflow-stage-requirements";
 import { readStageGoal, WorkflowStageGoal, type StageGoalConfiguration, type StageGoalRoleRevision } from "@/workflow-stage-goal";
-import { stagePlanMode, WorkflowStagePlan, type StagePlanConfiguration } from "@/workflow-stage-plan";
+import { stagePlanMode, WorkflowStagePlan } from "@/workflow-stage-plan";
 
 export function AgentRoleFields({ projectId, checkoutId, mode, configuration, nodeId, nodeKind, goalRole, disabled, fixedModel = false, onChange }: {
   projectId: string;
@@ -22,9 +22,11 @@ export function AgentRoleFields({ projectId, checkoutId, mode, configuration, no
   const { options, loading, errors } = useLiveModelOptions();
   const model = configuration.model as ModelSelection | undefined;
   const requirements = (configuration.requirements as (RequirementConfiguration & {
-    goal?: StageGoalConfiguration; boundRole?: StageGoalRoleRevision; plan?: StagePlanConfiguration;
+    goal?: StageGoalConfiguration; boundRole?: StageGoalRoleRevision;
   }) | undefined) ?? {};
-  const effectiveMode = nodeKind === "plan" ? stagePlanMode(requirements.plan) : mode;
+  const generic = nodeKind === "agent";
+  const planModeEnabled = generic && Boolean(requirements.plan);
+  const effectiveMode = nodeKind === "plan" || planModeEnabled ? stagePlanMode(requirements.plan) : mode;
   const goal = readStageGoal(requirements.goal);
   const goalRoleVersion = goalRole?.version ?? requirements.boundRole;
   const previewConfiguration = goalRoleVersion
@@ -41,7 +43,8 @@ export function AgentRoleFields({ projectId, checkoutId, mode, configuration, no
       reset: { label: "Use runtime model defaults", onSelect: () => onChange(inherited) } }} />
     {unavailable && <p className="text-sm text-muted-foreground">Configured stage model · {model.modelId} · Unavailable in current profiles</p>}
     {errors[0] && <p role="alert">{String(errors[0])}</p>}
-    {nodeKind === "plan" && <WorkflowStagePlan plan={requirements.plan} disabled={disabled || fixedModel}
+    {(nodeKind === "plan" || generic) && <WorkflowStagePlan plan={requirements.plan} optional={generic}
+      goalEnabled={generic && Boolean(requirements.goal)} disabled={disabled || fixedModel}
       onChange={(plan) => {
         const { requirements: _previous, ...node } = configuration;
         const { plan: _before, ...rest } = requirements;
@@ -53,7 +56,7 @@ export function AgentRoleFields({ projectId, checkoutId, mode, configuration, no
       onChange={(requirements) => onChange({ ...configuration, requirements })} />
     <WorkflowStageGoal projectId={projectId} checkoutId={checkoutId} mode={effectiveMode} model={model ?? null}
       node={{ id: nodeId, kind: nodeKind, configuration: previewConfiguration }} roleRevision={goalRoleVersion}
-      roleReferencePending={goalRole?.pending} disabled={disabled || fixedModel} goal={goal}
+      roleReferencePending={goalRole?.pending} disabled={disabled || fixedModel} goal={goal} planModeEnabled={planModeEnabled}
       malformed={requirements.goal !== undefined && !goal}
       onChange={(goal) => {
         const { requirements: _previous, ...node } = configuration;

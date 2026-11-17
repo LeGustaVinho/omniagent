@@ -1,4 +1,4 @@
-import { ArrowLeft, Bot, Braces, ChevronRight, Cpu, GitPullRequest, HardDrive, Monitor, Moon, Paperclip, Search, Shield, SlidersHorizontal, Sun, Workflow, X, type LucideIcon } from "lucide-react";
+import { ArrowLeft, Bot, Braces, ChevronRight, Cpu, GitPullRequest, HardDrive, Monitor, Moon, Paperclip, Search, Settings2, Shield, SlidersHorizontal, Sun, Workflow, X, type LucideIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useEffect, useRef, useState } from "react";
 import type { AppearanceSettings } from "@/bindings/AppearanceSettings";
@@ -121,6 +121,10 @@ function initialSelection(initialPage?: string): PageId {
   return pages.find(({ id }) => id === initialPage)?.id ?? "appearance";
 }
 
+function initialAnchor(initialPage?: string) {
+  return initialPage === "backup" || initialPage === "updates" ? initialPage : undefined;
+}
+
 type SearchResult = {
   page: Page;
   entry?: SearchEntry;
@@ -164,10 +168,11 @@ function SettingsSession({
   simulation,
   startSimulation,
 }: SettingsDialogProps) {
-  const [pageId, setPageId] = useState<PageId>(() => initialSelection(initialPage));
+  const [selection, setSelection] = useState<{ page: PageId; anchor?: string }>(() => ({
+    page: initialSelection(initialPage), anchor: initialAnchor(initialPage),
+  }));
   const [mobilePage, setMobilePage] = useState(() => pageFromLink(initialPage));
   const [query, setQuery] = useState("");
-  const [anchor, setAnchor] = useState<string>();
   const [exampleAppearance, setExampleAppearance] = useState(defaultAppearance);
   const [disposablePolicies, setDisposablePolicies] = useState<Partial<Record<PageId, Record<string, string>>>>({});
   const [approvedExample, setApprovedExample] = useState(false);
@@ -177,41 +182,42 @@ function SettingsSession({
   const appearance = (simulation ? exampleAppearance : preferences.data) ?? defaultAppearance;
   const presentation = useAppearancePresentation(appearance);
   const searchInput = useRef<HTMLInputElement>(null);
+  const pageTitle = useRef<HTMLHeadingElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const showResults = query.trim().length > 0;
   const available = checkout ? pages : pages.filter(({ scope }) => scope === "device");
-  const currentPage = (available.find(({ id }) => id === pageId) ?? pages[0])!;
+  const currentPage = (available.find(({ id }) => id === selection.page) ?? pages[0])!;
   const target = scopeTarget(currentPage.scope, checkout);
   const results = showResults ? searchSettings(available, query) : [];
   const simulate = checkout ? startSimulation : undefined;
 
   useEffect(() => {
     if (!open) return;
-    setPageId(initialSelection(initialPage));
+    setSelection({ page: initialSelection(initialPage), anchor: initialAnchor(initialPage) });
     setQuery("");
-    setAnchor(undefined);
     setMobilePage(pageFromLink(initialPage));
   }, [initialPage, open]);
 
   useEffect(() => {
     const panel = content.current;
-    if (!panel) return;
-    if (!anchor) {
+    if (!open || !panel) return;
+    if (!selection.anchor) {
       panel.scrollTop = 0;
       return;
     }
-    const setting = panel.querySelector<HTMLElement>(`[data-setting="${anchor}"]`);
-    setting?.scrollIntoView?.({ block: "nearest" });
-    setting?.querySelector<HTMLElement>("button:not([disabled]), input:not([disabled]), select:not([disabled])")?.focus();
-  }, [pageId, anchor]);
+    const setting = panel.querySelector<HTMLElement>(`[data-setting="${selection.anchor}"]`);
+    setting?.scrollIntoView?.({ block: "start" });
+    const focus = setting?.querySelector<HTMLElement>("button:not([disabled]), input:not([disabled]), select:not([disabled]), summary")
+      ?? (setting?.hasAttribute("tabindex") ? setting : pageTitle.current);
+    focus?.focus({ preventScroll: true });
+  }, [open, selection]);
 
-  function navigate(id: PageId, setting?: string) {
-    setAnchor(setting);
-    setPageId(id);
+  function navigate(page: PageId, anchor?: string) {
+    setSelection({ page, anchor });
     setMobilePage(true);
-    if (!setting && window.matchMedia?.("(max-width: 759px)").matches) {
-      requestAnimationFrame(() => document.getElementById("settings-page-title")?.focus());
+    if (!anchor && window.matchMedia?.("(max-width: 759px)").matches) {
+      requestAnimationFrame(() => pageTitle.current?.focus());
     }
   }
 
@@ -308,9 +314,11 @@ function SettingsSession({
           style={simulation ? presentation.style : undefined}
           onOpenAutoFocus={(event) => {
             previouslyFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-            if (searchInput.current?.getClientRects().length) {
+            const target = !pageFromLink(initialPage) && searchInput.current?.getClientRects().length
+              ? searchInput.current : pageTitle.current;
+            if (target?.getClientRects().length) {
               event.preventDefault();
-              searchInput.current.focus();
+              target.focus();
             }
           }}
           onCloseAutoFocus={(event) => {
@@ -321,7 +329,8 @@ function SettingsSession({
           }}
         >
           <header className="settings-header">
-            <Dialog.Title>Settings</Dialog.Title>
+            <span className="settings-heading-icon"><Settings2 size={17} aria-hidden="true" /></span>
+            <Dialog.Title asChild><h1>Settings</h1></Dialog.Title>
             <Dialog.Description className="sr-only">Edit device, project and checkout preferences.</Dialog.Description>
             {simulation && <span className="settings-example-label">Simulation</span>}
             <Dialog.Close type="button" className="settings-icon-button" aria-label="Close settings">
@@ -334,6 +343,10 @@ function SettingsSession({
                 <Search size={16} aria-hidden="true" />
                 <input ref={searchInput} type="search" aria-label="Search settings" placeholder="Search settings"
                   value={query} onChange={(event) => setQuery(event.target.value)} />
+                {showResults && <button type="button" className="settings-clear-search" aria-label="Clear settings search"
+                  onClick={() => { setQuery(""); searchInput.current?.focus(); }}>
+                  <X size={14} aria-hidden="true" />
+                </button>}
               </div>
               <nav className="settings-navigation" aria-label="Settings categories">
                 {showResults ? (
@@ -341,7 +354,8 @@ function SettingsSession({
                     <h3>Search results</h3>
                     {results.map(({ page, entry }) => (
                       <button type="button" key={`${page.id}:${entry?.id ?? ""}`}
-                        className="settings-search-result" onClick={() => navigate(page.id, entry?.id)}>
+                        className="settings-search-result" aria-label={entry && `${entry.label} in ${page.title}`}
+                        onClick={() => navigate(page.id, entry?.id)}>
                         <page.icon size={16} aria-hidden="true" />
                         <span>
                           <span>{entry?.label ?? page.title}</span>
@@ -363,7 +377,7 @@ function SettingsSession({
                         className="settings-nav-button" aria-current={page.id === currentPage.id ? "page" : undefined}
                         onClick={() => navigate(page.id)}>
                         <page.icon size={16} aria-hidden="true" />
-                        {page.title}
+                        <span>{page.title}</span>
                         <ChevronRight className="settings-mobile-chevron" size={14} aria-hidden="true" />
                       </button>
                     ))}
@@ -379,10 +393,13 @@ function SettingsSession({
                 <ArrowLeft size={16} aria-hidden="true" /> Settings
               </button>
               <div className="settings-page-heading">
-                <small title={target.path}>{target.label}</small>
-                <h2 id="settings-page-title" tabIndex={-1}>{currentPage.title}</h2>
+                <span className="settings-heading-icon"><currentPage.icon size={21} aria-hidden="true" /></span>
+                <div>
+                  <small title={target.path}>{target.label}</small>
+                  <h2 id="settings-page-title" ref={pageTitle} tabIndex={-1}>{currentPage.title}</h2>
+                </div>
               </div>
-              {pageContent()}
+              <div className="settings-page-body">{pageContent()}</div>
             </section>
           </div>
         </Dialog.Content>

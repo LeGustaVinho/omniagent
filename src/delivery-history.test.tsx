@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Job } from "@/bindings/Job";
@@ -120,11 +120,13 @@ it("reopens a completed task and navigates its original note, selected diff, acc
   render(<QueryClientProvider client={client}><ReopenedWorkbench /></QueryClientProvider>);
   const user = userEvent.setup();
   const detail = within(await screen.findByRole("region", { name: task.title }));
-  await detail.findByText("Completed", { selector: '[role="status"]' });
+  await waitFor(() => expect(detail.getByRole("status").textContent).toBe("Completed"));
+  await user.click(detail.getByRole("button", { name: "Work history" }));
   await user.click(await detail.findByText(/^Verified delivery ·/));
   expect(await screen.findByText("Publish the unit · codex/historical")).toBeTruthy();
   expect(screen.getAllByText(sha).length).toBeGreaterThan(0);
-  await user.click(screen.getByRole("button", { name: "Open delivery workflow" }));
+  await user.click(detail.getByRole("button", { name: "Workflow" }));
+  await user.click(detail.getByRole("button", { name: "Open delivery workflow" }));
   await user.click(await screen.findByText("Saved Markdown · release.md"));
   expect(await screen.findByText("Original frozen note content")).toBeTruthy();
   await user.click(await screen.findByText("Accepted diff"));
@@ -230,6 +232,7 @@ it("shows full receipts for the Task, its independent units, and each contributi
   </QueryClientProvider>);
   const user = userEvent.setup();
   const parentDetail = within(await screen.findByRole("region", { name: parent.title }));
+  await user.click(parentDetail.getByRole("button", { name: "Work history" }));
   const history = within(await parentDetail.findByRole("region", { name: "Delivery history" }));
   await user.click(history.getByText(/^Verified delivery ·/));
   const receipt = within(await history.findByRole("region", { name: `Delivery unit ${own.commit.purpose}` }));
@@ -254,6 +257,7 @@ it("shows full receipts for the Task, its independent units, and each contributi
   expect(contributors.queryByRole("button", { name: /Separate work/ })).toBeNull();
   await user.click(contributors.getByRole("button", { name: `Open Sub-Task delivery for ${child.title}` }));
   const childDetail = within(await screen.findByRole("region", { name: child.title }));
+  expect(childDetail.getByRole("button", { name: "Work history", pressed: true })).toBeTruthy();
   const childHistory = within(await childDetail.findByRole("region", { name: "Delivery history" }));
   expect(childHistory.getByText(/^Verified delivery ·/).closest("details")?.open).toBe(true);
   expect(await childHistory.findByText(childUnit.commit.candidateRevision)).toBeTruthy();

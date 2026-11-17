@@ -10,8 +10,9 @@ function basename(path: string) {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
-export function CheckoutSelector({ checkout, onSelect }: {
-  checkout: ProjectCheckout;
+export function CheckoutSelector({ checkout, onSelect, disabled }: {
+  checkout: ProjectCheckout | null;
+  disabled?: boolean;
   onSelect: (checkout: ProjectCheckout) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
@@ -38,10 +39,11 @@ export function CheckoutSelector({ checkout, onSelect }: {
 
   return <Popover.Root open={open} onOpenChange={setOpen}>
     <Popover.Trigger asChild>
-      <Button variant="ghost" className="work-project-button" aria-label="Switch repository or worktree">
+      <Button variant={checkout ? "ghost" : "outline"} className={checkout ? "work-project-button" : undefined}
+        disabled={disabled} aria-label={checkout ? "Switch repository or worktree" : "Registered repositories"}>
         <FolderGit2 size={15} className="shrink-0" />
-        <span title={checkout.checkoutRoot} className="truncate">{basename(checkout.repositoryRoot)}
-          {checkout.checkoutRoot !== checkout.repositoryRoot && " / " + basename(checkout.checkoutRoot)}
+        <span title={checkout?.checkoutRoot} className="truncate">{checkout ? basename(checkout.repositoryRoot) : "Registered repositories"}
+          {checkout && checkout.checkoutRoot !== checkout.repositoryRoot && " / " + basename(checkout.checkoutRoot)}
         </span>
         <ChevronDown size={13} className="shrink-0" />
       </Button>
@@ -51,9 +53,10 @@ export function CheckoutSelector({ checkout, onSelect }: {
         <h2 className="text-[13px] font-semibold">Repositories and worktrees</h2>
         {registered.isPending && <p role="status">Loading checkouts…</p>}
         {(error || registered.error) && <p role="alert">{error || String(registered.error)}</p>}
+        {registered.data?.length === 0 && <p>No registered repositories yet.</p>}
         <ul>
           {registered.data?.map((item) => <li key={item.checkoutId}>
-            <button type="button" aria-current={item.checkoutId === checkout.checkoutId ? "true" : undefined}
+            <button type="button" aria-current={item.checkoutId === checkout?.checkoutId ? "true" : undefined}
               disabled={pending} onClick={() => void select(item)} title={item.checkoutRoot}>
               {item.checkoutRoot === item.repositoryRoot ? <FolderGit2 size={16} /> : <GitFork size={16} />}
               <span><strong>{basename(item.repositoryRoot)}</strong><small>{item.checkoutRoot}</small></span>

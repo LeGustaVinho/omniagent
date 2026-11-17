@@ -112,8 +112,6 @@ it("adds pinned reusable nodes, saves an editable override, and opens a child wi
   mount(<WorkflowPackageEditor draftId="draft" checkout={exampleCheckout} simulation={null}
     startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />);
   const user = userEvent.setup();
-  await user.click(await screen.findByText("Edit package"));
-  await user.click(screen.getByText("Edit member graph"));
   await user.click(await screen.findByText("Add a reusable node"));
   const pick = screen.getByLabelText("Published reusable node");
   await user.selectOptions(pick, await screen.findByRole("option", { name: /Test preset ·/ }));

@@ -1,8 +1,10 @@
 import { DndContext, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
-import { Activity, FileText, GitCompare, GripVertical, LayoutGrid, List, Plus, Search, X } from "lucide-react";
+import { Activity, FileText, GitCompare, GripVertical, Plus } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { lazy, Suspense, useEffect, useState, type FormEvent } from "react";
 import { AgileTable, type WorkEvidence } from "@/agile-table";
+import { AgileDetailFrame, AgileDetailTabs, AgileKanbanColumn, AgileSearch, AgileWorkCard, AgileWorkDialog, AgileWorkspaceFrame,
+  type WorkDetailView as DetailTab } from "@/agile-layout";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { useGitSimulation } from "@/git-simulation";
 import { exampleNotes } from "@/ide-knowledge-data";
@@ -19,14 +21,12 @@ import {
 } from "@/tasks-demo-data";
 import type { SimulationSession, WorkspaceProps } from "@/workbench-contract";
 
-const tabs = ["Overview", "Workflow", "Work history", "Context", "Changes"] as const;
 const levels = ["Task", "Epic", "Sub-Task"] as const;
 const levelLabels = { Epic: "Epics", Task: "Tasks", "Sub-Task": "Sub-Tasks" };
 const MarkdownEditor = lazy(() => import("@/knowledge-editor").then(({ MarkdownEditor }) => ({ default: MarkdownEditor })));
 const descriptionModes = [["source", "Source"], ["live", "Live Preview"], ["reading", "Reading"]] as const;
 const priorities = ["Urgent", "High", "Normal", "Low"] as const;
 const agents = ["Planning agent", "Cross-review", "Implementation agent", "Verification agent"] as const;
-type DetailTab = typeof tabs[number];
 
 function recordedParticipants(task: DeliveryTask, step?: SimulationSession["delivery"]) {
   if (task.id === deliveryTaskId && step && step !== "note") {
@@ -49,12 +49,9 @@ function TaskColumn({ state, tasks, selected, onSelect }: {
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: state });
   return (
-    <section ref={setNodeRef} className="delivery-column" aria-label={state} data-over={isOver}>
-      <header className="flex items-center justify-between px-1 py-1">
-        <DeliveryStatus>{state}</DeliveryStatus><span className="text-xs text-muted-foreground tabular-nums">{tasks.length}</span>
-      </header>
+    <AgileKanbanColumn nodeRef={setNodeRef} label={state} count={tasks.length} over={isOver}>
       {tasks.map((task) => <TaskCard key={task.id} task={task} selected={task.id === selected} onSelect={onSelect} />)}
-    </section>
+    </AgileKanbanColumn>
   );
 }
 
@@ -63,20 +60,16 @@ function TaskCard({ task, selected, onSelect }: { task: DeliveryTask; selected: 
   const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, isDragging } = useDraggable({ id: task.id, disabled: !canMove });
   const style = transform ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`, zIndex: 2 } : undefined;
   return (
-    <article ref={setNodeRef} style={style} className="delivery-card relative" data-selected={selected} data-dragging={isDragging}>
-      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>{workCode(task)}</span>
-        {canMove && <button type="button" className="cursor-grab rounded p-0.5 hover:text-foreground" ref={setActivatorNodeRef} {...attributes} {...listeners} aria-label={`Drag ${task.title}`}><GripVertical size={14} /></button>}
-      </div>
-      <button type="button" onClick={() => onSelect(task.id)} aria-pressed={selected} className="block w-full py-1.5 text-left text-sm font-medium leading-5 break-words">
-        {task.title}
-      </button>
-      {task.blocker && <p className="mb-2 text-xs leading-5 text-muted-foreground">{task.blocker}</p>}
-      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+    <AgileWorkCard nodeRef={setNodeRef} identity={workCode(task)} title={task.title} style={style} selected={selected}
+      dragging={isDragging} onOpen={() => onSelect(task.id)}
+      handle={canMove && <button type="button" className="cursor-grab rounded p-0.5 hover:text-foreground"
+        ref={setActivatorNodeRef} {...attributes} {...listeners} aria-label={`Drag ${task.title}`}><GripVertical size={14} aria-hidden="true" /></button>}>
+      {task.blocker && <p>{task.blocker}</p>}
+      <div className="flex flex-wrap items-center gap-2">
         {workKind(task) !== "Epic" && <><span className="rounded bg-muted px-1.5 py-0.5">{task.priority}</span><span>{modelName(task.assignment)}</span></>}
         {!!task.checklist?.length && <span>{task.checklist.filter(({ checked }) => checked).length}/{task.checklist.length} checked</span>}
       </div>
-    </article>
+    </AgileWorkCard>
   );
 }
 
@@ -179,20 +172,13 @@ function TaskDialog({ task, parents, onClose, onSave, hasWorktree }: {
   const activator = useState(() => document.activeElement)[0];
   return (
     <Dialog.Root open onOpenChange={(next) => { if (!next) onClose(); }}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[min(47rem,calc(100dvh-2rem))] w-[min(36rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-auto rounded-xl border border-border bg-card p-5 shadow-xl"
-          onCloseAutoFocus={(event) => {
-            if (activator instanceof HTMLElement && activator.getClientRects().length) { event.preventDefault(); activator.focus(); }
-          }}>
-          <header className="mb-4 flex items-center justify-between gap-3">
-            <Dialog.Title className="font-semibold">{task.title ? `Edit ${kind}` : `New ${kind}`}</Dialog.Title>
-            <Dialog.Close aria-label="Close task editor" className="rounded p-1 text-muted-foreground hover:bg-muted"><X size={17} /></Dialog.Close>
-          </header>
-          <Dialog.Description className="sr-only">Edit the task details, planned assignment, dependencies and criteria.</Dialog.Description>
-          <TaskForm task={task} parents={parents} onSave={onSave} hasWorktree={hasWorktree} />
-        </Dialog.Content>
-      </Dialog.Portal>
+      <AgileWorkDialog title={task.title ? `Edit ${kind}` : `New ${kind}`} closeLabel="Close task editor"
+        description="Edit the task details, planned assignment, dependencies and criteria."
+        onCloseAutoFocus={(event) => {
+          if (activator instanceof HTMLElement && activator.getClientRects().length) { event.preventDefault(); activator.focus(); }
+        }}>
+        <TaskForm task={task} parents={parents} onSave={onSave} hasWorktree={hasWorktree} />
+      </AgileWorkDialog>
     </Dialog.Root>
   );
 }
@@ -283,19 +269,8 @@ function TaskDetails({ task, parent, children, onSelect, onCheck, onAddItem, tab
   const mode = task.checklistMode ?? parent?.checklistMode ?? "Track progress";
   const [itemTitle, setItemTitle] = useState("");
   return (
-    <aside className="delivery-detail" aria-label="Task details">
-      <header className="flex items-start justify-between gap-3 border-b border-border p-3.5">
-        <div className="min-w-0">
-          <p className="mb-1 text-xs text-muted-foreground">{kind} · {workCode(task)}</p>
-          <DeliveryStatus>{task.state}</DeliveryStatus>
-          <h3 className="mt-1.5 text-sm font-semibold leading-5 break-words">{task.title}</h3>
-        </div>
-        <button className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground" onClick={close} type="button" aria-label="Close details"><X size={16} /></button>
-      </header>
-      <nav className="flex gap-0.5 overflow-x-auto border-b border-border px-2 py-1" aria-label="Task detail views">
-        {tabs.map((tabName) => <button type="button" key={tabName} className="delivery-tab" aria-pressed={tab === tabName} onClick={() => setTab(tabName)}>{tabName}</button>)}
-      </nav>
-      <div className="delivery-detail-content grid content-start gap-4 p-3.5">
+    <AgileDetailFrame label="Task details" title={task.title} identity={`${kind} · ${workCode(task)}`}
+      state={task.state} closeLabel="Close details" close={close} navigation={<AgileDetailTabs view={tab} onViewChange={setTab} />}>
         {tab === "Overview" && <>
           {parent && <button type="button" className="agile-ref justify-self-start" onClick={() => onSelect(parent.id)}>
             {workKind(parent)} · {parent.title}
@@ -359,8 +334,7 @@ function TaskDetails({ task, parent, children, onSelect, onCheck, onAddItem, tab
             ? <><p className="text-sm text-muted-foreground">Saved candidate <code>{deliveryCommit}</code></p><Button type="button" variant="outline" className="justify-self-start px-2.5 py-1.5 text-xs" onClick={() => props.openChanges("saved")}><GitCompare size={14} /> Open saved diff</Button></>
             : <p className="text-sm text-muted-foreground">No candidate diff captured for this task.</p>}
         </>}
-      </div>
-    </aside>
+    </AgileDetailFrame>
   );
 }
 
@@ -472,20 +446,16 @@ function PreviewTasksWorkspace(props: WorkspaceProps) {
   }
 
   return (
-    <section className="delivery-view" aria-label="Tasks workspace">
-      <header className="delivery-toolbar">
-        <h2 className="mr-2">Agile Board</h2>
-        <button type="button" className="delivery-tab" aria-pressed={view === "board"} onClick={() => setView("board")}><LayoutGrid size={14} className="mr-1 inline-block" />Kanban</button>
-        <button type="button" className="delivery-tab" aria-pressed={view === "list"} onClick={() => setView("list")}><List size={14} className="mr-1 inline-block" />Table</button>
-        <Button type="button" className="ml-auto px-3 py-1.5 text-xs" disabled={!simulation} title={simulation ? undefined : "Task creation integration pending"}
+    <AgileWorkspaceFrame title="Agile Board" view={view === "board" ? "kanban" : "table"}
+      onViewChange={(next) => setView(next === "kanban" ? "board" : "list")}
+      action={<Button type="button" className="px-3 py-1.5 text-xs" disabled={!simulation} title={simulation ? undefined : "Task creation integration pending"}
           onClick={() => create(newKind)}>
-          <Plus size={15} /> New {newKind.toLowerCase()}
-        </Button>
-      </header>
-      {simulation && <div className="delivery-toolbar delivery-filters">
+          <Plus size={15} aria-hidden="true" /> New {newKind.toLowerCase()}
+        </Button>}
+      filters={simulation && <>
         {view === "board" && <select className="delivery-filter font-medium" aria-label="Kanban level" value={level}
           onChange={(event) => setLevel(event.target.value as WorkKind)}>{levels.map((kind) => <option key={kind} value={kind}>{levelLabels[kind]}</option>)}</select>}
-        <label className="relative min-w-35 max-w-65 flex-1"><Search className="pointer-events-none absolute left-2.5 top-1.5 text-muted-foreground" size={15} /><input className="delivery-filter delivery-search w-full" placeholder="Find a task" aria-label="Find a task" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+        <AgileSearch label="Find a task" value={query} onChange={setQuery} />
         <select className="delivery-filter" aria-label="Filter tasks by state" value={stateFilter} onChange={(event) => setStateFilter(event.target.value)}><option value="">All states</option>{taskStates.map((state) => <option key={state}>{state}</option>)}</select>
         <select className="delivery-filter" aria-label="Filter tasks by provider" value={providerFilter} onChange={(event) => setProviderFilter(event.target.value)}><option value="">All providers</option><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="antigravity">Antigravity</option></select>
         <select className="delivery-filter" aria-label="Filter tasks by agent" disabled={!simulation} value={agentFilter} onChange={(event) => setAgentFilter(event.target.value)}><option value="">All agents</option>{agents.map((agent) => <option key={agent}>{agent}</option>)}</select>
@@ -495,7 +465,7 @@ function PreviewTasksWorkspace(props: WorkspaceProps) {
         {(filter || stateFilter || providerFilter || agentFilter || modelFilter) && <button className="delivery-tab" type="button" onClick={() => {
           setQuery(""); setStateFilter(""); setProviderFilter(""); setAgentFilter(""); setModelFilter("");
         }}>Clear filters</button>}
-      </div>}
+      </>}>
       <div className="delivery-body">
         <div className="delivery-main">
           {!simulation ? <IntegrationNotice title="Tasks are unavailable in this checkout" onSimulate={startSimulation}>Explore the board, task details, dependencies, and reviews with example data.</IntegrationNotice>
@@ -510,6 +480,6 @@ function PreviewTasksWorkspace(props: WorkspaceProps) {
       </div>
       {editing && <TaskDialog task={editing} parents={work.filter((item) => workKind(item) === (workKind(editing) === "Task" ? "Epic" : "Task"))}
         onClose={() => setEditing(undefined)} onSave={save} hasWorktree={Boolean(evidence(editing))} />}
-    </section>
+    </AgileWorkspaceFrame>
   );
 }

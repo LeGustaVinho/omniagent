@@ -8,6 +8,7 @@ use crate::{
         WorkflowHostSubmission, tests::approved_delivery_repository,
     },
 };
+use serde_json::json;
 
 #[tokio::test]
 async fn a_manual_launch_pins_the_published_revision_source_and_subtask_across_restart()
@@ -150,6 +151,27 @@ async fn a_manual_launch_pins_the_published_revision_source_and_subtask_across_r
         )
         .await?;
     assert_ne!(newest, first);
+    let saved_run = run.id.clone();
+    store
+        .execute(move |db| {
+            let payload: Vec<u8> = db.query_row(
+                "SELECT payload FROM workflow_launches WHERE pipeline_run_id = ?1",
+                [&saved_run],
+                |row| row.get(0),
+            )?;
+            let mut historic: Map<String, Value> =
+                serde_json::from_slice(&protection::unprotect(&payload)?)?;
+            assert!(historic.remove("checkoutId").is_some());
+            db.execute(
+                "UPDATE workflow_launches SET payload = ?1 WHERE pipeline_run_id = ?2",
+                params![
+                    protection::protect(&serde_json::to_vec(&historic)?)?,
+                    saved_run
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
     drop(store);
     let reopened = Store::open(database)?;
     assert_eq!(reopened.launch_workflow_manual(request.clone()).await?, run);
@@ -160,12 +182,15 @@ async fn a_manual_launch_pins_the_published_revision_source_and_subtask_across_r
         Some(WorkflowLaunchReceipt {
             workflow_run_id: run.id.clone(),
             version: first,
-            source: original.revision,
+            checkout_id: original.revision.checkout_id.clone(),
+            source: Some(original.revision),
             origin: WorkflowLaunchOrigin::Agile {
                 request_id: request.request_id.clone(),
                 work_id: subtask.id,
             },
             checklist_item: None,
+            inputs: Default::default(),
+            event: None,
         })
     );
     assert!(
@@ -184,5 +209,217 @@ async fn a_manual_launch_pins_the_published_revision_source_and_subtask_across_r
             .is_err()
     );
     assert_eq!(reopened.list_workflow_runs(project).await?, [run]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_start_records_exact_inputs_without_markdown_and_deduplicates_launches() -> Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("store.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, directory.path()).await?;
+    let foreign_dir = directory.path().join("foreign");
+    std::fs::create_dir(&foreign_dir)?;
+    let foreign = approved_delivery_repository(&store, &foreign_dir).await?;
+    assert_ne!(repo.project_id, foreign.project_id);
+    let project = repo.project_id.clone();
+    let work = store
+        .create_project_task(project.clone(), "Scoped Task".into())
+        .await?;
+    let foreign_work = store
+        .create_project_task(foreign.project_id, "Foreign Task".into())
+        .await?;
+    let workflow = store.save_workflow_revision(
+        project.clone(),
+        "typed-workflow".into(),
+        serde_json::from_value(json!({
+            "name": "Typed workflow",
+            "nodes": [
+                {"id":"entry", "kind":"typed_start", "configuration":{"kind":"typed_start","fields":[
+                    {"name":"title", "valueType":"text", "required":true},
+                    {"name":"count", "valueType":"number", "required":true},
+                    {"name":"empty", "valueType":"null", "required":false}
+                ]}},
+                {"id":"render", "kind":"build_text", "configuration":{"kind":"build_text","template":"{{title}} {{count}}"}}
+            ],
+            "wires": [
+                {"from":{"node":"entry","port":"start"},"to":{"node":"render","port":"ready"}},
+                {"from":{"node":"entry","port":"inputs"},"to":{"node":"render","port":"values"}}
+            ]
+        }))?,
+    ).await?;
+    let base = store
+        .workflow_authoring_bases(project.clone())
+        .await?
+        .into_iter()
+        .find(|base| base.version == workflow)
+        .context("Typed Start metadata is missing")?;
+    let base = serde_json::to_value(base)?;
+    let schema = &base["start"];
+    assert_eq!(
+        schema["fields"][0],
+        json!({"name": "title", "valueType": "text", "required": true})
+    );
+    assert_eq!(schema["requiresDocument"], false);
+    assert_eq!(schema["requiresWork"], false);
+    assert_eq!(schema["requiresEvent"], false);
+    let inputs =
+        serde_json::from_value(json!({ "title": "Pinned text", "count": 0, "empty": null }))?;
+    let request = TypedWorkflowLaunch {
+        project_id: project.clone(),
+        workflow: workflow.clone(),
+        checkout_id: repo.checkout_id.clone(),
+        document_revision_id: None,
+        request_id: Uuid::new_v4().to_string(),
+        work_id: Some(work.id.clone()),
+        inputs,
+    };
+    for invalid in [
+        TypedWorkflowLaunch {
+            checkout_id: foreign.checkout_id,
+            ..request.clone()
+        },
+        TypedWorkflowLaunch {
+            work_id: Some(foreign_work.id),
+            ..request.clone()
+        },
+        TypedWorkflowLaunch {
+            inputs: serde_json::from_value(json!({ "title": "Missing count" }))?,
+            ..request.clone()
+        },
+        TypedWorkflowLaunch {
+            inputs: serde_json::from_value(json!({ "title": "Wrong type", "count": "0" }))?,
+            ..request.clone()
+        },
+        TypedWorkflowLaunch {
+            inputs: serde_json::from_value(
+                json!({ "title": "Extra field", "count": 0, "extra": true }),
+            )?,
+            ..request.clone()
+        },
+    ] {
+        assert!(
+            store
+                .launch_workflow_request(WorkflowLaunchRequest::Typed(invalid))
+                .await
+                .is_err()
+        );
+    }
+    let retry = WorkflowLaunchRequest::Typed(request.clone());
+    let (first, repeated) = tokio::join!(
+        store.launch_workflow_request(retry.clone()),
+        store.launch_workflow_request(retry.clone())
+    );
+    let run = first?;
+    assert_eq!(repeated?, run);
+    let receipt = store
+        .workflow_launch(project.clone(), run.id.clone())
+        .await?
+        .context("Missing Start receipt")?;
+    assert_eq!(receipt.version, workflow);
+    assert_eq!(receipt.checkout_id, repo.checkout_id);
+    assert!(receipt.source.is_none());
+    assert!(receipt.event.is_none());
+    assert_eq!(receipt.inputs, request.inputs);
+    let outputs = store
+        .current_workflow_host_outputs(project.clone(), run.id.clone())
+        .await?;
+    let artifact = store
+        .resolve_workflow_artifact(
+            project.clone(),
+            run.id.clone(),
+            outputs["entry"].clone(),
+            ArtifactKind::JsonObject,
+        )
+        .await?
+        .context("Missing Start inputs artifact")?;
+    assert_eq!(
+        artifact.value,
+        ArtifactValue::JsonObject(request.inputs.clone())
+    );
+    drop(store);
+    let reopened = Store::open(database)?;
+    assert_eq!(reopened.launch_workflow_request(retry).await?, run);
+    let mut changed = request.clone();
+    changed.inputs.remove("empty");
+    assert!(
+        reopened
+            .launch_workflow_request(WorkflowLaunchRequest::Typed(changed))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        reopened
+            .workflow_launch(project.clone(), run.id.clone())
+            .await?,
+        Some(receipt)
+    );
+    assert_eq!(reopened.list_workflow_runs(project).await?, [run]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_start_requires_a_pinned_markdown_revision_when_document_is_wired() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("store.sqlite"))?;
+    let repo = approved_delivery_repository(&store, directory.path()).await?;
+    let project = repo.project_id.clone();
+    let note = Path::new(&repo.checkout_root).join("brief.md");
+    let original = store
+        .capture_repository_markdown(repo.checkout_id.clone(), note.clone())
+        .await?;
+    let workflow = store.save_workflow_revision(project.clone(), "typed-document".into(), serde_json::from_value(json!({
+        "name":"With a document",
+        "nodes":[
+            {"id":"entry","kind":"typed_start","configuration":{"kind":"typed_start","fields":[]}},
+            {"id":"context","kind":"load_context","configuration":{"kind":"none"}}
+        ],
+        "wires":[
+            {"from":{"node":"entry","port":"start"},"to":{"node":"context","port":"ready"}},
+            {"from":{"node":"entry","port":"document"},"to":{"node":"context","port":"document"}}
+        ]
+    }))?).await?;
+    let mut request = TypedWorkflowLaunch {
+        project_id: project.clone(),
+        workflow,
+        checkout_id: repo.checkout_id,
+        document_revision_id: None,
+        request_id: Uuid::new_v4().to_string(),
+        work_id: None,
+        inputs: Map::new(),
+    };
+    assert!(
+        store
+            .launch_workflow_request(WorkflowLaunchRequest::Typed(request.clone()))
+            .await
+            .is_err()
+    );
+    std::fs::write(note, "New revision")?;
+    request.document_revision_id = Some(original.revision.id.clone());
+    let run = store
+        .launch_workflow_request(WorkflowLaunchRequest::Typed(request))
+        .await?;
+    let receipt = store
+        .workflow_launch(project.clone(), run.id.clone())
+        .await?
+        .context("The launch receipt is missing")?;
+    let outputs = store
+        .current_workflow_host_outputs(project.clone(), run.id.clone())
+        .await?;
+    let context = store
+        .resolve_workflow_artifact(
+            project,
+            run.id,
+            outputs["context"].clone(),
+            ArtifactKind::Markdown,
+        )
+        .await?
+        .context("The Start document did not reach Load context")?;
+    assert_eq!(
+        context.value,
+        ArtifactValue::Markdown(original.revision.clone())
+    );
+    assert_eq!(receipt.source, Some(original.revision));
     Ok(())
 }

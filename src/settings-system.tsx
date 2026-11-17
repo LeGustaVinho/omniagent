@@ -1,11 +1,11 @@
-import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArchiveRestore, HardDrive, RefreshCw, ShieldCheck } from "lucide-react";
-import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useReducer, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { DesktopCliPrerequisites } from "@/desktop-cli-prerequisites";
 import { ripgrepStatusKey, useRipgrepStatus, type RipgrepStatus } from "@/ide-file-search";
+import { SystemInstallation } from "@/system-installation";
 import { IntegrationNotice, SettingRow } from "@/settings-controls";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { signedUpdateStatusKey, type SignedUpdateStatus } from "@/workflow-maintenance";
@@ -135,26 +135,13 @@ export function SystemSettings({
   simulated?: Simulation;
   startSimulation?: WorkspaceProps["startSimulation"];
 }) {
-  const runtime = useQuery({
-    queryKey: ["runtime-status"],
-    queryFn: () => invoke<string>("runtime_status"),
-    enabled: !simulated,
-  });
-  const build = useQuery({
-    queryKey: ["application-version"], queryFn: getVersion, enabled: !simulated, staleTime: Infinity,
-  });
-
   if (simulated) return <SimulatedSystem {...simulated} />;
   return (
     <div className="settings-system">
       <SystemGroup icon={<HardDrive size={18} />} id="environment" title="Current installation">
-        <dl className="settings-facts">
-          <dt>Build</dt><dd>{build.data ?? (build.isError ? "Unavailable" : "Loading…")}</dd>
-          <dt>Runtime</dt><dd>{runtime.data ?? (runtime.isError ? "Unavailable" : "Checking…")}</dd>
-          <dt>Data directory</dt><dd>Local Windows application data</dd>
-        </dl>
+        <SystemInstallation />
       </SystemGroup>
-      <IntegrationNotice start={startSimulation} scenario="windows">
+      <IntegrationNotice start={startSimulation} scenario="windows" title="Maintenance simulation">
         Try the example installation and update recovery flows.
       </IntegrationNotice>
       <SystemGroup icon={<ShieldCheck size={18} />} id="qualification" title="Prerequisites and qualification">
@@ -471,8 +458,9 @@ export function QualificationMatrix({ examples = false }: { examples?: boolean }
 }
 
 function SystemGroup({ icon, id, title, children }: { icon: ReactNode; id: string; title: string; children: ReactNode }) {
-  return <section className="settings-system-group" data-setting={id}>
-    <h3>{icon}{title}</h3>
+  const titleId = useId();
+  return <section className="settings-system-group" data-setting={id} aria-labelledby={titleId} tabIndex={-1}>
+    <h3 id={titleId}>{icon}{title}</h3>
     {children}
   </section>;
 }

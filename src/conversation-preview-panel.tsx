@@ -8,6 +8,7 @@ import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import { ModelPicker } from "@/components/model-picker";
 import { EffortSelect } from "@/components/effort-select";
+import { ConversationComposerToolbar, ConversationEmptyState, ConversationMessage, ConversationTitleBar, ConversationTranscript } from "@/conversation-layout";
 import { ConversationModeSelect, goalCommand, type ConversationMode } from "@/conversation-mode";
 import { exampleModelEfforts } from "@/model-effort-examples";
 import { ConversationMarkdown } from "@/conversation-markdown";
@@ -268,11 +269,10 @@ export function PreviewConversationPanel(props: PanelProps) {
   const attachmentContent = fileSamples[attachment.path as keyof typeof fileSamples];
   return (
     <section className="conv-pane" aria-label={conversation.title}>
-      <header className="conv-heading">
-        <MessageSquare aria-hidden /><h1>{conversation.title}</h1>
-        {conversation.worktree !== "example-main" && <small className="min-w-0 truncate text-muted-foreground" title={conversation.worktree}>{conversation.worktree}</small>}
-        {conversation.archived && <small className="text-muted-foreground">Archived</small>}
-        <div className="conv-preview-header-controls">
+      <ConversationTitleBar title={conversation.title} details={<>
+        {conversation.worktree !== "example-main" && <small className="conv-title-context" title={conversation.worktree}>{conversation.worktree}</small>}
+        {conversation.archived && <small className="conv-title-context">Archived</small>}
+      </>}>
           {sideQuestion && <button ref={sideQuestionButton} type="button" className="conv-quiet-button" aria-expanded={showSideQuestion}
             onClick={() => showSideQuestion ? closeSideQuestion() : setShowSideQuestion(true)}>
             <MessageSquare aria-hidden /> Side question
@@ -290,29 +290,24 @@ export function PreviewConversationPanel(props: PanelProps) {
           <button type="button" className="conv-quiet-button" onClick={() => openActivity("example-run")}>
             <Activity aria-hidden /> Activity
           </button>
-        </div>
-      </header>
+      </ConversationTitleBar>
       <div className="conv-layout">
         <div className="conv-chat">
-          <div className="conv-history" ref={history} role="region" aria-label="Conversation history" onScroll={(event) => {
+          <ConversationTranscript historyRef={history} onScroll={(event) => {
             const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
             stickToEnd.current = scrollHeight - clientHeight - scrollTop < 32;
             setShowJump(!stickToEnd.current);
           }}>
-            <div className="conv-reading">
-              {!conversation.messages.length && !step && <div className="conv-empty">
-                <MessageSquare aria-hidden /><h2>Start a conversation</h2><p>Send a message or try /plan, /goal, and /btw.</p>
-              </div>}
+              {!conversation.messages.length && !step && <ConversationEmptyState title="Start a conversation"
+                description="Send a message or try /plan, /goal, and /btw." />}
               <ol className="conv-messages">
                 {conversation.messages.map((message) => (
-                  <li key={message.id} className={message.author === "user" ? "conv-user conv-example-message" : "conv-assistant conv-example-message"}>
-                    <p className="sr-only">{message.author === "user" ? "You" : "Assistant"}</p>
+                  <ConversationMessage key={message.id} role={message.author} actions={<>
+                    <button type="button" className="conv-quiet-button" onClick={() => onFork(message)}>Fork from here</button>
+                    <button type="button" className="conv-quiet-button" onClick={() => onRewind(message)}>Rewind to here</button>
+                  </>}>
                     {message.author === "user" ? <p>{message.text}</p> : <ConversationMarkdown>{message.text}</ConversationMarkdown>}
-                    <div className="conv-message-actions">
-                      <button type="button" className="conv-quiet-button" onClick={() => onFork(message)}>Fork from here</button>
-                      <button type="button" className="conv-quiet-button" onClick={() => onRewind(message)}>Rewind to here</button>
-                    </div>
-                  </li>
+                  </ConversationMessage>
                 ))}
               </ol>
               {step && <section className="conv-example-flow" aria-label="Example delivery">
@@ -346,8 +341,7 @@ export function PreviewConversationPanel(props: PanelProps) {
                   </div>}
                 </article>}
               </section>}
-            </div>
-          </div>
+          </ConversationTranscript>
           <div className="conv-composer-area">
             {showJump && <button type="button" className="conv-jump" onClick={() => {
               if (history.current) history.current.scrollTop = history.current.scrollHeight;
@@ -412,7 +406,12 @@ export function PreviewConversationPanel(props: PanelProps) {
               </div>}
               {!draft && !activeRun && !composingGoal && conversation.messages.length > 0 && <button type="button" className="conv-suggestion"
                 onClick={() => editDraft(exampleSuggestion)}>{exampleSuggestion}<kbd>Tab</kbd></button>}
-              <div className="conv-composer-toolbar">
+              <ConversationComposerToolbar actions={<>
+                {activeRun && <button type="button" className="conv-quiet-button" onClick={() => simulation?.advanceDelivery("interrupt")}>Stop</button>}
+                <button type="submit" className="conv-primary-button conv-send" disabled={!canSend}>
+                  {goalInput === "" ? "Open Goal Mode" : composingGoal ? "Start goal" : activeRun && deliveryRoute === "queued" ? "Queue" : "Send"} <ArrowUp size={15} aria-hidden />
+                </button>
+              </>}>
                 <button type="button" className="conv-icon-button" title="Attach a file" aria-label="Attach a file" onClick={openAttachment}><Plus aria-hidden /></button>
                 <select aria-label="Provider" className="conv-select" value={provider} onChange={(event) => updateProfile(event.currentTarget.value as Provider)}>
                   {Object.entries(providers).map(([id, name]) => <option key={id} value={id}>{name}</option>)}
@@ -425,11 +424,7 @@ export function PreviewConversationPanel(props: PanelProps) {
                   <option value="live" disabled={provider !== "codex"}>Send to active turn</option>
                   <option value="queued">Queue for next turn</option>
                 </select>}
-                {activeRun && <button type="button" className="conv-quiet-button" onClick={() => simulation?.advanceDelivery("interrupt")}>Stop</button>}
-                <button type="submit" className="conv-primary-button conv-send" disabled={!canSend}>
-                  {goalInput === "" ? "Open Goal Mode" : composingGoal ? "Start goal" : activeRun && deliveryRoute === "queued" ? "Queue" : "Send"} <ArrowUp size={15} aria-hidden />
-                </button>
-              </div>
+              </ConversationComposerToolbar>
               {queuedNotice && <p className="text-xs text-muted-foreground" role="status">{queuedNotice}</p>}
             </form>
           </div>

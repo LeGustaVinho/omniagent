@@ -271,6 +271,10 @@ impl Store {
                 super::stage_plan::StagePlanConfiguration::for_stage(&definition)?
                     .map_or(SessionMode::Plan, |plan| plan.mode())
             }
+            Executor::ReadOnlyAgent if definition.definition.kind == BuiltinNode::Agent => {
+                super::stage_plan::StagePlanConfiguration::for_stage(&definition)?
+                    .map_or(SessionMode::ReadOnly, |plan| plan.mode())
+            }
             Executor::ReadOnlyAgent => SessionMode::ReadOnly,
             Executor::WriteAgent => SessionMode::ApprovedWrite,
             _ => anyhow::bail!("this node does not execute a CLI role"),
@@ -291,6 +295,8 @@ impl Store {
         };
         let checkout_id = if let Some(unit) = &unit {
             unit.checkout_id.clone()
+        } else if definition.definition.kind == BuiltinNode::Agent {
+            self.generic_agent_checkout(project, run).await?
         } else if let Some(ArtifactValue::GitInspection(git)) =
             artifacts.get("git").map(|artifact| &artifact.value)
         {

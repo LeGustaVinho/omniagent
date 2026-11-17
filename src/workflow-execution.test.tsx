@@ -10,6 +10,7 @@ import type { Job } from "@/bindings/Job";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { WorkflowExecutionAgent } from "@/workflow-execution-agent";
 import { WorkflowDiffStage } from "@/workflow-execution-diff";
+import { WorkflowNodeEvidence } from "@/workflow-execution-evidence";
 import type { ExecutionJob, ExecutionOutput, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 import { exampleCheckout } from "@/workbench-contract";
 
@@ -90,6 +91,119 @@ it("queues an authored planner with the pinned role model and exact wired contex
   expect(invoke).toHaveBeenCalledWith("submit_repository_delivery_agent", {
     input: { projectId, runId, nodeId: plan.instance.id, unitId: null, inputs: { context: "selected-document" }, selection: model, effort: "high" },
   });
+});
+
+it("queues a generic Agent with its exact prompt and an unconnected optional comparison port", async () => {
+  const source = node("source", "Compose request", [], [control("completed"), port("text", "rendered_text")]);
+  const agent = node("agent", "Summarize request", [control("ready"), port("prompt", "rendered_text"), port("comparison", "comparison_results")]);
+  const model = { provider: "codex", profileId: "reader-profile", modelId: "reader-model" } as const;
+  agent.instance.configuration = { kind: "agent_role", role: "Summarizer", model };
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, version, projectId, planRevision: null },
+    definition: { version, name: "Authored Agent", nodes: [source, agent], wires: [
+      { from: { node: source.instance.id, port: "completed" }, to: { node: agent.instance.id, port: "ready" } },
+      { from: { node: source.instance.id, port: "text" }, to: { node: agent.instance.id, port: "prompt" } },
+    ] },
+    outputs: [output(source.instance.id, "selected-prompt", "text", "rendered_text", "Saved request")],
+    unitNodeIds: [], units: [], jobs: [], control: [],
+  };
+  vi.mocked(invoke).mockImplementation(async (name, input) => {
+    if (name === "conversation_models") return (input as { provider: string }).provider === "codex"
+      ? [{ option: { selection: model, name: "Reader profile", selectable: true, rating: null } }] : [];
+    if (name === "submit_repository_delivery_agent") return job(agent.instance.id, []).job;
+    throw new Error(name);
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <WorkflowExecutionAgent snapshot={snapshot} node={agent} openActivity={vi.fn()} />
+  </QueryClientProvider>);
+  const queue = screen.getByRole<HTMLButtonElement>("button", { name: "Queue summarize request" });
+  await waitFor(() => expect(queue.disabled).toBe(false));
+  await userEvent.setup().click(queue);
+  expect(invoke).toHaveBeenCalledWith("submit_repository_delivery_agent", {
+    input: { projectId, runId, nodeId: agent.instance.id, unitId: null, inputs: { prompt: "selected-prompt" }, selection: model, effort: null },
+  });
+});
+
+it("records a generic Goal criterion against its saved continuation checkpoint", async () => {
+  const source = node("source", "Compose request", [], [port("text", "rendered_text")]);
+  const agent = node("agent", "Review request", [port("prompt", "rendered_text")], [port("response", "agent_response")]);
+  agent.instance.configuration = { kind: "agent_role", role: "Reviewer", requirements: {
+    goal: { objective: "Review the changes", criteria: [{ text: "Assess the rollout", evidence: "operator_review" }], maxTurns: 3 },
+  } };
+  const attempt = { runId: "initial-agent-turn", ordinal: 1, previousRunId: null, conversationId: "goal-chat", status: "succeeded" as const };
+  const recorded = job(agent.instance.id, [attempt]);
+  recorded.inputs = { prompt: "selected-prompt" };
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, version, projectId, planRevision: null },
+    definition: { version, name: "Authored Goal", nodes: [source, agent], wires: [
+      { from: { node: source.instance.id, port: "text" }, to: { node: agent.instance.id, port: "prompt" } },
+    ] },
+    outputs: [output(source.instance.id, "selected-prompt", "text", "rendered_text", "Saved request")],
+    unitNodeIds: [], units: [], jobs: [recorded], control: [],
+  };
+  const checkpoint = "continuation-review-turn";
+  const evidence = { kind: "operator_review", approved: true, note: null };
+  let verified = false;
+  const verification = () => ({ runId: checkpoint, status: verified ? "completed" : "verifying", criteria: [
+    { ordinal: 1, text: "Assess the rollout", status: verified ? "passed" : "pending", evidence: verified ? evidence : null },
+  ] });
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "run_orchestration") {
+      expect(args).toEqual({ projectId, runId: attempt.runId, conversationId: attempt.conversationId });
+      return { goal: { controlState: "active", checkpoint: { runId: checkpoint, nextAction: "review" } } };
+    }
+    if (command === "goal_verification") {
+      expect(args).toEqual({ projectId, runId: checkpoint });
+      return verification();
+    }
+    if (command === "list_goal_criterion_evidence") return [];
+    if (command === "record_goal_criterion_evidence") {
+      expect(args).toEqual({ projectId, runId: checkpoint, ordinal: 1, evidence });
+      verified = true;
+      return verification();
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const refresh = vi.spyOn(client, "invalidateQueries");
+  render(<QueryClientProvider client={client}><WorkflowExecutionAgent snapshot={snapshot} node={agent} openActivity={vi.fn()} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.selectOptions(await screen.findByLabelText("Evidence for criterion 1"), "approve");
+  await user.click(screen.getByRole("button", { name: "Record evidence" }));
+  expect(await screen.findByText("Verified and complete")).toBeTruthy();
+  expect(refresh).toHaveBeenCalledWith({ queryKey: ["repository-delivery", projectId] });
+});
+
+it("reads only the recorded agent response and drops it on history invalidation", async () => {
+  const agent = node("agent", "Summarize request");
+  const artifact = output(agent.instance.id, "agent-output", "response", "agent_response", { runId: "recorded-agent-run" });
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, version, projectId, planRevision: null },
+    definition: { version, name: "Recorded agent", nodes: [agent], wires: [] },
+    outputs: [artifact], unitNodeIds: [], units: [], jobs: [], control: [],
+  };
+  let deleted = false;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    expect(command).toBe("workflow_agent_response");
+    expect(args).toEqual({ projectId, runId, artifactId: "agent-output" });
+    if (deleted) throw new Error("The recorded response is unavailable.");
+    return "Original agent text";
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const navigation = { checkout: exampleCheckout, openWorkspace: vi.fn(), openActivity: vi.fn() };
+  render(<QueryClientProvider client={client}>
+    <WorkflowNodeEvidence snapshot={snapshot} node={agent} navigation={navigation} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  expect(invoke).not.toHaveBeenCalled();
+  await user.click(screen.getByText("Read recorded agent response"));
+  expect(await screen.findByText("Original agent text")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Open original agent response" }));
+  expect(navigation.openActivity).toHaveBeenCalledWith("recorded-agent-run");
+  deleted = true;
+  await client.invalidateQueries({ queryKey: ["conversation"] });
+  expect(await screen.findByRole("alert")).toBeTruthy();
+  expect(screen.queryByText("Original agent text")).toBeNull();
 });
 
 it("sends a selected Git candidate with its exact base, tree and pinned document input", async () => {
@@ -294,4 +408,109 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
   expect(props.openActivity).toHaveBeenLastCalledWith("command-saved");
   await user.selectOptions(screen.getByRole("combobox", { name: "Saved workflow run" }), "newer-run");
   expect(props.openWorkspace).toHaveBeenCalledWith("pipelines", "run:newer-run");
+});
+
+it("shows a pending decision only for the pinned node in the current plan and selected unit", async () => {
+  const source = node("start", "Pinned source", [], [port("document", "markdown")]);
+  const approval = node("ask", "Release decision");
+  const earlier = { ...logical, planRevision: "earlier-plan", unit: { ...logical.unit, purpose: "Earlier delivery" } };
+  const active = {
+    requestId: "current-request", nodeId: approval.instance.id, nodeRevision: approval.revision,
+    planRevision: logical.planRevision, unitId: logical.unit.id, inputs: { document: "saved-source" },
+    request: { kind: "approval" as const, message: "Review the current delivery." },
+  };
+  let snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, version, planRevision: logical.planRevision, projectId },
+    definition: { version, name: "Decision scope", nodes: [source, approval], wires: [] },
+    unitNodeIds: [approval.instance.id], units: [logical, earlier], jobs: [], control: [],
+    outputs: [output(source.instance.id, "saved-source", "document", "markdown", { relativePath: "brief.md" })],
+    pendingDecisions: [
+      { ...active, requestId: "other-definition", nodeRevision: "old-node-revision",
+        request: { kind: "approval", message: "Review the superseded node." } },
+      { ...active, requestId: "earlier-request", planRevision: earlier.planRevision, unitId: earlier.unit.id,
+        request: { kind: "approval", message: "Review the earlier delivery." } },
+      active,
+    ],
+  };
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "list_repository_deliveries") return [snapshot.run];
+    if (command === "inspect_workflow_execution") return snapshot;
+    if (command === "resolve_workflow_stage_decision") {
+      expect(args).toEqual({ submission: { projectId, runId, requestId: active.requestId,
+        decision: { kind: "approval", approved: true } } });
+      snapshot = { ...snapshot, pendingDecisions: [], control: [{ nodeId: approval.instance.id,
+        planRevision: logical.planRevision, unitId: logical.unit.id, state: "completed", selectedPorts: ["approved"] }] };
+      return null;
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  const props = { checkout: exampleCheckout, target: `run:${runId}`, simulation: null, startSimulation: vi.fn(),
+    openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn() };
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><PipelinesWorkspace {...props} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "View waiting stage" }));
+  const evidence = within(screen.getByRole("complementary", { name: "Execution node evidence" }));
+  expect(evidence.getByText("Review the current delivery.")).toBeTruthy();
+  expect(evidence.getByText("saved-source")).toBeTruthy();
+  expect(evidence.queryByText("Review the superseded node.")).toBeNull();
+  await user.selectOptions(screen.getByRole("combobox", { name: "Logical unit" }), screen.getByRole("option", { name: /Earlier delivery/ }));
+  expect(evidence.queryByText("Review the earlier delivery.")).toBeNull();
+  expect(evidence.queryByText("Review the current delivery.")).toBeNull();
+  expect(evidence.queryByRole("button", { name: "Approve" })).toBeNull();
+  await user.selectOptions(screen.getByRole("combobox", { name: "Logical unit" }), screen.getByRole("option", { name: new RegExp(logical.unit.purpose) }));
+  await user.click(evidence.getByRole("button", { name: "Approve" }));
+  expect(await screen.findByRole("button", { name: "Release decision · Completed" })).toBeTruthy();
+  expect(evidence.queryByRole("button", { name: "Approve" })).toBeNull();
+});
+
+it("opens comparison outcomes for the exact wired input and preserves the candidate attempt link", async () => {
+  const source = node("source", "Saved request", [], [port("text", "text")]);
+  const compare = node("compare", "Review alternatives", [port("prompt", "text")], [port("results", "comparison_results")]);
+  const stage = { nodeId: compare.instance.id, nodeRevision: compare.revision, groupId: "current-comparison",
+    unitId: null, planRevision: null, inputs: { prompt: "current-prompt" }, state: "settled" as const, error: null };
+  const selection = { provider: "codex", profileId: "desktop", modelId: "saved-model" };
+  const candidates = [
+    { selection, jobId: "compared-job", runId: "compared-run", dispatchId: "compared-dispatch", responseRevisionId: "saved-response", state: "succeeded" },
+    { selection: { ...selection, modelId: "missing-response-model" }, jobId: "missing-response-job", runId: "missing-response-run",
+      dispatchId: "missing-response-dispatch", responseRevisionId: null, state: "succeeded" },
+  ];
+  const recorded = { groupId: stage.groupId, commit: "pinned-comparison-commit", state: "partial", candidates };
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, version, planRevision: null, projectId },
+    definition: { version, name: "Comparison lineage", nodes: [source, compare],
+      wires: [{ from: { node: source.instance.id, port: "text" }, to: { node: compare.instance.id, port: "prompt" } }] },
+    units: [], unitNodeIds: [], jobs: [], control: [], pendingDecisions: [],
+    outputs: [output(source.instance.id, "current-prompt", "text", "text", "Saved prompt"),
+      output(compare.instance.id, "current-results", "results", "comparison_results", recorded)],
+    comparisonStages: [stage, { ...stage, groupId: "earlier-comparison", inputs: { prompt: "earlier-prompt" } },
+      { ...stage, groupId: "other-unit-comparison", unitId: "other-unit", planRevision: "other-plan" }],
+  };
+  const groups = [{ id: stage.groupId, commit: recorded.commit, candidates: candidates.map((candidate) => ({
+    ...candidate, conversationId: candidate.runId === "compared-run" ? "compared-chat" : "missing-response-chat",
+  })) }];
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "list_repository_deliveries") return [snapshot.run];
+    if (command === "inspect_workflow_execution") return snapshot;
+    if (command === "model_comparisons") return groups;
+    if (command === "model_comparison_outcomes") {
+      expect(args).toEqual({ projectId, groupId: stage.groupId });
+      return candidates.map(({ jobId, runId, responseRevisionId }) => ({ jobId, runId,
+        response: responseRevisionId ? "Original candidate text" : "Unpinned response text",
+        reasoning: [], reportedModel: "saved-model", durationSeconds: null, inputTokens: null, outputTokens: null,
+        cachedInputTokens: null, reasoningTokens: null, failure: null }));
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  const props = { checkout: exampleCheckout, target: `run:${runId}`, simulation: null, startSimulation: vi.fn(),
+    openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn() };
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><PipelinesWorkspace {...props} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Review alternatives · Completed" }));
+  const comparison = within(screen.getByRole("region", { name: "Workflow model comparison" }));
+  expect(await comparison.findByText("Original candidate text")).toBeTruthy();
+  expect(comparison.getByText("Partial result")).toBeTruthy();
+  expect(comparison.getByText(/Response unavailable/)).toBeTruthy();
+  expect(comparison.queryByText("Unpinned response text")).toBeNull();
+  await user.click(within(comparison.getAllByRole("listitem")[0]!).getByRole("button", { name: "Open execution" }));
+  expect(props.openActivity).toHaveBeenCalledWith("compared-run", "compared-chat");
 });

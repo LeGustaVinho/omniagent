@@ -222,6 +222,8 @@ it("filters completed work by the recorded review model after changing the plann
   const board = within(screen.getByLabelText("Agile Kanban"));
   await user.click(await board.findByRole("button", { name: `Work history for ${standalone.title}` }));
   const detail = within(screen.getByRole("complementary", { name: "Work detail" }));
+  expect(detail.getByRole("button", { name: "Work history", pressed: true })).toBeTruthy();
+  await user.click(detail.getByRole("button", { name: "Workflow" }));
   await user.click(detail.getByText("Planned model assignments"));
   await user.selectOptions(await detail.findByRole("combobox", { name: "Workflow role" }), "candidate reviewer");
   expect(within(await detail.findByRole("group", { name: "Reference rating for Review model" })).getByText("73.2/100")).toBeTruthy();
@@ -243,6 +245,7 @@ it("filters completed work by the recorded review model after changing the plann
     projectId, taskId: standalone.id, role: "candidate reviewer", selection: replacement.selection,
   });
 
+  await user.click(detail.getByRole("button", { name: "Work history" }));
   const history = within(detail.getByRole("region", { name: "Work history" }));
   const review = history.getByText("review-model").closest("li");
   if (!review) throw new Error("Missing recorded reviewer");
@@ -268,6 +271,8 @@ it("filters completed work by the recorded review model after changing the plann
   await user.click(latestFilter.getByRole("menuitemradio", { name: "Replacement model" }));
   expect(table.queryByRole("button", workButton)).toBeNull();
   expect(await screen.findByText("No matching work.")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Clear filters" }));
+  expect(table.getByRole("button", workButton)).toBeTruthy();
 });
 
 it("opens exact active attempts and task job approvals and keeps observed subagents with interrupted work", async () => {
@@ -309,8 +314,10 @@ it("opens exact active attempts and task job approvals and keeps observed subage
 
   await user.click(ready.getByRole("button", { name: `Work history for ${parent.title}` }));
   const detail = within(screen.getByRole("complementary", { name: "Work detail" }));
+  await user.click(detail.getByRole("button", { name: "Overview" }));
   await user.click(within(detail.getByRole("region", { name: "Task job blockers" })).getByRole("button", { name: "Review job approval" }));
   expect(openQueueJob).toHaveBeenLastCalledWith(waitingJob.job.id);
+  await user.click(detail.getByRole("button", { name: "Work history" }));
   const history = within(detail.getByRole("region", { name: "Work history" }));
   expect(history.getByText("Interrupted")).toBeTruthy();
   await user.click(history.getByText("Observed subagents"));
@@ -401,15 +408,15 @@ it("routes board moves and the detail control through the same guarded transitio
 
 it("creates the hierarchy from the work form and keeps a direct checklist beside a subtask", async () => {
   const { user } = testWorkspace(false);
-  await user.click(screen.getByText("New work"));
-  const kind = screen.getByRole("combobox", { name: "Work type" });
-  const titleInput = screen.getByRole("textbox", { name: "Title" });
-  const create = screen.getByRole("button", { name: "Create work" });
   async function add(kindValue: string, title: string, owner?: { label: string; id: string }) {
-    await user.selectOptions(kind, kindValue);
-    if (owner) await user.selectOptions(screen.getByRole("combobox", { name: owner.label }), owner.id);
-    await user.type(titleInput, title);
-    await user.click(create);
+    const trigger = screen.getByRole<HTMLButtonElement>("button", { name: "New work" });
+    await waitFor(() => expect(trigger.disabled).toBe(false));
+    await user.click(trigger);
+    const dialog = within(screen.getByRole("dialog", { name: "New work" }));
+    await user.selectOptions(dialog.getByRole("combobox", { name: "Work type" }), kindValue);
+    if (owner) await user.selectOptions(dialog.getByRole("combobox", { name: owner.label }), owner.id);
+    await user.type(dialog.getByRole("textbox", { name: "Title" }), title);
+    await user.click(dialog.getByRole("button", { name: "Create work" }));
     await screen.findByRole("region", { name: title });
   }
   await add("epic", "New ship");

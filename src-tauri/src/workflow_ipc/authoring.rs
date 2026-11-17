@@ -196,9 +196,10 @@ pub async fn save_workflow_package(
     draft_id: String,
     expected_revision: String,
     package: WorkflowPackage,
+    canvas_by_member: Option<BTreeMap<String, WorkflowCanvasEdit>>,
 ) -> Result<WorkflowPackageDraft, String> {
     store
-        .save_workflow_package(project_id, draft_id, expected_revision, package)
+        .save_workflow_package_canvas(project_id, draft_id, expected_revision, package, canvas_by_member.unwrap_or_default())
         .await
         .map_err(report)
 }

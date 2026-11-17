@@ -6,13 +6,14 @@ import {
   type DockviewReadyEvent,
   type IDockviewHeaderActionsProps,
 } from "dockview-react";
-import { ArrowLeft, ArrowRight, Columns2, GitBranch, MessageSquarePlus, PanelLeftClose } from "lucide-react";
-import { Dialog } from "radix-ui";
+import { ArrowLeft, ArrowRight, Columns2, GitBranch } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { ConversationLibrary, ConversationLibraryNavigation, type OpenLibraryConversation } from "@/conversation-library";
+import { ConversationEmptyState, ConversationNavigation, ConversationWorkspaceLayout } from "@/conversation-layout";
 import { ConversationListPanel, ConversationPanel, useNewConversation } from "@/conversation-panels";
+import { DesktopDiagnostics, DiagnosticsWorkspace, type DiagnosticView } from "@/diagnostics-workspace";
 import { CustomizationsPanel } from "@/customizations-panel";
 import { FixtureListPanel, FixtureRunPanel } from "@/fixture-panels";
 import { ProviderSettingsPanel } from "@/provider-settings";
@@ -201,51 +202,42 @@ export function RealConversations({
     <ConversationLibraryNavigation.Provider value={{
       checkoutId: checkout.checkoutId, projectId: checkout.projectId, open: openLibraryConversation,
     }}>
-    <div className="flex h-full min-h-0 min-w-0">
-      {!compact && sidebar && <aside className="work-context">{contents}</aside>}
-      {compact && <Dialog.Root open={sidebar} onOpenChange={onSidebarChange}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="work-shade" />
-          <Dialog.Content className="work-context work-context-drawer" aria-describedby={undefined}>
-            <header className="work-panel-header">
-              <Dialog.Title className="font-semibold">Conversation navigation</Dialog.Title>
-              <Dialog.Close asChild><Button variant="ghost" aria-label="Close conversation navigation"><PanelLeftClose size={16} /></Button></Dialog.Close>
-            </header>
-            {contents}
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>}
-      <Dock dock={dock} error={targetError}>
-        <span className="work-empty-icon"><MessageSquarePlus size={23} aria-hidden="true" /></span>
-        <h2>Start a conversation</h2>
-        <p>Ask an agent about this checkout or open an existing conversation.</p>
-        <div className="work-empty-actions">
-          <Button onClick={() => start.mutate()} disabled={start.isPending} aria-label="Start a new conversation">
-            {start.isPending ? "Creating…" : "New conversation"}
-          </Button>
-          {!sidebar && <Button variant="outline" onClick={() => onSidebarChange(true)}>Show conversations</Button>}
-        </div>
-        {start.error && <p className="conv-alert" role="alert">{String(start.error)}</p>}
-      </Dock>
-    </div>
+      <ConversationWorkspaceLayout navigation={<ConversationNavigation compact={compact} open={sidebar} onOpenChange={onSidebarChange}>
+        {contents}
+      </ConversationNavigation>}>
+        <Dock dock={dock} error={targetError}>
+          <ConversationEmptyState title="Start a conversation" description="Ask an agent about this checkout or open an existing conversation.">
+            <Button onClick={() => start.mutate()} disabled={start.isPending} aria-label="Start a new conversation">
+              {start.isPending ? "Creating…" : "New conversation"}
+            </Button>
+            {!sidebar && <Button variant="outline" onClick={() => onSidebarChange(true)}>Show conversations</Button>}
+          </ConversationEmptyState>
+          {start.error && <p className="conv-alert" role="alert">{String(start.error)}</p>}
+        </Dock>
+      </ConversationWorkspaceLayout>
     </ConversationLibraryNavigation.Provider>
   );
 }
 
-export function RealDiagnostics({ checkout }: { checkout: ProjectCheckout }) {
+export function RealDiagnostics({ checkout, openSystem }: { checkout: ProjectCheckout; openSystem?: () => void }) {
   const dock = useDesktopDock(checkout, "diagnostics");
-  return (
-    <section aria-label="Diagnostics workspace" className="flex h-full min-h-0 flex-col">
-      <div className="work-panel-header">
-        <span className="font-semibold">Diagnostics</span>
-        <Button variant="ghost" disabled={!dock.ready} onClick={() => dock.api && openFixtureList(dock.api)}><GitBranch size={15} /> Fixture runs</Button>
-      </div>
-      <Dock dock={dock}>
-        <span className="work-empty-icon"><GitBranch size={23} aria-hidden="true" /></span>
-        <h2>Check the execution environment</h2>
-        <p>Run a fixture to inspect its output, requests, events, and final state.</p>
-        <Button className="mt-2" onClick={() => dock.api && openFixtureList(dock.api)}>Open fixture runs</Button>
-      </Dock>
-    </section>
-  );
+  const [view, setView] = useState<DiagnosticView>("desktop");
+  const [fixturesVisited, setFixturesVisited] = useState(false);
+
+  function select(next: DiagnosticView) {
+    if (next === "fixture") {
+      if (view === next && dock.ready && dock.api) openFixtureList(dock.api);
+      setFixturesVisited(true);
+    }
+    setView(next);
+  }
+
+  return <DiagnosticsWorkspace active={view} onSelect={select}
+    desktop={<DesktopDiagnostics openSystem={openSystem} />}
+    fixtures={fixturesVisited && <Dock dock={dock}>
+      <span className="work-empty-icon"><GitBranch size={23} aria-hidden="true" /></span>
+      <h2>No fixture tabs open</h2>
+      <Button onClick={() => dock.api && openFixtureList(dock.api)}>Open fixture runs</Button>
+    </Dock>}
+  />;
 }

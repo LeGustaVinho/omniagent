@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{protection, store::Store};
 
 use super::{
-    ChecklistExecutionMode, ChecklistItem, activity::load_task_details,
+    ChecklistExecutionMode, ChecklistItem, ChecklistProgressReceipt, activity::load_task_details,
     checklists::load_checklist_items,
 };
 
@@ -148,56 +148,138 @@ impl Store {
     ) -> Result<Option<TaskDispatchContext>> {
         self.execute(move |db| {
             let tx = db.transaction()?;
-            let scope = tx.query_row(
-                "SELECT r.project_id, r.task_id, m.parent_task_id, coalesce(m.epic_id, parent.epic_id),
-                        c.id, r.checklist_item_id, execution.mode, task.title, parent_task.title, r.job_id
+            let scope = tx
+                .query_row(
+                    "SELECT r.project_id, r.task_id, r.checklist_item_id, execution.mode, r.job_id
                  FROM task_runs r
-                 JOIN project_tasks task ON task.project_id = r.project_id AND task.id = r.task_id
-                 LEFT JOIN project_task_memberships m ON m.project_id = r.project_id AND m.task_id = r.task_id
-                 LEFT JOIN project_task_memberships parent ON parent.project_id = r.project_id AND parent.task_id = m.parent_task_id
-                 LEFT JOIN project_tasks parent_task ON parent_task.project_id = r.project_id AND parent_task.id = m.parent_task_id
-                 LEFT JOIN project_checklists c ON c.project_id = r.project_id AND c.task_id = r.task_id
                  LEFT JOIN job_checklist_modes execution ON execution.job_id = r.job_id
                  WHERE r.run_id = ?1",
-                [&run],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?, row.get::<_, String>(7)?, row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<String>>(9)?)),
-            ).optional()?;
-            let Some((project, task, parent, epic, checklist_id, checklist_item_id, mode, title, parent_title, job)) = scope else {
+                    [&run],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((project, task, checklist_item_id, mode, job)) = scope else {
                 return Ok(None);
             };
-            let mut descriptions = WorkDescriptions {
-                epic: epic.map(|id| current_description(&tx, &project, &DescriptionOwner::Epic(id)))
-                    .transpose()?.flatten().filter(|revision| revision.markdown.is_some()),
-                task: active_work_description(&tx, &project, parent.as_ref().unwrap_or(&task))?,
-                subtask: None,
-            };
-            if parent.is_some() {
-                descriptions.subtask = active_work_description(&tx, &project, &task)?;
-            }
-            let checklist_mode = mode.as_deref().map(ChecklistExecutionMode::from_sql).transpose()?;
-            let direct_work = if checklist_mode.is_some() {
-                let details = load_task_details(&tx, &project, &task)?;
-                Some(TaskDirectWork {
-                    title, parent_title, acceptance_criteria: details.acceptance_criteria,
-                    prerequisites: details.prerequisites, blockers: details.blockers,
-                })
-            } else { None };
+            let checklist_mode = mode
+                .as_deref()
+                .map(ChecklistExecutionMode::from_sql)
+                .transpose()?;
             let item = checklist_item_id.as_deref();
             let pinned_item = match (job.as_deref(), item) {
-                (Some(job), Some(item)) => crate::workflows::pinned_workflow_checklist_for_job(&tx, &project, job, &task, Some(item))?,
+                (Some(job), Some(item)) => crate::workflows::pinned_workflow_checklist_for_job(
+                    &tx,
+                    &project,
+                    job,
+                    &task,
+                    Some(item),
+                )?,
                 _ => None,
             };
-            let checklist = load_checklist_items(&tx, &project, &task, item, pinned_item.map(|pin| pin.revision))?;
-            ensure!(checklist_item_id.is_none() || checklist.len() == 1, "the selected checklist item has no saved revision");
-            Ok(Some(TaskDispatchContext {
-                task_id: task, descriptions, direct_work, checklist_mode, checklist_id, checklist_item_id, checklist,
-            }))
-        }).await
+            load_task_context(
+                &tx,
+                &project,
+                &task,
+                checklist_mode,
+                item.map(|item| (item, pinned_item.map(|pin| pin.revision))),
+                checklist_mode.is_some(),
+            )
+            .map(Some)
+        })
+        .await
     }
+}
+
+pub(crate) fn workflow_task_context(
+    db: &Connection,
+    project: &str,
+    task: &str,
+    item: Option<&ChecklistProgressReceipt>,
+) -> Result<TaskDispatchContext> {
+    load_task_context(
+        db,
+        project,
+        task,
+        item.map(|_| ChecklistExecutionMode::RunByItem),
+        item.map(|item| (item.item_id.as_str(), Some(item.revision))),
+        true,
+    )
+}
+
+fn load_task_context(
+    db: &Connection,
+    project: &str,
+    task: &str,
+    checklist_mode: Option<ChecklistExecutionMode>,
+    item: Option<(&str, Option<i64>)>,
+    include_direct_work: bool,
+) -> Result<TaskDispatchContext> {
+    let (parent, epic, checklist_id, title, parent_title) = db.query_row(
+        "SELECT m.parent_task_id, coalesce(m.epic_id, parent.epic_id), c.id, task.title, parent_task.title
+         FROM project_tasks task
+         LEFT JOIN project_task_memberships m ON m.project_id = task.project_id AND m.task_id = task.id
+         LEFT JOIN project_task_memberships parent ON parent.project_id = task.project_id AND parent.task_id = m.parent_task_id
+         LEFT JOIN project_tasks parent_task ON parent_task.project_id = task.project_id AND parent_task.id = m.parent_task_id
+         LEFT JOIN project_checklists c ON c.project_id = task.project_id AND c.task_id = task.id
+         WHERE task.project_id = ?1 AND task.id = ?2",
+        params![project, task],
+        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?)),
+    ).optional()?.context("The selected work context is outside this project")?;
+    let descriptions = WorkDescriptions {
+        epic: epic
+            .map(|id| current_description(db, project, &DescriptionOwner::Epic(id)))
+            .transpose()?
+            .flatten()
+            .filter(|revision| revision.markdown.is_some()),
+        task: active_work_description(db, project, parent.as_deref().unwrap_or(task))?,
+        subtask: if parent.is_some() {
+            active_work_description(db, project, task)?
+        } else {
+            None
+        },
+    };
+    let direct_work = if include_direct_work {
+        let details = load_task_details(db, project, task)?;
+        Some(TaskDirectWork {
+            title,
+            parent_title,
+            acceptance_criteria: details.acceptance_criteria,
+            prerequisites: details.prerequisites,
+            blockers: details.blockers,
+        })
+    } else {
+        None
+    };
+    let checklist_item_id = item.map(|(id, _)| id);
+    let checklist = load_checklist_items(
+        db,
+        project,
+        task,
+        checklist_item_id,
+        item.and_then(|(_, revision)| revision),
+    )?;
+    ensure!(
+        checklist_item_id.is_none() || checklist.len() == 1,
+        "the selected checklist item has no saved revision"
+    );
+    Ok(TaskDispatchContext {
+        task_id: task.into(),
+        descriptions,
+        direct_work,
+        checklist_mode,
+        checklist_id,
+        checklist_item_id: checklist_item_id.map(str::to_owned),
+        checklist,
+    })
 }
 
 fn write_description(

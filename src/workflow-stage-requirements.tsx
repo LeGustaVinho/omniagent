@@ -8,6 +8,7 @@ import type { Provider } from "@/bindings/Provider";
 import type { SessionMode } from "@/bindings/SessionMode";
 import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
+import type { StagePlanConfiguration } from "@/workflow-stage-plan";
 
 type Subject = { kind: "protocol"; capability: Capability } | { kind: "tool"; id: string; version: string; operation: string };
 type SourcePath = { kind: "checkout" | "absolute"; path: string };
@@ -18,7 +19,7 @@ type Source = { provider: Provider } & (
     version?: string; sourceLocation?: string; installPath?: string } });
 export type StageRequirements = { capabilities?: Subject[]; sources?: Source[] };
 type RoleRevision = { templateId: string; revision: string };
-export type RequirementConfiguration = { roleTemplate?: RoleRevision; stage?: StageRequirements };
+export type RequirementConfiguration = { roleTemplate?: RoleRevision; stage?: StageRequirements; plan?: StagePlanConfiguration };
 type Decision = { blocker: string | null } & ({kind: "capability"; subject: Subject; status: string | null; evidenceId: string | null} |
   {kind: "source"; source: Source});
 type Inventory = {
@@ -189,7 +190,7 @@ export function WorkflowRequirementsEditor({ projectId, checkoutId, mode, model,
       </Button>
       {preview.error && preview.variables?.scopeKey === scopeKey && <p role="alert">{String(preview.error)}</p>}
       <Button variant="outline" type="button" disabled={!checkoutId || !models.length || profileMatches.isPending ||
-        !configuration.roleTemplate && !sources.length && !capabilities.length}
+        !configuration.roleTemplate && !sources.length && !capabilities.length && configuration.plan?.questionRoute !== "native"}
         onClick={() => profileMatches.mutate(matchKey)}>
         {profileMatches.isPending ? "Checking saved profile assessments…" : "Find matching profiles"}
       </Button>

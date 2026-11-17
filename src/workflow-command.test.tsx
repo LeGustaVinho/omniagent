@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { useState } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -52,12 +52,20 @@ it("registers a project-local script and saves its exact revision with a structu
     projectId: "project", request: { name: "Build", target: registration.target },
   });
   fireEvent.change(screen.getByLabelText("Arguments, one per line"), { target: { value: "first argument\nsecond" } });
-  fireEvent.change(screen.getByLabelText("Standard input JSON"), { target: { value: '{"labels":["build","test"]}' } });
+  const input = within(screen.getByRole("group", { name: "Standard input fields" }));
+  fireEvent.change(input.getByLabelText("Field name"), { target: { value: "labels" } });
+  fireEvent.click(input.getByRole("button", { name: "Add field" }));
+  fireEvent.change(input.getByLabelText("labels type"), { target: { value: "array" } });
+  fireEvent.click(input.getByRole("button", { name: "Add item" }));
+  fireEvent.change(input.getByLabelText("Item 1"), { target: { value: "build" } });
+  fireEvent.click(input.getByRole("button", { name: "Add item" }));
+  fireEvent.change(input.getByLabelText("Item 2"), { target: { value: "test" } });
   fireEvent.change(screen.getByLabelText("Standard output"), { target: { value: "json" } });
   expect(JSON.parse(screen.getByLabelText("Saved configuration").textContent ?? "")).toEqual({
     kind: "command", registrationId: "command", registrationRevision: registration.revision,
     arguments: ["first argument", "second"], input: { labels: ["build", "test"] }, output: "json",
   });
+  fireEvent.click(screen.getByText("Input JSON"));
   fireEvent.change(screen.getByLabelText("Standard input JSON"), { target: { value: "[]" } });
   expect(screen.getByRole("alert").textContent).toContain("Enter a JSON object");
 });

@@ -320,7 +320,7 @@ async fn reviewed_workflow_publication_preserves_stale_drafts_and_survives_resta
         .await?
         .context("Missing explicit launch receipt")?;
     assert_eq!(launch.version, publication.workflow);
-    assert_eq!(launch.source, markdown.revision);
+    assert_eq!(launch.source, Some(markdown.revision));
     let followup = store
         .start_workflow_authoring(
             conversation,

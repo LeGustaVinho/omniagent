@@ -259,7 +259,7 @@ async fn exact_local_mcp_binding_unblocks_an_explicit_upgrade_and_keeps_grants_p
             work: TriggerWorkKind::Task,
             target_state: None,
             pipeline: selected.workflow,
-            source: selected.source,
+            source: selected.source.into(),
         }
     };
     let rule = store

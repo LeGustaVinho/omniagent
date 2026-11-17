@@ -38,6 +38,8 @@ mod tests;
 pub struct AuthoringBase {
     pub version: WorkflowRevision,
     name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start: Option<super::WorkflowStartSchema>,
 }
 
 #[derive(Serialize)]
@@ -108,6 +110,7 @@ impl Store {
                 .map(|payload| {
                     let definition: WorkflowDefinition = open(&payload?)?;
                     Ok(AuthoringBase {
+                        start: super::WorkflowStartSchema::for_definition(&definition),
                         version: definition.version,
                         name: definition.name,
                     })

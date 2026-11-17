@@ -38,7 +38,7 @@ test("answers and approves the seeded plan before opening the linked task withou
 test("context actions target the clicked conversation while another conversation remains open", async () => {
   const user = userEvent.setup();
   render(<Example />);
-  const library = screen.getByRole("complementary", { name: "Conversation library" });
+  const library = screen.getByRole("region", { name: "Conversation library" });
   fireEvent.contextMenu(within(library).getByRole("button", { name: "Check provider profiles" }));
   await user.click(screen.getByRole("menuitem", { name: "Rename" }));
   const dialog = screen.getByRole("dialog", { name: "Rename conversation" });

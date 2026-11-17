@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobInspection } from "@/bindings/JobInspection";
@@ -58,6 +58,30 @@ afterEach(() => {
 });
 
 describe("project queue", () => {
+  it("moves keyboard focus between a job, its details, and the active filter", async () => {
+    vi.mocked(invoke).mockResolvedValue({ settings: { paused: false, capacity: 3 }, active: 1, jobs: [queuedJob, runningJob] });
+    const user = userEvent.setup();
+    renderQueue();
+    const job = await screen.findByRole("button", { name: "Agent job" });
+    job.focus();
+    await user.keyboard("{Enter}");
+
+    const details = within(screen.getByRole("complementary", { name: "Selected job" }));
+    const heading = details.getByRole("heading", { name: "Agent job" });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+    await user.tab();
+    expect(document.activeElement).toBe(details.getByRole("button", { name: "Close job details" }));
+    await user.keyboard("{Enter}");
+    expect(document.activeElement).toBe(job);
+
+    await user.keyboard("{Enter}");
+    const history = within(screen.getByRole("navigation", { name: "Queue states" })).getByRole("button", { name: "History" });
+    await user.click(history);
+    expect(screen.queryByRole("button", { name: "Agent job" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Close job details" }));
+    expect(document.activeElement).toBe(history);
+  });
+
   it.each([false, true])("queues an operator-selected model with reference scores (subagent %s)", async (child) => {
     const selection = { provider: "codex", profileId: "desktop-direct:codex", modelId: "gpt-6-luna" };
     vi.mocked(invoke).mockImplementation(async (command) => {

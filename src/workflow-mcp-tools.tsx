@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { Job } from "@/bindings/Job";
 import { Button } from "@/components/ui/button";
 import type { WorkflowNodeConfiguration } from "@/workflow-graph-model";
+import { StructuredListField, StructuredObjectField, StructuredValueField } from "@/workflow-structured-fields";
 
 type Tool = { name: string; revision: string; inputSchema: Record<string, unknown>; outputSchema: Record<string, unknown> | null };
 type Server = { id: string; revision: string; name: string; executable: string; tools: Tool[] };
@@ -42,7 +43,14 @@ function FixedArgument({ name, schema, value, required, disabled, onChange }: {
       max={typeof schema.maximum === "number" ? schema.maximum : undefined}
       onChange={(event) => onChange(Number.isFinite(event.currentTarget.valueAsNumber) ? event.currentTarget.valueAsNumber : undefined)} /></label>;
   }
-  return <p className="pipeline-meta">Use Fixed arguments JSON to enter {name}.</p>;
+  if (schema.type === "object" || schema.type === "array") {
+    if (value === undefined) return <Button type="button" variant="outline" disabled={disabled}
+      onClick={() => onChange(schema.type === "object" ? {} : [])}>Set {name}</Button>;
+    return schema.type === "object"
+      ? <StructuredObjectField label={name} value={value} disabled={disabled} onChange={onChange} />
+      : <StructuredListField label={name} value={value} disabled={disabled} onChange={onChange} />;
+  }
+  return <StructuredValueField label={name} value={value} disabled={disabled} onChange={onChange} />;
 }
 
 function ArgumentFields({ schema, configuration, disabled, onChange }: {
@@ -50,10 +58,11 @@ function ArgumentFields({ schema, configuration, disabled, onChange }: {
   onChange: (configuration: WorkflowNodeConfiguration) => void;
 }) {
   const properties = Object.entries(asRecord(schema.properties));
-  if (properties.length === 0) return null;
+  const knownNames = new Set(properties.map(([name]) => name));
   const required = new Set(Array.isArray(schema.required) ? schema.required : []);
   const fixed = asRecord(configuration.arguments);
   const mappings = asRecord(configuration.argumentMappings);
+  const additional = Object.fromEntries(Object.entries(fixed).filter(([name]) => !knownNames.has(name)));
   const locked = disabled || configuration.arguments === null || configuration.argumentMappings === null;
   const update = (name: string, source: "fixed" | "artifact", value: unknown) => {
     const otherFixed = Object.fromEntries(Object.entries(fixed).filter(([key]) => key !== name));
@@ -87,6 +96,11 @@ function ArgumentFields({ schema, configuration, disabled, onChange }: {
           onClick={() => update(name, "fixed", undefined)}>Omit {name}</Button>}
       </div>;
     })}
+    {(schema.additionalProperties !== false || Object.keys(additional).length > 0) &&
+      <StructuredObjectField label="Additional fixed arguments" value={additional} disabled={locked} reservedNames={[...knownNames, ...Object.keys(mappings)]}
+        onChange={(fields) => onChange({ ...configuration, arguments: {
+          ...Object.fromEntries(Object.entries(fixed).filter(([name]) => knownNames.has(name))), ...fields,
+        } })} />}
   </fieldset>;
 }
 

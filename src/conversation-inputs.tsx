@@ -20,14 +20,14 @@ type Field = {
   default: FieldValue | null;
   input: Input;
 };
-type QuestionForm = { message: string | null; fields: Field[]; actions: QuestionAction[] };
+export type QuestionForm = { message: string | null; fields: Field[]; actions: QuestionAction[] };
 type Approval = { type: "approval"; request_id: RequestId; operation: string; description: string | null };
 type Question = { type: "question"; request_id: RequestId; normalized?: QuestionForm };
 export type ConversationPendingInput = { data: Approval | Question };
 
 const inputClass = "w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm focus-visible:outline-ring";
 
-function FieldControl({ field, value, update }: {
+export function FieldControl({ field, value, update }: {
   field: Field;
   value: FieldValue | undefined;
   update: (value: FieldValue | undefined) => void;

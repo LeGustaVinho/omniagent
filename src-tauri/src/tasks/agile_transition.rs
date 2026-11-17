@@ -55,7 +55,8 @@ impl Store {
                 .map(|run| pipeline_work_origin(&tx, &project, run))
                 .transpose()?
                 .unwrap_or(AgileEventOrigin::Operator);
-            let updated = transition_in_transaction(&tx, &project, &task, expected, next, &origin)?;
+            let updated =
+                transition_work_in_transaction(&tx, &project, &task, expected, next, &origin)?;
             tx.commit()?;
             Ok(updated)
         })
@@ -63,7 +64,15 @@ impl Store {
     }
 }
 
-fn transition_in_transaction(
+pub(crate) fn current_work_state(
+    db: &Connection,
+    project: &str,
+    task: &str,
+) -> Result<TaskWorkflowState> {
+    Ok(load_delivery_state(db, project, task)?.state)
+}
+
+pub(crate) fn transition_work_in_transaction(
     tx: &Connection,
     project: &str,
     task: &str,

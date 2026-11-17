@@ -7,13 +7,14 @@ use uuid::Uuid;
 
 use crate::{
     conversations::{MessageRole, SessionScope},
-    jobs::{JobRequest, insert_selected_operator_job},
+    jobs::{Job, JobRequest, insert_selected_operator_job},
     model_catalog::{ModelOption, ModelRating, ModelSelection},
     protection,
     providers::SessionMode,
     repository::{
         self, CheckoutLayout,
         comparison::{materialize_comparison, verify_comparison},
+        verification::MaterializedCandidate,
     },
     store::Store,
 };
@@ -21,10 +22,14 @@ use crate::{
 mod evidence;
 mod outcomes;
 pub(crate) mod selection;
+pub(crate) mod stage;
 mod synthesis;
 pub use evidence::ComparisonEnvironment;
 pub use outcomes::ComparisonOutcome;
 pub use selection::{ComparisonInput, ComparisonSelection};
+pub use stage::{
+    WorkflowComparisonConfiguration, WorkflowComparisonResults, WorkflowComparisonStage,
+};
 pub use synthesis::ComparisonSynthesis;
 
 #[derive(Debug, Serialize)]
@@ -65,6 +70,76 @@ struct CandidateSelection {
     selection: ModelSelection,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_reference: Option<ComparisonModelReference>,
+}
+
+struct PreparedComparison {
+    lease: MaterializedCandidate,
+    project: String,
+    checkout: String,
+    commit: String,
+    tree: String,
+    path: PathBuf,
+    prompt: String,
+    profiles: Vec<(CandidateSelection, SessionScope)>,
+}
+
+impl PreparedComparison {
+    fn insert_group(
+        &mut self,
+        db: &Connection,
+        mut enqueue: impl FnMut(SessionScope, JobRequest) -> Result<Job>,
+    ) -> Result<ModelComparison> {
+        let id = Uuid::new_v4().to_string();
+        let path = self
+            .path
+            .to_str()
+            .context("The comparison checkout path is unavailable")?;
+        ensure!(
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM checkouts WHERE root = ?1 COLLATE NOCASE)",
+                [path],
+                |row| row.get::<_, bool>(0)
+            )?,
+            "The comparison checkout is already registered for project work"
+        );
+        db.execute(
+            "INSERT INTO model_comparison_groups VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                self.project,
+                self.checkout,
+                self.commit,
+                self.tree,
+                path,
+                protection::protect(self.prompt.as_bytes())?
+            ],
+        )?;
+        for (position, (selection, scope)) in
+            std::mem::take(&mut self.profiles).into_iter().enumerate()
+        {
+            let job = enqueue(
+                scope,
+                JobRequest {
+                    checkout_id: Some(self.checkout.clone()),
+                    task_id: None,
+                    mode: SessionMode::ReadOnly,
+                    instructions: self.prompt.clone(),
+                    dependencies: Vec::new(),
+                    requires_bridge: false,
+                },
+            )?;
+            db.execute(
+                "INSERT INTO model_comparison_candidates VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    id,
+                    i64::try_from(position)?,
+                    job.id,
+                    serde_json::to_string(&selection)?
+                ],
+            )?;
+        }
+        load_group(db, &self.project, &id)
+    }
 }
 
 pub(crate) struct ComparisonPin {
@@ -122,6 +197,34 @@ impl Store {
         profiles: Vec<(SessionScope, Option<ModelOption>)>,
         storage: PathBuf,
     ) -> Result<ModelComparison> {
+        let mut prepared = self
+            .prepare_model_comparison(project, checkout, commit, prompt, profiles, storage)
+            .await?;
+        let group = self
+            .execute(move |db| {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let project = prepared.project.clone();
+                let group = prepared.insert_group(&tx, |scope, request| {
+                    insert_selected_operator_job(&tx, project.clone(), scope, request)
+                })?;
+                tx.commit()?;
+                prepared.lease.preserve();
+                Ok(group)
+            })
+            .await?;
+        self.job_signal.send_replace(());
+        Ok(group)
+    }
+
+    async fn prepare_model_comparison(
+        &self,
+        project: String,
+        checkout: String,
+        commit: String,
+        prompt: String,
+        profiles: Vec<(SessionScope, Option<ModelOption>)>,
+        storage: PathBuf,
+    ) -> Result<PreparedComparison> {
         let prompt = prompt.trim().to_owned();
         ensure!(!prompt.is_empty(), "Enter the shared comparison prompt");
         ensure!(
@@ -169,65 +272,16 @@ impl Store {
             move || materialize_comparison(&verified, &commit, &storage)
         })
         .await??;
-        let group = self
-            .execute(move |db| {
-                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let id = Uuid::new_v4().to_string();
-                let path = path
-                    .to_str()
-                    .context("The comparison checkout path is unavailable")?;
-                ensure!(
-                    !tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM checkouts WHERE root = ?1 COLLATE NOCASE)",
-                        [path],
-                        |row| row.get::<_, bool>(0)
-                    )?,
-                    "The comparison checkout is already registered for project work"
-                );
-                tx.execute(
-                    "INSERT INTO model_comparison_groups VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        id,
-                        project,
-                        checkout,
-                        commit,
-                        tree,
-                        path,
-                        protection::protect(prompt.as_bytes())?
-                    ],
-                )?;
-                for (position, (selection, scope)) in profiles.into_iter().enumerate() {
-                    let job = insert_selected_operator_job(
-                        &tx,
-                        project.clone(),
-                        scope,
-                        JobRequest {
-                            checkout_id: Some(checkout.clone()),
-                            task_id: None,
-                            mode: SessionMode::ReadOnly,
-                            instructions: prompt.clone(),
-                            dependencies: Vec::new(),
-                            requires_bridge: false,
-                        },
-                    )?;
-                    tx.execute(
-                        "INSERT INTO model_comparison_candidates VALUES (?1, ?2, ?3, ?4)",
-                        params![
-                            id,
-                            i64::try_from(position)?,
-                            job.id,
-                            serde_json::to_string(&selection)?
-                        ],
-                    )?;
-                }
-                let group = load_group(&tx, &project, &id)?;
-                tx.commit()?;
-                lease.preserve();
-                Ok(group)
-            })
-            .await?;
-        self.job_signal.send_replace(());
-        Ok(group)
+        Ok(PreparedComparison {
+            lease,
+            project,
+            checkout,
+            commit,
+            tree,
+            path,
+            prompt,
+            profiles,
+        })
     }
 
     pub async fn model_comparisons(&self, project: String) -> Result<Vec<ModelComparison>> {

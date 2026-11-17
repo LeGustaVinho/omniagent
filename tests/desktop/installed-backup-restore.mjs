@@ -80,6 +80,7 @@ async function showRestoredTask(browser, seed, attempt) {
   await click(work.$(`button=${seed.taskTitle}`));
   const detail = work.$('aside[aria-label="Work detail"]');
   await detail.$(`h3=${seed.taskTitle}`).waitForDisplayed({ timeout });
+  await click(detail.$("button=Work history"));
   assert.match(attempt.role.value, /^[\w -]+$/);
   const attemptButton = detail.$(`.//li[./div/p[starts-with(normalize-space(.), '${attempt.role.value} · ')]]//button[normalize-space(.)='Open attempt ${attempt.ordinal}']`);
   await click(attemptButton);

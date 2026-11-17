@@ -567,3 +567,152 @@ async fn legacy_workflow_package_authoring_pins_the_qualified_source_run_and_rev
     assert_eq!(publication.reviewed_revision, reviewed.revision);
     Ok(())
 }
+
+#[tokio::test]
+async fn visual_canvas_positions_are_protected_revision_edits() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("builder.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, temp.path()).await?;
+    let project = repo.project_id;
+    let draft = store
+        .create_workflow_package(
+            project.clone(),
+            None,
+            package(vec![member(
+                "pipeline",
+                PackageArtifactBody::Pipeline { graph: graph() },
+            )]),
+        )
+        .await?;
+    let canvas = || {
+        serde_json::from_value(serde_json::json!({
+            "pipeline": { "layout": {"start": {"x": 114.0, "y": 72.0}}, "updateDefinitions": {} }
+        }))
+    };
+    let saved = store
+        .save_workflow_package_canvas(
+            project.clone(),
+            draft.id.clone(),
+            draft.revision.clone(),
+            draft.package.clone(),
+            canvas()?,
+        )
+        .await?;
+    assert_ne!(saved.revision, draft.revision);
+    assert_eq!(saved.package, draft.package);
+    assert!(
+        store
+            .save_workflow_package_canvas(
+                project.clone(),
+                draft.id.clone(),
+                draft.revision.clone(),
+                draft.package,
+                canvas()?
+            )
+            .await
+            .is_err()
+    );
+    drop(store);
+    let reopened = Store::open(database)?
+        .workflow_package(project, saved.id.clone())
+        .await?;
+    assert_eq!(reopened.revision, saved.revision);
+    assert_eq!(
+        serde_json::to_value(&reopened.layouts)?,
+        serde_json::json!({"pipeline": {"start": {"x": 114.0, "y": 72.0}}})
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn visual_data_pipeline_simulates_and_runs_the_same_typed_result() -> Result<()> {
+    use crate::workflows::{ArtifactValue, WorkflowLaunchRequest};
+    use serde_json::json;
+
+    let temp = tempfile::tempdir()?;
+    let database = temp.path().join("visual-result.sqlite");
+    let store = Store::open(database.clone())?;
+    let repo = approved_delivery_repository(&store, temp.path()).await?;
+    let project = repo.project_id;
+    let graph: WorkflowGraph = serde_json::from_value(json!({
+        "name": "Summarize work",
+        "nodes": [
+            {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","fields":[
+                {"name":"label","valueType":"text","required":true}
+            ]}},
+            {"id":"text","kind":"build_text","configuration":{"kind":"build_text","template":"Status for {{label}}"}},
+            {"id":"result","kind":"summarize_result","configuration":{"kind":"none"}}
+        ],
+        "wires":[
+            {"from":{"node":"start","port":"start"},"to":{"node":"text","port":"ready"}},
+            {"from":{"node":"start","port":"inputs"},"to":{"node":"text","port":"values"}},
+            {"from":{"node":"text","port":"completed"},"to":{"node":"result","port":"ready"}},
+            {"from":{"node":"text","port":"text"},"to":{"node":"result","port":"summary"}}
+        ]
+    }))?;
+    let draft = store
+        .create_workflow_package(
+            project.clone(),
+            None,
+            package(vec![member(
+                "pipeline",
+                PackageArtifactBody::Pipeline { graph },
+            )]),
+        )
+        .await?;
+    let layout = json!({"start": {"x": 96.5, "y": 89.5}, "text": {"x": 495.0, "y": 89.5},
+        "result": {"x": 850.0, "y": 89.5}});
+    let draft = store
+        .save_workflow_package_canvas(
+            project.clone(),
+            draft.id.clone(),
+            draft.revision,
+            draft.package,
+            serde_json::from_value(json!({"pipeline": {"layout": layout}}))?,
+        )
+        .await?;
+    let trace = store
+        .simulate_workflow_package_revision(
+            project.clone(),
+            draft.id.clone(),
+            draft.revision.clone(),
+            "pipeline".into(),
+            serde_json::from_value(json!({"inputs":{"inputs":{"label":"Visual builder"}}}))?,
+        )
+        .await?;
+    let visible = serde_json::to_value(trace)?;
+    assert_eq!(visible["graph"]["layout"], layout);
+    let result = visible["steps"]
+        .as_array()
+        .context("missing trace steps")?
+        .iter()
+        .find(|step| step["nodeId"] == "result")
+        .context("missing result")?;
+    assert_eq!(
+        result["outputs"]["summary"]["value"]["evidence"]["summary"],
+        "Status for Visual builder"
+    );
+    assert!(store.list_workflow_runs(project.clone()).await?.is_empty());
+
+    let publication = commit(&store, &project, &draft).await?;
+    let published = artifact(&publication, "pipeline").version.clone();
+    let request: WorkflowLaunchRequest = serde_json::from_value(json!({
+        "projectId": project, "checkoutId": repo.checkout_id, "requestId": "visual-builder-result",
+        "workflow": {"id": published.id, "revision": published.revision},
+        "inputs": {"label":"Visual builder"}
+    }))?;
+    let run = store.launch_workflow_request(request.clone()).await?;
+    assert_eq!(store.launch_workflow_request(request).await?.id, run.id);
+    drop(store);
+    let reopened = Store::open(database)?;
+    let evidence = reopened
+        .inspect_workflow_execution(project, run.id)
+        .await?
+        .context("missing published execution")?;
+    assert_eq!(serde_json::to_value(&evidence.layout)?, layout);
+    assert!(evidence.outputs.iter().any(|output| matches!(
+        &output.artifact.value, ArtifactValue::ResultSummary { summary, .. } if summary == "Status for Visual builder"
+    )));
+    Ok(())
+}

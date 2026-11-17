@@ -7,6 +7,19 @@ use super::{ConditionPredicate, command::CommandConfiguration, mcp_tools::McpToo
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuiltinNode {
+    Agent,
+    TypedStart,
+    SummarizeResult,
+    LoadWorkContext,
+    ManageWork,
+    SetFields,
+    FilterMapList,
+    BuildText,
+    RequestInput,
+    Approval,
+    CompareModels,
+    FindWork,
+    UpdateProgress,
     Start,
     LoadContext,
     Plan,
@@ -67,6 +80,15 @@ impl BuiltinNode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
+    AgentResponse,
+    AgileEvent,
+    ResultSummary,
+    WorkflowContext,
+    JsonObject,
+    RenderedText,
+    ComparisonResults,
+    AgileTarget,
+    AgileProgressReceipt,
     Markdown,
     Plan,
     Review,
@@ -112,6 +134,17 @@ pub struct Port {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationKind {
+    TypedStart,
+    LoadWorkContext,
+    ManageWork,
+    SetFields,
+    FilterMapList,
+    BuildText,
+    RequestInput,
+    Approval,
+    CompareModels,
+    FindWork,
+    UpdateProgress,
     None,
     AgentRole,
     RequiredChecks,
@@ -130,6 +163,25 @@ pub enum ConfigurationKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NodeConfiguration {
+    TypedStart(super::launch::TypedStartConfiguration),
+    LoadWorkContext {
+        mode: super::agile_nodes::LoadWorkContextMode,
+    },
+    ManageWork {
+        action: super::agile_nodes::ManageWorkConfiguration,
+    },
+    SetFields(super::data_nodes::SetFieldsConfiguration),
+    FilterMapList(super::data_nodes::FilterMapListConfiguration),
+    BuildText(super::data_nodes::BuildTextConfiguration),
+    RequestInput(super::decision_nodes::RequestInputConfiguration),
+    Approval(super::decision_nodes::ApprovalConfiguration),
+    CompareModels(super::comparison::stage::WorkflowComparisonConfiguration),
+    FindWork {
+        query: super::agile_nodes::FindWorkConfiguration,
+    },
+    UpdateProgress {
+        action: super::agile_nodes::UpdateProgressConfiguration,
+    },
     None,
     AgentRole {
         role: String,
@@ -167,6 +219,17 @@ pub enum NodeConfiguration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Executor {
+    SummarizeResult,
+    ReadWorkContext,
+    ManageWork,
+    SetFields,
+    FilterMapList,
+    BuildText,
+    AwaitWorkflowInput,
+    AwaitWorkflowApproval,
+    CompareModels,
+    FindWork,
+    UpdateProgress,
     BindInput,
     ReadContext,
     PlanAgent,
@@ -255,6 +318,113 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
 
     let entries = [
         (
+            BuiltinNode::SetFields,
+            "Set fields",
+            Executor::SetFields,
+            ConfigurationKind::SetFields,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("source", Evidence)][..],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("object", Data(JsonObject)),
+            ][..],
+        ),
+        (
+            BuiltinNode::FilterMapList,
+            "Filter and map list",
+            Executor::FilterMapList,
+            ConfigurationKind::FilterMapList,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("items", Data(JsonList))],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("items", Data(JsonList)),
+            ],
+        ),
+        (
+            BuiltinNode::BuildText,
+            "Build text",
+            Executor::BuildText,
+            ConfigurationKind::BuildText,
+            Effect::ReadEvidence,
+            &[("ready", Control), ("values", Data(JsonObject))],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("text", Data(RenderedText)),
+            ],
+        ),
+        (
+            BuiltinNode::RequestInput,
+            "Request input",
+            Executor::AwaitWorkflowInput,
+            ConfigurationKind::RequestInput,
+            Effect::None,
+            &[("ready", Control)],
+            &[("answered", Control), ("answers", Data(JsonObject))],
+        ),
+        (
+            BuiltinNode::Approval,
+            "Approval",
+            Executor::AwaitWorkflowApproval,
+            ConfigurationKind::Approval,
+            Effect::None,
+            &[("ready", Control), ("evidence", Evidence)],
+            &[
+                ("approved", Control),
+                ("rejected", Control),
+                ("decision", Data(JsonObject)),
+            ],
+        ),
+        (
+            BuiltinNode::CompareModels,
+            "Compare models",
+            Executor::CompareModels,
+            ConfigurationKind::CompareModels,
+            Effect::InvokeModel,
+            &[
+                ("ready", Control),
+                ("request", Data(RenderedText)),
+                ("context", Data(Markdown)),
+            ],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("results", Data(ComparisonResults)),
+            ],
+        ),
+        (
+            BuiltinNode::FindWork,
+            "Find work",
+            Executor::FindWork,
+            ConfigurationKind::FindWork,
+            Effect::ReadEvidence,
+            &[("ready", Control)],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("matches", Data(JsonList)),
+                ("task", Data(Task)),
+                ("target", Data(AgileTarget)),
+            ],
+        ),
+        (
+            BuiltinNode::UpdateProgress,
+            "Update progress",
+            Executor::UpdateProgress,
+            ConfigurationKind::UpdateProgress,
+            Effect::ChangeTaskRecords,
+            &[("ready", Control), ("target", Data(AgileTarget))],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("progress", Data(AgileProgressReceipt)),
+                ("target", Data(AgileTarget)),
+            ],
+        ),
+        (
             Start,
             "Start",
             Executor::BindInput,
@@ -262,6 +432,86 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             Effect::None,
             &[][..],
             &[("start", Control), ("document", Data(Markdown))][..],
+        ),
+        (
+            TypedStart,
+            "Start",
+            Executor::BindInput,
+            ConfigurationKind::TypedStart,
+            Effect::None,
+            &[],
+            &[
+                ("start", Control),
+                ("inputs", Data(JsonObject)),
+                ("document", Data(Markdown)),
+                ("task", Data(Task)),
+                ("event", Data(AgileEvent)),
+            ],
+        ),
+        (
+            Agent,
+            "Agent",
+            Executor::ReadOnlyAgent,
+            ConfigurationKind::AgentRole,
+            Effect::InvokeModel,
+            &[
+                ("ready", Control),
+                ("prompt", Data(RenderedText)),
+                ("comparison", Data(ComparisonResults)),
+            ],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("response", Data(AgentResponse)),
+            ],
+        ),
+        (
+            SummarizeResult,
+            "Result",
+            Executor::SummarizeResult,
+            ConfigurationKind::None,
+            Effect::ReadEvidence,
+            &[
+                ("ready", Control),
+                ("summary", Data(RenderedText)),
+                ("evidence", Evidence),
+            ],
+            &[("completed", Control), ("summary", Data(ResultSummary))],
+        ),
+        (
+            LoadWorkContext,
+            "Load work context",
+            Executor::ReadWorkContext,
+            ConfigurationKind::LoadWorkContext,
+            Effect::ReadEvidence,
+            &[
+                ("ready", Control),
+                ("task", Data(Task)),
+                ("document", Data(Markdown)),
+            ],
+            &[
+                ("loaded", Control),
+                ("failed", Control),
+                ("context", Data(WorkflowContext)),
+            ],
+        ),
+        (
+            ManageWork,
+            "Create or link work",
+            Executor::ManageWork,
+            ConfigurationKind::ManageWork,
+            Effect::ChangeTaskRecords,
+            &[
+                ("ready", Control),
+                ("title", Data(RenderedText)),
+                ("task", Data(Task)),
+            ],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("task", Data(Task)),
+                ("target", Data(AgileTarget)),
+            ],
         ),
         (
             LoadContext,
@@ -314,7 +564,10 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
                 ("plan", Data(ArtifactKind::Plan)),
                 ("task", Data(Task)),
             ],
-            &[("approved", Control), ("decision", Data(Approval))],
+            &[
+                ("approved", Control),
+                ("decision", Data(ArtifactKind::Approval)),
+            ],
         ),
         (
             PrepareWorktree,
@@ -325,7 +578,7 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             &[
                 ("ready", Control),
                 ("task", Data(Task)),
-                ("decision", Data(Approval)),
+                ("decision", Data(ArtifactKind::Approval)),
             ],
             &[
                 ("prepared", Control),
@@ -640,6 +893,15 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
 impl ArtifactKind {
     pub(super) fn key(self) -> &'static str {
         match self {
+            Self::AgentResponse => "agent_response",
+            Self::AgileEvent => "agile_event",
+            Self::ResultSummary => "result_summary",
+            Self::WorkflowContext => "workflow_context",
+            Self::JsonObject => "json_object",
+            Self::RenderedText => "rendered_text",
+            Self::ComparisonResults => "comparison_results",
+            Self::AgileTarget => "agile_target",
+            Self::AgileProgressReceipt => "agile_progress_receipt",
             Self::Markdown => "markdown",
             Self::Plan => "plan",
             Self::Review => "review",
@@ -665,6 +927,19 @@ impl NodeConfiguration {
     pub(super) fn matches(&self, kind: ConfigurationKind) -> bool {
         match (self, kind) {
             (Self::None, ConfigurationKind::None) => true,
+            (Self::TypedStart(config), ConfigurationKind::TypedStart) => config.valid(),
+            (Self::LoadWorkContext { .. }, ConfigurationKind::LoadWorkContext)
+            | (Self::ManageWork { .. }, ConfigurationKind::ManageWork) => true,
+            (Self::SetFields(config), ConfigurationKind::SetFields) => config.validate().is_ok(),
+            (Self::FilterMapList(config), ConfigurationKind::FilterMapList) => {
+                config.validate().is_ok()
+            }
+            (Self::BuildText(config), ConfigurationKind::BuildText) => config.validate().is_ok(),
+            (Self::RequestInput(config), ConfigurationKind::RequestInput) => config.is_valid(),
+            (Self::Approval(config), ConfigurationKind::Approval) => config.is_valid(),
+            (Self::CompareModels(config), ConfigurationKind::CompareModels) => config.valid(),
+            (Self::FindWork { query }, ConfigurationKind::FindWork) => query.valid(),
+            (Self::UpdateProgress { .. }, ConfigurationKind::UpdateProgress) => true,
             (
                 Self::AgentRole {
                     role,
@@ -712,7 +987,7 @@ impl Executor {
     pub(super) fn scheduler_profile(self) -> Option<&'static str> {
         match self {
             Self::PlanAgent => Some("planning"),
-            Self::ReadOnlyAgent | Self::ExecuteMcpTool => Some("read_only"),
+            Self::ReadOnlyAgent | Self::ExecuteMcpTool | Self::CompareModels => Some("read_only"),
             Self::WriteAgent | Self::ExecuteCommand => Some("approved_write"),
             _ => None,
         }

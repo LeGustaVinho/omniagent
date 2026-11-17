@@ -106,13 +106,14 @@ function CriterionEvidenceForm({ criterion, choices, projectId, runId, onSaved, 
   </form>;
 }
 
-export function GoalVerificationPanel({ projectId, runId, live = false, requiredEvidence, candidateId, actions }: {
+export function GoalVerificationPanel({ projectId, runId, live = false, requiredEvidence, candidateId, actions, onVerificationSaved }: {
   projectId: string;
   runId: string;
   live?: boolean;
   requiredEvidence?: readonly StageGoalEvidence[];
   candidateId?: string;
   actions?: (result: Verification) => ReactNode;
+  onVerificationSaved?: () => void;
 }) {
   const client = useQueryClient();
   const key = ["goal-verification", projectId, runId, live];
@@ -137,6 +138,7 @@ export function GoalVerificationPanel({ projectId, runId, live = false, required
     void client.invalidateQueries({ queryKey: key });
     void client.invalidateQueries({ queryKey: choicesKey });
     void client.invalidateQueries({ queryKey: ["run-orchestration", projectId, runId] });
+    onVerificationSaved?.();
   };
   return <section aria-label="Goal verification" className="grid gap-2 text-xs">
     <h3 className="text-sm font-medium">Goal verification</h3>

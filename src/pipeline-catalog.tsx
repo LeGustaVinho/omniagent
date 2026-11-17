@@ -66,32 +66,57 @@ const registry: Record<string, CatalogNode[]> = {
 export function PipelineCatalog({ onAdd }: {
   onAdd?: (kind: StageKind, title: string) => void;
 }) {
+  return <PipelineNodeCatalog groups={Object.entries(registry).map(([title, nodes]) => ({
+    title,
+    entries: nodes.map(({ label, input, output, kind }) => ({
+      id: label, label, input, output, action: onAdd && kind ? () => onAdd(kind, label) : undefined,
+    })),
+  }))} />;
+}
+
+export type PipelineCatalogEntry = {
+  id: string;
+  label: string;
+  input: string;
+  output: string;
+  detail?: string;
+  action?: () => void;
+  actionLabel?: string;
+  unavailable?: string;
+};
+
+export type PipelineCatalogGroup = { title: string; entries: PipelineCatalogEntry[] };
+
+export function PipelineNodeCatalog({ groups, searchLabel = "Search pipeline nodes", compact = false }: {
+  groups: PipelineCatalogGroup[]; searchLabel?: string; compact?: boolean;
+}) {
   const [query, setQuery] = useState("");
   const terms = query.trim().toLowerCase().split(/\s+/);
-  const groups = Object.entries(registry).map(([group, entries]) => ({
-    group,
-    nodes: entries.filter((entry) => terms.every((term) =>
-      [group, entry.label, entry.input, entry.output].join(" ").toLowerCase().includes(term))),
-  })).filter(({ nodes }) => nodes.length);
+  const matches = groups.map(({ title, entries }) => ({
+    title,
+    entries: entries.filter(({ label, input, output, detail }) => terms.every((term) =>
+      [title, label, input, output, detail].join(" ").toLowerCase().includes(term))),
+  })).filter(({ entries }) => entries.length > 0);
   return (
-    <div className="pipeline-catalog">
+    <div className="pipeline-catalog" data-compact={compact || undefined}>
       <div className="pipeline-catalog-toolbar">
         <label className="pipeline-catalog-search"><Search size={16} aria-hidden="true" />
-          <input type="search" aria-label="Search pipeline nodes" placeholder="Find a node, port or preset" value={query}
+          <input type="search" aria-label={searchLabel} placeholder="Find a node, port or preset" value={query}
             onChange={(event) => setQuery(event.target.value)} />
         </label>
       </div>
-      {!groups.length && <p className="pipeline-note" role="status">No matching nodes.</p>}
-      {groups.map(({ group, nodes }) => <section key={group} className="pipeline-catalog-group">
-        <h3>{group}</h3>
-        <ul>{nodes.map((node) => <li key={node.label}>
+      {!matches.length && <p className="pipeline-note" role="status">No matching nodes.</p>}
+      {matches.map(({ title, entries }) => <section key={title} className="pipeline-catalog-group">
+        <h3>{title}</h3>
+        <ul>{entries.map((node) => <li key={node.id}>
           <div className="pipeline-catalog-node">
             <div><h4>{node.label}</h4>
               <dl><dt>Input</dt><dd>{node.input}</dd><dt>Output</dt><dd>{node.output}</dd></dl>
+              {node.detail && <p className="pipeline-catalog-detail">{node.detail}</p>}
             </div>
-            {onAdd && node.kind
-              ? <Button variant="outline" type="button" aria-label={`Add ${node.label}`} onClick={() => onAdd(node.kind!, node.label)}><Plus size={15} /> Add</Button>
-              : <span className="pipeline-meta">Definition preview</span>}
+            {node.action
+              ? <Button variant="outline" type="button" aria-label={node.actionLabel ?? `Add ${node.label}`} onClick={node.action}><Plus size={15} /> Add</Button>
+              : <span className="pipeline-meta">{node.unavailable ?? "Definition preview"}</span>}
           </div>
         </li>)}</ul>
       </section>)}

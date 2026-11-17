@@ -7,16 +7,18 @@ export function IntegrationNotice({
   children,
   start,
   scenario,
+  title = "Integration pending",
 }: {
   children: ReactNode;
   start?: WorkspaceProps["startSimulation"];
   scenario?: ScenarioId;
+  title?: string;
 }) {
   return (
     <div className="settings-notice">
       <Info size={16} aria-hidden="true" />
       <div>
-        <strong>Integration pending</strong>
+        <strong>{title}</strong>
         <p>{children}</p>
         {!start && <p>Open a repository to try this workflow.</p>}
       </div>

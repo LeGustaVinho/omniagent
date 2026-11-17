@@ -7,7 +7,7 @@ import type { PackageDraft } from "@/workflow-authoring-package";
 import { WorkflowGraphEditor } from "@/workflow-graph-editor";
 import {
   portType, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowEndpoint,
-  type WorkflowGraph, type WorkflowNodeConfiguration, type WorkflowPortType, type WorkflowWire,
+  type WorkflowGraph, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPortType, type WorkflowWire,
 } from "@/workflow-graph-model";
 
 export type ReusableVersion = { id: string; revision: string; kind: string; destination: "project" | "library" };
@@ -26,7 +26,7 @@ type Selection = { type: "preset"; nodeId: string; editableFields: string[] }
   | { type: "subflow"; nodeIds: string[] | null; inputs: Record<string, WorkflowWire[]>; outputs: Record<string, WorkflowEndpoint> };
 type ArtifactSummary = { version: ReusableVersion; name: string; blockers: string[] };
 export type ReusableDescription = {
-  artifact: ArtifactSummary & { body: ReusableBody; references: Record<string, ReusableReference> };
+  artifact: ArtifactSummary & { body: ReusableBody; references: Record<string, ReusableReference>; layout?: WorkflowLayout };
   definition: WorkflowDefinition;
   graphDefinitions: WorkflowDefinitions;
   editableOverrides: string[];
@@ -261,7 +261,7 @@ function SubflowGraph({ projectId, checkoutId, version }: {
   return <section className="pipeline-stack" aria-label={`Pinned subflow ${artifact.name}`}>
     <p>{artifact.name} · <code className="break-all">{artifact.version.revision}</code></p>
     <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId}
-      state={{ graph, layout: {}, updateDefinitions: {} }} setState={() => undefined}
+      state={{ graph, layout: artifact.layout ?? {}, updateDefinitions: {} }} setState={() => undefined}
       definitions={graphDefinitions} catalog={[]} disabled problems={[]} allowDefinitionUpdates={false}
       inspectReference={(id) => {
         const reference = artifact.references[id];

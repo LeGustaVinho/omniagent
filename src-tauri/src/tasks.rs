@@ -22,11 +22,15 @@ pub use agile_events::{
 pub(crate) use agile_events::{
     WorkStateChanges, bind_workflow_trigger_origin, pipeline_work_origin,
 };
+pub(crate) use agile_transition::{current_work_state, transition_work_in_transaction};
 pub(crate) use checklists::bind_checklist_job_mode;
-pub(crate) use checklists::progress::ChecklistProgressRequest;
+pub(crate) use checklists::load_checklist_items;
 pub use checklists::progress::{
     ChecklistProgressAccess, ChecklistProgressActor, ChecklistProgressAvailability,
     ChecklistProgressError, ChecklistProgressReceipt, ChecklistProgressRecord,
+};
+pub(crate) use checklists::progress::{
+    ChecklistProgressRequest, set_pipeline_checklist_item_checked_in_transaction,
 };
 pub use checklists::{
     ChecklistDispatchTarget, ChecklistExecutionMode, ChecklistItem, TaskChecklist,
@@ -43,6 +47,7 @@ pub(crate) use delivery::validate_repository_delivery_open;
 pub use delivery::{
     TaskDelivery, TaskDeliveryEvidence, TaskDeliveryState, TaskPrerequisiteBlocker,
 };
+pub(crate) use descriptions::workflow_task_context;
 pub use descriptions::{
     DescriptionDraft, DescriptionEditorConflict, DescriptionEditorSave, DescriptionEditorState,
     DescriptionOwner, DescriptionRevision, TaskDirectWork, TaskDispatchContext, WorkDescriptions,
@@ -269,29 +274,9 @@ impl Store {
     pub async fn project_work_hierarchy(&self, project_id: String) -> Result<ProjectWorkHierarchy> {
         self.execute(move |db| {
             let tx = db.transaction()?;
-            let epics = tx.prepare(
-                "SELECT id, title FROM project_epics WHERE project_id = ?1 ORDER BY title, id",
-            )?.query_map([&project_id], |row| Ok(ProjectEpic {
-                id: row.get(0)?, project_id: project_id.clone(), title: row.get(1)?,
-            }))?.collect::<rusqlite::Result<_>>()?;
-            let work = tx.prepare(
-                "SELECT t.id, t.title, m.epic_id, m.parent_task_id, c.id FROM project_tasks t
-                 LEFT JOIN project_task_memberships m ON m.project_id = t.project_id AND m.task_id = t.id
-                 LEFT JOIN project_checklists c ON c.project_id = t.project_id AND c.task_id = t.id
-                 WHERE t.project_id = ?1 ORDER BY t.title, t.id",
-            )?.query_map([&project_id], |row| {
-                let placement = match row.get(3)? {
-                    Some(parent_task_id) => TaskPlacement::Subtask { parent_task_id },
-                    None => TaskPlacement::Task { epic_id: row.get(2)? },
-                };
-                Ok(ProjectWork {
-                    task: ProjectTask { id: row.get(0)?, project_id: project_id.clone(), title: row.get(1)? },
-                    placement,
-                    checklist_id: row.get(4)?,
-                })
-            })?.collect::<rusqlite::Result<_>>()?;
-            Ok(ProjectWorkHierarchy { epics, work })
-        }).await
+            load_project_work_hierarchy(&tx, &project_id)
+        })
+        .await
     }
 
     pub async fn project_task(
@@ -302,6 +287,48 @@ impl Store {
         self.execute(move |db| load_project_task(db, &project_id, &id))
             .await
     }
+}
+
+pub(crate) fn load_project_work_hierarchy(
+    db: &Connection,
+    project: &str,
+) -> Result<ProjectWorkHierarchy> {
+    let epics = db
+        .prepare("SELECT id, title FROM project_epics WHERE project_id = ?1 ORDER BY title, id")?
+        .query_map([project], |row| {
+            Ok(ProjectEpic {
+                id: row.get(0)?,
+                project_id: project.into(),
+                title: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let work = db
+        .prepare(
+            "SELECT t.id, t.title, m.epic_id, m.parent_task_id, c.id FROM project_tasks t
+         LEFT JOIN project_task_memberships m ON m.project_id = t.project_id AND m.task_id = t.id
+         LEFT JOIN project_checklists c ON c.project_id = t.project_id AND c.task_id = t.id
+         WHERE t.project_id = ?1 ORDER BY t.title, t.id",
+        )?
+        .query_map([project], |row| {
+            let placement = match row.get(3)? {
+                Some(parent_task_id) => TaskPlacement::Subtask { parent_task_id },
+                None => TaskPlacement::Task {
+                    epic_id: row.get(2)?,
+                },
+            };
+            Ok(ProjectWork {
+                task: ProjectTask {
+                    id: row.get(0)?,
+                    project_id: project.into(),
+                    title: row.get(1)?,
+                },
+                placement,
+                checklist_id: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ProjectWorkHierarchy { epics, work })
 }
 
 pub(crate) fn insert_project_work(

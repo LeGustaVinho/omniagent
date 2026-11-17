@@ -1,6 +1,7 @@
-import { Archive, ArrowUp, CircleHelp, FileText, GitFork, MessageSquare, Plus, Search, X } from "lucide-react";
+import { Archive, ArrowUp, CircleHelp, FileText, GitFork, MessageSquare, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { ConversationEmptyState, ConversationLibraryLayout, ConversationNavigation, ConversationWorkspaceLayout } from "@/conversation-layout";
 import { ConversationRow, type ConversationAction } from "@/conversation-menu";
 import {
   createLibrary, createPreviewConversation, primaryProject,
@@ -8,7 +9,8 @@ import {
 } from "@/conversation-preview-data";
 import { PreviewConversationPanel } from "@/conversation-preview-panel";
 import type { WorkspaceProps } from "@/workbench-contract";
-import "./conversation.css";
+
+type PreviewWorkspaceProps = WorkspaceProps & { compact?: boolean };
 
 type LibraryDialog = {
   action: "rename" | "new-section" | "fork" | "delete" | "rewind";
@@ -30,19 +32,17 @@ function selectConversation(library: PreviewLibrary, conversationId: string): Pr
   };
 }
 
-export default function ConversationsPreview(props: WorkspaceProps) {
+export default function ConversationsPreview(props: PreviewWorkspaceProps) {
   if (!props.simulation) return (
-    <section className="conv-empty">
-      <MessageSquare aria-hidden /><h2>Conversations</h2>
-      <p>Try conversation history, planning and agent controls with example data.</p>
+    <ConversationEmptyState title="Conversations" description="Try conversation history, planning and agent controls with example data.">
       <button type="button" className="conv-inline-action" onClick={() => props.startSimulation("delivery")}>Simulate</button>
-    </section>
+    </ConversationEmptyState>
   );
   return <PreviewSession key={props.simulation.epoch} {...props} simulation={props.simulation} />;
 }
 
-function PreviewSession(props: WorkspaceProps & { simulation: NonNullable<WorkspaceProps["simulation"]> }) {
-  const { target } = props;
+function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable<WorkspaceProps["simulation"]> }) {
+  const { target, compact = false } = props;
   const [library, setLibrary] = useState(createLibrary);
   const [filter, setFilter] = useState("");
   const [allProjects, setAllProjects] = useState(false);
@@ -55,6 +55,7 @@ function PreviewSession(props: WorkspaceProps & { simulation: NonNullable<Worksp
   const [forkTarget, setForkTarget] = useState("current");
   const [deleteCopies, setDeleteCopies] = useState(false);
   const libraryRef = useRef<HTMLElement>(null);
+  const libraryToggle = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (target) setLibrary((current) => selectConversation(current, target));
@@ -81,7 +82,12 @@ function PreviewSession(props: WorkspaceProps & { simulation: NonNullable<Worksp
 
   function openConversation(id: string) {
     setLibrary((current) => selectConversation(current, id));
-    setMobileLibrary(false);
+    changeMobileLibrary(false);
+  }
+
+  function changeMobileLibrary(open: boolean) {
+    setMobileLibrary(open);
+    if (!open && mobileLibrary) requestAnimationFrame(() => libraryToggle.current?.focus());
   }
 
   function closeTab(id: string) {
@@ -102,7 +108,7 @@ function PreviewSession(props: WorkspaceProps & { simulation: NonNullable<Worksp
     });
     setArchived(false);
     setFilter("");
-    setMobileLibrary(false);
+    changeMobileLibrary(false);
   }
 
   function openDialog(action: LibraryDialog["action"], conversation: PreviewConversation, message?: PreviewMessage) {
@@ -208,27 +214,16 @@ function PreviewSession(props: WorkspaceProps & { simulation: NonNullable<Worksp
     rename: "Rename conversation", "new-section": "Create section", fork: "Create fork",
     delete: "Delete conversation history", rewind: "Rewind conversation",
   }[dialog.action] : "";
-  return (
-    <div className="conv-example">
-      <button type="button" className="conv-mobile-library conv-quiet-button" onClick={() => setMobileLibrary(!mobileLibrary)}
-        aria-expanded={mobileLibrary}><MessageSquare aria-hidden /> Conversations</button>
-      <aside ref={libraryRef} className="conv-example-sidebar conv-sessions" data-open={mobileLibrary} aria-label="Conversation library">
-        <header className="conv-session-heading">
-          <h2>Conversations</h2>
-          <button type="button" className="conv-icon-button" aria-label="New conversation" onClick={createConversation}>
-            <Plus aria-hidden />
-          </button>
-        </header>
-        <label className="conv-search"><Search aria-hidden /><input aria-label="Filter conversations" placeholder="Filter conversations"
-          value={filter} onChange={(event) => setFilter(event.currentTarget.value)} /></label>
-        <div className="conv-library-options">
-          <select className="conv-select" aria-label="Conversation project scope" value={allProjects ? "all" : "current"}
-            onChange={(event) => setAllProjects(event.currentTarget.value === "all")}>
-            <option value="current">{scope}</option><option value="all">All projects</option>
-          </select>
-          <button type="button" className="conv-icon-button" aria-label="Archived" aria-pressed={archived}
-            title="Archived" onClick={() => setArchived(!archived)}><Archive aria-hidden /></button>
-        </div>
+  const navigation = <ConversationNavigation compact={compact} open={!compact || mobileLibrary} onOpenChange={changeMobileLibrary}>
+    <ConversationLibraryLayout sectionRef={libraryRef} className="conv-example-sidebar" query={filter} searchLabel="Filter conversations"
+      onQuery={setFilter} onCreate={createConversation} filters={<>
+        <select className="conv-select conv-project-filter" aria-label="Conversation project scope" value={allProjects ? "all" : "current"}
+          onChange={(event) => setAllProjects(event.currentTarget.value === "all")}>
+          <option value="current">{scope}</option><option value="all">All projects</option>
+        </select>
+        <button type="button" className="conv-icon-button" aria-label="Archived" aria-pressed={archived}
+          title="Archived" onClick={() => setArchived(!archived)}><Archive aria-hidden /></button>
+      </>}>
         {orderedGroups.map(([group, conversations]) => (
           <section key={group} aria-label={group}>
             <h3 className="conv-session-group">{group}</h3>
@@ -251,8 +246,13 @@ function PreviewSession(props: WorkspaceProps & { simulation: NonNullable<Worksp
         ))}
         {!matching.length && <p className="conv-sidebar-note">{archived ? "No archived conversations match." : "No conversations match."}</p>}
         {notice && <p className="conv-sidebar-note" role="status">{notice}</p>}
-      </aside>
-      <section className="conv-example-main">
+    </ConversationLibraryLayout>
+  </ConversationNavigation>;
+  return (
+    <ConversationWorkspaceLayout navigation={navigation} controls={compact &&
+      <button ref={libraryToggle} type="button" className="conv-mobile-library conv-quiet-button" onClick={() => changeMobileLibrary(true)}
+        aria-expanded={mobileLibrary}><MessageSquare aria-hidden /> Conversations</button>
+    }>
         <nav className="conv-example-tabs" aria-label="Open conversations">
           {library.tabIds.map((id) => {
             const tab = library.conversations.find((conversation) => conversation.id === id);
@@ -260,7 +260,7 @@ function PreviewSession(props: WorkspaceProps & { simulation: NonNullable<Worksp
             return (
               <div className="conv-example-tab" key={id} data-active={current?.id === id}>
                 <button type="button" aria-current={current?.id === id ? "page" : undefined} onClick={() => openConversation(id)}>
-                  <MessageSquare aria-hidden /> {tab.title}
+                  <MessageSquare aria-hidden /><span>{tab.title}</span>
                 </button>
                 <button type="button" className="conv-icon-button" aria-label={`Close ${tab.title}`} onClick={() => closeTab(id)}><X aria-hidden /></button>
               </div>
@@ -272,9 +272,9 @@ function PreviewSession(props: WorkspaceProps & { simulation: NonNullable<Worksp
           update={(update) => updateConversation(current.id, update)}
           onFork={(message) => openDialog("fork", current, message)}
           onRewind={(message) => openDialog("rewind", current, message)} />
-          : <div className="conv-empty"><MessageSquare aria-hidden /><h2>No conversation open</h2>
-            <button type="button" className="conv-inline-action" onClick={createConversation}>New conversation</button></div>}
-      </section>
+          : <ConversationEmptyState title="No conversation open">
+            <button type="button" className="conv-primary-button" onClick={createConversation}>New conversation</button>
+          </ConversationEmptyState>}
       {dialog && <Dialog.Root open onOpenChange={(open) => { if (!open) setDialog(undefined); }}>
         <Dialog.Portal>
           <Dialog.Overlay className="conv-dialog-scrim" />
@@ -315,6 +315,6 @@ function PreviewSession(props: WorkspaceProps & { simulation: NonNullable<Worksp
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>}
-    </div>
+    </ConversationWorkspaceLayout>
   );
 }

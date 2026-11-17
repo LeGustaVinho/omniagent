@@ -672,6 +672,7 @@ fn published_subflow_ports(
             members: vec![member],
         },
         definitions: BTreeMap::from([("installed".into(), existing.definitions.clone())]),
+        layouts: BTreeMap::new(),
     };
     ReviewCatalog::new(db, project, &document, "exchange-installed")
         .compile(&document.package.members[0], &mut Vec::new())

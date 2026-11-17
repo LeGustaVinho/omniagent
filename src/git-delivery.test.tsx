@@ -4,7 +4,6 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import ChangesPanel from "@/changes-panel";
 import { GitSimulationProvider } from "@/git-simulation";
 import GitWorkspace from "@/git-workspace";
 import QueuePanel from "@/queue-panel";
@@ -115,15 +114,6 @@ describe("delivery review UI", () => {
     expect(screen.getByRole("button", { name: "Accept diff" })).toBeDefined();
   });
 
-  it("labels unavailable diffs and enters simulation only on request", async () => {
-    const user = userEvent.setup();
-    const startSimulation = vi.fn();
-    render(<ChangesPanel {...defaultProps} simulation={null} startSimulation={startSimulation} kind="saved" />);
-    expect(screen.getByText("Diff integration pending")).toBeDefined();
-    expect(screen.queryByText("docs/release.md")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Simulate" }));
-    expect(startSimulation).toHaveBeenCalledOnce();
-  });
 });
 
 describe("execution queue UI", () => {

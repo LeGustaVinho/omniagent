@@ -768,7 +768,7 @@ pub(super) async fn workflow_plan_candidates_fixture(
         .workflow_launch(project.clone(), run.id.clone())
         .await?
     {
-        Some(launch) => launch.source,
+        Some(launch) => launch.source.context("the legacy launch did not pin Markdown")?,
         None => {
             store
                 .capture_repository_markdown(repo.checkout_id.clone(), root.join("brief.md"))

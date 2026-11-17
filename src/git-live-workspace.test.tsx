@@ -5,16 +5,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
+import ChangesPanel from "@/changes-panel";
 import GitWorkspace from "@/git-workspace";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-vi.mock("@/changes-panel", () => ({
-  default: () => null,
-  MonacoComparison: ({ file }: { file: { original: string; modified: string } }) => (
-    <section aria-label="Monaco comparison"><pre>{file.original}</pre><pre>{file.modified}</pre></section>
-  ),
-}));
 vi.mock("@/ide-monaco", () => ({
   loadMonaco: () => Promise.reject(new Error("No Monaco worker in jsdom")),
   monacoTheme: () => "vs-dark",
@@ -80,12 +75,12 @@ it("compares live paths and sends the current index, branch and HEAD for each st
   });
   const user = userEvent.setup();
   openGit();
-  expect(within(await screen.findByRole("region", { name: "Monaco comparison" })).getByText("working revision")).toBeDefined();
+  expect(within(await screen.findByRole("region", { name: "Revised file" })).getByText("working revision")).toBeDefined();
   await user.click(screen.getByRole("button", { name: "Stage main.txt" }));
   expect(invoke).toHaveBeenCalledWith("set_git_path_staged", { checkoutId: checkout.checkoutId, path: "main.txt", staged: true, expected: originalRevision });
   await screen.findByText("No working changes.");
   await user.selectOptions(screen.getByLabelText("Diff source"), "staged");
-  expect(within(await screen.findByRole("region", { name: "Monaco comparison" })).getByText("staged revision")).toBeDefined();
+  expect(within(await screen.findByRole("region", { name: "Revised file" })).getByText("staged revision")).toBeDefined();
   await user.click(screen.getByRole("button", { name: "Unstage main.txt" }));
   expect(invoke).toHaveBeenCalledWith("set_git_path_staged", {
     checkoutId: checkout.checkoutId, path: "main.txt", staged: false, expected: { ...originalRevision, index: "new-index" },
@@ -100,6 +95,57 @@ it("compares live paths and sends the current index, branch and HEAD for each st
   await user.selectOptions(await screen.findByLabelText("History branch"), "refs/heads/feature");
   await screen.findByText("Linked history");
   expect(invoke).toHaveBeenCalledWith("git_checkout_history", { checkoutId: "linked-task", branch: "refs/heads/feature" });
+  await user.click(screen.getByRole("button", { name: "Changes" }));
+  await within(screen.getByRole("region", { name: "Changed files" })).findByRole("button", { name: /linked\.txt.*Untracked/ });
+  expect(screen.queryByRole("button", { name: "Open file" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Open changes panel" })).toBeNull();
+});
+
+it("loads the active checkout's diff in the Changes side panel and opens its real file", async () => {
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, worktrees, branches, root: checkout.checkoutRoot, managed: false,
+      revision: originalRevision, changes: [{ path: "notes/real.md", working: "M", staged: null }],
+    };
+    if (command === "git_checkout_diff") return {
+      path: "notes/real.md", source: "working", original: { status: "text", content: "on the index" },
+      modified: { status: "text", content: "on the real worktree" },
+    };
+    throw new Error(`Unexpected ${command}`);
+  });
+  const user = userEvent.setup();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const openWorkspace = vi.fn();
+  render(<QueryClientProvider client={client}><ChangesPanel
+    checkout={checkout} simulation={null} target="working" startSimulation={() => {}}
+    openWorkspace={openWorkspace} openChanges={() => {}} openActivity={() => {}}
+  /></QueryClientProvider>);
+  expect(await screen.findByText("on the real worktree")).toBeDefined();
+  expect(screen.getByLabelText("Comparison revisions").textContent).toBe("Index→Worktree");
+  expect(invoke).toHaveBeenCalledWith("git_checkout_review", { checkoutId: checkout.checkoutId });
+  expect(invoke).toHaveBeenCalledWith("git_checkout_diff", { checkoutId: checkout.checkoutId, path: "notes/real.md", source: "working" });
+  expect(screen.queryByRole("button", { name: "Stage notes/real.md" })).toBeNull();
+  expect(screen.queryByText("docs/release.md")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Open file" }));
+  expect(openWorkspace).toHaveBeenCalledWith("knowledge", "notes/real.md");
+});
+
+it("reports unavailable saved evidence in the side panel for the exact requested attempt", async () => {
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "git_saved_attempts") return [{ runId: "newer-run", checkoutId: checkout.checkoutId, label: "Later attempt" }];
+    if (command === "attempt_worktree_evidence") return null;
+    throw new Error(`Unexpected ${command}`);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><ChangesPanel
+    checkout={checkout} simulation={null} target="attempt:unavailable-run" startSimulation={() => {}}
+    openWorkspace={() => {}} openChanges={() => {}} openActivity={() => {}}
+  /></QueryClientProvider>);
+  expect(await screen.findByText("Saved Git evidence is unavailable for this attempt.")).toBeDefined();
+  expect(invoke).toHaveBeenCalledWith("attempt_worktree_evidence", { projectId: checkout.projectId, runId: "unavailable-run" });
+  expect(invoke).not.toHaveBeenCalledWith("attempt_worktree_evidence", { projectId: checkout.projectId, runId: "newer-run" });
+  expect(invoke).not.toHaveBeenCalledWith("git_checkout_review", expect.anything());
+  expect(screen.queryByRole("button", { name: "View attempt" })).toBeNull();
 });
 
 it("opens the requested attempt's saved diff without loading live checkout content", async () => {
@@ -185,5 +231,5 @@ it("requires explicit review when the staged revision changes with a commit mess
   expect(invoke).toHaveBeenCalledWith("commit_git_index", {
     checkoutId: checkout.checkoutId, message: "Describe the staged changes", expected: { ...originalRevision, index: "new-index" },
   });
-  expect(await screen.findByText("new-commit-sha", { selector: "code" })).toBeDefined();
+  expect((await screen.findByText("Commit saved", { exact: false })).textContent).toContain("new-commit-sha");
 });

@@ -22,7 +22,11 @@ it("reviews an exact prior package revision and simulates the chosen member with
     changes: [{ path: "/body/graph/nodes/check", change: "added", after: { kind: "command" }, before: null }],
     changesTruncated: false, dependencies: { check: { source: "published", version: reference } },
     affectedUses: [], diagnostics: [], requirements: ["Command check needs a local registration."],
-    simulatable: true, sampleInputs: ["document"], sampleNodes: [{ nodeId: "check::command", title: "Command", outputs: ["result"] }],
+    simulatable: true, sampleInputs: ["document", "inputs"],
+    startSchema: { requiresDocument: true, requiresWork: false, requiresEvent: false,
+      fields: [{ name: "maxFiles", valueType: "number", required: true },
+        { name: "includeDiff", valueType: "boolean", required: false }] },
+    sampleNodes: [{ nodeId: "check::command", title: "Command", outputs: ["result"] }],
   };
   const request = { projectId, draftId: "draft", revision: "older" };
   vi.mocked(invoke).mockImplementation(async (name, payload) => {
@@ -49,11 +53,17 @@ it("reviews an exact prior package revision and simulates the chosen member with
   await user.click(screen.getByText("Graph changes (1)"));
   expect(screen.getByText("/body/graph/nodes/check")).toBeTruthy();
   const outcomes = { "check::command": { state: "waiting", reason: "Sample operator response" } };
-  fireEvent.change(screen.getByRole("textbox", { name: "Sample outcomes" }), { target: { value: JSON.stringify(outcomes) } });
-  await user.click(screen.getByRole("button", { name: "Simulate" }));
+  await user.click(screen.getByText("Sample outcomes"));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Outcome for check::command" }), "waiting");
+  fireEvent.change(screen.getByRole("textbox", { name: "Reason for check::command" }), { target: { value: "Sample operator response" } });
+  const runSimulation = screen.getByRole<HTMLButtonElement>("button", { name: "Simulate" });
+  expect(runSimulation.disabled).toBe(true);
+  fireEvent.change(screen.getByRole("spinbutton", { name: "maxFiles" }), { target: { value: "3" } });
+  await user.click(screen.getByRole("checkbox", { name: "Include includeDiff" }));
+  await user.click(runSimulation);
   expect(invoke).toHaveBeenCalledWith("preview_workflow_package_revision", request);
   expect(invoke).toHaveBeenCalledWith("simulate_workflow_package_revision", { ...request, memberKey: "pipeline",
-    scenario: { inputs: { document: { relativePath: "sample.md" } }, outcomes } });
+    scenario: { inputs: { document: { relativePath: "sample.md" }, inputs: { maxFiles: 3, includeDiff: false } }, outcomes } });
   const trace = within(await screen.findByRole("region", { name: "Simulation trace" }));
   await user.click(trace.getByText(/Reusable checker/));
   expect(trace.getByText(reference.revision)).toBeTruthy();
@@ -87,10 +97,8 @@ it("edits a package member graph through the shared editor and saves the same pa
       startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />
   </QueryClientProvider>);
   const user = userEvent.setup();
-  await user.click(await screen.findByText("Edit package"));
-  await user.click(screen.getByText("Edit member graph"));
   await user.click(await screen.findByRole("button", { name: "Add node" }));
-  await user.click(within(screen.getByRole("region", { name: "Node catalog" })).getByRole("button", { name: "Parallel" }));
+  await user.click(within(screen.getByRole("region", { name: "Node catalog" })).getByRole("button", { name: "Add Parallel" }));
   await user.click(screen.getByRole("button", { name: "Save package revision" }));
   expect(invoke).toHaveBeenCalledWith("save_workflow_package", {
     projectId: exampleCheckout.projectId, draftId: draft.id, expectedRevision: draft.revision,

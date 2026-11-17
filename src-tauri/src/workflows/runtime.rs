@@ -117,6 +117,13 @@ pub(super) fn insert_workflow_run(
             .inputs
             .iter()
             .any(|port| port.value == PortType::Data(ArtifactKind::Plan));
+        let scheduler_profile = if node.definition.kind == super::BuiltinNode::Agent
+            && super::stage_plan::StagePlanConfiguration::for_stage(node)?.is_some()
+        {
+            Executor::PlanAgent.scheduler_profile()
+        } else {
+            node.definition.executor.scheduler_profile()
+        };
         db.execute(
             "INSERT INTO workflow_node_pins VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -124,7 +131,7 @@ pub(super) fn insert_workflow_run(
                 node.instance.id,
                 node.revision,
                 node.definition.revision,
-                node.definition.executor.scheduler_profile(),
+                scheduler_profile,
                 requires_plan
             ],
         )?;
@@ -296,13 +303,26 @@ impl Store {
                 &artifacts,
             )
             .await?;
+        let comparison = if node.definition.kind == super::BuiltinNode::Agent {
+            ensure!(
+                comparison.is_none() && !checklist_execution
+                    && input.pinned.is_none() && input.target.is_none()
+                    && input.role_context.is_none() && plan_revision_request.is_none()
+                    && goal_review_token.is_none(),
+                "An Agent must start a fresh conversation from its wired inputs"
+            );
+            request.instructions = super::generic_agent::prompt(resolved.get("prompt"))?.to_owned();
+            super::generic_agent::selected_comparison(resolved.get("comparison"))?
+        } else {
+            ensure!(
+                comparison.is_none()
+                    || (node.definition.kind == super::BuiltinNode::ReviewPlan
+                        && scope.mode == SessionMode::ReadOnly),
+                "Manual comparison selection requires a read-only plan review stage"
+            );
+            comparison
+        };
         let planning_route = input.pinned.as_ref().map(|(_, route)| *route);
-        ensure!(
-            comparison.is_none()
-                || (node.definition.kind == super::BuiltinNode::ReviewPlan
-                    && scope.mode == SessionMode::ReadOnly),
-            "Comparison responses require a read-only plan review stage"
-        );
         let qualified =
             if let Some(plan) = super::stage_plan::StagePlanConfiguration::for_stage(&node)? {
                 scope.mode == plan.mode()
@@ -470,10 +490,7 @@ impl Store {
             "submission cannot change the pinned node role"
         );
         if let Some(unit) = &unit {
-            request.instructions.push_str("\n\nPinned logical unit\n");
-            request
-                .instructions
-                .push_str(&serde_json::to_string(&unit.unit)?);
+            append_pinned_unit(&mut request.instructions, &unit.unit)?;
             input
                 .target
                 .get_or_insert_with(|| crate::tasks::TaskRunScope {
@@ -563,6 +580,15 @@ impl Store {
         self.execute(move |db| load_node_attempt(db, &project, &attempt))
             .await
     }
+}
+
+pub(super) fn append_pinned_unit(
+    instructions: &mut String,
+    unit: &super::units::WorkflowPlanUnit,
+) -> Result<()> {
+    instructions.push_str("\n\nPinned logical unit\n");
+    instructions.push_str(&serde_json::to_string(unit)?);
+    Ok(())
 }
 
 pub(crate) fn load_node_attempt(

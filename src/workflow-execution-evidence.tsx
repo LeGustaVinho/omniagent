@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { useState } from "react";
 import type { JobInspection } from "@/bindings/JobInspection";
 import { Button } from "@/components/ui/button";
+import { ConversationMarkdown } from "@/conversation-markdown";
 import { deliveryMergeReceiptQuery } from "@/delivery-merge-model";
 import { JobFailurePanel } from "@/job-failure";
 import { commitQuery } from "@/project-agile-model";
@@ -44,10 +46,41 @@ function GitEvidence({ evidence, merge, scope, navigation }: { evidence: Git; me
   </div>;
 }
 
+function AgentResponseEvidence({ artifact, scope, openActivity }: {
+  artifact: ExecutionArtifact; scope: ArtifactScope; openActivity: Navigation["openActivity"];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const source = artifact.value.evidence as { runId: string };
+  const response = useQuery({
+    queryKey: ["conversation", "workflow-agent-response", scope.projectId, scope.runId, artifact.id],
+    queryFn: () => invoke<string>("workflow_agent_response", { ...scope, artifactId: artifact.id }),
+    enabled: expanded,
+    retry: false,
+    gcTime: 0,
+  });
+  return <div className="pipeline-stack">
+    <details onToggle={(event) => setExpanded(event.currentTarget.open)}>
+      <summary>Read recorded agent response</summary>
+      {expanded && (response.isFetching ? <p role="status">Loading the recorded response…</p>
+        : response.error ? <p role="alert">{String(response.error)}</p>
+          : response.data !== undefined && <ConversationMarkdown>{response.data}</ConversationMarkdown>)}
+    </details>
+    <Button type="button" className="justify-self-start" variant="outline" onClick={() => openActivity(source.runId)}>Open original agent response</Button>
+  </div>;
+}
+
 function ArtifactLinks({ artifact, scope, navigation }: { artifact: ExecutionArtifact; scope: ArtifactScope; navigation: Navigation }) {
   const { kind, evidence } = artifact.value;
   switch (kind) {
     case "task": return <LinkedWork task={evidence as Task} projectId={scope.projectId} navigation={navigation} />;
+    case "agile_target": return <LinkedWork task={(evidence as { task: Task }).task} projectId={scope.projectId} navigation={navigation} />;
+    case "agile_progress_receipt": {
+      const progress = evidence as { target: { task: Task }; changed: boolean };
+      return <div className="workflow-execution-links">
+        <p>{progress.changed ? "Progress updated" : "Progress already matched the request"}</p>
+        <LinkedWork task={progress.target.task} projectId={scope.projectId} navigation={navigation} />
+      </div>;
+    }
     case "worktree": case "checks": return <LinkedWork task={(evidence as { task: Task }).task} projectId={scope.projectId} navigation={navigation} />;
     case "approval": {
       const approval = evidence as Approval;
@@ -84,19 +117,22 @@ function ArtifactLinks({ artifact, scope, navigation }: { artifact: ExecutionArt
     }
     case "merge": return <GitEvidence evidence={evidence as Merge} merge={evidence as Merge} scope={scope} navigation={navigation} />;
     case "plan": case "review": return <Button type="button" variant="outline" onClick={() => navigation.openActivity((evidence as { run_id: string }).run_id)}>Open source attempt</Button>;
+    case "agent_response": return <AgentResponseEvidence artifact={artifact} scope={scope} openActivity={navigation.openActivity} />;
     case "command_result": return <Button type="button" variant="outline" onClick={() => navigation.openActivity((evidence as { runId: string }).runId)}>Open command output and logs</Button>;
     default: return null;
   }
 }
 
-function RecordedInputs({ inputs, snapshot, scope, navigation }: { inputs: Record<string, string> | null; snapshot: WorkflowExecutionSnapshot; scope: ArtifactScope; navigation: Navigation }) {
+type InputEvidence = [port: string, artifactId: string];
+
+export function RecordedInputs({ inputs, snapshot, scope, navigation }: { inputs: Record<string, string> | InputEvidence[] | null; snapshot: WorkflowExecutionSnapshot; scope: ArtifactScope; navigation: Navigation }) {
   if (inputs === null) return <p>Exact data inputs were not recorded for this execution.</p>;
-  const entries = Object.entries(inputs);
+  const entries = Array.isArray(inputs) ? inputs : Object.entries(inputs);
   if (entries.length === 0) return <p>No data inputs were supplied.</p>;
   return <ul className="pipeline-stack" aria-label="Recorded data inputs">
     {entries.map(([port, id]) => {
       const output = snapshot.outputs.find(({ artifact }) => artifact.id === id)?.artifact;
-      return <li key={port} className="break-words"><strong>{port}</strong>
+      return <li key={`${port}:${id}`} className="break-words"><strong>{port}</strong>
         {output && <> · {output.nodeInstanceId}.{output.port} · {text(output.value.kind)}</>}
         <p><code className="break-all">{id}</code></p>
         {output && <details><summary>Open input evidence</summary>
@@ -153,14 +189,16 @@ function ControlEvidence({ control, snapshot, jobs, navigation }: {
   const attempt = runId ? snapshot.jobs.flatMap(({ attempts }) => attempts).find((entry) => entry.runId === runId) : undefined;
   const shownInJobs = jobs.some(({ attempts }) => attempts.some((entry) => entry.runId === runId));
   const showFailure = !shownInJobs && (attempt?.status === "failed" || attempt?.status === "interrupted");
-  const inputs = Object.fromEntries((control.dependencies ?? []).flatMap(({ toPort, artifactId }) => artifactId ? [[toPort, artifactId]] : []));
+  const inputPorts = snapshot.definition.nodes.find(({ instance }) => instance.id === control.nodeId)?.definition.inputs;
+  const inputs = (control.dependencies ?? []).flatMap<InputEvidence>(({ toPort, artifactId }) =>
+    artifactId && inputPorts?.find(({ name }) => name === toPort)?.value.kind !== "control" ? [[toPort, artifactId]] : []);
   return <section className="workflow-record-card" aria-label="Recorded control decision">
     {control.reason && <p>{control.reason}</p>}
     {control.selectedPorts.length > 0 && <p>Selected ports · {control.selectedPorts.map(text).join(" · ")}</p>}
     {!!control.dependencies?.length && <ul aria-label="Control dependencies">{control.dependencies.map(({ from, toPort, selected }) => <li key={`${from.node}:${from.port}:${toPort}`}>
       {toPort} · {from.node}.{from.port} · {selected ? "Selected" : "Skipped input"}
     </li>)}</ul>}
-    {Object.keys(inputs).length > 0 && <RecordedInputs inputs={inputs} snapshot={snapshot}
+    {inputs.length > 0 && <RecordedInputs inputs={inputs} snapshot={snapshot}
       scope={{ projectId: snapshot.run.projectId, runId: snapshot.run.id }} navigation={navigation} />}
     {runId && <p>Triggering attempt <code>{runId}</code></p>}
     {attempt && <>

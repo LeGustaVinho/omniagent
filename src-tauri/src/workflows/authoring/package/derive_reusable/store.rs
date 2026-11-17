@@ -104,6 +104,7 @@ impl Store {
                         members: vec![],
                     },
                     definitions: BTreeMap::new(),
+                    layouts: BTreeMap::new(),
                 },
             };
             document
@@ -224,6 +225,7 @@ impl LoadedSource {
                     members: vec![member],
                 },
                 definitions: BTreeMap::from([(member_key.clone(), artifact.definitions)]),
+                layouts: BTreeMap::new(),
             },
             member_key,
         }

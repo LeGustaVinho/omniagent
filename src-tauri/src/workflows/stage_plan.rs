@@ -3,14 +3,14 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    jobs::PipelineDispatch,
+    jobs::{Job, PipelineDispatch},
     providers::{
         Capability, SessionMode, capabilities::CapabilitySubject, questions::QuestionRoute,
     },
 };
 
 use super::{
-    Executor, NodeConfiguration, PinnedNode, runtime::load_pinned_node,
+    BuiltinNode, Executor, NodeConfiguration, PinnedNode, runtime::load_pinned_node,
     stage_requirements::StageRequirements,
 };
 
@@ -46,8 +46,9 @@ impl StagePlanConfiguration {
         let plan = Self::from_node(&stage.instance.configuration);
         if let Some(plan) = plan {
             ensure!(
-                stage.definition.executor == Executor::PlanAgent,
-                "Select Plan Mode on a Plan stage"
+                stage.definition.executor == Executor::PlanAgent
+                    || stage.definition.kind == BuiltinNode::Agent,
+                "Select Plan Mode on a Plan or Agent stage"
             );
             ensure!(
                 plan.is_valid(),
@@ -91,19 +92,38 @@ pub(crate) fn load_stage_plan(
 
 pub(crate) fn bind_conversation(
     db: &Connection,
-    job: &str,
+    job: &Job,
     conversation: &str,
     binding: &PipelineDispatch,
     plan: StagePlanConfiguration,
 ) -> Result<()> {
     ensure!(
-        binding.plan_revision.is_none() && binding.release_id.is_none(),
-        "A Plan stage cannot receive a release or use a plan as an authorization"
+        binding.release_id.is_none(),
+        "Plan Mode cannot receive a release"
     );
+    if let Some(plan_revision) = &binding.plan_revision {
+        let stage = load_pinned_node(
+            db,
+            &job.project_id,
+            &binding.pipeline_run_id,
+            &binding.node_instance_id,
+        )?
+        .context("The scoped planning stage is unavailable")?;
+        ensure!(
+            stage.definition.kind == BuiltinNode::Agent && job.mode == plan.mode(),
+            "Only a scoped Agent can retain the active plan in Plan Mode"
+        );
+        super::approval::require_current_plan(
+            db,
+            &job.project_id,
+            &binding.pipeline_run_id,
+            plan_revision,
+        )?;
+    }
     let inserted = db.execute(
         "INSERT INTO workflow_planning_conversations (job_id, conversation_id, expected_plan_revision, max_subagents)
          SELECT ?1, ?2, plan_revision, ?4 FROM job_pipeline_runs WHERE id = ?3",
-        params![job, conversation, binding.pipeline_run_id, plan.max_subagents],
+        params![job.id, conversation, binding.pipeline_run_id, plan.max_subagents],
     )?;
     ensure!(inserted == 1, "The pinned workflow scope is unavailable");
     Ok(())

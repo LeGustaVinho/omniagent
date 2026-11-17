@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { MessageSquare, Pencil, Plus, Search } from "lucide-react";
+import { MessageSquare, Pencil, Search } from "lucide-react";
 import { Popover } from "radix-ui";
 import { createContext, useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
+import { ConversationLibraryLayout } from "@/conversation-layout";
 import { ConversationReferenceSelection, type ConversationReferencePreview } from "@/conversation-reference";
 
 type ConversationLibraryEntry = {
@@ -133,23 +134,14 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   ]));
   const error = open.error ?? list.error ?? registered.error ?? startError;
 
-  return <section className="conv-sessions" aria-label="Conversation library">
-    <header className="conv-session-heading">
-      <h2>Conversations</h2>
-      <button className="conv-icon-button" type="button" title="New conversation" aria-label="New conversation"
-        disabled={startPending} onClick={onStart}><Plus aria-hidden /></button>
-    </header>
-    <label className="conv-search"><Search aria-hidden />
-      <input type="search" aria-label="Search conversation titles" placeholder="Search conversation titles"
-        value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
-    </label>
-    <label className="mt-2 grid gap-1 px-1 text-xs text-muted-foreground">
-      Project
-      <select className="conv-select w-full" value={projectId ?? ""} onChange={(event) => setProjectId(event.currentTarget.value || null)}>
+  return <ConversationLibraryLayout query={query} searchLabel="Search conversation titles" onQuery={setQuery}
+    onCreate={onStart} creating={startPending} filters={
+      <select className="conv-select conv-project-filter" aria-label="Project" value={projectId ?? ""}
+        onChange={(event) => setProjectId(event.currentTarget.value || null)}>
         <option value="">All projects</option>
         {[...projects].map(([id, name]) => <option key={id} value={id}>{name}</option>)}
       </select>
-    </label>
+    }>
     {error && <p role="alert" className="conv-alert mt-2">{String(error)}</p>}
     {list.isPending && <p role="status" className="conv-sidebar-note">Loading conversations…</p>}
     {list.data?.length === 0 && <p className="conv-sidebar-note">{query.trim() ? "No matching conversations." : "No conversations in this view."}</p>}
@@ -172,7 +164,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
           </div>}
       </li>)}
     </ul>
-  </section>;
+  </ConversationLibraryLayout>;
 }
 
 export function ConversationReferencePicker({ projectId, excludeId, onOpen, onAttach }: {

@@ -145,6 +145,8 @@ impl StageGoalPin {
         else {
             anyhow::bail!("The goal stage lost its pinned role");
         };
+        ensure!(stage.definition.kind != BuiltinNode::Agent || requirements.plan.is_none(),
+            "Choose either Plan Mode or Goal Mode on the Agent stage");
         Ok(Self {
             stage_revision: stage.revision.clone(),
             configuration_revision: digest(&serde_json::to_vec(&configuration)?),
