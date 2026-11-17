@@ -4,6 +4,8 @@ import type { MenuGroups } from "@/components/ui/context-actions";
 import { gitFilePermalink, type GitPermalinkLines } from "@/git-file-versions";
 import { fileName } from "@/ide-knowledge-data";
 import type { FileTreeTarget } from "@/ide-file-workspace";
+import { noteSearchTarget } from "@/ide-file-search";
+import type { WorkspaceProps } from "@/workbench-contract";
 
 const terminalPrefix = "omni-terminal-folder:";
 const noteRenamePrefix = "omni-rename-note:";
@@ -11,6 +13,8 @@ const openNotesPrefix = "omni-open-notes:";
 let noteNavigationRequest = 0;
 const workingDiffPrefix = "omni-working-diff:";
 const fileHistoryPrefix = "omni-file-history:";
+const sourceLinePrefix = "omni-source-line:";
+let sourceNavigationRequest = 0;
 
 export function workingDiffTarget(path: string) {
   return workingDiffPrefix + path;
@@ -26,6 +30,23 @@ export function fileHistoryTarget(path: string) {
 
 export function readFileHistoryTarget(target?: string) {
   if (target?.startsWith(fileHistoryPrefix)) return target.slice(fileHistoryPrefix.length) || undefined;
+}
+
+export function sourceLineTarget(path: string, line: number) {
+  return sourceLinePrefix + JSON.stringify([path, line, ++sourceNavigationRequest]);
+}
+
+export function readSourceLineTarget(target?: string) {
+  if (!target?.startsWith(sourceLinePrefix)) return;
+  try {
+    const [path, line] = JSON.parse(target.slice(sourceLinePrefix.length)) as [unknown, unknown];
+    if (typeof path === "string" && typeof line === "number" && Number.isSafeInteger(line) && line >= 1) return { path, line };
+  } catch { return; }
+}
+
+export function openWorkspaceFile(openWorkspace: WorkspaceProps["openWorkspace"], path: string, line?: number) {
+  if (/\.(md|markdown)$/i.test(path)) openWorkspace("knowledge", line ? noteSearchTarget(path, line, ++sourceNavigationRequest) : path);
+  else openWorkspace("ide", line ? sourceLineTarget(path, line) : path);
 }
 
 export function noteRenameTarget(path: string) {
@@ -75,7 +96,7 @@ export function fileContextActions({ checkout, simulated, status, report }: {
       report(`Could not copy to the clipboard. ${String(error)}`);
     });
   };
-  const shell = (relativePath: string, action: "reveal" | "open") => {
+  const shell = (relativePath: string, action: "reveal" | "open" | "open_with") => {
     report("");
     void invoke("open_checkout_item_in_shell", { checkoutId: checkout.checkoutId, relativePath, action }).catch((error: unknown) => report(String(error)));
   };
@@ -92,7 +113,10 @@ export function fileContextActions({ checkout, simulated, status, report }: {
       ...(path ? [{ label: "Copy relative path", run: () => copy(path, "Copied relative path") }] : []),
       ...(!simulated ? [
         { label: "Show in File Explorer", run: () => shell(path, "reveal") },
-        ...(target.kind === "file" ? [{ label: "Open in default application", run: () => shell(path, "open") }] : []),
+        ...(target.kind === "file" ? [
+          { label: "Open in default application", run: () => shell(path, "open") },
+          { label: "Open with another application…", run: () => shell(path, "open_with") },
+        ] : []),
       ] : []),
     ], [{ label: "Copy", items: [
       ...(path ? [

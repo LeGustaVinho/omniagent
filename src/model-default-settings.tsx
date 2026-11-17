@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import { ModelPicker } from "@/components/model-picker";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { availableModelSelection, useLiveModelOptions } from "@/live-models";
 import {
   CHECKOUT_MODEL_DEFAULTS, EXECUTION_PROFILE_MODEL, PROJECT_MODEL_DEFAULTS,
@@ -33,6 +34,7 @@ function ProjectDefault({ projectId, purpose, saved }: { projectId: string; purp
   const [chosenProvider, setProvider] = useState<Provider>();
   const provider = chosenProvider ?? saved?.provider ?? "codex";
   const setting = projectModelSettings[purpose];
+  const { feedback, copy } = useContextActionFeedback();
   const client = useQueryClient();
   const { options, loading, errors } = useLiveModelOptions([provider]);
   const selection = availableModelSelection(options, saved);
@@ -43,7 +45,11 @@ function ProjectDefault({ projectId, purpose, saved }: { projectId: string; purp
       return client.invalidateQueries({ queryKey: CHECKOUT_MODEL_DEFAULTS });
     },
   });
-  return <SettingRow {...setting}>
+  return <SettingRow {...setting} menu={saved ? [[
+    { label: "Copy saved model ID", run: () => copy(saved.modelId) },
+    { label: "Copy saved profile ID", run: () => copy(saved.profileId) },
+    { label: "Use profile default", disabled: save.isPending, run: () => save.mutate(null) },
+  ]] : []}>
     <div className="grid gap-2">
       <select id={setting.id} aria-label={`${setting.label} provider`} value={provider} disabled={save.isPending}
         onChange={(event) => { setProvider(event.currentTarget.value as Provider); save.reset(); }}>
@@ -56,6 +62,7 @@ function ProjectDefault({ projectId, purpose, saved }: { projectId: string; purp
         Saved default · {providerLabels[saved.provider]} · {saved.modelId} · unavailable in the displayed profile.
       </p>}
       {(save.error ?? errors[0]) && <p role="alert" className="settings-result settings-result-error">{String(save.error ?? errors[0])}</p>}
+      {feedback && <p role={feedback.failed ? "alert" : "status"} className="settings-result">{feedback.text}</p>}
     </div>
   </SettingRow>;
 }
@@ -82,16 +89,27 @@ function ProfileDefault({ provider }: { provider: Provider }) {
   const scoped = options.filter(({ selection }) => selection.profileId === profileId);
   const selection = availableModelSelection(scoped, defaults.data);
   const error = save.error ?? defaults.error ?? errors[0];
+  const { feedback, copy } = useContextActionFeedback();
+  const model = defaults.data;
   return <div className="mt-2 grid gap-2">
     {profiles.length > 1 && <label>Execution profile <select value={profileId} disabled={save.isPending}
       onChange={(event) => { setProfile(event.currentTarget.value); save.reset(); }}>
       {profiles.map((id) => <option value={id} key={id}>{id}</option>)}
     </select></label>}
-    <ModelPicker label={`${providerLabels[provider]} profile default model`} options={scoped} loading={loading || Boolean(profileId && defaults.isPending)}
-      disabled={!profileId || defaults.isPending || save.isPending}
-      selection={{ mode: "single", selected: selection, onChange: (model) => save.mutate(model),
-        reset: { label: "Choose on each use", onSelect: () => save.mutate(null) } }} />
+    <ContextActions label={`${providerLabels[provider]} profile model`} className="settings-profile-model-menu" groups={profileId ? [[
+      { label: "Copy profile ID", run: () => copy(profileId) },
+      ...(model ? [
+        { label: "Copy default model ID", run: () => copy(model.modelId) },
+        { label: "Choose on each use", disabled: save.isPending, run: () => save.mutate(null) },
+      ] : []),
+    ]] : []}>
+      <ModelPicker label={`${providerLabels[provider]} profile default model`} options={scoped} loading={loading || Boolean(profileId && defaults.isPending)}
+        disabled={!profileId || defaults.isPending || save.isPending}
+        selection={{ mode: "single", selected: selection, onChange: (model) => save.mutate(model),
+          reset: { label: "Choose on each use", onSelect: () => save.mutate(null) } }} />
+    </ContextActions>
     {defaults.data && !selection && <p role="status" className="text-xs text-muted-foreground">Saved model {defaults.data.modelId} is unavailable for this profile.</p>}
     {error && <p role="alert" className="settings-result settings-result-error">{String(error)}</p>}
+    {feedback && <p role={feedback.failed ? "alert" : "status"} className="settings-result">{feedback.text}</p>}
   </div>;
 }

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
+import { excerptReference, type EditorExcerpt } from "@/editor-context";
 import { GitDiffReview, type GitHunk, type GitTextComparison } from "@/git-diff-view";
 import { GitDiffSourceSelect } from "@/git-workspace-frame";
 import { DeliveryDetailPanel, InlineIssue } from "@/tasks-git-ui";
@@ -38,7 +39,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
   indexActions?: boolean;
   initialSource?: Source;
   initialPath?: string;
-  openFile?: (path: string) => void;
+  openFile?: (path: string, line?: number) => void;
   openPanel?: () => void;
   openConversation?: (id: string) => void;
   onClose?: () => void;
@@ -61,12 +62,17 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
   const diffRevision = diff.data?.revision;
   const unavailable = diff.data && [diff.data.original, diff.data.modified].find((side) => side.status === "unavailable");
   const canOpen = source === "working" && comparison && diff.data?.modified.status === "text" && openFile;
+  const addDiffExcerpt = openConversation && diffRevision ? (selection: EditorExcerpt, side: string, instruction?: string) => {
+    conversationActions.startContextText({ title: `Git diff · ${selection.path}`, text: selection.text, language: selection.language,
+      reference: `${excerptReference(selection)} · ${side} · HEAD ${diffRevision.head ?? "Unborn"} · Index ${diffRevision.index ?? "None"}` }, instruction);
+  } : undefined;
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
     <div className="delivery-toolbar delivery-filters">
       <GitDiffSourceSelect sources={reviewSources} value={source} onChange={(next) => { setSource(next); setSelection(undefined); }} />
       {source === "working" && openPanel && <Button className="ml-auto px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={openPanel}>Open changes panel</Button>}
     </div>
-    {source === "branch" ? <GitBranchComparison review={review} onClose={onClose} /> : <div className="delivery-body">
+    {source === "branch" ? <GitBranchComparison review={review} onClose={onClose}
+      startContextText={openConversation ? conversationActions.startContextText : undefined} /> : <div className="delivery-body">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <GitDiffReview key={source} source={source} title={sourceLabels[source]}
           ranges={source === "working" ? { base: "Index", revised: "Worktree" } : { base: "HEAD", revised: "Index" }}
@@ -77,6 +83,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
             : unavailable && <div className="p-3"><InlineIssue>{unavailable.reason}</InlineIssue></div>)}
           empty={<p>{source === "working" ? "No working changes." : "No staged changes."}</p>}
           onClose={onClose} openFile={canOpen ? () => openFile(comparison.path) : undefined}
+          openLine={canOpen ? (line) => openFile(comparison.path, line) : undefined} addExcerpt={addDiffExcerpt}
           hunkActions={(hunk) => [[
             ...(indexActions && comparison && diffRevision ? [{ label: source === "working" ? "Stage hunk" : "Unstage hunk",
               disabled: changeStage.isPending, run: () => changeStage.mutate({ path: comparison.path, source, hunkId: hunk.id, expected: diffRevision }) }] : []),
@@ -107,7 +114,8 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
   </div>;
 }
 
-function GitBranchComparison({ review, onClose }: { review: CheckoutReview; onClose?: () => void }) {
+function GitBranchComparison({ review, onClose, startContextText }: { review: CheckoutReview; onClose?: () => void;
+  startContextText?: ReturnType<typeof useCheckoutConversationActions>["startContextText"] }) {
   const [baseReference, setBase] = useState(() => review.branches.find((branch) => branch.reference === "refs/remotes/origin/main")?.reference
     ?? review.branches.find((branch) => branch.reference === "refs/heads/main")?.reference
     ?? review.branches[0]?.reference ?? "");
@@ -159,6 +167,10 @@ function GitBranchComparison({ review, onClose }: { review: CheckoutReview; onCl
         base: `Merge base of ${base?.name ?? "selected branch"}${revisions ? ` · ${revisions.mergeBase.slice(0, 12)}` : ""}`,
         revised: `${head ? head.name : "Checkout HEAD"}${revisions ? ` · ${revisions.head.slice(0, 12)}` : ""}`,
       }}
+      addExcerpt={startContextText && revisions ? (selection, side, instruction) => startContextText({
+        title: `Git diff · ${selection.path}`, text: selection.text, language: selection.language,
+        reference: `${excerptReference(selection)} · ${side} · Merge base ${revisions.mergeBase} · Compared ref ${revisions.head}`,
+      }, instruction) : undefined}
       preview={path && (diff.isPending ? <p role="status" className="p-3 text-sm">Loading diff…</p>
         : diff.error ? <div className="p-3"><InlineIssue>{String(diff.error)}</InlineIssue></div>
         : unavailable && <div className="p-3"><InlineIssue>{unavailable.reason}</InlineIssue></div>)}

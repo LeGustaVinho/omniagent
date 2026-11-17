@@ -169,6 +169,44 @@ function tab(name: string) {
   return within(screen.getByRole("button", { name: `Close ${name}` }).closest(".file-tab-label")!);
 }
 
+it("adds only the selected unsaved Markdown to an existing conversation draft", async () => {
+  mockRepository();
+  const ipc = vi.mocked(invoke);
+  const repository = ipc.getMockImplementation()!;
+  const openWorkspace = vi.fn();
+  const conversationId = "selected-conversation";
+  ipc.mockImplementation(async (command, args) => {
+    if (command === "list_conversations") {
+      expect(args).toEqual({ checkoutId });
+      return [{ id: conversationId, title: "Existing conversation" }];
+    }
+    if (command === "append_checkout_context_to_conversation") return;
+    return repository(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} openWorkspace={openWorkspace} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(release);
+  const quote = "Working text from the unsaved buffer.";
+  const offset = view.state.doc.length + 1;
+  act(() => view.dispatch({ changes: { from: offset - 1, insert: `\n${quote}` }, selection: { anchor: offset, head: offset + quote.length } }));
+  const line = view.state.doc.lineAt(offset).number;
+  vi.spyOn(view, "coordsAtPos").mockReturnValue(null);
+  fireEvent.keyDown(view.contentDOM, { key: "F10", shiftKey: true });
+  await user.click(screen.getByRole("menuitem", { name: "Add selection to conversation…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Add checkout context" }));
+  expect(dialog.getByLabelText("Selected text").textContent).toBe(quote);
+  await dialog.findByRole("option", { name: "Existing conversation" });
+  await user.selectOptions(dialog.getByRole("combobox", { name: "Conversation" }), conversationId);
+  expect(ipc).not.toHaveBeenCalledWith("append_checkout_context_to_conversation", expect.anything());
+  await user.click(dialog.getByRole("button", { name: "Add to draft" }));
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("conversations", conversationId));
+  expect(ipc).toHaveBeenCalledWith("append_checkout_context_to_conversation", {
+    checkoutId, conversationId, context: `Source: ${release}:${line}\n\n\`\`\`markdown\n${quote}\n\`\`\``,
+  });
+  expect(ipc.mock.calls.some(([command]) => /send_conversation|submit_turn/.test(command))).toBe(false);
+});
+
 it("starts Plan Mode delivery from the reviewed note revision and opens only its real linked Task", async () => {
   mockRepository();
   const ipc = vi.mocked(invoke);

@@ -4,6 +4,7 @@ import type { FailureCause } from "@/bindings/FailureCause";
 import type { FailurePhase } from "@/bindings/FailurePhase";
 import type { JobFailure } from "@/bindings/JobFailure";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { queueBlockerReason } from "@/queue-model";
 import { WorktreeEvidence } from "@/worktree-evidence";
 
@@ -41,6 +42,7 @@ export function JobFailurePanel({ projectId, runId, openLogs }: {
   runId: string;
   openLogs?: () => void;
 }) {
+  const { copy, feedback } = useContextActionFeedback();
   const query = useQuery({
     queryKey: ["job-failure", projectId, runId],
     queryFn: () => invoke<JobFailure | null>("job_failure", { projectId, runId }),
@@ -50,19 +52,30 @@ export function JobFailurePanel({ projectId, runId, openLogs }: {
   const failure = query.data;
   if (!failure) return null;
   const { phase, cause, process } = failure.observation;
+  const processLabel = process && `${process.cancelled ? "Cancelled" : "Exited"} (code ${process.code})`;
+  const dispatch = !openLogs && failure.dispatchRejection && queueBlockerReason({ type: "dispatch_rejected", rejection: failure.dispatchRejection });
+  const facts = [
+    { label: "Phase", value: phases[phase] },
+    { label: "Worktree", value: failure.checkoutRoot, className: "break-all font-mono text-xs" },
+    ...(cause ? [{ label: "Cause", value: causes[cause] }] : []),
+    ...(dispatch ? [{ label: "Dispatch", value: dispatch, className: "break-words" }] : []),
+    ...(processLabel ? [{ label: "Process", value: processLabel }] : []),
+    ...(failure.providerOutcome ? [{ label: "Provider outcome", value: failure.providerOutcome }] : []),
+  ];
   return (
     <section aria-label="Failure record" className="grid gap-2 rounded border border-border p-3 text-sm">
-      <h3 className="font-semibold">Failure record</h3>
+      <ContextActions label="Failure record" groups={[[
+        ...(openLogs && failure.logsAvailable ? [{ label: "Open recorded activity", run: openLogs }] : []),
+        { label: "Copy failure summary", run: () => copy([`Run ${runId}`, ...facts.map(({ label, value }) => `${label}\t${value}`)].join("\n")) },
+        { label: "Copy worktree path", run: () => copy(failure.checkoutRoot) },
+        ...(process ? [{ label: "Copy exit code", run: () => copy(String(process.code)) }] : []),
+      ]]}><h3 className="font-semibold">Failure record</h3></ContextActions>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1">
-        <dt>Phase</dt><dd>{phases[phase]}</dd>
-        <dt>Worktree</dt><dd className="break-all font-mono text-xs">{failure.checkoutRoot}</dd>
-        {cause && <><dt>Cause</dt><dd>{causes[cause]}</dd></>}
-        {!openLogs && failure.dispatchRejection && <><dt>Dispatch</dt>
-          <dd className="break-words">{queueBlockerReason({ type: "dispatch_rejected", rejection: failure.dispatchRejection })}</dd>
-        </>}
-        {process && <><dt>Process</dt><dd>{process.cancelled ? "Cancelled" : "Exited"} (code {process.code})</dd></>}
-        {failure.providerOutcome && <><dt>Provider outcome</dt><dd>{failure.providerOutcome}</dd></>}
+        {facts.map(({ label, value, className }) => <div key={label} className="contents">
+          <dt>{label}</dt><dd className={className}>{value}</dd>
+        </div>)}
       </dl>
+      {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
       {openLogs && failure.logsAvailable && <Button type="button" variant="outline" className="justify-self-start" onClick={openLogs}>Open recorded activity</Button>}
       {!failure.logsAvailable && <p className="text-muted-foreground">Recorded activity is unavailable.</p>}
       {failure.savedDiffAvailable ? <WorktreeEvidence projectId={projectId} runId={runId} ownerTaskId={null} /> :

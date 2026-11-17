@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { Provider } from "@/bindings/Provider";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { ripgrepStatusKey } from "@/ide-file-search";
 
 export const desktopCliPrerequisitesKey = ["desktop-cli-prerequisites"] as const;
@@ -24,32 +25,52 @@ export function useDesktopCliPrerequisites() {
   });
 }
 
-export function ExecutableInstallation({ status }: { status: CliPrerequisite }) {
+export function ExecutableInstallation({ status, label, provider, refresh }: { status: CliPrerequisite; label: string;
+  provider?: Provider; refresh?: () => void }) {
+  const { feedback, run, copy } = useContextActionFeedback();
+  const { executable, version, issue } = status;
+  const summary = [label, version, executable, issue].filter(Boolean).join("\n");
   return <>
-    <span>{status.version ?? (status.executable ? "Version unverified" : "Unavailable")}</span>
-    {status.executable && <code className="block break-all">{status.executable}</code>}
-    {status.issue && <p className="settings-result settings-result-error">{status.issue}</p>}
+    <ContextActions label={`${label} installation`} groups={[[
+      ...(executable ? [{ label: "Show executable in File Explorer", run: () => void run(() =>
+        invoke("reveal_desktop_cli_executable", { provider: provider ?? null, expected: executable })) }] : []),
+      ...(refresh ? [{ label: "Check installed executables", run: refresh }] : []),
+    ], [
+      ...(executable ? [{ label: "Copy executable path", run: () => copy(executable) }] : []),
+      ...(version ? [{ label: "Copy version", run: () => copy(version) }] : []),
+      { label: "Copy installation details", run: () => copy(summary) },
+    ]]}>
+      <div className="min-w-0">
+        <span>{version ?? (executable ? "Version unverified" : "Unavailable")}</span>
+        {executable && <code className="block break-all">{executable}</code>}
+        {issue && <p className="settings-result settings-result-error">{issue}</p>}
+      </div>
+    </ContextActions>
+    {feedback && <p className="settings-result" role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
   </>;
 }
 
 export function DesktopCliPrerequisites() {
   const status = useDesktopCliPrerequisites();
   const client = useQueryClient();
+  function refresh() {
+    void client.invalidateQueries({ queryKey: desktopCliPrerequisitesKey });
+    void client.invalidateQueries({ queryKey: ripgrepStatusKey });
+  }
   return <section aria-label="Desktop CLI installation">
     {status.isPending && <p role="status">Checking installed executables…</p>}
     {status.error && <p role="alert">{String(status.error)}</p>}
     {status.data && <dl className="settings-facts">
-      <dt>Git for Windows</dt><dd><ExecutableInstallation status={status.data.git} /></dd>
-      {status.data.providers.map(({ provider, status: executable }) =>
-        <ExecutableRow key={provider} label={providerExecutableLabels[provider]} status={executable} />)}
+      <dt>Git for Windows</dt><dd><ExecutableInstallation status={status.data.git} label="Git for Windows" refresh={refresh} /></dd>
+      {status.data.providers.map(({ provider, status: executable }) => {
+        const label = providerExecutableLabels[provider];
+        return <ExecutableRow key={provider} label={label} status={executable} provider={provider} refresh={refresh} />;
+      })}
     </dl>}
-    <Button type="button" variant="outline" disabled={status.isFetching} onClick={() => {
-      void client.invalidateQueries({ queryKey: desktopCliPrerequisitesKey });
-      void client.invalidateQueries({ queryKey: ripgrepStatusKey });
-    }}>Check installed executables</Button>
+    <Button type="button" variant="outline" disabled={status.isFetching} onClick={refresh}>Check installed executables</Button>
   </section>;
 }
 
-function ExecutableRow({ label, status }: { label: string; status: CliPrerequisite }) {
-  return <><dt>{label}</dt><dd><ExecutableInstallation status={status} /></dd></>;
+function ExecutableRow(props: Parameters<typeof ExecutableInstallation>[0]) {
+  return <><dt>{props.label}</dt><dd><ExecutableInstallation {...props} /></dd></>;
 }

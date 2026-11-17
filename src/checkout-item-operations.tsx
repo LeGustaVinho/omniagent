@@ -5,6 +5,7 @@ import type { MenuAction, MenuGroups } from "@/components/ui/context-actions";
 import { containingFolder } from "@/file-context-actions";
 import { fileName } from "@/ide-knowledge-data";
 import { FileDialog, type FileTreeTarget } from "@/ide-file-workspace";
+import { reconcileFavoriteItems } from "@/checkout-favorites";
 
 type Operation = "copy" | "move" | "recycle";
 type Item = { kind: "file" | "folder"; path: string };
@@ -95,7 +96,10 @@ export function useCheckoutItemOperations({ checkoutId, simulated, folders, refr
 
   async function reflectChanges(operation: Operation, completed: ItemEdit[], verb: string) {
     if (!completed.length) return;
-    if (operation !== "copy") onChanged(completed);
+    if (operation !== "copy") {
+      reconcileFavoriteItems(checkoutId, (path) => changedItemPath(path, completed));
+      onChanged(completed);
+    }
     window.dispatchEvent(new CustomEvent<ItemChange>(itemsChangedEvent, { detail: { origin: origin.current, checkoutId, operation, completed } }));
     const count = completed.length;
     status(`${verb} ${count} ${count === 1 ? "item" : "items"}`);

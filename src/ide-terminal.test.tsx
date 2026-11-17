@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { invoke } from "@tauri-apps/api/core";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ManualTerminal } from "@/ide-terminal";
@@ -21,6 +21,8 @@ const fixture = vi.hoisted(() => ({
   terminals: [] as FixtureTerminal[],
   dimensions: { cols: 96, rows: 25 },
   onResize: [] as (() => void)[],
+  findNext: vi.fn<(text: string) => boolean>(),
+  lines: [] as { text: string; isWrapped: boolean }[],
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -37,6 +39,14 @@ vi.mock("@xterm/xterm", () => ({
     dispose = vi.fn();
     clear = vi.fn();
     open = vi.fn();
+    attachCustomKeyEventHandler = vi.fn();
+    onSelectionChange = () => ({ dispose: vi.fn() });
+    get buffer() {
+      return { active: { length: fixture.lines.length, getLine: (index: number) => {
+        const line = fixture.lines[index];
+        return line && { isWrapped: line.isWrapped, translateToString: (trim: boolean) => trim ? line.text.trimEnd() : line.text };
+      } } };
+    }
     constructor() { fixture.terminals.push(this); }
     loadAddon(addon: { activate: (terminal: FixtureTerminal) => void }) { addon.activate(this); }
     onData(callback: (value: string) => void) {
@@ -52,10 +62,17 @@ vi.mock("@xterm/addon-fit", () => ({
     fit() { if (this.terminal) Object.assign(this.terminal, fixture.dimensions); }
   },
 }));
+vi.mock("@xterm/addon-search", () => ({ SearchAddon: class {
+  activate() {}
+  findNext = fixture.findNext;
+  findPrevious = vi.fn();
+  clearDecorations = vi.fn();
+} }));
 
 beforeEach(() => {
   fixture.terminals.length = 0;
   fixture.onResize.length = 0;
+  fixture.lines = [];
   fixture.dimensions = { cols: 96, rows: 25 };
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(768);
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(420);
@@ -64,6 +81,26 @@ beforeEach(() => {
     observe() {}
     disconnect() {}
   });
+});
+
+it("finds terminal output and passes one wrapped snapshot to the conversation chooser", async () => {
+  vi.mocked(invoke).mockResolvedValue({ checkoutId: "checkout", terminalId: "terminal" });
+  fixture.findNext.mockReturnValue(true);
+  fixture.lines = [{ text: "Some ", isWrapped: false }, { text: "wrapped output  ", isWrapped: true }, { text: "", isWrapped: false }];
+  const add = vi.fn();
+  const user = userEvent.setup();
+  render(<ManualTerminal checkoutId="checkout" active autoStart onContextText={add} />);
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  const terminal = screen.getByLabelText("Manual PowerShell terminal");
+  fireEvent.contextMenu(terminal);
+  await user.click(await screen.findByRole("menuitem", { name: "Find in terminal" }));
+  await user.type(screen.getByRole("searchbox", { name: "Find in terminal" }), "output");
+  expect(fixture.findNext).toHaveBeenLastCalledWith("output", { incremental: true });
+  await user.click(screen.getByRole("button", { name: "Close find" }));
+  fireEvent.contextMenu(terminal);
+  await user.click(await screen.findByRole("menuitem", { name: "Add terminal output to conversation…" }));
+  expect(add).toHaveBeenCalledExactlyOnceWith("Some wrapped output");
+  expect(invoke).not.toHaveBeenCalledWith("write_manual_terminal", expect.anything());
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.resetAllMocks(); vi.unstubAllGlobals(); });
 

@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { ContextActions } from "@/components/ui/context-actions";
+import { markdownExcerpt } from "@/editor-context";
 import "@xterm/xterm/css/xterm.css";
 
 const responses: Record<string, string[]> = {
@@ -100,14 +102,29 @@ type TerminalState = {
   status: "starting" | "running" | "closing" | "exited" | "failed";
   message?: string;
 };
-type TerminalAttachment = { terminal: Terminal; layout: (focus: boolean) => void; close: () => void };
+type TerminalAttachment = { terminal: Terminal; search: SearchAddon; layout: (focus: boolean) => void; close: () => void };
 
-export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStart, clearRevision = 0 }: {
+function terminalOutput(terminal: Terminal) {
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+  for (let index = 0; index < buffer.length; index++) {
+    const line = buffer.getLine(index);
+    const nextWrap = buffer.getLine(index + 1)?.isWrapped;
+    const text = line?.translateToString(!nextWrap) ?? "";
+    if (line?.isWrapped && lines.length) lines[lines.length - 1] += text;
+    else lines.push(text);
+  }
+  while (lines.at(-1) === "") lines.pop();
+  return lines.join("\n");
+}
+
+export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStart, clearRevision = 0, onContextText }: {
   checkoutId: string;
   relativeDirectory?: string;
   active: boolean;
   autoStart?: boolean;
   clearRevision?: number;
+  onContextText?: (text: string) => void;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const attachment = useRef<TerminalAttachment>(undefined);
@@ -116,6 +133,11 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
   const [request, setRequest] = useState<TerminalRequest>();
   const [state, setState] = useState<TerminalState>();
   const [clipboardError, setClipboardError] = useState("");
+  const [hasSelection, setHasSelection] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findText, setFindText] = useState("");
+  const [found, setFound] = useState<boolean>();
+  const findInput = useRef<HTMLInputElement>(null);
   const current = state?.request === request && request?.checkoutId === checkoutId ? state : undefined;
 
   useEffect(() => {
@@ -130,6 +152,16 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
     const element = mount.current;
     if (!element || request?.checkoutId !== checkoutId) return;
     const { terminal, fit } = openTerminal(element, 1000);
+    const search = new SearchAddon();
+    terminal.loadAddon(search);
+    const selection = terminal.onSelectionChange(() => setHasSelection(terminal.hasSelection()));
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type !== "keydown" || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "f") return true;
+      event.preventDefault();
+      setFindOpen(true);
+      findInput.current?.focus();
+      return false;
+    });
     let session: Session | undefined;
     let disposed = false;
     let stopped = false;
@@ -187,7 +219,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
       }
       if (focus) terminal.focus();
     };
-    attachment.current = { terminal, layout, close };
+    attachment.current = { terminal, search, layout, close };
 
     layout(false);
     size = { cols: terminal.cols, rows: terminal.rows };
@@ -212,6 +244,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
     return () => {
       disposed = true;
       resize.disconnect();
+      selection.dispose();
       input.dispose();
       terminal.dispose();
       attachment.current = undefined;
@@ -232,6 +265,9 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
   }, [clearRevision]);
 
   const start = () => {
+    setHasSelection(false);
+    setFindOpen(false);
+    setFound(undefined);
     const next = { checkoutId };
     setRequest(next);
     setState({ request: next, status: "starting" });
@@ -241,6 +277,18 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
     if (!terminal) return;
     setClipboardError("");
     void Promise.resolve().then(() => operation(terminal)).catch(() => setClipboardError("Could not access the clipboard."));
+  }
+  function find(text: string, previous = false, incremental = false) {
+    const search = attachment.current?.search;
+    if (!search) return;
+    if (!text) { search.clearDecorations(); setFound(undefined); return; }
+    setFound(previous ? search.findPrevious(text, { incremental }) : search.findNext(text, { incremental }));
+  }
+  function dismissFind() {
+    setFindOpen(false);
+    setFound(undefined);
+    attachment.current?.search.clearDecorations();
+    attachment.current?.terminal.focus();
   }
   return <div className="flex h-full min-h-0 flex-col gap-2">
     <div className="flex shrink-0 items-center gap-2">
@@ -255,17 +303,49 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, autoStar
       {current?.message && <span className="file-help" role={current.status === "exited" ? "status" : "alert"}>{current.message}</span>}
     </div>
     {clipboardError && <p className="file-help" role="alert">{clipboardError}</p>}
+    {findOpen && <form className="flex shrink-0 flex-wrap items-center gap-1" aria-label="Terminal search"
+      onSubmit={(event) => { event.preventDefault(); find(findText); }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); dismissFind(); }
+        if (event.key === "Enter" && event.shiftKey) { event.preventDefault(); find(findText, true); }
+      }}>
+      <input ref={findInput} autoFocus type="search" className="delivery-filter min-w-0 flex-1" aria-label="Find in terminal"
+        value={findText} onChange={(event) => { setFindText(event.currentTarget.value); find(event.currentTarget.value, false, true); }} />
+      <button type="button" className="fw-btn" disabled={!findText} onClick={() => find(findText, true)}>Previous</button>
+      <button type="submit" className="fw-btn" disabled={!findText}>Next</button>
+      <button type="button" className="fw-btn" onClick={dismissFind}>Close find</button>
+      {found === false && <span role="status" className="file-help">No matching terminal output.</span>}
+    </form>}
     <ContextActions label="PowerShell terminal" className="min-h-0 flex-1" groups={[[
-      { label: "Copy selection", disabled: !request, run: () => clipboard((terminal) => {
+      { label: "Copy selection", disabled: !hasSelection, run: () => clipboard((terminal) => {
         const selection = terminal.getSelection();
         return selection ? navigator.clipboard.writeText(selection) : Promise.resolve();
       }) },
+      { label: "Copy selection as Markdown", disabled: !hasSelection, run: () => clipboard((terminal) =>
+        navigator.clipboard.writeText(markdownExcerpt({ text: terminal.getSelection() }))) },
+      { label: "Copy terminal output", disabled: !request, run: () => clipboard((terminal) => navigator.clipboard.writeText(terminalOutput(terminal))) },
       { label: "Paste", disabled: current?.status !== "running", run: () => clipboard(async (terminal) => {
         const text = await navigator.clipboard.readText();
         if (attachment.current?.terminal === terminal) terminal.paste(text);
       }) },
       { label: "Select all", disabled: !request, run: () => attachment.current?.terminal.selectAll() },
+    ], [
+      { label: "Find in terminal", disabled: !request, run: () => { setFindOpen(true); findInput.current?.focus(); } },
+      { label: "Scroll to top", disabled: !request, run: () => attachment.current?.terminal.scrollToTop() },
+      { label: "Scroll to bottom", disabled: !request, run: () => attachment.current?.terminal.scrollToBottom() },
       { label: "Clear output", disabled: !request, run: () => attachment.current?.terminal.clear() },
+    ], onContextText ? [
+      { label: "Add selection to conversation…", disabled: !hasSelection, run: () => {
+        const text = attachment.current?.terminal.getSelection();
+        if (text) onContextText(text);
+      } },
+      { label: "Add terminal output to conversation…", disabled: !request, run: () => {
+        const terminal = attachment.current?.terminal;
+        if (terminal) onContextText(terminalOutput(terminal));
+      } },
+    ] : [], [
+      ...(!current || current.status === "exited" || current.status === "failed" ? [{ label: "Start PowerShell", run: start }] : []),
+      ...(current?.status === "running" ? [{ label: "Close PowerShell", run: () => attachment.current?.close() }] : []),
     ]]}>
       <div ref={mount} className="ide-terminal-surface" aria-label="Manual PowerShell terminal" />
     </ContextActions>

@@ -10,11 +10,12 @@ import { FileDialog, type FileTreeTarget } from "@/ide-file-workspace";
 import { fileName } from "@/ide-knowledge-data";
 
 const newConversation = "new";
+type ContextText = { title: string; reference: string; text: string; language?: string };
 
 export function useCheckoutConversationActions(checkoutId: string, simulated: boolean, openConversation: (id: string) => void) {
   const client = useQueryClient();
   const [targets, setTargets] = useState<readonly FileTreeTarget[]>();
-  const [excerpt, setExcerpt] = useState<{ selection: EditorExcerpt; instruction?: string }>();
+  const [excerpt, setExcerpt] = useState<{ selection: ContextText; instruction?: string }>();
   const [destination, setDestination] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
@@ -47,12 +48,16 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
     setTargets(items);
   }
 
-  function startExcerpt(selection: EditorExcerpt, instruction?: string) {
-    if (simulated) return;
+  function startContextText(selection: ContextText, instruction?: string) {
+    if (simulated || !selection.text.trim()) return;
     setTargets(undefined);
     setExcerpt({ selection, instruction });
     setDestination(instruction ? newConversation : "");
     setError("");
+  }
+
+  function startExcerpt(selection: EditorExcerpt, instruction?: string) {
+    startContextText({ title: fileName(selection.path), reference: excerptReference(selection), text: selection.text, language: selection.language }, instruction);
   }
 
   function close() {
@@ -76,8 +81,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
     try {
       let conversationId = destination;
       if (destination === newConversation) {
-        const path = excerpt?.selection.path ?? (targets?.length === 1 ? targets[0]?.path : undefined);
-        const title = path ? fileName(path) : "Selected checkout files";
+        const title = excerpt?.selection.title ?? (targets?.length === 1 ? fileName(targets[0]!.path) : "Selected checkout files");
         const created = await invoke<Conversation>("create_conversation", { checkoutId, title });
         conversationId = created.id;
         setDestination(created.id);
@@ -86,7 +90,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
       }
       if (excerpt) {
         const { selection, instruction } = excerpt;
-        const context = [instruction, `Source: ${excerptReference(selection)}`, markdownExcerpt(selection)].filter(Boolean).join("\n\n");
+        const context = [instruction, `Source: ${selection.reference}`, markdownExcerpt(selection)].filter(Boolean).join("\n\n");
         await queueConversationDraftWrite(conversationId, () => invoke<void>("append_checkout_context_to_conversation", {
           checkoutId, conversationId, context,
         }));
@@ -104,7 +108,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
     }
   }
 
-  const description = excerpt ? excerptReference(excerpt.selection)
+  const description = excerpt ? excerpt.selection.reference
     : targets?.length === 1 ? targets[0]!.path : `${targets?.length ?? 0} selected items`;
   const dialog = (targets || excerpt) && <FileDialog title="Add checkout context" description={description}
     onClose={() => { if (!busy) close(); }}>
@@ -152,5 +156,5 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
       </div>
     </form>
   </FileDialog>;
-  return { actions, dialog, startExcerpt };
+  return { actions, dialog, startExcerpt, startContextText };
 }

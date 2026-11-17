@@ -36,6 +36,66 @@ fn repairs_only_the_reviewed_wikilink_and_retains_plugin_source() -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn repairs_only_the_clicked_inline_markdown_destination_and_preserves_the_label_and_title()
+-> Result<()> {
+    let source = "# 🚀 Launch\r\n\r\n[First](./Old.md#Ready) · [**Second**](<./Old.md#Ready> \"Keep title\")\r\n\r\n`[Protected](./Old.md#Ready)`\r\n";
+    let offset = crate::markdown_analysis::analyze_markdown(source, "repair-test".into())
+        .nodes
+        .into_iter()
+        .filter(|node| {
+            matches!(
+                node.kind,
+                crate::markdown_analysis::MarkdownKind::Link { .. }
+            )
+        })
+        .nth(1)
+        .expect("the second link is parsed")
+        .range
+        .from;
+    let output = replace_markdown_note_reference(
+        source,
+        "./Old.md#Ready",
+        "notes/Launch.md",
+        Some(3),
+        Some(offset),
+        "docs/Café #2.md",
+        Some("Release checklist"),
+    )?;
+    assert_eq!(
+        output,
+        source.replace(
+            "<./Old.md#Ready>",
+            "<../docs/Caf%C3%A9%20%232.md#Release%20checklist>"
+        )
+    );
+    assert!(
+        replace_markdown_note_reference(
+            source,
+            "./Old.md#Ready",
+            "notes/Launch.md",
+            Some(3),
+            None,
+            "docs/Café #2.md",
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        replace_markdown_note_reference(
+            "[Shared][guide]\n\n[guide]: ./Old.md\n",
+            "./Old.md",
+            "notes/Launch.md",
+            Some(1),
+            None,
+            "docs/Café #2.md",
+            None
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
 const ORIGINAL: &str = "\u{feff}# Heading\r\n\r\nTarget paragraph ^anchor\r\n\r\n[Sibling](./Sibling.md)\r\n![[./cover.png]]\r\n[[#Heading]]\r\n";
 const INCOMING: &str = "---\r\nprivate-plugin-setting: '[[chapters/Old]]'\r\n---\r\n\r\n## 📚 Links\r\n\r\n[[chapters/Old#Heading|Label]]\r\n[Text](<chapters/Old.md#Heading> \"preserve title\")\r\n![[chapters/Old#^anchor]]\r\n\r\n| Reference |\r\n| --- |\r\n| [[chapters/Old\\|Cell label]] |\r\n\r\n`[[chapters/Old]]`\r\n\r\n%% [[chapters/Old]] %%\r\n\r\n```dataview\r\nLIST FROM [[chapters/Old]]\r\n```\r\n";
 

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import type { AttachmentLimits } from "@/bindings/AttachmentLimits";
 import type { CliProbe } from "@/bindings/CliProbe";
 import type { ConfiguredExecutable } from "@/bindings/ConfiguredExecutable";
@@ -9,6 +9,7 @@ import type { PluginInventoryStatus } from "@/bindings/PluginInventoryStatus";
 import type { Provider } from "@/bindings/Provider";
 import { UserPluginManagement } from "@/cli-plugin-management";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { desktopCliPrerequisitesKey, ExecutableInstallation, providerExecutableLabels, useDesktopCliPrerequisites, type CliPrerequisite } from "@/desktop-cli-prerequisites";
 import { ExecutionProfileModelSettings } from "@/model-default-settings";
 import { useWorkspace } from "@/workspace-state";
@@ -128,11 +129,15 @@ function ExecutableSettings({ profile, installation }: { profile: ConfiguredExec
   const [probe, setProbe] = useState<CliProbe | null>(null);
   const [pending, setPending] = useState<"save" | "cli" | "plugins" | null>(null);
   const [error, setError] = useState("");
+  const editablePath = useRef<HTMLInputElement>(null);
+  const { feedback, copy } = useContextActionFeedback();
   const requested = path.trim().replace(/^"(.*)"$/, "$1");
   const observedInstallation = probe?.version && probe.executable
     ? { executable: probe.executable, version: probe.version, issue: null }
     : installation;
   const { provider } = profile;
+  const label = providerExecutableLabels[provider];
+  const ready = pending === null && requested === (configured ?? "");
   const pluginKey = ["cli-plugin-inventory", provider];
   const inventory = useQuery({
     queryKey: pluginKey,
@@ -168,32 +173,44 @@ function ExecutableSettings({ profile, installation }: { profile: ConfiguredExec
     if (requested && requested !== configured) void run("save", () => save(requested));
   }
 
+  const usePath = () => void run("save", () => save(null));
+  const probeCli = () => void run("cli", async () => setProbe(await invoke<CliProbe>("probe_cli_executable", { provider })));
+  const refreshPlugins = () => void run("plugins", async () => {
+    const result = await invoke<PluginInventory | null>("cli_plugin_inventory", { provider, refresh: true });
+    queryClient.setQueryData(pluginKey, result);
+  });
+
   return (
     <section className="rounded-lg border border-border bg-card p-4" aria-labelledby={`${provider}-executable-title`}>
-      <h2 id={`${provider}-executable-title`} className="text-base font-semibold">{providerExecutableLabels[provider]}</h2>
+      <ContextActions label={label} groups={[[
+        { label: "Edit executable path", run: () => { requestAnimationFrame(() => { editablePath.current?.focus(); editablePath.current?.select(); }); } },
+        { label: "Use PATH", disabled: pending !== null || configured === null, run: usePath },
+        { label: "Check CLI", disabled: !ready, run: probeCli },
+        { label: "Refresh installed plugin inventory", disabled: !ready, run: refreshPlugins },
+      ], [
+        { label: "Copy provider ID", run: () => copy(provider) },
+        ...(configured ? [{ label: "Copy configured executable path", run: () => copy(configured) }] : []),
+      ]]}><h2 id={`${provider}-executable-title`} className="flex-1 text-base font-semibold">{label}</h2></ContextActions>
       <form onSubmit={submit} className="mt-3 flex flex-wrap items-end gap-2">
         <label className="min-w-52 flex-1 text-sm">
           Executable path
-          <input name={provider} value={path} onChange={(event) => setPath(event.target.value)}
+          <input ref={editablePath} name={provider} value={path} onChange={(event) => setPath(event.target.value)}
             placeholder="Use PATH" className="mt-1 block w-full rounded-md border border-border bg-background p-2 font-mono text-xs" />
         </label>
         <Button type="submit" disabled={pending !== null || !requested || requested === configured}>Save</Button>
         <Button type="button" variant="outline" disabled={pending !== null || configured === null}
-          onClick={() => void run("save", () => save(null))}>Use PATH</Button>
-        <Button type="button" variant="outline" disabled={pending !== null || requested !== (configured ?? "")}
-          onClick={() => void run("cli", async () => setProbe(await invoke<CliProbe>("probe_cli_executable", { provider })))}>
+          onClick={usePath}>Use PATH</Button>
+        <Button type="button" variant="outline" disabled={!ready} onClick={probeCli}>
           {pending === "cli" ? "Checking CLI…" : "Check CLI"}
         </Button>
-        <Button type="button" variant="outline" disabled={pending !== null || requested !== (configured ?? "")}
-          onClick={() => void run("plugins", async () => {
-            const result = await invoke<PluginInventory | null>("cli_plugin_inventory", { provider, refresh: true });
-            queryClient.setQueryData(pluginKey, result);
-          })}>{pending === "plugins" ? "Checking plugins…" : "Check plugins"}</Button>
+        <Button type="button" variant="outline" disabled={!ready} onClick={refreshPlugins}>
+          {pending === "plugins" ? "Checking plugins…" : "Check plugins"}</Button>
       </form>
       {observedInstallation && <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-        <dt className="text-muted-foreground">Installation</dt><dd><ExecutableInstallation status={observedInstallation} /></dd>
+        <dt className="text-muted-foreground">Installation</dt><dd><ExecutableInstallation status={observedInstallation} label={label} provider={provider} /></dd>
       </dl>}
       {error && <p role="alert" className="mt-2 text-sm text-red-300">{error}</p>}
+      {feedback && <p role={feedback.failed ? "alert" : "status"} className="mt-2 text-sm text-muted-foreground">{feedback.text}</p>}
       {probe && (
         <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
           <dt className="text-muted-foreground">Protocol</dt><dd>{PROTOCOL_LABELS[probe.protocol]}</dd>
@@ -215,6 +232,7 @@ function ExecutableSettings({ profile, installation }: { profile: ConfiguredExec
 function PluginList({ inventory }: { inventory: PluginInventory }) {
   const { report, checkedAt } = inventory;
   const hasInventory = report.status === "reported" || report.status === "partial";
+  const { feedback, copy } = useContextActionFeedback();
   return (
     <details className="mt-3 border-t border-border pt-3 text-sm">
       <summary className="cursor-pointer font-medium">
@@ -229,11 +247,18 @@ function PluginList({ inventory }: { inventory: PluginInventory }) {
         </p>
       )}
       {hasInventory && !report.loadTelemetryReported && <p className="mt-1 text-muted-foreground">CLI profile inventory. In-session plugin loads are unconfirmed.</p>}
+      {feedback && <p className="mt-1" role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
       {report.plugins.length > 0 && (
         <ul className="mt-2 max-h-64 space-y-2 overflow-auto pr-2">
           {report.plugins.map((plugin, index) => (
             <li key={`${plugin.id}-${plugin.scope ?? ""}-${index}`} className="rounded-md border border-border p-2">
-              <p className="break-words font-medium">{plugin.name ?? plugin.id}{plugin.version && ` · ${plugin.version}`}</p>
+              <ContextActions label={plugin.id} groups={[[
+                { label: "Copy plugin ID", run: () => copy(plugin.id) },
+                ...(plugin.version ? [{ label: "Copy version", run: () => copy(plugin.version!) }] : []),
+                ...(plugin.sourceLocation ? [{ label: "Copy plugin source", run: () => copy(plugin.sourceLocation!) }] : []),
+                ...(plugin.skills?.length ? [{ label: "Copy skill names", run: () => copy(plugin.skills!.join("\n")) }] : []),
+                ...(plugin.mcpServers?.length ? [{ label: "Copy MCP server names", run: () => copy(plugin.mcpServers!.join("\n")) }] : []),
+              ]]}><p className="min-w-0 break-words font-medium">{plugin.name ?? plugin.id}{plugin.version && ` · ${plugin.version}`}</p></ContextActions>
               <p className="break-words text-xs text-muted-foreground">
                 {[plugin.enabled === null ? "Enablement unreported" : plugin.enabled ? "Enabled" : "Disabled",
                   plugin.scope, plugin.marketplace, plugin.source, plugin.sourceLocation].filter(Boolean).join(" · ")}

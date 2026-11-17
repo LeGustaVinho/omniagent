@@ -3,7 +3,7 @@
 import type { ComponentProps } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { ModelOption } from "@/bindings/ModelOption";
@@ -127,6 +127,20 @@ it("shows an availability error from the settings authority and keeps the saved 
   const project = within(screen.getByRole("region", { name: "Project defaults" }));
   expect((await project.findByRole("alert")).textContent).toContain("The selected model is no longer available");
   expect(project.getByRole("button", { name: "Planning model · Use profile default" })).toBeTruthy();
+});
+
+it("copies and resets the clicked saved model default at the correct scope", async () => {
+  const { user } = fixture();
+  await chooseAndMeasure(user, /^Planning model · /, codex, "$1.25");
+  const setting = within(screen.getByRole("region", { name: "Project defaults" }));
+  const planning = setting.getByText("Planning model", { selector: "label" });
+  fireEvent.contextMenu(planning);
+  await user.click(screen.getByRole("menuitem", { name: "Copy saved profile ID" }));
+  expect(await navigator.clipboard.readText()).toBe(codex.selection.profileId);
+  fireEvent.contextMenu(planning);
+  await user.click(screen.getByRole("menuitem", { name: "Use profile default" }));
+  expect(invoke).toHaveBeenCalledWith("set_project_model_default", { projectId: checkout.projectId, purpose: "planning", selection: null });
+  expect(await setting.findByRole("button", { name: "Planning model · Use profile default" })).toBeTruthy();
 });
 
 it("keeps the explicit conversation selection when the project model arrives later", async () => {

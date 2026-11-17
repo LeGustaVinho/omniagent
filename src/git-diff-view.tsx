@@ -2,9 +2,10 @@ import { ChevronDown, ChevronRight, ChevronUp, Columns2, ExternalLink, FileCode2
 import type { editor } from "monaco-editor";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
+import { excerptReference, markdownExcerpt, type EditorExcerpt } from "@/editor-context";
 import { ResizablePanel } from "@/panel-resize";
 import { InlineIssue } from "@/tasks-git-ui";
-import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
+import { ContextActions, useContextActionFeedback, type MenuGroups } from "@/components/ui/context-actions";
 
 export type GitTextComparison = {
   path: string;
@@ -13,11 +14,14 @@ export type GitTextComparison = {
   modified: string;
   patch?: string;
   hunks?: GitHunk[];
+  originalPath?: string;
 };
 
 export type GitHunk = { id: string; header: string; patch: string; originalLine: number; modifiedLine: number };
 
 type DiffLayout = "auto" | "split" | "unified";
+type DiffSide = "original" | "modified";
+type ExcerptHandler = (selection: EditorExcerpt, revision: string, instruction?: string) => void;
 
 type GitDiffRow = {
   path: string;
@@ -51,7 +55,7 @@ function ChangeCounts({ additions, deletions }: { additions: number; deletions: 
 }
 
 export function GitDiffReview({ source, title, ranges, files, selectedPath, select, comparison, preview, empty, notice,
-  allowSavedPatch, openFile, fileActions, hunkActions, footer, onClose }: {
+  allowSavedPatch, openFile, openLine, addExcerpt, fileActions, hunkActions, footer, onClose }: {
   source: string;
   title: string;
   ranges: { base: string; revised: string };
@@ -64,6 +68,8 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   notice?: ReactNode;
   allowSavedPatch?: boolean;
   openFile?: () => void;
+  openLine?: (line: number) => void;
+  addExcerpt?: ExcerptHandler;
   fileActions?: (file: GitDiffRow) => MenuGroups;
   hunkActions?: (hunk: GitHunk) => MenuGroups;
   footer?: ReactNode;
@@ -159,6 +165,7 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
                   return <section key={hunk.id} className="min-w-0 rounded border border-border" aria-label={hunk.header}>
                     <ContextActions label={hunk.header} className="diff-hunk-menu" groups={[[
                       { label: "Go to hunk in comparison", run: goToHunk },
+                      ...(openLine ? [{ label: "Go to hunk in working file", run: () => openLine(Math.max(1, hunk.modifiedLine)) }] : []),
                       { label: "Copy hunk patch", run: () => copy(hunk.patch) },
                       ...(hunk.modifiedLine > 0 ? [{ label: "Copy revised line reference", run: () => copy(`${comparison.path}:${hunk.modifiedLine}`) }] : []),
                     ], ...(hunkActions?.(hunk) ?? [])]}>
@@ -172,7 +179,8 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
                   </section>;
                 })}
               </div> : <UnifiedPatch file={comparison} />)
-                : <MonacoComparison key={comparison.path} file={comparison} layout={layout} ready={setInstance} />))}
+                : <MonacoComparison key={comparison.path} file={comparison} layout={layout} ready={setInstance}
+                  revisions={{ original: ranges.base, modified: ranges.revised }} openLine={openLine} addExcerpt={addExcerpt} />))}
             </div>}
         </div>}
         {footer && <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-3 py-2">{footer}</footer>}
@@ -194,14 +202,20 @@ function UnifiedPatch({ file }: { file: GitTextComparison }) {
   </div>;
 }
 
-export function MonacoComparison({ file, layout, ready }: {
+export function MonacoComparison({ file, layout, ready, revisions, openLine, addExcerpt }: {
   file: GitTextComparison; layout: DiffLayout; ready?: (instance: editor.IStandaloneDiffEditor | null) => void;
+  revisions?: Record<DiffSide, string>;
+  openLine?: (line: number) => void;
+  addExcerpt?: ExcerptHandler;
 }) {
   const anchor = useRef<HTMLDivElement>(null);
   const instance = useRef<editor.IStandaloneDiffEditor | null>(null);
   const [error, setError] = useState(false);
   const layoutSetting = useRef(layout);
   layoutSetting.current = layout;
+  const { copy, feedback } = useContextActionFeedback();
+  const actions = useRef({ revisions, openLine, addExcerpt, copy });
+  actions.current = { revisions, openLine, addExcerpt, copy };
 
   useEffect(() => {
     const host = anchor.current;
@@ -242,6 +256,37 @@ export function MonacoComparison({ file, layout, ready }: {
       });
       instance.current = opened;
       opened.setModel({ original, modified });
+      for (const side of ["original", "modified"] as const) {
+        const sideEditor = side === "original" ? opened.getOriginalEditor() : opened.getModifiedEditor();
+        const path = side === "original" ? file.originalPath ?? file.path : file.path;
+        function selection(): EditorExcerpt | undefined {
+          const range = sideEditor.getSelection();
+          const model = sideEditor.getModel();
+          if (!range || !model) return;
+          const { startLineNumber: startLine, endLineNumber, endColumn } = range;
+          const endLine = endColumn === 1 && endLineNumber > startLine ? endLineNumber - 1 : endLineNumber;
+          return { path, startLine, endLine, text: model.getValueInRange(range), language: file.language === "plaintext" ? undefined : file.language };
+        }
+        sideEditor.addAction({ id: `omniagent.copy-${side}-diff-line`, label: "Copy file and line reference", contextMenuGroupId: "9_omniagent-diff",
+          run: () => {
+            const range = selection();
+            const revision = actions.current.revisions?.[side];
+            if (range) actions.current.copy([excerptReference(range), revision].filter(Boolean).join(" · "));
+          } });
+        sideEditor.addAction({ id: `omniagent.copy-${side}-diff-markdown`, label: "Copy selection as Markdown", contextMenuGroupId: "9_omniagent-diff",
+          precondition: "editorHasSelection", run: () => { const range = selection(); if (range?.text) actions.current.copy(markdownExcerpt(range)); } });
+        if (actions.current.addExcerpt) for (const [id, label, instruction] of [
+          ["quote", "Add diff selection to conversation…", undefined],
+          ["review", "Review selected change…", "Review this excerpt in the context of the Git comparison."],
+        ] as const) sideEditor.addAction({ id: `omniagent.${id}-${side}-diff-selection`, label, contextMenuGroupId: "9_omniagent-diff",
+          precondition: "editorHasSelection", run: () => {
+            const range = selection();
+            if (range?.text) actions.current.addExcerpt?.(range, actions.current.revisions?.[side] ?? (side === "original" ? "Base" : "Revised"), instruction);
+          } });
+        if (side === "modified" && actions.current.openLine) sideEditor.addAction({ id: "omniagent.open-working-diff-line",
+          label: "Go to line in working file", contextMenuGroupId: "9_omniagent-diff",
+          run: () => { const line = sideEditor.getPosition()?.lineNumber; if (line) actions.current.openLine?.(line); } });
+      }
       theme();
       themeObserver = new MutationObserver(theme);
       themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-app-theme", "data-app-motion", "style", "class"] });
@@ -264,5 +309,8 @@ export function MonacoComparison({ file, layout, ready }: {
   }, [layout]);
 
   return error ? <><div className="p-2"><InlineIssue>Diff editor unavailable. Showing the text comparison.</InlineIssue></div><UnifiedPatch file={file} /></>
-    : <div className="h-full min-h-45 w-full min-w-0 overflow-hidden" ref={anchor} aria-label={`Diff editor for ${file.path}`} />;
+    : <div className="flex h-full min-h-45 w-full min-w-0 flex-col overflow-hidden">
+      {feedback && <p className="px-3 py-1 text-xs" role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
+      <div className="min-h-0 flex-1" ref={anchor} aria-label={`Diff editor for ${file.path}`} />
+    </div>;
 }

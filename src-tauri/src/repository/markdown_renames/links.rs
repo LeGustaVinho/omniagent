@@ -252,18 +252,18 @@ pub fn replace_wiki_note_reference(
     destination: &str,
     anchor: Option<&str>,
 ) -> Result<String> {
-    ensure!(
-        !destination.is_empty()
-            && !destination.contains(['\\', ':', '\r', '\n', '\0'])
-            && destination
-                .split('/')
-                .all(|component| !component.is_empty() && !matches!(component, "." | "..")),
-        "select a note path in the checkout"
-    );
-    ensure!(
-        anchor.is_none_or(|value| !value.contains(['\r', '\n', '\0'])),
-        "enter a heading or block on one line"
-    );
+    replace_wiki_note_reference_at(markdown, raw, source_line, None, destination, anchor)
+}
+
+pub fn replace_wiki_note_reference_at(
+    markdown: &str,
+    raw: &str,
+    source_line: Option<u32>,
+    source_offset: Option<usize>,
+    destination: &str,
+    anchor: Option<&str>,
+) -> Result<String> {
+    validate_repair_destination(destination, anchor)?;
     let nodes = analyze_markdown(markdown, "wiki-repair".into()).nodes;
     let mut selected = None;
     for node in &nodes {
@@ -302,6 +302,7 @@ pub fn replace_wiki_note_reference(
         }
         if (inner != Some(raw) && canonical != raw)
             || source_line.is_some_and(|wanted| wanted != line)
+            || source_offset.is_some_and(|wanted| wanted != node.range.from)
         {
             continue;
         }
@@ -360,7 +361,104 @@ pub fn replace_wiki_note_reference(
     Ok(result)
 }
 
+fn validate_repair_destination(destination: &str, anchor: Option<&str>) -> Result<()> {
+    ensure!(
+        !destination.is_empty()
+            && !destination.contains(['\\', ':', '\r', '\n', '\0'])
+            && destination
+                .split('/')
+                .all(|component| !component.is_empty() && !matches!(component, "." | "..")),
+        "select a note path in the checkout"
+    );
+    ensure!(
+        anchor.is_none_or(|value| !value.contains(['\r', '\n', '\0'])),
+        "enter a heading or block on one line"
+    );
+    Ok(())
+}
+
+pub fn replace_markdown_note_reference(
+    markdown: &str,
+    raw: &str,
+    source_path: &str,
+    source_line: Option<u32>,
+    source_offset: Option<usize>,
+    destination: &str,
+    anchor: Option<&str>,
+) -> Result<String> {
+    validate_repair_destination(source_path, None)?;
+    validate_repair_destination(destination, anchor)?;
+    let original = MarkdownLinkQuery::from_markdown(source_path, raw)
+        .context("select a local Markdown link")?;
+    let nodes = analyze_markdown(markdown, "markdown-link-repair".into()).nodes;
+    let mut selected = None;
+    for node in &nodes {
+        let target = match &node.kind {
+            MarkdownKind::Link { target, .. } | MarkdownKind::Image { target, .. } => target,
+            _ => continue,
+        };
+        let span = node.range.byte_start..node.range.byte_end;
+        let line = markdown[..span.start]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count() as u32
+            + 1;
+        if source_line.is_some_and(|wanted| wanted != line)
+            || source_offset.is_some_and(|wanted| wanted != node.range.from)
+            || MarkdownLinkQuery::from_markdown(source_path, target).as_ref() != Some(&original)
+            || nodes.iter().any(|outer| {
+                matches!(
+                    outer.kind,
+                    MarkdownKind::CodeBlock { .. }
+                        | MarkdownKind::CodeSpan
+                        | MarkdownKind::Frontmatter { .. }
+                        | MarkdownKind::Comment
+                ) && overlaps(&(outer.range.byte_start..outer.range.byte_end), &span)
+            })
+        {
+            continue;
+        }
+        let range = markdown_link_destination_range(&markdown[span.clone()], true)
+            .context("the link uses a shared definition or has no inline target. Edit its source to change it")?;
+        ensure!(
+            selected.replace((span, range)).is_none(),
+            "more than one matching link was found. Select its source location to repair it"
+        );
+    }
+    let (span, range) = selected.context("the reviewed Markdown link was not found")?;
+    let in_table = nodes.iter().any(|outer| {
+        matches!(outer.kind, MarkdownKind::Table)
+            && overlaps(&(outer.range.byte_start..outer.range.byte_end), &span)
+    });
+    let target = if original.target.is_empty() && source_path == destination && anchor.is_some() {
+        String::new()
+    } else {
+        rewrite_address(&original, destination)
+    };
+    let mut encoded = escape_markdown(&target);
+    if let Some(anchor) = anchor {
+        encoded.push('#');
+        encoded.push_str(&escape_markdown(anchor));
+    }
+    let query = MarkdownLinkQuery {
+        target,
+        anchor: anchor.map(str::to_owned),
+        ..original
+    };
+    ensure!(
+        valid_replacement(&markdown[span.clone()], &range, &encoded, &query, in_table),
+        "the selected destination could not be represented in this Markdown link"
+    );
+    let mut result = markdown.to_owned();
+    result.replace_range(span.start + range.start..span.start + range.end, &encoded);
+    Ok(result)
+}
+
 fn markdown_target_range(raw: &str) -> Option<Range<usize>> {
+    markdown_link_destination_range(raw, false)
+}
+
+fn markdown_link_destination_range(raw: &str, include_fragment: bool) -> Option<Range<usize>> {
     let bracket = usize::from(raw.starts_with('!'));
     let label = raw.get(bracket..)?.strip_prefix('[')?;
     let label_end = matching_boundary(label, '[', ']', false)?;
@@ -376,10 +474,11 @@ fn markdown_target_range(raw: &str) -> Option<Range<usize>> {
     } else {
         (&target[..matching_boundary(target, '(', ')', true)?], start)
     };
-    let stop = path
-        .char_indices()
-        .find_map(|(index, ch)| (ch == '#').then_some(index))
-        .unwrap_or(path.len());
+    let stop = if include_fragment {
+        path.len()
+    } else {
+        path.find('#').unwrap_or(path.len())
+    };
     trimmed_range(raw, start..start + stop)
 }
 

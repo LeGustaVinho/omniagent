@@ -4,10 +4,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use serde::Serialize;
 
-use crate::{process::TerminalOutcome, repository::git_path, store::Store};
+use crate::{
+    process::TerminalOutcome,
+    repository::{checkout_items::reveal_local_file, git_path},
+    store::Store,
+};
 
 use super::{ConfiguredExecutable, Provider, command_probe, published_version};
 
@@ -62,6 +66,32 @@ impl Store {
             git: git.await?,
             providers,
         })
+    }
+
+    pub async fn reveal_desktop_cli_executable(
+        &self,
+        provider: Option<Provider>,
+        expected: PathBuf,
+    ) -> Result<()> {
+        let configured = match provider {
+            Some(provider) => Some(self.configured_executable(provider).await?),
+            None => None,
+        };
+        tokio::task::spawn_blocking(move || {
+            let executable = match configured {
+                Some(configured) => configured
+                    .provider
+                    .adapter()
+                    .discover(configured.executable.as_deref().map(Path::new))?,
+                None => dunce::canonicalize(git_path()?)?,
+            };
+            ensure!(
+                executable == expected,
+                "The executable location changed. Refresh the installation details."
+            );
+            reveal_local_file(&executable)
+        })
+        .await?
     }
 }
 

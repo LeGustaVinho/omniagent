@@ -25,7 +25,9 @@ vi.mock("@/ide-code-editor", () => ({
 const terminalProps = vi.hoisted(() => vi.fn());
 vi.mock("@/ide-terminal", () => ({
   ExampleTerminal: () => null,
-  ManualTerminal: (props: { checkoutId: string; active: boolean; clearRevision?: number }) => {
+  ManualTerminal: ({ onContextText: _onContextText, ...props }: {
+    checkoutId: string; active: boolean; clearRevision?: number; onContextText?: unknown;
+  }) => {
     terminalProps(props);
     return null;
   },
@@ -64,7 +66,7 @@ type Disk = ReturnType<typeof documentAt>;
 type Draft = { revision: string; base: Disk["document"]["revision"]; markdown: string };
 type Notice = (event: { checkoutId: string; relativePath: string }) => void;
 
-function fixture() {
+function fixture(extraSources: Record<string, string> = {}) {
   const disk = new Map([[main, documentAt(main, "m1", "fn original() {}")], [alternate, documentAt(alternate, "a1", "fn other_worktree() {}")]]);
   const drafts = new Map<string, Draft>();
   const folders = new Map<string, string[]>();
@@ -83,17 +85,21 @@ function fixture() {
       checkoutId: string; path?: string; layout?: string; revisionId?: string; baseRevision?: string;
       expectedRevision?: string; expectedDraftRevision?: string | null; markdown?: string; channel?: { onmessage: Notice };
       relativeDirectory?: string; name?: string; directory?: boolean;
+      contents?: string;
       operation?: "copy" | "move" | "recycle"; edits?: ItemEdit[];
     };
     const id = args.checkoutId;
     switch (command) {
       case "workbench_layout": return layouts.get(id) ?? null;
       case "save_workbench_layout": layouts.set(id, args.layout!); return;
-      case "list_repository_source_files": return [disk.get(id)?.document.revision.relativePath, "docs/Guide.md"].filter(Boolean);
+      case "list_repository_source_files": return [disk.get(id)?.document.revision.relativePath, "docs/Guide.md", ...Object.keys(extraSources)].filter(Boolean);
       case "list_checkout_folders": return folders.get(id) ?? [];
       case "create_checkout_item": {
         const path = [args.relativeDirectory, args.name].filter(Boolean).join("/");
-        if (!args.directory) throw new Error("Expected a folder in this fixture");
+        if (!args.directory) {
+          if (args.contents === undefined) throw new Error("Expected a saved copy in this fixture");
+          return path;
+        }
         folders.set(id, [...(folders.get(id) ?? []), path]);
         return path;
       }
@@ -113,8 +119,12 @@ function fixture() {
       case "add_checkout_files_to_conversation": return { revision: "attached", files: [] };
       case "append_checkout_context_to_conversation": return;
       case "list_repository_source_drafts": return drafts.has(id) ? [file] : [];
-      case "open_repository_source_file": return disk.get(id) ?? { status: "missing", relativePath: file };
-      case "read_repository_source_draft": return drafts.get(id) ?? null;
+      case "open_repository_source_file": {
+        const extra = args.path && extraSources[args.path];
+        if (extra !== undefined && args.path) return documentAt(id, `${id}:${args.path}`, extra, args.path);
+        return disk.get(id) ?? { status: "missing", relativePath: file };
+      }
+      case "read_repository_source_draft": return args.path === file ? drafts.get(id) ?? null : null;
       case "read_repository_source_revision": return revisions.get(args.revisionId!) ?? null;
       case "watch_repository_source": notices.set(id, args.channel!.onmessage); return `watch-${id}`;
       case "unwatch_repository_source": return;
@@ -200,6 +210,96 @@ it("renames the underlying file and keeps split editor tabs on the renamed path"
   });
 });
 
+it("closes tabs to the right of an inactive tab, prompts on drafts and preserves pins", async () => {
+  const service = fixture({ "src/archive.rs": "fn archive() {}", "src/keep.rs": "fn keep() {}", "src/recent.rs": "fn recent() {}" });
+  render(<IdeWorkspace {...propsFor(main)} />);
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  const open = async (name: string) => {
+    fireEvent.click(screen.getByRole("button", { name }));
+    return screen.findByRole<HTMLTextAreaElement>("textbox", { name: `Source editor for src/${name}` });
+  };
+  const close = (name: string) => screen.getByRole("button", { name: `Close ${name}` });
+  const contextMenu = async (name: string) => {
+    fireEvent.contextMenu(close(name).closest(".file-tab-label")!);
+    return within(await screen.findByRole("menu", { name }));
+  };
+  await open("archive.rs");
+  fireEvent.change(await open("review.rs"), { target: { value: "fn saved_from_batch() {}" } });
+  await waitFor(() => expect(service.drafts.get(main)?.markdown).toBe("fn saved_from_batch() {}"));
+  await open("keep.rs");
+  fireEvent.click((await contextMenu("keep.rs")).getByRole("menuitem", { name: "Pin tab" }));
+  await open("recent.rs");
+
+  fireEvent.click((await contextMenu("archive.rs")).getByRole("menuitem", { name: "Close tabs to the right" }));
+  const initialPrompt = within(await screen.findByRole("dialog", { name: "Save changes?" }));
+  expect(initialPrompt.getByText("src/review.rs has unsaved changes.")).toBeTruthy();
+  fireEvent.click(initialPrompt.getByRole("button", { name: "Cancel" }));
+  expect(close("recent.rs")).toBeTruthy();
+  expect(service.disk.get(main)?.document.markdown).toBe("fn original() {}");
+
+  fireEvent.click((await contextMenu("archive.rs")).getByRole("menuitem", { name: "Close tabs to the right" }));
+  const saveClose = within(await screen.findByRole("dialog", { name: "Save changes?" })).getByRole("button", { name: "Save and close" });
+  fireEvent.click(saveClose);
+  fireEvent.click(saveClose);
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Close recent.rs" })).toBeNull());
+  expect(screen.queryByRole("button", { name: "Close review.rs" })).toBeNull();
+  expect(close("archive.rs")).toBeTruthy();
+  expect(close("keep.rs").closest(".file-tab-label")?.querySelector('[aria-label="Pinned"]')).toBeTruthy();
+  expect(service.disk.get(main)?.document.markdown).toBe("fn saved_from_batch() {}");
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "save_repository_source_file")).toHaveLength(1);
+
+  fireEvent.click((await contextMenu("archive.rs")).getByRole("menuitem", { name: "Reopen closed tab" }));
+  expect((await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Source editor for src/recent.rs" })).value).toBe("fn recent() {}");
+});
+
+it("moves the clicked tab to a new group and merges groups without changing the draft or pin", async () => {
+  const service = fixture({ "src/other.rs": "fn other() {}" });
+  render(<IdeWorkspace {...propsFor(main)} />);
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  fireEvent.click(screen.getByRole("button", { name: "review.rs" }));
+  fireEvent.change(await screen.findByRole("textbox", { name: editorLabel }), { target: { value: "fn draft_before_move() {}" } });
+  await waitFor(() => expect(service.drafts.get(main)?.markdown).toBe("fn draft_before_move() {}"));
+  fireEvent.click(screen.getByRole("button", { name: "other.rs" }));
+  await screen.findByRole("textbox", { name: "Source editor for src/other.rs" });
+
+  const selected = () => screen.getByRole("button", { name: "Close review.rs" }).closest(".file-tab-label")!;
+  fireEvent.contextMenu(selected());
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Pin tab" }));
+  fireEvent.contextMenu(selected());
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Move tab" }), { key: "ArrowRight" });
+  fireEvent.click(await screen.findByRole("menuitem", { name: "New group to the right" }));
+
+  const movedGroup = selected().closest(".dv-groupview")!;
+  expect(movedGroup).not.toBe(screen.getByRole("button", { name: "Close other.rs" }).closest(".dv-groupview"));
+  expect(views()).toHaveLength(1);
+  expect(views()[0]?.value).toBe("fn draft_before_move() {}");
+  expect(within(movedGroup as HTMLElement).getByLabelText("Pinned")).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "Save changes?" })).toBeNull();
+
+  fireEvent.contextMenu(within(movedGroup as HTMLElement).getByRole("button", { name: "Actions for Editor group" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Merge all groups here" }));
+  expect(selected().closest(".dv-groupview")).toBe(screen.getByRole("button", { name: "Close other.rs" }).closest(".dv-groupview"));
+  expect(await screen.findByLabelText("Pinned")).toBeTruthy();
+  expect(service.drafts.get(main)?.markdown).toBe("fn draft_before_move() {}");
+});
+
+it("reveals the breadcrumb folder and reopens the last tab from the empty group", async () => {
+  fixture();
+  render(<IdeWorkspace {...propsFor(alternate)} />);
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  fireEvent.click(screen.getByRole("button", { name: "review.rs" }));
+  await screen.findByRole("textbox", { name: editorLabel });
+  const path = within(screen.getByRole("navigation", { name: "File breadcrumbs" }));
+  fireEvent.contextMenu(path.getByRole("button", { name: "Reveal folder src" }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Show in File Explorer" }));
+  expect(invoke).toHaveBeenCalledWith("open_checkout_item_in_shell", { checkoutId: alternate, relativePath: "src", action: "reveal" });
+
+  fireEvent.click(closeButtons()[0]!);
+  fireEvent.contextMenu(await screen.findByText("Open a source file"));
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Reopen closed tab" }));
+  expect((await screen.findByRole<HTMLTextAreaElement>("textbox", { name: editorLabel })).value).toBe("fn other_worktree() {}");
+});
+
 it("uses the selected rows for bulk recycling after confirmation", async () => {
   fixture();
   render(<IdeWorkspace {...propsFor(alternate)} />);
@@ -274,6 +374,24 @@ it("adds the clicked file to the chosen conversation draft and opens the draft",
   expect(invoke).toHaveBeenCalledWith("add_checkout_files_to_conversation", {
     checkoutId: alternate, conversationId: "review-chat", paths: ["docs/Guide.md"],
   });
+});
+
+it("saves the open editor buffer as a new file without saving the original", async () => {
+  const service = fixture();
+  render(<IdeWorkspace {...propsFor(alternate)} target={file} />);
+  const editor = await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.change(editor, { target: { value: "fn edited_copy() {}" } });
+  const tab = await screen.findByText("review.rs", { selector: ".file-tab-label span" });
+  fireEvent.contextMenu(tab);
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Save a copy…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Save a copy" }));
+  expect(dialog.getByRole<HTMLInputElement>("textbox", { name: "Name" }).value).toBe("review copy.rs");
+  fireEvent.click(dialog.getByRole("button", { name: "Save copy" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("create_checkout_item", {
+    checkoutId: alternate, relativeDirectory: "src", name: "review copy.rs", directory: false, contents: "fn edited_copy() {}",
+  }));
+  expect(service.disk.get(alternate)?.document.markdown).toBe("fn other_worktree() {}");
+  expect(invoke).not.toHaveBeenCalledWith("save_repository_source_file", expect.anything());
 });
 
 it("previews live editor text and appends its range and prompt only to the chosen draft", async () => {

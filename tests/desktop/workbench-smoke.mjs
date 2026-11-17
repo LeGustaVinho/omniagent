@@ -1906,6 +1906,70 @@ test("compares committed branches and registers a manual worktree in the real Gi
   }
 });
 
+test("opens file history with the keyboard and recycles only the clicked checkout file", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Explorer context checkout");
+  const retained = "retained.txt";
+  const removed = `OmniAgent-context-smoke-${randomUUID()}.txt`;
+  git(scratch, "init", "-q", "-b", "main", repo);
+  git(repo, "config", "core.autocrlf", "false");
+  await writeFile(join(repo, retained), "Original retained text\n");
+  git(repo, "add", retained);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Retained file revision");
+  await writeFile(join(repo, removed), "Disposable file for the Explorer context menu\n");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    await click(browser, '.work-rail button[aria-label="IDE"]');
+    const ide = browser.$('[aria-label="IDE workspace"]');
+    const retainedRow = ide.$(`button[title="${retained}"]`);
+    await retainedRow.waitForDisplayed();
+    await browser.execute((name) => document.querySelector(`[aria-label="IDE workspace"] button[title="${CSS.escape(name)}"]`).focus(), retained);
+    await browser.keys([Key.Shift, Key.F10]);
+    const menu = browser.$('[role="menu"].context-actions-menu');
+    await click(menu, './/*[@role="menuitem"][normalize-space(.)="Show file history"]');
+    const history = browser.$('[aria-label="File history"]');
+    await history.$("button*=Retained file revision").waitForDisplayed();
+
+    await click(browser, '.work-rail button[aria-label="IDE"]');
+    const root = ide.$("button=Checkout root");
+    await root.waitForDisplayed();
+    await root.click({ button: "right" });
+    const templates = menu.$('.//*[@role="menuitem"][normalize-space(.)="New from template"]');
+    await templates.waitForDisplayed();
+    await templates.moveTo();
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Markdown note"]');
+    const create = browser.$('[role="dialog"].file-dialog');
+    await create.waitForDisplayed();
+    await create.$('input[aria-label="Name"]').setValue("new-from-template");
+    await click(create, "button=Create");
+    await create.waitForExist({ reverse: true });
+    assert.equal(await readFile(join(repo, "new-from-template.md"), "utf8"), "# Title\n\n");
+
+    await click(browser, '.work-rail button[aria-label="IDE"]');
+    const disposableRow = ide.$(`button[title="${removed}"]`);
+    await disposableRow.waitForDisplayed();
+    await disposableRow.click({ button: "right" });
+    await click(menu, './/*[@role="menuitem"][normalize-space(.)="Move to Recycle Bin…"]');
+    const confirmation = browser.$('[role="dialog"].file-dialog');
+    await confirmation.waitForDisplayed();
+    assert.ok((await confirmation.getText()).includes(removed));
+    await click(confirmation, "button=Move to Recycle Bin");
+    await confirmation.waitForExist({ reverse: true, timeout: 15_000 });
+    await disposableRow.waitForExist({ reverse: true });
+    await assert.rejects(access(join(repo, removed)), { code: "ENOENT" });
+    assert.equal(await readFile(join(repo, retained), "utf8"), "Original retained text\n");
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
 test("persists real conversation organization through a desktop restart", { timeout: 90_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Conversation library repository");

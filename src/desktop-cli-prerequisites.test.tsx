@@ -24,6 +24,7 @@ it("reports prerequisite discovery and persists exact Windows provider paths thr
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     if (command === "cli_executables") return profiles();
     if (command === "cli_plugin_inventory") return null;
+    if (command === "reveal_desktop_cli_executable") return;
     if (command === "desktop_cli_prerequisites") return {
       git: { executable: "C:\\Program Files\\Git\\cmd\\git.exe", version: "2.55.0.windows.3", issue: null },
       providers: profiles().map(({ provider, executable }) => {
@@ -48,6 +49,9 @@ it("reports prerequisite discovery and persists exact Windows provider paths thr
   expect(inventory.getByText("Gemini via agy")).toBeTruthy();
   expect(inventory.getByText("agy.exe is not installed on PATH")).toBeTruthy();
   const user = userEvent.setup();
+  fireEvent.contextMenu(inventory.getByText(detected.claude));
+  await user.click(await screen.findByRole("menuitem", { name: "Show executable in File Explorer" }));
+  expect(invoke).toHaveBeenCalledWith("reveal_desktop_cli_executable", { provider: "claude", expected: detected.claude });
   for (const provider of providers) {
     const card = within(await screen.findByRole("region", { name: providerExecutableLabels[provider] }));
     const executable = `D:\\My utilities\\${names[provider]}`;
@@ -57,7 +61,8 @@ it("reports prerequisite discovery and persists exact Windows provider paths thr
     expect(invoke).toHaveBeenCalledWith("set_cli_executable", { provider, executable });
   }
   const gemini = within(screen.getByRole("region", { name: "Gemini via agy" }));
-  await user.click(gemini.getByRole("button", { name: "Use PATH" }));
+  fireEvent.contextMenu(gemini.getByRole("heading", { name: "Gemini via agy" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Use PATH" }));
   expect(await gemini.findByText("agy.exe is not installed on PATH")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("set_cli_executable", { provider: "antigravity", executable: null });
   expect(vi.mocked(invoke).mock.calls.every(([command]) => command !== "probe_cli_executable")).toBe(true);

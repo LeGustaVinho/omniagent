@@ -142,7 +142,7 @@ function queryClient() {
 }
 
 const paths = () => within(screen.getByRole("list", { name: "Graph notes" }))
-  .getAllByRole("button").map((button) => button.getAttribute("title"));
+  .getAllByRole("button", { name: (name) => !name.startsWith("Actions for ") }).map((button) => button.getAttribute("title"));
 
 function currentGraph() {
   const graph = instances.at(-1);

@@ -92,6 +92,8 @@
   background: var(--card);
 }
 
+.context-actions-target.run-evidence-menu { align-items: flex-start; }
+
 @media (forced-colors: active) {
   .run-inspection .run-inspection-tabs button[aria-selected="true"] {
     outline: 1px solid Highlight;

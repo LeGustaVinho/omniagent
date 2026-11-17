@@ -76,9 +76,10 @@ export function GitFileHistoryView({ review, path, openFile, clear }: { review: 
     if (original.status === "unavailable" || modified.status === "unavailable") return {
       error: [original, modified].flatMap((side) => side.status === "unavailable" ? [side.reason] : []).join(" "),
     };
-    return { file: { path: entry.path, language: /\.(md|markdown)$/i.test(entry.path) ? "markdown" : "plaintext",
+    const originalPath = comparison?.base?.kind === "commit" ? comparison.base.path : path;
+    return { file: { path: entry.path, originalPath, language: /\.(md|markdown)$/i.test(entry.path) ? "markdown" : "plaintext",
       original: gitFileText(original), modified: gitFileText(modified) }, empty: original.status === "missing" && modified.status === "missing" };
-  }, [load.data, entry]);
+  }, [load.data, entry, comparison, path]);
 
   async function copy(read: () => string | Promise<string>, message: string) {
     setError("");
@@ -156,7 +157,7 @@ export function GitFileHistoryView({ review, path, openFile, clear }: { review: 
           : load.error || sides?.error ? <div className="p-3"><InlineIssue>{load.error ? String(load.error) : sides?.error}</InlineIssue></div>
             : sides?.empty ? <p className="p-3 text-sm">This file is absent from both revisions.</p>
               : sides?.file && (view === "contents" ? <pre className="p-3 font-mono text-xs">{sides.file.modified}</pre>
-                : <MonacoComparison file={sides.file} layout={layout} />)}
+                : <MonacoComparison file={sides.file} layout={layout} revisions={{ original: comparison.ranges[0]!, modified: comparison.ranges[1]! }} />)}
       </div>
     </div>}
   </section>;

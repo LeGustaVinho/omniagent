@@ -8,7 +8,7 @@ import {
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
 import { ExampleFileSearch, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget } from "@/ide-file-search";
-import { containingFolder, fileContextActions, fileHistoryTarget, noteRenameTarget, openNotesTarget, readTerminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
+import { containingFolder, fileContextActions, fileHistoryTarget, noteRenameTarget, openNotesTarget, readSourceLineTarget, readTerminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
 import { ContextActions } from "@/components/ui/context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
@@ -74,13 +74,14 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const [status, setStatus] = useState(simulation?.scenario === "recovery" ? "Recovered unsaved changes in src/health.ts" : "");
   const [problem, setProblem] = useState("");
   const [dialog, setDialog] = useState<IdeDialog>();
+  const [confirmingClose, setConfirmingClose] = useState(false);
   const models = useRef(new Map<string, CodeModel>()).current;
   const lastTarget = useRef(firstPath);
   const openRequest = useRef(0);
   const active = dock.path;
   const buffer = active ? files[active] : undefined;
   const dirty = (path: string) => {
-    const entry = files[path];
+    const entry = simulated ? files[path] : source.getFile(path);
     return Boolean(entry && (entry.external !== undefined || entry.content !== entry.saved));
   };
   const filesForSearch = [
@@ -165,10 +166,12 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       setNavigator("search");
       return;
     }
-    const next = normalizeRepositoryPath(target);
-    if (next && next !== lastTarget.current) {
-      lastTarget.current = next;
-      openFile(next);
+    const location = readSourceLineTarget(target);
+    const next = normalizeRepositoryPath(location?.path ?? target);
+    const request = location ? target : next;
+    if (next && request !== lastTarget.current) {
+      lastTarget.current = request;
+      openFile(next, location?.line);
     }
   }, [dock.ready, openFile, openTerminal, requestedFolder, requestedTerminal, setSidebar, target]);
 
@@ -189,6 +192,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     const entry = simulated ? files[path] : source.getFile(path);
     if (!entry) return false;
     if (entry.external !== undefined) {
+      dock.cancelCloseBatch();
       setDialog({ kind: "conflict", path });
       return false;
     }
@@ -196,7 +200,10 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     if (!simulated) {
       source.clearError();
       if (!await source.save(path)) {
-        if (source.getFile(path)?.external !== undefined) setDialog({ kind: "conflict", path });
+        if (source.getFile(path)?.external !== undefined) {
+          dock.cancelCloseBatch();
+          setDialog({ kind: "conflict", path });
+        }
         return false;
       }
     } else {
@@ -244,12 +251,39 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   };
   const closeView = (path: string, api: FilePanelApi) => {
     const remains = dock.api && keepOnlyCleanClose(dock.api, path, api);
-    api.close();
+    if (!dock.closeTab(api)) return false;
     if (!remains) forgetFile(path);
+    return true;
   };
   const requestClose = (path: string, api: FilePanelApi) => {
-    if (!dirty(path) || !dock.api || keepOnlyCleanClose(dock.api, path, api)) closeView(path, api);
-    else setDialog({ kind: "close", path, api });
+    if (!dirty(path) || !dock.api || keepOnlyCleanClose(dock.api, path, api)) {
+      closeView(path, api);
+      return true;
+    }
+    setDialog({ kind: "close", path, api });
+    return false;
+  };
+  const dockCommands = { dirty, requestClose, loadClosedFile: async (path: string) => {
+    if (simulated) return files[path] ? path : undefined;
+    const canonical = await loadSource(path);
+    if (canonical) watchSource(canonical);
+    return canonical;
+  } };
+  const confirmClose = async ({ path, api }: Extract<IdeDialog, { kind: "close" }>, saveChanges: boolean) => {
+    if (confirmingClose) return;
+    setConfirmingClose(true);
+    try {
+      if (await (saveChanges ? save(path) : resolve(path, false)) && closeView(path, api)) {
+        setDialog(undefined);
+        dock.resumeCloseBatch(dockCommands);
+      }
+    } catch (failure) { setProblem(String(failure)); }
+    finally { setConfirmingClose(false); }
+  };
+  const cancelClose = () => {
+    if (confirmingClose) return;
+    dock.cancelCloseBatch();
+    setDialog(undefined);
   };
   const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem });
   const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated, bufferAt: (path) => {
@@ -347,6 +381,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                   ...(!markdownPath(target.path) ? [{ label: "Open to the side", run: () => openFile(target.path, undefined, true) }] : []),
                   ...(!simulated && markdownPath(target.path) ? [{ label: "Rename note…", run: () => renameNote(target.path) }] : []),
                   ...(!simulated ? [{ label: "Open working diff", run: () => openWorkspace("git", workingDiffTarget(target.path)) }] : []),
+                  ...(!simulated && files[target.path] ? [{ label: "Save a copy…", run: () => treeActions.saveCopy(target.path, files[target.path]!.content) }] : []),
                 ]] : []),
                 ...(!simulated ? [[{ label: "Open terminal here", run: () => openTerminal(target.kind === "file" ? containingFolder(target.path) : target.path) }]] : []),
                 ...menu.location(target),
@@ -383,7 +418,14 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
               const sourceProblem = source.files[path]?.sourceProblem;
               return (
                 <div className="ide-file-view">
-                  <FileCaption path={path} revision={entry.revision} />
+                  <FileCaption path={path} revision={entry.revision} onReveal={revealFile} actions={(item) => [
+                    [{ label: "Reveal in Explorer tree", run: () => revealFile(item.path) },
+                      ...(item.kind === "folder" ? [{ label: "Find in folder", run: () => {
+                        setSidebar(true); setSearchFolder(item.path); setNavigator("search");
+                      } }] : []),
+                      ...(!simulated ? [{ label: "Open terminal here", run: () => openTerminal(item.kind === "file" ? containingFolder(item.path) : item.path) }] : [])],
+                    ...menu.location(item),
+                  ]} />
                   {sourceProblem && <p role="alert" className="file-help">{sourceProblem}</p>}
                   <Suspense fallback={<p role="status" className="file-help">Loading source editor…</p>}>
                     <Editor scope={scope} path={path} content={entry.content} models={models} update={update} problems={report} jump={jumps[path]}
@@ -397,8 +439,11 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
               onSimulate={simulated ? undefined : () => startSimulation()} />,
             dirty,
             requestClose,
+            layoutActions: (api) => dock.layoutActions(api, dockCommands),
+            groupActions: (id) => dock.groupActions(id, dockCommands),
             tabActions: (path, view, api) => [[
               { label: "Save", disabled: !dirty(path), run: () => { void save(path); } },
+              ...(!simulated && files[path] ? [{ label: "Save a copy…", run: () => treeActions.saveCopy(path, files[path]!.content) }] : []),
               ...(files[path]?.external !== undefined ? [{ label: "Review external change", run: () => setDialog({ kind: "conflict", path }) }] : []),
               { label: "Split right", run: () => dock.split(path, view, "right", api.id) },
               { label: "Split down", run: () => dock.split(path, view, "below", api.id) },
@@ -434,7 +479,9 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                 {simulated ? <Terminal clearRevision={clearRevisions[""] ?? 0} />
                   : terminalFolders.map((folder) => <div key={folder} className="h-full min-h-0" hidden={folder !== terminalFolder}>
                     <WorktreeTerminal checkoutId={checkout.checkoutId} active={bottom === "terminal" && folder === terminalFolder}
-                      clearRevision={clearRevisions[folder] ?? 0} {...(folder ? { relativeDirectory: folder, autoStart: true } : autoStartRoot ? { autoStart: true } : {})} />
+                      clearRevision={clearRevisions[folder] ?? 0} onContextText={(text) => conversationActions.startContextText({
+                        title: "PowerShell output", reference: `PowerShell · ${folder || "Checkout root"}`, text,
+                      })} {...(folder ? { relativeDirectory: folder, autoStart: true } : autoStartRoot ? { autoStart: true } : {})} />
                   </div>)}
               </Suspense>
             </div>
@@ -472,15 +519,11 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       {conversationActions.dialog}
       {fileOperations.dialog}
       {comparison.dialog}
-      {dialog?.kind === "close" && <FileDialog title="Save changes?" description={`${dialog.path} has unsaved changes.`} onClose={() => setDialog(undefined)}>
+      {dialog?.kind === "close" && <FileDialog title="Save changes?" description={`${dialog.path} has unsaved changes.`} onClose={cancelClose}>
         <div className="file-dialog-footer">
-          <button type="button" className="fw-btn" onClick={() => setDialog(undefined)}>Cancel</button>
-          <button type="button" className="fw-btn fw-destructive" onClick={async () => {
-            if (await resolve(dialog.path, false)) { closeView(dialog.path, dialog.api); setDialog(undefined); }
-          }}>Discard changes</button>
-          <button type="button" className="fw-btn fw-primary" onClick={async () => {
-            if (await save(dialog.path)) { closeView(dialog.path, dialog.api); setDialog(undefined); }
-          }}>Save and close</button>
+          <button type="button" className="fw-btn" disabled={confirmingClose} onClick={cancelClose}>Cancel</button>
+          <button type="button" className="fw-btn fw-destructive" disabled={confirmingClose} onClick={() => void confirmClose(dialog, false)}>Discard changes</button>
+          <button type="button" className="fw-btn fw-primary" disabled={confirmingClose} onClick={() => void confirmClose(dialog, true)}>Save and close</button>
         </div>
       </FileDialog>}
       {dialog?.kind === "conflict" && <FileDialog title="File changed externally" description={`Review both versions of ${dialog.path} before continuing.`} onClose={() => setDialog(undefined)}>

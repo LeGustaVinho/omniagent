@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     fs,
+    io::Write,
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     ptr,
@@ -8,12 +9,15 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use rusqlite::OptionalExtension;
-use serde::Deserialize;
-use tauri::State;
+use serde::{Deserialize, Serialize};
+use tauri::{State, WebviewWindow};
 use windows_sys::Win32::{
     System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize},
     UI::{
-        Shell::{SHOpenFolderAndSelectItems, SHParseDisplayName, ShellExecuteW},
+        Shell::{
+            OAIF_EXEC, OPENASINFO, SHOpenFolderAndSelectItems, SHOpenWithDialog,
+            SHParseDisplayName, ShellExecuteW,
+        },
         WindowsAndMessaging::SW_SHOWNORMAL,
     },
 };
@@ -21,8 +25,9 @@ use windows_sys::Win32::{
 use crate::{providers::configuration::plain_metadata, store::Store};
 
 use super::{
-    checkout_root, documents::relative_name, git_path, git_query, verify_checkout,
-    with_managed_worktree_writer,
+    checkout_root,
+    documents::{lock_directories, relative_name},
+    git_command, git_path, git_query, verify_checkout, with_managed_worktree_writer,
 };
 
 pub mod mutations;
@@ -115,8 +120,8 @@ pub async fn list_checkout_folders(
     list.await.map_err(|error| format!("{error:#}"))
 }
 
-fn list_folders(root: &Path) -> Result<Vec<String>> {
-    let ignored = git_query(
+fn ignored_roots(root: &Path) -> Result<String> {
+    git_query(
         &git_path()?,
         root,
         &[
@@ -127,7 +132,11 @@ fn list_folders(root: &Path) -> Result<Vec<String>> {
             "--directory",
             "--exclude-standard",
         ],
-    )?;
+    )
+}
+
+fn list_folders(root: &Path) -> Result<Vec<String>> {
+    let ignored = ignored_roots(root)?;
     let ignored: HashSet<_> = ignored
         .split_terminator('\0')
         .filter_map(|path| path.strip_suffix('/'))
@@ -158,6 +167,69 @@ fn list_folders(root: &Path) -> Result<Vec<String>> {
     Ok(directories)
 }
 
+#[derive(Default, Serialize)]
+pub struct CheckoutIgnoredItems {
+    files: Vec<String>,
+    folders: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn list_checkout_ignored_items(
+    store: State<'_, Store>,
+    checkout_id: String,
+    folder: Option<String>,
+) -> Result<CheckoutIgnoredItems, String> {
+    let list = async {
+        let root = validated_root(&store, checkout_id).await?;
+        tokio::task::spawn_blocking(move || list_ignored(&root, folder.as_deref())).await?
+    };
+    list.await.map_err(|error| format!("{error:#}"))
+}
+
+fn list_ignored(root: &Path, folder: Option<&str>) -> Result<CheckoutIgnoredItems> {
+    let mut items = CheckoutIgnoredItems::default();
+    let mut push = |path: &Path| {
+        let Ok(path_name) = relative_name(root, path) else {
+            return;
+        };
+        let Ok(Some(metadata)) = plain_metadata(path) else {
+            return;
+        };
+        if metadata.is_file() {
+            items.files.push(path_name);
+        } else if metadata.is_dir() && path.join(".git").symlink_metadata().is_err() {
+            items.folders.push(path_name);
+        }
+    };
+    if let Some(folder) = folder {
+        ensure!(!folder.is_empty(), "Choose an ignored subfolder.");
+        let directory = checkout_directory(root, folder)?;
+        let _parents = lock_directories(&directory)?;
+        let checked = git_command(&git_path()?, root)
+            .args(["check-ignore", "--quiet", "--", &format!("{folder}/")])
+            .output()?;
+        ensure!(
+            checked.status.success(),
+            "The folder is no longer ignored by Git."
+        );
+        for entry in fs::read_dir(directory)? {
+            push(&entry?.path());
+        }
+    } else {
+        for path in ignored_roots(root)?.split_terminator('\0') {
+            let relative = path.trim_end_matches('/');
+            if let Ok(path) = item_path(root, relative) {
+                push(&path);
+            }
+        }
+    }
+    items.files.sort_unstable();
+    items.files.dedup();
+    items.folders.sort_unstable();
+    items.folders.dedup();
+    Ok(items)
+}
+
 #[tauri::command]
 pub async fn create_checkout_item(
     store: State<'_, Store>,
@@ -165,9 +237,16 @@ pub async fn create_checkout_item(
     relative_directory: String,
     name: String,
     directory: bool,
+    contents: Option<String>,
 ) -> Result<String, String> {
     write_in_checkout(&store, checkout_id, move |root| {
-        create_item(root, &relative_directory, &name, directory)
+        create_item(
+            root,
+            &relative_directory,
+            &name,
+            directory,
+            contents.as_deref(),
+        )
     })
     .await
     .map_err(|error| format!("{error:#}"))
@@ -209,6 +288,7 @@ fn create_item(
     relative_directory: &str,
     name: &str,
     directory: bool,
+    contents: Option<&str>,
 ) -> Result<String> {
     validate_name(name)?;
     let parent = checkout_directory(root, relative_directory)?;
@@ -216,7 +296,15 @@ fn create_item(
     let path = parent.join(name);
     let relative = relative_name(root, &path)?;
     if directory {
+        ensure!(contents.is_none(), "A folder cannot contain text.");
         fs::create_dir(path)?;
+    } else if let Some(contents) = contents {
+        let mut staged = tempfile::NamedTempFile::new_in(&parent)?;
+        staged.as_file_mut().write_all(contents.as_bytes())?;
+        staged.as_file().sync_all()?;
+        staged
+            .persist_noclobber(path)
+            .context("Save the new file without replacing an existing item")?;
     } else {
         fs::OpenOptions::new()
             .write(true)
@@ -231,25 +319,59 @@ fn create_item(
 pub enum ShellAction {
     Reveal,
     Open,
+    OpenWith,
+}
+
+pub(crate) fn reveal_local_file(path: &Path) -> Result<()> {
+    ensure!(
+        plain_metadata(path)?.is_some_and(|metadata| metadata.is_file()),
+        "The executable no longer exists."
+    );
+    shell_item(path, false, ShellAction::Reveal)
 }
 
 #[tauri::command]
 pub async fn open_checkout_item_in_shell(
     store: State<'_, Store>,
+    window: WebviewWindow,
     checkout_id: String,
     relative_path: String,
     action: ShellAction,
 ) -> Result<(), String> {
     let open = async {
         let root = validated_root(&store, checkout_id).await?;
+        let hwnd = window.hwnd().map_or(0, |handle| handle.0 as isize);
         tokio::task::spawn_blocking(move || {
             let path = item_path(&root, &relative_path)?;
             let metadata = plain_metadata(&path)?.context("The checkout item no longer exists.")?;
+            if matches!(action, ShellAction::OpenWith) {
+                ensure!(
+                    metadata.is_file(),
+                    "Select a file to open with another application."
+                );
+                return shell_open_with(&path, hwnd);
+            }
             shell_item(&path, metadata.is_dir(), action)
         })
         .await?
     };
     open.await.map_err(|error| format!("{error:#}"))
+}
+
+fn shell_open_with(path: &Path, parent: isize) -> Result<()> {
+    let _apartment = Apartment::initialize()?;
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let options = OPENASINFO {
+        pcszFile: path.as_ptr(),
+        pcszClass: ptr::null(),
+        oaifInFlags: OAIF_EXEC,
+    };
+    let result = unsafe { SHOpenWithDialog(parent as *mut std::ffi::c_void, &options) };
+    ensure!(
+        result >= 0 || matches!(result as u32, 0x8007_04C7 | 0x8000_4004),
+        "Windows could not open the application picker ({result:#x})."
+    );
+    Ok(())
 }
 
 struct Apartment;
@@ -319,18 +441,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lists_ignored_roots_and_reads_only_requested_direct_children() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = dunce::canonicalize(temporary.path())?;
+        git_query(&git_path()?, &root, &["init", "--quiet"])?;
+        fs::write(root.join(".gitignore"), "cache/\n*.private.log\n")?;
+        fs::create_dir_all(root.join("cache/logs/archived"))?;
+        fs::create_dir_all(root.join("cache/nested-repository"))?;
+        fs::create_dir(root.join("notes"))?;
+        fs::write(root.join("cache/direct.txt"), "direct child")?;
+        fs::write(root.join("cache/logs/archived/old.log"), "deep child")?;
+        fs::write(root.join("notes/debug.private.log"), "ignored by pattern")?;
+        fs::write(root.join("notes/guide.md"), "ordinary file")?;
+        git_query(
+            &git_path()?,
+            &root.join("cache/nested-repository"),
+            &["init", "--quiet"],
+        )?;
+
+        let ignored = list_ignored(&root, None)?;
+        assert_eq!(ignored.folders, ["cache"]);
+        assert_eq!(ignored.files, ["notes/debug.private.log"]);
+        assert_eq!(list_folders(&root)?, ["notes"]);
+        let cache = list_ignored(&root, Some("cache"))?;
+        assert_eq!(cache.folders, ["cache/logs"]);
+        assert_eq!(cache.files, ["cache/direct.txt"]);
+        let logs = list_ignored(&root, Some("cache/logs"))?;
+        assert_eq!(logs.folders, ["cache/logs/archived"]);
+        assert!(logs.files.is_empty());
+        assert!(list_ignored(&root, Some("notes")).is_err());
+        assert!(list_ignored(&root, Some("cache/nested-repository")).is_err());
+        assert!(list_ignored(&root, Some("../cache")).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn creates_empty_folders_and_refuses_replacement_or_checkout_escape() -> Result<()> {
         let temporary = tempfile::tempdir()?;
         let root = dunce::canonicalize(temporary.path())?;
         git_query(&git_path()?, &root, &["init", "--quiet"])?;
-        assert_eq!(create_item(&root, "", "notes", true)?, "notes");
-        assert_eq!(create_item(&root, "notes", "empty", true)?, "notes/empty");
-        assert_eq!(create_item(&root, "notes", "é.md", false)?, "notes/é.md");
+        assert_eq!(create_item(&root, "", "notes", true, None)?, "notes");
+        assert_eq!(
+            create_item(&root, "notes", "empty", true, None)?,
+            "notes/empty"
+        );
+        assert_eq!(
+            create_item(&root, "notes", "é.md", false, None)?,
+            "notes/é.md"
+        );
         fs::write(root.join("notes/é.md"), "saved")?;
-        assert!(create_item(&root, "notes", "é.md", false).is_err());
-        assert!(create_item(&root, "", "CON.md", false).is_err());
-        assert!(create_item(&root, "../notes", "doc.md", false).is_err());
-        assert!(create_item(&root, ".git", "doc.md", false).is_err());
+        assert!(create_item(&root, "notes", "é.md", false, Some("Must not overwrite")).is_err());
+        assert_eq!(
+            create_item(
+                &root,
+                "notes",
+                "draft copy.md",
+                false,
+                Some("Edited text\n")
+            )?,
+            "notes/draft copy.md"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("notes/draft copy.md"))?,
+            "Edited text\n"
+        );
+        assert!(create_item(&root, "", "CON.md", false, None).is_err());
+        assert!(create_item(&root, "../notes", "doc.md", false, None).is_err());
+        assert!(create_item(&root, ".git", "doc.md", false, None).is_err());
         fs::write(root.join(".gitignore"), "ignored/\n")?;
         fs::create_dir(root.join("ignored"))?;
         assert_eq!(list_folders(&root)?, ["notes", "notes/empty"]);

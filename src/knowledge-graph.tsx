@@ -1,7 +1,9 @@
 import cytoscape from "cytoscape";
 import { CircleDot, Focus, Network, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { fileName, type ExampleFile } from "@/ide-knowledge-data";
+import { isContextKey, useNoteContextMenu } from "@/knowledge-context";
 import { exampleNoteGraph, indexNoteGraph, selectNoteGraph, type NoteGraphProjection } from "@/knowledge-graph-model";
 import { ResizablePanel } from "@/panel-resize";
 
@@ -10,28 +12,48 @@ export type { NoteGraphProjection } from "@/knowledge-graph-model";
 const elementId = (path: string, id?: number) => `note:${id ?? path}`;
 const emptyExamples: readonly ExampleFile[] = [];
 
-export default function NoteGraph({ files = emptyExamples, projection, selected, onOpen }: {
+export default function NoteGraph({ files = emptyExamples, projection, selected, onOpen, onNodeActions }: {
   files?: readonly ExampleFile[];
   projection?: NoteGraphProjection;
   selected?: string;
   onOpen: (path: string) => void;
+  onNodeActions?: (path: string) => MenuGroups;
 }) {
   const container = useRef<HTMLDivElement>(null);
   const instance = useRef<cytoscape.Core>(undefined);
   const onOpenRef = useRef(onOpen);
+  const onNodeActionsRef = useRef(onNodeActions);
   const [scope, setScope] = useState<"global" | "local">("global");
+  const [center, setCenter] = useState<string>();
   const [depth, setDepth] = useState(1);
   const [filter, setFilter] = useState("");
   const [tag, setTag] = useState("");
+  const { open: openContextMenu, overlay } = useNoteContextMenu();
   const indexed = useMemo(() => indexNoteGraph(projection ?? exampleNoteGraph(files)), [files, projection]);
   const hasActive = selected !== undefined && indexed.byPath.has(selected);
-  const local = scope === "local" && hasActive ? selected : undefined;
+  const local = scope === "local" ? center && indexed.byPath.has(center) ? center : hasActive ? selected : undefined : undefined;
   const selectedTag = indexed.tags.includes(tag) ? tag : "";
   const { notes, edges, distance } = useMemo(() => selectNoteGraph(indexed, {
     active: local, depth, search: filter, tag: selectedTag,
   }), [depth, filter, indexed, local, selectedTag]);
 
   useEffect(() => { onOpenRef.current = onOpen; }, [onOpen]);
+  useEffect(() => { onNodeActionsRef.current = onNodeActions; }, [onNodeActions]);
+  function focusNote(path: string) {
+    setFilter("");
+    setTag("");
+    setCenter(path);
+    setScope("local");
+  }
+  function nodeGroups(path: string): MenuGroups {
+    return [[{ label: "Open note", run: () => onOpenRef.current(path) },
+      { label: "Center local graph here", run: () => focusNote(path) }], ...(onNodeActionsRef.current?.(path) ?? [])];
+  }
+  function backgroundGroups(): MenuGroups {
+    return [[{ label: "Fit graph", run: () => instance.current?.fit(undefined, 52) },
+      { label: "Show global graph", run: () => setScope("global") },
+      { label: "Clear graph filters", run: () => { setFilter(""); setTag(""); } }]];
+  }
   useEffect(() => {
     const mount = container.current;
     if (!mount || !notes.length) return;
@@ -63,10 +85,31 @@ export default function NoteGraph({ files = emptyExamples, projection, selected,
     });
     instance.current = graph;
     graph.on("tap", "node", (event) => onOpenRef.current(event.target.data("path")));
+    graph.on("cxttap", (event) => {
+      if (!onNodeActionsRef.current) return;
+      const bounds = mount.getBoundingClientRect();
+      const point = { x: bounds.left + (event.renderedPosition?.x ?? 0), y: bounds.top + (event.renderedPosition?.y ?? 0) };
+      const target = event.target;
+      const focus = () => { if (mount.isConnected) mount.focus(); };
+      if (target === graph) openContextMenu("Note graph", backgroundGroups(), point, focus);
+      else if (target.isNode()) {
+        const path = String(target.data("path"));
+        openContextMenu(path, nodeGroups(path), point, focus);
+      } else if (target.isEdge()) {
+        const from = String(target.source().data("path"));
+        const to = String(target.target().data("path"));
+        openContextMenu(`${from} → ${to}`, [[
+          { label: "Open source note", run: () => onOpenRef.current(from) },
+          { label: "Open destination note", run: () => onOpenRef.current(to) },
+          { label: "Center graph on source note", run: () => focusNote(from) },
+          { label: "Center graph on destination note", run: () => focusNote(to) },
+        ]], point, focus);
+      }
+    });
     const resize = new ResizeObserver(() => { if (mount.clientWidth && mount.clientHeight) graph.resize(); });
     resize.observe(mount);
     return () => { resize.disconnect(); graph.destroy(); instance.current = undefined; };
-  }, [depth, distance, edges, indexed.byPath, local, notes, selected]);
+  }, [depth, distance, edges, indexed.byPath, local, notes, openContextMenu, selected]);
 
   const zoomBy = (factor: number) => {
     const graph = instance.current;
@@ -78,7 +121,8 @@ export default function NoteGraph({ files = emptyExamples, projection, selected,
       <div className="note-graph-tools">
         <Network size={16} aria-hidden="true" />
         <button type="button" className="fw-btn" aria-pressed={!local} onClick={() => setScope("global")}>Global</button>
-        <button type="button" className="fw-btn" aria-pressed={Boolean(local)} onClick={() => setScope("local")} disabled={!hasActive}>Local</button>
+        <button type="button" className="fw-btn" aria-pressed={Boolean(local)} onClick={() => { if (hasActive) setCenter(undefined); setScope("local"); }}
+          disabled={!hasActive && !center}>Local</button>
         {local && <label>Depth <select value={depth} onChange={(event) => setDepth(Number(event.target.value))}>
           <option value={1}>1</option><option value={2}>2</option><option value={3}>3</option>
         </select></label>}
@@ -92,14 +136,26 @@ export default function NoteGraph({ files = emptyExamples, projection, selected,
           <button type="button" className="fw-icon" aria-label="Fit graph" disabled={!notes.length} onClick={() => instance.current?.fit(undefined, 52)}><Focus size={15} /></button>
         </div>
       </div>
-      {notes.length ? <div className="note-graph-canvas" ref={container} role="img" aria-label="Graph of repository notes" /> : <p role="status" className="file-sidebar-note">{indexed.byPath.size ? "No notes match the current graph filter." : "No Markdown notes in this checkout."}</p>}
+      {notes.length ? <div className="note-graph-canvas" ref={container} role="img" aria-label="Graph of repository notes"
+        tabIndex={onNodeActions ? 0 : undefined} onContextMenu={onNodeActions ? (event) => event.preventDefault() : undefined}
+        onKeyDown={onNodeActions ? (event) => {
+          if (!isContextKey(event.nativeEvent)) return;
+          const canvas = event.currentTarget;
+          const { left, top } = canvas.getBoundingClientRect();
+          event.preventDefault();
+          event.stopPropagation();
+          openContextMenu("Note graph", backgroundGroups(), { x: left, y: top }, () => { if (canvas.isConnected) canvas.focus(); });
+        } : undefined} /> : <p role="status" className="file-sidebar-note">{indexed.byPath.size ? "No notes match the current graph filter." : "No Markdown notes in this checkout."}</p>}
       <ResizablePanel className="note-graph-list-panel" edge="top" resizeKey="note-graph-list" resizeLabel="graph notes">
         <ul className="note-graph-node-list" aria-label="Graph notes">
-          {notes.map(({ path, title }) => <li key={path}><button type="button" className="fw-btn" title={path}
+          {notes.map(({ path, title }) => <li key={path}><ContextActions label={path} groups={onNodeActions ? nodeGroups(path) : []}>
+            <button type="button" className="fw-btn" title={path}
             aria-label={projection ? `${title} (${path})` : undefined} aria-current={path === selected ? "true" : undefined}
-            onClick={() => onOpen(path)}><CircleDot size={12} aria-hidden="true" />{projection ? title : fileName(path)}</button></li>)}
+            onClick={() => onOpen(path)}><CircleDot size={12} aria-hidden="true" />{projection ? title : fileName(path)}</button>
+          </ContextActions></li>)}
         </ul>
       </ResizablePanel>
+      {overlay}
     </div>
   );
 }

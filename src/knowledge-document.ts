@@ -10,6 +10,9 @@ export interface NoteTarget {
   embed: boolean;
   sourcePath?: string;
   sourceLine?: number;
+  sourceOffset?: number;
+  syntax?: "wiki" | "markdown";
+  editableInline?: boolean;
 }
 
 export interface NoteLocation {
@@ -50,9 +53,9 @@ function lineParts(line: string) {
 }
 
 export function getProperties(content: string) {
-  return (frontmatter(content)?.body.split(/\r?\n/) ?? []).flatMap((line) => {
+  return (frontmatter(content)?.body.split(/\r?\n/) ?? []).flatMap((line, index) => {
     const parts = lineParts(line);
-    return parts ? [{ key: parts.key, value: parts.value.trim() }] : [];
+    return parts ? [{ key: parts.key, value: parts.value.trim(), line: index + 2 }] : [];
   });
 }
 
@@ -91,12 +94,12 @@ function byMarkdownLine(content: string, map: (line: string, lineIndex: number) 
   }).join("");
 }
 
-function byText(content: string, map: (text: string) => string, stripComments = false) {
+function byText(content: string, map: (text: string, line: number) => string, stripComments = false) {
   let commenting = false;
-  return byMarkdownLine(content, (line) => {
+  return byMarkdownLine(content, (line, lineIndex) => {
     let cursor = 0;
     let output = "";
-    const fragment = (text: string) => commenting ? (stripComments ? "" : text) : map(text);
+    const fragment = (text: string) => commenting ? (stripComments ? "" : text) : map(text, lineIndex);
     for (const token of line.matchAll(/%%|(`+)(?!`)(.*?)\1(?!`)/g)) {
       const offset = token.index;
       output += fragment(line.slice(cursor, offset));
@@ -271,6 +274,13 @@ function excerpt(source: string, target?: string) {
   return lines.slice(heading.line - firstLine, next === undefined ? undefined : next - firstLine).join("\n");
 }
 
+export function noteAnchorExcerpt(source: string, anchor: string) {
+  const firstLine = anchorLine(source, anchor);
+  const text = excerpt(source, anchor)?.trimEnd();
+  if (!firstLine || !text) return;
+  return { text, startLine: firstLine, endLine: firstLine + text.split(/\r?\n/).length - 1, language: "markdown" };
+}
+
 function replaceWikiAddress(content: string, replace: (link: NoteTarget) => string | undefined) {
   const text = withoutProperties(content);
   const rewritten = byText(text, (line) => line.replace(wikiPattern, (original: string, embed: string, raw: string) => {
@@ -281,13 +291,17 @@ function replaceWikiAddress(content: string, replace: (link: NoteTarget) => stri
   return content.slice(0, content.length - text.length) + rewritten;
 }
 
-export function repairWikiAddress(content: string, raw: string, to: string, anchor?: string) {
+export function repairWikiAddress(content: string, raw: string, to: string, anchor?: string, sourceLine?: number) {
   const text = withoutProperties(content);
-  const updated = byText(text, (line) => line.replace(wikiPattern, (original: string, embed: string, entry: string) => {
-    if (entry !== raw) return original;
+  const firstLine = content.slice(0, content.length - text.length).split("\n").length;
+  let matches = 0;
+  const updated = byText(text, (line, index) => line.replace(wikiPattern, (original: string, embed: string, entry: string) => {
+    if (entry !== raw || sourceLine !== undefined && index + firstLine !== sourceLine) return original;
+    matches += 1;
     const { alias } = parseWiki(entry);
     return `${embed}[[${to}${anchor ? "#" + anchor : ""}${alias ? "|" + alias : ""}]]`;
   }));
+  if (sourceLine !== undefined && matches !== 1) throw new Error("The source line no longer identifies one matching wikilink. Edit the source to disambiguate it.");
   return content.slice(0, content.length - text.length) + updated;
 }
 
@@ -304,34 +318,50 @@ function escapedLabel(label: string) {
   return label.replace(/[\\\[\]]/g, "\\$&");
 }
 
-export function readingWikiAddress(path: string, raw: string) {
-  return "omni-wiki:" + encodeURIComponent(JSON.stringify([path, raw]));
+export function readingWikiAddress(path: string, raw: string, line?: number, markdown?: { target: string; anchor?: string }) {
+  return "omni-wiki:" + encodeURIComponent(JSON.stringify([path, raw, line ?? null, markdown ?? null]));
 }
 
 export function parseReadingAddress(href: string): NoteTarget | undefined {
   try {
     const input: unknown = JSON.parse(decodeURIComponent(href.slice("omni-wiki:".length)));
-    if (!Array.isArray(input) || input.length !== 2 || typeof input[0] !== "string" || typeof input[1] !== "string") return;
-    const [sourcePath, raw] = input;
-    return { ...parseWiki(raw.replace(/^!/, ""), raw.startsWith("!")), sourcePath };
+    if (!href.startsWith("omni-wiki:") || !Array.isArray(input) || typeof input[0] !== "string" || typeof input[1] !== "string") return;
+    const [sourcePath, raw, line, markdown] = input;
+    const sourceLine = typeof line === "number" && Number.isSafeInteger(line) && line > 0 ? line : undefined;
+    if (markdown && typeof markdown === "object" && typeof markdown.target === "string") {
+      const anchor = typeof markdown.anchor === "string" ? markdown.anchor : undefined;
+      return { raw, target: markdown.target, anchor, embed: false, sourcePath, sourceLine, syntax: "markdown", editableInline: sourceLine !== undefined };
+    }
+    return { ...parseWiki(raw.replace(/^!/, ""), raw.startsWith("!")), sourcePath, sourceLine, syntax: "wiki" };
   } catch {
     return undefined;
   }
 }
 
-export function readingLocalAddress(path: string, destination: string) {
+export function readingLocalAddress(path: string, destination: string, line?: number) {
   if (!destination || destination.startsWith("#") || /^[\\/]{2}/.test(destination) || /^[a-z][\w+.-]*:/i.test(destination)) return "";
   try {
     const [target, hash] = destination.split("#", 2).map(decodeURIComponent);
     if (!target || target.includes(":") || /^[\\/]{2}/.test(target)) return "";
     if (/\.(?:md|markdown)$/i.test(target)) {
-      const relative = target.startsWith("/") ? target : "./" + target;
-      return readingWikiAddress(path, relative + (hash ? "#" + hash : ""));
+      const relative = /^(?:\/|\.\.?\/)/.test(target) ? target : "./" + target;
+      return readingWikiAddress(path, destination, line, { target: relative, anchor: hash || undefined });
     }
     return "omni-file:" + encodeURIComponent(JSON.stringify([path, target]));
   } catch {
     return "";
   }
+}
+
+export function markdownNoteLink(path: string, address: string, sourceLine?: number): NoteTarget | undefined {
+  if (address.startsWith("#")) {
+    if (/^#(?:user-content-)?fn(?:ref)?-/i.test(address)) return;
+    try {
+      const anchor = decodeURIComponent(address.slice(1));
+      if (anchor) return { raw: address, target: "", anchor, embed: false, sourcePath: path, sourceLine, syntax: "markdown" };
+    } catch { return; }
+  }
+  return parseReadingAddress(readingLocalAddress(path, address, sourceLine));
 }
 
 export function parseReadingFile(href: string): [string, string] | undefined {
@@ -366,13 +396,17 @@ export function prepareReading(source: string, path: string, files: readonly Exa
   return readingDocument(source, path, files, resolve, undefined, lineage).markdown;
 }
 
+export type ReadingOrigin = { path: string; line: number };
+
 export function readingDocument(source: string, path: string, files: readonly ExampleFile[], resolve: PreviewLinkResolver = resolveWiki,
-  sourceLine?: number, lineage: readonly string[] = [path]) {
+  sourceLine?: number, lineage: readonly string[] = [path], originOffset = 0) {
   const body = withoutProperties(source);
   const content = byText(body, (text) => text, true);
-  const firstLine = sourceLine === undefined ? 1 : source.slice(0, source.length - body.length).split("\n").length;
+  const firstLine = source.slice(0, source.length - body.length).split("\n").length + originOffset;
   let renderedLine = sourceLine === undefined ? undefined : Math.max(1, sourceLine - firstLine + 1);
+  const expandedOrigins = new Map<number, ReadingOrigin[]>();
   const markdown = byMarkdownLine(content, (line, lineIndex) => {
+    const origin = { path, line: firstLine + lineIndex };
     const wholeEmbed = /^\s*!\[\[([^\]]+)\]\]\s*$/.exec(line)?.[1];
     if (wholeEmbed) {
       const matches = resolve(parseWiki(wholeEmbed, true), path, files);
@@ -385,8 +419,10 @@ export function readingDocument(source: string, path: string, files: readonly Ex
         if (lineage.length >= 4) return "> This transclusion reached the maximum embed depth.";
         const excerptSource = excerpt(note.content, target.anchor);
         if (excerptSource !== undefined) {
-          const embedded = prepareReading(excerptSource, target.path, files, [...lineage, scope], resolve);
-          const rows = embedded.split("\n");
+          const startLine = target.anchor ? anchorLine(note.content, target.anchor) ?? 1 : readableDocument(note.content).firstLine;
+          const embedded = readingDocument(excerptSource, target.path, files, resolve, undefined, [...lineage, scope], startLine - 1);
+          const rows = embedded.markdown.split("\n");
+          expandedOrigins.set(lineIndex, [origin, origin, ...embedded.origins]);
           if (sourceLine !== undefined && renderedLine !== undefined && firstLine + lineIndex < sourceLine) renderedLine += rows.length + 1;
           return `> **Embedded · ${fileName(target.path)}**\n>\n` + rows.map((row) => `> ${row}`).join("\n");
         }
@@ -394,15 +430,16 @@ export function readingDocument(source: string, path: string, files: readonly Ex
     }
     return byText(line, (text) => text.replace(markdownDestination,
       (original, prefix: string, destination: string) => {
-        const url = readingLocalAddress(path, destination.replace(/^<|>$/g, ""));
+        const url = readingLocalAddress(path, destination.replace(/^<|>$/g, ""), origin.line);
         return url ? prefix + url : original;
       })
     .replace(wikiPattern, (_entry: string, embed: string, raw: string) => {
       const { target, alias, anchor } = parseWiki(raw);
       const label = alias ?? (target || anchor || raw);
-      return `[${escapedLabel(label)}](${readingWikiAddress(path, embed + raw)})`;
+      return `[${escapedLabel(label)}](${readingWikiAddress(path, embed + raw, origin.line)})`;
     }).replace(/==([^=]+)==/g, (_match, value: string) => `[${escapedLabel(value)}](omni-mark:${encodeURIComponent(value)})`)
       .replace(/^> \[!([A-Za-z]+)\]\s*(.*)$/, (_match, kind: string, label: string) => `> **${kind}${label ? " · " + label : ""}**`));
   });
-  return { markdown, renderedLine };
+  const origins = content.split("\n").flatMap((_, index) => expandedOrigins.get(index) ?? [{ path, line: firstLine + index }]);
+  return { markdown, renderedLine, origins };
 }

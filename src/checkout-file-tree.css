@@ -1,0 +1,7 @@
+.file-sidebar-scroll:has(> .file-explorer-tree) { display: flex; flex-direction: column; }
+.file-explorer-tree { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.file-tree-blank { flex: 1; min-height: 2rem; }
+.file-tree-row[data-git-ignored] { color: var(--muted-foreground); }
+.file-tree-favorites { margin-bottom: .4rem; }
+.file-tree-favorites h3 { padding: .2rem .375rem; color: var(--muted-foreground); font-size: .7rem; font-weight: 600; }
+.file-tree-favorites small { overflow: hidden; margin-left: auto; color: var(--muted-foreground); text-overflow: ellipsis; }

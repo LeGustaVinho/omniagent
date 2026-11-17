@@ -11,7 +11,7 @@ import { SavedGitDiffs } from "@/git-saved-diffs";
 import { GitWorkspaceFrame, GitWorkspaceTable } from "@/git-workspace-frame";
 import { GitWorktreeDialog, type WorktreeDraft } from "@/git-worktree-dialog";
 import { DeliveryDetailPanel, DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
-import { fileContextActions, readFileHistoryTarget, readWorkingDiffTarget } from "@/file-context-actions";
+import { fileContextActions, openWorkspaceFile, readFileHistoryTarget, readWorkingDiffTarget } from "@/file-context-actions";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type HistoryEntry = { sha: string; author: string; committedAt: string; subject: string };
@@ -63,7 +63,7 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
       {review.error && <div className="p-4"><InlineIssue>{String(review.error)}</InlineIssue></div>}
       {review.data && !review.error && <>
         {tab === "Changes" && <GitCheckoutChanges key={JSON.stringify([checkoutId, requestedFile])} review={review.data} indexActions initialPath={requestedFile}
-          openFile={activeCheckout ? (path) => props.openWorkspace(/\.(md|markdown)$/i.test(path) ? "knowledge" : "ide", path) : undefined}
+          openFile={activeCheckout ? (path, line) => openWorkspaceFile(props.openWorkspace, path, line) : undefined}
           openConversation={activeCheckout ? (id) => props.openWorkspace("conversations", id) : undefined}
           openPanel={activeCheckout ? () => props.openChanges("working") : undefined} />}
         {tab === "Worktrees" && <WorktreeTable review={review.data} project={props.checkout} select={(id, view) => {
@@ -74,7 +74,7 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
         {tab === "Worktrees" && creating && <CreateGitWorktree projectId={props.checkout.projectId} review={review.data}
           select={(id) => { setCreating(false); setCheckout(id); }} close={() => setCreating(false)} />}
         {tab === "History" && (historyPath ? <GitFileHistoryView key={JSON.stringify([checkoutId, historyPath])} review={review.data} path={historyPath}
-          openFile={activeCheckout ? () => props.openWorkspace(/\.(md|markdown)$/i.test(historyPath) ? "knowledge" : "ide", historyPath) : undefined}
+          openFile={activeCheckout ? () => openWorkspaceFile(props.openWorkspace, historyPath) : undefined}
           clear={() => setHistoryPath(undefined)} /> : <CommitHistory key={checkoutId} review={review.data} />)}
       </>}
     </>}

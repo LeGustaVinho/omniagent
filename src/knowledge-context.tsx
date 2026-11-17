@@ -1,0 +1,38 @@
+import { useCallback, useState } from "react";
+import { PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
+import type { EditorExcerpt } from "@/editor-context";
+import type { NoteTarget } from "@/knowledge-document";
+
+export type NoteContextHit = {
+  path: string;
+  line?: number;
+  anchor?: string;
+  link?: NoteTarget;
+  attachment?: { paths: readonly string[]; label: string };
+  tag?: string;
+  excerpt?: EditorExcerpt;
+  property?: { name: string; value: string };
+  mermaid?: string;
+};
+
+export type NoteContextActions = (hit: NoteContextHit) => MenuGroups;
+
+export function noteWikilink(path: string, anchor?: string) {
+  if (/[#\[\]|\r\n]/.test(path) || anchor && /[\[\]|\r\n]/.test(anchor)) return;
+  return `[[${path}${anchor ? `#${anchor}` : ""}]]`;
+}
+
+export function isContextKey(event: KeyboardEvent) {
+  return event.key === "ContextMenu" || event.shiftKey && event.key === "F10";
+}
+
+export function useNoteContextMenu() {
+  const [menu, setMenu] = useState<{ label: string; groups: MenuGroups; point: { x: number; y: number }; focus: () => void }>();
+  const open = useCallback((label: string, groups: MenuGroups | undefined, point: { x: number; y: number }, focus: () => void) => {
+    if (!groups?.some((group) => group.length)) return false;
+    setMenu({ label, groups, point, focus });
+    return true;
+  }, []);
+  return { open, overlay: menu && <PositionedContextActions label={menu.label} groups={menu.groups} point={menu.point}
+    onClose={() => setMenu(undefined)} restoreFocus={menu.focus} /> };
+}

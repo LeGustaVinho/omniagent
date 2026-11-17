@@ -18,7 +18,9 @@ use super::{
 };
 
 mod links;
-pub use links::replace_wiki_note_reference;
+pub use links::{
+    replace_markdown_note_reference, replace_wiki_note_reference, replace_wiki_note_reference_at,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
