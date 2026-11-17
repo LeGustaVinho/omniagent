@@ -20,6 +20,7 @@ pub mod process_io;
 mod protection;
 pub mod providers;
 pub mod repository;
+pub mod restore;
 pub mod runner;
 pub mod runs;
 mod runtime_inspection;

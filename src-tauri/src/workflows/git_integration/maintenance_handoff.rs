@@ -1,13 +1,16 @@
 use sha2::{Digest, Sha256};
 
-use crate::workflows::{
-    ApprovalDecisionSource, BuiltinNode, DeliveryRoles,
-    builtin::{BUILTIN_DELIVERY_ID, MAINTENANCE_ACTIVATION_ID},
-    maintenance::{
-        MaintenanceActivationMode, MaintenanceActivationRequest, MaintenanceBuild,
-        MaintenanceConfiguration, MaintenanceHandoffRequest,
+use crate::{
+    restore,
+    workflows::{
+        ApprovalDecisionSource, BuiltinNode, DeliveryRoles,
+        builtin::{BUILTIN_DELIVERY_ID, MAINTENANCE_ACTIVATION_ID},
+        maintenance::{
+            MaintenanceActivationMode, MaintenanceActivationRequest, MaintenanceBuild,
+            MaintenanceConfiguration, MaintenanceHandoffRequest,
+        },
+        tests::{approve_reviewed_plan_fixture, link_reviewed_plan_fixture},
     },
-    tests::{approve_reviewed_plan_fixture, link_reviewed_plan_fixture},
 };
 
 use super::*;
@@ -33,8 +36,9 @@ if ($LASTEXITCODE -ne 0) { exit 40 }
 async fn maintenance_uses_the_verified_source_and_requires_a_user_selected_fixture_activation()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let database = temp.path().join("maintenance.sqlite");
-    let package_root = temp.path().join("packages");
+    let installed = restore::open_installation(&temp.path().join("installed"))?;
+    let database = installed.layout.database_path();
+    let package_root = installed.layout.maintenance_packages();
     let store = Store::open(database.clone())?;
     let repo = approved_delivery_repository(&store, temp.path()).await?;
     let project = &repo.project_id;
@@ -365,9 +369,45 @@ async fn maintenance_uses_the_verified_source_and_requires_a_user_selected_fixtu
         .await?;
     assert!(
         store
-            .activate_maintenance_fixture(activation, package_root)
+            .activate_maintenance_fixture(activation, package_root.clone())
             .await
             .is_err()
     );
+
+    let checkpoint = store.workflow_maintenance(project.clone()).await?.handoffs;
+    assert!(checkpoint.contains(&recorded));
+    let backup = store
+        .create_application_backup(
+            installed.identity.clone(),
+            package_root,
+            temp.path().to_owned(),
+        )
+        .await?;
+    let preview = restore::preview_restore(&installed.identity, &backup.root)?;
+    assert_eq!(preview.package_count, checkpoint.len());
+    assert_eq!(preview.manifest_sha256, backup.manifest_sha256);
+    let receipt =
+        restore::stage_restore(&installed.identity, &backup.root, &preview.manifest_sha256)?;
+    assert_eq!(receipt.checkpoint_id, backup.manifest.checkpoint_id);
+    fs::write(&package_path, b"new live contents")?;
+    drop(store);
+
+    let restored = restore::open_installation(installed.layout.app_data())?;
+    assert_eq!(restored.restore.active, Some(receipt));
+    let store = Store::open(restored.layout.database_path())?;
+    assert_eq!(
+        store.workflow_maintenance(project.clone()).await?.handoffs,
+        checkpoint
+    );
+    assert_eq!(
+        fs::read(
+            restored
+                .layout
+                .maintenance_packages()
+                .join(format!("{}.package", handoff.id))
+        )?,
+        expected
+    );
+    assert_eq!(fs::read(package_path)?, b"new live contents");
     Ok(())
 }

@@ -78,6 +78,35 @@ it("shows reported CLI permissions independently of Windows sandbox support", as
   expect(screen.getByText("Windows command sandbox").nextElementSibling?.textContent).toBe("Unsupported for this CLI on the Windows host");
 });
 
+it("stages the verified backup only after confirmation and reports the pending restart", async () => {
+  const archive = "C:\\Backups\\OmniAgent checkpoint";
+  const receipt = { checkpointId: "checkpoint-123", schemaBefore: 111, schemaAfter: 112 };
+  let pending: typeof receipt | null = null;
+  getVersion.mockResolvedValue("0.1.0");
+  invoke.mockImplementation(async (command: string) => {
+    switch (command) {
+      case "appearance_settings": return defaultAppearance;
+      case "runtime_status": return "Desktop runtime is ready.";
+      case "ripgrep_status": return { configuredExecutable: null, executable: null, version: null };
+      case "desktop_cli_prerequisites": return { git: {}, providers: [] };
+      case "application_restore_status": return { active: null, pending, rejection: null };
+      case "preview_application_restore": return {
+        archive, preview: { checkpointId: receipt.checkpointId, schemaVersion: 111, manifestSha256: "a".repeat(64), packageCount: 2 },
+      };
+      case "stage_application_restore": return pending = receipt;
+      default: throw new Error(`Unexpected command ${command}`);
+    }
+  });
+  openSettings({ initialPage: "system", simulation: null });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Preview restore" }));
+  expect(await screen.findByText(archive)).toBeTruthy();
+  expect(invoke.mock.calls.some(([command]) => command === "stage_application_restore")).toBe(false);
+  await user.click(screen.getByRole("button", { name: "Stage restore for next restart" }));
+  expect(invoke).toHaveBeenCalledWith("stage_application_restore", { archive, manifestSha256: "a".repeat(64) });
+  expect(await screen.findByText(/Restore staged\. Quit OmniAgent/)).toBeTruthy();
+});
+
 it("saves Git automation independently of its completion milestone and destination drift policy", async () => {
   invoke.mockImplementation(async (command: string, args?: { policy?: unknown }) => {
     switch (command) {

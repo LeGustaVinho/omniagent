@@ -1,8 +1,9 @@
 [CmdletBinding()]
-param([string]$Revision = 'HEAD', [switch]$BuildOnly)
+param([string]$Revision = 'HEAD', [switch]$BuildOnly, [switch]$RequireInstallationIdentity)
 
 # Run with PowerShell 7. The case builds a separate product with its own app profile.
 # OMNIAGENT_TAURI_DRIVER and OMNIAGENT_EDGE_DRIVER override driver lookup on PATH.
+# -RequireInstallationIdentity requires an unchanged installation.dpapi across both boots.
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../..')).Path
 $commit = git -C $repo rev-parse --verify "$Revision^{commit}"
@@ -22,7 +23,12 @@ if ($LASTEXITCODE) { throw 'Cannot archive the verified source' }
 tar -xf $archive -C $snapshot
 if ($LASTEXITCODE) { throw 'Cannot extract the source snapshot' }
 $case = Join-Path $scratch 'case.json'
-@{ sourceCommit = $commit; product = $product; identifier = $identifier } |
+@{
+    sourceCommit = $commit
+    product = $product
+    identifier = $identifier
+    requireInstallationIdentity = $RequireInstallationIdentity.IsPresent
+} |
     ConvertTo-Json | Set-Content -LiteralPath $case -Encoding utf8NoBOM
 Write-Output "NSIS test artifacts are in $scratch"
 

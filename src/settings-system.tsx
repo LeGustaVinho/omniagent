@@ -154,7 +154,7 @@ export function SystemSettings({
         </dl>
       </SystemGroup>
       <IntegrationNotice start={startSimulation} scenario="windows">
-        Release qualification, recovery snapshots and signed activation depend on the Windows maintenance service.
+        Try the example installation and update recovery flows.
       </IntegrationNotice>
       <SystemGroup icon={<ShieldCheck size={18} />} id="qualification" title="Prerequisites and qualification">
         <p>Windows 10 22H2 or Windows 11 x64, WebView2, Git for Windows, ripgrep and a supported provider CLI.</p>
@@ -165,6 +165,7 @@ export function SystemSettings({
       <SystemGroup icon={<ArchiveRestore size={18} />} id="backup" title="Backup and restore">
         <p>A backup includes local settings, run history and protected artifacts. Restore checks the original Windows account and OmniAgent installation.</p>
         <ApplicationBackup />
+        <ApplicationRestore />
       </SystemGroup>
       <SystemGroup icon={<RefreshCw size={18} />} id="updates" title="Updates and recovery">
         <p>Review the candidate version, Git revision, signature and approvals before applying an update.</p>
@@ -191,6 +192,73 @@ function ApplicationBackup() {
     </Button>
     {backup.data && <p role="status" className="settings-result">Verified backup saved to <code>{backup.data.root}</code></p>}
     {backup.error && <p role="alert" className="settings-result settings-result-error">{String(backup.error)}</p>}
+  </>;
+}
+
+type RestoreReceipt = { checkpointId: string; schemaBefore: number; schemaAfter: number };
+type RestoreStatus = { active: RestoreReceipt | null; pending: RestoreReceipt | null; rejection: string | null };
+type SelectedBackup = {
+  archive: string;
+  preview: { checkpointId: string; schemaVersion: number; manifestSha256: string; packageCount: number };
+};
+
+function ApplicationRestore() {
+  const client = useQueryClient();
+  const [selection, setSelection] = useState<SelectedBackup>();
+  const statusKey = ["application-restore-status"];
+  const status = useQuery({
+    queryKey: statusKey,
+    queryFn: () => invoke<RestoreStatus>("application_restore_status"),
+  });
+  const preview = useMutation({
+    mutationFn: () => invoke<SelectedBackup | null>("preview_application_restore"),
+    onSuccess: (selected) => {
+      if (selected) setSelection(selected);
+    },
+  });
+  const stage = useMutation({
+    mutationFn: (selected: SelectedBackup) => invoke<RestoreReceipt>("stage_application_restore", {
+      archive: selected.archive,
+      manifestSha256: selected.preview.manifestSha256,
+    }),
+    onSuccess: (receipt) => {
+      setSelection(undefined);
+      client.setQueryData<RestoreStatus>(statusKey, (old) => ({
+        active: old?.active ?? null,
+        pending: receipt,
+        rejection: null,
+      }));
+      void client.invalidateQueries({ queryKey: statusKey });
+    },
+  });
+  const pending = status.data?.pending;
+  const active = status.data?.active;
+  const busy = preview.isPending || stage.isPending;
+  const error = preview.error ?? stage.error ?? status.error;
+  return <>
+    <Button type="button" variant="outline" disabled={busy || Boolean(pending)} onClick={() => {
+      stage.reset();
+      setSelection(undefined);
+      preview.mutate();
+    }}>
+      {preview.isPending ? "Verifying backup…" : "Preview restore"}
+    </Button>
+    {selection && !pending && <>
+      <dl className="settings-facts">
+        <dt>Archive</dt><dd><code>{selection.archive}</code></dd>
+        <dt>Verified checkpoint</dt><dd><code>{selection.preview.checkpointId}</code></dd>
+        <dt>Database schema</dt><dd>{selection.preview.schemaVersion}</dd>
+        <dt>Maintenance packages</dt><dd>{selection.preview.packageCount}</dd>
+      </dl>
+      <p>Restoring this checkpoint replaces the settings, history and evidence available in the app after restart.</p>
+      <Button type="button" disabled={busy} onClick={() => stage.mutate(selection)}>
+        {stage.isPending ? "Staging restore…" : "Stage restore for next restart"}
+      </Button>
+    </>}
+    {pending && <p role="status" className="settings-result">Restore staged. Quit OmniAgent from the tray and reopen it to apply checkpoint <code>{pending.checkpointId}</code>.</p>}
+    {active && <p className="settings-result">Restored checkpoint <code>{active.checkpointId}</code>.</p>}
+    {status.data?.rejection && <p role="alert" className="settings-result settings-result-error">{status.data.rejection}</p>}
+    {error && <p role="alert" className="settings-result settings-result-error">{String(error)}</p>}
   </>;
 }
 

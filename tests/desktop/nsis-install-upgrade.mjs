@@ -17,7 +17,8 @@ assert.equal(process.arch, "x64");
 assert.ok(process.argv[2], "Usage: node tests/desktop/nsis-install-upgrade.mjs <case.json>");
 const caseFile = resolve(process.argv[2]);
 const scratch = dirname(caseFile);
-const { product, identifier, sourceCommit } = JSON.parse(await readFile(caseFile, "utf8"));
+const { product, identifier, sourceCommit, requireInstallationIdentity = false } = JSON.parse(await readFile(caseFile, "utf8"));
+assert.equal(typeof requireInstallationIdentity, "boolean");
 const tag = /^OmniAgent NSIS Test ([a-f0-9]{10})$/.exec(product)?.[1];
 assert.ok(tag, "A unique NSIS test product name is required");
 assert.equal(identifier, `io.github.legustavinho.omniagent.nsis-test-${tag}`);
@@ -25,6 +26,7 @@ assert.match(sourceCommit, /^[a-f0-9]{40}$/);
 const dataRoot = join(process.env.LOCALAPPDATA, identifier);
 const installedRoot = join(process.env.LOCALAPPDATA, product);
 const database = join(dataRoot, "omniagent.sqlite3");
+const installationIdentity = join(dataRoot, "installation.dpapi");
 const uninstallKey = `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${product}`;
 const bundleRoot = join(scratch, "installers");
 const sourceConfig = JSON.parse(await readFile(join(scratch, "source", "src-tauri", "tauri.conf.json"), "utf8"));
@@ -186,6 +188,10 @@ try {
   });
   const { checkout } = opened;
   assert.equal(await realpath(database), database);
+  if (requireInstallationIdentity || existsSync(installationIdentity)) {
+    assert.equal(await realpath(installationIdentity), installationIdentity);
+    receipt.installationIdentitySha256 = await sha256(installationIdentity);
+  }
   receipt.firstInstall = { ...first, ...opened };
 
   const upgrade = await install("0.1.1");
@@ -197,6 +203,10 @@ try {
     return verifyBuild(browser, checkout.projectId);
   });
   assert.equal(await realpath(database), database);
+  if (receipt.installationIdentitySha256) {
+    assert.equal(await realpath(installationIdentity), installationIdentity);
+    assert.equal(await sha256(installationIdentity), receipt.installationIdentitySha256);
+  }
   assert.equal(await readFile(join(repo, "brief.md"), "utf8"), "# Installer acceptance fixture\n");
   receipt.upgrade = { ...upgrade, build: runningUpgrade, restoredCheckoutId: checkout.checkoutId };
 } finally {

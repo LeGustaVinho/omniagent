@@ -1,11 +1,12 @@
 use omniagent::{
+    restore::InstallationLayout,
     store::Store,
     workflows::maintenance::{
         MaintenanceActivationRequest, MaintenanceConfiguration, MaintenanceHandoff,
         MaintenanceHandoffRequest, MaintenanceSettings, WorkflowMaintenance,
     },
 };
-use tauri::{Manager, State};
+use tauri::State;
 
 use super::report;
 
@@ -32,32 +33,24 @@ pub async fn set_workflow_maintenance(
 
 #[tauri::command]
 pub async fn create_maintenance_handoff(
-    app: tauri::AppHandle,
+    layout: State<'_, InstallationLayout>,
     store: State<'_, Store>,
     request: MaintenanceHandoffRequest,
 ) -> Result<MaintenanceHandoff, String> {
-    let root = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|error| error.to_string())?;
     store
-        .create_maintenance_handoff(request, root.join("maintenance-packages"))
+        .create_maintenance_handoff(request, layout.maintenance_packages())
         .await
         .map_err(report)
 }
 
 #[tauri::command]
 pub async fn activate_maintenance_fixture(
-    app: tauri::AppHandle,
+    layout: State<'_, InstallationLayout>,
     store: State<'_, Store>,
     request: MaintenanceActivationRequest,
 ) -> Result<MaintenanceHandoff, String> {
-    let root = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|error| error.to_string())?;
     store
-        .activate_maintenance_fixture(request, root.join("maintenance-packages"))
+        .activate_maintenance_fixture(request, layout.maintenance_packages())
         .await
         .map_err(report)
 }

@@ -248,7 +248,11 @@ impl Store {
     }
 }
 
-fn open_database(path: &Path) -> Result<Connection> {
+pub(crate) fn current_schema_version() -> u32 {
+    MIGRATIONS.len() as u32
+}
+
+pub(crate) fn open_database(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }

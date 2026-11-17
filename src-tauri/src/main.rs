@@ -216,8 +216,8 @@ fn main() {
         .on_window_event(desktop::hide_main_on_close)
         .on_webview_event(conversation_attachment_ipc::retain_attachment_drop)
         .setup(|app| {
-            let path = app.path().app_local_data_dir()?.join("omniagent.sqlite3");
-            let store = Store::open(path)?;
+            let installation = omniagent::restore::open_installation(&app.path().app_local_data_dir()?)?;
+            let store = Store::open(installation.layout.database_path())?;
             tauri::async_runtime::block_on(store.recover_agent_attempts_after_restart())?;
             if let Err(error) =
                 tauri::async_runtime::block_on(store.retire_local_attachments_after_restart())
@@ -236,6 +236,8 @@ fn main() {
                 )
             });
             app.manage(store);
+            app.manage(installation.identity);
+            app.manage(installation.layout);
             app.manage(conversation_attachment_ipc::AttachmentDropReceipts::default());
             app.manage(scheduler);
             app.manage(ipc::EventSubscriptions::default());
@@ -251,6 +253,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             runtime_status,
             backup_ipc::create_application_backup,
+            backup_ipc::preview_application_restore,
+            backup_ipc::stage_application_restore,
+            backup_ipc::application_restore_status,
             register_project,
             provision_task_worktree,
             set_project_worktree_root,
