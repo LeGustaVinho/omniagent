@@ -79,6 +79,7 @@ impl CliAdapter for ClaudeAdapter {
             goal_command: None,
             composer_commands: None,
             question_route: Default::default(),
+            output_schema: None,
         }))
     }
 }
@@ -97,6 +98,7 @@ struct ClaudeSession {
     goal_command: Option<bool>,
     composer_commands: Option<Vec<ComposerCommand>>,
     question_route: super::questions::QuestionRoute,
+    output_schema: Option<String>,
 }
 
 #[derive(Default)]
@@ -610,7 +612,11 @@ impl ClaudeSession {
             ));
         }
         if outcome == TurnOutcome::Completed {
-            let final_text = string(frame, "result").filter(|text| !text.trim().is_empty());
+            let final_text = if self.output_schema.is_some() {
+                frame.get("structured_output").map(Value::to_string)
+            } else {
+                string(frame, "result").filter(|text| !text.trim().is_empty())
+            };
             if !turn.saw_final_message
                 && let Some(text) = &final_text
             {
@@ -655,6 +661,16 @@ impl ClaudeSession {
 }
 
 impl CliSession for ClaudeSession {
+    fn configure_output_schema(&mut self, schema: &Value) -> Result<()> {
+        let schema = schema.to_string();
+        ensure!(
+            schema.encode_utf16().count() <= 16 * 1024,
+            "The output Schema is too large for the Claude Code command line"
+        );
+        self.output_schema = Some(schema);
+        Ok(())
+    }
+
     fn reported_cli_permission(&self) -> Option<&'static str> {
         self.permission_mode_reported
             .then(|| self.permission_mode())
@@ -727,6 +743,9 @@ impl CliSession for ClaudeSession {
         ]);
         if self.request.mode == SessionMode::Plan {
             arguments.extend(args(["--permission-prompt-tool", "stdio"]));
+        }
+        if let Some(schema) = &self.output_schema {
+            arguments.extend(args(["--json-schema", schema]));
         }
         if self.suggestion_enabled {
             arguments.push("--prompt-suggestions".into());
@@ -903,7 +922,10 @@ impl CliSession for ClaudeSession {
             Some("result") => {
                 let outcome = if self.turn.as_ref().is_some_and(|turn| turn.interrupted) {
                     TurnOutcome::Interrupted
-                } else if frame["is_error"] == false && frame["subtype"] == "success" {
+                } else if frame["is_error"] == false
+                    && frame["subtype"] == "success"
+                    && (self.output_schema.is_none() || frame["structured_output"].is_object())
+                {
                     TurnOutcome::Completed
                 } else {
                     TurnOutcome::Failed
@@ -916,7 +938,7 @@ impl CliSession for ClaudeSession {
                                 frame["errors"][0]
                                     .as_str()
                                     .or(frame["result"].as_str())
-                                    .unwrap_or("Claude turn failed"),
+                                    .unwrap_or("Claude turn did not produce the requested result"),
                             ),
                         },
                     )
@@ -1095,6 +1117,10 @@ mod tests {
     }
 
     fn session(checkout: &Path) -> Result<Box<dyn CliSession>> {
+        session_with_schema(checkout, None)
+    }
+
+    fn session_with_schema(checkout: &Path, schema: Option<&Value>) -> Result<Box<dyn CliSession>> {
         let mut adapter = ClaudeAdapter.create_session(SessionRequest {
             checkout: checkout.into(),
             intent: SessionIntent::Start,
@@ -1102,6 +1128,9 @@ mod tests {
             model: Some("claude-haiku-5-5".into()),
             effort: None,
         })?;
+        if let Some(schema) = schema {
+            adapter.configure_output_schema(schema)?;
+        }
         adapter.start()?;
         receive(
             &mut *adapter,
@@ -1126,6 +1155,37 @@ mod tests {
             }),
         )?;
         Ok(adapter)
+    }
+
+    #[test]
+    fn structured_turn_uses_claudes_native_result_envelope() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let schema = json!({
+            "type":"object",
+            "properties":{"title":{"type":"string"}},
+            "required":["title"],
+            "additionalProperties":false
+        });
+        let mut adapter = session_with_schema(checkout.path(), Some(&schema))?;
+        let args = adapter.arguments();
+        let pair = args
+            .windows(2)
+            .find(|pair| pair[0] == "--json-schema")
+            .context("Claude structured turn lost its Schema argument")?;
+        assert_eq!(pair[1], OsString::from(schema.to_string()));
+        let update = receive(
+            &mut *adapter,
+            json!({
+                "type":"result", "subtype":"success", "is_error":false,
+                "session_id":"session", "uuid":"result", "result":"Provider preamble",
+                "structured_output":{"title":"Report"}
+            }),
+        )?;
+        assert!(update.events.iter().any(|event| {
+            matches!(&event.data, ProviderEventData::AssistantFinal { text }
+                if text == r#"{"title":"Report"}"#)
+        }));
+        Ok(())
     }
 
     #[test]

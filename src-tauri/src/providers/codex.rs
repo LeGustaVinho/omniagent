@@ -99,6 +99,7 @@ impl CliAdapter for CodexAdapter {
             prediction: None,
             model_pages: Vec::new(),
             workspace_instructions: None,
+            output_schema: None,
             model_cursors: HashSet::new(),
             approvals: HashMap::new(),
             questions: HashMap::new(),
@@ -340,6 +341,7 @@ struct CodexSession {
     prediction: Option<Prediction>,
     model_pages: Vec<ReportedModel>,
     workspace_instructions: Option<String>,
+    output_schema: Option<Value>,
     model_cursors: HashSet<String>,
     approvals: HashMap<RequestId, Approval>,
     questions: HashMap<RequestId, super::questions::QuestionForm>,
@@ -1581,6 +1583,11 @@ impl CodexSession {
 }
 
 impl CliSession for CodexSession {
+    fn configure_output_schema(&mut self, schema: &Value) -> Result<()> {
+        self.output_schema = Some(schema.clone());
+        Ok(())
+    }
+
     fn reported_cli_permission(&self) -> Option<&'static str> {
         self.session.as_ref().map(|_| self.sandbox().0)
     }
@@ -1817,6 +1824,9 @@ impl CliSession for CodexSession {
             items.push(attachment.block(Provider::Codex)?);
         }
         let mut params = json!({ "threadId": session.id, "input": items });
+        if let Some(schema) = &self.output_schema {
+            params["outputSchema"] = schema.clone();
+        }
         if let Some(effort) = &self.request.effort {
             params["effort"] = json!(effort);
         }
@@ -2149,6 +2159,28 @@ mod tests {
 
     fn outbound(update: &AdapterUpdate, index: usize) -> Result<Value> {
         Ok(serde_json::from_slice(update.outbound[index].as_bytes())?)
+    }
+
+    #[test]
+    fn structured_turn_passes_the_schema_to_the_app_server() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = negotiate(SessionMode::ReadOnly, SessionIntent::Start, checkout.path())?;
+        let schema = json!({
+            "type":"object",
+            "properties":{"title":{"type":"string"}},
+            "required":["title"],
+            "additionalProperties":false
+        });
+        session.configure_output_schema(&schema)?;
+        let turn = session.send(TurnInput {
+            message_id: "typed-turn".into(),
+            text: "Summarize".into(),
+            attachments: Vec::new(),
+        })?;
+        let frame = outbound(&turn, 0)?;
+        assert_eq!(frame["method"], "turn/start");
+        assert_eq!(frame["params"]["outputSchema"], schema);
+        Ok(())
     }
 
     #[test]

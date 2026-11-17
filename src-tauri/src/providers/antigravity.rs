@@ -78,6 +78,7 @@ impl CliAdapter for AntigravityAdapter {
             goal_command: None,
             bridge: None,
             prompt_capabilities: Value::Null,
+            output_schema: None,
         }))
     }
 }
@@ -238,6 +239,7 @@ struct ReportedTool {
 
 struct AcpSession {
     request: SessionRequest,
+    output_schema: Option<Value>,
     rpc: Rpc<Request>,
     handshake_started: bool,
     ready: bool,
@@ -877,6 +879,13 @@ impl AcpSession {
 }
 
 impl CliSession for AcpSession {
+    fn configure_output_schema(&mut self, schema: &Value) -> Result<()> {
+        // The CLI exposes --json-schema in print mode. ACP retains host approval of
+        // tool requests and launches with default executable customizations disabled.
+        self.output_schema = Some(schema.clone());
+        Ok(())
+    }
+
     fn reported_cli_permission(&self) -> Option<&'static str> {
         let mode = self.required_mode();
         (self.ready && self.configuration.current(Setting::Mode) == Some(mode)).then_some(mode)
@@ -955,7 +964,7 @@ impl CliSession for AcpSession {
         });
         let asked_for_plan = self.request.mode == SessionMode::Plan
             && (explicit_plan || (self.plan_command_available && !other_advertised_command));
-        let text = if asked_for_plan {
+        let mut text = if asked_for_plan {
             let prefix = if explicit_plan { "" } else { "/plan " };
             format!(
                 "{prefix}{}\n\n{}",
@@ -965,6 +974,12 @@ impl CliSession for AcpSession {
         } else {
             input.text
         };
+        if let Some(schema) = &self.output_schema {
+            text.push_str(
+                "\n\nReturn exactly one JSON object matching this output JSON Schema. Do not include Markdown fences or additional text.\n",
+            );
+            text.push_str(&schema.to_string());
+        }
         let mut prompt = Vec::new();
         if !text.is_empty() || input.attachments.is_empty() {
             prompt.push(json!({"type":"text", "text":text}));
@@ -1178,6 +1193,48 @@ mod tests {
             {"id":"mode","type":"select","currentValue":mode,
                 "options":[{"value":"default"},{"value":"plan"}]}
         ]})
+    }
+
+    #[test]
+    fn structured_turn_sends_the_schema_in_the_scoped_acp_prompt() -> Result<()> {
+        let checkout = tempfile::tempdir()?;
+        let mut session = AntigravityAdapter.create_session(SessionRequest {
+            checkout: checkout.path().into(),
+            mode: SessionMode::ReadOnly,
+            intent: SessionIntent::Start,
+            model: None,
+            effort: None,
+        })?;
+        let schema =
+            json!({"type":"object","properties":{},"required":[],"additionalProperties":false});
+        session.configure_output_schema(&schema)?;
+        assert!(
+            session
+                .arguments()
+                .contains(&"--include-default-customizations=false".into())
+        );
+        session.start()?;
+        receive(
+            &mut *session,
+            json!({"id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}),
+        )?;
+        receive(
+            &mut *session,
+            json!({"id":2,"result":results("argon","medium","plan")}),
+        )?;
+        let request = session.send(TurnInput {
+            attachments: Vec::new(),
+            message_id: "typed-message".into(),
+            text: "Summarize".into(),
+        })?;
+        let frame = message(&request)?;
+        assert_eq!(frame["method"], "session/prompt");
+        let text = frame["params"]["prompt"][0]["text"]
+            .as_str()
+            .context("ACP structured prompt did not contain text")?;
+        assert!(text.starts_with("Summarize\n\nReturn exactly one JSON object"));
+        assert!(text.ends_with(&schema.to_string()));
+        Ok(())
     }
 
     #[test]

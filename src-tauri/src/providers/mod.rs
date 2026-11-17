@@ -647,6 +647,9 @@ pub trait CliSession: Send {
     fn set_checkout_root(&mut self, _root: &Path) {}
     fn allow_native_fork_fallback(&mut self) {}
     fn set_question_route(&mut self, _route: questions::QuestionRoute) {}
+    fn configure_output_schema(&mut self, _schema: &Value) -> anyhow::Result<()> {
+        anyhow::bail!("This adapter has no structured workflow output route")
+    }
     fn configure_mcp_bridge(&mut self, _launch: crate::mcp_bridge::BridgeLaunch) {}
     fn set_workspace_instructions(&mut self, _instructions: String) -> anyhow::Result<()> {
         anyhow::bail!("this adapter does not accept protocol instruction projection")
