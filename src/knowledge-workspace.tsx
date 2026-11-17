@@ -17,11 +17,12 @@ import { useCheckoutConversationActions } from "@/checkout-conversation-actions"
 import { changedItemPath, itemIncludesPath, useCheckoutItemOperations } from "@/checkout-item-operations";
 import { useCheckoutFileComparison } from "@/checkout-file-comparison";
 import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
-import { reconcileFavoriteItems } from "@/checkout-favorites";
+import { checkoutFavoriteKey, reconcileFavoriteItems, setCheckoutFavorites, useCheckoutFavorites,
+  type CheckoutNoteFavorite } from "@/checkout-favorites";
 import { deliveryNote, exampleNotes, fileName, findFileText, normalizeRepositoryPath, type ExampleFile } from "@/ide-knowledge-data";
 import {
-  anchorLine, getProperties, headings, noteAnchorExcerpt, parseReadingAddress, readingLocalAddress, repairWikiAddress, resolveWiki, rewriteNoteReferences,
-  updateProperty, wikiLinks, type NoteLocation, type NoteTarget,
+  anchorLine, favoriteAnchorLine, getProperties, headings, noteAnchorExcerpt, noteAnchorIdentity, parseReadingAddress, readingLocalAddress, repairWikiAddress, resolveWiki, rewriteNoteReferences,
+  updateProperty, wikiLinks, type NoteAnchorKind, type NoteLocation, type NoteTarget,
 } from "@/knowledge-document";
 import { AttachmentPreview, downloadNoteDiagramPng, noteAttachments, type NoteAttachment } from "@/knowledge-media";
 import { noteWikilink, type NoteContextHit, type NoteSelection } from "@/knowledge-context";
@@ -143,6 +144,9 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const lastTarget = useRef(simulated && !initialTarget?.line && !initialWindowPath ? target : undefined);
   const lastOpen = useRef(0);
   const { load: loadNote, watch: watchNote, getNote } = repository;
+  const favoritesId = simulated ? "example" : checkout.checkoutId;
+  const { favorites } = useCheckoutFavorites(favoritesId);
+  const favoriteKeys = useMemo(() => new Set(favorites.map(checkoutFavoriteKey)), [favorites]);
   const active = dock.path;
   const note = active ? notes[active] : undefined;
   const savedNote = active ? repository.notes[active] : undefined;
@@ -459,6 +463,22 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       for (const path of next) void loadNote(path).then((canonical) => { if (canonical) watchNote(canonical); });
     },
   });
+  const openNoteFavorite = (favorite: CheckoutNoteFavorite) => {
+    const navigate = (path: string | undefined) => {
+      const content = path ? (simulated ? examples[path] : getNote(path))?.content : undefined;
+      const line = content === undefined ? undefined : favoriteAnchorLine(content, favorite.kind, favorite.anchor, favorite.occurrence);
+      if (!path || line === undefined) {
+        setProblem("The saved " + favorite.kind + " was not found in " + favorite.path + ".");
+        return;
+      }
+      setProblem("");
+      open(path, line);
+    };
+    if (simulated) { navigate(favorite.path); return; }
+    const request = ++lastOpen.current;
+    void loadNote(favorite.path).then((path) => { if (request === lastOpen.current) navigate(path); });
+  };
+
   const startFromSavedNote = (path: string, kind: "plan" | "launch") => {
     void loadNote(path).then((canonical) => {
       const selected = canonical ? getNote(canonical) : undefined;
@@ -507,7 +527,19 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     open(path, anchor ? anchorLine(targetSource, anchor) : undefined, anchor);
   };
   const openLocation = ({ path, line, anchor }: KnowledgeLocation) => open(path, line ?? undefined, anchor ?? undefined);
-  const locationActions = ({ path, line, anchor }: KnowledgeLocation) => [
+  const anchorFavoriteActions = (path: string, label: string, kind: NoteAnchorKind, line?: number): MenuGroups[number] => {
+    const content = (simulated ? examples[path] : getNote(path))?.content;
+    const identity = content === undefined ? undefined : noteAnchorIdentity(content, kind, label, line);
+    if (!identity) return [];
+    const favorite = { kind, path, label, ...identity };
+    const saved = favoriteKeys.has(checkoutFavoriteKey(favorite));
+    return [{
+      label: saved ? "Remove " + kind + " from favorites" : "Add " + kind + " to favorites",
+      run: () => setCheckoutFavorites(favoritesId, [favorite], saved),
+    }];
+  };
+  const locationActions = ({ path, line, anchor }: KnowledgeLocation, kind?: NoteAnchorKind) => [
+    ...(anchor ? anchorFavoriteActions(path, anchor, kind ?? (anchor.startsWith("^") ? "block" : "heading"), line ?? undefined) : []),
     { label: "Open to the side", run: () => open(path, line ?? undefined, anchor ?? undefined, "side") },
     { label: "Reveal in note tree", run: () => { setSidebar(true); setDisplay("tree"); setReveal({ path }); } },
     ...(!/[#\[\]|]/.test(path) && (!anchor || !/[\[\]|]/.test(anchor)) ? [
@@ -585,7 +617,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       label: "Rename tag in checkout…", run: () => setDialog({ kind: "tagRename", tag, ownerPanel }),
     }] : []),
   ];
-  const noteContextActions = ({ path, line, anchor, link, attachment, tag, excerpt, selection: noteSelection, property, mermaid, diagramImage }: NoteContextHit, reading: boolean, ownerPanel?: FilePanelApi): MenuGroups => {
+  const noteContextActions = ({ path, line, anchor, anchorKind, anchorLine: hitAnchorLine, link, attachment, tag, excerpt, selection: noteSelection, property, mermaid, diagramImage }: NoteContextHit, reading: boolean, ownerPanel?: FilePanelApi): MenuGroups => {
     const groups: MenuGroups[number][] = [];
     if (attachment && !simulated) groups.push(...attachmentActions(attachment.paths, attachment.label));
     if (link) {
@@ -611,8 +643,9 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     if (anchor) {
       const reference = noteWikilink(path, anchor);
       const block = notes[path] && noteAnchorExcerpt(notes[path].content, anchor);
-      const kind = anchor.startsWith("^") ? "block" : "heading";
+      const kind = anchorKind ?? (anchor.startsWith("^") ? "block" : "heading");
       groups.push([
+        ...anchorFavoriteActions(path, anchor, kind, hitAnchorLine ?? line),
         ...(reference ? [{ label: `Copy ${kind} wikilink`,
           run: () => menu.copy(reference, "Copied wikilink") }] : []),
         { label: "Open reference to the side", run: () => open(path, line, anchor, "side") },
@@ -723,7 +756,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
           {display === "search" ? <KnowledgeSearch query={query} onQueryChange={setQuery} results={matches}
             pending={!simulated && noteIndex.searching} error={!simulated && noteIndex.error ? String(noteIndex.error) : undefined}
             focusRequest={focusSearch} onOpen={openLocation} />
-            : <FileTree paths={catalog.map(({ path }) => path)} folders={treeActions.folders} active={active} onOpen={open} checkoutId={checkout.checkoutId} workspace="knowledge" simulated={simulated} reveal={reveal} actions={(item, selection) => selection ? [
+            : <FileTree paths={catalog.map(({ path }) => path)} folders={treeActions.folders} active={active} onOpen={open} onOpenNoteFavorite={openNoteFavorite} checkoutId={checkout.checkoutId} workspace="knowledge" simulated={simulated} reveal={reveal} actions={(item, selection) => selection ? [
               [
                 { label: "Open selected notes", disabled: !selection.some(({ kind }) => kind === "file"),
                   run: () => { void openSelected(selection.filter(({ kind }) => kind === "file").map(({ path }) => path)); } },
@@ -822,7 +855,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                       {selectedMode === "reading" && <Reading path={path} content={entry.content} files={catalog} jump={jumps[path]} onLink={onLink}
                         checkoutId={simulated ? undefined : checkout.checkoutId} sampleAttachments={simulated}
                         resolveLinks={simulated ? undefined : lookupLink}
-                        previewFor={simulated ? undefined : previewNote} contextActions={(hit) => noteContextActions(hit, true)}
+                        previewFor={simulated ? undefined : previewNote} contextActions={(hit) => noteContextActions(hit, true, ownerPanel)}
                         onAttachment={(attachment) => setDialog({ kind: "attachment", attachment })}
                         onRepositoryAttachment={(paths, label) => setDialog({ kind: "repositoryAttachment", paths, label })} />}
                     </Suspense>
@@ -865,7 +898,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
               {!active || !note ? <p className="file-help">Open a note to see its details.</p> : <>
                 {inspector === "outline" && <KnowledgeOutline
                   entries={(isDirty(note) ? headings(source) : outlineIndex.data?.headings ?? headings(source))
-                    .map((entry) => ({ ...entry, path: active, anchor: entry.label }))} onOpen={openLocation} actions={locationActions} />}
+                    .map((entry) => ({ ...entry, path: active, anchor: entry.label }))} onOpen={openLocation} actions={(location) => locationActions(location, "heading")} />}
                 {inspector === "links" && <KnowledgeLinks outgoing={outgoingLinks} backlinks={backlinks}
                   onOpen={openLocation} actions={locationActions} copyReference={(text) => menu.copy(text, "Copied link target")}
                   pending={showIndexed && relationships.isPending}

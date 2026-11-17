@@ -229,17 +229,16 @@ export function anchorKey(label: string) {
 }
 
 export function anchorLine(source: string, target: string): number | undefined {
-  if (target.startsWith("^")) return findBlock(source, target)?.line;
+  if (target.startsWith("^")) return findBlocks(source, target)[0]?.line;
   return headings(source).find(({ anchor }) => anchorKey(anchor) === anchorKey(target))?.line;
 }
 
-function findBlock(source: string, target: string) {
-  if (!/^\^[\w-]+$/.test(target)) return;
+function findBlocks(source: string, target: string) {
+  const result: { line: number; markerLine: number; content: string }[] = [];
+  if (!/^\^[\w-]+$/.test(target)) return result;
   const { text, tree, lineAt } = readableDocument(source);
   const markerPattern = new RegExp(`(^|[ \\t])\\${target}[ \\t]*$`, "m");
-  let result: { line: number; content: string } | undefined;
   tree.iterate({ enter({ name, node, from, to }) {
-    if (result) return false;
     if (name !== "Paragraph") return;
     const paragraph = text.slice(from, to);
     const marker = markerPattern.exec(paragraph);
@@ -247,23 +246,48 @@ function findBlock(source: string, target: string) {
     const offset = from + marker.index + marker[1]!.length;
     const syntax = tree.resolveInner(offset + 1);
     if (["InlineCode", "Link", "Image"].includes(syntax.name)) return false;
+    const markerLine = lineAt(offset);
     if (paragraph.trim() === target) {
       const block = node.prevSibling;
-      if (block) result = { line: lineAt(block.from), content: text.slice(block.from, block.to) };
+      if (block) result.push({ line: lineAt(block.from), markerLine, content: text.slice(block.from, block.to) });
     } else {
       const start = node.parent?.name === "ListItem" ? node.parent.from : from;
       const lineEnd = offset + target.length;
       const content = (text.slice(start, from + marker.index).trimEnd() + text.slice(lineEnd, to)).trimEnd();
-      if (content) result = { line: lineAt(start), content };
+      if (content) result.push({ line: lineAt(start), markerLine, content });
     }
     return false;
   } });
   return result;
 }
 
+export type NoteAnchorKind = "heading" | "block";
+
+const favoriteHeadingKey = (label: string) => anchorKey(label) || label.normalize("NFKC").toLowerCase().trim();
+
+export function noteAnchorIdentity(source: string, kind: NoteAnchorKind, label: string, line?: number) {
+  if (kind === "block") {
+    const blocks = findBlocks(source, label);
+    const match = blocks.findIndex((block) => block.markerLine === line || block.line === line);
+    if (match >= 0 || blocks.length === 1) return { anchor: label, occurrence: Math.max(match, 0) };
+    return;
+  }
+  const entries = headings(source);
+  const anchor = favoriteHeadingKey(entries.find((entry) => entry.line === line)?.anchor ?? label);
+  const matching = entries.filter((entry) => favoriteHeadingKey(entry.anchor) === anchor);
+  const match = matching.findIndex((entry) => entry.line === line);
+  if (match >= 0 || matching.length === 1) return { anchor, occurrence: Math.max(match, 0) };
+}
+
+export function favoriteAnchorLine(source: string, kind: NoteAnchorKind, anchor: string, occurrence: number) {
+  const targets = kind === "block" ? findBlocks(source, anchor)
+    : headings(source).filter((entry) => favoriteHeadingKey(entry.anchor) === anchor);
+  return targets[occurrence]?.line;
+}
+
 function excerpt(source: string, target?: string) {
   if (!target) return withoutProperties(source);
-  if (target.startsWith("^")) return findBlock(source, target)?.content;
+  if (target.startsWith("^")) return findBlocks(source, target)[0]?.content;
   const document = readableDocument(source);
   const entries = documentHeadings(document);
   const heading = entries.find(({ anchor }) => anchorKey(anchor) === anchorKey(target));

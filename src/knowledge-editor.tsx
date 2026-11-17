@@ -208,6 +208,13 @@ function noteContextAt(editor: EditorView, path: string, offset: number): NoteCo
   const tag = nodes?.find((node) => node.kind === "tag" && inside(node));
   const mermaid = nodes?.find((node) => node.kind === "code_block" && node.language?.toLowerCase() === "mermaid" && inside(node))?.text;
   const hit: NoteContextHit = { path, line: line.number, anchor: heading?.text || (block?.id ? `^${block.id}` : undefined), tag: tag?.name, mermaid };
+  if (heading && hit.anchor) {
+    hit.anchorKind = "heading";
+    hit.anchorLine = doc.lineAt(heading.range.from).number;
+  } else if (block && hit.anchor) {
+    hit.anchorKind = "block";
+    hit.anchorLine = doc.lineAt(block.range.from).number;
+  }
   if (link) {
     const sourceLine = doc.lineAt(link.range.from).number;
     if (link.kind === "wikilink" || link.kind === "embed") {
@@ -249,7 +256,14 @@ function noteContextAt(editor: EditorView, path: string, offset: number): NoteCo
           break;
         }
       }
-      if (!hit.link && !hit.attachment) hit.anchor = headings(doc.toString()).find((entry) => entry.line === line.number)?.anchor;
+      if (!hit.link && !hit.attachment) {
+        const fallback = headings(doc.toString()).find((entry) => entry.line === line.number);
+        if (fallback) {
+          hit.anchor = fallback.anchor;
+          hit.anchorKind = "heading";
+          hit.anchorLine = fallback.line;
+        }
+      }
     }
   }
   const { from, to } = state.selection.main;

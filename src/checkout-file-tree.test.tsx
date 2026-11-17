@@ -253,3 +253,22 @@ it("reports a Windows-attribute lookup failure while keeping the known checkout 
   await user.click(screen.getByRole("button", { name: "known.md" }));
   expect(open).toHaveBeenCalledWith("known.md");
 });
+
+it("keeps an anchor favorite separate from its note and other anchor occurrences in a group", () => {
+  const checkout = "favorite-anchor-worktree";
+  const file = { path: "notes/outline.md", kind: "file" } as const;
+  const heading = { path: file.path, kind: "heading", anchor: "scope", label: "Scope", occurrence: 0 } as const;
+  const next = { ...heading, occurrence: 1 };
+  const block = { path: file.path, kind: "block", anchor: "^decision", label: "^decision", occurrence: 0 } as const;
+  const state = renderHook(() => useCheckoutFavorites(checkout));
+  act(() => {
+    setCheckoutFavorites(checkout, [file, heading, next, block], false);
+    saveCheckoutFavoriteGroup(checkout, { name: "Second scope", items: [next] });
+  });
+  const group = state.result.current.groups[0]!;
+  expect(state.result.current.favorites).toEqual([file, heading, { ...next, groupId: group.id }, block]);
+  act(() => reconcileFavoriteItems(checkout, (path) => path === file.path ? "notes/moved.md" : undefined));
+  const moved = "notes/moved.md";
+  act(() => setCheckoutFavorites(checkout, [{ ...next, path: moved }], true));
+  expect(state.result.current.favorites).toEqual([file, heading, block].map((item) => ({ ...item, path: moved })));
+});

@@ -296,6 +296,61 @@ it("refuses extraction if the source buffer changes while reviewing the selectio
 });
 
 
+it("favorites distinct headings and a block, follows the edited source, and removes the exact favorite", async () => {
+  const fixture = mockRepository();
+  const content = "# Overview\n\n## Scope\n\nFirst scope.\n\n## Scope\n\nSecond scope.\n\nA decision to preserve. ^decision\n";
+  fixture.externalChange(documentAt(release, "favorite-source", content));
+  const scroll = vi.fn(function (this: HTMLElement) { return this; });
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scroll });
+  const storageKey = "omniagent:checkout-favorites:" + checkoutId;
+  const previous = localStorage.getItem(storageKey);
+  localStorage.removeItem(storageKey);
+  try {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+    const user = userEvent.setup();
+    const view = await editor(release);
+    await user.click(screen.getByRole("button", { name: "Reading" }));
+    const reader = within(await screen.findByLabelText("Reading view for " + release));
+    for (const heading of await reader.findAllByRole("heading", { name: "Scope" })) {
+      fireEvent.contextMenu(heading);
+      await user.click(await screen.findByRole("menuitem", { name: "Add heading to favorites" }));
+    }
+    fireEvent.contextMenu(reader.getByText(/A decision to preserve/));
+    await user.click(await screen.findByRole("menuitem", { name: "Add block to favorites" }));
+    const favorites = within(screen.getByRole("region", { name: "Favorites" }));
+    const first = favorites.getByTitle(release + "#Scope");
+    const second = favorites.getByTitle(release + "#Scope · Occurrence 2");
+    const block = favorites.getByTitle(release + "#^decision");
+
+    await user.click(screen.getByRole("button", { name: "Live Preview" }));
+    act(() => view.dispatch({ changes: { from: 0, insert: "New introduction.\n\n" } }));
+    await user.click(screen.getByRole("button", { name: "Reading" }));
+    const updatedReader = within(await screen.findByLabelText("Reading view for " + release));
+    await user.click(second);
+    await waitFor(() => expect(scroll.mock.results.at(-1)?.value).toBe(updatedReader.getAllByRole("heading", { name: "Scope" })[1]));
+    scroll.mockClear();
+    await user.click(block);
+    await waitFor(() => expect(scroll.mock.results.at(-1)?.value).toBe(updatedReader.getByText(/A decision to preserve/)));
+    scroll.mockClear();
+    await user.click(first);
+    await waitFor(() => expect(scroll.mock.results.at(-1)?.value).toBe(updatedReader.getAllByRole("heading", { name: "Scope" })[0]));
+
+    fireEvent.contextMenu(second);
+    await user.click(await screen.findByRole("menuitem", { name: "Remove from favorites" }));
+    expect(favorites.queryByTitle(release + "#Scope · Occurrence 2")).toBeNull();
+    expect(favorites.getByTitle(release + "#Scope")).toBeTruthy();
+    expect(favorites.getByTitle(release + "#^decision")).toBeTruthy();
+  } finally {
+    if (previous === null) localStorage.removeItem(storageKey);
+    else localStorage.setItem(storageKey, previous);
+    if (descriptor) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", descriptor);
+    else Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+  }
+});
+
+
 it("opens tag rename from the indexed tag menu, previews occurrences, and keeps blocked drafts intact", async () => {
   const fixture = mockRepository();
   const ipc = vi.mocked(invoke);

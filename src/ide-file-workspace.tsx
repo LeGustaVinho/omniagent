@@ -4,13 +4,14 @@ import {
   type IDockviewHeaderActionsProps, type IDockviewPanelHeaderProps, type IDockviewPanelProps, type IWatermarkPanelProps,
   type SerializedDockview,
 } from "dockview-react";
-import { FileCode2, FileText, Folder, FolderOpen, FolderTree, PanelLeftClose, Pin, X } from "lucide-react";
+import { FileCode2, FileText, Folder, FolderOpen, FolderTree, Hash, Link2, PanelLeftClose, Pin, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { Dialog } from "radix-ui";
 import { ContextActions, PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { fileName } from "@/ide-knowledge-data";
-import { maxFavoriteGroupName, moveCheckoutFavorites, saveCheckoutFavoriteGroup, setCheckoutFavorites, useCheckoutFavorites,
-  type CheckoutFavorite, type CheckoutFavoriteGroup } from "@/checkout-favorites";
+import { checkoutFavoriteKey, isNoteFavorite, maxFavoriteGroupName, moveCheckoutFavorites, saveCheckoutFavoriteGroup,
+  setCheckoutFavorites, useCheckoutFavorites, type CheckoutFavorite, type CheckoutFavoriteGroup,
+  type CheckoutNoteFavorite, type CheckoutPathFavorite } from "@/checkout-favorites";
 import { dockviewLayoutInMain, editorPopoutPath, FileEditorDocument, mirrorEditorAppearance } from "@/file-editor-popout";
 import { makeTree, readTreePreferences, saveTreePreference, showTreePath, treeParents, useIgnoredTree, useWindowsHiddenTree,
   type FolderNodeData, type TreeReveal } from "@/checkout-file-tree";
@@ -540,6 +541,7 @@ type FileTreeProps = {
   folders?: readonly string[];
   active?: string;
   onOpen: (path: string) => void;
+  onOpenNoteFavorite?: (target: CheckoutNoteFavorite) => void;
   actions: TreeRows["actions"];
   reveal?: { path: string };
   checkoutId: string;
@@ -547,7 +549,7 @@ type FileTreeProps = {
   simulated: boolean;
 };
 
-type FavoriteGroupEdit = { group?: CheckoutFavoriteGroup; paths?: readonly string[] };
+type FavoriteGroupEdit = { group?: CheckoutFavoriteGroup; items?: readonly CheckoutFavorite[] };
 
 export function FileTree(props: FileTreeProps) {
   const { checkoutId, workspace, simulated } = props;
@@ -555,7 +557,7 @@ export function FileTree(props: FileTreeProps) {
   return <PersistentFolderTree key={storageKey} {...props} storageKey={storageKey} />;
 }
 
-function PersistentFolderTree({ paths, folders = [], active, onOpen, actions, reveal, storageKey, checkoutId, workspace, simulated }:
+function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteFavorite, actions, reveal, storageKey, checkoutId, workspace, simulated }:
   FileTreeProps & { storageKey: string }) {
   const preferencesKey = `${storageKey}:preferences`;
   const [preferences, setPreferences] = useState(() => readTreePreferences(preferencesKey));
@@ -579,7 +581,7 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, actions, re
   const [favoriteGroupEdit, editFavoriteGroup] = useState<FavoriteGroupEdit>();
   const [collapsedFavoriteGroups, setCollapsedFavoriteGroups] = useState(new Set<string>());
   const newFavoriteGroup = { label: "New favorite group…", run: () => editFavoriteGroup({}) };
-  const favoritePaths = new Set(favorites.map(({ path }) => path.toLowerCase()));
+  const favoriteKeys = new Set(favorites.map(checkoutFavoriteKey));
   const automaticReveal = preferences.autoReveal && active ? { path: active } : undefined;
   const revealPath = manualReveal?.path ?? automaticReveal?.path;
   const visibleReveals = [manualReveal ?? visibilityOverride, automaticReveal].filter((reveal) => reveal !== undefined);
@@ -671,8 +673,8 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, actions, re
   }
 
   function rowActions(target: FileTreeTarget, selection?: readonly FileTreeTarget[]): MenuGroups {
-    const items = (selection ?? [target]).filter((item): item is CheckoutFavorite => item.kind !== "root");
-    const allSaved = items.every(({ path }) => favoritePaths.has(path.toLowerCase()));
+    const items = (selection ?? [target]).filter((item): item is CheckoutPathFavorite => item.kind !== "root");
+    const allSaved = items.every((item) => favoriteKeys.has(checkoutFavoriteKey(item)));
     return [...actions(target, selection), items.length ? [{
       label: selection ? (allSaved ? "Remove selected from favorites" : "Add selected to favorites") : (allSaved ? "Remove from favorites" : "Add to favorites"),
       run: () => setCheckoutFavorites(favoritesId, items.map((item) => ({ ...item, ignored: ignoredPaths.has(item.path) || undefined })), allSaved),
@@ -706,7 +708,9 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, actions, re
         run: () => { setManualReveal(undefined); setPreferences((value) => ({ ...value, autoReveal: !value.autoReveal })); } },
     ], [newFavoriteGroup]];
 
-  function openFavorite({ path, kind, ignored }: CheckoutFavorite) {
+  function openFavorite(item: CheckoutFavorite) {
+    if (isNoteFavorite(item)) { onOpenNoteFavorite?.(item); return; }
+    const { path, kind, ignored } = item;
     if (kind === "file") onOpen(path);
     else {
       if (ignored && !simulated && !folders.includes(path)) {
@@ -718,22 +722,32 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, actions, re
     }
   }
 
-  const visibleFavorites = favorites.filter(({ kind, path }) => workspace === "ide" || kind === "folder" || markdown(path));
+  const visibleFavorites = favorites.filter((item) => isNoteFavorite(item)
+    ? workspace === "knowledge" && onOpenNoteFavorite && markdown(item.path)
+    : workspace === "ide" || item.kind === "folder" || markdown(item.path));
   function favoriteRows(items: readonly CheckoutFavorite[]) {
     if (!items.length) return null;
     return <ul className="file-tree">{items.map((item) => {
-      const Icon = item.kind === "folder" ? Folder : markdown(item.path) ? FileText : FileCode2;
-      return <li key={item.path}><ContextActions label={`Favorite ${item.path}`} groups={[[
-        { label: item.kind === "folder" ? "Reveal favorite folder" : "Open favorite file", run: () => openFavorite(item) },
+      const noteTarget = isNoteFavorite(item);
+      const Icon = noteTarget ? (item.kind === "heading" ? Hash : Link2)
+        : item.kind === "folder" ? Folder : markdown(item.path) ? FileText : FileCode2;
+      const duplicate = noteTarget && item.occurrence > 0 ? " · Occurrence " + (item.occurrence + 1) : "";
+      const name = noteTarget ? item.label + duplicate : fileName(item.path);
+      const location = noteTarget ? item.path + "#" + item.label + duplicate : item.path;
+      const openLabel = noteTarget ? (item.kind === "heading" ? "Open favorite heading" : "Open favorite block")
+        : item.kind === "folder" ? "Reveal favorite folder" : "Open favorite file";
+      return <li key={checkoutFavoriteKey(item)}><ContextActions label={"Favorite " + location} groups={[[
+        { label: openLabel, run: () => openFavorite(item) },
+        ...(noteTarget ? [{ label: "Open note", run: () => onOpen(item.path) }] : []),
         { label: "Move to favorite group", items: [
-          ...favoriteGroups.map((group) => ({ label: `Move to ${group.name}`, disabled: item.groupId === group.id,
-            run: () => moveCheckoutFavorites(favoritesId, [item.path], group.id) })),
-          { label: "Remove from group", disabled: !item.groupId, run: () => moveCheckoutFavorites(favoritesId, [item.path]) },
-          { label: newFavoriteGroup.label, run: () => editFavoriteGroup({ paths: [item.path] }) },
+          ...favoriteGroups.map((group) => ({ label: "Move to " + group.name, disabled: item.groupId === group.id,
+            run: () => moveCheckoutFavorites(favoritesId, [item], group.id) })),
+          { label: "Remove from group", disabled: !item.groupId, run: () => moveCheckoutFavorites(favoritesId, [item]) },
+          { label: newFavoriteGroup.label, run: () => editFavoriteGroup({ items: [item] }) },
         ] },
-      ], ...rowActions(item)]}>
-        <button type="button" className="file-tree-row" title={item.path} onClick={() => openFavorite(item)}>
-          <Icon size={15} /><span>{fileName(item.path)}</span><small>{item.path}</small>
+      ], ...(noteTarget ? [[{ label: "Remove from favorites", run: () => setCheckoutFavorites(favoritesId, [item], true) }]] : rowActions(item))]}>
+        <button type="button" className="file-tree-row" title={location} onClick={() => openFavorite(item)}>
+          <Icon size={15} /><span>{name}</span><small>{item.path}</small>
         </button>
       </ContextActions></li>;
     })}</ul>;
@@ -798,7 +812,7 @@ function FavoriteGroupDialog({ checkoutId, edit, close }: { checkoutId: string; 
     <form className="grid gap-2" onSubmit={(event) => {
       event.preventDefault();
       try {
-        saveCheckoutFavoriteGroup(checkoutId, { id: edit.group?.id, name, paths: edit.paths });
+        saveCheckoutFavoriteGroup(checkoutId, { id: edit.group?.id, name, items: edit.items });
         close();
       } catch (failure) {
         setError(failure instanceof Error ? failure.message : String(failure));
