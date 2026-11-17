@@ -543,7 +543,15 @@ impl Store {
                             .context("The recovery checkpoint is no longer current")
                     })
                     .transpose()?;
-                let writer_checkpoint = pending_writer_checkpoint(&tx, &job)?;
+                let automatic_writer_checkpoint = if job.mode == SessionMode::ApprovedWrite
+                    && let Some(goal) = &inputs.goal
+                    && crate::workflows::load_workflow_job_input(&tx, &job.id)?.is_some()
+                {
+                    Some(goal.run.clone())
+                } else {
+                    None
+                };
+                let writer_checkpoint = pending_writer_checkpoint(&tx, &job)?.or(automatic_writer_checkpoint);
                 let wait = job.downstream_wait.as_ref();
                 let question_run = inputs.question.as_ref().map(|question| question.run.clone());
                 let goal_run = inputs.goal.as_ref().map(|boundary| boundary.run.clone());
@@ -1434,6 +1442,14 @@ fn evaluate(
         blockers.push(PipelineRelease { reason });
     }
     if job.mode == SessionMode::ApprovedWrite {
+        if let Some(goal) = &inputs.goal
+            && crate::workflows::load_workflow_job_input(db, &job.id)?.is_some()
+            && !goals::confirmed_stage_worktree(db, job, &goal.run)?
+        {
+            blockers.push(Policy {
+                reason: "The workflow goal's prior worktree checkpoint is unavailable",
+            });
+        }
         let scope = job
             .task_id
             .as_deref()

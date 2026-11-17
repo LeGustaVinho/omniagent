@@ -119,7 +119,7 @@ impl Store {
     }
 }
 
-pub(super) fn candidate(
+pub(crate) fn candidate(
     db: &Connection,
     checkout: &str,
     scope: &SessionScope,

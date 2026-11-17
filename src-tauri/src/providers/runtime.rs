@@ -1559,11 +1559,16 @@ impl TurnExecution {
         let native_seed = self.plan.native_goal_seed.as_ref();
         let mut input = if let Some(seed) = native_seed {
             let mut projected = projected_input.to_vec();
+            let suffix = format!("\n\n{}", seed.managed_instructions);
             let goal = projected
                 .iter_mut()
-                .rfind(|message| message.text == seed.managed_instructions)
+                .rfind(|message| message.text == seed.managed_instructions || message.text.ends_with(&suffix))
                 .context("The admitted native goal context lost its objective")?;
-            goal.text = seed.objective.clone();
+            goal.text = if let Some(stage) = goal.text.strip_suffix(&suffix) {
+                format!("{stage}\n\n{}", seed.objective)
+            } else {
+                seed.objective.clone()
+            };
             format_input(&projected)?
         } else {
             format_input(&projected_input)?

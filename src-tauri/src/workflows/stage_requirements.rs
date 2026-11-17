@@ -47,6 +47,8 @@ pub struct StageRequirementConfiguration {
     pub role_template: Option<StageRoleRevision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_role: Option<PackageArtifactVersion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<super::stage_goal::StageGoalConfiguration>,
     #[serde(default, skip_serializing_if = "StageRequirements::is_empty")]
     pub stage: StageRequirements,
 }
@@ -214,11 +216,15 @@ impl StageRequirements {
 
 impl StageRequirementConfiguration {
     pub(crate) fn is_empty(&self) -> bool {
-        self.role_template.is_none() && self.bound_role.is_none() && self.stage.is_empty()
+        self.role_template.is_none()
+            && self.bound_role.is_none()
+            && self.goal.is_none()
+            && self.stage.is_empty()
     }
 
     pub(crate) fn is_valid(&self) -> bool {
         self.stage.is_valid()
+            && self.goal.as_ref().is_none_or(|goal| goal.validate().is_ok())
             && self.bound_role.as_ref().is_none_or(roles::valid_bound_role)
             && self.role_template.as_ref().is_none_or(|role| {
                 !role.template_id.trim().is_empty() && !role.revision.trim().is_empty()

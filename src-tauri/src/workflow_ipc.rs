@@ -21,6 +21,7 @@ pub mod approval;
 pub mod authoring;
 pub mod command;
 pub mod comparison;
+pub mod goal;
 pub mod graph_editor;
 pub mod inspection;
 pub mod launch;

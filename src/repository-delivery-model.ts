@@ -2,6 +2,7 @@ import type { Job } from "@/bindings/Job";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import type { WorkflowLaunchReceipt } from "@/workflow-launch";
+import type { StageGoalConfiguration } from "@/workflow-stage-goal";
 
 export type DeliveryNode = "plan" | "review-plan" | "implement" | "review-candidate";
 export type DeliveryInputs = Record<string, string>;
@@ -31,7 +32,9 @@ export type DeliveryArtifact = {
 export type DeliveryRun = { id: string; planRevision: string | null; version?: { id: string; revision: string } };
 export type DeliveryJob = { nodeId: DeliveryNode; unitId: string | null; inputs: DeliveryInputs; job: Job };
 export type DeliveryWorkflowDefinition = {
-  nodes: { instance: { id: string; kind: string; configuration?: { kind: string; model?: ModelSelection | null } }; definition: { title: string } }[];
+  nodes: { instance: { id: string; kind: string; configuration?: {
+    kind: string; model?: ModelSelection | null; requirements?: { goal?: StageGoalConfiguration };
+  } }; definition: { title: string } }[];
   wires: { from: { node: string; port: string }; to: { node: string; port: string } }[];
 };
 export type DeliverySnapshot = {

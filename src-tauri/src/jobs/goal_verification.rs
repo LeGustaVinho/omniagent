@@ -174,6 +174,7 @@ impl Store {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let scope = result_scope(&tx, &project, &run)?
                 .context("No sealed goal result needs verification for this run")?;
+            crate::workflows::stage_goal::require_stage_criterion(&tx, &run, ordinal, &evidence)?;
             let current = evaluate(&tx, &scope)?;
             let criterion = ordinal.checked_sub(1).and_then(|index| current.criteria.get(index))
                 .context("The criterion is outside the saved goal revision")?;
@@ -202,7 +203,7 @@ impl Store {
     }
 }
 
-pub(super) fn load_goal_verification(
+pub(crate) fn load_goal_verification(
     db: &Connection,
     project: &str,
     run: &str,

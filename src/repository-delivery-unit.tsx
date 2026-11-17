@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { useQueries, useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import type { DeliveryGitPolicy } from "@/delivery-git-policy";
 import type { MergeAttempt, MergeOutcome } from "@/delivery-merge-model";
+import { GoalVerificationPanel } from "@/goal-verification-panel";
 import { DeliveryAgent } from "@/repository-delivery-agent";
 import { VerifiedDeliveryHistory } from "@/repository-delivery-history";
 import {
@@ -42,6 +43,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
   commitNodeId?: string;
 }) {
   const { taskId, unit: planned, commitEvidenceId } = unit;
+  const client = useQueryClient();
   const { id: unitId } = planned;
   const [untracked, setUntracked] = useState<string[]>([]);
   const [tracked, setTracked] = useState("");
@@ -51,6 +53,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
   const [commitBlock, setCommitBlock] = useState("");
   const artifacts = delivery.artifacts.filter((artifact) => artifact.unitId === unitId);
   const implementation = matchingJob(delivery, "implement", implementationInputs, unitId);
+  const goal = delivery.definition?.nodes.find(({ instance }) => instance.id === "implement")?.instance.configuration?.requirements?.goal;
   const attemptId = implementation?.latestAttempt?.runId;
   const capture = useQuery({
     queryKey: ["delivery-capture", scope.projectId, attemptId],
@@ -59,11 +62,12 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
   });
   const selected = useQuery({
     queryKey: ["delivery-selection", scope.projectId, taskId, unitId],
-    queryFn: () => invoke<{ id: string } | null>("current_selected_candidate", { projectId: scope.projectId, taskId, unitId }),
+    queryFn: () => invoke<{ id: string; target: { runId: string } } | null>("current_selected_candidate", { projectId: scope.projectId, taskId, unitId }),
     enabled: active && Boolean(attemptId),
   });
   const candidate = artifacts.find((artifact) => artifact.value.kind === "candidate" &&
     artifact.value.evidence.id === selected.data?.id && artifact.value.evidence.target.runId === attemptId);
+  const goalCandidate = goal && selected.data && selected.data.target?.runId === attemptId && !candidate ? selected.data : null;
   const reviewInputs: DeliveryInputs = candidate ? { candidate: candidate.id } : {};
   const reviewing = candidate ? matchingJob(delivery, "review-candidate", reviewInputs, unitId) : undefined;
   const review = matchingReview(delivery, reviewing);
@@ -107,6 +111,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
   const requestUnit = (nodeId: string, inputs: DeliveryInputs, request: object) => invoke<UnitOutcome>("execute_repository_delivery_unit", {
     input: { ...scope, taskId, unitId, nodeId, inputs, request },
   });
+  const publishCandidate = (selectionId: string) => invoke("publish_repository_delivery_candidate", { ...scope, taskId, selectionId });
   const validSha = /^([0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha.trim());
   const manual = policy.data ? policy.data === "user_commits_and_merges" : manualWait;
   function showCommit(outcome: CommitOutcome) {
@@ -128,7 +133,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
         job={implementation} label="Implementation" actions={actions} openActivity={openActivity} />
       {implementation?.latestAttempt?.status === "succeeded" && attemptId && <WorktreeEvidence projectId={scope.projectId} runId={attemptId} ownerTaskId={implementation.worktreeOwnerTaskId} />}
       {capture.data?.kind === "unavailable" && <p role="alert">{capture.data.reason}</p>}
-      {captureArtifact && attemptId && <details className="pipeline-evidence" open={!candidate}>
+      {captureArtifact && attemptId && <details className="pipeline-evidence" open={!candidate && !goalCandidate}>
         <summary>Candidate selection</summary>
         <label className="pipeline-stack">Tracked paths to include, one per line (blank includes all)
           <textarea value={tracked} onChange={(event) => setTracked(event.currentTarget.value)} />
@@ -146,9 +151,24 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
             selection: { trackedPaths: trackedPaths.length ? trackedPaths : null, untrackedPaths: untracked },
           });
           setCriteria([]);
-          return invoke("publish_repository_delivery_candidate", { ...scope, taskId, selectionId: selection.id });
+          if (!goal) return publishCandidate(selection.id);
+          await client.invalidateQueries({ queryKey: ["delivery-selection", scope.projectId, taskId, unitId] });
         })}>Save candidate selection</Button>
       </details>}
+      {goal && goalCandidate && attemptId && <section aria-label="Candidate goal evidence" className="pipeline-stack">
+        <GoalVerificationPanel key={goalCandidate.id} projectId={scope.projectId} runId={attemptId}
+          candidateId={goalCandidate.id} requiredEvidence={goal.criteria.map(({ evidence }) => evidence)}
+          actions={(result) => <div className="flex flex-wrap gap-2">
+            {result.status !== "completed" && goal.criteria.some(({ evidence }) => evidence === "candidate_gate") &&
+              <Button variant="outline" disabled={actions.busy} onClick={() => actions.execute(async () => {
+                await invoke("verify_workflow_goal_candidate", { ...scope, nodeId: "implement", taskId, selectionId: goalCandidate.id });
+                await client.invalidateQueries({ queryKey: ["goal-verification", scope.projectId, attemptId] });
+              })}>Run goal candidate checks</Button>}
+            <Button variant="outline"
+              disabled={actions.busy || result.status !== "completed" || (result.candidateId !== null && result.candidateId !== goalCandidate.id)}
+              onClick={() => actions.execute(() => publishCandidate(goalCandidate.id))}>Publish verified candidate</Button>
+          </div>} />
+      </section>}
       {candidate?.value.kind === "candidate" && <>
         <p className="break-all">Candidate tree <code>{candidate.value.evidence.tree}</code></p>
         <DeliveryAgent key={candidate.id} scope={scope} nodeId="review-candidate" inputs={reviewInputs}

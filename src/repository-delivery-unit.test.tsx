@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { QueryClient, QueryClientProvider, useMutation } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Job } from "@/bindings/Job";
@@ -15,6 +15,80 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
+});
+
+it("runs checks on the selected goal candidate and publishes only after matching evidence is recorded", async () => {
+  const scope = { projectId: "project", runId: "workflow" };
+  const taskId = "task";
+  const attemptId = "goal-terminal-run";
+  const unitId = "unit";
+  const selectionId = "selected-candidate";
+  const checkoutId = "approved-worktree";
+  const implementationInputs = { plan: "plan", worktree: "worktree", release: "release" };
+  const unit: DeliveryUnit = { checkoutId, taskId, commitEvidenceId: null,
+    unit: { id: unitId, ordinal: 1, purpose: "Implementation goal", completionCriteria: ["Required build passed"] } };
+  const job: Job = { id: "implementation-job", projectId: scope.projectId, checkoutId, taskId,
+    kind: "agent", origin: { type: "pipeline" }, worktreeOwnerTaskId: taskId, context: null, mode: "approved_write",
+    pipeline: { pipelineRunId: scope.runId, nodeInstanceId: "implement", planRevision: "plan", release: null },
+    priority: 0, queueState: "queued", queuedRecovery: null, downstreamWait: null,
+    latestAttempt: { ordinal: 1, runId: attemptId, conversationId: null, status: "succeeded", cancelRequested: false, previousRunId: "previous-run", recovery: null },
+  };
+  const delivery: DeliverySnapshot = { run: { id: scope.runId, planRevision: "plan" }, artifacts: [],
+    jobs: [{ nodeId: "implement", inputs: implementationInputs, unitId, job }],
+    definition: { wires: [], nodes: [{ instance: { id: "implement", kind: "implement", configuration: {
+      kind: "agent_role", requirements: { goal: { objective: "Implement the bounded change", maxTurns: 3,
+        criteria: [{ text: "Required build passed", evidence: "candidate_gate" }] } },
+    } }, definition: { title: "Implementation" } }] },
+  };
+  const testEvidence = { kind: "candidate_gate", verificationId: "selected-result", gateIndex: 0 };
+  let selection = false;
+  let checked = false;
+  let recorded = false;
+  const verification = () => ({ revisionId: "goal-policy", runId: attemptId, contextId: "result", providerResult: null,
+    candidateId: recorded ? selectionId : null, status: recorded ? "completed" : "verifying",
+    criteria: [{ ordinal: 1, text: "Required build passed", status: recorded ? "passed" : "pending", evidence: recorded ? testEvidence : null }],
+  });
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    switch (command) {
+      case "attempt_worktree_evidence": return { kind: "saved", artifact: { revision: "sealed-capture", candidate: { changes: null } } };
+      case "current_selected_candidate": return selection ? { id: selectionId, target: { runId: attemptId } } : null;
+      case "select_worktree_candidate": selection = true; return { id: selectionId };
+      case "goal_verification": return verification();
+      case "verify_workflow_goal_candidate": checked = true; return { id: "selected-result" };
+      case "list_goal_criterion_evidence": return checked ? [
+        { label: "Required build", candidateId: selectionId, status: "passed", evidence: testEvidence },
+        { label: "Another candidate's build", candidateId: "other-candidate", status: "passed", evidence: { ...testEvidence, verificationId: "other-result" } },
+        { label: "Wrong evidence kind", candidateId: selectionId, status: "passed", evidence: { kind: "candidate_acceptance", acceptanceId: "other-result" } },
+      ] : [];
+      case "record_goal_criterion_evidence": recorded = true; return verification();
+      case "publish_repository_delivery_candidate": return { id: "typed-candidate-artifact" };
+      default: throw new Error(`Unexpected command ${command}`);
+    }
+  });
+  function Fixture() {
+    const action = useMutation({ mutationFn: (operation: () => Promise<unknown>) => operation() });
+    return <RepositoryDeliveryUnit scope={scope} unit={unit} delivery={delivery} implementationInputs={implementationInputs}
+      actions={{ execute: (operation) => action.mutate(operation), busy: action.isPending }} openActivity={() => {}} active />;
+  }
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><Fixture /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Save candidate selection" }));
+  const publish = await screen.findByRole<HTMLButtonElement>("button", { name: "Publish verified candidate" });
+  expect(publish.disabled).toBe(true);
+  expect(invoke).not.toHaveBeenCalledWith("publish_repository_delivery_candidate", expect.anything());
+  await user.click(screen.getByRole("button", { name: "Run goal candidate checks" }));
+  const field = screen.getByLabelText("Evidence for criterion 1");
+  await within(field).findByRole("option", { name: /Required build/ });
+  expect(within(field).queryByRole("option", { name: /Another candidate|Wrong evidence|Approve criterion/ })).toBeNull();
+  expect(publish.disabled).toBe(true);
+  await user.selectOptions(field, JSON.stringify(testEvidence));
+  await user.click(screen.getByRole("button", { name: "Record evidence" }));
+  await waitFor(() => expect(publish.disabled).toBe(false));
+  await user.click(publish);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("publish_repository_delivery_candidate", { ...scope, taskId, selectionId }));
+  expect(invoke).toHaveBeenCalledWith("verify_workflow_goal_candidate", { ...scope, nodeId: "implement", taskId, selectionId });
+  expect(invoke).toHaveBeenCalledWith("record_goal_criterion_evidence", { projectId: scope.projectId, runId: attemptId, ordinal: 1, evidence: testEvidence });
 });
 
 it("checks for a commit after accepting the diff and verifies the full SHA under a manual Git policy", async () => {

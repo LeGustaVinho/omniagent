@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { CommandNodeConfiguration } from "@/workflow-command";
 import { WorkflowMcpNodeConfiguration } from "@/workflow-mcp-tools";
 import { AgentRoleFields } from "@/workflow-stage-model";
+import type { StageGoalRoleRevision } from "@/workflow-stage-goal";
 import {
   changedPorts, configurationProblem, connectionProblem, defaultConfiguration, incompatibility,
   initialNodePositions, outputPort, portType, wireKey,
@@ -65,7 +66,7 @@ function connectionWire(connection: Connection): WorkflowWire | undefined {
 const readTheme = (): "light" | "dark" => document.documentElement.dataset.appTheme === "light" ? "light" : "dark";
 
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
-  allowDefinitionUpdates = true, inspectReference, editablePresetFields }: {
+  allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode }: {
   projectId: string;
   checkoutId?: string;
   state: WorkflowEditorState;
@@ -77,6 +78,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   allowDefinitionUpdates?: boolean;
   inspectReference?: (nodeId: string) => ReactNode;
   editablePresetFields?: Record<string, string[]>;
+  goalRoleForNode?: (nodeId: string) => { version?: StageGoalRoleRevision; pending?: boolean } | undefined;
 }) {
   const { graph, layout } = state;
   const [theme, setTheme] = useState(readTheme);
@@ -220,7 +222,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
           <p className="text-sm text-muted-foreground">Version {definition.revision} · {definition.effect.replaceAll("_", " ")}</p>
           {inspectReference?.(node.id)}
           <NodeFields key={node.id} projectId={projectId} checkoutId={checkoutId} node={node} definition={definition}
-            presetFields={editablePresetFields?.[node.id]} disabled={disabled} onChange={(configuration) => configure(node.id, configuration)} />
+            presetFields={editablePresetFields?.[node.id]} goalRole={goalRoleForNode?.(node.id)}
+            disabled={disabled} onChange={(configuration) => configure(node.id, configuration)} />
           {available && <VersionReview node={node} previous={definition} next={available} wires={graph.wires}
             disabled={disabled} apply={() => updateVersion(node, available)} />}
           {definition.inputs.length > 0 && <ConnectInput key={`${node.id}:${definition.revision}`} graph={graph} node={node}
@@ -234,9 +237,10 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   </section>;
 }
 
-function NodeFields({ projectId, checkoutId, node, definition, disabled, presetFields, onChange }: {
+function NodeFields({ projectId, checkoutId, node, definition, disabled, presetFields, goalRole, onChange }: {
   projectId: string; checkoutId?: string; node: WorkflowGraphNode; definition: WorkflowDefinition; disabled: boolean; onChange: (configuration: WorkflowNodeConfiguration) => void;
   presetFields?: string[];
+  goalRole?: { version?: StageGoalRoleRevision; pending?: boolean };
 }) {
   const { configuration } = node;
   const allow = (field: string) => !presetFields || presetFields.includes(field);
@@ -245,6 +249,7 @@ function NodeFields({ projectId, checkoutId, node, definition, disabled, presetF
     case "none": return null;
     case "agent_role": return <AgentRoleFields projectId={projectId} checkoutId={checkoutId}
       mode={definition.kind === "plan" ? "plan" : definition.effect === "write_repository" ? "approved_write" : "read_only"}
+      nodeId={node.id} nodeKind={node.kind} goalRole={goalRole}
       configuration={configuration} onChange={onChange} disabled={locked || !allow("role")} fixedModel={Boolean(presetFields)} />;
     case "required_checks": return <label>Required checks<textarea rows={3} disabled={locked || !allow("names")}
       value={Array.isArray(configuration.names) ? configuration.names.join("\n") : ""}

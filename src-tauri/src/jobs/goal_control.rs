@@ -505,6 +505,10 @@ pub(super) fn activate_paused_goal(
 ) -> Result<()> {
     let (current, stopped_run) = paused_job(db, project, revision)?;
     ensure!(current.id == job, "The goal has a newer continuation");
+    ensure!(
+        super::history::effective_release_blocker(db, &current)?.is_none(),
+        "The workflow goal needs current approval for this continuation scope"
+    );
     let (owner, deadline, definition): (String, Option<i64>, Vec<u8>) = db.query_row(
         "SELECT continuation_owner, deadline_ms, definition FROM goal_revisions WHERE id = ?1",
         [revision],

@@ -393,6 +393,8 @@ fn main() {
             workflow_ipc::stage_requirements::workflow_stage_inventory,
             workflow_ipc::stage_requirements::workflow_stage_matching_profiles,
             workflow_ipc::stage_requirements::workflow_stage_assessment,
+            workflow_ipc::goal::preview_workflow_stage_goal,
+            workflow_ipc::goal::verify_workflow_goal_candidate,
             desktop::choose_repository,
             desktop::choose_repository_markdown,
             desktop::list_repository_markdown_revisions,

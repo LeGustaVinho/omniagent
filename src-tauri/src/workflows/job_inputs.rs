@@ -136,6 +136,11 @@ pub(super) fn load_attempt_input(db: &Connection, run: &str) -> Result<Option<Wo
         .transpose()
 }
 
+pub(crate) fn load_workflow_job_input(db: &Connection, job: &str) -> Result<Option<WorkflowJobInput>> {
+    let payload: Option<Vec<u8>> = db.query_row("SELECT payload FROM workflow_job_inputs WHERE job_id = ?1", [job], |row| row.get(0)).optional()?;
+    payload.map(|payload| Ok(serde_json::from_slice(&protection::unprotect(&payload)?)?)).transpose()
+}
+
 impl Store {
     pub(super) async fn workflow_attempt_input(
         &self,

@@ -217,7 +217,13 @@ fn pinned_release_blocker(db: &Connection, job: &Job) -> Result<Option<ReleaseBl
         params![job.project_id, origin.pipeline_run_id],
         |row| row.get(0),
     )?;
-    if current.is_none() || current != origin.plan_revision {
+    let unplanned_goal = current.is_none() && job.mode != crate::providers::SessionMode::ApprovedWrite
+        && db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM goal_continuations g JOIN workflow_job_inputs w ON w.job_id = g.job_id WHERE g.job_id = ?1)",
+            [&job.id], |row| row.get::<_, bool>(0),
+        )?;
+    if (!unplanned_goal && current.is_none()) || current != origin.plan_revision {
+
         return Ok(Some(ReleaseBlocker::StalePlan));
     }
     release_blocker(db, job)

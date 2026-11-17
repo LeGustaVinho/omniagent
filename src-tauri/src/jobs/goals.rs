@@ -9,11 +9,12 @@ use crate::{
     conversations::{SessionScope, consume_matching_draft, load_conversation},
     protection,
     providers::{
-        Provider, ProviderEvent, ProviderEventData, TurnOutcome, goal::NativeGoalObservation,
+        Provider, ProviderEvent, ProviderEventData, SessionMode, TurnOutcome, goal::NativeGoalObservation,
         questions::QuestionRoute,
     },
     repository::writers::writer_owner,
     store::Store,
+    workflows::{WorkflowJobInput, bind_job_input, load_workflow_job_input, stage_job_input},
 };
 
 use super::{
@@ -195,14 +196,6 @@ impl Store {
                 )?,
                 "Wait until the conversation reaches a turn boundary before starting a goal"
             );
-            if let Some(active) = active_revision(&tx, &conversation.id, stage.as_ref())? {
-                let active_goal = load_revision(&tx, active)?;
-                ensure!(
-                    active_goal.verification.is_some_and(|verification| verification.status == GoalVerificationStatus::Completed),
-                    "This conversation or stage already has an active goal"
-                );
-                tx.execute("DELETE FROM active_goals WHERE revision_id = ?1", [&active_goal.id])?;
-            }
             ensure!(
                 super::instructions::parked_owner(&tx, &conversation.id, &conversation.context_id)?.is_none(),
                 "This context already has an owning continuation"
@@ -235,36 +228,7 @@ impl Store {
                 "UPDATE jobs SET operator_scope = ?1 WHERE id = ?2",
                 params![protection::protect(&serde_json::to_vec(&scope)?)?, job.id],
             )?;
-            let goal_id = match &stage {
-                Some(stage) => tx.query_row(
-                    "INSERT INTO goals(id, project_id, conversation_id, pipeline_run_id, node_instance_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
-                     ON CONFLICT(pipeline_run_id, node_instance_id) WHERE pipeline_run_id IS NOT NULL
-                     DO UPDATE SET conversation_id = excluded.conversation_id RETURNING id",
-                    params![Uuid::new_v4().to_string(), job.project_id, conversation.id, stage.pipeline_run_id, stage.node_instance_id],
-                    |row| row.get::<_, String>(0),
-                )?,
-                None => tx.query_row(
-                    "INSERT INTO goals(id, project_id, conversation_id) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(conversation_id) WHERE pipeline_run_id IS NULL
-                     DO UPDATE SET id = goals.id RETURNING id",
-                    params![Uuid::new_v4().to_string(), job.project_id, conversation.id],
-                    |row| row.get::<_, String>(0),
-                )?,
-            };
-            let id = Uuid::new_v4().to_string();
-            let started = now_ms();
-            let deadline = definition.max_seconds.map(|seconds| started + i64::from(seconds) * 1000);
-            tx.execute(
-                "INSERT INTO goal_revisions(id, goal_id, initial_job_id, definition, continuation_owner,
-                    created_ms, deadline_ms, token_budget_requested)
-                 VALUES (?1, ?2, ?3, ?4, 'managed', ?5, ?6, ?7)",
-                params![id, goal_id, job.id, protection::protect(&serde_json::to_vec(&definition)?)?,
-                    started, deadline, definition.token_budget.is_some()],
-            )?;
-            tx.execute("INSERT INTO active_goals VALUES (?1, ?2)", params![goal_id, id])?;
-            tx.execute("INSERT INTO goal_revision_controls(revision_id, state) VALUES (?1, 'active')", [&id])?;
-            tx.execute("INSERT INTO goal_continuations VALUES (?1, 0, ?2)", params![id, job.id])?;
+            let (goal_id, id) = bind_initial_goal(&tx, &job, &context.conversation_id, &definition, stage.as_ref())?;
             tx.commit()?;
             Ok(GoalRevision {
                 goal_id, id, definition, continuation_owner: GoalContinuationOwner::Managed,
@@ -965,6 +929,10 @@ pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) 
     else {
         return Ok(());
     };
+    let recorded: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM goal_checkpoints WHERE run_id = ?1)", [run], |row| row.get(0))?;
+    if recorded {
+        return Ok(());
+    }
     let definition: GoalDefinition = serde_json::from_slice(&protection::unprotect(&definition)?)?;
     let report = decode_report(report)?;
     let mut next = if native {
@@ -1003,8 +971,15 @@ pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) 
         } else {
             true
         };
-        if permitted_scope {
-            continuation = Some(prior);
+        if permitted_scope && super::history::effective_release_blocker(db, &prior)?.is_none() {
+            let (request, stage, input) = continuation_inputs(db, &prior, &definition)?;
+            if let (Some(stage), Some(input)) = (&stage, &input) && (
+                (prior.mode == SessionMode::ApprovedWrite && !confirmed_stage_worktree(db, &prior, run)?)
+                || stage_job_input(db, &project, stage, &request, input).is_err()) {
+                next = "blocked";
+            } else {
+                continuation = Some((prior, request, stage, input));
+            }
         } else {
             next = "blocked";
         }
@@ -1015,17 +990,8 @@ pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) 
         params![revision, ordinal, run, context, next],
     )?;
     if inserted == 1
-        && let Some(prior) = continuation
+        && let Some((prior, request, stage, input)) = continuation
     {
-        let request = JobRequest {
-            checkout_id: Some(prior.checkout_id),
-            task_id: prior.task_id,
-            mode: prior.mode,
-            instructions: definition.instructions(),
-            dependencies: Vec::new(),
-            requires_bridge: true,
-        };
-        let stage = prior.pipeline.as_ref().map(|origin| origin.binding());
         let target = insert_job(
             db,
             project,
@@ -1038,6 +1004,10 @@ pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) 
             prior.priority,
             stage.as_ref(),
         )?;
+        if let (Some(stage), Some(input)) = (&stage, &input) {
+            bind_job_input(db, &target.id, stage, input)?;
+            copy_workflow_goal_context(db, &source_job, &target.id)?;
+        }
         db.execute(
             "UPDATE jobs SET operator_scope = (SELECT operator_scope FROM jobs WHERE id = ?1) WHERE id = ?2",
             params![source_job, target.id],
@@ -1053,6 +1023,78 @@ pub(crate) fn accept_goal_checkpoint(db: &Connection, run: &str, context: &str) 
             "INSERT INTO goal_continuations VALUES (?1, ?2, ?3)",
             params![revision, ordinal, target.id],
         )?;
+    }
+    Ok(())
+}
+
+pub(super) fn confirmed_stage_worktree(db: &Connection, job: &Job, run: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM job_worktree_starts s
+             JOIN job_worktree_candidates c ON c.run_id = s.run_id
+             JOIN job_attempts a ON a.run_id = s.run_id
+             JOIN jobs source ON source.id = a.job_id
+             LEFT JOIN job_worktree_scopes scope ON scope.job_id = source.id
+             WHERE s.run_id = ?1 AND s.checkout_id = ?2 AND c.capture_confirmed
+               AND source.project_id = ?3 AND coalesce(scope.scope_task_id, source.task_id) = ?4)",
+        params![run, job.checkout_id, job.project_id, job.task_id],
+        |row| row.get(0),
+    )?)
+}
+
+fn continuation_inputs(
+    db: &Connection,
+    prior: &Job,
+    definition: &GoalDefinition,
+) -> Result<(JobRequest, Option<PipelineDispatch>, Option<WorkflowJobInput>)> {
+    let stage = prior.pipeline.as_ref().map(|origin| origin.binding());
+    let workflow = load_workflow_job_input(db, &prior.id)?;
+    let request = if workflow.is_some() {
+        ensure!(stage.is_some(), "The goal job lost its workflow origin");
+        let encoded: Vec<u8> = db.query_row(
+            "SELECT request FROM jobs WHERE id = ?1 AND project_id = ?2",
+            params![prior.id, prior.project_id],
+            |row| row.get(0),
+        )?;
+        let request: JobRequest = serde_json::from_slice(&protection::unprotect(&encoded)?)?;
+        ensure!(
+            request.checkout_id.as_deref() == Some(prior.checkout_id.as_str())
+                && request.task_id == prior.task_id && request.mode == prior.mode,
+            "The goal job lost its approved scope"
+        );
+        request
+    } else {
+        JobRequest {
+            checkout_id: Some(prior.checkout_id.clone()),
+            task_id: prior.task_id.clone(),
+            mode: prior.mode,
+            instructions: definition.instructions(),
+            dependencies: Vec::new(),
+            requires_bridge: true,
+        }
+    };
+    Ok((request, stage, workflow))
+}
+
+pub(crate) fn require_workflow_goal_release(db: &Connection, run: &str) -> Result<()> {
+    let job = super::pipeline::load_attempt_job(db, run)?
+        .context("The workflow goal attempt lost its scheduled job")?;
+    ensure!(
+        super::history::effective_release_blocker(db, &job)?.is_none(),
+        "The workflow goal needs current approval for this result scope"
+    );
+    Ok(())
+}
+
+fn copy_workflow_goal_context(db: &Connection, source: &str, target: &str) -> Result<()> {
+    for statement in [
+        "INSERT INTO job_role_contexts(job_id, policy) SELECT ?2, policy FROM job_role_contexts WHERE job_id = ?1",
+        "INSERT INTO job_repository_markdown(job_id, checkout_id, revision_id) SELECT ?2, checkout_id, revision_id FROM job_repository_markdown WHERE job_id = ?1",
+        "INSERT INTO job_task_run_scopes(job_id, project_id, task_id, role, checklist_item_id) SELECT ?2, project_id, task_id, role, checklist_item_id FROM job_task_run_scopes WHERE job_id = ?1",
+        "INSERT INTO job_checklist_modes(job_id, mode) SELECT ?2, mode FROM job_checklist_modes WHERE job_id = ?1",
+        "INSERT INTO model_comparison_inputs(job_id, position, group_id, source_job_id, source_run_id, source_dispatch_id, response_revision_id)
+         SELECT ?2, position, group_id, source_job_id, source_run_id, source_dispatch_id, response_revision_id FROM model_comparison_inputs WHERE job_id = ?1",
+    ] {
+        db.execute(statement, params![source, target])?;
     }
     Ok(())
 }
@@ -1131,6 +1173,57 @@ pub(super) fn queued_boundary_owner(
             |row| row.get(0),
         )
         .optional()?)
+}
+
+pub(super) fn bind_initial_goal(
+    db: &Connection,
+    job: &Job,
+    conversation: &str,
+    definition: &GoalDefinition,
+    stage: Option<&PipelineDispatch>,
+) -> Result<(String, String)> {
+    definition.validate()?;
+    if let Some(active) = active_revision(db, conversation, stage)? {
+        let goal = load_revision(db, active)?;
+        ensure!(
+            goal.verification.is_some_and(|verification| verification.status == GoalVerificationStatus::Completed),
+            "This conversation or stage already has an active goal"
+        );
+        db.execute("DELETE FROM active_goals WHERE revision_id = ?1", [&goal.id])?;
+    }
+    let new_id = Uuid::new_v4().to_string();
+    let goal_id: String = if let Some(stage) = stage {
+        db.query_row(
+            "INSERT INTO goals(id, project_id, conversation_id, pipeline_run_id, node_instance_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(pipeline_run_id, node_instance_id) WHERE pipeline_run_id IS NOT NULL
+             DO UPDATE SET conversation_id = excluded.conversation_id RETURNING id",
+            params![new_id, job.project_id, conversation, stage.pipeline_run_id, stage.node_instance_id],
+            |row| row.get(0),
+        )?
+    } else {
+        db.query_row(
+            "INSERT INTO goals(id, project_id, conversation_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT(conversation_id) WHERE pipeline_run_id IS NULL
+             DO UPDATE SET id = goals.id RETURNING id",
+            params![new_id, job.project_id, conversation],
+            |row| row.get(0),
+        )?
+    };
+    let revision = Uuid::new_v4().to_string();
+    let started = now_ms();
+    let deadline = definition.max_seconds.map(|seconds| started + i64::from(seconds) * 1000);
+    db.execute(
+        "INSERT INTO goal_revisions(id, goal_id, initial_job_id, definition, continuation_owner,
+            created_ms, deadline_ms, token_budget_requested)
+         VALUES (?1, ?2, ?3, ?4, 'managed', ?5, ?6, ?7)",
+        params![revision, goal_id, job.id, protection::protect(&serde_json::to_vec(definition)?)?,
+            started, deadline, definition.token_budget.is_some()],
+    )?;
+    db.execute("INSERT INTO active_goals VALUES (?1, ?2)", params![goal_id, revision])?;
+    db.execute("INSERT INTO goal_revision_controls(revision_id, state) VALUES (?1, 'active')", [&revision])?;
+    db.execute("INSERT INTO goal_continuations VALUES (?1, 0, ?2)", params![revision, job.id])?;
+    Ok((goal_id, revision))
 }
 
 fn active_revision(

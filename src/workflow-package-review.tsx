@@ -152,6 +152,13 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={state} setState={update} definitions={definitions} catalog={catalog}
       problems={graphProblems(presented, definitions)} disabled={disabled} allowDefinitionUpdates={false}
       editablePresetFields={Object.fromEntries([...presets.entries()].map(([id, preset]) => [id, preset.fields]))}
+      goalRoleForNode={(id) => {
+        const reference = references[id];
+        if (reference?.source === "published" && reference.version.kind === "role") return { version: reference.version };
+        if ((reference?.source === "draft" && !Object.hasOwn(draftPresets, reference.key)) ||
+          (reference?.source === "parameter" && reference.kind === "role")) return { pending: true };
+        return undefined;
+      }}
       inspectReference={(id) => {
         const reference = references[id];
         if (reference?.source === "draft") return openDraftSubflow(reference.key);

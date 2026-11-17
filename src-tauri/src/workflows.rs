@@ -32,6 +32,7 @@ pub mod role_templates;
 pub mod triggers;
 mod runtime;
 pub mod settings_proposals;
+pub mod stage_goal;
 pub mod stage_requirements;
 #[cfg(test)]
 mod stage_models;
@@ -62,7 +63,7 @@ pub use command::{
 pub(crate) use command::publish_command_result;
 pub use execution::{NodeInputs, WorkflowHostRequest, WorkflowHostSubmission};
 pub use iteration::{BuildListConfiguration, ForEachBeginConfiguration, ForEachCollectConfiguration, ForEachConfiguration, ForEachGateConfiguration, WorkflowIterationResults, WorkflowJsonItem, WorkflowJsonList};
-pub(crate) use job_inputs::{WorkflowJobInput, bind_job_input, stage_job_input};
+pub(crate) use job_inputs::{WorkflowJobInput, bind_job_input, load_workflow_job_input, stage_job_input};
 pub use launch::{
     ManualWorkflowLaunch, WorkflowLaunchOrigin, WorkflowLaunchReceipt, WorkflowLaunchSource,
 };
@@ -191,11 +192,13 @@ fn compile_resolved_graph<'definition>(
             instance.id
         );
         let revision = digest(&serde_json::to_vec(&(&instance, definition))?);
-        nodes.push(PinnedNode {
+        let pinned = PinnedNode {
             instance,
             revision,
             definition: definition.clone(),
-        });
+        };
+        stage_goal::StageGoalPin::for_stage(&pinned)?;
+        nodes.push(pinned);
     }
 
     let indexes: HashMap<_, _> = nodes

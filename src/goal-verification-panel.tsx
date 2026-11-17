@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { useId, useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import type { StageGoalEvidence } from "@/workflow-stage-goal";
 
 type CriterionStatus = "pending" | "failed" | "passed";
 type VerificationStatus = "verifying" | "failed" | "completed";
@@ -49,12 +50,13 @@ function evidenceLabel(evidence: CriterionEvidence, gateLabel?: string) {
   }
 }
 
-function CriterionEvidenceForm({ criterion, choices, projectId, runId, onSaved }: {
+function CriterionEvidenceForm({ criterion, choices, projectId, runId, onSaved, allowOperatorReview }: {
   criterion: Criterion;
   choices: EvidenceChoice[];
   projectId: string;
   runId: string;
   onSaved: (verification: Verification) => void;
+  allowOperatorReview: boolean;
 }) {
   const choiceLabel = useId();
   const noteLabel = useId();
@@ -88,10 +90,10 @@ function CriterionEvidenceForm({ criterion, choices, projectId, runId, onSaved }
           {evidenceLabel(choice.evidence, choice.label)} · {criterionLabels[choice.status]} · Candidate {choice.candidateId}
         </option>)}
       </optgroup>}
-      <optgroup label="Operator review of this result">
+      {allowOperatorReview && <optgroup label="Operator review of this result">
         <option value="approve">Approve criterion</option>
         <option value="reject">Reject criterion</option>
-      </optgroup>
+      </optgroup>}
     </select>
     {review && <>
       <label htmlFor={noteLabel}>Review note (optional)</label>
@@ -104,10 +106,13 @@ function CriterionEvidenceForm({ criterion, choices, projectId, runId, onSaved }
   </form>;
 }
 
-export function GoalVerificationPanel({ projectId, runId, live = false }: {
+export function GoalVerificationPanel({ projectId, runId, live = false, requiredEvidence, candidateId, actions }: {
   projectId: string;
   runId: string;
   live?: boolean;
+  requiredEvidence?: readonly StageGoalEvidence[];
+  candidateId?: string;
+  actions?: (result: Verification) => ReactNode;
 }) {
   const client = useQueryClient();
   const key = ["goal-verification", projectId, runId, live];
@@ -140,15 +145,21 @@ export function GoalVerificationPanel({ projectId, runId, live = false }: {
     {result.candidateId && <p className="break-all">Candidate {result.candidateId}</p>}
     {choices.error && <p role="alert">{String(choices.error)}</p>}
     {result.criteria.length > 0 && <ol aria-label="Required goal criteria" className="grid gap-2">
-      {result.criteria.map((criterion) => <li key={criterion.ordinal} className="grid gap-1 border-t border-border pt-2">
-        <p className="font-medium">{criterion.text}</p>
-        <p>{criterionLabels[criterion.status]}</p>
-        {criterion.evidence && <p className="break-words text-muted-foreground">{evidenceLabel(criterion.evidence,
-          choices.data?.find((item) => JSON.stringify(item.evidence) === JSON.stringify(criterion.evidence))?.label)}</p>}
-        {criterion.evidence?.kind === "operator_review" && criterion.evidence.note && <p>{criterion.evidence.note}</p>}
-        {editable && <CriterionEvidenceForm criterion={criterion} choices={choices.data ?? []}
-          projectId={projectId} runId={runId} onSaved={onSaved} />}
-      </li>)}
+      {result.criteria.map((criterion) => {
+        const required = requiredEvidence?.[criterion.ordinal - 1];
+        const qualified = (choices.data ?? []).filter((choice) =>
+          (!required || choice.evidence.kind === required) && (!candidateId || candidateId === choice.candidateId));
+        return <li key={criterion.ordinal} className="grid gap-1 border-t border-border pt-2">
+          <p className="font-medium">{criterion.text}</p>
+          <p>{criterionLabels[criterion.status]}</p>
+          {criterion.evidence && <p className="break-words text-muted-foreground">{evidenceLabel(criterion.evidence,
+            choices.data?.find((item) => JSON.stringify(item.evidence) === JSON.stringify(criterion.evidence))?.label)}</p>}
+          {criterion.evidence?.kind === "operator_review" && criterion.evidence.note && <p>{criterion.evidence.note}</p>}
+          {editable && <CriterionEvidenceForm criterion={criterion} choices={qualified} allowOperatorReview={required !== "candidate_gate"}
+            projectId={projectId} runId={runId} onSaved={onSaved} />}
+        </li>;
+      })}
     </ol>}
+    {actions?.(result)}
   </section>;
 }

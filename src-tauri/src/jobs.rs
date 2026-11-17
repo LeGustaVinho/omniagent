@@ -59,6 +59,7 @@ pub use goal_verification::{
     GoalCriterionEvidence, GoalCriterionStatus, GoalCriterionVerification, GoalEvidenceChoice,
     GoalVerification, GoalVerificationStatus,
 };
+pub(crate) use goal_verification::load_goal_verification;
 pub(crate) use goal_control::{
     pause_revoked_goal, recover_managed_goal_stops, settle_goal_stop,
     settle_owned_goal_cancellations,
@@ -69,7 +70,7 @@ pub use goals::{
 };
 pub(crate) use goals::{
     GoalExecution, accept_goal_checkpoint, delegated_goal_authority_revoked, is_native_goal_run,
-    record_native_goal, record_native_goal_turn, recover_native_goal_executors,
+    record_native_goal, record_native_goal_turn, recover_native_goal_executors, require_workflow_goal_release,
     settle_native_goal_executor,
 };
 pub use history::{QueueHistoryPolicy, QueueHistorySettings};
@@ -81,7 +82,7 @@ pub use instructions::{InstructionDelivery, PendingInstruction};
 pub(crate) use native_goal_evidence::{
     late_native_goal_evidence, record_native_goal_control, recover_native_goal_output,
 };
-pub(crate) use native_goal_qualification::{NativeGoalSeed, effective_qualification_matches};
+pub(crate) use native_goal_qualification::{NativeGoalSeed, candidate as native_goal_candidate, effective_qualification_matches};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use orchestration::RunOrchestration;
 pub use question_answers::ConversationQuestionTimelineEntry;
