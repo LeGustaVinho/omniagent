@@ -2029,6 +2029,7 @@ test("opens Git and local file history and recycles only the clicked checkout fi
     await create.waitForExist({ reverse: true });
     assert.equal(await readFile(join(repo, "new-from-template.md"), "utf8"), "# Title\n\n");
 
+    await browser.$('.work-rail button[aria-label="Knowledge"][aria-current="page"]').waitForDisplayed();
     await click(browser, '.work-rail button[aria-label="IDE"]');
     const disposableRow = ide.$(`button[title="${removed}"]`);
     await disposableRow.waitForDisplayed();
