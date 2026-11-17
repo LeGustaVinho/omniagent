@@ -11,12 +11,13 @@ use crate::{
 
 use super::*;
 
-pub(super) const FAILED_CONTENT: &str = "integration rejected this head";
+pub(in crate::workflows::git_integration) const FAILED_CONTENT: &str =
+    "integration rejected this head";
 const REPOSITORY_ID: u64 = 11;
 const ACCOUNT_ID: u64 = 22;
-pub(super) const MERGE_REQUEST: &str = "fixture-merge-request";
+pub(in crate::workflows::git_integration) const MERGE_REQUEST: &str = "fixture-merge-request";
 
-pub(super) fn settings() -> GithubSettings {
+pub(in crate::workflows::git_integration) fn settings() -> GithubSettings {
     GithubSettings {
         account_id: ACCOUNT_ID,
         repository_id: REPOSITORY_ID,
@@ -46,14 +47,14 @@ struct Remote {
     pending_merge: Option<u64>,
 }
 
-pub(super) struct LocalGithub {
+pub(in crate::workflows::git_integration) struct LocalGithub {
     root: PathBuf,
     slug: RepositorySlug,
     remote: Mutex<Remote>,
 }
 
 impl LocalGithub {
-    pub(super) fn new(root: &Path, tip: String) -> Self {
+    pub(in crate::workflows::git_integration) fn new(root: &Path, tip: String) -> Self {
         let mut remote = Remote::default();
         remote.refs.insert(DESTINATION.into(), tip);
         Self {
@@ -66,7 +67,7 @@ impl LocalGithub {
         }
     }
 
-    pub(super) fn merges(&self) -> usize {
+    pub(in crate::workflows::git_integration) fn merges(&self) -> usize {
         self.remote.lock().unwrap().merges
     }
 
@@ -125,8 +126,27 @@ impl GithubDeliveryClient for LocalGithub {
         Ok(())
     }
 
-    async fn search_public_repositories(&self, _: &str, _: u16) -> Result<Vec<PublicRepository>> {
-        anyhow::bail!("This fixture graph does not search public repositories")
+    async fn search_public_repositories(
+        &self,
+        query: &str,
+        limit: u16,
+    ) -> Result<Vec<PublicRepository>> {
+        ensure!(!query.trim().is_empty() && limit > 0);
+        let slug = RepositorySlug {
+            owner: "fixture".into(),
+            name: "reference".into(),
+        };
+        Ok(vec![PublicRepository {
+            url: slug.url(),
+            repository: GitHubRepository {
+                id: 44,
+                slug,
+                default_branch: "main".into(),
+            },
+            description: Some("A fixture repository for pinned public research".into()),
+            license: Some("MIT".into()),
+            revision: self.branch_head(&self.slug, DESTINATION).await?,
+        }])
     }
 
     async fn branch_head_optional(
