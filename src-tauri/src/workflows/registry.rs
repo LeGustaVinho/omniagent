@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::model_catalog::ModelSelection;
 
@@ -24,6 +27,10 @@ pub enum BuiltinNode {
     BuildText,
     RequestInput,
     Approval,
+    Human,
+    Wait,
+    End,
+    ConversationAgent,
     CompareModels,
     FindWork,
     UpdateProgress,
@@ -56,6 +63,12 @@ pub enum BuiltinNode {
     Condition,
     Parallel,
     Join,
+    Fork,
+    JoinResults,
+    Loop,
+    LoopGate,
+    LoopStep,
+    LoopResult,
     Subflow,
     RepeatUntil,
     RepeatOutput,
@@ -78,6 +91,9 @@ impl BuiltinNode {
                 | Self::ForEachCollect
                 | Self::RepeatOutput
                 | Self::DeliveryAttempt
+                | Self::LoopGate
+                | Self::LoopStep
+                | Self::LoopResult
         )
     }
 
@@ -166,6 +182,15 @@ pub struct Port {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationKind {
+    End,
+    Human,
+    Wait,
+    Fork,
+    JoinResults,
+    Loop,
+    LoopGate,
+    LoopStep,
+    LoopResult,
     PromptDecision,
     PromptOutcome,
     CandidateAcceptance,
@@ -207,6 +232,22 @@ pub enum ConfigurationKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NodeConfiguration {
+    End,
+    Human(super::decision_nodes::HumanConfiguration),
+    Wait(super::timed::WaitConfiguration),
+    Fork(super::orchestration::ForkConfiguration),
+    JoinResults(super::orchestration::JoinResultsConfiguration),
+    Loop(super::orchestration::LoopConfiguration),
+    LoopGate(super::orchestration::LoopGateConfiguration),
+    LoopStep(super::orchestration::LoopStepConfiguration),
+    LoopResult(super::orchestration::LoopResultConfiguration),
+    #[serde(rename_all = "camelCase")]
+    PromptOverrides {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        role_overrides: BTreeMap<String, Value>,
+    },
     PromptDecision(super::prompt::PromptDecisionConfiguration),
     PromptOutcome(super::prompt::PromptOutcomeConfiguration),
     CandidateAcceptance(super::candidate_acceptance::CandidateAcceptanceConfiguration),
@@ -300,6 +341,16 @@ pub enum NodeConfiguration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Executor {
+    End,
+    ConversationAgent,
+    AwaitDeadline,
+    AwaitHuman,
+    AdmitBranches,
+    AggregateBranches,
+    ExpandLoop,
+    GateLoop,
+    StepLoop,
+    AggregateLoop,
     PromptDecision,
     PromptOutcome,
     SearchPublicRepositories,
@@ -387,9 +438,17 @@ pub struct NodeDefinition {
     pub effect: Effect,
     pub inputs: Vec<Port>,
     pub outputs: Vec<Port>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub input_schemas: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub output_schemas: BTreeMap<String, Value>,
 }
 
 pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
+    let mut pinned = pinned.clone();
+    pinned.input_schemas.clear();
+    pinned.output_schemas.clear();
+    let pinned = &pinned;
     let mut registry = builtin_registry();
     let Some(current) = registry.iter_mut().find(|entry| entry.kind == pinned.kind) else {
         return false;
@@ -398,6 +457,7 @@ pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
     match (pinned.kind, pinned.title.as_str()) {
         (BuiltinNode::VerifyCommit, "Commit") => current.title = "Commit".into(),
         (BuiltinNode::VerifyMerge, "Merge") => current.title = "Merge".into(),
+        (BuiltinNode::End, "Return") => current.title = "Return".into(),
         _ => {}
     }
     if pinned.kind == BuiltinNode::Command && pinned.revision == 1 {
@@ -411,6 +471,20 @@ pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
     if pinned.kind == BuiltinNode::Agent && pinned.revision == 1 {
         current.revision = 1;
         current.inputs.retain(|port| port.name != "review_subject");
+    }
+    if pinned.kind == BuiltinNode::Agent && pinned.revision == 3 {
+        configure_structured_agent(current, pinned.executor == Executor::WriteAgent);
+    }
+    if matches!(
+        pinned.kind,
+        BuiltinNode::Fork
+            | BuiltinNode::JoinResults
+            | BuiltinNode::LoopGate
+            | BuiltinNode::LoopStep
+            | BuiltinNode::LoopResult
+    ) {
+        current.inputs.clone_from(&pinned.inputs);
+        current.outputs.clone_from(&pinned.outputs);
     }
     if pinned.kind == BuiltinNode::PromptOutcome {
         let outputs = pinned
@@ -508,6 +582,33 @@ pub(super) fn prompt_outcome_matches(
         .find(|definition| definition.kind == BuiltinNode::PromptOutcome)
         .and_then(|base| config.definition(&base).ok())
         .is_some_and(|definition| definition == *pinned)
+}
+
+pub(super) fn configure_structured_agent(definition: &mut NodeDefinition, write: bool) {
+    let port = |name: &str, value| Port {
+        name: name.into(),
+        value,
+    };
+    definition.revision = 3;
+    definition.title = "AI Node Agent".into();
+    definition.inputs = vec![
+        port("ready", PortType::Control),
+        port("input", PortType::Data(ArtifactKind::JsonObject)),
+    ];
+    definition.outputs = vec![
+        port("completed", PortType::Control),
+        port("failed", PortType::Control),
+        port("result", PortType::Data(ArtifactKind::JsonObject)),
+    ];
+    if write {
+        definition.executor = Executor::WriteAgent;
+        definition.effect = Effect::WriteRepository;
+        definition.inputs.extend([
+            port("release", PortType::Data(ArtifactKind::Release)),
+            port("worktree", PortType::Data(ArtifactKind::Worktree)),
+            port("plan", PortType::Data(ArtifactKind::Plan)),
+        ]);
+    }
 }
 
 pub fn builtin_registry() -> Vec<NodeDefinition> {
@@ -757,6 +858,117 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
                 ("failed", Control),
                 ("text", Data(RenderedText)),
             ],
+        ),
+        (
+            BuiltinNode::Wait,
+            "Wait",
+            Executor::AwaitDeadline,
+            ConfigurationKind::Wait,
+            Effect::None,
+            &[("ready", Control), ("input", Data(JsonObject))],
+            &[("completed", Control), ("result", Data(JsonObject))],
+        ),
+        (
+            BuiltinNode::Human,
+            "Human in the Loop",
+            Executor::AwaitHuman,
+            ConfigurationKind::Human,
+            Effect::None,
+            &[("ready", Control), ("input", Data(JsonObject))],
+            &[
+                ("answered", Control),
+                ("approved", Control),
+                ("rejected", Control),
+                ("expired", Control),
+                ("failed", Control),
+                ("response", Data(JsonObject)),
+                ("approved_result", Data(JsonObject)),
+            ],
+        ),
+        (
+            BuiltinNode::End,
+            "End",
+            Executor::End,
+            ConfigurationKind::End,
+            Effect::None,
+            &[("ready", Control), ("result", Data(JsonObject))],
+            &[("completed", Control), ("result", Data(JsonObject))],
+        ),
+        (
+            BuiltinNode::ConversationAgent,
+            "Conversation Agent",
+            Executor::ConversationAgent,
+            ConfigurationKind::None,
+            Effect::InvokeModel,
+            &[("ready", Control), ("input", Data(JsonObject))],
+            &[
+                ("completed", Control),
+                ("result", Data(JsonObject)),
+                ("failed", Control),
+            ],
+        ),
+        (
+            BuiltinNode::Fork,
+            "Parallel / Fork",
+            Executor::AdmitBranches,
+            ConfigurationKind::Fork,
+            Effect::None,
+            &[("ready", Control), ("input", Data(JsonObject))],
+            &[],
+        ),
+        (
+            BuiltinNode::JoinResults,
+            "Join",
+            Executor::AggregateBranches,
+            ConfigurationKind::JoinResults,
+            Effect::None,
+            &[],
+            &[
+                ("joined", Control),
+                ("failed", Control),
+                ("results", Data(JsonObject)),
+            ],
+        ),
+        (
+            BuiltinNode::Loop,
+            "Loop",
+            Executor::ExpandLoop,
+            ConfigurationKind::Loop,
+            Effect::None,
+            &[("ready", Control), ("input", Data(JsonObject))],
+            &[
+                ("completed", Control),
+                ("limit_reached", Control),
+                ("failed", Control),
+                ("results", Data(JsonObject)),
+            ],
+        ),
+        (
+            BuiltinNode::LoopGate,
+            "Start loop iteration",
+            Executor::GateLoop,
+            ConfigurationKind::LoopGate,
+            Effect::None,
+            &[],
+            &[],
+        ),
+        (
+            BuiltinNode::LoopStep,
+            "Record loop iteration",
+            Executor::StepLoop,
+            ConfigurationKind::LoopStep,
+            Effect::None,
+            &[],
+            &[],
+        ),
+        (
+            BuiltinNode::LoopResult,
+            "Collect loop outputs",
+            Executor::AggregateLoop,
+            ConfigurationKind::LoopResult,
+            Effect::None,
+            &[],
+            &[],
         ),
         (
             BuiltinNode::RequestInput,
@@ -1376,6 +1588,8 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
                 effect,
                 inputs: ports(inputs),
                 outputs: ports(outputs),
+                input_schemas: BTreeMap::new(),
+                output_schemas: BTreeMap::new(),
             },
         )
         .collect()
@@ -1427,6 +1641,15 @@ impl NodeConfiguration {
     pub(super) fn matches(&self, kind: ConfigurationKind) -> bool {
         match (self, kind) {
             (Self::None, ConfigurationKind::None) => true,
+            (Self::End, ConfigurationKind::End) => true,
+            (Self::Human(config), ConfigurationKind::Human) => config.is_valid(),
+            (Self::Wait(config), ConfigurationKind::Wait) => config.is_valid(),
+            (Self::Fork(_), ConfigurationKind::Fork)
+            | (Self::JoinResults(_), ConfigurationKind::JoinResults)
+            | (Self::Loop(_), ConfigurationKind::Loop)
+            | (Self::LoopGate(_), ConfigurationKind::LoopGate)
+            | (Self::LoopStep(_), ConfigurationKind::LoopStep)
+            | (Self::LoopResult(_), ConfigurationKind::LoopResult) => true,
             (Self::PromptDecision(config), ConfigurationKind::PromptDecision) => config.valid(),
             (Self::PromptOutcome(config), ConfigurationKind::PromptOutcome) => config.valid(),
             (Self::None, ConfigurationKind::CandidateAcceptance) => true,
@@ -1547,7 +1770,7 @@ impl NodeConfiguration {
 impl Executor {
     pub(super) fn scheduler_profile(self) -> Option<&'static str> {
         match self {
-            Self::PlanAgent => Some("planning"),
+            Self::PlanAgent | Self::ConversationAgent => Some("planning"),
             Self::ReadOnlyAgent | Self::ExecuteMcpTool | Self::CompareModels => Some("read_only"),
             Self::WriteAgent | Self::ExecuteCommand => Some("approved_write"),
             _ => None,

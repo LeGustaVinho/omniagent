@@ -29,6 +29,7 @@ use super::{
     launch::load_workflow_launch,
     runtime::append_pinned_unit,
     stage_plan::StagePlanConfiguration,
+    structured_agent,
     units::load_delivery_unit,
 };
 
@@ -132,6 +133,36 @@ pub(super) fn require_admission(
         return Ok(());
     }
     let workflow = &binding.pipeline_run_id;
+    let typed = structured_agent::configuration(node);
+    let read = |port, kind| -> Result<Option<WorkflowArtifact>> {
+        input
+            .artifacts
+            .get(port)
+            .map(|id| load_artifact(db, project, workflow, id, kind))
+            .transpose()
+            .map(Option::flatten)
+    };
+    let approved_release = if typed
+        .is_some_and(|config| config.effective_role.tool_scope == SessionMode::ApprovedWrite)
+    {
+        let release = read("release", ArtifactKind::Release)?;
+        let Some(ArtifactValue::Release(approved)) = release.map(|artifact| artifact.value) else {
+            anyhow::bail!("A writing AI Node needs its approved release")
+        };
+        let worktree = read("worktree", ArtifactKind::Worktree)?;
+        ensure!(
+            matches!(worktree.map(|artifact| artifact.value), Some(ArtifactValue::Worktree { checkout_id, task })
+                if checkout_id == approved.release.checkout_id && task.project_id == project
+                    && task.task_id == approved.release.task_id)
+                && binding.release_id.as_ref() == Some(&approved.release.id)
+                && binding.plan_revision.as_ref() == Some(&approved.release.plan_revision)
+                && request.task_id.as_ref() == Some(&approved.release.task_id),
+            "The AI Node release does not match the task, worktree or plan"
+        );
+        Some(approved.release)
+    } else {
+        None
+    };
     let unit = match input.unit_id.as_deref() {
         Some(id) => {
             let task = request
@@ -148,48 +179,55 @@ pub(super) fn require_admission(
             Some(unit)
         }
         None => {
-            ensure!(
-                request.task_id.is_none() && binding.plan_revision.is_none(),
-                "A standalone Agent uses the checkout pinned at launch"
-            );
+            if approved_release.is_none() {
+                ensure!(
+                    request.task_id.is_none() && binding.plan_revision.is_none(),
+                    "A standalone Agent uses the checkout pinned at launch"
+                );
+            }
             None
         }
     };
     let checkout = if let Some(unit) = &unit {
         unit.checkout_id.clone()
+    } else if let Some(approved) = &approved_release {
+        approved.checkout_id.clone()
     } else {
         checkout(db, project, workflow)?
     };
-    let mode =
-        StagePlanConfiguration::for_stage(node)?.map_or(SessionMode::ReadOnly, |plan| plan.mode());
+    let mode = if let Some(config) = typed {
+        config.effective_role.tool_scope
+    } else {
+        StagePlanConfiguration::for_stage(node)?.map_or(SessionMode::ReadOnly, |plan| plan.mode())
+    };
     ensure!(
         request.checkout_id.as_deref() == Some(checkout.as_str())
             && request.mode == mode
             && request.dependencies.is_empty()
             && !request.requires_bridge
-            && binding.release_id.is_none(),
-        "The Agent must use its pinned checkout and non-writing mode"
+            && (binding.release_id.is_some() == approved_release.is_some()),
+        "The Agent must use its pinned checkout and execution scope"
     );
-    let read = |port, kind| -> Result<Option<WorkflowArtifact>> {
-        input
-            .artifacts
-            .get(port)
-            .map(|id| load_artifact(db, project, workflow, id, kind))
-            .transpose()
-            .map(Option::flatten)
+    let mut expected_prompt = if let Some(config) = typed {
+        config.render(read("input", ArtifactKind::JsonObject)?.as_ref())?
+    } else {
+        let prompt_artifact = read("prompt", ArtifactKind::RenderedText)?;
+        prompt(prompt_artifact.as_ref())?.to_owned()
     };
-    let prompt_artifact = read("prompt", ArtifactKind::RenderedText)?;
-    let mut expected_prompt = prompt(prompt_artifact.as_ref())?.to_owned();
-    super::conversation_turns::append_prompt_context(
-        db,
-        workflow,
-        &binding.node_instance_id,
-        &mut expected_prompt,
-    )?;
+    if typed.is_none() {
+        super::conversation_turns::append_prompt_context(
+            db,
+            workflow,
+            &binding.node_instance_id,
+            &mut expected_prompt,
+        )?;
+    }
     let NodeConfiguration::AgentRole { requirements, .. } = &node.instance.configuration else {
         anyhow::bail!("The Agent stage lost its pinned role");
     };
-    let mut expected_instructions = if let Some(version) = &requirements.bound_role {
+    let mut expected_instructions = if let Some(config) = typed {
+        config.instructions(&expected_prompt)
+    } else if let Some(version) = &requirements.bound_role {
         let template = roles::load_role(db, project, version)?
             .context("The pinned Agent role is unavailable")?;
         roles::role_instructions(&template, &expected_prompt)
@@ -285,6 +323,7 @@ pub(super) fn evaluate(
 ) -> Result<Option<AgentStageOutcome>> {
     let project = &run.project_id;
     let node_id = &node.instance.id;
+    let typed = structured_agent::configuration(node);
     let input_ids = inputs
         .iter()
         .map(|(port, artifact)| (port.clone(), artifact.id.clone()))
@@ -293,6 +332,11 @@ pub(super) fn evaluate(
         return Ok(Some(outcome));
     }
     let Some(job_id) = stage_job(db, project, &run.id, node_id, unit, &input_ids)? else {
+        if let Some(config) = typed
+            && let Err(error) = config.render(inputs.get("input"))
+        {
+            return Ok(Some(AgentStageOutcome::failed(None, &format!("{error:#}"))));
+        }
         return Ok(None);
     };
     let job = load_job(db, project, &job_id)?.context("The Agent job is unavailable")?;
@@ -334,6 +378,47 @@ pub(super) fn evaluate(
         (job_id, attempt.run_id)
     };
     let (source_job, run_id) = source_run;
+    if let Some(config) = typed {
+        let value = load_response_for_mode(
+            db,
+            project,
+            &job.checkout_id,
+            &source_job,
+            &run_id,
+            Some(config.effective_role.tool_scope),
+        )
+        .and_then(|(_, _, text)| config.output(&text));
+        let output = match value {
+            Ok(result) => result,
+            Err(error) => {
+                return Ok(Some(AgentStageOutcome::failed(
+                    Some(run_id),
+                    &format!("{error:#}"),
+                )));
+            }
+        };
+        let artifact = insert_scoped_artifact(
+            db,
+            project,
+            run.id.clone(),
+            node_id.clone(),
+            "result".into(),
+            unit.map(str::to_owned),
+            ArtifactValue::JsonObject(output),
+        )?;
+        record_workflow_completion_inputs(
+            db,
+            &artifact,
+            run.plan_revision.as_deref().unwrap_or(""),
+            inputs,
+        )?;
+        return Ok(Some(AgentStageOutcome {
+            state: ControlStageState::Completed,
+            port: "completed",
+            reason: None,
+            source_run_id: Some(run_id),
+        }));
+    }
     let response =
         match record_response(db, project, &job.checkout_id, &source_job, &run_id, inputs) {
             Ok(response) => response,
@@ -440,6 +525,18 @@ pub(super) fn load_response(
     job: &str,
     run: &str,
 ) -> Result<(String, String, String)> {
+    load_response_for_mode(db, project, checkout, job, run, None)
+}
+
+fn load_response_for_mode(
+    db: &Connection,
+    project: &str,
+    checkout: &str,
+    job: &str,
+    run: &str,
+    mode: Option<SessionMode>,
+) -> Result<(String, String, String)> {
+    let expected_mode = mode.map(serde_json::to_value).transpose()?;
     let (dispatch, conversation, input, result, initial_job) = db.query_row(
         "SELECT d.id, a.conversation_id, a.context_id, a.result_context_id, coalesce(goal.initial_job_id, j.id)
          FROM agent_attempts a JOIN runs r ON r.id = a.run_id
@@ -451,14 +548,15 @@ pub(super) fn load_response(
          LEFT JOIN goal_continuations g ON g.job_id = j.id
          LEFT JOIN goal_revisions goal ON goal.id = g.revision_id
          WHERE r.id = ?1 AND j.id = ?2 AND j.project_id = ?3 AND r.checkout_id = ?4
-           AND c.background = 1 AND j.mode IN ('read_only', 'plan') AND r.status = 'succeeded'
+           AND c.background = 1 AND r.status = 'succeeded'
+           AND (j.mode = ?5 OR (?5 IS NULL AND j.mode IN ('read_only', 'plan')))
            AND a.provider_terminal = 'completed' AND d.delivery = 'submitted'
            AND NOT EXISTS (SELECT 1 FROM history_deleted_dispatch_payloads x WHERE x.dispatch_id = d.id)",
-        params![run, job, project, checkout],
+        params![run, job, project, checkout, expected_mode.as_ref().and_then(serde_json::Value::as_str)],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
                  row.get::<_, String>(3)?, row.get::<_, String>(4)?)),
     ).optional()?.context("The exact Agent dispatch is missing or unavailable")?;
-    require_initial_dispatch(db, &initial_job, checkout)?;
+    require_initial_dispatch(db, &initial_job, checkout, mode)?;
     let initial = context_entries(db, &conversation, &input)?;
     let final_context = context_entries(db, &conversation, &result)?;
     let output = final_context
@@ -475,7 +573,12 @@ pub(super) fn load_response(
     Ok((dispatch, message.revision_id, message.text))
 }
 
-fn require_initial_dispatch(db: &Connection, job: &str, checkout: &str) -> Result<()> {
+fn require_initial_dispatch(
+    db: &Connection,
+    job: &str,
+    checkout: &str,
+    mode: Option<SessionMode>,
+) -> Result<()> {
     let (request, snapshot, available) = db.query_row(
         "SELECT j.request, s.payload, NOT EXISTS (
             SELECT 1 FROM history_deleted_dispatch_payloads removed WHERE removed.dispatch_id = d.id)
@@ -492,7 +595,10 @@ fn require_initial_dispatch(db: &Connection, job: &str, checkout: &str) -> Resul
     let snapshot: ContextSnapshot = serde_json::from_slice(&protection::unprotect(&snapshot)?)?;
     ensure!(
         snapshot.scope.mode == request.mode
-            && matches!(request.mode, SessionMode::ReadOnly | SessionMode::Plan)
+            && mode.map_or(
+                matches!(request.mode, SessionMode::ReadOnly | SessionMode::Plan),
+                |mode| mode == request.mode,
+            )
             && matches!(snapshot.native_history, NativeHistory::Fresh)
             && matches!(snapshot.submitted_messages.as_slice(), [message]
                 if message.role == MessageRole::User && message.text == request.instructions),

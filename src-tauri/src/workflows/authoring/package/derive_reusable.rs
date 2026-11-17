@@ -346,7 +346,7 @@ fn derive_subflow(
     name: &str,
     node_ids: Option<&[String]>,
     inputs: BTreeMap<String, Vec<Wire>>,
-    outputs: BTreeMap<String, Endpoint>,
+    mut outputs: BTreeMap<String, Endpoint>,
     destination: PackageDestination,
 ) -> Result<DerivedBody> {
     let graph = source.graph()?;
@@ -356,11 +356,10 @@ fn derive_subflow(
         !inputs.is_empty() && !outputs.is_empty(),
         "Map public inputs and outputs for the reusable subflow"
     );
-    let start = graph
-        .nodes
-        .iter()
-        .find(|node| node.kind == BuiltinNode::Start)
-        .context("The saved source has no Start definition")?;
+    let mut entry_definition = crate::workflows::builtin_registry()
+        .into_iter()
+        .find(|definition| definition.kind == BuiltinNode::Start)
+        .context("The subflow entry definition is unavailable")?;
     let entry = (1..=selected.len() + 1)
         .map(|ordinal| {
             if ordinal == 1 {
@@ -394,6 +393,10 @@ fn derive_subflow(
         let value = *remaining
             .get(&(first.from.clone(), first.to.clone()))
             .context("A public input must use an unused selected boundary wire")?;
+        let contract = source
+            .effective_definitions
+            .get(&first.from.node)
+            .and_then(|definition| definition.output_schemas.get(&first.from.port));
         ensure!(
             links.iter().all(|wire| wire.from == first.from),
             "One public input cannot combine different upstream sources"
@@ -413,6 +416,11 @@ fn derive_subflow(
             });
         }
         public_inputs.insert(name.clone(), endpoint);
+        if let Some(schema) = contract {
+            entry_definition
+                .output_schemas
+                .insert(name.clone(), schema.clone());
+        }
         entry_ports.push(Port { name, value });
     }
     ensure!(
@@ -438,7 +446,7 @@ fn derive_subflow(
             outputs: entry_ports,
         },
     }];
-    let mut definitions = BTreeMap::from([(entry, source.definition(start)?.clone())]);
+    let mut definitions = BTreeMap::from([(entry, entry_definition)]);
     let mut references = BTreeMap::new();
     for node in graph
         .nodes
@@ -452,8 +460,67 @@ fn derive_subflow(
         if let Some((reference, _)) = reference {
             references.insert(node.id.clone(), reference);
         }
+        for binding in [
+            "schema",
+            "role",
+            "input_schema",
+            "output_schema",
+            "reviewer",
+        ] {
+            let slot = format!("{}:{binding}", node.id);
+            if let Some((reference, _)) = source.reference(&slot, destination)? {
+                references.insert(slot, reference);
+            }
+        }
         definitions.insert(node.id.clone(), source.definition(node)?.clone());
         nodes.push(node.clone());
+    }
+    if graph.nodes.iter().any(|node| node.kind == BuiltinNode::End) {
+        let mut completion = outputs.iter_mut().filter(|(name, endpoint)| {
+            !matches!(
+                name.as_str(),
+                "failed" | "rejected" | "expired" | "limit_reached"
+            ) && source.effective_port(endpoint, false).ok() == Some(PortType::Control)
+        });
+        let (_, completed) = completion
+            .next()
+            .context("Choose the Function's completion port")?;
+        ensure!(
+            completion.next().is_none(),
+            "Choose one completion port for Return"
+        );
+        let return_id = (1..=nodes.len() + 1)
+            .map(|index| {
+                if index == 1 {
+                    "return".to_owned()
+                } else {
+                    format!("return-{index}")
+                }
+            })
+            .find(|id| nodes.iter().all(|node| &node.id != id))
+            .context("Missing Return ID")?;
+        wires.push(Wire {
+            from: completed.clone(),
+            to: Endpoint {
+                node: return_id.clone(),
+                port: "ready".into(),
+            },
+        });
+        *completed = Endpoint {
+            node: return_id.clone(),
+            port: "completed".into(),
+        };
+        nodes.push(NodeInstance {
+            id: return_id.clone(),
+            kind: BuiltinNode::End,
+            configuration: NodeConfiguration::End,
+        });
+        let mut definition = crate::workflows::builtin_registry()
+            .into_iter()
+            .find(|definition| definition.kind == BuiltinNode::End)
+            .context("The Return definition is unavailable")?;
+        definition.title = "Return".into();
+        definitions.insert(return_id, definition);
     }
     Ok((
         PackageArtifactBody::Subflow {
@@ -484,7 +551,7 @@ fn select_nodes<'a>(
             && graph
                 .nodes
                 .iter()
-                .filter(|node| node.kind == BuiltinNode::Start)
+                .filter(|node| matches!(node.kind, BuiltinNode::Start | BuiltinNode::TypedStart))
                 .count()
                 == 1,
         "A saved source needs distinct stages and one Start node"
@@ -503,7 +570,12 @@ fn select_nodes<'a>(
     } else {
         included.extend(found.keys().copied());
     }
-    included.retain(|id| found[id].kind != BuiltinNode::Start);
+    included.retain(|id| {
+        !matches!(
+            found[id].kind,
+            BuiltinNode::Start | BuiltinNode::TypedStart | BuiltinNode::End
+        )
+    });
     ensure!(!included.is_empty(), "Select at least one configured stage");
     ensure!(
         included

@@ -48,6 +48,8 @@ pub struct StageRequirementConfiguration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_role: Option<PackageArtifactVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<super::structured_agent::StructuredAgentConfiguration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_text: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub prompt_delegate: bool,
@@ -226,6 +228,7 @@ impl StageRequirementConfiguration {
     pub(crate) fn is_empty(&self) -> bool {
         self.role_template.is_none()
             && self.bound_role.is_none()
+            && self.structured.is_none()
             && self.prompt_text.is_none()
             && !self.prompt_delegate
             && self.goal.is_none()
@@ -242,6 +245,14 @@ impl StageRequirementConfiguration {
                 .is_none_or(|goal| goal.validate().is_ok())
             && self.plan.as_ref().is_none_or(|plan| plan.is_valid())
             && self.bound_role.as_ref().is_none_or(roles::valid_bound_role)
+            && self.structured.as_ref().is_none_or(|config| {
+                self.prompt_text.is_none()
+                    && !self.prompt_delegate
+                    && !self.review_reuse
+                    && self.plan.is_none()
+                    && self.goal.is_none()
+                    && config.validate().is_ok()
+            })
             && self
                 .prompt_text
                 .as_ref()
@@ -271,10 +282,14 @@ fn effective_requirements(
         .map(roles::role_version)
         .filter(|version| configured.bound_role.as_ref() != Some(version));
     let mut effective = StageRequirements::default();
-    for version in configured.bound_role.iter().chain(requirements_only.iter()) {
-        let template = roles::load_role(db, project, version)?
-            .context("A pinned workflow role revision is unavailable")?;
-        merge_requirements(&mut effective, &template.requirements);
+    if let Some(structured) = &configured.structured {
+        merge_requirements(&mut effective, &structured.effective_role.requirements);
+    } else {
+        for version in configured.bound_role.iter().chain(requirements_only.iter()) {
+            let template = roles::load_role(db, project, version)?
+                .context("A pinned workflow role revision is unavailable")?;
+            merge_requirements(&mut effective, &template.requirements);
+        }
     }
     merge_requirements(&mut effective, &configured.stage);
     if let Some(plan) = configured.plan {

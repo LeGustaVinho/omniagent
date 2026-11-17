@@ -37,6 +37,10 @@ pub(super) fn validate_authoring_body(
                 "Set invited Roles on the Prompt card"
             );
             ensure!(
+                requirements.structured.is_none(),
+                "Select Schemas and the effective Role through a typed Prompt card"
+            );
+            ensure!(
                 destination != PackageDestination::Library || requirements.role_template.is_none(),
                 "A library Agent needs a library role reference or a binding parameter"
             );
@@ -186,16 +190,23 @@ pub(crate) fn role_pins(
             .map(|bound| (bound, false))
             .chain(inherited.into_iter().map(|inherited| (inherited, true)))
         {
-            let role = load_role(db, project, &version)?.map(|template| WorkflowRoleDetails {
-                name: template.name,
-                model: if requirements_only {
-                    template.model
-                } else {
-                    model.clone().unwrap_or(template.model)
-                },
-                effort: template.effort,
-                tool_scope: template.tool_scope,
-                review_policy: template.review_policy,
+            let role = load_role(db, project, &version)?.map(|template| {
+                let template = requirements
+                    .structured
+                    .as_ref()
+                    .filter(|_| !requirements_only)
+                    .map_or(template, |config| config.effective_role.clone());
+                WorkflowRoleDetails {
+                    name: template.name,
+                    model: if requirements_only {
+                        template.model
+                    } else {
+                        model.clone().unwrap_or(template.model)
+                    },
+                    effort: template.effort,
+                    tool_scope: template.tool_scope,
+                    review_policy: template.review_policy,
+                }
             });
             pins.push(WorkflowRolePin {
                 node_id: node.instance.id.clone(),
@@ -271,11 +282,9 @@ pub(crate) fn validate_attempt_role(
     else {
         return Ok(());
     };
-    let Some(version) = &requirements.bound_role else {
+    if requirements.structured.is_none() && requirements.bound_role.is_none() {
         return Ok(());
-    };
-    let template =
-        load_role(db, project, version)?.context("The pinned workflow role is unavailable")?;
+    }
     let session: String = db.query_row(
         "SELECT session.scope FROM agent_attempts attempt
          JOIN agent_sessions session ON session.id = attempt.agent_session_id
@@ -283,7 +292,17 @@ pub(crate) fn validate_attempt_role(
         [attempt],
         |row| row.get(0),
     )?;
-    qualify_bound_role(&template, model.as_ref(), &serde_json::from_str(&session)?)
+    let scope = serde_json::from_str(&session)?;
+    if let Some(config) = &requirements.structured {
+        return config.require_scope(&scope);
+    }
+    let version = requirements
+        .bound_role
+        .as_ref()
+        .context("The pinned role is missing")?;
+    let template =
+        load_role(db, project, version)?.context("The pinned workflow role is unavailable")?;
+    qualify_bound_role(&template, model.as_ref(), &scope)
 }
 
 pub(crate) fn role_instructions(template: &ConversationTemplate, instructions: &str) -> String {

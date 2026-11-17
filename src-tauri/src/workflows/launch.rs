@@ -17,7 +17,8 @@ use crate::{
 
 use super::{
     ArtifactValue, BuiltinNode, NodeConfiguration, TaskReference, WorkflowArtifact,
-    WorkflowHostRequest, WorkflowRevision, WorkflowRun, artifacts::insert_artifact,
+    WorkflowHostRequest, WorkflowRevision, WorkflowRun,
+    artifacts::insert_artifact,
     builtin::BUILTIN_DELIVERY_ID,
     digest,
     execution::{host_request_revision, record_host_completion},
@@ -387,7 +388,10 @@ pub(super) fn prepare_entry(
     entry: &LaunchEntry,
     origin: &WorkflowLaunchOrigin,
 ) -> Result<PreparedLaunch> {
-    ensure!(revision.id != BUILTIN_DELIVERY_ID, "Repository delivery has been removed");
+    ensure!(
+        revision.id != BUILTIN_DELIVERY_ID,
+        "Repository delivery has been removed"
+    );
     validate_workflow_launch_checkout(db, project, &entry.checkout_id)?;
     let work = if let Some(work) = origin.work_id() {
         let exists: bool = db.query_row(
@@ -458,7 +462,7 @@ pub(super) fn prepare_entry(
             None
         };
         normalized = Some(
-            configuration.launch_values(
+            schema.launch_values(
                 &entry.inputs,
                 saved_markdown
                     .as_ref()

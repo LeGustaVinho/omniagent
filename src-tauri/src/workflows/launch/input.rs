@@ -73,9 +73,12 @@ pub struct WorkflowStartField {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TypedStartConfiguration {
+    #[serde(default)]
     fields: Vec<WorkflowStartField>,
     #[serde(rename = "promptOrMarkdown", default, skip_serializing_if = "is_false")]
     prompt_or_markdown: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) conversation: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -195,6 +198,8 @@ impl TypedStartConfiguration {
 pub struct WorkflowStartSchema {
     #[serde(flatten)]
     configuration: TypedStartConfiguration,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) json_schema: Option<Value>,
     pub(crate) requires_document: bool,
     pub(crate) requires_work: bool,
     pub(crate) requires_event: bool,
@@ -204,27 +209,91 @@ pub struct WorkflowStartSchema {
 
 impl WorkflowStartSchema {
     pub(crate) fn for_definition(definition: &WorkflowDefinition) -> Option<Self> {
-        let (id, start) =
+        let (node, start) =
             definition
                 .nodes
                 .iter()
                 .find_map(|node| match &node.instance.configuration {
-                    NodeConfiguration::TypedStart(start) => Some((&node.instance.id, start)),
+                    NodeConfiguration::TypedStart(start) => Some((node, start)),
                     _ => None,
                 })?;
         let wired = |port: &str| {
             definition
                 .wires
                 .iter()
-                .any(|wire| &wire.from.node == id && wire.from.port == port)
+                .any(|wire| wire.from.node == node.instance.id && wire.from.port == port)
         };
+        let json_schema = node.definition.output_schemas.get("inputs").cloned();
+        let mut configuration = start.clone();
+        if let Some(schema) = &json_schema
+            && let Some(properties) = schema["properties"].as_object()
+        {
+            configuration.fields = properties
+                .iter()
+                .filter_map(|(name, property)| {
+                    let value_type = match property["type"].as_str()? {
+                        "string" => WorkflowStartValueType::Text,
+                        "number" | "integer" => WorkflowStartValueType::Number,
+                        "boolean" => WorkflowStartValueType::Boolean,
+                        "null" => WorkflowStartValueType::Null,
+                        "object" => WorkflowStartValueType::Object,
+                        "array" => WorkflowStartValueType::Array,
+                        _ => return None,
+                    };
+                    let conversation_source = match (start.conversation, name.as_str(), value_type)
+                    {
+                        (true, "message", WorkflowStartValueType::Text) => {
+                            Some(ConversationStartSource::Message)
+                        }
+                        (true, "history", WorkflowStartValueType::Array) => {
+                            Some(ConversationStartSource::History)
+                        }
+                        _ => None,
+                    };
+                    Some(WorkflowStartField {
+                        name: name.clone(),
+                        required: schema["required"].as_array().is_some_and(|fields| {
+                            fields.iter().any(|field| field.as_str() == Some(name))
+                        }),
+                        value_type,
+                        conversation_source,
+                    })
+                })
+                .collect();
+        }
         Some(Self {
-            configuration: start.clone(),
+            configuration,
+            json_schema,
             requires_document: wired("document"),
             requires_work: wired("task"),
             requires_event: wired("event"),
             requires_backlog_plan: wired("plan"),
         })
+    }
+
+    pub(crate) fn conversation_enabled(&self) -> bool {
+        self.configuration.conversation
+            && self
+                .configuration
+                .fields
+                .iter()
+                .any(|field| field.conversation_source == Some(ConversationStartSource::Message))
+    }
+
+    pub(crate) fn launch_values(
+        &self,
+        submitted: &Map<String, Value>,
+        markdown: Option<&str>,
+    ) -> Result<Map<String, Value>> {
+        if let Some(schema) = &self.json_schema {
+            ensure!(
+                serde_json::to_vec(submitted)?.len() <= MAX_START_BYTES,
+                "The submitted inputs exceed the workflow input size limit"
+            );
+            crate::workflows::schema::validate(schema, &Value::Object(submitted.clone()))?;
+            return Ok(submitted.clone());
+        }
+        self.configuration.launch_values(submitted, markdown)
     }
 
     pub(crate) fn accepts_automation(&self) -> bool {
@@ -277,7 +346,14 @@ impl WorkflowStartSchema {
             };
             values.insert(field.name.clone(), value);
         }
-        self.configuration.validate_values(&values)?;
+        if self.json_schema.is_some() {
+            ensure!(
+                serde_json::to_vec(&values)?.len() <= MAX_START_BYTES,
+                "The submitted inputs exceed the workflow input size limit"
+            );
+        } else {
+            self.configuration.validate_values(&values)?;
+        }
         if !history_fields.is_empty() {
             // Keep complete recent messages, counting separators as well as escaped JSON.
             let fields_budget =
@@ -314,6 +390,7 @@ mod tests {
     fn schema(fields: Value) -> WorkflowStartSchema {
         WorkflowStartSchema {
             configuration: serde_json::from_value(json!({ "fields": fields })).unwrap(),
+            json_schema: None,
             requires_document: false,
             requires_work: false,
             requires_event: false,

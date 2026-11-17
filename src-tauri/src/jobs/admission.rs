@@ -207,6 +207,14 @@ fn queue_conversation_instruction(
         params![operator_scope, job.id],
     )?;
     instructions::record_instruction(db, &job.id, &conversation_id, text, attachments)?;
+    let revision = instructions::load_revision(db, &job.id)?
+        .context("The queued instruction has no revision")?;
+    crate::workflows::conversation_turns::launch_direct_turn(
+        db,
+        &job,
+        scope,
+        Some(&revision.revision_id),
+    )?;
     Ok(job)
 }
 

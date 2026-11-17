@@ -141,7 +141,18 @@ impl Store {
             }))?.collect::<rusqlite::Result<Vec<_>>>()?;
             let mut catalog = versions.into_values().chain(legacy).map(|version| {
                 let artifact = load_published(db, &project, &version)?.context("A published catalog revision is unavailable")?;
-                Ok(WorkflowPackageCatalogEntry { version, prompt: matches!(artifact.body, PackageArtifactBody::Prompt { .. }), name: artifact.name, blockers: artifact.blockers })
+                let prompt = match &artifact.body {
+                    PackageArtifactBody::Prompt { prompt } => Some(prompt),
+                    _ => None,
+                };
+                Ok(WorkflowPackageCatalogEntry {
+                    version,
+                    prompt: prompt.is_some(),
+                    typed_prompt: prompt.is_some_and(|prompt| prompt.schema_contract),
+                    node_prefab: prompt.is_some_and(|prompt| prompt.schema_contract && prompt.node_prefab),
+                    name: artifact.name,
+                    blockers: artifact.blockers,
+                })
             }).collect::<Result<Vec<_>>>()?;
             catalog.sort_by(|left, right| left.name.cmp(&right.name).then(left.version.cmp(&right.version)));
             Ok(catalog)
@@ -332,6 +343,9 @@ fn publish_member(
     let mut role_execution_revision = None;
     let mut prompt_expansion = None;
     match &mut body {
+        PackageArtifactBody::Schema { fields } => {
+            crate::workflows::schema::object(fields)?;
+        }
         PackageArtifactBody::Pipeline { graph } | PackageArtifactBody::Subflow { graph, .. } => {
             let named_commands = references
                 .iter()
@@ -836,6 +850,62 @@ struct CompiledGraph {
     authoring_definitions: BTreeMap<String, NodeDefinition>,
 }
 
+pub(super) fn public_schemas(
+    ports: &BTreeMap<String, crate::workflows::Endpoint>,
+    workflow: &WorkflowDefinition,
+) -> BTreeMap<String, serde_json::Value> {
+    ports
+        .iter()
+        .filter_map(|(name, port)| {
+            let node = workflow
+                .nodes
+                .iter()
+                .find(|node| node.instance.id == port.node)?;
+            let schema = node.definition.output_schemas.get(&port.port)?;
+            Some((name.clone(), schema.clone()))
+        })
+        .collect()
+}
+
+fn typed_prompt_instance(
+    artifact: &PublishedPackageArtifact,
+    node: &crate::workflows::NodeInstance,
+    dependencies: &BTreeMap<String, PublishedPackageArtifact>,
+) -> Result<PublishedPackageArtifact> {
+    let mut effective = artifact.clone();
+    let PackageArtifactBody::Prompt { prompt } = &mut effective.body else {
+        anyhow::bail!("Choose a typed Prompt");
+    };
+    for slot in ["role", "input_schema", "output_schema", "reviewer"] {
+        if let Some(replacement) = dependencies.get(&format!("{}:{slot}", node.id)) {
+            let target = ResolvedPackageReference::Published {
+                version: replacement.version.clone(),
+            };
+            if slot == "role" && effective.references.get(slot) != Some(&target) {
+                prompt.role_overrides.clear();
+            }
+            effective.references.insert(slot.into(), target);
+        }
+    }
+    match &node.configuration {
+        NodeConfiguration::None => (),
+        NodeConfiguration::PromptOverrides {
+            prompt: text,
+            role_overrides,
+        } => {
+            if let Some(text) = text {
+                prompt.text.clone_from(text);
+            }
+            prompt.role_overrides.extend(role_overrides.clone());
+        }
+        _ => anyhow::bail!("A typed Prompt requires valid Prompt overrides"),
+    }
+    if effective.body != artifact.body || effective.references != artifact.references {
+        effective.prompt_expansion = None;
+    }
+    Ok(effective)
+}
+
 struct GraphCompiler<'a> {
     db: &'a Connection,
     project: &'a str,
@@ -869,7 +939,51 @@ impl<'a> GraphCompiler<'a> {
         let mut effective_pins = pins.clone();
         let mut calls = BTreeMap::new();
         let mut declared_mcp = BTreeSet::new();
+        let native_ids = graph
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<BTreeSet<_>>();
         for (slot, artifact) in dependencies {
+            if !native_ids.contains(slot)
+                && let Some((id, binding)) = slot.rsplit_once(':')
+                && native_ids.contains(id)
+            {
+                let node = graph
+                    .nodes
+                    .iter_mut()
+                    .find(|node| node.id == id)
+                    .context("Missing reference node")?;
+                if binding == "schema" {
+                    let contract = prompt_card::artifact_schema(artifact)?;
+                    let definition = effective_pins
+                        .get_mut(id)
+                        .context("Missing Schema port definition")?;
+                    match &mut node.configuration {
+                        NodeConfiguration::TypedStart(_)
+                        | NodeConfiguration::SubflowEntry { .. } => {
+                            definition.output_schemas.insert("inputs".into(), contract);
+                        }
+                        NodeConfiguration::End => {
+                            definition
+                                .input_schemas
+                                .insert("result".into(), contract.clone());
+                            definition.output_schemas.insert("result".into(), contract);
+                        }
+                        NodeConfiguration::ValidateOutput(config) => {
+                            config.schema.clone_from(&contract);
+                            definition.output_schemas.insert("object".into(), contract);
+                        }
+                        _ => anyhow::bail!("Select Schemas on Start, End, or Validate Output"),
+                    }
+                    continue;
+                }
+                ensure!(node.kind == BuiltinNode::Subflow
+                    && matches!(binding, "role" | "input_schema" | "output_schema" | "reviewer")
+                    && dependencies.get(id).is_some_and(|target| matches!(&target.body, PackageArtifactBody::Prompt { prompt } if prompt.schema_contract)),
+                    "The reference {slot} does not identify a typed Prompt override");
+                continue;
+            }
             let node = graph
                 .nodes
                 .iter_mut()
@@ -949,6 +1063,12 @@ impl<'a> GraphCompiler<'a> {
                 }
                 PackageArtifactBody::Role { .. } => roles::bind(&mut node.configuration, artifact)
                     .with_context(|| format!("The role reference for {slot} is invalid"))?,
+                PackageArtifactBody::Prompt { prompt }
+                    if node.kind == BuiltinNode::Subflow && prompt.schema_contract =>
+                {
+                    let effective = typed_prompt_instance(artifact, node, dependencies)?;
+                    calls.insert(slot.clone(), self.child(&effective, blockers)?);
+                }
                 PackageArtifactBody::Subflow { .. } | PackageArtifactBody::Prompt { .. }
                     if node.kind == BuiltinNode::Subflow =>
                 {
@@ -966,6 +1086,16 @@ impl<'a> GraphCompiler<'a> {
                     calls.insert(
                         slot.clone(),
                         crate::workflows::repetition::expand_repeat(body, configuration)?,
+                    );
+                }
+                PackageArtifactBody::Subflow { .. } if node.kind == BuiltinNode::Loop => {
+                    let NodeConfiguration::Loop(configuration) = &node.configuration else {
+                        anyhow::bail!("Loop {slot} needs iteration settings");
+                    };
+                    let body = self.child(artifact, blockers)?;
+                    calls.insert(
+                        slot.clone(),
+                        crate::workflows::orchestration::expand_loop(body, configuration)?,
                     );
                 }
                 PackageArtifactBody::Subflow { .. } if node.kind == BuiltinNode::ForEach => {
@@ -1020,6 +1150,9 @@ impl<'a> GraphCompiler<'a> {
                         revision: artifact.version.revision.clone(),
                     };
                 }
+                PackageArtifactBody::Schema { .. } => {
+                    anyhow::bail!("Bind a Schema to a typed port on {slot}");
+                }
             }
         }
         for node in &graph.nodes {
@@ -1054,7 +1187,10 @@ impl<'a> GraphCompiler<'a> {
             );
             if matches!(
                 node.kind,
-                BuiltinNode::Subflow | BuiltinNode::RepeatUntil | BuiltinNode::ForEach
+                BuiltinNode::Subflow
+                    | BuiltinNode::RepeatUntil
+                    | BuiltinNode::ForEach
+                    | BuiltinNode::Loop
             ) && !calls.contains_key(&node.id)
             {
                 blockers.push(format!("Select a pinned subflow for {}.", node.id));
@@ -1116,7 +1252,46 @@ impl<'a> GraphCompiler<'a> {
                         })
                     })
                     .collect::<Result<_>>()?;
+                definition.input_schemas = public_schemas(&call.inputs, &call.workflow);
+                definition.output_schemas = public_schemas(&call.outputs, &call.workflow);
             }
+            crate::workflows::resolve_port_schemas(&graph, &mut authoring_definitions)?;
+        }
+        if graph.nodes.iter().any(|node| node.kind == BuiltinNode::End) {
+            let mut terminals = graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind == BuiltinNode::End);
+            let terminal = terminals.next().context("Select the workflow End")?;
+            ensure!(
+                terminals.next().is_none(),
+                "A graph needs one End or Return node"
+            );
+            ensure!(
+                !graph.wires.iter().any(|wire| wire.from.node == terminal.id),
+                "End returns its result to the workflow caller"
+            );
+            let entry = graph
+                .nodes
+                .iter()
+                .find(|node| matches!(node.kind, BuiltinNode::Start | BuiltinNode::TypedStart))
+                .context("A graph needs one Start node")?;
+            let mut reachable = BTreeSet::from([entry.id.as_str()]);
+            loop {
+                let reached = reachable.len();
+                for wire in &graph.wires {
+                    if reachable.contains(wire.from.node.as_str()) {
+                        reachable.insert(wire.to.node.as_str());
+                    }
+                }
+                if reached == reachable.len() {
+                    break;
+                }
+            }
+            ensure!(
+                reachable.contains(terminal.id.as_str()),
+                "Connect Start to End through the pipeline"
+            );
         }
         let empty = BTreeMap::new();
         let expanded = subflow::expand(

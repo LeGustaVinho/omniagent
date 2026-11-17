@@ -479,6 +479,7 @@ fn preview_member(
             }
         }
         PackageArtifactBody::Subflow { inputs, .. } => inputs.keys().cloned().collect(),
+        PackageArtifactBody::Prompt { prompt } if prompt.schema_contract => vec!["input".into()],
         PackageArtifactBody::Prompt { prompt } => prompt.inputs.keys().cloned().collect(),
         PackageArtifactBody::McpTool { input_schema, .. } => input_schema
             .get("properties")
@@ -543,6 +544,12 @@ fn preview_member(
         PackageArtifactBody::McpTool { binding, .. } => {
             requirements.push(format!("Bind local MCP server {binding} for execution."));
             Some(single_sample(member))
+        }
+        PackageArtifactBody::Schema { fields } => {
+            if let Err(error) = crate::workflows::schema::object(fields) {
+                diagnostics.push(format!("{error:#}"));
+            }
+            None
         }
         PackageArtifactBody::Command { binding, .. } => {
             if let PackageCommandBinding::Required { name } = binding {

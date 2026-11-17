@@ -163,6 +163,7 @@ fn visit(
         _ => None,
     };
     match &mut member.body {
+        PackageArtifactBody::Schema { .. } => {}
         PackageArtifactBody::Pipeline { graph } | PackageArtifactBody::Subflow { graph, .. } => {
             for node in &mut graph.nodes {
                 config(

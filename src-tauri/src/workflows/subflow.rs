@@ -16,6 +16,8 @@ pub struct WorkflowSubflow {
     pub name: String,
     pub version: PackageArtifactVersion,
     pub nodes: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, Vec<Endpoint>>,
     pub outputs: BTreeMap<String, Endpoint>,
 }
 
@@ -223,6 +225,11 @@ pub(super) fn expand(
             .map(|pinned| {
                 let mut node = pinned.instance.clone();
                 node.id = qualify(slot, &node.id);
+                if let NodeConfiguration::JoinResults(config) = &mut node.configuration
+                    && let Some(fork) = &mut config.fork
+                {
+                    *fork = qualify(slot, fork);
+                }
                 definitions.insert(node.id.clone(), pinned.definition.clone());
                 node
             })
@@ -243,6 +250,20 @@ pub(super) fn expand(
             name: call.name.clone(),
             version: call.version.clone(),
             nodes: qualified.iter().map(|node| node.id.clone()).collect(),
+            inputs: call
+                .inputs
+                .iter()
+                .map(|(name, entry)| {
+                    let consumers = call
+                        .workflow
+                        .wires
+                        .iter()
+                        .filter(|wire| wire.from == *entry)
+                        .map(|wire| qualify_endpoint(slot, &wire.to))
+                        .collect();
+                    (name.clone(), consumers)
+                })
+                .collect(),
             outputs,
         });
         for nested in &call.workflow.subflows {
@@ -254,6 +275,19 @@ pub(super) fn expand(
                     .nodes
                     .iter()
                     .map(|node| qualify(slot, node))
+                    .collect(),
+                inputs: nested
+                    .inputs
+                    .iter()
+                    .map(|(name, consumers)| {
+                        (
+                            name.clone(),
+                            consumers
+                                .iter()
+                                .map(|endpoint| qualify_endpoint(slot, endpoint))
+                                .collect(),
+                        )
+                    })
                     .collect(),
                 outputs: nested
                     .outputs

@@ -35,6 +35,223 @@ async fn publish_fixture(
 }
 
 #[tokio::test]
+async fn an_end_reply_settles_the_chat_while_another_branch_waits() -> Result<()> {
+    use crate::workflows::{builtin_registry, compile_resolved_graph};
+
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("chat.sqlite"))?;
+    let repo = approved_delivery_repository(&store, temp.path()).await?;
+    let reply = json!({
+        "type":"object", "properties":{"reply":{"type":"string"}},
+        "required":["reply"], "additionalProperties":false
+    });
+    let mut catalog = builtin_registry();
+    for node in &mut catalog {
+        match node.kind {
+            BuiltinNode::SetFields => {
+                node.output_schemas.insert("object".into(), reply.clone());
+            }
+            BuiltinNode::End => {
+                node.input_schemas.insert("result".into(), reply.clone());
+                node.output_schemas.insert("result".into(), reply.clone());
+            }
+            _ => {}
+        }
+    }
+    let graph = serde_json::from_value(json!({
+        "name":"Early reply",
+        "nodes":[
+            {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","conversation":true,"fields":[{"name":"message","valueType":"text","required":true,"conversationSource":"message"}]}},
+            {"id":"answer","kind":"set_fields","configuration":{"kind":"set_fields","mode":"build","operations":[{"op":"set","path":"/reply","value":{"source":"literal","value":"Recorded response"}}]}},
+            {"id":"wait","kind":"request_input","configuration":{"kind":"request_input","message":"Review this run","fields":[{"id":"note","label":"Note","required":true,"input":{"kind":"text"}}]}},
+            {"id":"end","kind":"end","configuration":{"kind":"end"}}
+        ],
+        "wires":[
+            {"from":{"node":"start","port":"start"},"to":{"node":"answer","port":"ready"}},
+            {"from":{"node":"start","port":"start"},"to":{"node":"wait","port":"ready"}},
+            {"from":{"node":"answer","port":"completed"},"to":{"node":"end","port":"ready"}},
+            {"from":{"node":"answer","port":"object"},"to":{"node":"end","port":"result"}}
+        ]
+    }))?;
+    let definition = compile_resolved_graph(
+        "early-reply".into(),
+        graph,
+        |node| catalog.iter().find(|entry| entry.kind == node.kind),
+        true,
+    )?;
+    let workflow = definition.version.clone();
+    let project = repo.project_id.clone();
+    store
+        .execute(move |db| {
+            let version = &definition.version;
+            db.execute(
+                "INSERT INTO workflow_revisions VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    project,
+                    version.id,
+                    version.revision,
+                    protection::protect(&serde_json::to_vec(&definition)?)?
+                ],
+            )?;
+            db.execute(
+                "INSERT INTO workflow_published_heads VALUES (?1, ?2, ?3)",
+                params![project, version.id, version.revision],
+            )?;
+            Ok(())
+        })
+        .await?;
+    let choices = store
+        .conversation_pipeline_options(repo.checkout_id.clone())
+        .await?;
+    assert!(choices.iter().any(|choice| choice.name == "Early reply"));
+    let chat = store
+        .create_conversation_with_pipeline(
+            repo.checkout_id,
+            "Early reply".into(),
+            ConversationPipelineChoice::Published { workflow },
+        )
+        .await?;
+    store
+        .enqueue_conversation_pipeline_turn(ConversationPipelineTurnRequest {
+            conversation_id: chat.id.clone(),
+            request_id: "send-once".into(),
+            text: "First turn".into(),
+            submitted_draft: None,
+            inputs: None,
+            selection: None,
+            effort: None,
+            reference_ids: Vec::new(),
+            action: None,
+        })
+        .await?;
+    assert!(store.advance_conversation_pipeline_turns().await?);
+    assert!(store.advance_conversation_pipeline_turns().await?);
+    let mut turns = store.conversation_pipeline_turns(chat.id.clone()).await?;
+    let turn = turns.pop().context("Missing recorded turn")?;
+    assert_eq!(turn.state, "succeeded");
+    let run = turn.run_id.context("Missing pinned run")?;
+    let inspection = store
+        .inspect_workflow_execution(repo.project_id.clone(), run.clone())
+        .await?
+        .context("Missing inspection")?;
+    assert_eq!(inspection.pending_decisions.len(), 1);
+    assert!(!store.advance_conversation_pipeline_turns().await?);
+    store
+        .resolve_workflow_stage_decision(WorkflowDecisionSubmission {
+            project_id: repo.project_id,
+            run_id: run,
+            request_id: inspection.pending_decisions[0].request_id.clone(),
+            decision: WorkflowStageDecision::Answer {
+                values: [("note".into(), json!("Reviewed after reply"))].into(),
+            },
+        })
+        .await?;
+    assert!(store.advance_conversation_pipeline_turns().await?);
+    assert!(!store.advance_conversation_pipeline_turns().await?);
+    let messages = store.conversation_messages(chat.id).await?;
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        ["First turn", "Recorded response"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_turn_pins_native_job_and_reuses_one_transcript_reply() -> Result<()> {
+    use crate::{
+        conversations::SessionScope,
+        jobs::{AdmissionEnvironment, JobContext},
+        providers::Provider,
+        runs::RunStatus,
+    };
+
+    let temp = tempfile::tempdir()?;
+    let store = Store::open(temp.path().join("native-chat.sqlite"))?;
+    let repo = approved_delivery_repository(&store, temp.path()).await?;
+    let chat = store
+        .create_conversation_with_pipeline(
+            repo.checkout_id,
+            "Direct".into(),
+            ConversationPipelineChoice::Direct,
+        )
+        .await?;
+    let scope = SessionScope {
+        provider: Provider::Codex,
+        profile_id: "fixture".into(),
+        account_binding: None,
+        executable: std::env::current_exe()?,
+        checkout: repo.checkout_root.into(),
+        cli_version: "1.2.3".into(),
+        mode: SessionMode::ReadOnly,
+        model: None,
+        effort: None,
+        runner: "fixture-runner".into(),
+        permission_revision: "fixture-policy".into(),
+    };
+    store
+        .save_conversation_draft(chat.id.clone(), "Native question".into())
+        .await?;
+    let job = store
+        .enqueue_conversation_turn(
+            JobContext {
+                conversation_id: chat.id.clone(),
+                context_id: chat.context_id,
+            },
+            scope.clone(),
+            "Native question".into(),
+        )
+        .await?;
+    let initial = store.conversation_pipeline_turns(chat.id.clone()).await?;
+    assert_eq!(initial[0].request_id, job.id);
+    let pinned_run = initial[0]
+        .run_id
+        .clone()
+        .context("Expected a pinned direct run")?;
+    let attempt = store
+        .claim_next_job(AdmissionEnvironment {
+            runner: scope.runner,
+            bridge_available: false,
+        })
+        .await?
+        .context("Expected the native job to be admitted")?;
+    store.mark_agent_running(attempt.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(
+            attempt.run.id,
+            RunStatus::Succeeded,
+            Some("Native reply".into()),
+        )
+        .await?;
+    assert!(store.advance_conversation_pipeline_turns().await?);
+    let turns = store.conversation_pipeline_turns(chat.id.clone()).await?;
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].state, "succeeded");
+    assert_eq!(turns[0].run_id.as_deref(), Some(pinned_run.as_str()));
+    let messages = store.conversation_messages(chat.id).await?;
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Native question", "Native reply"]
+    );
+    assert_eq!(
+        turns[0].result_revision_id.as_deref(),
+        Some(messages[1].revision_id.as_str())
+    );
+    let inspection = store
+        .inspect_workflow_execution(repo.project_id, pinned_run)
+        .await?
+        .context("Expected the direct execution graph")?;
+    assert!(inspection.control.iter().any(|node| node.node_id == "end"));
+    assert!(inspection.jobs.iter().any(|entry| entry.job.id == job.id));
+    Ok(())
+}
+
+#[tokio::test]
 async fn conversation_pipeline_turns_pin_previous_output_and_resume_in_order() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let database = temp.path().join("store.sqlite");

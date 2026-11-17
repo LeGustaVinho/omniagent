@@ -127,10 +127,12 @@ pub(super) fn note_ready_agent(
     inputs: &BTreeMap<String, WorkflowArtifact>,
 ) -> Result<()> {
     let prompt_delegate = prompt_delegate(node);
-    if !prompt_delegate && !enabled(db, &run.id)? {
+    let typed = super::structured_agent::configuration(node).is_some();
+    if !typed && !prompt_delegate && !enabled(db, &run.id)? {
         return Ok(());
     }
-    if !prompt_delegate
+    if !typed
+        && !prompt_delegate
         && matches!(
             node.definition.kind,
             super::BuiltinNode::Agent | super::BuiltinNode::ReviewCandidate
@@ -171,6 +173,35 @@ pub(super) fn note_ready_agent(
          VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT DO NOTHING",
         params![run.id, node.instance.id, key, plan, payload],
     )?;
+    Ok(())
+}
+
+pub(super) fn cancel_branch_request(
+    db: &Connection,
+    run: &WorkflowRun,
+    node: &str,
+    unit: Option<&str>,
+) -> Result<()> {
+    let plan = run.plan_revision.as_deref().unwrap_or("");
+    let pending = db
+        .prepare(
+            "SELECT request_key, payload FROM workflow_automatic_agents
+         WHERE pipeline_run_id = ?1 AND node_instance_id = ?2 AND plan_key = ?3 AND job_id IS NULL",
+        )?
+        .query_map(params![run.id, node, plan], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (key, payload) in pending {
+        let request: AgentInputs = serde_json::from_slice(&protection::unprotect(&payload)?)?;
+        if request.unit.as_deref() == unit {
+            db.execute(
+                "DELETE FROM workflow_automatic_agents WHERE pipeline_run_id = ?1 AND node_instance_id = ?2
+                 AND request_key = ?3 AND job_id IS NULL",
+                params![run.id, node, key],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -230,7 +261,9 @@ impl PendingWorkflowAgent {
         else {
             anyhow::bail!("The fixture stage is not a published agent role");
         };
-        let role = if let Some(version) = requirements.bound_role {
+        let role = if let Some(config) = requirements.structured {
+            Some(config.effective_role)
+        } else if let Some(version) = requirements.bound_role {
             let project = self.project.clone();
             Some(
                 store
@@ -286,26 +319,34 @@ impl PendingWorkflowAgent {
             .await?
             .context("The automatic stage revision is unavailable")?;
         let NodeConfiguration::AgentRole {
-            model: Some(selection),
+            model,
             requirements,
             ..
         } = pinned.instance.configuration
         else {
             anyhow::bail!("Set the Agent model on the published workflow for automatic dispatch");
         };
-        let effort = if let Some(role) = requirements.bound_role {
+        let (selection, effort) = if let Some(config) = requirements.structured {
+            (
+                Some(config.effective_role.model),
+                config.effective_role.effort,
+            )
+        } else if let Some(role) = requirements.bound_role {
             let project = self.project.clone();
-            store
+            let effort = store
                 .execute(move |db| {
                     let template =
                         super::authoring::package::roles::load_role(db, &project, &role)?
                             .context("The pinned Agent role is unavailable")?;
                     Ok(template.effort)
                 })
-                .await?
+                .await?;
+            (model, effort)
         } else {
-            None
+            (model, None)
         };
+        let selection = selection
+            .context("Set the Agent model on the published workflow for automatic dispatch")?;
         let configured = store.configured_executable(selection.provider).await?;
         let model_id = selection.model_id.clone();
         let profile =

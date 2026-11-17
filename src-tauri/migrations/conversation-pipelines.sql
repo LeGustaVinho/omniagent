@@ -20,3 +20,16 @@ CREATE INDEX IF NOT EXISTS conversation_pipeline_turns_by_state
 
 CREATE UNIQUE INDEX IF NOT EXISTS conversation_pipeline_turns_by_run
     ON conversation_pipeline_turns(workflow_run_id) WHERE workflow_run_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS conversation_pipeline_turn_drains (
+    sequence INTEGER PRIMARY KEY REFERENCES conversation_pipeline_turns(sequence) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS conversation_direct_pipeline_pins (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL,
+    workflow_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    FOREIGN KEY (project_id, workflow_id, revision)
+        REFERENCES workflow_revisions(project_id, workflow_id, revision)
+) STRICT, WITHOUT ROWID;

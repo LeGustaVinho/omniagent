@@ -17,6 +17,7 @@ use super::{
     runtime::{load_definition, load_workflow_run},
 };
 
+mod orchestration;
 mod prompt_context;
 pub(super) mod repair;
 #[cfg(test)]
@@ -133,8 +134,12 @@ fn is_control(kind: BuiltinNode) -> bool {
     matches!(
         kind,
         BuiltinNode::Condition
+            | BuiltinNode::End
+            | BuiltinNode::ConversationAgent
             | BuiltinNode::Parallel
             | BuiltinNode::Join
+            | BuiltinNode::Fork
+            | BuiltinNode::JoinResults
             | BuiltinNode::IterationLimit
             | BuiltinNode::BuildList
             | BuiltinNode::SetFields
@@ -147,6 +152,8 @@ fn is_control(kind: BuiltinNode) -> bool {
             | BuiltinNode::BuildText
             | BuiltinNode::RequestInput
             | BuiltinNode::Approval
+            | BuiltinNode::Wait
+            | BuiltinNode::Human
             | BuiltinNode::FindWork
             | BuiltinNode::UpdateProgress
             | BuiltinNode::CompareModels
@@ -195,7 +202,8 @@ pub(super) fn validate_release_wires(nodes: &[PinnedNode], wires: &[Wire]) -> Re
         matches!(
             node.instance.kind,
             BuiltinNode::Implement | BuiltinNode::Command | BuiltinNode::VerifyTestPhase
-        )
+        ) || (node.instance.kind == BuiltinNode::Agent
+            && node.definition.executor == super::Executor::WriteAgent)
     }) {
         let node = step.instance.id.as_str();
         let provider = source(node, "release").context("writing node requires a pinned release")?;
@@ -219,7 +227,10 @@ pub(super) fn validate_release_wires(nodes: &[PinnedNode], wires: &[Wire]) -> Re
             source(&provider.node, "task") == source(&approver.node, "task"),
             "write preparation and implementation approval must use the same work item"
         );
-        if step.instance.kind == BuiltinNode::Implement {
+        if matches!(
+            step.instance.kind,
+            BuiltinNode::Implement | BuiltinNode::Agent
+        ) {
             ensure!(
                 source(node, "plan") == source(&approver.node, "plan"),
                 "writing node {node} must use the plan selected by its implementation approval"
@@ -230,25 +241,31 @@ pub(super) fn validate_release_wires(nodes: &[PinnedNode], wires: &[Wire]) -> Re
 }
 
 pub(super) fn unit_nodes(definition: &WorkflowDefinition) -> HashSet<&str> {
-    let mut scoped: HashSet<_> = definition
-        .nodes
+    unit_nodes_for(&definition.nodes, &definition.wires)
+}
+
+pub(super) fn unit_nodes_for<'a>(nodes: &'a [PinnedNode], wires: &[Wire]) -> HashSet<&'a str> {
+    let mut scoped: HashSet<_> = nodes
         .iter()
         .filter(|node| node.instance.kind.per_unit())
         .map(|node| node.instance.id.as_str())
         .collect();
-    let control_ids: HashSet<_> = definition
-        .nodes
+    let control_ids: HashSet<_> = nodes
         .iter()
         .filter(|node| is_control(node.instance.kind))
         .map(|node| node.instance.id.as_str())
         .collect();
     loop {
         let len = scoped.len();
-        for wire in &definition.wires {
+        for wire in wires {
             if scoped.contains(wire.from.node.as_str())
                 && control_ids.contains(wire.to.node.as_str())
             {
-                scoped.insert(wire.to.node.as_str());
+                scoped.insert(
+                    *control_ids
+                        .get(wire.to.node.as_str())
+                        .expect("control node"),
+                );
             }
         }
         if scoped.len() == len {
@@ -336,6 +353,11 @@ pub(super) fn conversation_stage_availability(
     unit: Option<&str>,
 ) -> Result<StageAvailability> {
     let state = Evaluation::new(db, definition, run)?;
+    match state.branch_gate(&node.instance.id, unit)? {
+        Arrival::Ignored => return Ok(StageAvailability::Skipped),
+        Arrival::Pending => return Ok(StageAvailability::Waiting),
+        Arrival::Selected(_) => {}
+    }
     let mut inputs = super::NodeInputs::new();
     let mut pending = false;
     for wire in definition
@@ -375,6 +397,10 @@ pub(super) fn require_dependencies(
         return Ok(false);
     }
     let state = Evaluation::new(db, definition, run)?;
+    ensure!(
+        matches!(state.branch_gate(node, unit)?, Arrival::Selected(_)),
+        "The stage's Fork branch is not active"
+    );
     let target = state
         .nodes
         .get(node)
@@ -516,6 +542,7 @@ struct Evaluation<'a> {
     unit_nodes: HashSet<&'a str>,
     nodes: HashMap<&'a str, &'a PinnedNode>,
     receipts: HashMap<(String, Option<String>), ControlStageReceipt>,
+    forks: Vec<super::orchestration::ForkScope<'a>>,
 }
 
 impl<'a> Evaluation<'a> {
@@ -535,6 +562,7 @@ impl<'a> Evaluation<'a> {
             run,
             unit_nodes: unit_nodes(definition),
             receipts,
+            forks: super::orchestration::fork_scopes(&definition.nodes, &definition.wires)?,
             nodes: definition
                 .nodes
                 .iter()
@@ -581,10 +609,24 @@ impl<'a> Evaluation<'a> {
         // Revisit downstream nodes regardless of their published order.
         loop {
             let before = self.receipts.len();
+            let settled = self.settle_forks(unit)?;
+            // An early Join may cancel queued branches as soon as the current batch settles.
+            for node in &self.definition.nodes {
+                if node.instance.kind == BuiltinNode::JoinResults
+                    && self.unit_nodes.contains(node.instance.id.as_str()) == unit.is_some()
+                    && let Some(receipt) = self.evaluate(node, unit)?
+                {
+                    self.save(receipt)?;
+                }
+            }
+            let admitted = self.admit_forks(unit)?;
             let mut approved = false;
             for node in &self.definition.nodes {
                 if self.unit_nodes.contains(node.instance.id.as_str()) == unit.is_some() {
-                    if controls && let Some(receipt) = self.evaluate(node, unit)? {
+                    if controls
+                        && node.instance.kind != BuiltinNode::JoinResults
+                        && let Some(receipt) = self.evaluate(node, unit)?
+                    {
                         self.save(receipt)?;
                     }
                     if node.instance.kind == BuiltinNode::ApproveImplementation && unit.is_none() {
@@ -592,7 +634,7 @@ impl<'a> Evaluation<'a> {
                     }
                 }
             }
-            if !approved && before == self.receipts.len() {
+            if !approved && !admitted && !settled && before == self.receipts.len() {
                 return Ok(());
             }
         }
@@ -606,6 +648,19 @@ impl<'a> Evaluation<'a> {
     }
 
     fn approval_inputs(&self, node: &PinnedNode) -> Result<ApprovalSelection> {
+        match self.branch_gate(&node.instance.id, None)? {
+            Arrival::Ignored => {
+                return Ok(ApprovalSelection::Skipped {
+                    reason: "The Fork branch was skipped or cancelled.".into(),
+                });
+            }
+            Arrival::Pending => {
+                return Ok(ApprovalSelection::Waiting {
+                    reason: "Waiting for a Fork branch slot.".into(),
+                });
+            }
+            Arrival::Selected(_) => {}
+        }
         if let Some(receipt) = self.receipt(&node.instance.id, None)
             && receipt.state == ControlStageState::Skipped
         {
@@ -673,6 +728,31 @@ impl<'a> Evaluation<'a> {
         {
             return Ok(None);
         }
+        match self.branch_gate(node_id, unit)? {
+            Arrival::Pending => return Ok(None),
+            Arrival::Ignored => {
+                let cancelled = self.branch_cancelled(node_id, unit)?;
+                return Ok(Some(ControlStageReceipt {
+                    node_id: node_id.into(),
+                    unit_id: unit.map(str::to_owned),
+                    plan_revision: self.run.plan_revision.clone(),
+                    state: ControlStageState::Skipped,
+                    selected_ports: Vec::new(),
+                    reason: Some(
+                        if cancelled {
+                            "The Join cancelled this Fork branch"
+                        } else {
+                            "No execution reached the Fork"
+                        }
+                        .into(),
+                    ),
+                    source_run_id: None,
+                    dependencies: Vec::new(),
+                    forwarded_outputs: Default::default(),
+                }));
+            }
+            Arrival::Selected(_) => {}
+        }
         let dependencies = self
             .definition
             .wires
@@ -680,6 +760,54 @@ impl<'a> Evaluation<'a> {
             .filter(|wire| wire.to.node == node_id)
             .map(|wire| Ok((wire, self.dependency(wire, unit)?)))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        if matches!(
+            node.instance.kind,
+            Fork | JoinResults | LoopGate | LoopStep | LoopResult
+        ) {
+            return Ok(self
+                .evaluate_flow(node, unit, &dependencies)?
+                .map(|outcome| ControlStageReceipt {
+                    node_id: node_id.into(),
+                    unit_id: unit.map(str::to_owned),
+                    plan_revision: self.run.plan_revision.clone(),
+                    state: outcome.state,
+                    selected_ports: outcome.ports,
+                    reason: outcome.reason,
+                    source_run_id: None,
+                    forwarded_outputs: Default::default(),
+                    dependencies: dependencies
+                        .iter()
+                        .filter_map(|(wire, arrival)| {
+                            if outcome.branches.as_ref().is_some_and(|branches| {
+                                wire.to
+                                    .port
+                                    .split_once(':')
+                                    .is_some_and(|(_, branch)| !branches.contains(branch))
+                            }) {
+                                return Some(ControlDependency {
+                                    from: wire.from.clone(),
+                                    to_port: wire.to.port.clone(),
+                                    selected: false,
+                                    artifact_id: None,
+                                });
+                            }
+                            let (selected, artifact_id) = match arrival {
+                                Arrival::Pending => return None,
+                                Arrival::Ignored => (false, None),
+                                Arrival::Selected(artifact) => {
+                                    (true, artifact.as_ref().map(|value| value.id.clone()))
+                                }
+                            };
+                            Some(ControlDependency {
+                                from: wire.from.clone(),
+                                to_port: wire.to.port.clone(),
+                                selected,
+                                artifact_id,
+                            })
+                        })
+                        .collect(),
+                }));
+        }
         let selected_artifact = |port: &str| {
             dependencies
                 .iter()
@@ -796,6 +924,60 @@ impl<'a> Evaluation<'a> {
             return Ok(None);
         } else {
             match node.instance.kind {
+                End => {
+                    let inputs = pinned_inputs();
+                    if let Some(artifact) = inputs.get("result") {
+                        let ArtifactValue::JsonObject(result) = &artifact.value else {
+                            anyhow::bail!("End needs a structured result");
+                        };
+                        if let Some(schema) = node.definition.input_schemas.get("result")
+                            && let Err(error) = super::schema::validate(
+                                schema,
+                                &serde_json::Value::Object(result.clone()),
+                            )
+                        {
+                            diagnostic = Some(crate::diagnostics::preview(&error.to_string()));
+                            (ControlStageState::Failed, None, None, None)
+                        } else {
+                            self.record_stage_artifact(
+                                node_id,
+                                unit,
+                                "result",
+                                artifact.value.clone(),
+                                &inputs,
+                            )?;
+                            (ControlStageState::Completed, Some("completed"), None, None)
+                        }
+                    } else {
+                        (ControlStageState::Completed, Some("completed"), None, None)
+                    }
+                }
+                ConversationAgent => {
+                    use super::conversation_turns::NativeOutcome;
+                    match super::conversation_turns::native_outcome(self.db, self.run)? {
+                        NativeOutcome::Waiting => return Ok(None),
+                        NativeOutcome::Failed => (
+                            ControlStageState::Failed,
+                            Some("failed"),
+                            Some("The conversation agent did not complete"),
+                            None,
+                        ),
+                        NativeOutcome::Completed(message) => {
+                            let result = serde_json::Map::from_iter([(
+                                "replyRevisionId".into(),
+                                serde_json::Value::String(message.revision_id),
+                            )]);
+                            self.record_stage_artifact(
+                                node_id,
+                                unit,
+                                "result",
+                                ArtifactValue::JsonObject(result),
+                                &pinned_inputs(),
+                            )?;
+                            (ControlStageState::Completed, Some("completed"), None, None)
+                        }
+                    }
+                }
                 QualityGate => {
                     let inputs = pinned_inputs();
                     let NodeConfiguration::QualityGate(config) = &node.instance.configuration
@@ -953,18 +1135,61 @@ impl<'a> Evaluation<'a> {
                         }
                     }
                 }
-                RequestInput | Approval => {
-                    let Some(port) = super::decision_nodes::stage_port(
-                        self.db,
-                        self.run,
-                        node,
-                        unit,
-                        &input_ids(),
-                    )?
-                    else {
-                        return Ok(None);
+                RequestInput | Approval | Human => {
+                    let original =
+                        selected_artifact("input").and_then(|artifact| match &artifact.value {
+                            ArtifactValue::JsonObject(value) => Some(value.clone()),
+                            _ => None,
+                        });
+                    match super::decision_nodes::WorkflowDecisionRequest::for_node(node, original) {
+                        Ok(request) => {
+                            let Some(port) = super::decision_nodes::stage_port(
+                                self.db,
+                                self.run,
+                                node,
+                                unit,
+                                &input_ids(),
+                                request,
+                            )?
+                            else {
+                                return Ok(None);
+                            };
+                            if port == "failed" {
+                                (
+                                    ControlStageState::Failed,
+                                    Some(port),
+                                    Some("The workflow decision expired"),
+                                    None,
+                                )
+                            } else {
+                                (ControlStageState::Completed, Some(port), None, None)
+                            }
+                        }
+                        Err(error) if node.instance.kind == Human => {
+                            super::timed::cancel(self.db, self.run, node_id, unit)?;
+                            diagnostic = Some(crate::diagnostics::preview(&error.to_string()));
+                            (ControlStageState::Failed, Some("failed"), None, None)
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Wait => {
+                    let NodeConfiguration::Wait(config) = &node.instance.configuration else {
+                        anyhow::bail!("Missing pinned Wait configuration");
                     };
-                    (ControlStageState::Completed, Some(port), None, None)
+                    if !super::timed::wait(self.db, self.run, node_id, unit, config)? {
+                        return Ok(None);
+                    }
+                    if let Some(input) = selected_artifact("input") {
+                        self.record_stage_artifact(
+                            node_id,
+                            unit,
+                            "result",
+                            input.value.clone(),
+                            &pinned_inputs(),
+                        )?;
+                    }
+                    (ControlStageState::Completed, Some("completed"), None, None)
                 }
                 UpdateProgress | ManageWork | MaterializeBacklog => {
                     use super::agile_nodes::AgileStageOutcome;
@@ -1892,6 +2117,33 @@ impl<'a> Evaluation<'a> {
             .find(|port| port.name == wire.from.port)
             .context("Control wire lost its output port")?;
         let receipt = self.receipt(source_id, source_unit);
+        if source.instance.kind == BuiltinNode::LoopGate
+            && wire.from.port == "context"
+            && receipt
+                .is_some_and(|value| !value.selected_ports.iter().any(|port| port == "iterate"))
+        {
+            return Ok(Arrival::Ignored);
+        }
+        if source.instance.kind == BuiltinNode::Fork {
+            let branch = super::orchestration::port_branch(&wire.from.port)
+                .context("A Fork output lost its branch")?;
+            use super::orchestration::BranchState;
+            match super::orchestration::branch_state(
+                self.db,
+                self.run,
+                source_id,
+                source_unit,
+                branch,
+            )? {
+                Some((BranchState::Queued, _)) => return Ok(Arrival::Pending),
+                Some((BranchState::Cancelled, _)) => return Ok(Arrival::Ignored),
+                None if receipt.is_some_and(|value| value.state == ControlStageState::Skipped) => {
+                    return Ok(Arrival::Ignored);
+                }
+                None => return Ok(Arrival::Pending),
+                _ => {}
+            }
+        }
         let delivery_agent = matches!(
             source.instance.kind,
             BuiltinNode::Implement | BuiltinNode::ReviewCandidate
@@ -1910,8 +2162,13 @@ impl<'a> Evaluation<'a> {
                         || automatic_unit_action
                         || prompt_native_stage)
                     && port.value != PortType::Control
+                    && !(matches!(
+                        source.instance.kind,
+                        BuiltinNode::JoinResults | BuiltinNode::LoopResult
+                    ) && wire.from.port == "results")
                     && !(source.instance.kind == BuiltinNode::PromptOutcome
                         && port.name == "outcome")
+                    && !(source.instance.kind == BuiltinNode::Human && port.name == "response")
                     && !(source.instance.kind == BuiltinNode::WaitForCi
                         && port.name == "ci"
                         && receipt.selected_ports.iter().any(|port| port == "failed"))
@@ -2077,7 +2334,10 @@ impl<'a> Evaluation<'a> {
         let artifact =
             self.source_artifact(&wire.from, source_unit, port.value == PortType::Control)?;
         if artifact.is_none()
-            && receipt.is_some_and(|receipt| receipt.state == ControlStageState::Failed)
+            && receipt.is_some_and(|receipt| {
+                receipt.state == ControlStageState::Failed
+                    || matches!(source.instance.kind, BuiltinNode::Wait | BuiltinNode::Human)
+            })
         {
             return Ok(Arrival::Ignored);
         }
@@ -2109,10 +2369,16 @@ impl<'a> Evaluation<'a> {
             .nodes
             .get(source.node.as_str())
             .is_some_and(|node| node.instance.kind == BuiltinNode::TypedStart);
-        let prompt_output = self.nodes.get(source.node.as_str()).is_some_and(|node| {
+        let pinned_output = self.nodes.get(source.node.as_str()).is_some_and(|node| {
             matches!(
                 node.instance.kind,
-                BuiltinNode::PromptDecision | BuiltinNode::PromptOutcome
+                BuiltinNode::PromptDecision
+                    | BuiltinNode::PromptOutcome
+                    | BuiltinNode::Fork
+                    | BuiltinNode::JoinResults
+                    | BuiltinNode::LoopGate
+                    | BuiltinNode::LoopStep
+                    | BuiltinNode::LoopResult
             )
         });
         let mut rows = statement.query(params![
@@ -2130,7 +2396,7 @@ impl<'a> Evaluation<'a> {
             let host_key: Option<String> = row.get(1)?;
             let exact_receipt: bool = row.get(2)?;
             let launch_receipt: bool = row.get(3)?;
-            if prompt_output && !exact_receipt {
+            if pinned_output && !exact_receipt {
                 continue;
             }
             let artifact: WorkflowArtifact =

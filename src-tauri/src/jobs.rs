@@ -472,6 +472,16 @@ fn change_pending_job_state(
     job_id: &str,
     state: QueueState,
 ) -> Result<Job> {
+    try_change_pending_job_state(db, project, job_id, state)?
+        .context("job is not pending in this project")
+}
+
+fn try_change_pending_job_state(
+    db: &Connection,
+    project: &str,
+    job_id: &str,
+    state: QueueState,
+) -> Result<Option<Job>> {
     let changed = db.execute(
         "UPDATE jobs SET queue_state = ?3 WHERE project_id = ?1 AND id = ?2
          AND queue_state IN ('queued', 'paused')
@@ -484,7 +494,9 @@ fn change_pending_job_state(
                   WHERE a.job_id = ?2 AND w.state IN ('waiting', 'needs_review')))",
         params![project, job_id, state.as_sql()],
     )?;
-    ensure!(changed == 1, "job is not pending in this project");
+    if changed == 0 {
+        return Ok(None);
+    }
     if state == QueueState::Cancelled {
         db.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [job_id])?;
         db.execute(
@@ -500,7 +512,20 @@ fn change_pending_job_state(
         goals::deactivate_cancelled_job(db, job_id)?;
         downstream::observe_cancelled_job(db, &job)?;
     }
-    Ok(job)
+    Ok(Some(job))
+}
+
+pub(crate) fn stop_branch_job(db: &Connection, project: &str, job_id: &str) -> Result<()> {
+    let interrupted = db.execute(
+        "UPDATE job_attempts SET cancel_requested = 1 WHERE job_id = ?2
+         AND EXISTS (SELECT 1 FROM jobs WHERE id = ?2 AND project_id = ?1)
+         AND EXISTS (SELECT 1 FROM runs WHERE id = job_attempts.run_id AND status IN ('starting', 'running', 'waiting_for_input'))",
+        params![project, job_id],
+    )?;
+    if interrupted == 0 {
+        try_change_pending_job_state(db, project, job_id, QueueState::Cancelled)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn insert_selected_operator_job(

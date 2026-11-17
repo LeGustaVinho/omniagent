@@ -169,12 +169,19 @@ impl Store {
                         .context("The reusable subflow executor is unavailable")?;
                     definition.inputs = named_ports(inputs, &definitions)?;
                     definition.outputs = named_ports(outputs, &definitions)?;
+                    definition.input_schemas = named_schemas(inputs, &definitions);
+                    definition.output_schemas = named_schemas(outputs, &definitions);
                     (definition, definitions, vec![])
                 }
                 PackageArtifactBody::Prompt { .. } => {
-                    let expansion = artifact.prompt_expansion.as_ref()
+                    let expansion = artifact
+                        .prompt_expansion
+                        .as_ref()
                         .context("The published Prompt expansion is unavailable")?;
-                    let definitions = expansion.workflow.nodes.iter()
+                    let definitions = expansion
+                        .workflow
+                        .nodes
+                        .iter()
                         .map(|node| (node.instance.id.clone(), node.definition.clone()))
                         .collect();
                     let mut definition = builtin_registry()
@@ -183,6 +190,8 @@ impl Store {
                         .context("The reusable subflow executor is unavailable")?;
                     definition.inputs = named_ports(&expansion.inputs, &definitions)?;
                     definition.outputs = named_ports(&expansion.outputs, &definitions)?;
+                    definition.input_schemas = named_schemas(&expansion.inputs, &definitions);
+                    definition.output_schemas = named_schemas(&expansion.outputs, &definitions);
                     (definition, definitions, vec![])
                 }
                 _ => anyhow::bail!("Choose a published preset or subflow"),
@@ -329,6 +338,22 @@ fn named_ports(
                 name: name.clone(),
                 value,
             })
+        })
+        .collect()
+}
+
+fn named_schemas(
+    bindings: &BTreeMap<String, Endpoint>,
+    definitions: &BTreeMap<String, NodeDefinition>,
+) -> BTreeMap<String, serde_json::Value> {
+    bindings
+        .iter()
+        .filter_map(|(name, endpoint)| {
+            let contract = definitions
+                .get(&endpoint.node)?
+                .output_schemas
+                .get(&endpoint.port)?;
+            Some((name.clone(), contract.clone()))
         })
         .collect()
 }

@@ -317,6 +317,7 @@ fn start_turn(
             executable_revision: None,
             platform: None,
             staged_attachments: StagedAttachments::default(),
+            structured_output: false,
             native_suggestions,
             admission,
             failure: FailureObservation {
@@ -368,7 +369,13 @@ fn start_turn(
         }
         let answer = execution.proposed_plan.unwrap_or_else(|| {
             if execution.final_answer.is_empty() {
-                execution.streamed_answer
+                if execution.structured_output {
+                    execution
+                        .last_parent_message
+                        .unwrap_or(execution.streamed_answer)
+                } else {
+                    execution.streamed_answer
+                }
             } else {
                 execution.final_answer
             }
@@ -432,6 +439,7 @@ struct TurnExecution {
     executable_revision: Option<String>,
     platform: Option<ExecutionPlatform>,
     staged_attachments: StagedAttachments,
+    structured_output: bool,
     native_suggestions: bool,
 }
 
@@ -475,10 +483,15 @@ impl TurnExecution {
             match &event.data {
                 ProviderEventData::AssistantDelta { text } => self.streamed_answer.push_str(text),
                 ProviderEventData::AssistantMessage { text } => {
-                    self.final_answer.push_str(text);
-                    if !self.plan.question_route.is_native() {
+                    if !self.structured_output {
+                        self.final_answer.push_str(text);
+                    }
+                    if self.structured_output || !self.plan.question_route.is_native() {
                         self.last_parent_message = Some(text.clone());
                     }
+                }
+                ProviderEventData::AssistantFinal { text } if self.structured_output => {
+                    self.final_answer.clone_from(text);
                 }
                 ProviderEventData::PlanProposed { text, source }
                     if *source != PlanSource::StructuredTurn =>
@@ -659,6 +672,13 @@ impl TurnExecution {
             model: scope.model.clone(),
             effort: scope.effort.clone(),
         })?;
+        if let Some(schema) = self.app.block_on(
+            self.store
+                .workflow_output_schema_for_attempt(self.plan.run.id.clone()),
+        )? {
+            self.structured_output = true;
+            session.configure_output_schema(&schema)?;
+        }
         if self.plan.native_fork.is_some() {
             session.allow_native_fork_fallback();
         }
@@ -1029,7 +1049,8 @@ impl TurnExecution {
         let mut inventory_deadline = None;
         let mut wait_for_configuration = false;
         let mut wait_for_skills = false;
-        let wait_for_commands = self.plan.scope.provider != Provider::Codex
+        let wait_for_commands = !self.structured_output
+            && self.plan.scope.provider != Provider::Codex
             && self.plan.input.last().is_some_and(|message| {
                 message.role == MessageRole::User && contains_command_token(&message.text)
             });
@@ -1694,7 +1715,7 @@ impl TurnExecution {
             .plan
             .input
             .last()
-            .filter(|message| message.role == MessageRole::User)
+            .filter(|message| !self.structured_output && message.role == MessageRole::User)
             .map_or("", |message| message.text.as_str());
         let command = resolve_command(
             &self.plan.scope,

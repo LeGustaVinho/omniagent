@@ -316,6 +316,7 @@ impl Store {
                 &artifacts,
             )
             .await?;
+        let typed = super::structured_agent::configuration(&node);
         ensure!(
             automatic_key.is_none()
                 || matches!(
@@ -338,7 +339,11 @@ impl Store {
                     && goal_review_token.is_none(),
                 "An Agent must start a fresh conversation from its wired inputs"
             );
-            request.instructions = super::generic_agent::prompt(resolved.get("prompt"))?.to_owned();
+            request.instructions = if let Some(config) = typed {
+                config.render(resolved.get("input"))?
+            } else {
+                super::generic_agent::prompt(resolved.get("prompt"))?.to_owned()
+            };
             super::generic_agent::selected_comparison(resolved.get("comparison"))?
         } else {
             ensure!(
@@ -350,20 +355,26 @@ impl Store {
             comparison
         };
         let planning_route = input.pinned.as_ref().map(|(_, route)| *route);
-        let qualified =
-            if let Some(plan) = super::stage_plan::StagePlanConfiguration::for_stage(&node)? {
-                scope.mode == plan.mode()
-            } else {
-                match (node.definition.executor, scope.mode) {
-                    (Executor::PlanAgent, SessionMode::Plan) => true,
-                    (Executor::PlanAgent, SessionMode::ReadOnly) => {
-                        planning_route == Some(QuestionRoute::StructuredTurn)
-                    }
-                    (Executor::ReadOnlyAgent, SessionMode::ReadOnly) => true,
-                    (Executor::WriteAgent, SessionMode::ApprovedWrite) => true,
-                    _ => false,
+        let qualified = if let Some(config) = typed {
+            config.require_scope(&scope)?;
+            matches!(
+                (node.definition.executor, scope.mode),
+                (Executor::ReadOnlyAgent, SessionMode::ReadOnly)
+                    | (Executor::WriteAgent, SessionMode::ApprovedWrite)
+            )
+        } else if let Some(plan) = super::stage_plan::StagePlanConfiguration::for_stage(&node)? {
+            scope.mode == plan.mode()
+        } else {
+            match (node.definition.executor, scope.mode) {
+                (Executor::PlanAgent, SessionMode::Plan) => true,
+                (Executor::PlanAgent, SessionMode::ReadOnly) => {
+                    planning_route == Some(QuestionRoute::StructuredTurn)
                 }
-            };
+                (Executor::ReadOnlyAgent, SessionMode::ReadOnly) => true,
+                (Executor::WriteAgent, SessionMode::ApprovedWrite) => true,
+                _ => false,
+            }
+        };
         ensure!(
             qualified,
             "the CLI profile does not match the pinned agent executor"
@@ -391,10 +402,11 @@ impl Store {
                     .or(unit.as_ref().map(|unit| &unit.plan_revision)),
             "the scheduled plan must be the revision received on the pinned input"
         );
-        if let Some(ArtifactValue::Plan {
-            run_id,
-            event_sequence,
-        }) = plan.map(|artifact| &artifact.value)
+        if typed.is_none()
+            && let Some(ArtifactValue::Plan {
+                run_id,
+                event_sequence,
+            }) = plan.map(|artifact| &artifact.value)
         {
             if node.definition.kind == super::BuiltinNode::ReviewPlan {
                 let origin = self
@@ -419,7 +431,8 @@ impl Store {
             request
                 .instructions
                 .push_str(&serde_json::to_string(&proposal)?);
-        } else if let Some(ArtifactValue::BacklogPlan(plan)) = plan.map(|artifact| &artifact.value)
+        } else if typed.is_none()
+            && let Some(ArtifactValue::BacklogPlan(plan)) = plan.map(|artifact| &artifact.value)
         {
             if node.definition.kind == super::BuiltinNode::ReviewPlan {
                 ensure!(
@@ -495,8 +508,10 @@ impl Store {
         let workflow_run = dispatch.pipeline_run_id.clone();
         let node_id = dispatch.node_instance_id.clone();
         let mut instructions = request.instructions;
-        request.instructions = self
-            .execute(move |db| {
+        request.instructions = if typed.is_some() {
+            instructions
+        } else {
+            self.execute(move |db| {
                 super::conversation_turns::append_prompt_context(
                     db,
                     &workflow_run,
@@ -505,7 +520,8 @@ impl Store {
                 )?;
                 Ok(instructions)
             })
-            .await?;
+            .await?
+        };
         if !requirements.is_empty() {
             super::stage_requirements::validate_stage_requirements(
                 self,
@@ -514,7 +530,9 @@ impl Store {
             )
             .await?;
         }
-        if let Some(version) = &requirements.bound_role {
+        if let Some(config) = typed {
+            request.instructions = config.instructions(&request.instructions);
+        } else if let Some(version) = &requirements.bound_role {
             let (project, version) = (project_id.clone(), version.clone());
             let template = self
                 .execute(move |db| roles::load_role(db, &project, &version))

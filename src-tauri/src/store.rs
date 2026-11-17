@@ -150,6 +150,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/121-conversation-library-section-order.sql"),
     include_str!("../migrations/122-saved-attachment-reuse-lineage.sql"),
     include_str!("../migrations/123-model-comparison-markdown-source.sql"),
+    include_str!("../migrations/136-workflow-wait-deadlines.sql"),
+    include_str!("../migrations/137-workflow-fork-branches.sql"),
+    include_str!("../migrations/138-workflow-schemas.sql"),
 ];
 // Branch snapshots used some numbers for different migrations. Table names identify the schema
 // already installed, regardless of the original number stored in user_version.
@@ -177,7 +180,8 @@ pub struct Store {
     pub(crate) event_signal: watch::Sender<()>,
     pub(crate) job_signal: watch::Sender<()>,
     pub(crate) note_index_locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
-    pub(crate) document_write_locks: Arc<Mutex<HashMap<(String, String), Weak<tokio::sync::Mutex<()>>>>>,
+    pub(crate) document_write_locks:
+        Arc<Mutex<HashMap<(String, String), Weak<tokio::sync::Mutex<()>>>>>,
 }
 
 pub enum DraftKey {
@@ -201,11 +205,13 @@ impl DraftKey {
 
     pub(crate) fn read(&self, db: &Connection) -> Result<Option<Vec<u8>>> {
         let (kind, owner, document) = self.parts();
-        let payload: Option<Vec<u8>> = db.query_row(
-            "SELECT payload FROM drafts WHERE kind = ?1 AND owner_id = ?2 AND document = ?3",
-            params![kind, owner, document],
-            |row| row.get(0),
-        ).optional()?;
+        let payload: Option<Vec<u8>> = db
+            .query_row(
+                "SELECT payload FROM drafts WHERE kind = ?1 AND owner_id = ?2 AND document = ?3",
+                params![kind, owner, document],
+                |row| row.get(0),
+            )
+            .optional()?;
         payload
             .map(|bytes| protection::unprotect(&bytes))
             .transpose()
@@ -327,7 +333,7 @@ pub(crate) fn open_database(path: &Path) -> Result<Connection> {
 }
 
 fn migrate(db: &mut Connection, target: usize) -> Result<()> {
-    const TABLE_REBUILDS: [usize; 3] = [30, 106, 115];
+    const TABLE_REBUILDS: [usize; 4] = [30, 106, 115, 138];
     let installed: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     for rebuild in TABLE_REBUILDS {
         if rebuild <= installed as usize || rebuild > target {
@@ -396,7 +402,9 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
 }
 
 fn has_table(db: &Connection, name: &str) -> Result<bool> {
-    Ok(db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1")?.exists([name])?)
+    Ok(db
+        .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1")?
+        .exists([name])?)
 }
 
 #[cfg(test)]
@@ -404,7 +412,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn document_history_migration_links_earlier_editor_captures_without_rewriting_bodies() -> Result<()> {
+    fn document_history_migration_links_earlier_editor_captures_without_rewriting_bodies()
+    -> Result<()> {
         let mut db = Connection::open_in_memory()?;
         db.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&mut db, 117)?;
@@ -413,7 +422,11 @@ mod tests {
              INSERT INTO checkouts (id, project_id, git_dir, root) VALUES ('checkout', 'project', 'fixture.git', 'fixture');",
         )?;
         let protected = protection::protect(b"prior bytes")?;
-        for (id, at) in [("editor-later", 200), ("source-earlier", 100), ("workflow-input", 300)] {
+        for (id, at) in [
+            ("editor-later", 200),
+            ("source-earlier", 100),
+            ("workflow-input", 300),
+        ] {
             db.execute(
                 "INSERT INTO repository_markdown_revisions (checkout_id, id, path, sha256, body, captured_at)
                  VALUES ('checkout', ?1, 'note.md', ?2, ?3, ?4)",
@@ -421,17 +434,34 @@ mod tests {
             )?;
         }
         migrate(&mut db, 128)?;
-        let entries = db.prepare(
-            "SELECT history.revision_id, history.origin, history.recorded_at, revision.body
+        let entries = db
+            .prepare(
+                "SELECT history.revision_id, history.origin, history.recorded_at, revision.body
              FROM checkout_document_history history JOIN repository_markdown_revisions revision
              ON revision.checkout_id = history.checkout_id AND revision.id = history.revision_id
              ORDER BY history.position",
-        )?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Vec<u8>>(3)?)))?
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(entries, vec![
-            ("source-earlier".into(), "captured".into(), 100, protected.clone()),
-            ("editor-later".into(), "captured".into(), 200, protected),
-        ]);
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    "source-earlier".into(),
+                    "captured".into(),
+                    100,
+                    protected.clone()
+                ),
+                ("editor-later".into(), "captured".into(), 200, protected),
+            ]
+        );
         assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
         Ok(())
     }
@@ -455,8 +485,10 @@ mod tests {
             db.execute_batch(MIGRATIONS[127])?;
             if version >= 119 {
                 db.execute_batch(MIGRATIONS[128])?;
-                db.execute_batch("INSERT INTO git_review_comments (id, checkout_id, surface, path, payload)
-                    VALUES ('comment', 'checkout', 'working', 'note.md', x'0102')")?;
+                db.execute_batch(
+                    "INSERT INTO git_review_comments (id, checkout_id, surface, path, payload)
+                    VALUES ('comment', 'checkout', 'working', 'note.md', x'0102')",
+                )?;
             }
             if version >= 120 {
                 db.execute_batch(MIGRATIONS[131])?;
@@ -481,10 +513,20 @@ mod tests {
                 |row| row.get(0),
             )?;
             assert_eq!(body, protected);
-            let comment: Option<Vec<u8>> = db.query_row("SELECT payload FROM git_review_comments WHERE id = 'comment'", [], |row| row.get(0)).optional()?;
+            let comment: Option<Vec<u8>> = db
+                .query_row(
+                    "SELECT payload FROM git_review_comments WHERE id = 'comment'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
             assert_eq!(comment, (version >= 119).then_some(vec![1, 2]));
             assert_eq!(
-                db.query_row("SELECT count(*) FROM git_reviewed_hunks WHERE hunk_id = 'hunk'", [], |row| row.get::<_, i64>(0))?,
+                db.query_row(
+                    "SELECT count(*) FROM git_reviewed_hunks WHERE hunk_id = 'hunk'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
                 if version >= 120 { 1 } else { 0 },
             );
             assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
@@ -524,7 +566,14 @@ mod tests {
             assert!(has_table(&db, "checkout_document_history")?);
             assert!(has_table(&db, "git_review_comments")?);
             assert!(has_table(&db, "git_reviewed_hunks")?);
-            assert_eq!(db.query_row("SELECT attempt_number FROM workflow_delivery_attempts WHERE unit_id = 'unit'", [], |row| row.get::<_, i64>(0))?, 1);
+            assert_eq!(
+                db.query_row(
+                    "SELECT attempt_number FROM workflow_delivery_attempts WHERE unit_id = 'unit'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
             let reuse: Option<String> = db.query_row("SELECT output_artifact_id FROM workflow_agent_review_reuses WHERE node_instance_id = 'node'", [], |row| row.get(0)).optional()?;
             assert_eq!(reuse.as_deref(), (version == 129).then_some("review"));
             assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);

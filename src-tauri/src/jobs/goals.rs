@@ -181,6 +181,7 @@ impl Store {
                 ).context("The stage's goal context is unavailable")?;
                     resolve_node_checkout(&tx, stage, &conversation.checkout_id)?
                 } else {
+                    conversation.require_direct_turn()?;
                     ensure!(
                         conversation.context_id == context.context_id,
                         "The goal's context changed"
@@ -256,6 +257,11 @@ impl Store {
                     &definition,
                     stage.as_ref(),
                 )?;
+                if stage.is_none() {
+                    crate::workflows::conversation_turns::launch_direct_turn(
+                        &tx, &job, &scope, None,
+                    )?;
+                }
                 tx.commit()?;
                 Ok(GoalRevision {
                     goal_id,

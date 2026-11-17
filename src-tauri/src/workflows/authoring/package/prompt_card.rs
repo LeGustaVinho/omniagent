@@ -9,7 +9,13 @@ use crate::{
         ArtifactKind, BuiltinNode, ConditionPredicate, Endpoint, NodeConfiguration, NodeDefinition,
         NodeInstance, Port, PortType, Wire, WorkflowGraph, builtin_registry,
         prompt::{PromptDecisionConfiguration, PromptOutcomeConfiguration, valid_identifier},
+        registry::configure_structured_agent,
+        role_templates::{
+            ConversationTemplate, TemplateReviewPolicy, validate_conversation_template,
+        },
         stage_plan::StagePlanConfiguration,
+        stage_requirements::StageRequirementConfiguration,
+        structured_agent::StructuredAgentConfiguration,
     },
 };
 
@@ -240,6 +246,17 @@ pub(super) fn validate_shape(prompt: &PromptCard) -> Result<()> {
         !prompt.text.trim().is_empty() && prompt.text.len() <= 24 * 1024,
         "Enter the Prompt text (up to 24 KiB)"
     );
+    if prompt.schema_contract {
+        ensure!(
+            prompt.executor == BuiltinNode::Agent,
+            "A typed Prompt uses the Agent executor"
+        );
+        ensure!(
+            prompt.delegates.is_empty(),
+            "Configure typed Prompt review using its Role"
+        );
+        return Ok(());
+    }
     ensure!(
         matches!(
             prompt.executor,
@@ -312,6 +329,252 @@ fn projected_schema(
     })
 }
 
+pub(super) fn artifact_schema(artifact: &PublishedPackageArtifact) -> Result<Value> {
+    let PackageArtifactBody::Schema { fields } = &artifact.body else {
+        bail!("Select a Schema revision");
+    };
+    crate::workflows::schema::object(fields)
+}
+
+fn effective_role(
+    slot: &str,
+    dependencies: &BTreeMap<String, PublishedPackageArtifact>,
+    overrides: &BTreeMap<String, Value>,
+) -> Result<ConversationTemplate> {
+    let artifact = dependencies
+        .get(slot)
+        .with_context(|| format!("Choose a Role for {slot}"))?;
+    let PackageArtifactBody::Role { template } = &artifact.body else {
+        bail!("The reference {slot} must select a Role revision");
+    };
+    let mut value = serde_json::to_value(template)?;
+    let fields = value
+        .as_object_mut()
+        .context("The Role needs an object configuration")?;
+    for (key, value) in overrides {
+        ensure!(
+            matches!(
+                key.as_str(),
+                "name"
+                    | "role"
+                    | "model"
+                    | "effort"
+                    | "instructions"
+                    | "toolScope"
+                    | "completionContract"
+                    | "reviewPolicy"
+                    | "requirements"
+            ),
+            "Unknown Role override {key}"
+        );
+        fields.insert(key.clone(), value.clone());
+    }
+    let mut effective = serde_json::from_value(value).context("The Role overrides are invalid")?;
+    validate_conversation_template(&mut effective)?;
+    Ok(effective)
+}
+
+fn typed_agent(
+    graph: &mut PromptGraph,
+    id: &str,
+    config: StructuredAgentConfiguration,
+    role: &super::PackageArtifactVersion,
+) -> Result<()> {
+    config.validate()?;
+    let write = config.effective_role.tool_scope == SessionMode::ApprovedWrite;
+    let input = config.input_schema.clone();
+    let output = config.output_schema.clone();
+    graph.node(
+        id,
+        BuiltinNode::Agent,
+        NodeConfiguration::AgentRole {
+            role: config.effective_role.name.clone(),
+            model: Some(config.effective_role.model.clone()),
+            requirements: StageRequirementConfiguration {
+                bound_role: Some(role.clone()),
+                stage: config.effective_role.requirements.clone(),
+                structured: Some(config),
+                ..Default::default()
+            },
+        },
+    )?;
+    let definition = graph.pins.get_mut(id).context("Missing Agent definition")?;
+    configure_structured_agent(definition, write);
+    definition.input_schemas.insert("input".into(), input);
+    definition.output_schemas.insert("result".into(), output);
+    Ok(())
+}
+
+fn lower_typed(
+    name: &str,
+    prompt: &PromptCard,
+    dependencies: &BTreeMap<String, PublishedPackageArtifact>,
+) -> Result<LoweredPrompt> {
+    let input = artifact_schema(
+        dependencies
+            .get("input_schema")
+            .context("Select an Input Schema")?,
+    )?;
+    let output = artifact_schema(
+        dependencies
+            .get("output_schema")
+            .context("Select an Output Schema")?,
+    )?;
+    let effective = effective_role("role", dependencies, &prompt.role_overrides)?;
+    let policy = effective.review_policy;
+    let write = effective.tool_scope == SessionMode::ApprovedWrite;
+    let reviewer_role = if policy == TemplateReviewPolicy::CrossReview {
+        ensure!(
+            dependencies
+                .get("reviewer")
+                .map(|artifact| &artifact.version)
+                != dependencies.get("role").map(|artifact| &artifact.version),
+            "Choose a different Role for cross-review"
+        );
+        Some(effective_role("reviewer", dependencies, &BTreeMap::new())?)
+    } else {
+        None
+    };
+    let mut graph = PromptGraph::new(name);
+    let object = PortType::Data(ArtifactKind::JsonObject);
+    let mut entry_ports = vec![
+        Port {
+            name: "ready".into(),
+            value: PortType::Control,
+        },
+        Port {
+            name: "input".into(),
+            value: object,
+        },
+    ];
+    if write {
+        for (port, kind) in [
+            ("release", ArtifactKind::Release),
+            ("worktree", ArtifactKind::Worktree),
+            ("plan", ArtifactKind::Plan),
+        ] {
+            entry_ports.push(Port {
+                name: port.into(),
+                value: PortType::Data(kind),
+            });
+        }
+    }
+    graph.node(
+        ENTRY,
+        BuiltinNode::Start,
+        NodeConfiguration::SubflowEntry {
+            outputs: entry_ports.clone(),
+        },
+    )?;
+    graph
+        .pins
+        .get_mut(ENTRY)
+        .context("Missing Prompt entry")?
+        .output_schemas
+        .insert("input".into(), input.clone());
+    let inputs = entry_ports
+        .into_iter()
+        .map(|port| (port.name.clone(), endpoint(ENTRY, &port.name)))
+        .collect();
+    graph.node(FAILURE, BuiltinNode::Join, NodeConfiguration::None)?;
+    typed_agent(
+        &mut graph,
+        EXECUTE,
+        StructuredAgentConfiguration {
+            prompt: prompt.text.clone(),
+            input_schema: input,
+            output_schema: output.clone(),
+            effective_role: effective,
+            reviewer_role: reviewer_role.clone(),
+        },
+        &dependencies["role"].version,
+    )?;
+    graph.wire(endpoint(ENTRY, "ready"), EXECUTE, "ready");
+    graph.wire(endpoint(ENTRY, "input"), EXECUTE, "input");
+    if write {
+        for port in ["release", "worktree", "plan"] {
+            graph.wire(endpoint(ENTRY, port), EXECUTE, port);
+        }
+    }
+    graph.failure(EXECUTE);
+    let candidate = endpoint(EXECUTE, "result");
+    let completion = endpoint(EXECUTE, "completed");
+    let (completed, result) = match policy {
+        TemplateReviewPolicy::Independent => (completion, candidate),
+        TemplateReviewPolicy::HumanApproval => {
+            let approval = serde_json::from_value(json!({
+                "kind": "human", "interaction": "approval",
+                "message": "Approve this agent result?", "fields": []
+            }))?;
+            graph.step("approval", BuiltinNode::Human, approval, completion)?;
+            graph.wire(candidate, "approval", "input");
+            for port in ["rejected", "expired", "failed"] {
+                graph.wire(endpoint("approval", port), FAILURE, "branches");
+            }
+            (
+                endpoint("approval", "approved"),
+                endpoint("approval", "approved_result"),
+            )
+        }
+        TemplateReviewPolicy::CrossReview => {
+            let reviewer = reviewer_role.context("Choose a reviewer Role")?;
+            ensure!(
+                reviewer.tool_scope == SessionMode::ReadOnly
+                    && reviewer.review_policy == TemplateReviewPolicy::Independent,
+                "The reviewer needs an independent read-only Role"
+            );
+            typed_agent(&mut graph, "reviewer", StructuredAgentConfiguration {
+                prompt: "Review this result against your Role instructions. Approve only if it meets the requirements. Result: {{input}}".into(),
+                input_schema: output.clone(),
+                output_schema: json!({"type":"object", "properties":{"approved":{"type":"boolean"}, "reason":{"type":"string"}}, "required":["approved"], "additionalProperties":false}),
+                effective_role: reviewer,
+                reviewer_role: None,
+            }, &dependencies["reviewer"].version)?;
+            graph.wire(completion, "reviewer", "ready");
+            graph.wire(candidate.clone(), "reviewer", "input");
+            graph.failure("reviewer");
+            graph.condition(
+                "verdict",
+                endpoint("reviewer", "completed"),
+                endpoint("reviewer", "result"),
+                ConditionPredicate::Equals {
+                    pointer: "/evidence/approved".into(),
+                    value: json!(true),
+                },
+            )?;
+            graph.wire(endpoint("verdict", "unmatched"), FAILURE, "branches");
+            graph.step(
+                "return",
+                BuiltinNode::End,
+                NodeConfiguration::End,
+                endpoint("verdict", "matched"),
+            )?;
+            graph.wire(candidate, "return", "result");
+            let end = graph
+                .pins
+                .get_mut("return")
+                .context("Missing review return")?;
+            end.input_schemas.insert("result".into(), output.clone());
+            end.output_schemas.insert("result".into(), output);
+            (
+                endpoint("return", "completed"),
+                endpoint("return", "result"),
+            )
+        }
+    };
+    Ok(LoweredPrompt {
+        graph: graph.graph,
+        pins: graph.pins,
+        dependencies: graph.dependencies,
+        inputs,
+        outputs: BTreeMap::from([
+            ("completed".into(), completed),
+            ("failed".into(), endpoint(FAILURE, "joined")),
+            ("result".into(), result),
+        ]),
+    })
+}
+
 fn execution_text(prompt: &PromptCard, output_schema: &Value) -> String {
     let mut text = prompt.text.clone();
     if structured(prompt) {
@@ -365,6 +628,9 @@ pub(super) fn lower(
     dependencies: &BTreeMap<String, PublishedPackageArtifact>,
 ) -> Result<LoweredPrompt> {
     validate_shape(prompt)?;
+    if prompt.schema_contract {
+        return lower_typed(name, prompt, dependencies);
+    }
     let uses_response = structured(prompt);
     ensure!(
         !uses_response || prompt.executor == BuiltinNode::Agent,

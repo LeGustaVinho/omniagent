@@ -720,9 +720,18 @@ pub(super) fn insert_scoped_artifact(
         }),
         "artifact kind does not match the pinned output port"
     );
+    if let Some(schema) = pinned.definition.output_schemas.get(&port) {
+        let ArtifactValue::JsonObject(object) = &value else {
+            anyhow::bail!("A Schema output needs a JSON object");
+        };
+        super::schema::validate(schema, &serde_json::Value::Object(object.clone()))?;
+    }
     let stage_scoped = matches!(
         pinned.definition.kind,
         BuiltinNode::RequestInput
+            | BuiltinNode::Wait
+            | BuiltinNode::Human
+            | BuiltinNode::End
             | BuiltinNode::Approval
             | BuiltinNode::SetFields
             | BuiltinNode::FilterMapList
@@ -730,6 +739,11 @@ pub(super) fn insert_scoped_artifact(
             | BuiltinNode::ValidateOutput
             | BuiltinNode::PromptDecision
             | BuiltinNode::PromptOutcome
+            | BuiltinNode::Fork
+            | BuiltinNode::JoinResults
+            | BuiltinNode::LoopGate
+            | BuiltinNode::LoopStep
+            | BuiltinNode::LoopResult
             | BuiltinNode::CollectEvidence
             | BuiltinNode::QualityGate
             | BuiltinNode::FindWork

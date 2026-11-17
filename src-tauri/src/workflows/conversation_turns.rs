@@ -33,10 +33,13 @@ const MAX_MESSAGE_BYTES: usize = 96 * 1024;
 const MAX_CONTEXT_BYTES: usize = 192 * 1024;
 
 mod dispatch;
+mod native;
 #[cfg(test)]
 mod tests;
 pub(crate) use dispatch::prepare_next_conversation_stage;
 use dispatch::{RunningTurn, TurnState};
+pub(super) use native::{NativeOutcome, native_outcome};
+pub(crate) use native::{is_conversation_template, launch_direct_turn, pin_direct_conversation};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -80,6 +83,8 @@ struct SavedRequest {
     workflow: WorkflowRevision,
     checkout_id: String,
     project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_job: Option<String>,
 }
 
 struct Turn {
@@ -136,6 +141,8 @@ struct ConversationPipelineAgent {
 #[serde(rename_all = "camelCase")]
 pub struct ConversationPipelineSchema {
     fields: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    json_schema: Option<Value>,
     requires_document: bool,
     requires_work: bool,
     requires_event: bool,
@@ -160,7 +167,11 @@ impl Store {
             let requires_event = schema.as_ref().is_some_and(|schema| schema.requires_event);
             let requires_work =
                 requires_event || schema.as_ref().is_some_and(|schema| schema.requires_work);
+            let json_schema = schema
+                .as_ref()
+                .and_then(|schema| schema.json_schema.clone());
             let fields = schema
+                .as_ref()
                 .map(|schema| {
                     let value = serde_json::to_value(schema)?;
                     Ok::<_, anyhow::Error>(
@@ -182,6 +193,7 @@ impl Store {
             let requires_model = agents.iter().any(|agent| agent.selection.is_none());
             Ok(ConversationPipelineSchema {
                 fields,
+                json_schema,
                 requires_document,
                 requires_work,
                 requires_event,
@@ -263,6 +275,7 @@ impl Store {
                 inputs, workflow, project_id, checkout_id,
                 request_fingerprint: request_fingerprint(&request)?,
                 request,
+                native_job: None,
             };
             let entry = turn_entry(&tx, &saved, &[])?;
             let prepared = prepare_entry(&tx, &saved.project_id, &saved.workflow, &entry, &origin(&saved))?;
@@ -353,7 +366,8 @@ impl Store {
     pub(crate) async fn advance_conversation_pipeline_turns(&self) -> Result<bool> {
         self.execute(|db| {
             let mut tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let running = tx.prepare("SELECT sequence FROM conversation_pipeline_turns WHERE state = 'running' ORDER BY sequence")?
+            let running = tx.prepare("SELECT sequence FROM conversation_pipeline_turns WHERE state = 'running'
+                UNION SELECT sequence FROM conversation_pipeline_turn_drains ORDER BY sequence")?
                 .query_map([], |row| row.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut progressed = false;
@@ -707,21 +721,40 @@ fn settle_turn(db: &Connection, turn: Turn) -> Result<bool> {
         .context("The conversation turn's pinned run is unavailable")?;
     super::control::refresh(db, &run.project_id, &run.id)?;
     let running = RunningTurn::read(db, &turn, &run)?;
+    if turn.state != "running" {
+        if running.has_unfinished {
+            return Ok(false);
+        }
+        return Ok(db.execute(
+            "DELETE FROM conversation_pipeline_turn_drains WHERE sequence = ?1",
+            [turn.sequence],
+        )? > 0);
+    }
+    if !matches!(running.state, TurnState::Running) && running.has_unfinished {
+        db.execute(
+            "INSERT INTO conversation_pipeline_turn_drains VALUES (?1) ON CONFLICT DO NOTHING",
+            [turn.sequence],
+        )?;
+    }
     let (status, result, error) = match running.state {
         TurnState::Running => return Ok(false),
         TurnState::Failed(reason) => ("failed", None, Some(reason)),
         TurnState::Completed(summary) => {
-            let result = summary
-                .map(|text| {
-                    append_pipeline_message(
-                        db,
-                        &turn.request.request.conversation_id,
-                        MessageRole::Assistant,
-                        &text,
-                    )
-                    .map(|(revision, _)| revision)
-                })
-                .transpose()?;
+            let result = if turn.request.native_job.is_some() {
+                summary
+            } else {
+                summary
+                    .map(|text| {
+                        append_pipeline_message(
+                            db,
+                            &turn.request.request.conversation_id,
+                            MessageRole::Assistant,
+                            &text,
+                        )
+                        .map(|(revision, _)| revision)
+                    })
+                    .transpose()?
+            };
             ("succeeded", result, None)
         }
     };

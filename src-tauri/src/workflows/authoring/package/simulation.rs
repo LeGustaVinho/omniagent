@@ -418,6 +418,8 @@ pub(super) fn intrinsic(kind: BuiltinNode) -> bool {
             | BuiltinNode::FilterMapList
             | BuiltinNode::BuildText
             | BuiltinNode::TypedStart
+            | BuiltinNode::Wait
+            | BuiltinNode::End
             | BuiltinNode::SummarizeResult
     ) || kind.generated_iteration()
 }
@@ -532,9 +534,29 @@ fn trace_node(
         step.reason = Some("Waiting for upstream evidence.".into());
         return Ok(step);
     }
+    for (port, contract) in &node.definition.input_schemas {
+        if let Some(input) = data.get(port)
+            && let Err(error) = crate::workflows::schema::validate(contract, &input["evidence"])
+        {
+            return Ok(failed_iteration(step, &error.to_string()));
+        }
+    }
     let mut values = BTreeMap::new();
     let control = match kind {
         Start | TypedStart => return trace_start(step, node, body, scenario),
+        End => {
+            if let Some(result) = data.get("result") {
+                values.insert("result".into(), (*result).clone());
+            }
+            Some("completed")
+        }
+        Wait => {
+            if let Some(input) = data.get("input") {
+                values.insert("result".into(), (*input).clone());
+            }
+            step.reason = Some("Continues when the configured deadline is reached.".into());
+            Some("completed")
+        }
         QualityGate => {
             let NodeConfiguration::QualityGate(config) = &node.instance.configuration else {
                 anyhow::bail!("Invalid pinned quality gate");
@@ -926,6 +948,8 @@ fn trace_node(
                 step.reason = Some(
                     if kind == ApproveImplementation {
                         "Waiting for sample approval."
+                    } else if kind == Human {
+                        "Waiting for a sample human response."
                     } else {
                         "Waiting for a sample outcome."
                     }
@@ -962,6 +986,26 @@ fn trace_node(
             values.clone_from(&outcome.outputs);
             if matches!(kind, RequestInput | Approval) {
                 Some(super::super::super::decision_nodes::simulate_stage_decision(node, &values)?)
+            } else if kind == Human {
+                let original = data
+                    .get("input")
+                    .and_then(|value| value["evidence"].as_object())
+                    .cloned();
+                let sample = values
+                    .remove("response")
+                    .context("Provide a sample Human response")?;
+                let (port, response) = super::super::super::decision_nodes::simulate_human(
+                    node,
+                    original.clone(),
+                    &sample,
+                )?;
+                if port == "approved"
+                    && let Some(original) = original
+                {
+                    values.insert("approved_result".into(), Value::Object(original));
+                }
+                values.insert("response".into(), Value::Object(response));
+                Some(port)
             } else if kind == VerifyTestPhase {
                 let verdict = values
                     .get("evidence")
@@ -1010,12 +1054,25 @@ fn trace_node(
             }
         }
     };
-    step.state = TraceState::Completed;
+    step.state = if kind == Human && control == Some("failed") {
+        step.reason = Some("The sample human response expired.".into());
+        TraceState::Failed
+    } else {
+        TraceState::Completed
+    };
     if let Some(control) = control {
         step.outputs.insert(control.into(), control_output());
     }
     for port in &node.definition.outputs {
         if let PortType::Data(kind) = port.value {
+            if !values.contains_key(&port.name)
+                && matches!(
+                    (node.instance.kind, port.name.as_str()),
+                    (Wait | End, "result") | (Human, "approved_result")
+                )
+            {
+                continue;
+            }
             if matches!(&node.instance.configuration, NodeConfiguration::FindWork { query }
                 if query.result == super::super::super::agile_nodes::FindWorkResultMode::List && matches!(port.name.as_str(), "task" | "target"))
             {
@@ -1039,6 +1096,11 @@ fn trace_node(
                     _ => value,
                 };
                 value = json!({ "kind": kind, "evidence": value });
+            }
+            if let Some(contract) = node.definition.output_schemas.get(&port.name)
+                && let Err(error) = crate::workflows::schema::validate(contract, &value["evidence"])
+            {
+                return Ok(failed_iteration(step, &error.to_string()));
             }
             step.outputs.insert(
                 port.name.clone(),
@@ -1103,6 +1165,13 @@ fn trace_start(
             .iter()
             .find(|(_, endpoint)| endpoint.node == node.instance.id && endpoint.port == port)
             .map(|(name, _)| name.as_str()),
+        PackageArtifactBody::Prompt { prompt } if prompt.schema_contract => match port {
+            "input" => Some("input"),
+            "plan" => Some("plan"),
+            "release" => Some("release"),
+            "worktree" => Some("worktree"),
+            _ => None,
+        },
         PackageArtifactBody::Prompt { prompt } => prompt
             .inputs
             .get_key_value(port)
@@ -1137,7 +1206,13 @@ fn trace_start(
                     .context("Enter sample Markdown text for the Start request")
             })
             .transpose()?;
-        typed_values = Some(Value::Object(config.launch_values(values, markdown)?));
+        typed_values = if let Some(contract) = node.definition.output_schemas.get("inputs") {
+            let value = Value::Object(values.clone());
+            crate::workflows::schema::validate(contract, &value)?;
+            Some(value)
+        } else {
+            Some(Value::Object(config.launch_values(values, markdown)?))
+        };
     }
     for name in scenario.inputs.keys() {
         ensure!(
@@ -1171,6 +1246,9 @@ fn trace_start(
                 anyhow::bail!("Sample control input {name} needs a Boolean")
             }
             (PortType::Data(kind), Some((_, Some(value)))) => {
+                if let Some(contract) = node.definition.output_schemas.get(&port.name) {
+                    crate::workflows::schema::validate(contract, value)?;
+                }
                 step.outputs.insert(
                     port.name.clone(),
                     TraceOutput {

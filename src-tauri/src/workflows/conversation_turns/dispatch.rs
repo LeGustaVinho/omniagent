@@ -74,6 +74,7 @@ pub(super) enum TurnState {
 
 pub(super) struct RunningTurn {
     pub state: TurnState,
+    pub has_unfinished: bool,
     pub waiting: Option<TurnWait>,
     pub artifacts: Vec<TurnArtifact>,
     pub action_outcome: Option<ActionOutcome>,
@@ -250,6 +251,7 @@ impl RunningTurn {
                         continue;
                     }
                     StageAvailability::Ready(inputs) => match node.definition.executor {
+                        _ if super::super::structured_agent::configuration(node).is_some() => {}
                         Executor::ReadContext if unit.is_none() => {
                             ready.push(ReadyStage {
                                 node: node.clone(),
@@ -317,7 +319,46 @@ impl RunningTurn {
                 .into_iter()
                 .filter(|node| !unsuccessful.contains(node)),
         );
-        let state = if unfinished.is_empty() {
+        let state = if let Some(end) = super::native::root_end(&definition) {
+            let receipt = control.iter().find(|receipt| {
+                receipt.node_id == end.instance.id
+                    && receipt.unit_id.is_none()
+                    && receipt.plan_revision == run.plan_revision
+            });
+            if let Some(receipt) =
+                receipt.filter(|receipt| receipt.state == ControlStageState::Completed)
+            {
+                let field = if turn.request.native_job.is_some() {
+                    "replyRevisionId"
+                } else {
+                    "reply"
+                };
+                let reply = current.iter().find_map(|artifact| {
+                    if receipt.node_id != artifact.node_instance_id || artifact.port != "result" {
+                        return None;
+                    }
+                    match &artifact.value {
+                        ArtifactValue::JsonObject(value) => value
+                            .get(field)
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
+                        _ => None,
+                    }
+                });
+                match reply {
+                    Some(text) => TurnState::Completed(Some(text)),
+                    None => {
+                        TurnState::Failed("End did not produce the required reply field".into())
+                    }
+                }
+            } else if receipt.is_some() || unfinished.is_empty() {
+                TurnState::Failed(
+                    failed.unwrap_or_else(|| "The selected branches did not reach End".into()),
+                )
+            } else {
+                TurnState::Running
+            }
+        } else if unfinished.is_empty() {
             let summary = current
                 .iter()
                 .filter_map(|artifact| match &artifact.value {
@@ -375,6 +416,7 @@ impl RunningTurn {
         });
         Ok(Self {
             state,
+            has_unfinished: !unfinished.is_empty(),
             waiting,
             artifacts,
             action_outcome,
@@ -401,6 +443,8 @@ fn wait(
 fn operator_kind(executor: Executor) -> &'static str {
     match executor {
         Executor::AwaitWorkflowInput => "question",
+        Executor::AwaitDeadline => "deadline",
+        Executor::AwaitHuman => "human input",
         Executor::AwaitWorkflowApproval | Executor::RecordImplementationRelease => "approval",
         Executor::FindOrCreateWork | Executor::ProvisionWorktree => "selection",
         Executor::ReadSelectedGit | Executor::VerifyGitMerge | Executor::VerifyGitCommit => "git",
@@ -418,9 +462,11 @@ fn current_job<'a>(
         .filter(|job| {
             job.node_id == node
                 && job.unit_id.as_deref() == unit
-                && job.job.pipeline.as_ref().is_some_and(|pipeline| {
-                    pipeline.plan_revision.is_none() || pipeline.plan_revision == run.plan_revision
-                })
+                && (run.version.id == super::native::WORKFLOW_ID
+                    || job.job.pipeline.as_ref().is_some_and(|pipeline| {
+                        pipeline.plan_revision.is_none()
+                            || pipeline.plan_revision == run.plan_revision
+                    }))
         })
         .last()
 }
@@ -530,8 +576,9 @@ pub(crate) async fn prepare_next_conversation_stage(
         .execute(|db| {
             let ids = db
                 .prepare(
-                    "SELECT sequence FROM conversation_pipeline_turns
-            WHERE state = 'running' AND NOT (SELECT paused FROM job_queue_settings WHERE id = 1)
+                    "SELECT turn.sequence FROM conversation_pipeline_turns turn
+            WHERE (turn.state = 'running' OR EXISTS (SELECT 1 FROM conversation_pipeline_turn_drains drain WHERE drain.sequence = turn.sequence))
+              AND NOT (SELECT paused FROM job_queue_settings WHERE id = 1)
             ORDER BY sequence",
                 )?
                 .query_map([], |row| row.get::<_, i64>(0))?

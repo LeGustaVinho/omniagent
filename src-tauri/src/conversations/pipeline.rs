@@ -82,6 +82,12 @@ fn checkout_project(db: &Connection, checkout_id: &str) -> Result<String> {
     .context("The conversation worktree is unavailable")
 }
 
+pub(super) fn pin_direct_chat(db: &Connection, conversation: &Conversation) -> Result<()> {
+    let project = checkout_project(db, &conversation.checkout_id)?;
+    crate::workflows::conversation_turns::pin_direct_conversation(db, &project, &conversation.id)?;
+    Ok(())
+}
+
 fn published_workflow_name(
     db: &Connection,
     project: &str,
@@ -103,9 +109,17 @@ fn published_workflow_name(
         was_published,
         "The selected pipeline revision is not published in this project"
     );
-    Ok(load_definition(db, project, workflow)?
-        .context("The selected pipeline revision is unavailable")?
-        .name)
+    let definition = load_definition(db, project, workflow)?
+        .context("The selected pipeline revision is unavailable")?;
+    if definition.nodes.iter().any(|node| {
+        node.instance.kind == crate::workflows::BuiltinNode::End && !node.instance.id.contains("::")
+    }) {
+        ensure!(
+            crate::workflows::conversation_turns::is_conversation_template(&definition),
+            "This template needs conversation inputs at Start and a required text reply at End"
+        );
+    }
+    Ok(definition.name)
 }
 
 impl Store {
@@ -128,19 +142,25 @@ impl Store {
                 })?
                 .map(|workflow| {
                     let workflow = workflow?;
-                    Ok(ConversationPipelineOption {
-                        name: published_workflow_name(db, &project, &workflow)?,
-                        pipeline: ConversationPipelineChoice::Published { workflow },
-                    })
+                    let definition = load_definition(db, &project, &workflow)?
+                        .context("The published workflow revision is unavailable")?;
+                    Ok(
+                        crate::workflows::conversation_turns::is_conversation_template(&definition)
+                            .then_some(ConversationPipelineOption {
+                                name: definition.name,
+                                pipeline: ConversationPipelineChoice::Published { workflow },
+                            }),
+                    )
                 })
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
             published.sort_by_cached_key(|item| item.name.to_lowercase());
-            let mut result = vec![
-                ConversationPipelineOption {
-                    name: "Direct conversation".into(),
-                    pipeline: ConversationPipelineChoice::Direct,
-                },
-            ];
+            let mut result = vec![ConversationPipelineOption {
+                name: "Direct conversation".into(),
+                pipeline: ConversationPipelineChoice::Direct,
+            }];
             result.extend(published);
             Ok(result)
         })
@@ -218,7 +238,9 @@ pub(super) fn read_optional_pipeline(
         .map(|json| serde_json::from_str::<ConversationPipeline>(&json))
         .transpose()
         .map(|pipeline| match pipeline {
-            Some(ConversationPipeline::RepositoryDelivery { .. }) => Some(ConversationPipeline::Direct),
+            Some(ConversationPipeline::RepositoryDelivery { .. }) => {
+                Some(ConversationPipeline::Direct)
+            }
             pipeline => pipeline,
         })
         .map_err(|error| {
@@ -235,6 +257,9 @@ fn save_conversation_pipeline(
     conversation: &mut Conversation,
     pipeline: ConversationPipeline,
 ) -> Result<()> {
+    if pipeline == ConversationPipeline::Direct {
+        pin_direct_chat(db, conversation)?;
+    }
     let payload = serde_json::to_string(&pipeline)?;
     db.execute(
         "UPDATE conversations SET pipeline = ?1 WHERE id = ?2",
@@ -256,7 +281,16 @@ pub(super) fn inherit_pipeline(
             "A conversation pipeline can only be forked within the same project"
         );
         save_conversation_pipeline(db, target, pipeline.clone())?;
+    } else {
+        pin_direct_chat(db, target)?;
     }
+    db.execute(
+        "UPDATE conversation_direct_pipeline_pins AS target
+         SET (workflow_id, revision) = (SELECT workflow_id, revision FROM conversation_direct_pipeline_pins WHERE conversation_id = ?2)
+         WHERE target.conversation_id = ?1 AND EXISTS (SELECT 1 FROM conversation_direct_pipeline_pins source
+             WHERE source.conversation_id = ?2 AND source.project_id = target.project_id)",
+        params![target.id, source.id],
+    )?;
     Ok(())
 }
 

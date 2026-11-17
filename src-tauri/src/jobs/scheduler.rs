@@ -479,6 +479,9 @@ async fn drive(
             }
             if let Some(_boundary) = admission.enter_admission().await {
                 let mut agile_progress = false;
+                if let Err(error) = store.refresh_due_workflow_waits().await {
+                    report(&error);
+                }
                 match store.advance_conversation_pipeline_turns().await {
                     Ok(progressed) => agile_progress |= progressed,
                     Err(error) => report(&error),

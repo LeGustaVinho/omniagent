@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    ArtifactValue, BuiltinNode, Executor, NodeInputs, WorkflowArtifact,
-    WorkflowRevision, WorkflowRun,
+    ArtifactValue, BuiltinNode, Executor, NodeInputs, WorkflowArtifact, WorkflowRevision,
+    WorkflowRun,
 };
 
 #[derive(Serialize)]
@@ -236,18 +236,23 @@ impl Store {
         let (definition, artifacts) = self
             .workflow_execution_inputs(project, run, node, unit_id, inputs)
             .await?;
-        let mode = match definition.definition.executor {
-            Executor::PlanAgent => {
-                super::stage_plan::StagePlanConfiguration::for_stage(&definition)?
-                    .map_or(SessionMode::Plan, |plan| plan.mode())
+        let typed = super::structured_agent::configuration(&definition);
+        let mode = if let Some(config) = typed {
+            config.effective_role.tool_scope
+        } else {
+            match definition.definition.executor {
+                Executor::PlanAgent => {
+                    super::stage_plan::StagePlanConfiguration::for_stage(&definition)?
+                        .map_or(SessionMode::Plan, |plan| plan.mode())
+                }
+                Executor::ReadOnlyAgent if definition.definition.kind == BuiltinNode::Agent => {
+                    super::stage_plan::StagePlanConfiguration::for_stage(&definition)?
+                        .map_or(SessionMode::ReadOnly, |plan| plan.mode())
+                }
+                Executor::ReadOnlyAgent => SessionMode::ReadOnly,
+                Executor::WriteAgent => SessionMode::ApprovedWrite,
+                _ => anyhow::bail!("this node does not execute a CLI role"),
             }
-            Executor::ReadOnlyAgent if definition.definition.kind == BuiltinNode::Agent => {
-                super::stage_plan::StagePlanConfiguration::for_stage(&definition)?
-                    .map_or(SessionMode::ReadOnly, |plan| plan.mode())
-            }
-            Executor::ReadOnlyAgent => SessionMode::ReadOnly,
-            Executor::WriteAgent => SessionMode::ApprovedWrite,
-            _ => anyhow::bail!("this node does not execute a CLI role"),
         };
         let plan = artifacts.get("plan");
         let unit = if let Some(id) = unit_id {
@@ -263,8 +268,17 @@ impl Store {
         } else {
             None
         };
+        let release = match artifacts.get("release").map(|artifact| &artifact.value) {
+            Some(ArtifactValue::Release(reference)) => Some(&reference.release),
+            _ => None,
+        };
         let checkout_id = if let Some(unit) = &unit {
             unit.checkout_id.clone()
+        } else if typed.is_some() && mode == SessionMode::ApprovedWrite {
+            release
+                .context("A writing AI Node needs an approved release")?
+                .checkout_id
+                .clone()
         } else if definition.definition.kind == BuiltinNode::Agent {
             self.generic_agent_checkout(project, run).await?
         } else if let Some(ArtifactValue::GitInspection(git)) =
@@ -285,19 +299,18 @@ impl Store {
         } else {
             anyhow::bail!("the agent inputs do not identify a registered checkout");
         };
-        let release_id = match artifacts.get("release").map(|artifact| &artifact.value) {
-            Some(ArtifactValue::Release(reference)) => Some(reference.release.id.clone()),
-            _ => None,
-        };
         Ok(WorkflowAgentTarget {
             kind: definition.definition.kind,
             checkout_id,
             mode,
-            release_id,
+            release_id: release.map(|release| release.id.clone()),
             plan_revision: plan
                 .map(|artifact| artifact.id.clone())
                 .or_else(|| unit.as_ref().map(|unit| unit.plan_revision.clone())),
             task_id: unit.map(|unit| unit.task_id).or_else(|| {
+                if typed.is_some() && mode == SessionMode::ApprovedWrite {
+                    return release.map(|release| release.task_id.clone());
+                }
                 match artifacts.get("git").map(|artifact| &artifact.value) {
                     Some(ArtifactValue::GitInspection(git)) => {
                         Some(git.candidate.target.task_id.clone())

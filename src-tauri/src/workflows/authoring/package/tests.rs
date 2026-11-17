@@ -72,6 +72,187 @@ fn package(members: Vec<PackageMember>) -> WorkflowPackage {
 }
 
 #[tokio::test]
+async fn pins_typed_prompt_ports_and_isolates_prefab_overrides() -> Result<()> {
+    use crate::{
+        jobs::AdmissionEnvironment,
+        workflows::{
+            ArtifactValue, WorkflowLaunchRequest, control::ControlStageState,
+            generic_agent::tests::complete_response,
+        },
+    };
+    use serde_json::json;
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path().join("typed-prompts.sqlite"))?;
+    let repo = approved_delivery_repository(&store, directory.path()).await?;
+    let project = repo.project_id.clone();
+    let mut saved_role = role();
+    let PackageArtifactBody::Role { template } = &mut saved_role else {
+        unreachable!();
+    };
+    template.review_policy = TemplateReviewPolicy::Independent;
+    let contract = serde_json::from_value(json!({
+        "kind":"schema", "fields":[{"name":"reply","required":true,"type":"string"}]
+    }))?;
+    let mut prompt = member(
+        "prefab",
+        serde_json::from_value(json!({
+            "kind":"prompt", "prompt":{"text":"Respond to {{input.reply}}.", "executor":"agent", "schemaContract":true}
+        }))?,
+    );
+    prompt.references = BTreeMap::from([
+        ("role".into(), reference("role")),
+        ("input_schema".into(), reference("text")),
+        ("output_schema".into(), reference("text")),
+    ]);
+    let mut root = member(
+        "pipeline",
+        serde_json::from_value(json!({
+            "kind":"pipeline", "graph":{
+                "name":"Typed Prompt pipeline",
+                "nodes":[
+                    {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","fields":[]}},
+                    {"id":"first","kind":"subflow","configuration":{"kind":"prompt_overrides","prompt":"First: {{input.reply}}"}},
+                    {"id":"second","kind":"subflow","configuration":{"kind":"prompt_overrides","roleOverrides":{"instructions":"Second reviewer."}}},
+                    {"id":"end","kind":"end","configuration":{"kind":"end"}}
+                ],
+                "wires":[
+                    {"from":{"node":"start","port":"start"},"to":{"node":"first","port":"ready"}},
+                    {"from":{"node":"start","port":"inputs"},"to":{"node":"first","port":"input"}},
+                    {"from":{"node":"first","port":"completed"},"to":{"node":"second","port":"ready"}},
+                    {"from":{"node":"first","port":"result"},"to":{"node":"second","port":"input"}},
+                    {"from":{"node":"second","port":"completed"},"to":{"node":"end","port":"ready"}},
+                    {"from":{"node":"second","port":"result"},"to":{"node":"end","port":"result"}}
+                ]
+            }
+        }))?,
+    );
+    root.references = BTreeMap::from([
+        ("start:schema".into(), reference("text")),
+        ("first".into(), reference("prefab")),
+        ("second".into(), reference("prefab")),
+        ("end:schema".into(), reference("text")),
+    ]);
+    let draft = store
+        .create_workflow_package(
+            project.clone(),
+            None,
+            package(vec![
+                member("role", saved_role),
+                member("text", contract),
+                prompt,
+                root,
+            ]),
+        )
+        .await?;
+    let published = commit(&store, &project, &draft).await?;
+    let version = artifact(&published, "pipeline").version.clone();
+    let launch: WorkflowLaunchRequest = serde_json::from_value(json!({
+        "projectId":project, "checkoutId":repo.checkout_id, "requestId":"typed-prompt-test",
+        "workflow":{"id":version.id,"revision":version.revision},"inputs":{"reply":"Hello"}
+    }))?;
+    let run = store.launch_workflow_request(launch).await?;
+    let inspection = store
+        .inspect_workflow_execution(project.clone(), run.id.clone())
+        .await?
+        .context("Missing pipeline execution")?;
+    let agent = |id| -> Result<_> {
+        let node = inspection
+            .definition
+            .nodes
+            .iter()
+            .find(|node| node.instance.id == id)
+            .context("Missing expanded Prompt")?;
+        let NodeConfiguration::AgentRole { requirements, .. } = &node.instance.configuration else {
+            anyhow::bail!("Expected a typed Agent");
+        };
+        requirements
+            .structured
+            .as_ref()
+            .context("Missing typed Agent configuration")
+    };
+    assert_eq!(agent("first::execute")?.prompt, "First: {{input.reply}}");
+    assert_eq!(
+        agent("second::execute")?.prompt,
+        "Respond to {{input.reply}}."
+    );
+    assert_eq!(
+        agent("second::execute")?.effective_role.instructions,
+        "Second reviewer."
+    );
+    assert_eq!(
+        agent("first::execute")?.effective_role.instructions,
+        "Private review instructions"
+    );
+    assert!(inspection.outputs.iter().any(|output| matches!(
+        &output.artifact.value, ArtifactValue::JsonObject(value) if value.get("reply") == Some(&json!("Hello"))
+    )));
+    let dispatch_agent = |store: Store, id: &'static str| async move {
+        let stage = store
+            .next_workflow_agent()
+            .await?
+            .context("Missing ready typed Agent")?;
+        assert_eq!(stage.fixture_identity().1, id);
+        let submission = stage.fixture_submission(&store).await?;
+        stage.enqueue(&store, submission).await?;
+        store
+            .claim_next_job(AdmissionEnvironment {
+                runner: "fixture-runner".into(),
+                bridge_available: false,
+            })
+            .await?
+            .context("Typed Agent did not pass the ordinary workflow admission")
+    };
+    let first = dispatch_agent(store.clone(), "first::execute").await?;
+    assert!(first.input[0].text.contains("First: Hello"));
+    assert_eq!(
+        store
+            .workflow_output_schema_for_attempt(first.run.id.clone())
+            .await?,
+        Some(json!({
+            "type":"object","properties":{"reply":{"type":"string"}},
+            "required":["reply"],"additionalProperties":false
+        }))
+    );
+    complete_response(&store, &first, r#"{"reply":"first answer"}"#, None).await?;
+    let second = dispatch_agent(store.clone(), "second::execute").await?;
+    assert!(second.input[0].text.contains("Respond to first answer."));
+    assert!(second.input[0].text.contains("Second reviewer."));
+    complete_response(&store, &second, r#"{"reply":"second answer"}"#, None).await?;
+    let completed = store
+        .inspect_workflow_execution(project.clone(), run.id)
+        .await?
+        .context("Missing completed pipeline execution")?;
+    assert!(completed.outputs.iter().any(|output| {
+        output.artifact.node_instance_id == "end"
+            && matches!(&output.artifact.value, ArtifactValue::JsonObject(value) if value["reply"] == "second answer")
+    }));
+    let invalid_launch: WorkflowLaunchRequest = serde_json::from_value(json!({
+        "projectId":project, "checkoutId":repo.checkout_id, "requestId":"invalid-typed-prompt-test",
+        "workflow":{"id":version.id,"revision":version.revision},"inputs":{"reply":"Hello"}
+    }))?;
+    let invalid_run = store.launch_workflow_request(invalid_launch).await?;
+    let invalid = dispatch_agent(store.clone(), "first::execute").await?;
+    complete_response(&store, &invalid, r#"{"reply":42}"#, None).await?;
+    let failure = store
+        .inspect_workflow_execution(project, invalid_run.id)
+        .await?
+        .context("Missing failed pipeline execution")?;
+    assert!(failure.control.iter().any(|receipt| {
+        receipt.node_id == "first::execute"
+            && receipt.state == ControlStageState::Failed
+            && receipt.selected_ports == ["failed"]
+    }));
+    assert!(
+        failure
+            .outputs
+            .iter()
+            .all(|output| output.artifact.node_instance_id != "first::execute")
+    );
+    assert!(store.next_workflow_agent().await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn duplicates_a_published_workflow_as_an_independent_draft_with_its_pins_and_layout()
 -> Result<()> {
     let temporary = tempfile::tempdir()?;
@@ -795,6 +976,9 @@ async fn publishes_reuses_and_simulates_the_exact_prompt_contract() -> Result<()
         "evaluate",
         PackageArtifactBody::Prompt {
             prompt: PromptCard {
+                schema_contract: false,
+                node_prefab: false,
+                role_overrides: BTreeMap::new(),
                 text: "Assess the evidence. Literal syntax {{example}} belongs in the prompt."
                     .into(),
                 executor: BuiltinNode::Agent,

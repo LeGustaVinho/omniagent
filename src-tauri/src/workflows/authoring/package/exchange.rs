@@ -372,20 +372,20 @@ fn prepare(
         );
         let pins = &document.definitions[&member.key];
         let expanded = match &member.body {
-            PackageArtifactBody::Pipeline { .. } | PackageArtifactBody::Subflow { .. } | PackageArtifactBody::Prompt { .. } => {
-                match catalog.compile(member, &mut notes) {
-                    Ok((_, definitions)) => Some(definitions),
-                    Err(error) => {
-                        conflicts.push(issue(
-                            &member.key,
-                            None,
-                            None,
-                            crate::diagnostics::preview(&error.to_string()),
-                        ));
-                        None
-                    }
+            PackageArtifactBody::Pipeline { .. }
+            | PackageArtifactBody::Subflow { .. }
+            | PackageArtifactBody::Prompt { .. } => match catalog.compile(member, &mut notes) {
+                Ok((_, definitions)) => Some(definitions),
+                Err(error) => {
+                    conflicts.push(issue(
+                        &member.key,
+                        None,
+                        None,
+                        crate::diagnostics::preview(&error.to_string()),
+                    ));
+                    None
                 }
-            }
+            },
             _ => {
                 if let Err(error) = validate_member_body(member, pins) {
                     conflicts.push(issue(

@@ -34,6 +34,7 @@ pub mod maintenance;
 pub mod mcp_tools;
 mod merge_execution;
 mod operator;
+mod orchestration;
 mod plan_revision;
 #[cfg(test)]
 mod planning_integration;
@@ -42,6 +43,8 @@ mod registry;
 mod repetition;
 pub mod role_templates;
 mod runtime;
+pub(crate) mod schema;
+pub(crate) mod structured_agent;
 pub(crate) use runtime::load_definition;
 pub mod settings_proposals;
 pub mod stage_goal;
@@ -53,6 +56,7 @@ mod subflow;
 pub(crate) mod test_phase;
 #[cfg(test)]
 mod tests;
+mod timed;
 pub mod triggers;
 mod unit_execution;
 mod units;
@@ -88,9 +92,8 @@ pub(crate) use job_inputs::{
     WorkflowJobInput, bind_job_input, load_workflow_job_input, stage_job_input,
 };
 pub use launch::{
-    ManualWorkflowLaunch, TypedStartConfiguration, WorkflowLaunchEvent,
-    WorkflowLaunchOrigin, WorkflowLaunchReceipt, WorkflowLaunchRequest, WorkflowLaunchSource,
-    WorkflowStartSchema,
+    ManualWorkflowLaunch, TypedStartConfiguration, WorkflowLaunchEvent, WorkflowLaunchOrigin,
+    WorkflowLaunchReceipt, WorkflowLaunchRequest, WorkflowLaunchSource, WorkflowStartSchema,
 };
 pub(crate) use launch::{launch_workflow_in_tx, validate_workflow_launch_source};
 pub(crate) use launch::{pinned_workflow_checklist_for_job, require_launch_checklist_item};
@@ -189,7 +192,10 @@ fn compile_resolved<'definition>(
     ensure!(
         graph.nodes.iter().all(|node| !matches!(
             node.kind,
-            BuiltinNode::Subflow | BuiltinNode::RepeatUntil | BuiltinNode::ForEach
+            BuiltinNode::Subflow
+                | BuiltinNode::RepeatUntil
+                | BuiltinNode::ForEach
+                | BuiltinNode::Loop
         )),
         "Select a pinned subflow in an authoring package for reusable calls, repeats and iteration"
     );
@@ -213,11 +219,20 @@ fn compile_resolved_graph<'definition>(
         !id.trim().is_empty() && !graph.name.trim().is_empty(),
         "a workflow needs an ID and name"
     );
+    let mut definitions = graph
+        .nodes
+        .iter()
+        .map(|instance| {
+            let definition = definition_for(instance)
+                .filter(|definition| definition.kind == instance.kind)
+                .context("unregistered built-in node")?;
+            Ok((instance.id.clone(), definition.clone()))
+        })
+        .collect::<Result<_>>()?;
+    resolve_port_schemas(&graph, &mut definitions)?;
     let mut nodes = Vec::with_capacity(graph.nodes.len());
     for instance in graph.nodes {
-        let definition = definition_for(&instance)
-            .filter(|definition| definition.kind == instance.kind)
-            .context("unregistered built-in node")?;
+        let definition = &definitions[&instance.id];
         ensure!(
             !instance.id.trim().is_empty(),
             "a workflow node needs an ID"
@@ -312,6 +327,24 @@ fn compile_resolved_graph<'definition>(
             input.value.accepts(output.value),
             "incompatible workflow ports"
         );
+        if let Some(expected) = nodes[to].definition.input_schemas.get(&wire.to.port) {
+            let source = nodes[from]
+                .definition
+                .output_schemas
+                .get(&wire.from.port)
+                .with_context(|| {
+                    format!(
+                        "{}.{} needs a Schema to connect to {}.{}",
+                        wire.from.node, wire.from.port, wire.to.node, wire.to.port
+                    )
+                })?;
+            schema::compatible(source, expected).with_context(|| {
+                format!(
+                    "Incompatible Schemas on {}.{} → {}.{}",
+                    wire.from.node, wire.from.port, wire.to.node, wire.to.port
+                )
+            })?;
+        }
         if wire.to.port == "value"
             && matches!(
                 nodes[to].instance.configuration,
@@ -411,6 +444,16 @@ fn compile_resolved_graph<'definition>(
         }
         for port in &node.definition.inputs {
             let connected = incoming.contains(&(node.instance.id.as_str(), port.name.as_str()));
+            if orchestration::optional_input(node, &port.name)
+                || (node.instance.kind == BuiltinNode::End
+                    && port.name == "result"
+                    && !node.definition.input_schemas.contains_key("result"))
+                || (node.instance.kind == BuiltinNode::Wait && port.name == "input")
+                || (matches!(&node.instance.configuration, NodeConfiguration::Human(config) if !config.requires_input())
+                    && port.name == "input")
+            {
+                continue;
+            }
             if matches!(
                 (node.instance.kind, port.name.as_str()),
                 (
@@ -517,6 +560,7 @@ fn compile_resolved_graph<'definition>(
         }
     }
     ensure!(visited == nodes.len(), "workflow graph contains a cycle");
+    orchestration::validate_graph(&nodes, &graph.wires)?;
     let mut attempt_limits = nodes
         .iter()
         .filter_map(|node| match node.instance.configuration {
@@ -553,4 +597,17 @@ fn compile_resolved_graph<'definition>(
         "List execution currently requires a workflow outside a logical delivery unit"
     );
     Ok(definition)
+}
+
+fn resolve_port_schemas(
+    graph: &WorkflowGraph,
+    definitions: &mut std::collections::BTreeMap<String, NodeDefinition>,
+) -> Result<()> {
+    for node in &graph.nodes {
+        if let Some(definition) = definitions.get_mut(&node.id) {
+            orchestration::define(node, definition)?;
+        }
+    }
+    schema::infer_ports(graph, definitions);
+    Ok(())
 }

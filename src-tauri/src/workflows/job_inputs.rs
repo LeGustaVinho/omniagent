@@ -51,8 +51,15 @@ pub(crate) fn stage_job_input_with_repair(
         &binding.node_instance_id,
     )?
     .context("the scheduled workflow node is unavailable")?;
-    if matches!(pinned.definition.executor, Executor::ReadOnlyAgent | Executor::PlanAgent) {
-        super::conversation_turns::require_no_active_stage_job(db, binding, input.unit_id.as_deref())?;
+    if matches!(
+        pinned.definition.executor,
+        Executor::ReadOnlyAgent | Executor::PlanAgent
+    ) {
+        super::conversation_turns::require_no_active_stage_job(
+            db,
+            binding,
+            input.unit_id.as_deref(),
+        )?;
     }
     let isolated_comparison = pinned.definition.kind == BuiltinNode::CompareModels;
     let unit_scoped = if isolated_comparison || pinned.definition.kind == BuiltinNode::Agent {
@@ -69,9 +76,18 @@ pub(crate) fn stage_job_input_with_repair(
         "workflow node has the wrong logical unit scope"
     );
     if isolated_comparison {
-        let context = input.artifacts.get("context").context("The comparison has no pinned context")?;
-        let artifact = load_artifact(db, project, &binding.pipeline_run_id, context, ArtifactKind::Markdown)?
-            .context("The comparison context is unavailable")?;
+        let context = input
+            .artifacts
+            .get("context")
+            .context("The comparison has no pinned context")?;
+        let artifact = load_artifact(
+            db,
+            project,
+            &binding.pipeline_run_id,
+            context,
+            ArtifactKind::Markdown,
+        )?
+        .context("The comparison context is unavailable")?;
         let ArtifactValue::Markdown(document) = artifact.value else {
             anyhow::bail!("The comparison requires a saved Markdown context");
         };

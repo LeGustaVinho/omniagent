@@ -238,7 +238,10 @@ impl Store {
         checkout_id: String,
         context: String,
     ) -> Result<()> {
-        ensure!(!context.trim().is_empty(), "Select text to add to the draft");
+        ensure!(
+            !context.trim().is_empty(),
+            "Select text to add to the draft"
+        );
         ensure!(
             context.len() <= 512 * 1024,
             "The selected context exceeds 512 KiB"
@@ -306,6 +309,7 @@ impl Store {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let conversation = insert_conversation(&tx, checkout_id, title, false)?;
+            pipeline::pin_direct_chat(&tx, &conversation)?;
             tx.commit()?;
             Ok(conversation)
         })
@@ -1126,7 +1130,8 @@ impl Store {
             tx.commit()?;
             Ok(outcome)
         }).await?;
-        self.settle_generic_agent_after_attempt(workflow_attempt).await;
+        self.settle_generic_agent_after_attempt(workflow_attempt)
+            .await;
         self.job_signal.send_replace(());
         Ok(outcome)
     }
@@ -2064,8 +2069,14 @@ fn check_idle_base(db: &Connection, id: &str, requested: &str) -> Result<Convers
     let active: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM active_agent_attempts WHERE conversation_id = ?1
          UNION ALL SELECT 1 FROM unconfirmed_agent_stops WHERE conversation_id = ?1
-         UNION ALL SELECT 1 FROM conversation_pipeline_turns
-           WHERE conversation_id = ?1 AND state IN ('queued', 'running'))",
+         UNION ALL SELECT 1 FROM conversation_pipeline_turns turn
+           WHERE conversation_id = ?1 AND state IN ('queued', 'running')
+             AND NOT EXISTS (
+               SELECT 1 FROM workflow_run_pins pin JOIN jobs job ON job.project_id = pin.project_id
+               WHERE job.id = turn.request_id AND job.conversation_id = turn.conversation_id
+                 AND pin.pipeline_run_id = turn.workflow_run_id
+                 AND pin.workflow_id = 'omniagent:direct-conversation'
+             ))",
         [id],
         |row| row.get(0),
     )?;
@@ -2416,15 +2427,31 @@ mod tests {
             .save_conversation_draft(chat.id.clone(), "Existing instructions".into())
             .await?;
         let context = "Source: src/lib.rs:2-4\n\n```rust\n  unsaved();\n```";
-        assert!(store
-            .append_checkout_context_to_conversation(chat.id.clone(), "wrong-checkout".into(), context.into())
-            .await
-            .is_err());
-        assert_eq!(store.conversation_draft(chat.id.clone()).await?, "Existing instructions");
+        assert!(
+            store
+                .append_checkout_context_to_conversation(
+                    chat.id.clone(),
+                    "wrong-checkout".into(),
+                    context.into()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.conversation_draft(chat.id.clone()).await?,
+            "Existing instructions"
+        );
         store
-            .append_checkout_context_to_conversation(chat.id.clone(), chat.checkout_id, context.into())
+            .append_checkout_context_to_conversation(
+                chat.id.clone(),
+                chat.checkout_id,
+                context.into(),
+            )
             .await?;
-        assert_eq!(store.conversation_draft(chat.id.clone()).await?, format!("Existing instructions\n\n{context}"));
+        assert_eq!(
+            store.conversation_draft(chat.id.clone()).await?,
+            format!("Existing instructions\n\n{context}")
+        );
         assert!(store.latest_conversation_run(chat.id).await?.is_none());
         Ok(())
     }

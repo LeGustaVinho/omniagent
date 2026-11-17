@@ -11,6 +11,7 @@ use crate::workflows::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PackageArtifactKind {
+    Schema,
     Pipeline,
     Role,
     Preset,
@@ -22,6 +23,7 @@ pub enum PackageArtifactKind {
 impl PackageArtifactKind {
     pub(super) fn sql(self) -> &'static str {
         match self {
+            Self::Schema => "schema",
             Self::Pipeline => "pipeline",
             Self::Role => "role",
             Self::Preset => "preset",
@@ -98,6 +100,9 @@ pub enum PackageCommandBinding {
     deny_unknown_fields
 )]
 pub enum PackageArtifactBody {
+    Schema {
+        fields: Vec<crate::workflows::schema::SchemaField>,
+    },
     Pipeline {
         graph: WorkflowGraph,
     },
@@ -137,6 +142,7 @@ pub enum PackageArtifactBody {
 impl PackageArtifactBody {
     pub fn kind(&self) -> PackageArtifactKind {
         match self {
+            Self::Schema { .. } => PackageArtifactKind::Schema,
             Self::Pipeline { .. } => PackageArtifactKind::Pipeline,
             Self::Role { .. } => PackageArtifactKind::Role,
             Self::Preset { .. } => PackageArtifactKind::Preset,
@@ -152,6 +158,12 @@ impl PackageArtifactBody {
 pub struct PromptCard {
     pub text: String,
     pub executor: BuiltinNode,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub schema_contract: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub node_prefab: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub role_overrides: BTreeMap<String, Value>,
     #[serde(default)]
     pub inputs: BTreeMap<String, PromptInput>,
     #[serde(default)]
@@ -314,6 +326,10 @@ pub struct WorkflowPackageCatalogEntry {
     pub name: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub prompt: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub typed_prompt: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub node_prefab: bool,
     pub blockers: Vec<String>,
 }
 

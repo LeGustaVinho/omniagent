@@ -42,7 +42,11 @@ pub struct WorkflowExecutionInspection {
     pub jobs: Vec<WorkflowExecutionJob>,
     pub outputs: Vec<WorkflowExecutionOutput>,
     pub control: Vec<ControlStageReceipt>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fork_branches: Vec<super::orchestration::ForkBranchStatus>,
     pub pending_decisions: Vec<WorkflowPendingDecision>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub timed_waits: Vec<super::timed::TimedWorkflowWait>,
     pub comparison_stages: Vec<super::comparison::WorkflowComparisonStage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub automatic_agent_waits: Vec<super::automation::AutomaticAgentWait>,
@@ -181,7 +185,9 @@ impl Store {
             let jobs = load_jobs(&tx, &run)?;
             let outputs = load_outputs(&tx, &run, &jobs, &units)?;
             let control = recorded_control(&tx, &run)?;
+            let fork_branches = super::orchestration::branch_statuses(&tx, &run)?;
             let pending_decisions = pending_decisions(&tx, &run, &definition)?;
+            let timed_waits = super::timed::active_waits(&tx, &run)?;
             let comparison_stages = super::comparison::stage::load_stages(&tx, &run)?;
             let mut automatic_agent_waits = super::automation::agent_waits(&tx, &run)?;
             automatic_agent_waits.extend(super::automation::agents_delivery::waits(&tx, &run)?);
@@ -202,7 +208,9 @@ impl Store {
                 jobs,
                 outputs,
                 control,
+                fork_branches,
                 pending_decisions,
+                timed_waits,
                 comparison_stages,
                 automatic_agent_waits,
                 automatic_preparation_waits,
@@ -226,7 +234,12 @@ impl Store {
             let (project, job) = (project.clone(), job.clone());
             move |db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM job_pipeline_origins o
                 JOIN workflow_run_pins p ON p.pipeline_run_id = o.pipeline_run_id AND p.project_id = o.project_id
-                WHERE o.project_id = ?1 AND o.pipeline_run_id = ?2 AND o.job_id = ?3)", params![project, run, job], |row| row.get::<_, bool>(0))?)
+                WHERE o.project_id = ?1 AND o.pipeline_run_id = ?2 AND o.job_id = ?3
+                UNION ALL SELECT 1 FROM conversation_pipeline_turns turn
+                JOIN workflow_run_pins pin ON pin.pipeline_run_id = turn.workflow_run_id
+                JOIN jobs native ON native.id = turn.request_id AND native.conversation_id = turn.conversation_id
+                WHERE pin.project_id = ?1 AND pin.pipeline_run_id = ?2 AND native.id = ?3
+                  AND pin.workflow_id = 'omniagent:direct-conversation')", params![project, run, job], |row| row.get::<_, bool>(0))?)
         }).await?;
         if !matches {
             return Ok(None);
@@ -255,10 +268,16 @@ pub(super) fn load_units(db: &Connection, run: &WorkflowRun) -> Result<Vec<Workf
 }
 
 pub(super) fn load_jobs(db: &Connection, run: &WorkflowRun) -> Result<Vec<WorkflowExecutionJob>> {
-    db.prepare("SELECT o.node_instance_id, j.id, i.payload FROM job_pipeline_origins o
+    db.prepare("SELECT o.node_instance_id, j.id, i.payload, j.sequence FROM job_pipeline_origins o
         JOIN jobs j ON j.id = o.job_id JOIN workflow_node_pins n ON n.pipeline_run_id = o.pipeline_run_id AND n.node_instance_id = o.node_instance_id
         LEFT JOIN workflow_job_inputs i ON i.job_id = j.id
-        WHERE o.project_id = ?1 AND j.project_id = ?1 AND o.pipeline_run_id = ?2 ORDER BY j.sequence")?
+        WHERE o.project_id = ?1 AND j.project_id = ?1 AND o.pipeline_run_id = ?2
+        UNION ALL SELECT 'conversation-agent', j.id, i.payload, j.sequence FROM conversation_pipeline_turns turn
+        JOIN workflow_run_pins pin ON pin.pipeline_run_id = turn.workflow_run_id
+        JOIN jobs j ON j.id = turn.request_id AND j.conversation_id = turn.conversation_id AND j.project_id = pin.project_id
+        LEFT JOIN workflow_job_inputs i ON i.job_id = j.id
+        WHERE pin.project_id = ?1 AND pin.pipeline_run_id = ?2 AND pin.workflow_id = 'omniagent:direct-conversation'
+        ORDER BY 4")?
         .query_map(params![run.project_id, run.id], |row| Ok((row.get(0)?, row.get::<_, String>(1)?, row.get::<_, Option<Vec<u8>>>(2)?)))?
         .map(|row| {
             let (node_id, id, payload) = row?;
