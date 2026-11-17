@@ -2303,7 +2303,7 @@ test("opens OmniAgent file links in a running desktop and on cold launch", { tim
     const target = await invoke(browser, "register_project", { directory: linked });
     await selectCheckout(browser, primary);
     const query = new URLSearchParams({ checkout: target.checkoutId, path: file, line: "2", column: "3" });
-    const link = `omniagent://open-file?${query}`;
+    const link = `omniagent://open-file/?${query}`;
 
     await showTestApplication(browser, application, [link]);
     const ide = browser.$('[aria-label="IDE workspace"]');

@@ -11,7 +11,7 @@ use super::{
     verify_checkout,
 };
 
-const PREFIX: &str = "omniagent://open-file?";
+const PREFIX: &str = "omniagent://open-file/?";
 const MAX_LINK_BYTES: usize = 32_767;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -35,7 +35,10 @@ impl FileLink {
         if argument.len() > MAX_LINK_BYTES {
             return None;
         }
-        let query = argument.strip_prefix(PREFIX)?;
+        // Windows ShellExecute inserts a slash at the root of a hierarchical URI.
+        let query = argument
+            .strip_prefix(PREFIX)
+            .or_else(|| argument.strip_prefix("omniagent://open-file?"))?;
         let mut checkout_id = None;
         let mut path = None;
         let mut line = None;
@@ -166,6 +169,11 @@ mod tests {
         let note =
             FileLink::parse(&format!("{PREFIX}checkout={ID}&path=docs/Note.MD&line=12")).unwrap();
         assert_eq!((note.line, note.column), (Some(12), None));
+        let legacy = FileLink::parse(&format!(
+            "omniagent://open-file?checkout={ID}&path=docs/Note.MD&line=12"
+        ))
+        .unwrap();
+        assert_eq!(legacy, note);
     }
 
     #[test]
@@ -208,6 +216,7 @@ mod tests {
             "omniagent://user@open-file",
             "omniagent://open-file:80",
             "omniagent://open-file/other",
+            "omniagent://open-file//",
             "omniagent://delete-file",
         ] {
             assert!(

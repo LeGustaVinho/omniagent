@@ -154,7 +154,7 @@ try {
         $windows = @{ allowDowngrades = $true }
         if ($version -eq '0.1.2') { $windows.nsis = @{ installerHooks = './fixture-installer.nsh' } }
         @{ productName = $product; identifier = $identifier; version = $version;
-           plugins = @{ updater = @{ windows = @{ installMode = 'quiet' } } };
+           plugins = @{ updater = @{ windows = @{ installMode = 'quiet' } }; 'deep-link' = @{ desktop = @{ schemes = @() } } };
            bundle = @{ createUpdaterArtifacts = $false; windows = $windows } } |
            ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $override -Encoding utf8NoBOM
         $env:OMNIAGENT_SOURCE_COMMIT = $source

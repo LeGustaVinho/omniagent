@@ -31,27 +31,44 @@ const installedRoot = join(process.env.LOCALAPPDATA, product);
 const database = join(dataRoot, "omniagent.sqlite3");
 const installationIdentity = join(dataRoot, "installation.dpapi");
 const uninstallKey = `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${product}`;
+const fixtureProtocol = `omniagent-nsis-${tag}`;
+const protocolCommandKey = `Software\\Classes\\${fixtureProtocol}\\shell\\open\\command`;
 const bundleRoot = join(scratch, "installers");
 const sourceConfig = JSON.parse(await readFile(join(scratch, "source", "src-tauri", "tauri.conf.json"), "utf8"));
 assert.deepEqual(sourceConfig.bundle.targets, ["nsis"]);
 assert.equal(sourceConfig.bundle.windows.nsis.installMode, "currentUser");
 assert.deepEqual(sourceConfig.bundle.windows.webviewInstallMode, { type: "downloadBootstrapper", silent: true });
+const protocolScenarios = new Set();
 for (const version of ["0.1.0", "0.1.1"]) {
   const overlay = JSON.parse(await readFile(join(scratch, `package-${version}.json`), "utf8"));
   assert.equal(overlay.productName, product);
   assert.equal(overlay.identifier, identifier);
   assert.equal(overlay.version, version);
+  const desktop = overlay.plugins?.["deep-link"]?.desktop ?? sourceConfig.plugins?.["deep-link"]?.desktop;
+  const protocols = Array.isArray(desktop) ? desktop : desktop ? [desktop] : [];
+  for (const { schemes } of protocols) {
+    assert.ok(Array.isArray(schemes) && schemes.every((scheme) => scheme === fixtureProtocol),
+      "NSIS fixtures must leave installed OmniAgent protocol handlers alone");
+    if (schemes.length) protocolScenarios.add(version);
+  }
   assert.ok(existsSync(join(bundleRoot, `${product}_${version}_x64-setup.exe`)), `Missing NSIS bundle ${version}`);
 }
 
 function registry(hive, key, name, view = "64") {
-  const result = spawnSync("reg.exe", ["query", `${hive}\\${key}`, "/v", name, `/reg:${view}`], {
+  const result = spawnSync("reg.exe", ["query", `${hive}\\${key}`, ...(name === undefined ? ["/ve"] : ["/v", name]), `/reg:${view}`], {
     encoding: "utf8", windowsHide: true,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) return undefined;
-  return result.stdout.split(/\r?\n/).find((line) => line.trim().startsWith(`${name} `))
+  return result.stdout.split(/\r?\n/).find((line) => name === undefined ? /\sREG_SZ\s/.test(line) : line.trim().startsWith(`${name} `))
     ?.trim().split(/\s+REG_\w+\s+/)[1];
+}
+
+function verifyFixtureProtocol({ version, application }) {
+  if (!protocolScenarios.has(version)) return undefined;
+  const command = registry("HKCU", protocolCommandKey);
+  assert.equal(command, `"${application}" "%1"`);
+  return { scheme: fixtureProtocol, command };
 }
 
 function run(executable, args, { cwd = scratch, env = process.env, timeout = 120_000 } = {}) {
@@ -165,6 +182,7 @@ const nativeArchitectures = run("powershell.exe", ["-NoProfile", "-NonInteractiv
 assert.ok(nativeArchitectures.every((architecture) => architecture === "9"), "A native Windows x64 target is required");
 assert.ok(!existsSync(dataRoot) && !existsSync(installedRoot), "NSIS acceptance requires a fresh test product and profile");
 assert.equal(registry("HKCU", uninstallKey, "DisplayName"), undefined);
+assert.equal(registry("HKCU", protocolCommandKey), undefined);
 const receipt = {
   sourceCommit, sourcePatch, identifier, product,
   windows: {
@@ -203,7 +221,7 @@ try {
     assert.equal(await realpath(installationIdentity), installationIdentity);
     receipt.installationIdentitySha256 = await sha256(installationIdentity);
   }
-  receipt.firstInstall = { ...first, ...opened };
+  receipt.firstInstall = { ...first, ...opened, protocol: verifyFixtureProtocol(first) };
 
   const upgrade = await install("0.1.1");
   assert.equal(upgrade.application, first.application);
@@ -219,7 +237,7 @@ try {
     assert.equal(await sha256(installationIdentity), receipt.installationIdentitySha256);
   }
   assert.equal(await readFile(join(repo, "brief.md"), "utf8"), "# Installer acceptance fixture\n");
-  receipt.upgrade = { ...upgrade, build: runningUpgrade, restoredCheckoutId: checkout.checkoutId };
+  receipt.upgrade = { ...upgrade, build: runningUpgrade, protocol: verifyFixtureProtocol(upgrade), restoredCheckoutId: checkout.checkoutId };
 
   const installed = {
     application: upgrade.application, checkout, repo, scratch, dataRoot, sourceCommit, invoke, run,
@@ -250,6 +268,7 @@ try {
       await delay(200);
     }
     assert.equal(registry("HKCU", uninstallKey, "DisplayName"), undefined);
+    assert.equal(registry("HKCU", protocolCommandKey), undefined);
     assert.ok(!existsSync(join(installedRoot, "omniagent.exe")));
     receipt.testProductUninstalled = true;
   }

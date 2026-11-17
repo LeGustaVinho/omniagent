@@ -7,10 +7,10 @@ import type { WorkspaceId } from "@/workbench-contract";
 it("copies an encoded link with its checkout and supported cursor coordinates", () => {
   const id = "619536f7-bac1-46ea-af56-88cc8b22013a";
   expect(omniAgentFileLink(id, "src/Revisão #a.ts", 7, 3)).toBe(
-    `omniagent://open-file?checkout=${id}&path=src%2FRevis%C3%A3o+%23a.ts&line=7&column=3`,
+    `omniagent://open-file/?checkout=${id}&path=src%2FRevis%C3%A3o+%23a.ts&line=7&column=3`,
   );
   expect(omniAgentFileLink(id, "docs/Note.MD", 12, 3)).toBe(
-    `omniagent://open-file?checkout=${id}&path=docs%2FNote.MD&line=12`,
+    `omniagent://open-file/?checkout=${id}&path=docs%2FNote.MD&line=12`,
   );
 });
 
