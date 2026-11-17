@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { ContextActions, PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { markdownExcerpt } from "@/editor-context";
+import { trackTerminalCommands, type TerminalCommand } from "@/terminal-command-capture";
 import { parseTerminalFileReference, terminalFileAtPoint, terminalFileLinkProvider, trackTerminalDirectories, type TerminalFileReference } from "@/terminal-file-links";
 import "@xterm/xterm/css/xterm.css";
 
@@ -103,7 +104,7 @@ type TerminalState = {
   status: "starting" | "running" | "closing" | "exited" | "failed";
   message?: string;
 };
-type TerminalAttachment = { terminal: Terminal; search: SearchAddon; layout: (focus: boolean) => void; close: () => void;
+type TerminalAttachment = { terminal: Terminal; search: SearchAddon; layout: (focus: boolean) => void; close: () => void; clear: () => void;
   directoryAt?: (line?: number) => string | undefined };
 
 function terminalOutput(terminal: Terminal) {
@@ -143,6 +144,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
   const navigateSequence = useRef(0);
   const [request, setRequest] = useState<TerminalRequest>();
   const [state, setState] = useState<TerminalState>();
+  const [lastCommand, setLastCommand] = useState<{ request: TerminalRequest; result: TerminalCommand }>();
   const [clipboardError, setClipboardError] = useState("");
   const [fileError, setFileError] = useState("");
   const [referenceMenu, setReferenceMenu] = useState<{ reference: TerminalFileReference; point: { x: number; y: number }; terminal: Terminal; directory?: string }>();
@@ -153,6 +155,8 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
   const [found, setFound] = useState<boolean>();
   const findInput = useRef<HTMLInputElement>(null);
   const current = state?.request === request && request?.checkoutId === checkoutId ? state : undefined;
+  const lastExecuted = current && lastCommand && lastCommand.request === request ? lastCommand.result : undefined;
+  const lastOutput = lastExecuted?.output;
 
   useEffect(() => { openFile.current = onOpenFile; }, [onOpenFile]);
   const openReference = useCallback((terminal: Terminal, { path, line, column }: TerminalFileReference, directory?: string) => {
@@ -181,6 +185,9 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
     const search = new SearchAddon();
     terminal.loadAddon(search);
     let session: Session | undefined;
+    const commands = trackTerminalCommands(terminal, () => session?.terminalId, (result) => {
+      setLastCommand(result ? { request, result } : undefined);
+    });
     const directories = openFile.current && trackTerminalDirectories(terminal, () => session?.terminalId);
     const fileLinks = openFile.current && terminal.registerLinkProvider(terminalFileLinkProvider(terminal,
       (reference) => openReference(terminal, reference, directories?.at(reference.bufferLine))));
@@ -248,7 +255,8 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
       }
       if (focus && activeRef.current) terminal.focus();
     };
-    attachment.current = { terminal, search, layout, close, directoryAt: directories?.at };
+    const clear = () => { commands.discardOutputStart(); terminal.clear(); };
+    attachment.current = { terminal, search, layout, close, clear, directoryAt: directories?.at };
 
     layout(false);
     size = { cols: terminal.cols, rows: terminal.rows };
@@ -275,6 +283,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
       disposed = true;
       resize.disconnect();
       selection.dispose();
+      commands.dispose();
       directories?.dispose();
       fileLinks?.dispose();
       input.dispose();
@@ -296,7 +305,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
 
   useEffect(() => {
     if (previousClear.current !== clearRevision) {
-      attachment.current?.terminal.clear();
+      attachment.current?.clear();
       previousClear.current = clearRevision;
     }
   }, [clearRevision]);
@@ -386,8 +395,12 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
       { label: "Find in terminal", disabled: !request, run: () => { setFindOpen(true); findInput.current?.focus(); } },
       { label: "Scroll to top", disabled: !request, run: () => attachment.current?.terminal.scrollToTop() },
       { label: "Scroll to bottom", disabled: !request, run: () => attachment.current?.terminal.scrollToBottom() },
-      { label: "Clear output", disabled: !request, run: () => attachment.current?.terminal.clear() },
-    ], onContextText ? [
+      { label: "Clear output", disabled: !request, run: () => attachment.current?.clear() },
+    ], lastExecuted ? [
+      { label: "Copy last PowerShell command", run: () => clipboard(() => navigator.clipboard.writeText(lastExecuted.command)) },
+      ...(lastOutput ? [{ label: "Copy last command output", run: () => clipboard(() => navigator.clipboard.writeText(lastOutput)) }] : []),
+      ...(onContextText && lastOutput?.trim() ? [{ label: "Add last command output to conversation…", run: () => onContextText(lastOutput) }] : []),
+    ] : [], onContextText ? [
       { label: "Add selection to conversation…", disabled: !hasSelection, run: () => {
         const text = attachment.current?.terminal.getSelection();
         if (text) onContextText(text);

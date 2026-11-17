@@ -18,6 +18,9 @@ type FixtureTerminal = {
   linkProvider?: ILinkProvider;
   selected: string;
   onOsc?: (data: string) => boolean;
+  onScreenClear?: () => boolean;
+  onTerminalResize?: () => void;
+  onTerminalLineFeed?: () => void;
 };
 type TerminalChannel = { onmessage: (event: { kind: "output"; data: string } | { kind: "exited"; exitCode: number }) => void };
 
@@ -28,6 +31,7 @@ const fixture = vi.hoisted(() => ({
   findNext: vi.fn<(text: string) => boolean>(),
   lines: [] as { text: string; isWrapped: boolean }[],
   cursorRow: 0,
+  cursorColumn: 0,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -58,10 +62,17 @@ vi.mock("@xterm/xterm", () => ({
     }
     getSelection() { return this.selected; }
     getSelectionPosition() { return undefined; }
-    onOsc?: (data: string) => boolean;
+    private readonly oscHandlers: ((data: string) => boolean)[] = [];
+    onOsc = (data: string) => this.oscHandlers.findLast((callback) => callback(data)) !== undefined;
+    onScreenClear?: () => boolean;
+    onTerminalResize?: () => void;
+    onTerminalLineFeed?: () => void;
     parser = { registerOscHandler: (_id: number, handler: (data: string) => boolean) => {
-      this.onOsc = handler;
-      return { dispose: () => { this.onOsc = undefined; } };
+      this.oscHandlers.push(handler);
+      return { dispose: () => { this.oscHandlers.splice(this.oscHandlers.indexOf(handler), 1); } };
+    }, registerCsiHandler: (id: { final: string }, handler: () => boolean) => {
+      if (id.final === "J") this.onScreenClear = handler;
+      return { dispose: () => { if (id.final === "J") this.onScreenClear = undefined; } };
     } };
     registerMarker() {
       let onDispose: (() => void) | undefined;
@@ -69,13 +80,26 @@ vi.mock("@xterm/xterm", () => ({
     }
     attachCustomKeyEventHandler = vi.fn();
     onSelectionChange = () => ({ dispose: vi.fn() });
+    onResize = (handler: () => void) => {
+      this.onTerminalResize = handler;
+      return { dispose: () => { this.onTerminalResize = undefined; } };
+    };
+    onLineFeed = (handler: () => void) => {
+      this.onTerminalLineFeed = handler;
+      return { dispose: () => { this.onTerminalLineFeed = undefined; } };
+    };
     get buffer() {
-      return { active: { type: "normal", length: fixture.lines.length, viewportY: 0, baseY: 0, cursorY: fixture.cursorRow, getLine: (index: number) => {
+      return { onBufferChange: () => ({ dispose: vi.fn() }),
+        active: { type: "normal", length: fixture.lines.length, viewportY: 0, baseY: 0, cursorY: fixture.cursorRow, cursorX: fixture.cursorColumn,
+        getLine: (index: number) => {
         const line = fixture.lines[index];
         if (!line) return;
         const cells = Array.from(line.text).flatMap((character) => character === "界" ? [{ string: character, width: 2 }, { string: "", width: 0 }] : [{ string: character, width: 1 }]);
         return { length: cells.length, isWrapped: line.isWrapped,
-          translateToString: (trim: boolean) => trim ? line.text.trimEnd() : line.text,
+          translateToString: (trim: boolean, start?: number, end?: number) => {
+            const slice = line.text.slice(start, end);
+            return trim ? slice.trimEnd() : slice;
+          },
           getCell: (x: number) => cells[x] && { getChars: () => cells[x]!.string, getWidth: () => cells[x]!.width },
         };
       } } };
@@ -107,6 +131,7 @@ beforeEach(() => {
   fixture.onResize.length = 0;
   fixture.lines = [];
   fixture.cursorRow = 0;
+  fixture.cursorColumn = 0;
   fixture.dimensions = { cols: 96, rows: 25 };
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(768);
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(420);
@@ -131,6 +156,97 @@ it("opens reviewed input without a PTY and starts only after an explicit run wit
     checkoutId: session.checkoutId, reviewedScript: reviewedInput,
   }));
   expect(invoke).not.toHaveBeenCalledWith("write_manual_terminal", expect.anything());
+});
+
+it("copies and attaches only the last authenticated command and its bounded rendered output", async () => {
+  const session = { checkoutId: "checkout", terminalId: "session-token" };
+  vi.mocked(invoke).mockResolvedValue(session);
+  const add = vi.fn();
+  const user = userEvent.setup();
+  render(<ManualTerminal checkoutId={session.checkoutId} active autoStart onContextText={add} />);
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  const terminal = fixture.terminals[0]!;
+  const openMenu = () => fireEvent.contextMenu(screen.getByLabelText("Manual PowerShell terminal"));
+  const start = (id: string, sequence: number, row = fixture.cursorRow, column = fixture.cursorColumn) => terminal.onOsc?.(
+    `P;OmniAgentCommandStart=${id};${sequence};${row};${column}`);
+  const end = (id: string, sequence: number, command: string, row = fixture.cursorRow, column = fixture.cursorColumn) => {
+    const encoded = btoa(String.fromCharCode(...new TextEncoder().encode(command)));
+    return terminal.onOsc?.(`P;OmniAgentCommandEnd=${id};${sequence};${row};${column};${encoded}`);
+  };
+  fixture.lines = [
+    { text: "PS> previously printed input", isWrapped: false },
+    { text: "old> wrapping", isWrapped: false },
+    { text: " text", isWrapped: true },
+    { text: "okPS> new unexecuted input", isWrapped: false },
+  ];
+  act(() => {
+    start("other-terminal", 1);
+    end("other-terminal", 1, "untrusted command");
+  });
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Copy last PowerShell command" })).toBeNull();
+  await user.keyboard("{Escape}");
+
+  fixture.cursorRow = 1;
+  fixture.cursorColumn = 5;
+  act(() => { start(session.terminalId, 1); });
+  const command = "Write-Host 'é'";
+  fixture.cursorRow = 3;
+  fixture.cursorColumn = 2;
+  act(() => { end(session.terminalId, 1, command); });
+  // Later screen content cannot become part of the completed output.
+  fixture.lines[3]!.text = "changed after command completion";
+  openMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy last PowerShell command" }));
+  expect(await navigator.clipboard.readText()).toBe(command);
+  openMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy last command output" }));
+  expect(await navigator.clipboard.readText()).toBe("wrapping text\nok");
+  openMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Add last command output to conversation…" }));
+  expect(add).toHaveBeenCalledExactlyOnceWith("wrapping text\nok");
+
+  act(() => {
+    start(session.terminalId, 2);
+    terminal.onScreenClear?.();
+    end(session.terminalId, 2, "Clear-Host");
+  });
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Copy last command output" })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: "Add last command output to conversation…" })).toBeNull();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy last PowerShell command" }));
+  expect(await navigator.clipboard.readText()).toBe("Clear-Host");
+
+  act(() => {
+    start(session.terminalId, 3);
+    end(session.terminalId, 3, "Get-Date", fixture.cursorRow + 1);
+  });
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Copy last command output" })).toBeNull();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy last PowerShell command" }));
+  expect(await navigator.clipboard.readText()).toBe("Get-Date");
+
+  // ConPTY may send either receipt before it paints the corresponding row.
+  fixture.lines[3]!.text = "fast output";
+  fixture.lines.push({ text: "", isWrapped: false });
+  fixture.cursorRow = 2;
+  fixture.cursorColumn = 5;
+  act(() => {
+    start(session.terminalId, 4, 3, 0);
+    end(session.terminalId, 4, "Write-Output 'fast output'", 4, 0);
+  });
+  openMenu();
+  expect(screen.queryByRole("menuitem", { name: "Copy last command output" })).toBeNull();
+  await user.keyboard("{Escape}");
+  fixture.cursorRow = 3;
+  fixture.cursorColumn = 0;
+  act(() => terminal.onTerminalLineFeed?.());
+  fixture.cursorRow = 4;
+  act(() => terminal.onTerminalLineFeed?.());
+  fixture.lines[4]!.text = "PS> next command";
+  openMenu();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy last command output" }));
+  expect(await navigator.clipboard.readText()).toBe("fast output\n");
 });
 
 it("finds terminal output and passes one wrapped snapshot to the conversation chooser", async () => {
