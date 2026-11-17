@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 
-type TerminalPane = { id: string; directory: string; title: string; autoStart: boolean; clearRevision: number; generation?: number };
+type TerminalPane = { id: string; directory: string; title: string; autoStart: boolean; clearRevision: number; generation?: number;
+  reviewedInput?: string };
 type TerminalLayout = { panes: TerminalPane[]; visible: string[]; active: string };
 
 const initialLayout = (generation = 0): TerminalLayout => ({
@@ -24,10 +25,16 @@ export function useTerminalSessions() {
       : [...layout.panes, { id: directory, directory, title: directory || "Checkout root", autoStart: true, clearRevision: 0 }];
     return selectPane({ ...layout, panes }, directory);
   }), []);
+  const openReview = useCallback((id: string, text: string) => setLayout((layout) => {
+    if (layout.panes.some((pane) => pane.id === id)) return selectPane(layout, id);
+    const panes = [...layout.panes, { id, directory: "", title: "PowerShell review", autoStart: false, clearRevision: 0, reviewedInput: text }];
+    return selectPane({ ...layout, panes }, id);
+  }), []);
 
   return {
     ...layout,
     openDirectory,
+    openReview,
     select: (id: string) => setLayout((layout) => selectPane(layout, id)),
     duplicate(source: string, split: boolean) {
       const number = ++sequence.current;

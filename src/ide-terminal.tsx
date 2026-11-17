@@ -97,7 +97,7 @@ type Session = { checkoutId: string; terminalId: string };
 type TerminalEvent = { kind: "output"; data: string }
   | { kind: "exited"; exitCode: number }
   | { kind: "error"; message: string };
-type TerminalRequest = { checkoutId: string };
+type TerminalRequest = { checkoutId: string; reviewedScript?: string };
 type TerminalState = {
   request: TerminalRequest;
   status: "starting" | "running" | "closing" | "exited" | "failed";
@@ -120,7 +120,8 @@ function terminalOutput(terminal: Terminal) {
   return lines.join("\n");
 }
 
-export function ManualTerminal({ checkoutId, relativeDirectory, active, visible = active, autoStart, clearRevision = 0, onContextText, onOpenFile, onFocus, sessionActions }: {
+export function ManualTerminal({ checkoutId, relativeDirectory, active, visible = active, autoStart, clearRevision = 0,
+  onContextText, onOpenFile, onFocus, sessionActions, reviewedInput }: {
   checkoutId: string;
   relativeDirectory?: string;
   active: boolean;
@@ -131,6 +132,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
   onOpenFile?: (path: string, line?: number, column?: number) => void;
   onFocus?: () => void;
   sessionActions?: MenuGroups;
+  reviewedInput?: string;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const attachment = useRef<TerminalAttachment>(undefined);
@@ -165,12 +167,12 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
   }, [checkoutId, relativeDirectory]);
 
   useEffect(() => {
-    if (!request && autoStart && active) {
+    if (!request && autoStart && active && reviewedInput === undefined) {
       const next = { checkoutId };
       setRequest(next);
       setState({ request: next, status: "starting" });
     }
-  }, [active, autoStart, checkoutId, request]);
+  }, [active, autoStart, checkoutId, request, reviewedInput]);
 
   useEffect(() => {
     const element = mount.current;
@@ -252,7 +254,8 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
     size = { cols: terminal.cols, rows: terminal.rows };
     const resize = new ResizeObserver(() => layout(false));
     resize.observe(element);
-    void invoke<Session>("start_manual_terminal", { checkoutId, ...size, channel, ...(relativeDirectory ? { relativeDirectory } : {}) }).then((opened) => {
+    void invoke<Session>("start_manual_terminal", { checkoutId, ...size, channel, ...(relativeDirectory ? { relativeDirectory } : {}),
+      ...(request.reviewedScript === undefined ? {} : { reviewedScript: request.reviewedScript }) }).then((opened) => {
       if (disposed) {
         void invoke("close_manual_terminal", opened).catch(() => undefined);
         return;
@@ -298,16 +301,17 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
     }
   }, [clearRevision]);
 
-  const start = () => {
+  const canStart = !current || current.status === "exited" || current.status === "failed";
+  function start(reviewedScript?: string) {
     setHasSelection(false);
     setFileError("");
     setReferenceMenu(undefined);
     setFindOpen(false);
     setFound(undefined);
-    const next = { checkoutId };
+    const next = { checkoutId, reviewedScript };
     setRequest(next);
     setState({ request: next, status: "starting" });
-  };
+  }
   function clipboard(operation: (terminal: Terminal) => Promise<unknown>) {
     const terminal = attachment.current?.terminal;
     if (!terminal) return;
@@ -333,8 +337,8 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
   }
   return <div className="flex h-full min-h-0 flex-col gap-2" onFocusCapture={onFocus} onPointerDownCapture={onFocus}>
     <div className="flex shrink-0 items-center gap-2">
-      {(!current || current.status === "exited" || current.status === "failed") && (
-        <button type="button" className="fw-btn fw-outlined" onClick={start}>Start PowerShell</button>
+      {canStart && reviewedInput === undefined && (
+        <button type="button" className="fw-btn fw-outlined" onClick={() => start()}>Start PowerShell</button>
       )}
       {current?.status === "starting" && <span className="file-help" role="status">Starting PowerShell…</span>}
       {current?.status === "running" && (
@@ -343,6 +347,13 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
       {current?.status === "closing" && <span className="file-help" role="status">Closing PowerShell…</span>}
       {current?.message && <span className="file-help" role={current.status === "exited" ? "status" : "alert"}>{current.message}</span>}
     </div>
+    {canStart && reviewedInput !== undefined && <section className="grid min-h-0 shrink-0 gap-2" aria-label="Review PowerShell input">
+      <pre className="max-h-36 overflow-auto whitespace-pre-wrap wrap-anywhere font-mono text-xs" tabIndex={0}
+        aria-label="Reviewed PowerShell input">{reviewedInput}</pre>
+      <button type="button" className="fw-btn fw-primary justify-self-start" onClick={() => start(reviewedInput)}>
+        Run reviewed input in PowerShell
+      </button>
+    </section>}
     {clipboardError && <p className="file-help" role="alert">{clipboardError}</p>}
     {fileError && <p className="file-help" role="alert">{fileError}</p>}
     {findOpen && <form className="flex shrink-0 flex-wrap items-center gap-1" aria-label="Terminal search"
@@ -386,7 +397,7 @@ export function ManualTerminal({ checkoutId, relativeDirectory, active, visible 
         if (terminal) onContextText(terminalOutput(terminal));
       } },
     ] : [], [
-      ...(!current || current.status === "exited" || current.status === "failed" ? [{ label: "Start PowerShell", run: start }] : []),
+      ...(canStart && reviewedInput === undefined ? [{ label: "Start PowerShell", run: () => start() }] : []),
       ...(current?.status === "running" ? [{ label: "Close PowerShell", run: () => attachment.current?.close() }] : []),
     ], ...(sessionActions ?? [])]}>
       <div ref={mount} className="ide-terminal-surface" aria-label="Manual PowerShell terminal" onContextMenu={(event) => {

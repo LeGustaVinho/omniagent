@@ -44,6 +44,17 @@ function global:prompt {
 }
 "#;
 
+const POWERSHELL_REVIEWED_SCRIPT: &str = r#"
+& {
+    $sourceFile = $env:OMNIAGENT_REVIEWED_SCRIPT
+    Remove-Item Env:OMNIAGENT_REVIEWED_SCRIPT -ErrorAction SilentlyContinue
+    while (-not [IO.File]::Exists($sourceFile)) { Start-Sleep -Milliseconds 20 }
+    try { $source = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($sourceFile)) }
+    finally { [IO.File]::Delete($sourceFile) }
+    & ([ScriptBlock]::Create($source))
+}
+"#;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManualTerminalInfo {
@@ -85,6 +96,7 @@ impl Drop for Sessions {
 struct ManualSession {
     checkout_id: String,
     _work: Option<ExternalWork>,
+    _reviewed_script_directory: Option<tempfile::TempDir>,
     job: Mutex<Option<OwnedHandle>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
@@ -153,6 +165,7 @@ impl ManualTerminals {
         relative_directory: Option<String>,
         size: PtySize,
         work: Option<ExternalWork>,
+        reviewed_script: Option<String>,
         send: impl Fn(ManualTerminalEvent) -> bool + Send + Sync + 'static,
     ) -> Result<ManualTerminalInfo> {
         let root = checkout_root(store, checkout_id.clone()).await?;
@@ -161,7 +174,15 @@ impl ManualTerminals {
         tokio::task::spawn_blocking(move || {
             let directory =
                 checkout_directory(&layout.root, relative_directory.as_deref().unwrap_or(""))?;
-            launch(&sessions, checkout_id, &directory, size, work, send)
+            launch(
+                &sessions,
+                checkout_id,
+                &directory,
+                size,
+                work,
+                reviewed_script,
+                send,
+            )
         })
         .await?
     }
@@ -197,6 +218,7 @@ fn launch(
     root: &Path,
     size: PtySize,
     work: Option<ExternalWork>,
+    reviewed_script: Option<String>,
     send: impl Fn(ManualTerminalEvent) -> bool + Send + Sync + 'static,
 ) -> Result<ManualTerminalInfo> {
     ensure!(
@@ -204,14 +226,46 @@ fn launch(
         "The checkout directory changed before launch"
     );
     let terminal_id = Uuid::new_v4().to_string();
+    let (reviewed_directory, staged_script) = reviewed_script
+        .map(|script| -> Result<_> {
+            let directory = tempfile::Builder::new()
+                .prefix("omniagent-reviewed-shell-")
+                .tempdir()?;
+            let mut file = tempfile::NamedTempFile::new_in(directory.path())?;
+            file.write_all(script.as_bytes())?;
+            file.as_file().sync_all()?;
+            Ok((directory, file.into_temp_path()))
+        })
+        .transpose()?
+        .unzip();
+    let script_path = reviewed_directory
+        .as_ref()
+        .map(|directory| directory.path().join("reviewed-input"));
+    let startup = if script_path.is_some() {
+        format!("{POWERSHELL_PROMPT}\n{POWERSHELL_REVIEWED_SCRIPT}")
+    } else {
+        POWERSHELL_PROMPT.to_owned()
+    };
     let encoded = STANDARD.encode(
-        POWERSHELL_PROMPT.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>(),
+        startup
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<u8>>(),
     );
     let mut command = CommandBuilder::new(windows_powershell()?);
-    command.args(["-NoLogo", "-NoProfile", "-NoExit", "-EncodedCommand", &encoded]);
+    command.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NoExit",
+        "-EncodedCommand",
+        &encoded,
+    ]);
     command.cwd(root);
     command.env("TERM", "xterm-256color");
     command.env("OMNIAGENT_PROMPT_TOKEN", &terminal_id);
+    if let Some(path) = &script_path {
+        command.env("OMNIAGENT_REVIEWED_SCRIPT", path);
+    }
     let job = create_job().context("Create the manual terminal process job")?;
     let pair = native_pty_system()
         .openpty(size)
@@ -232,6 +286,7 @@ fn launch(
     let session = Arc::new(ManualSession {
         checkout_id: checkout_id.clone(),
         _work: work,
+        _reviewed_script_directory: reviewed_directory,
         job: Mutex::new(Some(job)),
         master: Mutex::new(Some(pair.master)),
         writer: Mutex::new(Some(writer)),
@@ -274,6 +329,13 @@ fn launch(
             .expect("manual terminals")
             .remove(&terminal_id);
         return Err(error).context("Start the PowerShell exit watcher");
+    }
+    // Publish the script only after the shell belongs to its tracked job and the terminal is ready.
+    if let Some((staged, path)) = staged_script.zip(script_path)
+        && let Err(error) = staged.persist_noclobber(path)
+    {
+        session.stop();
+        return Err(error).context("Make the reviewed script available to PowerShell");
     }
     Ok(ManualTerminalInfo {
         terminal_id,
@@ -393,6 +455,7 @@ pub async fn start_manual_terminal(
     scheduler: State<'_, JobScheduler>,
     checkout_id: String,
     relative_directory: Option<String>,
+    reviewed_script: Option<String>,
     cols: u16,
     rows: u16,
     channel: Channel<ManualTerminalEvent>,
@@ -406,6 +469,7 @@ pub async fn start_manual_terminal(
             relative_directory,
             size,
             Some(work),
+            reviewed_script,
             move |event| channel.send(event).is_ok(),
         )
         .await
@@ -438,10 +502,16 @@ pub async fn resolve_manual_terminal_file(
     path: String,
 ) -> Result<String, String> {
     omniagent::repository::terminal_file_links::resolve_terminal_file(
-        &store, checkout_id, relative_directory, observed_directory, path,
+        &store,
+        checkout_id,
+        relative_directory,
+        observed_directory,
+        path,
     )
     .await
-    .map_err(|_| "This terminal reference does not resolve to a file in the current checkout.".into())
+    .map_err(|_| {
+        "This terminal reference does not resolve to a file in the current checkout.".into()
+    })
 }
 
 #[tauri::command]

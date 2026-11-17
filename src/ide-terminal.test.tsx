@@ -117,6 +117,22 @@ beforeEach(() => {
   });
 });
 
+it("opens reviewed input without a PTY and starts only after an explicit run with exact bytes", async () => {
+  const reviewedInput = '$message = "café"\r\nWrite-Output $message\r\n';
+  const session = { checkoutId: "reviewed-checkout", terminalId: "reviewed-terminal" };
+  vi.mocked(invoke).mockResolvedValue(session);
+  const user = userEvent.setup();
+  render(<ManualTerminal checkoutId={session.checkoutId} active autoStart reviewedInput={reviewedInput} />);
+  expect(screen.getByLabelText("Reviewed PowerShell input").textContent).toBe(reviewedInput);
+  expect(invoke).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Run reviewed input in PowerShell" }));
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("start_manual_terminal", expect.objectContaining({
+    checkoutId: session.checkoutId, reviewedScript: reviewedInput,
+  }));
+  expect(invoke).not.toHaveBeenCalledWith("write_manual_terminal", expect.anything());
+});
+
 it("finds terminal output and passes one wrapped snapshot to the conversation chooser", async () => {
   vi.mocked(invoke).mockResolvedValue({ checkoutId: "checkout", terminalId: "terminal" });
   fixture.findNext.mockReturnValue(true);

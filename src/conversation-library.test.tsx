@@ -14,6 +14,8 @@ import type { RunRecord } from "@/bindings/RunRecord";
 import { RealConversations } from "@/desktop-dock";
 import { defaultAppearance } from "@/settings-appearance";
 import { useWorkspace } from "@/workspace-state";
+import { RunInspectorNavigation } from "@/run-inspector-navigation";
+import { takeTerminalReview } from "@/terminal-reviewed-input";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -171,6 +173,8 @@ function repository(archiveMessages: MessageRevision[] = []) {
         }] };
       case "latest_conversation_job": return null;
       case "composer_suggestion_mode": return "off";
+      case "list_checkout_folders": return ["scripts"];
+      case "create_checkout_item": return "scripts/code.ps1";
       case "conversation_models":
       case "pending_conversation_instructions":
       case "pending_conversation_inputs":
@@ -341,6 +345,47 @@ it("copies highlighted code and appends its own fenced block to the current draf
   const quoted = `${expected}> ${snippet}\n\n`;
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_conversation_draft", { conversationId: archiveId, text: quoted }));
   expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
+});
+
+it("confirms a checkout file save and stages the same clicked block for the terminal without running it", async () => {
+  const source = '$value = "café";\r\n\r\nWrite-Output $value\r\n';
+  const nested = source.split("\r\n").slice(0, -1).map((line) => `> ${line}\r\n`).join("");
+  repository([{ messageId: "review-code", revisionId: "review-code-revision", role: "assistant", text:
+    `\x60\x60\x60powershell\nGet-Date\n\x60\x60\x60\n\n> \x60\x60\x60powershell\r\n${nested}> \x60\x60\x60` }]);
+  useWorkspace.getState().selectCheckout(selected);
+  const openWorkspace = vi.fn();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><RunInspectorNavigation.Provider value={{ openActivity: vi.fn(), openWorkspace }}>
+    <RealConversations checkout={selected} sidebar compact={false} onSidebarChange={vi.fn()} />
+  </RunInspectorNavigation.Provider></QueryClientProvider>);
+  const user = userEvent.setup();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await user.click(await library().findByRole("button", { name: original }));
+  const code = (await screen.findAllByLabelText("powershell code"))[1]!;
+  fireEvent.contextMenu(code);
+  await user.click(await screen.findByRole("menuitem", { name: "Save code block as file…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Save code block as file" }));
+  expect(dialog.getByLabelText("Code to save").textContent).toBe(source);
+  expect(dialog.getByRole("textbox", { name: "File name" })).toHaveProperty("value", "code.ps1");
+  await dialog.findByRole("option", { name: "scripts" });
+  await user.selectOptions(dialog.getByRole("combobox", { name: "Destination folder" }), "scripts");
+  expect(invoke).not.toHaveBeenCalledWith("create_checkout_item", expect.anything());
+  await user.click(dialog.getByRole("button", { name: "Save new file" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("create_checkout_item", {
+    checkoutId: selected.checkoutId, relativeDirectory: "scripts", name: "code.ps1", directory: false, contents: source,
+  }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Save code block as file" })).toBeNull());
+  expect(openWorkspace).toHaveBeenCalledWith("ide", expect.stringContaining("scripts/code.ps1"));
+
+  fireEvent.contextMenu((await screen.findAllByLabelText("powershell code"))[1]!);
+  await user.click(await screen.findByRole("menuitem", { name: "Insert in terminal for review" }));
+  const [workspace, target] = openWorkspace.mock.lastCall as [string, string];
+  expect(workspace).toBe("ide");
+  expect(target).not.toContain("Write-Output");
+  expect(takeTerminalReview(target, selected.checkoutId)?.text).toBe(source);
+  expect(takeTerminalReview(target, selected.checkoutId)).toBeUndefined();
+  expect(invoke).not.toHaveBeenCalledWith("start_manual_terminal", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("write_manual_terminal", expect.anything());
 });
 
 it("reviews a library fork against the clicked conversation before creating it", async () => {

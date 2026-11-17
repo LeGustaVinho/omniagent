@@ -112,6 +112,60 @@ fn contains(bytes: &[u8], needle: &str) -> Option<()> {
         .then_some(())
 }
 
+#[tokio::test]
+async fn a_reviewed_script_runs_in_its_new_checkout_shell_with_exact_unicode_and_eol() -> Result<()>
+{
+    let fixture = tempfile::tempdir()?;
+    let root = fixture.path().join("reviewed shell");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet"])?;
+    let store = Store::open(fixture.path().join("profile.sqlite"))?;
+    let checkout = repository::register(&store, root.clone()).await?;
+    let script = "$content = @'\r\npreservar α\r\nsecond line\r\n'@\r\n\
+        [Console]::WriteLine('OMNI_REVIEW=' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($content)))\r\n\
+        [Console]::WriteLine('OMNI_REVIEW_CWD=' + $PWD.Path)\r\n";
+    let (send, events) = mpsc::unbounded_channel();
+    let terminals = ManualTerminals::default();
+    let info = terminals
+        .start(
+            &store,
+            checkout.checkout_id,
+            None,
+            terminal_size(160, 28)?,
+            None,
+            Some(script.into()),
+            move |notice| send.send(notice).is_ok(),
+        )
+        .await?;
+    let session = terminals
+        .find(&info.checkout_id, &info.terminal_id)?
+        .context("reviewed shell was not registered")?;
+    let mut output = TerminalOutput {
+        events,
+        bytes: Vec::new(),
+        cursor_answered: 0,
+    };
+    let encoded = format!(
+        "OMNI_REVIEW={}",
+        STANDARD.encode("preservar α\r\nsecond line")
+    );
+    output
+        .wait_for(&session, |bytes| contains(bytes, &encoded))
+        .await?;
+    let checkout_path = format!("OMNI_REVIEW_CWD={}", dunce::canonicalize(&root)?.display());
+    output
+        .wait_for(&session, |bytes| contains(bytes, &checkout_path))
+        .await?;
+    let directory = session
+        ._reviewed_script_directory
+        .as_ref()
+        .context("review input owner")?;
+    assert!(fs::read_dir(directory.path())?.next().is_none());
+    session.write("exit 0\r".into())?;
+    assert_eq!(output.exited().await?, 0);
+    Ok(())
+}
+
 async fn open_terminal(
     terminals: &ManualTerminals,
     store: &Store,
@@ -124,6 +178,7 @@ async fn open_terminal(
             checkout_id,
             None,
             terminal_size(100, 28)?,
+            None,
             None,
             move |notice| send.send(notice).is_ok(),
         )
@@ -192,6 +247,7 @@ async fn powershell_uses_the_verified_worktree_and_streams_input_output_resize_a
                 None,
                 terminal_size(80, 24)?,
                 None,
+                None,
                 |_| false
             )
             .await
@@ -202,9 +258,18 @@ async fn powershell_uses_the_verified_worktree_and_streams_input_output_resize_a
     let child_directory = worktree.join("child folder");
     fs::create_dir(&child_directory)?;
     session.write("Set-Location -LiteralPath 'child folder'\r".into())?;
-    let observed = format!("]633;P;OmniAgentCwd={};{}", info.terminal_id,
-        STANDARD.encode(dunce::canonicalize(&child_directory)?.to_str().context("fixture path")?));
-    output.wait_for(&session, |bytes| contains(bytes, &observed)).await?;
+    let observed = format!(
+        "]633;P;OmniAgentCwd={};{}",
+        info.terminal_id,
+        STANDARD.encode(
+            dunce::canonicalize(&child_directory)?
+                .to_str()
+                .context("fixture path")?
+        )
+    );
+    output
+        .wait_for(&session, |bytes| contains(bytes, &observed))
+        .await?;
     session.write("Set-Location ..\r".into())?;
     assert!(
         terminals

@@ -9,6 +9,7 @@ import type { ItemEdit } from "@/checkout-item-operations";
 import type { EditorExcerpt } from "@/editor-context";
 import type { FileFormat } from "@/source-file-format";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { reviewTerminalInputTarget } from "@/terminal-reviewed-input";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -419,6 +420,22 @@ it("uses the selected rows for bulk recycling after confirmation", async () => {
       { source: file, directory: false, destination: null },
     ],
   });
+});
+
+it("opens a single reviewed terminal pane only for the matching checkout", async () => {
+  fixture();
+  const text = "Write-Output 'café'\r\n";
+  const wrong = reviewTerminalInputTarget(alternate, text);
+  const mounted = render(<IdeWorkspace {...propsFor(main)} target={wrong} />);
+  await waitFor(() => expect(terminalProps).toHaveBeenCalledWith({ checkoutId: main, active: true, clearRevision: 0 }));
+  expect(screen.queryByRole("button", { name: "PowerShell review" })).toBeNull();
+  const target = reviewTerminalInputTarget(main, text);
+  mounted.rerender(<IdeWorkspace {...propsFor(main)} target={target} />);
+  await waitFor(() => expect(terminalProps).toHaveBeenCalledWith({
+    checkoutId: main, active: true, clearRevision: 0, reviewedInput: text,
+  }));
+  expect(screen.getAllByRole("button", { name: "PowerShell review" })).toHaveLength(1);
+  expect(invoke).not.toHaveBeenCalledWith("start_manual_terminal", expect.anything());
 });
 
 it("opens a folder terminal from the keyboard menu and keeps the root session mounted", async () => {

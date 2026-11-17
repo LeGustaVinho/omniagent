@@ -31,7 +31,8 @@ import { ConversationSubagentControls } from "@/subagent-quota";
 import { SideQuestionPanel, type SideSubmission } from "@/conversation-side-requests";
 import { ConversationSuggestionButton, useConversationSuggestion } from "@/conversation-suggestions";
 import { ConversationCompactionControl, useConversationCompaction } from "@/conversation-compaction";
-import { ConversationMarkdown } from "@/conversation-markdown";
+import { ConversationMarkdown, type ConversationCode } from "@/conversation-markdown";
+import { ConversationCodeFileDialog } from "@/conversation-code-file";
 import { readDraft, saveDraft } from "@/conversation-draft-writes";
 import { ConversationRow } from "@/conversation-menu";
 import { useConversationTranscriptExport } from "@/conversation-transcript-export";
@@ -49,6 +50,8 @@ import { openConversation } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import { ConversationAuthoring, workflowAuthoringTarget } from "@/workflow-authoring";
+import { openWorkspaceFile } from "@/file-context-actions";
+import { reviewTerminalInputTarget } from "@/terminal-reviewed-input";
 
 const historyOffsets = new Map<string, number>();
 
@@ -373,6 +376,10 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
   const [inspectedRun, setInspectedRun] = useState<string>();
   const activityButton = useRef<HTMLButtonElement>(null);
   const inspector = useContext(RunInspectorNavigation);
+  const selectedCheckout = useWorkspace((state) => state.checkout);
+  const codeCheckout = selectedCheckout?.checkoutId === confirmedCheckoutId ? selectedCheckout : undefined;
+  const [codeFile, setCodeFile] = useState<{ checkoutId: string; block: ConversationCode }>();
+  const [codeFileStatus, setCodeFileStatus] = useState("");
   const showingActivity = visible && run && inspectedRun === run.id;
   const openRunEvidence = (runId: string) => {
     if (inspector) inspector.openActivity(runId, conversationId);
@@ -695,13 +702,21 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
               ]]}
               actions={<ConversationMessageHistoryActions message={message} disabled={historyBusy} onAction={setHistoryAction} />}>
               {message.role === "user" ? <p>{conversationSkillMessage(message.text)}</p> : <ConversationMarkdown
-                codeActions={{ addToDraft: appendToDraft, draftDisabled: busy || historyBusy || !draft.isSuccess }}>
+                codeActions={{
+                  addToDraft: appendToDraft, draftDisabled: busy || historyBusy || !draft.isSuccess,
+                  saveFile: codeCheckout ? (block) => setCodeFile({ checkoutId: codeCheckout.checkoutId, block }) : undefined,
+                  reviewTerminal: codeCheckout && inspector?.openWorkspace ? (block) => {
+                    if (useWorkspace.getState().checkout?.checkoutId !== codeCheckout.checkoutId) return;
+                    inspector.openWorkspace?.("ide", reviewTerminalInputTarget(codeCheckout.checkoutId, block.text));
+                  } : undefined,
+                }}>
                 {message.text}
               </ConversationMarkdown>}
             </ConversationMessage>
           ))}
         </ol>
         {(latestJob.error || cancelQueued.error || recover.error) && <p role="alert" className="conv-alert">{String(latestJob.error || cancelQueued.error || recover.error)}</p>}
+        {codeFileStatus && <p role="status" className="text-xs text-muted-foreground">{codeFileStatus}</p>}
         {latest.error && <p role="alert" className="conv-alert">{String(latest.error)}</p>}
         {activity.error && <p role="alert" className="conv-alert">{String(activity.error)}</p>}
         {live && activity.output && <div className="conv-stream" aria-label="Streaming response">
@@ -889,6 +904,13 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
       {visible && continuation && <ConversationContinuationDialog key={continuation.review.previewId} review={continuation.review}
         pending={continueSend.isPending} error={continueSend.error} onConfirm={(choice) => continueSend.mutate({ choice, intent: continuation })}
         onClose={() => { setContinuation(undefined); continueSend.reset(); }} />}
+      {visible && codeCheckout && codeFile?.checkoutId === codeCheckout.checkoutId && <ConversationCodeFileDialog checkout={codeCheckout} block={codeFile.block}
+        close={() => setCodeFile(undefined)} created={(path) => {
+          setCodeFileStatus(`Saved ${path}`);
+          if (inspector?.openWorkspace && useWorkspace.getState().checkout?.checkoutId === codeCheckout.checkoutId) {
+            openWorkspaceFile(inspector.openWorkspace, path, undefined, { repeat: true });
+          }
+        }} />}
     </section>
   );
 }

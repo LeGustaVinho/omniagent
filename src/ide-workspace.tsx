@@ -22,6 +22,7 @@ import { SourceFormatDialog } from "@/source-format-dialog";
 import type { SourceFormatChange } from "@/source-file-format";
 import { IdeProblems, problemReference, type FileProblem } from "@/ide-problems";
 import { useTerminalSessions } from "@/ide-terminal-sessions";
+import { isTerminalReviewTarget, takeTerminalReview } from "@/terminal-reviewed-input";
 import { ResizablePanel } from "@/panel-resize";
 import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -71,7 +72,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const [quickFix, setQuickFix] = useState<(EditorLocation & { panelId: string })>();
   const [bottom, setBottom] = useState<"terminal" | "problems" | null>("terminal");
   const terminals = useTerminalSessions();
-  const { openDirectory } = terminals;
+  const { openDirectory, openReview } = terminals;
   const [terminalRename, setTerminalRename] = useState<{ id: string; title: string }>();
   const [exampleClearRevision, setExampleClearRevision] = useState(0);
   const openTerminal = useCallback((folder: string) => {
@@ -166,6 +167,14 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
 
   useEffect(() => {
     if (!target || !dock.ready) return;
+    if (isTerminalReviewTarget(target)) {
+      const request = !simulated && takeTerminalReview(target, checkout.checkoutId);
+      if (request) {
+        setBottom("terminal");
+        openReview(request.target, request.text);
+      }
+      return;
+    }
     if (requestedTerminal !== undefined) {
       openTerminal(requestedTerminal);
       return;
@@ -183,7 +192,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       lastTarget.current = request;
       openFile(next, location?.line, false, location?.column);
     }
-  }, [dock.ready, openFile, openTerminal, requestedFolder, requestedTerminal, setSidebar, target]);
+  }, [checkout.checkoutId, dock.ready, openFile, openReview, openTerminal, requestedFolder, requestedTerminal, setSidebar, simulated, target]);
 
   const update = useCallback((path: string, content: string) => {
     content = editorText(content);
@@ -547,7 +556,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
             <div className="ide-terminal-container" hidden={bottom !== "terminal"}>
               <Suspense fallback={<p className="file-help">Loading terminal…</p>}>
                 {simulated ? <Terminal clearRevision={exampleClearRevision} /> : <div className="ide-terminal-panes">
-                  {terminals.panes.map(({ id, directory, title, clearRevision, autoStart, generation }) => {
+                  {terminals.panes.map(({ id, directory, title, clearRevision, autoStart, generation, reviewedInput }) => {
                     const order = terminals.visible.indexOf(id);
                     const visible = bottom === "terminal" && order >= 0;
                     const active = visible && terminals.active === id;
@@ -562,6 +571,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                         <button className="fw-btn" type="button" aria-pressed={active} title={directory || "Checkout root"} onClick={() => terminals.select(id)}>{title}</button>
                       </ContextActions>
                       <WorktreeTerminal checkoutId={checkout.checkoutId} active={active} visible={visible} sessionActions={sessionActions}
+                        {...(reviewedInput === undefined ? {} : { reviewedInput })}
                         onFocus={() => terminals.select(id)} onOpenFile={(path, line, column) => openFile(path, line, false, column)}
                         clearRevision={clearRevision} onContextText={(text) => conversationActions.startContextText({
                           title: "PowerShell output", reference: `PowerShell · ${title}`, text,
