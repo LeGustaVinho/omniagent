@@ -9,6 +9,8 @@ import { RunInspector } from "@/inspection-panel";
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@/git-diff-view", () => ({ MonacoComparison: ({ file }: { file: { original: string; modified: string } }) =>
+  <div><pre aria-label="Original evidence">{file.original}</pre><pre aria-label="Modified evidence">{file.modified}</pre></div> }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 it("opens recorded run pages through the same Activity tabs as Simulate and loads exact evidence on selection", async () => {
@@ -79,16 +81,22 @@ it("copies captured command output and failure evidence for the exact inspected 
   const process = { code: 17, cancelled: false };
   const stdout = "  First line\nSecond line\n";
   const stderr = "Checks failed\n";
-  vi.mocked(invoke).mockImplementation(async (command) => {
+  const openActivity = vi.fn();
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
     if (command === "command_job_run") return run;
-    if (command === "command_job_output") return { process, stdout, stderr, truncated: true };
+    if (command === "command_job_output") return (args as { runId: string }).runId === run.id
+      ? { process, stdout, stderr, truncated: true } : { process: { code: 0 }, stdout: "Prior output", stderr: "", truncated: false };
+    if (command === "related_saved_attempts") return [
+      { runId: run.id, checkoutId: run.checkoutId, status: "failed", ordinal: 2, createdAt: 9 },
+      { runId: "prior-command", checkoutId: run.checkoutId, status: "succeeded", ordinal: 1, createdAt: 5 },
+    ];
     if (command === "job_failure") return { outcome: "failed", checkoutId: run.checkoutId, checkoutRoot: "D:\\worktree",
       observation: { phase: "execution", cause: "process_exit", process }, providerOutcome: null, logsAvailable: false, savedDiffAvailable: false };
     throw new Error(`Unexpected ${command}`);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><RunInspector checkout={exampleCheckout} runId={run.id}
-    simulation={null} onClose={vi.fn()} startSimulation={vi.fn()} openWorkspace={vi.fn()} openChanges={vi.fn()} openActivity={vi.fn()} /></QueryClientProvider>);
+    simulation={null} onClose={vi.fn()} startSimulation={vi.fn()} openWorkspace={vi.fn()} openChanges={vi.fn()} openActivity={openActivity} /></QueryClientProvider>);
   const user = userEvent.setup();
   const activity = within(await screen.findByRole("region", { name: "Command activity" }));
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "command_job_output")).toBe(false);
@@ -111,4 +119,67 @@ it("copies captured command output and failure evidence for the exact inspected 
   expect(await navigator.clipboard.readText()).toBe(`Exit code 17\n\nOutput capture is incomplete.\n\nStandard output\n${stdout}\n\nStandard error\n${stderr}`);
   expect(activity.getByText("Output capture is incomplete.")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("command_job_output", { projectId, runId: run.id });
+
+  fireEvent.contextMenu(activity.getByText("Exit code 17"));
+  await user.click(screen.getByRole("menuitem", { name: "Compare saved attempt output…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Compare saved attempt output" }));
+  expect((await dialog.findByLabelText("Original evidence")).textContent).toBe("Standard output\nPrior output\n\nStandard error\n");
+  expect(dialog.getByLabelText("Modified evidence").textContent).toBe(`Standard output\n${stdout}\n\nStandard error\n${stderr}`);
+  expect(dialog.getByText("Output capture is incomplete")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("related_saved_attempts", { projectId, runId: run.id });
+  await user.click(dialog.getByRole("button", { name: "Open base attempt" }));
+  expect(openActivity).toHaveBeenCalledExactlyOnceWith("prior-command");
+});
+
+it("compares only recorded attempts of the inspected conversation and opens the selected provenance", async () => {
+  const conversationId = "conversation";
+  const projectId = exampleCheckout.projectId;
+  const runId = "current-run";
+  const recorded = { id: runId, projectId, checkoutId: exampleCheckout.checkoutId, turnId: "turn-current", status: "succeeded" };
+  const openActivity = vi.fn();
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    switch (command) {
+      case "inspect_conversation_run": return [recorded, conversationId];
+      case "conversation_events": {
+        const args = payload as { conversationId: string; runId: string; after: string };
+        expect(args.conversationId).toBe(conversationId);
+        const child = { itemId: "child", turnId: "turn", sessionId: "session", parentItemId: "parent" };
+        const parent = { ...child, itemId: "text", parentItemId: null };
+        return args.runId === runId ? { cursor: "30", more: false, events: [
+          { data: { type: "assistant_final", text: "Current exact response" }, location: parent },
+        ] } : args.after === "0" ? { cursor: "17", more: true, events: [
+          { data: { type: "assistant_delta", text: "draft" }, location: parent },
+        ] } : { cursor: "20", more: false, events: [
+          { data: { type: "assistant_final", text: "Previous exact response" }, location: parent },
+          { data: { type: "assistant_final", text: "Child result" }, location: child },
+        ] };
+      }
+      case "related_saved_attempts": return [
+        { runId, checkoutId: recorded.checkoutId, ordinal: 5, status: "succeeded", createdAt: 500 },
+        { runId: "prior-exact", checkoutId: "prior-checkout", ordinal: 4, status: "failed", createdAt: 400 },
+      ];
+      case "saved_conversation_questions": return [];
+      case "run_orchestration": case "conversation_checklist_progress": case "downstream_wait": return null;
+      default: throw new Error(command);
+    }
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><RunInspector checkout={exampleCheckout} runId={runId} conversationId={conversationId}
+    simulation={null} onClose={vi.fn()} startSimulation={vi.fn()} openWorkspace={vi.fn()} openChanges={vi.fn()} openActivity={openActivity} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const activity = within(await screen.findByRole("complementary", { name: "Conversation activity" }));
+  await user.click(activity.getByRole("tab", { name: "Artifacts" }));
+  await activity.findByText("Current exact response");
+  expect(invoke).not.toHaveBeenCalledWith("related_saved_attempts", expect.anything());
+  fireEvent.contextMenu(activity.getByRole("heading", { name: "Recorded output" }));
+  await user.click(screen.getByRole("menuitem", { name: "Compare saved attempt output…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Compare saved attempt output" }));
+  expect((await dialog.findByLabelText("Original evidence")).textContent).toBe("Previous exact response");
+  expect(dialog.getByLabelText("Modified evidence").textContent).toBe("Current exact response");
+  expect(dialog.getByText("prior-checkout")).toBeTruthy();
+  expect(dialog.getByText("20")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("related_saved_attempts", { projectId, conversationId, runId });
+  expect(invoke).toHaveBeenCalledWith("conversation_events", { conversationId, runId: "prior-exact", after: "17" });
+  await user.click(dialog.getByRole("button", { name: "Open base attempt" }));
+  expect(openActivity).toHaveBeenCalledExactlyOnceWith("prior-exact", conversationId);
 });

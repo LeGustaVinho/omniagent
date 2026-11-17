@@ -8,6 +8,8 @@ use crate::{
     store::Store,
 };
 
+pub mod attempt_comparison;
+
 const ACTIVE_CHECKOUT: &str = "active_checkout";
 const MAX_LAYOUT_BYTES: usize = 512 * 1024;
 

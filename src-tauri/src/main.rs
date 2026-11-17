@@ -580,6 +580,7 @@ fn main() {
             ipc::save_workbench_layout,
             ipc::run_snapshot,
             ipc::inspect_conversation_run,
+            omniagent::workbench::attempt_comparison::related_saved_attempts,
             ipc::run_orchestration,
             ipc::project_task_goals,
             goal_verification_ipc::goal_verification,

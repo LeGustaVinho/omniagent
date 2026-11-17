@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
+import { SavedAttemptComparison, type AttemptChoice } from "@/saved-attempt-comparison";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type PlanVersion = {
@@ -26,12 +27,21 @@ export function RunPlanHistory({ projectId, runId, openActivity }: {
   openActivity: WorkspaceProps["openActivity"];
 }) {
   const [open, setOpen] = useState(false);
+  const [compared, setCompared] = useState<string>();
   const { copy, feedback } = useContextActionFeedback();
   const history = useQuery({
     queryKey: ["repository-delivery", projectId, "plan-history", runId],
     enabled: open,
     queryFn: () => invoke<PlanHistory | null>("repository_plan_history", { projectId, runId }),
   });
+  const versions = history.data?.versions ?? [];
+  const choices: AttemptChoice[] = versions.map(({ revisionId, sourceRunId, eventSequence, current, approvalArtifactId, releaseId, releaseRevoked }) => ({
+    id: revisionId, runId: sourceRunId, label: `Proposal ${eventSequence}${current ? " · Selected plan" : ""}`,
+    provenance: [{ label: "Plan revision", value: revisionId }, { label: "Proposal event", value: eventSequence },
+      ...(approvalArtifactId ? [{ label: "Approval decision", value: approvalArtifactId }] : []),
+      ...(releaseId ? [{ label: releaseRevoked ? "Revoked release" : "Approved release", value: releaseId }] : []),
+    ],
+  }));
   return <details onToggle={(event) => setOpen(event.currentTarget.open)} className="min-w-0">
     <summary className="cursor-pointer">Plan revision history</summary>
     {open && <div className="grid gap-2 pt-2 text-sm">
@@ -43,11 +53,12 @@ export function RunPlanHistory({ projectId, runId, openActivity }: {
         <p className="break-all">Base version <code>{history.data.request.baseRevisionId}</code></p>
         <p className="whitespace-pre-wrap break-words">{history.data.request.feedback}</p>
       </section>}
-      {history.data?.versions.map(({ revisionId, sourceRunId, eventSequence, text, current, approvalArtifactId, releaseId, releaseRevoked }) => {
+      {versions.map(({ revisionId, sourceRunId, eventSequence, text, current, approvalArtifactId, releaseId, releaseRevoked }) => {
         const label = `Proposal ${eventSequence}${current ? " · Selected plan" : ""}`;
         const openAttempt = () => openActivity(sourceRunId);
         return <ContextActions key={revisionId} label={label} className="run-evidence-menu rounded border border-border p-2" groups={[[
           ...(sourceRunId !== runId ? [{ label: "Open plan attempt", run: openAttempt }] : []),
+          ...(versions.some((version) => version.sourceRunId !== sourceRunId) ? [{ label: "Compare saved plans…", run: () => setCompared(revisionId) }] : []),
         ], [
           { label: "Copy plan text", run: () => copy(text) },
           { label: "Copy plan revision ID", run: () => copy(revisionId) },
@@ -67,6 +78,12 @@ export function RunPlanHistory({ projectId, runId, openActivity }: {
           </details>
         </ContextActions>;
       })}
+      {compared && <SavedAttemptComparison title="Compare saved plans" description="Plan revisions recorded in this attempt’s workflow history."
+        scope={[projectId, runId, "plan"]} choices={choices} sourceId={compared} language="markdown" close={() => setCompared(undefined)}
+        openAttempt={(id) => openActivity(id)} load={async ({ id }) => {
+          const version = versions.find(({ revisionId }) => revisionId === id);
+          return version && { text: version.text };
+        }} />}
       {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
     </div>}
   </details>;
