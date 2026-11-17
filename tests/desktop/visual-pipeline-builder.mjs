@@ -701,3 +701,168 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   }
   return browser;
 }
+
+export async function verifyAuditFactory({ browser, application, checkout, invoke, capture }) {
+  const { checkoutId, checkoutRoot, projectId } = checkout;
+  const nonce = randomUUID().slice(0, 8);
+  const graphName = `Audit desktop ${nonce}`;
+  const samplePrompt = `Plan the public export command for ${nonce}.`;
+  const prompt = `Document the retained export options for ${nonce}.\nKeep the existing response schema.`;
+  const markdownName = `Audit request ${nonce}.md`;
+  const markdown = `# Export request ${nonce}\n\nPreserve the exact saved specification.\n`;
+  const file = join(checkoutRoot, markdownName);
+  await writeFile(file, markdown, { flag: "wx" });
+  const { stdout } = await exec("git", ["rev-parse", "HEAD"], { cwd: checkoutRoot, windowsHide: true });
+  const sourceCommit = stdout.trim();
+  const listDrafts = () => invoke(browser, "list_workflow_packages", { projectId });
+  const listRuns = () => invoke(browser, "list_repository_deliveries", { projectId });
+  const listJobs = async () => (await invoke(browser, "project_job_queue", { projectId })).jobs;
+  const { name: factoryName } = (await invoke(browser, "workflow_factory_templates"))
+    .find(({ id }) => id === "super_ai_development_audit");
+  const previousDrafts = new Set((await listDrafts()).map(({ id }) => id));
+  const previousRuns = new Set((await listRuns()).map(({ id }) => id));
+  const previousJobs = await listJobs();
+
+  await setWindow(browser, invoke, 1440, 900);
+  await openBuilder(browser);
+  await click(browser.$("summary=Start from a template"));
+  await click(browser.$(`button[aria-label="Create ${factoryName} draft"]`));
+  const editor = browser.$('[aria-label="Workflow package editor"]');
+  await textIsVisible(browser, editor.$("h1"), factoryName);
+  let draft;
+  await browser.waitUntil(async () => {
+    draft = (await listDrafts()).find(({ id, name }) => name === factoryName && !previousDrafts.has(id));
+    return Boolean(draft);
+  }, { timeout, timeoutMsg: "Audit factory did not create an editable project draft" });
+  const scope = { projectId, draftId: draft.id };
+  const created = await invoke(browser, "inspect_workflow_package", scope);
+  assert.equal(created.publication, null);
+  const build = editor.$('[aria-label="Build workflow"]');
+  const graphEditor = build.$(builder);
+  await graphEditor.$(canvas).waitForDisplayed({ timeout });
+  await select(graphEditor, "Inspect node", "deliver-backlog");
+  await click(graphEditor.$("button=Open draft child workflow"));
+  const member = build.$(".//label[starts-with(normalize-space(.), 'Graph member')]/select");
+  await browser.waitUntil(async () => await member.getValue() === "task-delivery", { timeout });
+  await select(build, "Graph member", "planning");
+  await select(graphEditor, "Inspect node", start);
+  await replaceText(browser, graphEditor.$(".//label[normalize-space(.)='Pipeline name']/input"), graphName);
+  await click(editor.$("button=Save package revision"));
+  let saved;
+  await browser.waitUntil(async () => {
+    saved = await invoke(browser, "inspect_workflow_package", scope);
+    return saved.revision !== created.revision;
+  }, { timeout, timeoutMsg: "Editing the Audit graph did not save a new revision" });
+  const root = saved.package.members.find(({ key }) => key === "planning");
+  assert.equal(root.body.graph.name, graphName);
+  assert.equal(root.body.graph.nodes.find(({ id }) => id === start).configuration.promptOrMarkdown, true);
+  assert.deepEqual(root.references["deliver-backlog"], { source: "draft", key: "task-delivery" });
+  await capture?.(browser, "visual-audit-factory-editor");
+
+  const review = editor.$('[aria-label="Review workflow package"]');
+  await click(review.$("button=Review changes and simulate"));
+  await select(review, "Review artifact", "planning");
+  await replaceText(browser, review.$(".//label[normalize-space(.)='Sample prompt']/textarea"), samplePrompt);
+  await click(review.$("button=Simulate"));
+  const trace = review.$('[aria-label="Simulation trace"]');
+  await textIsVisible(browser, trace, saved.revision);
+  await click(trace.$("summary=Sample inputs used"));
+  await textIsVisible(browser, trace, samplePrompt);
+  const evidence = trace.$('[aria-label="Simulation node evidence"]');
+  await select(evidence, "Inspect simulated stage", "analyze-repository-agent");
+  await textIsVisible(browser, evidence, "Waiting");
+  assert.deepEqual(new Set((await listRuns()).map(({ id }) => id)), previousRuns);
+  assert.deepEqual(await listJobs(), previousJobs);
+  assert.equal((await invoke(browser, "inspect_workflow_package", scope)).publication, null);
+  await capture?.(browser, "visual-audit-factory-simulation");
+  await click(review.$("button=Review changes and simulate"));
+
+  await click(editor.$("button=Review package publication"));
+  const dialog = browser.$('[role="dialog"]');
+  await textIsVisible(browser, dialog, saved.revision);
+  await click(dialog.$("button=Confirm package publication"));
+  const published = editor.$('[aria-label="Package publication receipt"]');
+  await textIsVisible(browser, published, saved.revision);
+  const { publication } = await invoke(browser, "inspect_workflow_package", scope);
+  assert.equal(publication.reviewedRevision, saved.revision);
+  const { artifact } = publication.members.find(({ key }) => key === root.key);
+  const { id, revision } = artifact.version;
+  const version = { id, revision };
+  const rootReceipt = published.$(`.//li[./p/code[normalize-space(.)='${id}']]`);
+
+  async function openLaunch(source) {
+    const launch = rootReceipt.$('[aria-label="Launch workflow"]');
+    await click(launch.$("button=Run published workflow"));
+    await select(launch, "Published workflow revision", JSON.stringify([id, revision]));
+    const inputs = launch.$('[aria-label="Start inputs"]');
+    await select(inputs, "Checkout", checkoutId);
+    await select(inputs, "Request source", source);
+    const dispatch = inputs.$(".//label[contains(normalize-space(.), 'Dispatch ready workflow stages automatically')]/input");
+    assert.equal(await dispatch.isSelected(), false, "Fixture must leave automatic dispatch disabled");
+    return inputs;
+  }
+
+  async function checkRun(request, savedSource) {
+    let run;
+    await browser.waitUntil(async () => {
+      run = (await listRuns()).find(({ id: runId, version: pin }) =>
+        !previousRuns.has(runId) && pin.id === id && pin.revision === revision);
+      return Boolean(run);
+    }, { timeout, timeoutMsg: "The UI did not launch the published Audit revision" });
+    previousRuns.add(run.id);
+    const execution = browser.$('[aria-label="Pinned workflow execution"]');
+    await textIsVisible(browser, execution, revision);
+    const picker = execution.$(".//label[starts-with(normalize-space(.), 'Saved workflow run')]/select");
+    await browser.waitUntil(async () => await picker.getValue() === run.id, { timeout });
+    const snapshot = await invoke(browser, "inspect_workflow_execution", { projectId, runId: run.id });
+    assert.deepEqual(snapshot.run.version, version);
+    assert.equal(snapshot.definition.name, graphName);
+    assert.equal(snapshot.launch.workflowRunId, run.id);
+    assert.equal(snapshot.launch.origin.kind, "editor");
+    assert.equal(snapshot.launch.checkoutId, checkoutId);
+    assert.equal(snapshot.launch.sourceCommit, sourceCommit);
+    assert.equal(snapshot.launch.automatic ?? false, false);
+    assert.deepEqual(snapshot.launch.inputs ?? {}, savedSource ? {} : { prompt: request });
+    const outputs = snapshot.outputs.filter(({ current, artifact }) => current && artifact.nodeInstanceId === start);
+    assert.deepEqual(outputs.find(({ artifact }) => artifact.port === "inputs")?.artifact.value,
+      { kind: "json_object", evidence: { request } });
+    const document = outputs.find(({ artifact }) => artifact.port === "document")?.artifact.value;
+    assert.equal(snapshot.jobs.length, 0);
+    if (savedSource) {
+      assert.equal(document?.kind, "markdown");
+      for (const field of ["id", "relativePath", "sha256", "checkoutId"]) {
+        assert.equal(snapshot.launch.source[field], savedSource[field]);
+        assert.equal(document.evidence[field], savedSource[field]);
+      }
+    } else {
+      assert.equal(snapshot.launch.source ?? null, null);
+      assert.equal(document, undefined);
+    }
+  }
+
+  const promptInputs = await openLaunch("prompt");
+  await replaceText(browser, promptInputs.$(".//label[normalize-space(.)='Prompt']/textarea"), prompt);
+  await click(promptInputs.$("button=Start workflow"));
+  await checkRun(prompt);
+  await capture?.(browser, "visual-audit-factory-prompt");
+
+  await openBuilder(browser);
+  await click(browser.$(`.//li[.//strong[normalize-space(.)='${factoryName}']]//button[normalize-space(.)='Open package']`));
+  const markdownInputs = await openLaunch("markdown");
+  const source = markdownInputs.$('[aria-label="Repository Markdown source"]');
+  await chooseMarkdown(application, source.$("button=Select Markdown file"), file);
+  let savedSource;
+  await browser.waitUntil(async () => {
+    savedSource = (await invoke(browser, "list_repository_markdown_revisions", { checkoutId }))
+      .find(({ relativePath }) => relativePath === markdownName);
+    return Boolean(savedSource);
+  }, { timeout, timeoutMsg: "The Markdown picker did not capture the Audit source revision" });
+  assert.equal(savedSource.sha256, createHash("sha256").update(markdown).digest("hex"));
+  await writeFile(file, "# A newer unsaved Markdown revision\n");
+  await select(source, "Saved source revision", savedSource.id);
+  await click(source.$("button=Start workflow"));
+  await checkRun(markdown, savedSource);
+  assert.deepEqual(new Set((await listRuns()).map(({ id }) => id)), previousRuns);
+  assert.deepEqual(await listJobs(), previousJobs);
+  await capture?.(browser, "visual-audit-factory-markdown");
+}

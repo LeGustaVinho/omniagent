@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Key, remote } from "webdriverio";
 
-import { verifyVisualPipelineBuilder } from "./visual-pipeline-builder.mjs";
+import { verifyAuditFactory, verifyVisualPipelineBuilder } from "./visual-pipeline-builder.mjs";
 
 const fixtureIdentifier = "io.github.legustavinho.omniagent.desktop-tests";
 const packagedOrigin = "http://tauri.localhost";
@@ -2017,6 +2017,28 @@ test("builds, simulates and executes a real pipeline visually", { timeout: 180_0
         return browser;
       },
     });
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("publishes and launches the Audit factory from prompt and Markdown", { timeout: 180_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Audit factory checkout");
+  git(scratch, "init", "-q", repo);
+  await writeFile(join(repo, "README.md"), "# Audit factory test\n");
+  git(repo, "add", "README.md");
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Audit factory fixture");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    await verifyAuditFactory({ browser, application, checkout, invoke, capture });
   } finally {
     await browser?.deleteSession().catch(() => undefined);
     driver.kill();

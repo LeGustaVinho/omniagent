@@ -680,7 +680,11 @@ impl<'a> Evaluation<'a> {
             dependencies
                 .iter()
                 .filter_map(|(wire, outcome)| match outcome {
-                    Arrival::Selected(Some(artifact)) => {
+                    Arrival::Selected(Some(artifact))
+                        if !node.definition.inputs.iter().any(|port| {
+                            port.value == PortType::Control && port.name == wire.to.port
+                        }) =>
+                    {
                         Some((wire.to.port.clone(), artifact.clone()))
                     }
                     _ => None,
@@ -1693,7 +1697,7 @@ impl<'a> Evaluation<'a> {
             return Ok(Arrival::Ignored);
         }
         Ok(artifact.map_or(Arrival::Pending, |artifact| {
-            Arrival::Selected((port.value != PortType::Control).then_some(artifact))
+            Arrival::Selected(Some(artifact))
         }))
     }
 
