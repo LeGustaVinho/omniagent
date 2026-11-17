@@ -22,7 +22,7 @@ import { checkoutFavoriteKey, reconcileFavoriteItems, setCheckoutFavorites, useC
   type CheckoutNoteFavorite } from "@/checkout-favorites";
 import { deliveryNote, exampleNotes, fileName, findFileText, normalizeRepositoryPath, type ExampleFile } from "@/ide-knowledge-data";
 import {
-  anchorLine, favoriteAnchorLine, getProperties, headings, noteAnchorExcerpt, noteAnchorIdentity, parseReadingAddress, readingLocalAddress, repairWikiAddress, resolveWiki, rewriteNoteReferences,
+  anchorLine, favoriteAnchorLine, headings, noteAnchorExcerpt, noteAnchorIdentity, noteFrontmatter, parseReadingAddress, readingLocalAddress, repairWikiAddress, resolveWiki, rewriteNoteReferences,
   updateProperty, wikiLinks, type NoteAnchorKind, type NoteLocation, type NoteTarget,
 } from "@/knowledge-document";
 import { AttachmentPreview, downloadNoteDiagramPng, noteAttachments, type NoteAttachment } from "@/knowledge-media";
@@ -34,6 +34,7 @@ import type { NoteJump } from "@/knowledge-editor";
 import { useRepositoryNotes, type NoteBuffer, type NoteRevision } from "@/repository-note-buffers";
 import { downloadRepositoryAttachment, readExactRepositoryAttachment, RepositoryNoteMedia } from "@/repository-note-media";
 import { NotePropertyEditor } from "@/note-property-editor";
+import { useKnowledgeProperties, useKnowledgePropertySearch, type NotePropertyFilter, type NoteYamlProperty } from "@/knowledge-properties";
 import { ResizablePanel } from "@/panel-resize";
 import { KnowledgeLinks, KnowledgeOutline, KnowledgeSearch, type KnowledgeLocation, type KnowledgeOutgoingLink } from "@/knowledge-navigation";
 import { useRepositoryNoteIndex } from "@/repository-note-index";
@@ -70,6 +71,7 @@ type KnowledgeDialog =
   | { kind: "extract"; path: string; selection: NoteSelection; ownerPanel?: FilePanelApi }
   | { kind: "merge"; source: string; destination?: string; ownerPanel?: FilePanelApi }
   | { kind: "tagRename"; tag: string; ownerPanel?: FilePanelApi }
+  | { kind: "property"; path: string; property: NoteYamlProperty; source: string; ownerPanel?: FilePanelApi }
   | { kind: "conflict"; path: string; external: string; ownerPanel?: FilePanelApi }
   | { kind: "rename"; path: string }
   | { kind: "repositoryRename"; path: string; revision: string }
@@ -122,8 +124,10 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const [sidebar, setSidebar] = useFileSidebar();
   const [display, setDisplay] = useState<"tree" | "search">("tree");
   const [query, setQuery] = useState("");
+  const [propertyFilter, setPropertyFilter] = useState<NotePropertyFilter>();
   const [focusSearch, requestSearchFocus] = useState(0);
-  const noteIndex = useRepositoryNoteIndex(checkout.checkoutId, !simulated, query);
+  const noteIndex = useRepositoryNoteIndex(checkout.checkoutId, !simulated, propertyFilter ? "" : query);
+  const propertiesOf = useKnowledgeProperties(Object.values(notes).map(({ content }) => content), simulated);
   const [graph, setGraph] = useState(false);
   const graphEdges = useQuery({
     queryKey: ["repository-note-edges", checkout.checkoutId, noteIndex.index.dataUpdatedAt],
@@ -160,6 +164,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const canPlan = savedNote ? canLaunchFromNote : !isDirty(note);
   const conflictRecovery = dialog?.kind === "conflict" ? repository.notes[dialog.path]?.recovery : undefined;
   const source = note?.content ?? "";
+  const activeProperties = propertiesOf(source);
   const editorMode = (path: string) => mode === "reading" && editAlongsideReading.has(path) ? "live" : mode;
   const activeMode = dock.view === "reading" ? "reading" : active ? editorMode(active) : mode;
   const showIndexed = !simulated && Boolean(active) && noteIndex.index.isSuccess;
@@ -185,7 +190,14 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   }, [notes, noteIndex.index.data, repository.catalog, repository.draftPaths, simulated]);
   const previews = useRepositoryLinkPreviews(checkout.checkoutId, catalog, noteIndex.index.dataUpdatedAt, !simulated);
   const lookupLink = useCallback((link: NoteTarget, from: string) => linkPreviewValue(previews.data, link, from), [previews.data]);
-  const matches = simulated ? findFileText(catalog, query, true).map(({ path, line, excerpt }) => ({ path, line, snippet: excerpt })) : noteIndex.hits;
+  const drafts = useMemo(() => Object.fromEntries(Object.entries(repository.notes).filter(([, value]) => isDirty(value) && !value.sourceProblem)
+    .map(([path, { content }]) => [path, noteFrontmatter(content)])), [repository.notes]);
+  const propertySearch = useKnowledgePropertySearch({ checkoutId: checkout.checkoutId, simulated, filter: propertyFilter, catalog, drafts,
+    indexVersion: noteIndex.index.dataUpdatedAt });
+  const needle = query.trim().toLocaleLowerCase();
+  const matches = propertyFilter ? propertySearch.hits.filter(({ path, title }) => !needle || path.toLocaleLowerCase().includes(needle)
+    || title?.toLocaleLowerCase().includes(needle))
+    : simulated ? findFileText(catalog, query, true).map(({ path, line, excerpt }) => ({ path, line, snippet: excerpt })) : noteIndex.hits;
   const outgoing = wikiLinks(source);
   const exampleBacklinks = simulated && active && inspector === "links" ? catalog.flatMap(({ path, content }) => {
     if (path === active) return [];
@@ -627,8 +639,24 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   };
 
   const searchForTag = (tag: string) => {
+    setPropertyFilter(undefined);
     setQuery("#" + tag); setSidebar(true); setDisplay("search"); requestSearchFocus((before) => before + 1);
   };
+  const searchForProperty = ({ name, value }: NotePropertyFilter) => {
+    setPropertyFilter({ name, value });
+    setQuery(""); setSidebar(true); setDisplay("search"); requestSearchFocus((before) => before + 1);
+  };
+  const propertySource = (path: string) => {
+    if (simulated) return notes[path]?.external === undefined ? notes[path]?.content : undefined;
+    const current = getNote(path);
+    return current && !current.sourceProblem && !current.incoming && current.external === undefined ? current.content : undefined;
+  };
+  const propertyActions = (path: string, { name, value, line, filterable }: NoteYamlProperty): MenuGroups[number] => [
+    { label: "Go to property in source", run: () => open(path, line, undefined, "source") },
+    { label: "Copy property name", run: () => menu.copy(name, "Copied property name") },
+    { label: "Copy property value", run: () => menu.copy(value, "Copied property value") },
+    ...(filterable ? [{ label: "Find notes with this property value", run: () => searchForProperty({ name, value }) }] : []),
+  ];
   const tagActions = (tag: string, ownerPanel?: FilePanelApi): MenuGroups[number] => [
     { label: "Copy tag", run: () => menu.copy("#" + tag, "Copied tag") },
     { label: "Search notes for tag", run: () => searchForTag(tag) },
@@ -638,6 +666,10 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   ];
   const noteContextActions = ({ path, line, anchor, anchorKind, anchorLine: hitAnchorLine, link, attachment, tag, excerpt, selection: noteSelection, property, mermaid, diagramImage }: NoteContextHit, reading: boolean, ownerPanel?: FilePanelApi): MenuGroups => {
     const groups: MenuGroups[number][] = [];
+    const propertySnapshot = notes[path]?.content;
+    const properties = propertySnapshot === undefined ? [] : propertiesOf(propertySnapshot).rows.filter((row) => row.line === line
+      && (!property || row.name === property.name && row.value === property.value));
+    const selectedProperty = properties.length === 1 ? properties[0] : undefined;
     if (attachment && !simulated) groups.push(...attachmentActions(attachment.paths, attachment.label));
     if (link) {
       const from = link.sourcePath ?? path;
@@ -674,9 +706,15 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         ] : []),
       ]);
     }
-    if (reading && line) groups.push([{ label: anchorKind === "heading" ? "Edit heading in source" : "Go to source",
+    if (reading && line && !selectedProperty) groups.push([{ label: anchorKind === "heading" ? "Edit heading in source" : "Go to source",
       run: () => open(path, hitAnchorLine ?? line, anchor, "source") }]);
-    if (property) groups.push([
+    if (selectedProperty) groups.push([
+      ...(selectedProperty.editable && propertySnapshot !== undefined && propertySource(path) === propertySnapshot ? [{
+        label: "Edit property…", run: () => setDialog({ kind: "property", path, property: selectedProperty, source: propertySnapshot, ownerPanel }),
+      }] : []),
+      ...propertyActions(path, selectedProperty),
+    ]);
+    else if (property) groups.push([
       { label: "Copy property name", run: () => menu.copy(property.name, "Copied property name") },
       { label: "Copy property value", run: () => menu.copy(property.value, "Copied property value") },
     ]);
@@ -774,7 +812,13 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         </div>
         <div className="file-sidebar-scroll">
           {display === "search" ? <KnowledgeSearch query={query} onQueryChange={setQuery} results={matches}
-            pending={!simulated && noteIndex.searching} error={!simulated && noteIndex.error ? String(noteIndex.error) : undefined}
+            pending={propertyFilter ? propertySearch.pending : !simulated && noteIndex.searching}
+            error={!simulated && (propertyFilter ? noteIndex.index.error ?? propertySearch.error : noteIndex.error) ?
+              String(propertyFilter ? noteIndex.index.error ?? propertySearch.error : noteIndex.error) : undefined}
+            filter={propertyFilter && <div className="file-field">
+              <span className="min-w-0 flex-1 break-words">{propertyFilter.name}: {propertyFilter.value || "(empty)"}</span>
+              <button type="button" className="fw-btn" aria-label="Clear property filter" onClick={() => setPropertyFilter(undefined)}>Clear</button>
+            </div>}
             focusRequest={focusSearch} onOpen={openLocation} />
             : <FileTree paths={catalog.map(({ path }) => path)} folders={treeActions.folders} active={active} onOpen={open} onOpenNoteFavorite={openNoteFavorite} checkoutId={checkout.checkoutId} workspace="knowledge" simulated={simulated} reveal={reveal} actions={(item, selection) => selection ? [
               [
@@ -873,6 +917,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                           contextActions={(hit) => noteContextActions(hit, false, ownerPanel)} />
                       </div>}
                       {selectedMode === "reading" && <Reading path={path} content={entry.content} files={catalog} jump={jumps[path]} onLink={onLink}
+                        properties={propertiesOf(entry.content).rows}
                         checkoutId={simulated ? undefined : checkout.checkoutId} sampleAttachments={simulated}
                         resolveLinks={simulated ? undefined : lookupLink}
                         previewFor={simulated ? undefined : previewNote} contextActions={(hit) => noteContextActions(hit, true, ownerPanel)}
@@ -933,15 +978,15 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                       resolution.kind === "missing_anchor" ? link.anchor : undefined, entry.source.line ?? undefined, !link.wiki);
                   }} />}
                 {inspector === "properties" && <section aria-label="Properties"><h3>Properties</h3>
-                  {getProperties(source).map(({ key, value, line }, index) =>
-                    <NotePropertyEditor key={`${active}:${key}:${index}`} name={key} value={value}
-                      read={() => simulated ? note?.content : getNote(active)?.content}
-                      replace={simulated ? updateProperty : undefined} update={(content) => update(active, content)} actions={[
-                        { label: "Go to property in source", run: () => open(active, line, undefined, "source") },
-                        { label: "Copy property name", run: () => menu.copy(key, "Copied property name") },
-                        { label: "Copy property value", run: () => menu.copy(value, "Copied property value") },
-                      ]} />)}
-                  {getProperties(source).length === 0 && <p className="file-help">This note has no frontmatter properties.</p>}
+                  {activeProperties.pending && <p role="status" className="file-help">Reading YAML properties…</p>}
+                  {activeProperties.error && <p role="alert" className="file-help">{String(activeProperties.error)}</p>}
+                  {activeProperties.rows.map((property, index) =>
+                    <NotePropertyEditor key={`${active}:${property.name}:${index}`} name={property.name} value={property.value}
+                      editable={property.editable && propertySource(active) !== undefined} read={() => propertySource(active)}
+                      replace={simulated ? updateProperty : undefined} update={(content) => update(active, content)}
+                      actions={propertyActions(active, property)} />)}
+                  {activeProperties.rows.length === 0 && !activeProperties.pending && !activeProperties.error &&
+                    <p className="file-help">This note has no frontmatter properties.</p>}
                   {!isDirty(note) && previewNote(active)?.tags?.length ? <ul aria-label="Tags in this note" className="flex flex-wrap gap-1 pt-2">
                     {previewNote(active)?.tags.map((tag) => <li key={tag}>
                       <ContextActions label={"#" + tag} groups={[tagActions(tag)]}>
@@ -1008,6 +1053,11 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       {treeActions.dialog}
       {filePreview.dialog}
       {conversationActions.dialog}
+      {dialog?.kind === "property" && <FileDialog title="Edit YAML property" description={dialog.path} ownerPanel={dialog.ownerPanel} onClose={closeDialog}>
+        <NotePropertyEditor name={dialog.property.name} value={dialog.property.value} expectedSource={dialog.source} focus
+          read={() => propertySource(dialog.path)} replace={simulated ? updateProperty : undefined}
+          update={(content) => { update(dialog.path, content); closeDialog(); setStatus("Updated property in the note draft."); }} />
+      </FileDialog>}
       {dialog?.kind === "extract" && <ExtractNoteDialog ownerPanel={dialog.ownerPanel} path={dialog.path} selection={dialog.selection} folders={treeActions.folders}
         onClose={closeDialog} onExtract={(options) => repository.extractSelection(dialog.path, dialog.selection, options)}
         onCreated={(path, replaced) => {

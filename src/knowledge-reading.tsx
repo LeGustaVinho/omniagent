@@ -12,6 +12,7 @@ import { isContextKey, useNoteContextMenu, type NoteContextActions, type NoteCon
 import { fileName, type ExampleFile } from "@/ide-knowledge-data";
 import { NoteDiagram, noteAttachments, type NoteAttachment } from "@/knowledge-media";
 import { markdownHighlight } from "@/markdown-highlight";
+import type { NoteYamlProperty } from "@/knowledge-properties";
 import { noteAttachmentCandidates, RepositoryNoteMedia } from "@/repository-note-media";
 import type { IndexedLinkResolution } from "@/repository-note-links";
 import "katex/dist/katex.css";
@@ -166,6 +167,7 @@ type ReadingProps = {
   resolveLinks?: (link: NoteTarget, from: string) => IndexedLinkResolution | undefined;
   previewFor?: (path: string) => { title: string; preview?: string | null } | undefined;
   contextActions?: NoteContextActions;
+  properties?: readonly Pick<NoteYamlProperty, "name" | "value" | "line">[];
 };
 const ReadingContext = createContext<ReadingProps & { anchorScope: string }>(null!);
 
@@ -316,7 +318,7 @@ export function NoteReading(props: ReadingProps) {
     if (target?.status !== "resolved") return [];
     return [{ path: target.location.path, anchor: target.location.anchor ?? undefined }];
   } : undefined, jump?.line);
-  const properties = getProperties(content);
+  const properties = props.properties ?? getProperties(content).map(({ key, value, line }) => ({ name: key, value, line }));
   const plugins: NonNullable<MarkdownOptions["rehypePlugins"]> = [[markReadingOrigins, origins]];
   if (renderedLine !== undefined) plugins.push([markReadingLine, renderedLine]);
   if (contextActions) plugins.push([readingSections, collapsed]);
@@ -375,9 +377,9 @@ export function NoteReading(props: ReadingProps) {
     }}>
       <article>
         {properties.length > 0 && <dl aria-label="Properties" className="note-reading-properties">
-          {properties.map(({ key, value, line }, index) => <div key={`${key}:${index}`} data-note-property={key} data-note-property-value={value}
+          {properties.map(({ name, value, line }, index) => <div key={`${name}:${index}`} data-note-property={name} data-note-property-value={value}
             data-note-source={path} data-note-line={line} data-note-end-line={line} tabIndex={contextActions ? 0 : undefined}>
-            <dt>{key}</dt><dd>{value}</dd>
+            <dt>{name}</dt><dd className="whitespace-pre-wrap">{value}</dd>
           </div>)}
         </dl>}
         <ReadingContext.Provider value={{ ...props, anchorScope }}>

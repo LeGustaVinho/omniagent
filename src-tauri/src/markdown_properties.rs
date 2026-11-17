@@ -1,10 +1,116 @@
-use std::ops::Range;
+use std::{collections::BTreeMap, ops::Range};
 
 use anyhow::{Context, Result, ensure};
+use serde::Serialize;
 use yaml_edit::{Mapping, MappingEntry, TextPosition, YamlFile, YamlNode};
 
 #[cfg(test)]
 mod tests;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkdownProperty {
+    pub name: String,
+    pub value: String,
+    pub line: usize,
+    pub editable: bool,
+    pub filterable: bool,
+}
+
+pub fn describe_markdown_properties(markdown: &str) -> Result<Vec<MarkdownProperty>> {
+    let Some(frontmatter) = frontmatter_body(markdown) else {
+        return Ok(Vec::new());
+    };
+    let body = &markdown[frontmatter.clone()];
+    if body
+        .lines()
+        .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
+    {
+        return Ok(Vec::new());
+    }
+    let yaml: YamlFile = body.parse().context("Invalid YAML frontmatter")?;
+    let mapping = root_mapping(&yaml)?;
+    let entries = mapping
+        .entries()
+        .filter_map(|entry| {
+            let key = entry.key_node()?;
+            let name = key.as_scalar()?.as_string();
+            if !entry.key_matches(&name) {
+                return None;
+            }
+            let line = source_line(
+                markdown,
+                frontmatter.start + key.byte_range().start as usize,
+            );
+            let value = entry.value_node()?;
+            let raw = &body[bytes(value.byte_range())];
+            Some((name, line, raw.to_owned(), value))
+        })
+        .collect::<Vec<_>>();
+    let mut counts = BTreeMap::new();
+    for (name, _, _, _) in &entries {
+        *counts.entry(name.clone()).or_insert(0usize) += 1;
+    }
+    Ok(entries
+        .into_iter()
+        .map(|(name, line, value, node)| {
+            let editable = counts[&name] == 1
+                && !value.contains(['\r', '\n'])
+                && !matches!(node, YamlNode::Alias(_));
+            let filterable =
+                editable && parse_value(&value).is_ok_and(|standalone| standalone.yaml_eq(&node));
+            MarkdownProperty {
+                name,
+                value,
+                line,
+                editable,
+                filterable,
+            }
+        })
+        .collect())
+}
+
+pub fn comparable_markdown_property(value: &str) -> Result<YamlNode> {
+    let node = parse_value(value)?;
+    ensure!(
+        node.yaml_eq(&node),
+        "This YAML value cannot be compared outside its frontmatter"
+    );
+    Ok(node)
+}
+
+pub fn matching_markdown_property(
+    markdown: &str,
+    key: &str,
+    expected: &YamlNode,
+) -> Option<(usize, String)> {
+    let frontmatter = frontmatter_body(markdown)?;
+    let body = &markdown[frontmatter.clone()];
+    let yaml = body.parse::<YamlFile>().ok()?;
+    let mapping = root_mapping(&yaml).ok()?;
+    let entry = property(&mapping, key).ok()?;
+    let key = entry.key_node()?;
+    let value = entry.value_node()?;
+    let raw = &body[bytes(value.byte_range())];
+    if raw.contains(['\r', '\n']) || !expected.yaml_eq(&value) {
+        return None;
+    }
+    Some((
+        source_line(
+            markdown,
+            frontmatter.start + key.byte_range().start as usize,
+        ),
+        raw.to_owned(),
+    ))
+}
+
+fn source_line(markdown: &str, offset: usize) -> usize {
+    markdown[..offset]
+        .match_indices(['\r', '\n'])
+        .filter(|(at, symbol)| *symbol == "\n" || !markdown[*at..].starts_with("\r\n"))
+        .count()
+        + 1
+}
 
 /// Replaces one existing top-level property with the supplied YAML value. The result is an
 /// edited buffer, ready for the same revision-checked save as a direct source edit.

@@ -44,6 +44,12 @@ function frontmatter(content: string): Frontmatter | undefined {
   return { start: result[1], body: result[2], end: result[3] };
 }
 
+export function noteFrontmatter(content: string) {
+  if (!/^\uFEFF?---[ \t]*(?:\r\n|\r|\n)/.test(content)) return null;
+  const block = frontmatter(content) ?? frontmatter(content.replace(/\r(?!\n)/g, "\n"));
+  return block ? content.slice(0, block.start.length + block.body.length + block.end.length) : null;
+}
+
 function lineParts(line: string) {
   const found = /^([\w-]+)(:[ \t]*)(.*)$/.exec(line);
   if (!found?.[1] || !found[2]) return;

@@ -7,6 +7,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import KnowledgeWorkspace from "@/knowledge-workspace";
+import { getProperties, noteFrontmatter } from "@/knowledge-document";
 import type { NoteRevision } from "@/repository-note-buffers";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
 
@@ -54,6 +55,83 @@ const documentAt = (relativePath: string, id: string, markdown: string) => ({
   revision: { id, checkoutId, relativePath, sha256: id + "-sha256", baseCommit: null } satisfies NoteRevision,
   markdown,
   fileIdentity: relativePath,
+});
+
+it("edits the exact Reading property in the draft and searches same-value notes with the new YAML overlay", async () => {
+  const source = "\uFEFF---\r\n'phase': 'ready'  # preserve me\r\nflag: one\r\n'flag': two\r\n---\r\n# Review release\r\n";
+  const updated = source.replace("'ready'", '"done"');
+  const other = "notes/Second.md";
+  const fixture = mockRepository([documentAt(release, "phase-note", source), documentAt(other, "matching-note", "---\nphase: done\n---\n# Second\n")]);
+  const normal = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "describe_note_properties") {
+      const markdown = (args as { markdown: string }).markdown;
+      if (markdown.includes("'phase':")) return [
+        { name: "phase", line: 2, value: markdown.includes('"done"') ? '"done"' : "'ready'", editable: true, filterable: true },
+        { name: "flag", line: 3, value: "one", editable: false, filterable: false },
+        { name: "flag", line: 4, value: "two", editable: false, filterable: false },
+      ];
+    }
+    if (command === "replace_note_property") {
+      expect(args).toEqual({ markdown: source, key: "phase", value: '"done"' });
+      return updated;
+    }
+    if (command === "search_repository_note_properties") {
+      expect(args).toEqual({ checkoutId, key: "phase", value: '"done"', drafts: { [release]: noteFrontmatter(updated) } });
+      return [{ path: other, title: "Second", line: 2, value: "done" }];
+    }
+    return normal(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await editor(release);
+  await user.click(screen.getByRole("button", { name: "Reading" }));
+  const reading = within(await screen.findByLabelText(`Reading view for ${release}`));
+  await reading.findByText("phase", { selector: "dt" });
+  fireEvent.contextMenu(reading.getByText("two", { selector: "dd" }));
+  expect(await screen.findByRole("menuitem", { name: "Copy property value" })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Edit property…" })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: "Find notes with this property value" })).toBeNull();
+  await user.keyboard("{Escape}");
+
+  fireEvent.contextMenu(reading.getByText("phase", { selector: "dt" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Edit property…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Edit YAML property" }));
+  const field = dialog.getByRole("textbox", { name: "phase" });
+  expect(field).toHaveProperty("value", "'ready'");
+  await user.clear(field);
+  await user.type(field, '"done"');
+  await user.click(dialog.getByRole("button", { name: "Apply" }));
+  await waitFor(() => expect(fixture.drafts.get(release)?.markdown).toBe(updated));
+  expect(fixture.writes).not.toHaveBeenCalled();
+
+  fireEvent.contextMenu(await reading.findByText('"done"', { selector: "dd" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Find notes with this property value" }));
+  const match = await screen.findByRole("option", { name: /Second.*Line 2.*phase: done/ });
+  await user.click(match);
+  expect(await screen.findByLabelText(`Reading view for ${other}`)).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Clear property filter" }));
+  expect(screen.queryByRole("button", { name: "Clear property filter" })).toBeNull();
+});
+
+it.each(["Source", "Live Preview"])("offers the exact YAML property menu in %s", async (mode) => {
+  mockRepository();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={checklist} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(checklist);
+  await user.click(screen.getByRole("button", { name: "Note details" }));
+  await user.click(screen.getByRole("button", { name: "Properties" }));
+  await screen.findByRole("textbox", { name: "aliases" });
+  await user.click(screen.getByRole("button", { name: mode }));
+  vi.spyOn(view, "coordsAtPos").mockReturnValue(null);
+  act(() => view.dispatch({ selection: { anchor: view.state.doc.line(2).from + 2 } }));
+  fireEvent.keyDown(view.contentDOM, { key: "F10", shiftKey: true });
+  expect(screen.queryByRole("menuitem", { name: "Format Markdown" })).toBeNull();
+  await user.click(await screen.findByRole("menuitem", { name: "Edit property…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Edit YAML property" }));
+  expect(dialog.getByRole("textbox", { name: "aliases" })).toHaveProperty("value", "[Launch checklist]");
 });
 
 type NoteChange = { checkoutId: string; relativePath: string };
@@ -119,6 +197,8 @@ function mockRepository(extra: DocumentFixture[] = []) {
       }
       case "unwatch_repository_note": return;
       case "analyze_note_markdown": return { bufferRevision: input.bufferRevision, nodes: [] };
+      case "describe_note_properties": return getProperties(input.markdown).map(({ key, value, line }) => ({ name: key, value, line,
+        editable: true, filterable: true }));
       case "save_repository_markdown_draft": {
         const base = Array.from(onDisk.values()).find(({ revision }) => revision.id === input.baseRevision)?.revision;
         if (!base || input.expectedDraftRevision !== (drafts.get(base.relativePath)?.revision ?? null)) {
