@@ -396,19 +396,21 @@ impl RunningTurn {
             TurnState::Running
         };
         let action_outcome = turn.request.request.action.as_ref().and_then(|action| {
+            let target = definition
+                .nodes
+                .iter()
+                .find(|node| node.instance.id == action.node_id);
             if matches!(state, TurnState::Running)
-                || jobs
+                || target.is_some_and(|node| {
+                    super::super::structured_agent::configuration(node).is_none()
+                }) && jobs
                     .iter()
                     .any(|job| job.node_id == action.node_id && !job.attempts.is_empty())
             {
                 return None;
             }
             let mut outcome = ActionOutcome::not_executed(&action.node_id);
-            outcome.label = definition
-                .nodes
-                .iter()
-                .find(|node| node.instance.id == action.node_id)
-                .map(stage_label);
+            outcome.label = target.map(stage_label);
             if skipped.contains(action.node_id.as_str()) {
                 outcome.state = "skipped";
             }

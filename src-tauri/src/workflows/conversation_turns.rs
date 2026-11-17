@@ -40,6 +40,7 @@ pub(crate) use dispatch::prepare_next_conversation_stage;
 use dispatch::{RunningTurn, TurnState};
 pub(super) use native::{NativeOutcome, WORKFLOW_ID as DIRECT_WORKFLOW_ID, native_outcome};
 pub(crate) use native::{is_conversation_template, launch_direct_turn, pin_direct_conversation};
+pub(super) use native::validate_conversation_template;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -487,6 +488,7 @@ fn agents(
                     });
                 let action_eligible = !units.contains(node.instance.id.as_str())
                     && !super::automation::prompt_delegate(node)
+                    && super::structured_agent::configuration(node).is_none()
                     && !matches!(
                         node.instance.kind,
                         BuiltinNode::ReviewCandidate | BuiltinNode::ReviewDiffCandidate

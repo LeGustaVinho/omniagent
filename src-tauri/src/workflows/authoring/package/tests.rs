@@ -74,6 +74,7 @@ fn package(members: Vec<PackageMember>) -> WorkflowPackage {
 #[tokio::test]
 async fn pins_typed_prompt_ports_and_isolates_prefab_overrides() -> Result<()> {
     use crate::{
+        conversations::ConversationPipelineChoice,
         jobs::AdmissionEnvironment,
         workflows::{
             ArtifactValue, WorkflowLaunchRequest, control::ControlStageState,
@@ -91,7 +92,8 @@ async fn pins_typed_prompt_ports_and_isolates_prefab_overrides() -> Result<()> {
     };
     template.review_policy = TemplateReviewPolicy::Independent;
     let contract = serde_json::from_value(json!({
-        "kind":"schema", "fields":[{"name":"reply","required":true,"type":"string"}]
+        "kind":"schema", "fields":[{"name":"reply","required":true,"type":"string"},
+            {"name":"message","required":false,"type":"string"}]
     }))?;
     let mut prompt = member(
         "prefab",
@@ -110,7 +112,7 @@ async fn pins_typed_prompt_ports_and_isolates_prefab_overrides() -> Result<()> {
             "kind":"pipeline", "graph":{
                 "name":"Typed Prompt pipeline",
                 "nodes":[
-                    {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","fields":[]}},
+                    {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","conversation":true,"fields":[]}},
                     {"id":"first","kind":"subflow","configuration":{"kind":"prompt_overrides","prompt":"First: {{input.reply}}"}},
                     {"id":"second","kind":"subflow","configuration":{"kind":"prompt_overrides","roleOverrides":{"instructions":"Second reviewer."}}},
                     {"id":"end","kind":"end","configuration":{"kind":"end"}}
@@ -146,6 +148,24 @@ async fn pins_typed_prompt_ports_and_isolates_prefab_overrides() -> Result<()> {
         .await?;
     let published = commit(&store, &project, &draft).await?;
     let version = artifact(&published, "pipeline").version.clone();
+    let chat = store
+        .create_conversation_with_pipeline(
+            repo.checkout_id.clone(),
+            "Typed Prompt chat".into(),
+            ConversationPipelineChoice::Published {
+                workflow: crate::workflows::WorkflowRevision {
+                    id: version.id.clone(),
+                    revision: version.revision.clone(),
+                },
+            },
+        )
+        .await?;
+    let schema = serde_json::to_value(store.conversation_pipeline_schema(chat.id).await?)?;
+    let agents = schema["agents"]
+        .as_array()
+        .context("Expected typed agents")?;
+    assert_eq!(agents.len(), 2);
+    assert!(agents.iter().all(|agent| agent["actionEligible"] == false));
     let launch: WorkflowLaunchRequest = serde_json::from_value(json!({
         "projectId":project, "checkoutId":repo.checkout_id, "requestId":"typed-prompt-test",
         "workflow":{"id":version.id,"revision":version.revision},"inputs":{"reply":"Hello"}
@@ -209,8 +229,8 @@ async fn pins_typed_prompt_ports_and_isolates_prefab_overrides() -> Result<()> {
             .workflow_output_schema_for_attempt(first.run.id.clone())
             .await?,
         Some(json!({
-            "type":"object","properties":{"reply":{"type":"string"}},
-            "required":["reply"],"additionalProperties":false
+            "type":"object","properties":{"message":{"type":["string","null"]},"reply":{"type":"string"}},
+            "required":["message","reply"],"additionalProperties":false
         }))
     );
     complete_response(&store, &first, r#"{"reply":"first answer"}"#, None).await?;

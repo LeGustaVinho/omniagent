@@ -58,7 +58,7 @@ async fn an_end_reply_settles_the_chat_while_another_branch_waits() -> Result<()
             _ => {}
         }
     }
-    let graph = serde_json::from_value(json!({
+    let graph: WorkflowGraph = serde_json::from_value(json!({
         "name":"Early reply",
         "nodes":[
             {"id":"start","kind":"typed_start","configuration":{"kind":"typed_start","conversation":true,"fields":[{"name":"message","valueType":"text","required":true,"conversationSource":"message"}]}},
@@ -73,6 +73,19 @@ async fn an_end_reply_settles_the_chat_while_another_branch_waits() -> Result<()
             {"from":{"node":"answer","port":"object"},"to":{"node":"end","port":"result"}}
         ]
     }))?;
+    let mut missing_message = graph.clone();
+    missing_message.nodes[0].configuration = serde_json::from_value(json!({
+        "kind":"typed_start", "conversation":true, "fields":[]
+    }))?;
+    let invalid = compile_resolved_graph(
+        "missing-message".into(),
+        missing_message,
+        |node| catalog.iter().find(|entry| entry.kind == node.kind),
+        true,
+    )
+    .err()
+    .context("Expected a missing Start message diagnostic")?;
+    assert!(invalid.to_string().contains("text message input on Start"));
     let definition = compile_resolved_graph(
         "early-reply".into(),
         graph,

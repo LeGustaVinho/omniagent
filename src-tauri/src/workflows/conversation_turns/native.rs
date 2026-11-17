@@ -283,22 +283,32 @@ pub(in crate::workflows) fn native_outcome(
 }
 
 pub(crate) fn is_conversation_template(definition: &WorkflowDefinition) -> bool {
-    if !super::WorkflowStartSchema::for_definition(definition)
-        .is_some_and(|schema| schema.conversation_enabled())
-    {
-        return false;
-    }
-    root_end(definition)
-        .and_then(|node| node.definition.output_schemas.get("result"))
-        .is_some_and(|schema| {
-            schema
-                .pointer("/properties/reply/type")
-                .and_then(Value::as_str)
-                == Some("string")
-                && schema["required"].as_array().is_some_and(|fields| {
-                    fields.iter().any(|field| field.as_str() == Some("reply"))
-                })
-        })
+    validate_conversation_template(definition).is_ok()
+}
+
+pub(in crate::workflows) fn validate_conversation_template(
+    definition: &WorkflowDefinition,
+) -> Result<()> {
+    anyhow::ensure!(
+        super::WorkflowStartSchema::for_definition(definition)
+            .is_some_and(|schema| schema.conversation_enabled()),
+        "A conversation pipeline needs a text message input on Start"
+    );
+    anyhow::ensure!(
+        root_end(definition)
+            .and_then(|node| node.definition.output_schemas.get("result"))
+            .is_some_and(|schema| {
+                schema
+                    .pointer("/properties/reply/type")
+                    .and_then(Value::as_str)
+                    == Some("string")
+                    && schema["required"].as_array().is_some_and(|fields| {
+                        fields.iter().any(|field| field.as_str() == Some("reply"))
+                    })
+            }),
+        "A conversation pipeline needs an End result Schema with required reply text"
+    );
+    Ok(())
 }
 
 pub(super) fn root_end(definition: &WorkflowDefinition) -> Option<&crate::workflows::PinnedNode> {

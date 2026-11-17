@@ -585,6 +585,13 @@ fn compile_resolved_graph<'definition>(
         wires: graph.wires,
         subflows: Vec::new(),
     };
+    if definition.nodes.iter().any(|node| {
+        matches!(&node.instance.configuration,
+            NodeConfiguration::TypedStart(configuration) if configuration.conversation
+        )
+    }) {
+        conversation_turns::validate_conversation_template(&definition)?;
+    }
     let unit_nodes = control::unit_nodes(&definition);
     ensure!(
         definition.nodes.iter().all(|node| !matches!(

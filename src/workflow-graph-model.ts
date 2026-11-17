@@ -408,7 +408,13 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
   if (graph.nodes.filter(({ kind }) => isStartNode(kind)).length !== 1) problems.push("The pipeline needs one Start node.");
   const ends = graph.nodes.filter(({ kind }) => kind === "end");
   if (ends.length > 1) problems.push("Choose one End node.");
-  if (graph.nodes.some(({ kind, configuration }) => kind === "typed_start" && configuration.conversation === true)) {
+  const start = graph.nodes.find(({ kind, configuration }) => kind === "typed_start" && configuration.conversation === true);
+  if (start) {
+    const input = definitions[start.id]?.outputSchemas?.inputs;
+    const fields = Array.isArray(start.configuration.fields) ? start.configuration.fields as WorkflowStartField[] : [];
+    const receivesMessage = input ? input.properties?.message?.type === "string"
+      : fields.some(({ conversationSource, valueType }) => conversationSource === "message" && valueType === "text");
+    if (!receivesMessage) problems.push("A conversation pipeline needs a text message input on Start.");
     const result = ends[0] && definitions[ends[0].id]?.outputSchemas?.result;
     if (result?.properties?.reply?.type !== "string" || !result.required?.includes("reply")) {
       problems.push("A conversation pipeline needs an End result Schema with required reply text.");

@@ -597,6 +597,22 @@ it("edits typed launch fields and a branch condition without raw configuration",
   expect(inspector.queryByRole("textbox", { name: "Node parameters" })).toBeNull();
 });
 
+it("requires a conversation message in the selected Start Schema", () => {
+  const graph: WorkflowGraph = { name: "Conversation template", nodes: [
+    { id: "start", kind: "typed_start", configuration: { kind: "typed_start", conversation: true, fields: [] } },
+    { id: "end", kind: "end", configuration: { kind: "end" } },
+  ], wires: [wire("start", "start", "end", "ready")] };
+  const definitions: Record<string, WorkflowDefinition> = {
+    start: { ...start, kind: "typed_start", configuration: "typed_start",
+      outputSchemas: { inputs: { type: "object", properties: { topic: { type: "string" } } } } },
+    end: { ...start, kind: "end", configuration: "end", inputs: [control("ready")], outputs: [],
+      outputSchemas: { result: { type: "object", properties: { reply: { type: "string" } }, required: ["reply"] } } },
+  };
+  expect(graphProblems(graph, definitions)).toEqual(["A conversation pipeline needs a text message input on Start."]);
+  definitions.start!.outputSchemas = { inputs: { type: "object", properties: { message: { type: "string" } } } };
+  expect(graphProblems(graph, definitions)).toEqual([]);
+});
+
 it("matches the backend rules for Start events and optional or multiple Result evidence", () => {
   const definitions: Record<string, WorkflowDefinition> = {
     entry: { ...start, kind: "typed_start", configuration: "typed_start", outputs: [...start.outputs, data("event", "agile_event")] },
