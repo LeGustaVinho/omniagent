@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArchiveRestore, HardDrive, RefreshCw, ShieldCheck } from "lucide-react";
 import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import { DesktopCliPrerequisites } from "@/desktop-cli-prerequisites";
 import { ripgrepStatusKey, useRipgrepStatus, type RipgrepStatus } from "@/ide-file-search";
 import { IntegrationNotice, SettingRow } from "@/settings-controls";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -157,6 +158,7 @@ export function SystemSettings({
       </IntegrationNotice>
       <SystemGroup icon={<ShieldCheck size={18} />} id="qualification" title="Prerequisites and qualification">
         <p>Windows 10 22H2 or Windows 11 x64, WebView2, Git for Windows, ripgrep and a supported provider CLI.</p>
+        <DesktopCliPrerequisites />
         <RipgrepSettings />
         <QualificationMatrix />
       </SystemGroup>

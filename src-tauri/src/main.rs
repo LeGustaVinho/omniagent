@@ -458,6 +458,7 @@ fn main() {
             omniagent::appearance::appearance_settings,
             omniagent::appearance::save_appearance_settings,
             ipc::cli_executables,
+            ipc::desktop_cli_prerequisites,
             ipc::set_cli_executable,
             ipc::project_attachment_limits,
             ipc::set_project_attachment_limits,

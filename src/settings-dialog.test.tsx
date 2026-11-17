@@ -59,6 +59,11 @@ it("shows reported CLI permissions independently of Windows sandbox support", as
     switch (command) {
       case "appearance_settings": return defaultAppearance;
       case "cli_executables": return [{ provider: "claude", executable: null }];
+      case "desktop_cli_prerequisites": return {
+        git: { executable: null, version: null, issue: null },
+        providers: [{ provider: "claude", configuredExecutable: null,
+          status: { executable: "C:\\Tools\\claude.exe", version: "2.1.296", issue: null } }],
+      };
       case "cli_plugin_inventory": return null;
       case "probe_cli_executable": return {
         provider: "claude", version: "2.1.296", protocol: "verified", authentication: "authenticated",

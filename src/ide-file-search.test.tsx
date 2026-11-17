@@ -82,6 +82,7 @@ it("shows a missing executable and immediately shares a validated System Setting
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     switch (command) {
       case "runtime_status": return "Desktop runtime is ready.";
+      case "desktop_cli_prerequisites": return { git: { executable: null, version: null, issue: null }, providers: [] };
       case "ripgrep_status": return missing;
       case "set_ripgrep_executable":
         expect(args).toEqual({ executable: override });

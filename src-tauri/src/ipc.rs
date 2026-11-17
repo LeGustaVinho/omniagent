@@ -479,6 +479,13 @@ pub async fn cli_executables(store: State<'_, Store>) -> Result<Vec<ConfiguredEx
 }
 
 #[tauri::command]
+pub async fn desktop_cli_prerequisites(
+    store: State<'_, Store>,
+) -> Result<omniagent::providers::profiles::DesktopCliPrerequisites, String> {
+    store.desktop_cli_prerequisites().await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn set_cli_executable(
     store: State<'_, Store>,
     provider: Provider,

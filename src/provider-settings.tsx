@@ -9,14 +9,9 @@ import type { PluginInventoryStatus } from "@/bindings/PluginInventoryStatus";
 import type { Provider } from "@/bindings/Provider";
 import { ClaudePluginManagement } from "@/cli-plugin-management";
 import { Button } from "@/components/ui/button";
+import { desktopCliPrerequisitesKey, ExecutableInstallation, providerExecutableLabels, useDesktopCliPrerequisites, type CliPrerequisite } from "@/desktop-cli-prerequisites";
 import { ExecutionProfileModelSettings } from "@/model-default-settings";
 import { useWorkspace } from "@/workspace-state";
-
-const PROVIDERS: Record<Provider, string> = {
-  codex: "Codex",
-  claude: "Claude Code",
-  antigravity: "Antigravity",
-};
 
 const AUTH_LABELS: Record<CliProbe["authentication"], string> = {
   authenticated: "Signed in",
@@ -53,6 +48,7 @@ export function ProviderSettingsPanel() {
 }
 
 export function ProviderSettings() {
+  const prerequisites = useDesktopCliPrerequisites();
   const profiles = useQuery({
     queryKey: ["cli-executables"],
     queryFn: () => invoke<ConfiguredExecutable[]>("cli_executables"),
@@ -62,7 +58,11 @@ export function ProviderSettings() {
     <div className="grid max-w-3xl gap-4" data-setting="provider-paths">
       {profiles.isPending && <p role="status" className="text-sm text-muted-foreground">Loading executable paths…</p>}
       {profiles.isError && <p role="alert" className="text-sm text-red-300">{String(profiles.error)}</p>}
-      {profiles.data?.map((profile) => <ExecutableSettings key={profile.provider} profile={profile} />)}
+      {prerequisites.isPending && <p role="status" className="text-sm text-muted-foreground">Checking installed executables…</p>}
+      {prerequisites.error && <p role="alert" className="text-sm text-red-300">{String(prerequisites.error)}</p>}
+      {profiles.data?.map((profile) => <ExecutableSettings key={profile.provider} profile={profile}
+        installation={prerequisites.data?.providers.find(({ provider, configuredExecutable }) =>
+          provider === profile.provider && configuredExecutable === profile.executable)?.status} />)}
     </div>
   );
 }
@@ -121,13 +121,17 @@ export function ProjectAttachmentSettings({ projectId }: { projectId: string }) 
   );
 }
 
-function ExecutableSettings({ profile }: { profile: ConfiguredExecutable }) {
+function ExecutableSettings({ profile, installation }: { profile: ConfiguredExecutable; installation?: CliPrerequisite }) {
   const queryClient = useQueryClient();
   const [configured, setConfigured] = useState(profile.executable);
   const [path, setPath] = useState(profile.executable ?? "");
   const [probe, setProbe] = useState<CliProbe | null>(null);
   const [pending, setPending] = useState<"save" | "cli" | "plugins" | null>(null);
   const [error, setError] = useState("");
+  const requested = path.trim().replace(/^"(.*)"$/, "$1");
+  const observedInstallation = probe?.version && probe.executable
+    ? { executable: probe.executable, version: probe.version, issue: null }
+    : installation;
   const { provider } = profile;
   const pluginKey = ["cli-plugin-inventory", provider];
   const inventory = useQuery({
@@ -156,40 +160,42 @@ function ExecutableSettings({ profile }: { profile: ConfiguredExecutable }) {
     setPath(updated.executable ?? "");
     setProbe(null);
     void queryClient.invalidateQueries({ queryKey: ["conversation-models", provider] });
+    void queryClient.invalidateQueries({ queryKey: desktopCliPrerequisitesKey });
   }
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    void run("save", () => save(path.trim()));
+    if (requested && requested !== configured) void run("save", () => save(requested));
   }
 
   return (
-    <section className="rounded-lg border border-border bg-card p-4">
-      <h2 className="text-base font-semibold">{PROVIDERS[provider]}</h2>
+    <section className="rounded-lg border border-border bg-card p-4" aria-labelledby={`${provider}-executable-title`}>
+      <h2 id={`${provider}-executable-title`} className="text-base font-semibold">{providerExecutableLabels[provider]}</h2>
       <form onSubmit={submit} className="mt-3 flex flex-wrap items-end gap-2">
         <label className="min-w-52 flex-1 text-sm">
           Executable path
           <input name={provider} value={path} onChange={(event) => setPath(event.target.value)}
             placeholder="Use PATH" className="mt-1 block w-full rounded-md border border-border bg-background p-2 font-mono text-xs" />
         </label>
-        <Button type="submit" disabled={pending !== null || !path.trim() || path.trim() === configured}>Save</Button>
+        <Button type="submit" disabled={pending !== null || !requested || requested === configured}>Save</Button>
         <Button type="button" variant="outline" disabled={pending !== null || configured === null}
           onClick={() => void run("save", () => save(null))}>Use PATH</Button>
-        <Button type="button" variant="outline" disabled={pending !== null || path.trim() !== (configured ?? "")}
+        <Button type="button" variant="outline" disabled={pending !== null || requested !== (configured ?? "")}
           onClick={() => void run("cli", async () => setProbe(await invoke<CliProbe>("probe_cli_executable", { provider })))}>
           {pending === "cli" ? "Checking CLI…" : "Check CLI"}
         </Button>
-        <Button type="button" variant="outline" disabled={pending !== null || path.trim() !== (configured ?? "")}
+        <Button type="button" variant="outline" disabled={pending !== null || requested !== (configured ?? "")}
           onClick={() => void run("plugins", async () => {
             const result = await invoke<PluginInventory | null>("cli_plugin_inventory", { provider, refresh: true });
             queryClient.setQueryData(pluginKey, result);
           })}>{pending === "plugins" ? "Checking plugins…" : "Check plugins"}</Button>
       </form>
+      {observedInstallation && <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+        <dt className="text-muted-foreground">Installation</dt><dd><ExecutableInstallation status={observedInstallation} /></dd>
+      </dl>}
       {error && <p role="alert" className="mt-2 text-sm text-red-300">{error}</p>}
       {probe && (
         <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-          <dt className="text-muted-foreground">Installation</dt>
-          <dd>{probe.version ?? (probe.executable ? "Detected, version unverified" : "Executable not found")}</dd>
           <dt className="text-muted-foreground">Protocol</dt><dd>{PROTOCOL_LABELS[probe.protocol]}</dd>
           <dt className="text-muted-foreground">Authentication</dt><dd>{AUTH_LABELS[probe.authentication]}</dd>
           <dt className="text-muted-foreground">Effective CLI permissions</dt>
@@ -200,7 +206,7 @@ function ExecutableSettings({ profile }: { profile: ConfiguredExecutable }) {
       )}
       {inventory.isError && <p role="alert" className="mt-3 text-sm text-red-300">{String(inventory.error)}</p>}
       {inventory.data && <PluginList inventory={inventory.data} />}
-      {provider === "claude" && <ClaudePluginManagement key={configured ?? ""} disabled={pending !== null || path.trim() !== (configured ?? "")} />}
+      {provider === "claude" && <ClaudePluginManagement key={configured ?? ""} disabled={pending !== null || requested !== (configured ?? "")} />}
       <ExecutionProfileModelSettings provider={provider} />
     </section>
   );

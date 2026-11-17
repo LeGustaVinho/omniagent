@@ -29,6 +29,8 @@ use super::{
 
 mod account;
 pub(crate) use account::verify_account_binding;
+mod prerequisites;
+pub use prerequisites::DesktopCliPrerequisites;
 
 const PROBE_TIME: Duration = Duration::from_secs(10);
 const MAX_PROBE_OUTPUT: usize = 32 * 1024;
