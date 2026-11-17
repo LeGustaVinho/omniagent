@@ -10,6 +10,7 @@ import { ArrowLeft, ArrowRight, Columns2, GitBranch } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
+import { ConversationDockTab, ConversationDockTabContext, type ConversationTabFeedback } from "@/conversation-dock-tab";
 import { ConversationLibrary, ConversationLibraryNavigation, type OpenLibraryConversation, useConversationLibraryRead } from "@/conversation-library";
 import { ConversationEmptyState, ConversationNavigation, ConversationWorkspaceLayout } from "@/conversation-layout";
 import { ConversationListPanel, ConversationPanel, useNewConversation } from "@/conversation-panels";
@@ -35,6 +36,7 @@ const legacyPanels = {
   conversations: ConversationListPanel,
   conversation: ConversationPanel,
 };
+const noBuiltInTabMenu = () => [];
 
 function TabActions({ activePanel, panels, group }: IDockviewHeaderActionsProps) {
   if (!activePanel || panels.length < 2) return null;
@@ -130,14 +132,21 @@ function useDesktopDock(checkout: ProjectCheckout, area: DesktopDockArea) {
 }
 
 function Dock({
-  dock, error, children,
-}: { dock: ReturnType<typeof useDesktopDock>; error?: string; children?: React.ReactNode }) {
+  dock, error, conversationCheckoutId, children,
+}: { dock: ReturnType<typeof useDesktopDock>; error?: string; conversationCheckoutId?: string; children?: React.ReactNode }) {
+  const [feedback, report] = useState<ConversationTabFeedback>();
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {dock.layoutError && <p role="status" className="work-inline px-4 py-2">Layout storage: {dock.layoutError}</p>}
       {error && <p role="alert" className="conv-alert mx-4 my-2">{error}</p>}
+      {feedback && <p role={feedback.failed ? "alert" : "status"}
+        className={feedback.failed ? "conv-alert mx-4 my-2" : "conv-sidebar-note px-4"}>{feedback.text}</p>}
       <div className="workspace-dock relative min-h-0 flex-1">
-        <DockviewReact components={legacyPanels} onReady={dock.onReady} theme={themeDark} disableFloatingGroups rightHeaderActionsComponent={TabActions} />
+        <ConversationDockTabContext.Provider value={conversationCheckoutId ? { checkoutId: conversationCheckoutId, report } : null}>
+          <DockviewReact components={legacyPanels} onReady={dock.onReady} theme={themeDark} disableFloatingGroups rightHeaderActionsComponent={TabActions}
+            defaultTabComponent={conversationCheckoutId ? ConversationDockTab : undefined}
+            getTabContextMenuItems={conversationCheckoutId ? noBuiltInTabMenu : undefined} />
+        </ConversationDockTabContext.Provider>
         {!dock.ready && <div className="work-dock-empty" role="status">Restoring tabs…</div>}
         {dock.ready && !dock.hasPanels && children && <div className="work-dock-empty">{children}</div>}
       </div>
@@ -228,7 +237,7 @@ export function RealConversations({
       <ConversationWorkspaceLayout navigation={<ConversationNavigation compact={compact} open={sidebar} onOpenChange={onSidebarChange}>
         {contents}
       </ConversationNavigation>}>
-        <Dock dock={dock} error={targetError}>
+        <Dock dock={dock} error={targetError} conversationCheckoutId={checkout.checkoutId}>
           <ConversationEmptyState title="Start a conversation" description="Ask an agent about this checkout or open an existing conversation.">
             <Button onClick={() => start.mutate()} disabled={start.isPending} aria-label="Start a new conversation">
               {start.isPending ? "Creating…" : "New conversation"}

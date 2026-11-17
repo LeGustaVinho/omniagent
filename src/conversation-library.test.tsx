@@ -336,6 +336,51 @@ it("moves an already open conversation to the side with the same mounted compose
   expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
 });
 
+it("uses the clicked conversation tab for its menu and preserves its mounted draft when moving it", async () => {
+  repository();
+  const { user } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await user.click(await library().findByRole("button", { name: original }));
+  const input = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" });
+  const edited = `${draft}\nKeep the selected tab's draft.`;
+  fireEvent.change(input, { target: { value: edited } });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_conversation_draft", { conversationId: archiveId, text: edited }));
+  await user.click(library().getByRole("button", { name: "Live handoff" }));
+  const companion = await screen.findByRole("tab", { name: "Live handoff" });
+  const source = () => screen.getByRole("tab", { name: original });
+  const choose = async (action: string) => {
+    fireEvent.contextMenu(source());
+    await user.click(await screen.findByRole("menuitem", { name: action }));
+  };
+
+  await choose("Copy conversation ID");
+  expect(await navigator.clipboard.readText()).toBe(archiveId);
+  expect(companion.getAttribute("aria-selected")).toBe("true");
+  source().focus();
+  await user.keyboard("{Shift>}{F10}{/Shift}");
+  await user.click(await screen.findByRole("menuitem", { name: "Open worktree folder" }));
+  expect(invoke).toHaveBeenCalledWith("open_checkout_item_in_shell", { checkoutId: selected.checkoutId, relativePath: "", action: "open" });
+  expect(companion.getAttribute("aria-selected")).toBe("true");
+  await user.click(within(source()).getByRole("button", { name: `Actions for ${original} tab` }));
+  await user.click(await screen.findByRole("menuitem", { name: "Export conversation as Markdown…" }));
+  expect(invoke).toHaveBeenCalledWith("export_conversation_markdown", { checkoutId: selected.checkoutId, conversationId: archiveId });
+  expect(invoke).not.toHaveBeenCalledWith("export_conversation_markdown", { checkoutId: selected.checkoutId, conversationId: liveId });
+  expect(companion.getAttribute("aria-selected")).toBe("true");
+
+  await choose("Move tab right");
+  await waitFor(() => expect(screen.getAllByRole("tab").map((tab) => tab.getAttribute("aria-label"))).toEqual(["Live handoff", original]));
+  await choose("Split tab right");
+  await waitFor(() => expect(source().closest(".dv-groupview")).not.toBe(companion.closest(".dv-groupview")));
+  expect(screen.getAllByRole("textbox", { name: "Message draft" })).toContain(input);
+  expect(input.value).toBe(edited);
+
+  await choose("Close tab");
+  expect(screen.queryByRole("tab", { name: original })).toBeNull();
+  expect(screen.getByRole("tab", { name: "Live handoff" })).toBeTruthy();
+  await user.click(library().getByRole("button", { name: original }));
+  await waitFor(() => expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" }).value).toBe(edited));
+});
+
 it("persists library and tab renames, restores older history and draft, and shares the saved title with the reference picker", async () => {
   const { layouts } = repository();
   const first = mount();
