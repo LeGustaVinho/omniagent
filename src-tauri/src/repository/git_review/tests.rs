@@ -587,6 +587,14 @@ async fn follows_file_renames_and_keeps_disk_index_and_commits_distinct() -> Res
         end_line: 1,
         text: text.to_owned(),
     };
+    git(&root, &["update-ref", "refs/remotes/upstream/main", &renamed])?;
+    git(&root, &["update-ref", "refs/remotes/origin/main", &original])?;
+    let unpublished = store
+        .git_file_permalink(checkout.clone(), path.into(), None, Some(line("original")))
+        .await
+        .unwrap_err();
+    assert!(unpublished.to_string().contains("origin branches"));
+    git(&root, &["update-ref", "refs/remotes/origin/main", &renamed])?;
     assert_eq!(
         store
             .git_file_permalink(checkout.clone(), path.into(), None, Some(line("original")))

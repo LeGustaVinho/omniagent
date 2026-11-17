@@ -36,6 +36,11 @@ impl Store {
                 .context("the checkout has no origin remote")?;
             let remote = String::from_utf8(remote)?;
             let (host, repository) = remote_repository(remote.trim()).context("copying a permalink requires a GitHub.com or GitLab.com origin")?;
+            let published = passive(&scope.root, &[
+                "for-each-ref", "--count=1", "--format=%(refname)", "--contains", &sha, "refs/remotes/origin",
+            ])?;
+            ensure!(!published.is_empty(),
+                "the last synchronized origin branches do not contain this commit; fetch origin or publish the commit before copying its permalink");
             if let Some(lines) = &lines {
                 let GitFileSide::Text { content } = content::read_tree(&review.view, &sha, &path)? else {
                     anyhow::bail!("the selected lines are not available as text in that commit");
