@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { ContextActions } from "@/components/ui/context-actions";
-import type { CheckoutReview } from "@/git-checkout-changes";
+import { useGitCheckoutReview, type CheckoutReview } from "@/git-checkout-changes";
 import { MonacoComparison } from "@/git-diff-view";
 import { compareGitFileVersions, gitFilePermalink, gitFileText } from "@/git-file-versions";
 import { useGitReviewComments } from "@/git-review-comments";
@@ -15,15 +15,24 @@ type Entry = { sha: string; parent: string | null; author: string; committedAt: 
   path: string; previousPath: string | null; status: string };
 type FileHistory = { head: string | null; entries: Entry[]; hasMore: boolean };
 type Page = { pinnedHead: string | null; offset: number };
-type View = "parent" | "disk" | "index" | "head" | "contents" | "selected";
+type View = "parent" | "disk" | "index" | "head" | "contents" | "selected" | "editor";
 const viewLabels: Record<View, string> = {
   parent: "Compare with parent", disk: "Compare with file on disk", index: "Compare with staged index",
-  head: "Compare with current HEAD", contents: "View committed file", selected: "Compare with selected revision",
+  head: "Compare with current HEAD", contents: "View committed file", selected: "Compare with selected revision", editor: "Compare with editor snapshot",
 };
 const labels: Record<string, string> = { A: "Added", C: "Copied", D: "Deleted", M: "Modified", R: "Renamed", T: "Type changed" };
 
 const version = (entry: Entry) => ({ kind: "commit" as const, sha: entry.sha, path: entry.path });
 const short = (sha: string) => sha.slice(0, 12);
+
+export function EditorRevisionComparison({ checkoutId, path, text }: {
+  checkoutId: string; path: string; text: string;
+}) {
+  const review = useGitCheckoutReview(checkoutId);
+  if (review.error) return <p role="alert">{String(review.error)}</p>;
+  if (!review.data) return <p role="status">Loading Git references…</p>;
+  return <GitFileHistoryView review={review.data} path={path} editorSnapshot={text} />;
+}
 
 function comparisonFor(entry: Entry, view: View, reference?: Entry) {
   const selected = version(entry);
@@ -38,15 +47,19 @@ function comparisonFor(entry: Entry, view: View, reference?: Entry) {
     case "index": return { base: selected, revised: { kind: "index" as const }, ranges: [short(entry.sha), "Staged index"] };
     case "head": return { base: selected, revised: { kind: "head" as const }, ranges: [short(entry.sha), "Current HEAD"] };
     case "contents": return { base: null, revised: selected, ranges: ["", `${short(entry.sha)} · ${entry.path}`] };
+    case "editor": return { base: null, revised: selected, ranges: [`${short(entry.sha)} · ${entry.path}`, "Editor snapshot"] };
     case "selected": return reference && { base: version(reference), revised: selected,
       ranges: [`${short(reference.sha)} · ${reference.path}`, `${short(entry.sha)} · ${entry.path}`] };
   }
 }
 
-export function GitFileHistoryView({ review, path, openFile, openConversation, clear }: { review: CheckoutReview; path: string;
-  openFile?: () => void; openConversation?: (id: string) => void; clear: () => void }) {
+export function GitFileHistoryView({ review, path, editorSnapshot, openFile, openConversation, clear }: {
+  review: CheckoutReview; path: string; editorSnapshot?: string;
+  openFile?: () => void; openConversation?: (id: string) => void; clear?: () => void;
+}) {
   const { checkoutId } = review;
   const [branch, setBranch] = useState("");
+  const [compareTip, setCompareTip] = useState(editorSnapshot !== undefined);
   const [picked, select] = useState<{ sha: string; view: View }>();
   const [reference, setReference] = useState<Entry>();
   const [layout, setLayout] = useState<"auto" | "split" | "unified">("auto");
@@ -64,8 +77,18 @@ export function GitFileHistoryView({ review, path, openFile, openConversation, c
   });
   const entries = history.data?.pages.flatMap((page) => page.entries) ?? [];
   const entry = entries.find(({ sha }) => sha === picked?.sha) ?? entries[0];
-  const view = picked?.sha === entry?.sha ? picked?.view ?? "parent" : "parent";
-  const comparison = useMemo(() => entry ? comparisonFor(entry, view, reference) : undefined, [entry, view, reference]);
+  const defaultView = editorSnapshot === undefined ? "parent" : "editor";
+  const tip = history.data?.pages[0]?.head;
+  const view = compareTip ? "editor" : picked?.sha === entry?.sha ? picked?.view ?? defaultView : defaultView;
+  const comparison = useMemo(() => {
+    if (compareTip) return tip ? { base: null, revised: { kind: "commit" as const, sha: tip, path },
+      ranges: [`${short(tip)} · ${path}`, "Editor snapshot"] } : undefined;
+    return entry ? comparisonFor(entry, view, reference) : undefined;
+  }, [compareTip, tip, path, entry, view, reference]);
+  function selectRevision(sha: string, view: View) {
+    setCompareTip(false);
+    select({ sha, view });
+  }
   const load = useQuery({
     queryKey: ["git-file-versions", checkoutId, path, comparison,
       view === "head" ? review.revision.head : view === "index" ? review.revision.index : null],
@@ -73,19 +96,25 @@ export function GitFileHistoryView({ review, path, openFile, openConversation, c
     enabled: Boolean(comparison), retry: false,
   });
   const sides = useMemo(() => {
-    if (!load.data || !entry) return undefined;
+    if (!load.data || !comparison) return undefined;
     const { original, modified } = load.data;
     if (original.status === "unavailable" || modified.status === "unavailable") return {
       error: [original, modified].flatMap((side) => side.status === "unavailable" ? [side.reason] : []).join(" "),
     };
+    if (view === "editor" && editorSnapshot !== undefined) return { file: {
+      path, originalPath: comparison.revised.kind === "commit" ? comparison.revised.path : path,
+      language: /\.(md|markdown)$/i.test(path) ? "markdown" : "plaintext",
+      original: gitFileText(modified), modified: editorSnapshot,
+    }, empty: false, missingAtRevision: modified.status === "missing" };
+    if (!entry) return undefined;
     const originalPath = comparison?.base?.kind === "commit" ? comparison.base.path : path;
     return { file: { path: entry.path, originalPath, language: /\.(md|markdown)$/i.test(entry.path) ? "markdown" : "plaintext",
       original: gitFileText(original), modified: gitFileText(modified) }, empty: original.status === "missing" && modified.status === "missing" };
-  }, [load.data, entry, comparison, path]);
+  }, [load.data, entry, comparison, path, view, editorSnapshot]);
   const conversation = useCheckoutConversationActions(checkoutId, !openConversation, (id) => openConversation?.(id));
   const comments = useGitReviewComments({
     checkoutId, surface: "versions", matchPath: path, comparisonPath: path, language: sides?.file?.language,
-    scope: view !== "contents" && sides?.file && !load.error ? load.data?.commentScope : undefined,
+    scope: view !== "contents" && view !== "editor" && sides?.file && !load.error ? load.data?.commentScope : undefined,
     startContextText: openConversation ? conversation.startContextText : undefined,
   });
   const [reviewLocation, setReviewLocation] = useState(comments.annotations.location);
@@ -105,13 +134,17 @@ export function GitFileHistoryView({ review, path, openFile, openConversation, c
     <div className="delivery-toolbar delivery-filters">
       <h3 className="min-w-0 wrap-anywhere font-mono text-sm" title={path}>{path}</h3>
       <label className="delivery-field">History branch
-        <select className="delivery-filter" value={branch} onChange={(event) => { setBranch(event.currentTarget.value); select(undefined); setReference(undefined); }}>
+        <select className="delivery-filter" value={branch} onChange={(event) => {
+          setBranch(event.currentTarget.value); select(undefined); setReference(undefined); setCompareTip(editorSnapshot !== undefined);
+        }}>
           <option value="">Current checkout HEAD</option>
           {review.branches.map(({ name, reference }) => <option key={reference} value={reference}>{name}</option>)}
         </select>
       </label>
+      {editorSnapshot !== undefined && <Button type="button" variant="outline" disabled={compareTip || !tip}
+        onClick={() => setCompareTip(true)}>{branch ? "Compare branch tip" : "Compare checkout HEAD"}</Button>}
       {openFile && <Button type="button" variant="outline" onClick={openFile}>Open working file</Button>}
-      <Button type="button" variant="ghost" onClick={clear}>All commits</Button>
+      {clear && <Button type="button" variant="ghost" onClick={clear}>All commits</Button>}
     </div>
     <div className="max-h-[48%] shrink-0 overflow-auto border-b border-border px-3 py-2">
       {history.isPending && <p role="status" className="text-sm">Loading file history…</p>}
@@ -122,8 +155,9 @@ export function GitFileHistoryView({ review, path, openFile, openConversation, c
         {entries.map((row) => <tr key={row.sha}>
           <td><ContextActions label={`${row.subject || "Commit"} ${short(row.sha)}`} groups={[[
             ...(Object.entries(viewLabels) as [View, string][]).filter(([mode]) =>
-              (mode !== "contents" || row.status !== "D") && (mode !== "selected" || reference && reference.sha !== row.sha))
-              .map(([mode, label]) => ({ label, run: () => select({ sha: row.sha, view: mode }) })),
+              (mode !== "contents" || row.status !== "D") && (mode !== "selected" || reference && reference.sha !== row.sha)
+              && (mode !== "editor" || editorSnapshot !== undefined))
+              .map(([mode, label]) => ({ label, run: () => selectRevision(row.sha, mode) })),
             { label: reference?.sha === row.sha ? "Clear comparison base" : "Select revision as comparison base",
               run: () => setReference(reference?.sha === row.sha ? undefined : row) },
           ], [
@@ -137,8 +171,8 @@ export function GitFileHistoryView({ review, path, openFile, openConversation, c
               return gitFileText(snapshot.modified);
             }, "Copied committed text") }]),
           ]]}>
-            <button type="button" className="grid min-w-0 gap-1 text-left hover:underline" aria-pressed={entry?.sha === row.sha}
-              onClick={() => select({ sha: row.sha, view: "parent" })}>
+            <button type="button" className="grid min-w-0 gap-1 text-left hover:underline" aria-pressed={!compareTip && entry?.sha === row.sha}
+              onClick={() => selectRevision(row.sha, defaultView)}>
               <span className="break-words">{row.subject || "Commit"}</span><code className="text-xs text-muted-foreground">{short(row.sha)}</code>
             </button>
           </ContextActions></td>
@@ -166,6 +200,7 @@ export function GitFileHistoryView({ review, path, openFile, openConversation, c
           </select>
         </label>}
       </div>
+      {sides?.missingAtRevision && <p role="status" className="px-3 text-sm">This path did not exist at the selected revision.</p>}
       <div className="min-h-0 flex-1 overflow-auto" aria-live="polite">
         {load.isPending ? <p role="status" className="p-3 text-sm">Loading file versions…</p>
           : load.error || sides?.error ? <div className="p-3"><InlineIssue>{load.error ? String(load.error) : sides?.error}</InlineIssue></div>

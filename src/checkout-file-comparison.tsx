@@ -9,6 +9,7 @@ import { FileDialog, type FilePanelApi, type FileTreeTarget } from "@/ide-file-w
 type TextState = { content: string; saved: string; external?: string };
 type Comparison = { labels: [string, string]; ownerPanel?: FilePanelApi; file?: GitTextComparison; error?: string };
 const MonacoComparison = lazy(() => import("@/git-diff-view").then(({ MonacoComparison }) => ({ default: MonacoComparison })));
+const EditorRevisionComparison = lazy(() => import("@/git-file-history").then(({ EditorRevisionComparison }) => ({ default: EditorRevisionComparison })));
 
 export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, openHistory, restoreLocalText, canRestore }: {
   checkoutId: string;
@@ -21,6 +22,7 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, ope
   const [selected, setSelected] = useState<string>();
   const [comparison, setComparison] = useState<Comparison>();
   const [history, showHistory] = useState<{ path: string; ownerPanel?: FilePanelApi }>();
+  const [editorRevision, selectEditorRevision] = useState<{ path: string; text: string; ownerPanel?: FilePanelApi }>();
   const [layout, setLayout] = useState<"split" | "unified">("split");
   const request = useRef(0);
 
@@ -80,6 +82,7 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, ope
         ...(local ? [
           { label: "HEAD with editor", run: () => compareDraft(path, "head", local.content, ownerPanel) },
           { label: "Staged index with editor", run: () => compareDraft(path, "index", local.content, ownerPanel) },
+          { label: "Compare editor with branch or commit…", run: () => selectEditorRevision({ path, text: local.content, ownerPanel }) },
         ] : []),
       ] }] : []),
       ...(!simulated && openHistory ? [{ label: "Show file history", run: () => openHistory(path) }] : []),
@@ -109,7 +112,13 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, ope
     </div>
   </FileDialog>;
 
-  return { actions, selectionActions, dialog: history ? <CheckoutDocumentHistory key={history.path} checkoutId={checkoutId} path={history.path}
+  return { actions, selectionActions, dialog: editorRevision ? <FileDialog title="Compare editor with Git revision"
+    description={editorRevision.path} ownerPanel={editorRevision.ownerPanel} className="file-comparison-dialog" onClose={() => selectEditorRevision(undefined)}>
+    <Suspense fallback={<p role="status">Loading Git comparison…</p>}>
+      <EditorRevisionComparison key={editorRevision.path} checkoutId={checkoutId} path={editorRevision.path} text={editorRevision.text} />
+    </Suspense>
+  </FileDialog>
+    : history ? <CheckoutDocumentHistory key={history.path} checkoutId={checkoutId} path={history.path}
     editorText={bufferAt(history.path)?.content} readDisk={() => readDisk(history.path)} ownerPanel={history.ownerPanel}
     restore={restoreLocalText && canRestore?.(history.path) !== false ? (text) => restoreLocalText(history.path, text) : undefined}
     onClose={() => showHistory(undefined)} /> : dialog };

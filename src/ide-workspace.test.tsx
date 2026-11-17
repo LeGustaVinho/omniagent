@@ -690,6 +690,48 @@ it("copies the exact clicked file from a live buffer or a read-only capture in t
 });
 
 
+it("compares the clicked draft with the selected branch history and historical file path", async () => {
+  fixture();
+  const selectedRef = { name: "feature", reference: "refs/heads/feature", sha: "c".repeat(40) };
+  const oldPath = "src/former.rs";
+  const old = { sha: "b".repeat(40), parent: null, author: "Fixture", committedAt: "2026-11-17T11:25:00Z",
+    subject: "Historical version", path: oldPath, previousPath: null, status: "M" };
+  const newest = { ...old, sha: "a".repeat(40), subject: "Latest version", path: file, previousPath: oldPath, status: "R" };
+  const native = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation((command, args) => {
+    if (command === "git_checkout_review") return Promise.resolve({ checkoutId: alternate, root: "C:/checkout",
+      revision: { branch: "refs/heads/main", head: newest.sha, index: "index" }, managed: false, changes: [], branches: [selectedRef], worktrees: [] });
+    if (command === "git_checkout_file_history") {
+      const feature = (args as { branch: string | null }).branch === selectedRef.reference;
+      return Promise.resolve({ head: feature ? selectedRef.sha : newest.sha, entries: feature ? [newest, old] : [newest], hasMore: false });
+    }
+    if (command === "git_compare_file_versions") {
+      const { revised } = args as { revised: { path: string } };
+      return Promise.resolve({ original: { status: "missing" }, modified: { status: "text", content: revised.path === oldPath ? "fn historical() {}" : "fn latest() {}" } });
+    }
+    return native(command, args);
+  });
+  render(<IdeWorkspace {...propsFor(alternate)} target={file} />);
+  const user = userEvent.setup();
+  fireEvent.change(await screen.findByRole("textbox", { name: editorLabel }), { target: { value: "fn unsaved_draft() {}" } });
+  const tab = await screen.findByText("review.rs", { selector: ".file-tab-label span" });
+  fireEvent.contextMenu(tab);
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Compare Git versions" }), { key: "ArrowRight" });
+  await user.click(await screen.findByRole("menuitem", { name: "Compare editor with branch or commit…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Compare editor with Git revision" }));
+  await user.selectOptions(await dialog.findByLabelText("History branch"), selectedRef.reference);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId: alternate, path: file, base: null, revised: { kind: "commit", sha: selectedRef.sha, path: file },
+  }));
+  await user.click(await dialog.findByRole("button", { name: /^Historical version/ }));
+  expect(await dialog.findByText("fn historical() {}")).toBeTruthy();
+  expect(dialog.getByText("fn unsaved_draft() {}")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId: alternate, path: file, base: null, revised: { kind: "commit", sha: old.sha, path: oldPath },
+  });
+  expect(invoke).not.toHaveBeenCalledWith("save_repository_source_file", expect.anything());
+});
+
 it("saves a named copy of a closed file by copying its disk bytes", async () => {
   const path = "docs/Closed.bin";
   fixture({ [path]: "binary fixture" });
