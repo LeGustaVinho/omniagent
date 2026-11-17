@@ -2551,6 +2551,22 @@ test("persists real conversation organization through a desktop restart", { time
     await clickConversation(browser, title);
     await browser.waitUntil(async () => (await readTabs(browser)).active === title);
     await browser.waitUntil(async () => await row().getAttribute("aria-description") !== "Unread");
+
+    await click(library(), 'button[aria-label="New conversation"]');
+    await browser.waitUntil(async () => {
+      const { groups, active } = await readTabs(browser);
+      return groups.flat().length === 2 && Boolean(active && active !== title);
+    });
+    const activeBeforeMenu = (await readTabs(browser)).active;
+    const originalTab = browser.$(`//*[@role="tab"][.//*[contains(@class, "dv-default-tab-content")][normalize-space(.)=${JSON.stringify(title)}]]`);
+    await originalTab.waitForDisplayed();
+    await originalTab.click({ button: "right" });
+    const tabMenu = browser.$(`[role="menu"][aria-label=${JSON.stringify(`${title} tab`)}]`);
+    await click(tabMenu, './/*[@role="menuitem"][normalize-space(.)="Close tab"]');
+    await browser.waitUntil(async () => {
+      const { groups, active } = await readTabs(browser);
+      return active === activeBeforeMenu && groups.flat().length === 1 && !groups.flat().includes(title);
+    }, { timeoutMsg: "The tab context menu should close the clicked conversation and keep the active tab" });
   } finally {
     await browser?.deleteSession().catch(() => undefined);
     driver.kill();
