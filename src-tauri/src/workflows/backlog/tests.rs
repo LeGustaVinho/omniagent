@@ -469,13 +469,31 @@ async fn run_backlog_reserves_by_priority_and_holds_dependencies_without_a_verif
     let prepared = verified.context("Automatic worktree preparation did not finish")??;
     assert!(matches!(prepared.value, ArtifactValue::Worktree { .. }));
     let worktree = store
-        .live_managed_worktree(project.clone(), first_task)
+        .live_managed_worktree(project.clone(), first_task.clone())
         .await?
         .context("The child delivery lost its managed worktree")?
         .worktree;
     assert_ne!(worktree.base_commit, launch_head);
     assert_eq!(worktree.base_commit, integrated_head);
     assert!(worktree.root.join("integrated.txt").is_file());
+    let [unit] = store
+        .workflow_delivery_units(project.clone(), first_task.clone(), first_child.clone())
+        .await?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("The approved backlog must have one logical unit"))?;
+    let message = store
+        .execute(move |db| backlog_commit_message(db, &unit, &unit.unit.purpose))
+        .await?
+        .context("The prepared backlog unit lost its commit provenance")?;
+    let sdd = receipt.inputs["backlog"]["sourceArtifacts"]["sdd"]
+        .as_str()
+        .context("The approved backlog has no SDD artifact reference")?;
+    assert!(message.starts_with("Implement B\n\n"));
+    assert!(message.contains(&format!("OmniAgent-Task: {first_task}\n")));
+    assert!(message.contains("OmniAgent-Backlog-Key: B\n"));
+    assert!(message.contains(&format!("OmniAgent-Plan: {plan_id}\n")));
+    assert!(message.contains(&format!("OmniAgent-SDD: {sdd}\n")));
+    assert!(message.ends_with("OmniAgent-Requirements: [\"REQ-1\"]"));
     let scope = preview
         .facts
         .backlog_scope

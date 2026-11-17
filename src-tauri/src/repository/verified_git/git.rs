@@ -166,6 +166,7 @@ impl DeliveryCheckout {
             sha,
             captured_index_digest,
             acceptance_artifact_id: None,
+            message: None,
         })
     }
 

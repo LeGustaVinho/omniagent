@@ -10,6 +10,7 @@ mod artifacts;
 pub mod authoring;
 pub(crate) mod automation;
 mod backlog;
+pub(crate) use backlog::backlog_commit_message;
 mod builtin;
 mod candidate_acceptance;
 mod command;

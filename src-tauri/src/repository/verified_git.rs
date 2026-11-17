@@ -102,6 +102,8 @@ struct CommitIntent {
     captured_index_digest: String,
     #[serde(default)]
     acceptance_artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 struct DeliveryState {
@@ -239,6 +241,7 @@ impl Store {
         }
         if let Some(intent) = state.intent {
             let candidate = acceptance.candidate.clone();
+            let message = intent.message;
             let existing = tokio::task::spawn_blocking(move || {
                 let available = checkout.matches(&intent.sha, &candidate).is_ok();
                 (checkout, available)
@@ -249,10 +252,14 @@ impl Store {
                 return Ok(());
             }
             return self
-                .prepare_delivery_objects(request, acceptance, checkout)
+                .prepare_delivery_objects(request, acceptance, checkout, message)
                 .await;
         }
-        self.prepare_delivery_objects(request, acceptance, checkout)
+        let purpose = request.purpose.clone();
+        let message = self
+            .execute(move |db| crate::workflows::backlog_commit_message(db, &state.unit, &purpose))
+            .await?;
+        self.prepare_delivery_objects(request, acceptance, checkout, message)
             .await
     }
 
@@ -261,6 +268,7 @@ impl Store {
         request: &DeliveryCommitRequest,
         acceptance: CandidateAcceptance,
         checkout: DeliveryCheckout,
+        message: Option<String>,
     ) -> Result<()> {
         let candidate = &acceptance.candidate;
         let lease = self
@@ -281,18 +289,19 @@ impl Store {
             "captured index revision changed"
         );
         let mut intent = tokio::task::spawn_blocking({
-            let purpose = request.purpose.clone();
+            let message = message.clone().unwrap_or_else(|| request.purpose.clone());
             move || {
                 checkout.prepare(
                     lease.path(),
                     &acceptance,
-                    &purpose,
+                    &message,
                     artifact.candidate.index_digest,
                 )
             }
         })
         .await??;
         intent.acceptance_artifact_id = Some(request.acceptance_artifact_id.clone());
+        intent.message = message;
         self.execute({
             let request = request.clone();
             move |db| {

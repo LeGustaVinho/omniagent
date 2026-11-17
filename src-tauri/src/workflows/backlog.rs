@@ -13,8 +13,8 @@ use crate::tasks::{
 };
 
 use super::{
-    ArtifactKind, ArtifactValue, NodeInputs, TaskReference, artifacts::load_artifact,
-    launch::require_launch_work,
+    ArtifactKind, ArtifactValue, NodeInputs, TaskReference, WorkflowDeliveryUnit,
+    artifacts::load_artifact, launch::require_launch_work,
 };
 
 const MAX_TASKS_PER_BATCH: usize = 256;
@@ -155,6 +155,36 @@ impl BacklogDeliveryPlan {
             &self.task.specification.acceptance_criteria,
         )
     }
+}
+
+pub(crate) fn backlog_commit_message(
+    db: &Connection,
+    unit: &WorkflowDeliveryUnit,
+    purpose: &str,
+) -> Result<Option<String>> {
+    let plan = load_artifact(
+        db,
+        &unit.project_id,
+        &unit.workflow_run_id,
+        &unit.plan_revision,
+        ArtifactKind::Plan,
+    )?;
+    let Some(ArtifactValue::BacklogPlan(plan)) = plan.map(|artifact| artifact.value) else {
+        return Ok(None);
+    };
+    ensure!(
+        plan.task.task.project_id == unit.project_id && plan.task.task.task_id == unit.task_id,
+        "The commit must reference the approved backlog task"
+    );
+    let sdd = plan
+        .source_artifacts
+        .get("sdd")
+        .context("The approved task plan lost its SDD revision")?;
+    let requirements = serde_json::to_string(&plan.task.specification.sdd_requirements)?;
+    Ok(Some(format!(
+        "{purpose}\n\nOmniAgent-Task: {}\nOmniAgent-Backlog-Key: {}\nOmniAgent-Plan: {}\nOmniAgent-SDD: {sdd}\nOmniAgent-Requirements: {requirements}",
+        unit.task_id, plan.task.specification.key, unit.plan_revision
+    )))
 }
 
 impl BacklogDraft {
