@@ -463,6 +463,36 @@ it("previews a closed note and opens only that note when explicitly requested", 
   expect(active.state.doc.toString()).toBe(releaseSource);
 });
 
+it("copies a Markdown link, opens Reading to the side and shows the Outline for the clicked note", async () => {
+  mockRepository();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const original = await editor(release);
+  const tree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  const folder = tree.getByRole("button", { name: "notes" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
+  const target = await tree.findByRole("button", { name: "Checklist.md" });
+
+  fireEvent.contextMenu(target);
+  await user.click(await screen.findByRole("menuitem", { name: "Copy Markdown link" }));
+  expect(await navigator.clipboard.readText()).toBe("[Checklist](/notes/Checklist.md)");
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_document", { checkoutId, path: checklist });
+
+  fireEvent.contextMenu(target);
+  await user.click(await screen.findByRole("menuitem", { name: "Open Reading to the side" }));
+  const reading = await screen.findByLabelText(`Reading view for ${checklist}`);
+  expect(within(reading).getByRole("heading", { name: "Launch notes" })).toBeTruthy();
+  expect(reading.closest(".dv-groupview")).not.toBe(original.dom.closest(".dv-groupview"));
+  expect(original.contentDOM.closest("[hidden]")).toBeNull();
+
+  fireEvent.contextMenu(target);
+  await user.click(await screen.findByRole("menuitem", { name: "Show Outline" }));
+  const outline = within(await screen.findByRole("region", { name: "Outline" }));
+  expect(await outline.findByRole("button", { name: "Launch notes" })).toBeTruthy();
+  expect(outline.queryByRole("button", { name: "Release notes" })).toBeNull();
+});
+
 it("compares a closed note on disk with the selected branch tip even when it has no history there", async () => {
   mockRepository();
   const base = { name: "other", reference: "refs/heads/other", sha: "c".repeat(40) };

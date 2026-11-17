@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
-  anchorLine, getProperties, headings, parseReadingAddress, parseWiki, prepareReading, repairWikiAddress,
+  anchorLine, getProperties, headings, markdownNoteLink, noteMarkdownLink, parseReadingAddress, parseWiki, prepareReading, repairWikiAddress,
   resolveWiki, rewriteNoteReferences, updateProperty, wikiLinks,
 } from "@/knowledge-document";
 import { exampleNotes } from "@/ide-knowledge-data";
 
 describe("Knowledge example document projection", () => {
+  it("copies a valid Markdown link to the exact checkout-root note", () => {
+    const path = "ops décisões/Ação [QA] (#50%).md";
+    const destination = "/ops%20d%C3%A9cis%C3%B5es/A%C3%A7%C3%A3o%20%5BQA%5D%20%28%2350%25%29.md";
+    expect(noteMarkdownLink(path)).toBe(`[Ação \\[QA\\] (#50%)](${destination})`);
+    const link = markdownNoteLink("docs/Start.md", destination)!;
+    expect(resolveWiki(link, "docs/Start.md", [{ path, content: "" }, { path: "docs/" + path, content: "" }]))
+      .toEqual([{ path, anchor: undefined }]);
+  });
+
   it("follows qualified paths, preserves an anchor and surfaces duplicate names", () => {
     expect(resolveWiki(parseWiki("Readme"), "docs/release.md", exampleNotes)).toHaveLength(2);
     expect(resolveWiki(parseWiki("ops/Readme"), "docs/release.md", exampleNotes)).toEqual([{ path: "docs/ops/Readme.md", anchor: undefined }]);

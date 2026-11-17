@@ -12,10 +12,11 @@ export type { NoteGraphProjection } from "@/knowledge-graph-model";
 const elementId = (path: string, id?: number) => `note:${id ?? path}`;
 const emptyExamples: readonly ExampleFile[] = [];
 
-export default function NoteGraph({ files = emptyExamples, projection, selected, onOpen, onNodeActions }: {
+export default function NoteGraph({ files = emptyExamples, projection, selected, initialCenter, onOpen, onNodeActions }: {
   files?: readonly ExampleFile[];
   projection?: NoteGraphProjection;
   selected?: string;
+  initialCenter?: string;
   onOpen: (path: string) => void;
   onNodeActions?: (path: string) => MenuGroups;
 }) {
@@ -23,19 +24,22 @@ export default function NoteGraph({ files = emptyExamples, projection, selected,
   const instance = useRef<cytoscape.Core>(undefined);
   const onOpenRef = useRef(onOpen);
   const onNodeActionsRef = useRef(onNodeActions);
-  const [scope, setScope] = useState<"global" | "local">("global");
-  const [center, setCenter] = useState<string>();
+  const [scope, setScope] = useState<"global" | "local">(initialCenter ? "local" : "global");
+  const [center, setCenter] = useState(initialCenter);
   const [depth, setDepth] = useState(1);
   const [filter, setFilter] = useState("");
   const [tag, setTag] = useState("");
   const { open: openContextMenu, overlay } = useNoteContextMenu();
   const indexed = useMemo(() => indexNoteGraph(projection ?? exampleNoteGraph(files)), [files, projection]);
   const hasActive = selected !== undefined && indexed.byPath.has(selected);
-  const local = scope === "local" ? center && indexed.byPath.has(center) ? center : hasActive ? selected : undefined : undefined;
+  const anchor = scope === "local" ? center ?? selected : undefined;
+  const local = anchor && indexed.byPath.has(anchor) ? anchor : undefined;
+  const unavailable = Boolean(anchor && !local);
+  const highlightedPath = local ?? selected;
   const selectedTag = indexed.tags.includes(tag) ? tag : "";
-  const { notes, edges, distance } = useMemo(() => selectNoteGraph(indexed, {
+  const { notes, edges, distance } = useMemo(() => unavailable ? { notes: [], edges: [], distance: new Map<string, number>() } : selectNoteGraph(indexed, {
     active: local, depth, search: filter, tag: selectedTag,
-  }), [depth, filter, indexed, local, selectedTag]);
+  }), [depth, filter, indexed, local, selectedTag, unavailable]);
 
   useEffect(() => { onOpenRef.current = onOpen; }, [onOpen]);
   useEffect(() => { onNodeActionsRef.current = onNodeActions; }, [onNodeActions]);
@@ -64,7 +68,7 @@ export default function NoteGraph({ files = emptyExamples, projection, selected,
     const graph = cytoscape({
       container: mount,
       elements: [
-        ...notes.map(({ id, path, title }) => ({ data: { id: elementId(path, id), name: title, path }, classes: path === selected ? "current" : "" })),
+        ...notes.map(({ id, path, title }) => ({ data: { id: elementId(path, id), name: title, path }, classes: path === highlightedPath ? "current" : "" })),
         ...edges.map(({ sourcePath, targetPath }) => ({ data: {
           id: `edge:${JSON.stringify([sourcePath, targetPath])}`,
           source: elementId(sourcePath, indexed.byPath.get(sourcePath)?.id),
@@ -109,7 +113,7 @@ export default function NoteGraph({ files = emptyExamples, projection, selected,
     const resize = new ResizeObserver(() => { if (mount.clientWidth && mount.clientHeight) graph.resize(); });
     resize.observe(mount);
     return () => { resize.disconnect(); graph.destroy(); instance.current = undefined; };
-  }, [depth, distance, edges, indexed.byPath, local, notes, openContextMenu, selected]);
+  }, [depth, distance, edges, highlightedPath, indexed.byPath, local, notes, openContextMenu]);
 
   const zoomBy = (factor: number) => {
     const graph = instance.current;
@@ -120,8 +124,8 @@ export default function NoteGraph({ files = emptyExamples, projection, selected,
     <div className="note-graph">
       <div className="note-graph-tools">
         <Network size={16} aria-hidden="true" />
-        <button type="button" className="fw-btn" aria-pressed={!local} onClick={() => setScope("global")}>Global</button>
-        <button type="button" className="fw-btn" aria-pressed={Boolean(local)} onClick={() => { if (hasActive) setCenter(undefined); setScope("local"); }}
+        <button type="button" className="fw-btn" aria-pressed={scope === "global"} onClick={() => setScope("global")}>Global</button>
+        <button type="button" className="fw-btn" aria-pressed={scope === "local"} onClick={() => { if (hasActive) setCenter(undefined); setScope("local"); }}
           disabled={!hasActive && !center}>Local</button>
         {local && <label>Depth <select value={depth} onChange={(event) => setDepth(Number(event.target.value))}>
           <option value={1}>1</option><option value={2}>2</option><option value={3}>3</option>
@@ -145,12 +149,13 @@ export default function NoteGraph({ files = emptyExamples, projection, selected,
           event.preventDefault();
           event.stopPropagation();
           openContextMenu("Note graph", backgroundGroups(), { x: left, y: top }, () => { if (canvas.isConnected) canvas.focus(); });
-        } : undefined} /> : <p role="status" className="file-sidebar-note">{indexed.byPath.size ? "No notes match the current graph filter." : "No Markdown notes in this checkout."}</p>}
+        } : undefined} /> : <p role="status" className="file-sidebar-note">{unavailable ? `The note ${anchor} is unavailable in the graph.`
+          : indexed.byPath.size ? "No notes match the current graph filter." : "No Markdown notes in this checkout."}</p>}
       <ResizablePanel className="note-graph-list-panel" edge="top" resizeKey="note-graph-list" resizeLabel="graph notes">
         <ul className="note-graph-node-list" aria-label="Graph notes">
           {notes.map(({ path, title }) => <li key={path}><ContextActions label={path} groups={onNodeActions ? nodeGroups(path) : []}>
             <button type="button" className="fw-btn" title={path}
-            aria-label={projection ? `${title} (${path})` : undefined} aria-current={path === selected ? "true" : undefined}
+            aria-label={projection ? `${title} (${path})` : undefined} aria-current={path === highlightedPath ? "true" : undefined}
             onClick={() => onOpen(path)}><CircleDot size={12} aria-hidden="true" />{projection ? title : fileName(path)}</button>
           </ContextActions></li>)}
         </ul>

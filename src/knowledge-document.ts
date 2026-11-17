@@ -348,6 +348,13 @@ function escapedLabel(label: string) {
   return label.replace(/[\\\[\]]/g, "\\$&");
 }
 
+export function noteMarkdownLink(path: string) {
+  const name = fileName(path);
+  const label = escapedLabel(name.replace(/\.(?:md|markdown)$/i, "") || name);
+  const destination = path.split("/").map((part) => encodeURIComponent(part).replace(/[()]/g, (marker) => marker === "(" ? "%28" : "%29")).join("/");
+  return `[${label}](/${destination})`;
+}
+
 export function readingWikiAddress(path: string, raw: string, line?: number, markdown?: { target: string; anchor?: string }) {
   return "omni-wiki:" + encodeURIComponent(JSON.stringify([path, raw, line ?? null, markdown ?? null]));
 }

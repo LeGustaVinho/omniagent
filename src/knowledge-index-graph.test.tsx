@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type cytoscape from "cytoscape";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -157,6 +157,35 @@ const nodeId = (graph: cytoscape.Core, path: string) => {
 };
 const edgePaths = (graph: cytoscape.Core) => graph.edges().map((item) => [item.source().data("path"), item.target().data("path")]);
 
+it("opens the local graph centered on the clicked unopened note while keeping the editor's active note", async () => {
+  mockIndex();
+  render(workspace(alpha, queryClient()));
+  const user = userEvent.setup();
+  await screen.findByRole("button", { name: "Close Start.md" });
+  const tree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  const folder = await tree.findByRole("button", { name: "planos" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
+  const note = await tree.findByRole("button", { name: "Ação.md" });
+  fireEvent.contextMenu(note);
+  await user.click(await screen.findByRole("menuitem", { name: "Open local graph" }));
+  const graphNotes = within(await screen.findByRole("list", { name: "Graph notes" }));
+  expect(screen.getByRole("button", { name: "Local" }).getAttribute("aria-pressed")).toBe("true");
+  expect(graphNotes.getByRole("button", { name: `Ação seguinte (${secondary})` }).getAttribute("aria-current")).toBe("true");
+  expect(paths()).toEqual([guide, secondary]);
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_document", { checkoutId: alpha, path: secondary });
+
+  await user.click(screen.getByRole("button", { name: "Global" }));
+  expect(paths()).toContain(start);
+  fireEvent.contextMenu(note);
+  await user.click(await screen.findByRole("menuitem", { name: "Open local graph" }));
+  await waitFor(() => expect(paths()).toEqual([guide, secondary]));
+
+  await user.click(screen.getByRole("button", { name: "Graph" }));
+  const previousFolder = tree.getByRole("button", { name: "notes" });
+  if (previousFolder.getAttribute("aria-expanded") !== "true") await user.click(previousFolder);
+  expect(tree.getByRole("button", { name: "Start.md" }).getAttribute("aria-current")).toBe("page");
+});
+
 it("uses a checkout's indexed edges to focus a canonical tab and keeps identities separate across worktrees", async () => {
   const { watchers } = mockIndex();
   const client = queryClient();
@@ -186,7 +215,8 @@ it("uses a checkout's indexed edges to focus a canonical tab and keeps identitie
   await act(async () => { reference.target().emit("tap"); });
   await waitFor(() => expect(screen.queryByRole("list", { name: "Graph notes" })).toBeNull());
   expect(screen.getAllByRole("button", { name: "Close Guia.md" })).toHaveLength(1);
-  await user.click(fileTree.getByRole("button", { name: "planos" }));
+  const folder = fileTree.getByRole("button", { name: "planos" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
   expect(fileTree.getByRole("button", { name: "Guia.md" }).getAttribute("aria-current")).toBe("page");
   expect(invoke).toHaveBeenCalledWith("open_repository_document", { checkoutId: alpha, path: guide });
 
