@@ -326,7 +326,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated, bufferAt: (path) => {
     const note = simulated && exampleNotes.find((entry) => entry.path === path);
     return files[path] ?? (note ? { content: note.content, saved: note.content } : undefined);
-  }, copy: menu.copy, report: setProblem, openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)),
+  }, openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)),
   canRestore: (path) => !markdownPath(path), restoreLocalText: async (path, content) => {
     const canonical = await loadSource(path);
     if (canonical !== path) throw new Error("This file now resolves to a different path.");

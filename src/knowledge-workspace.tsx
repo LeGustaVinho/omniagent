@@ -421,7 +421,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   });
   const revealNote = (path: string) => { setSidebar(true); setDisplay("tree"); setReveal({ path }); };
   const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated, bufferAt: (path) => notes[path],
-    copy: menu.copy, report: setProblem, openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)),
+    openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)),
     restoreLocalText: async (path, content) => {
       const canonical = await loadNote(path);
       if (canonical !== path) throw new Error("This note now resolves to a different path.");

@@ -5,18 +5,15 @@ import type { MenuAction } from "@/components/ui/context-actions";
 import type { GitTextComparison } from "@/git-diff-view";
 import { compareGitFileVersions, gitFileText, type GitFileVersion } from "@/git-file-versions";
 import { FileDialog, type FilePanelApi, type FileTreeTarget } from "@/ide-file-workspace";
-import { fileName } from "@/ide-knowledge-data";
 
 type TextState = { content: string; saved: string; external?: string };
 type Comparison = { labels: [string, string]; ownerPanel?: FilePanelApi; file?: GitTextComparison; error?: string };
 const MonacoComparison = lazy(() => import("@/git-diff-view").then(({ MonacoComparison }) => ({ default: MonacoComparison })));
 
-export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, copy, report, openHistory, restoreLocalText, canRestore }: {
+export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, openHistory, restoreLocalText, canRestore }: {
   checkoutId: string;
   simulated: boolean;
   bufferAt: (path: string) => TextState | undefined;
-  copy: (text: string, message: string) => void;
-  report: (message: string) => void;
   openHistory?: (path: string) => void;
   restoreLocalText?: (path: string, text: string) => Promise<void>;
   canRestore?: (path: string) => boolean;
@@ -67,9 +64,7 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, cop
 
   function actions(path: string, ownerPanel?: FilePanelApi): MenuAction[] {
     const local = bufferAt(path);
-    const name = fileName(path);
     return [
-      { label: "Copy text content", run: () => { void read(path).then((text) => copy(text, `Copied ${name}`), (failure: unknown) => report(String(failure))); } },
       { label: selected === path ? "Clear comparison selection" : "Select for comparison", run: () => setSelected(selected === path ? undefined : path) },
       ...(selected && selected !== path ? [{ label: "Compare with selected file", run: () => comparePaths(selected, path, ownerPanel) }] : []),
       ...(local && local.content !== local.saved ? [{ label: "Compare with saved version", run: () => {
