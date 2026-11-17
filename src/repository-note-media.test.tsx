@@ -4,10 +4,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { RepositoryNoteMedia } from "@/repository-note-media";
+import { decodeArtifactBytes, downloadArtifact } from "@/download-artifact";
 
 const pdf = vi.hoisted(() => ({ getDocument: vi.fn(), GlobalWorkerOptions: { workerSrc: "" } }));
 vi.mock("pdfjs-dist", () => pdf);
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@/download-artifact", async (original) => ({
+  ...await original<typeof import("@/download-artifact")>(), downloadArtifact: vi.fn(),
+}));
 
 const checkoutId = "notes-checkout";
 const invokeAttachment = vi.mocked(invoke);
@@ -20,12 +24,12 @@ afterEach(() => {
   pdf.GlobalWorkerOptions.workerSrc = "";
 });
 
-function showAttachment(paths: string[], title: string) {
+function showAttachment(paths: string[], title: string, allowSaveCopy = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
   clients.push(client);
   return render(
     <QueryClientProvider client={client}>
-      <RepositoryNoteMedia checkoutId={checkoutId} paths={paths} title={title} />
+      <RepositoryNoteMedia checkoutId={checkoutId} paths={paths} title={title} allowSaveCopy={allowSaveCopy} />
     </QueryClientProvider>,
   );
 }
@@ -67,6 +71,23 @@ it.each(media)("renders $mimeType with the label '$title' after the first candid
     ["read_repository_attachment", { checkoutId, path: noteRelative }],
     ["read_repository_attachment", { checkoutId, path }],
   ]);
+});
+
+it("saves the resolved attachment's original bytes and file name from its preview", async () => {
+  const { path, mimeType, contentBase64 } = media[0]!;
+  invokeAttachment.mockResolvedValueOnce(null).mockResolvedValueOnce({ relativePath: path, mimeType, contentBase64 });
+  showAttachment(["notes/missing.png", path], "Diagram alias", true);
+  fireEvent.click(await screen.findByRole("button", { name: "Save a copy" }));
+  const [name, blob] = vi.mocked(downloadArtifact).mock.calls[0]!;
+  expect(name).toBe("review.png");
+  expect(blob.type).toBe(mimeType);
+  const bytes = await new Promise<Uint8Array>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(blob);
+  });
+  expect(bytes).toEqual(decodeArtifactBytes(contentBase64));
 });
 
 it("renders the selected PDF page to a bounded canvas with labeled navigation", async () => {

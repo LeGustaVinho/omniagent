@@ -32,7 +32,7 @@ import { RepositoryNoteMerge } from "@/repository-note-merge";
 import { RepositoryTagRename } from "@/repository-tag-rename";
 import type { NoteJump } from "@/knowledge-editor";
 import { useRepositoryNotes, type NoteBuffer, type NoteRevision } from "@/repository-note-buffers";
-import { RepositoryNoteMedia } from "@/repository-note-media";
+import { downloadRepositoryAttachment, readExactRepositoryAttachment, RepositoryNoteMedia } from "@/repository-note-media";
 import { NotePropertyEditor } from "@/note-property-editor";
 import { ResizablePanel } from "@/panel-resize";
 import { KnowledgeLinks, KnowledgeOutline, KnowledgeSearch, type KnowledgeLocation, type KnowledgeOutgoingLink } from "@/knowledge-navigation";
@@ -610,7 +610,16 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
 
   const attachmentActions = (paths: readonly string[], label: string): MenuGroups => {
     const path = paths.length === 1 ? paths[0] : undefined;
-    return [[{ label: "Preview attachment", run: () => setDialog({ kind: "repositoryAttachment", paths: [...paths], label }) }],
+    return [[
+      { label: "Preview attachment", run: () => setDialog({ kind: "repositoryAttachment", paths: [...paths], label }) },
+      ...(path ? [{ label: "Save a copy", run: () => {
+        setProblem("");
+        void readExactRepositoryAttachment(checkout.checkoutId, path).then((file) => {
+          if (!file) throw new Error("Attachment unavailable.");
+          downloadRepositoryAttachment(file);
+        }).catch((failure: unknown) => setProblem(String(failure)));
+      } }] : []),
+    ],
       ...(path ? [...menu.location({ kind: "file", path }), ...conversationActions.actions({ kind: "file", path })]
         : [[{ label: "Copy candidate paths", run: () => menu.copy(paths.join("\n"), "Copied attachment paths") }]])];
   };
@@ -1134,7 +1143,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         <AttachmentPreview attachment={dialog.attachment} />
       </FileDialog>}
       {dialog?.kind === "repositoryAttachment" && <FileDialog title={dialog.label} description="Repository attachment" onClose={closeDialog}>
-        <RepositoryNoteMedia checkoutId={checkout.checkoutId} paths={dialog.paths} title={dialog.label} />
+        <RepositoryNoteMedia checkoutId={checkout.checkoutId} paths={dialog.paths} title={dialog.label} allowSaveCopy />
       </FileDialog>}
     </section>
   );
