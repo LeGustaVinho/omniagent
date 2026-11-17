@@ -84,9 +84,15 @@ export function ConversationLibraryLayout({ sectionRef, className, query, search
   </section>;
 }
 
-export function ConversationLibraryGroup({ title, children }: { title: string; children: ReactNode }) {
+export function ConversationLibraryGroup({ title, children, sectionId, actions }: {
+  title: string;
+  children: ReactNode;
+  sectionId?: string;
+  actions?: MenuGroups;
+}) {
+  const heading = <h3 className="conv-session-group" data-library-section-id={sectionId} tabIndex={sectionId ? -1 : undefined}>{title}</h3>;
   return <section aria-label={title}>
-    <h3 className="conv-session-group">{title}</h3>
+    {actions ? <ContextActions label={`${title} section`} groups={actions}>{heading}</ContextActions> : heading}
     <ul className="conv-session-list">{children}</ul>
   </section>;
 }

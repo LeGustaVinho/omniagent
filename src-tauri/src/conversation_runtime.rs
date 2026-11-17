@@ -3,7 +3,7 @@ use omniagent::{
     conversations::{
         Conversation, ConversationHistory, ConversationHistoryInspection,
         ConversationLibraryChange, ConversationLibraryEntry, ConversationLibrarySection,
-        SessionScope,
+        ConversationLibrarySectionChange, SessionScope,
     },
     diagnostics,
     dispatch::{ConversationArtifactRevision, ConversationSelection, QueuedSummary},
@@ -151,6 +151,19 @@ pub async fn conversation_library_sections(
 ) -> Result<Vec<ConversationLibrarySection>, String> {
     store
         .conversation_library_sections(project_id)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn organize_conversation_library_section(
+    store: State<'_, Store>,
+    project_id: String,
+    section_id: String,
+    change: ConversationLibrarySectionChange,
+) -> Result<(), String> {
+    store
+        .organize_conversation_library_section(project_id, section_id, change)
         .await
         .map_err(ui_error)
 }

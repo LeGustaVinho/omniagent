@@ -77,8 +77,9 @@ function repository(archiveMessages: MessageRevision[] = []) {
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     const input = (args ?? {}) as {
       checkoutId?: string; conversationId?: string; title?: string; query?: string; projectId?: string;
-      archived?: boolean;
-      change?: { type: string; pinned?: boolean; unread?: boolean; archived?: boolean; sectionId?: string; name?: string };
+      archived?: boolean; sectionId?: string;
+      change?: { type: string; pinned?: boolean; unread?: boolean; archived?: boolean; sectionId?: string; name?: string;
+        expectedName?: string; neighborId?: string; before?: boolean };
       workspace?: string; layout?: string; runId?: string; after?: string; text?: string; choice?: string;
     };
     const layoutKey = `${input.checkoutId}:${input.workspace}`;
@@ -107,6 +108,26 @@ function repository(archiveMessages: MessageRevision[] = []) {
         });
       case "conversation_library_sections":
         return sections.filter(({ projectId }) => !input.projectId || projectId === input.projectId);
+      case "organize_conversation_library_section": {
+        const index = sections.findIndex((section) => section.projectId === input.projectId && section.id === input.sectionId);
+        if (index < 0) throw new Error("Section does not belong to this project");
+        const section = sections[index]!;
+        const change = input.change!;
+        if (change.type === "rename") {
+          if (change.expectedName !== section.name) throw new Error("Section changed");
+          if (sections.some((other) => other !== section && other.projectId === section.projectId && other.name.toLowerCase() === change.name?.toLowerCase())) {
+            throw new Error("A section already exists in this project");
+          }
+          section.name = change.name!;
+        } else {
+          const ordered = sections.filter((item) => item.projectId === section.projectId);
+          const neighbor = ordered[ordered.indexOf(section) + (change.before ? -1 : 1)];
+          if (!neighbor || neighbor.id !== change.neighborId) throw new Error("Section order changed");
+          sections[sections.indexOf(neighbor)] = section;
+          sections[index] = neighbor;
+        }
+        return;
+      }
       case "export_conversation_markdown":
         if (!conversation || conversation.checkoutId !== input.checkoutId) throw new Error("Wrong export scope");
         return true;
@@ -513,6 +534,54 @@ it("organizes conversations through the shared menu and reloads persisted sectio
   expect(await library().findByRole("region", { name: "Release notes" })).toBeTruthy();
   await reopened.user.click(library().getByRole("button", { name: original }));
   await waitFor(() => expect(library().getByRole("button", { name: original }).getAttribute("aria-description")).toBeNull());
+});
+
+it("renames and reorders a saved section, including empty sections, without changing membership", async () => {
+  repository();
+  const first = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  for (const name of ["Zulu", "Alpha"]) {
+    fireEvent.contextMenu(await library().findByRole("button", { name: original }));
+    const submenu = await screen.findByRole("menuitem", { name: "Section" });
+    submenu.focus();
+    await first.user.keyboard("{ArrowRight}");
+    await first.user.click(await screen.findByRole("menuitem", { name: "New section…" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Create section" }));
+    await first.user.type(dialog.getByRole("textbox", { name: "Section name" }), name);
+    await first.user.click(dialog.getByRole("button", { name: "Save" }));
+    await screen.findByRole("region", { name });
+  }
+  const order = () => library().getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent);
+  expect(order()).toEqual(["Conversations", "Zulu", "Alpha"]);
+  expect(within(library().getByRole("region", { name: "Zulu" })).getByText("No conversations in this section.")).toBeTruthy();
+
+  const actions = library().getByRole("button", { name: "Actions for Alpha section" });
+  actions.focus();
+  await first.user.keyboard("{Shift>}{F10}{/Shift}");
+  await first.user.click(await screen.findByRole("menuitem", { name: "Rename section…" }));
+  const rename = within(await screen.findByRole("dialog", { name: "Rename section" }));
+  const name = rename.getByRole("textbox", { name: "Section name" });
+  await first.user.clear(name);
+  await first.user.type(name, "Beta");
+  await first.user.click(rename.getByRole("button", { name: "Save" }));
+  const beta = await screen.findByRole("heading", { name: "Beta" });
+  expect(order()).toEqual(["Conversations", "Zulu", "Beta"]);
+  expect(invoke).toHaveBeenCalledWith("organize_conversation_library_section", {
+    projectId: selected.projectId, sectionId: "section-3", change: { type: "rename", expectedName: "Alpha", name: "Beta" },
+  });
+
+  fireEvent.contextMenu(beta);
+  expect((await screen.findByRole("menuitem", { name: "Move section down" })).hasAttribute("data-disabled")).toBe(true);
+  await first.user.click(screen.getByRole("menuitem", { name: "Move section up" }));
+  await waitFor(() => expect(order()).toEqual(["Conversations", "Beta", "Zulu"]));
+  expect(invoke).toHaveBeenCalledWith("organize_conversation_library_section", {
+    projectId: selected.projectId, sectionId: "section-3", change: { type: "move", neighborId: "section-2", before: true },
+  });
+  first.unmount();
+  mount();
+  await screen.findByRole("region", { name: "Beta" });
+  expect(order()).toEqual(["Conversations", "Beta", "Zulu"]);
+  expect(within(library().getByRole("region", { name: "Beta" })).getByRole("button", { name: original })).toBeTruthy();
 });
 
 it("exports the clicked conversation using its actual checkout, including from Archived", async () => {

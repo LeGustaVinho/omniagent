@@ -43,6 +43,7 @@ pub use continuation::{
 pub use history::ConversationHistoryInspection;
 pub use library::{
     ConversationLibraryChange, ConversationLibraryEntry, ConversationLibrarySection,
+    ConversationLibrarySectionChange,
 };
 pub use reference_delivery::SubmittedConversationReference;
 

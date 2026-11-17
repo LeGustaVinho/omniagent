@@ -54,6 +54,17 @@ pub enum ConversationLibraryChange {
     NewSection { name: String },
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ConversationLibrarySectionChange {
+    Rename { expected_name: String, name: String },
+    Move { neighbor_id: String, before: bool },
+}
+
 impl Store {
     pub async fn conversation_library(
         &self,
@@ -128,7 +139,7 @@ impl Store {
         self.execute(move |db| {
             let mut query = db.prepare(
                 "SELECT id, project_id, name FROM conversation_library_sections
-                 WHERE ?1 IS NULL OR project_id = ?1 ORDER BY project_id, name_key, id",
+                 WHERE ?1 IS NULL OR project_id = ?1 ORDER BY project_id, display_order, id",
             )?;
             let sections = query
                 .query_map([project_id], |row| {
@@ -142,6 +153,54 @@ impl Store {
             Ok(sections)
         })
         .await
+    }
+
+    pub async fn organize_conversation_library_section(
+        &self,
+        project_id: String,
+        section_id: String,
+        change: ConversationLibrarySectionChange,
+    ) -> Result<()> {
+        self.execute(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            match change {
+                ConversationLibrarySectionChange::Rename { expected_name, name } => {
+                    let (name, name_key) = section_name(&name)?;
+                    let exists = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM conversation_library_sections
+                         WHERE project_id = ?1 AND name_key = ?2 AND id <> ?3)",
+                        params![project_id, name_key, section_id], |row| row.get::<_, bool>(0),
+                    )?;
+                    ensure!(!exists, "A section named {name} already exists in this project");
+                    let updated = tx.execute(
+                        "UPDATE conversation_library_sections SET name = ?4, name_key = ?5
+                         WHERE project_id = ?1 AND id = ?2 AND name = ?3",
+                        params![project_id, section_id, expected_name, name, name_key],
+                    )?;
+                    ensure!(updated == 1, "This section changed or no longer belongs to the project. Refresh the library.");
+                }
+                ConversationLibrarySectionChange::Move { neighbor_id, before } => {
+                    let ordered: Vec<(String, i64)> = tx.prepare(
+                        "SELECT id, display_order FROM conversation_library_sections
+                         WHERE project_id = ?1 ORDER BY display_order, id",
+                    )?.query_map([&project_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    let index = ordered.iter().position(|(id, _)| *id == section_id)
+                        .context("Section does not belong to this project")?;
+                    let neighbor = if before { index.checked_sub(1) } else { Some(index + 1) };
+                    let (_, neighbor_order) = neighbor.and_then(|index| ordered.get(index))
+                        .filter(|(id, _)| *id == neighbor_id)
+                        .context("Section order changed. Refresh the library and choose an adjacent section.")?;
+                    tx.execute(
+                        "UPDATE conversation_library_sections SET display_order = CASE id WHEN ?2 THEN ?4 ELSE ?5 END
+                         WHERE project_id = ?1 AND id IN (?2, ?3)",
+                        params![project_id, section_id, neighbor_id, neighbor_order, ordered[index].1],
+                    )?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        }).await
     }
 
     pub async fn organize_conversation(
@@ -193,12 +252,12 @@ impl Store {
                     )?
                 }
                 ConversationLibraryChange::NewSection { name } => {
-                    let name = name.trim();
-                    ensure!(!name.is_empty() && !name.chars().any(char::is_control), "Enter a valid section name");
-                    let name_key: String = name.nfc().flat_map(char::to_lowercase).collect();
+                    let (name, name_key) = section_name(&name)?;
                     let id = Uuid::new_v4().to_string();
                     let inserted = tx.execute(
-                        "INSERT INTO conversation_library_sections (id, project_id, name, name_key) VALUES (?1, ?2, ?3, ?4)
+                        "INSERT INTO conversation_library_sections (id, project_id, name, name_key, display_order)
+                         SELECT ?1, ?2, ?3, ?4, COALESCE(MAX(display_order) + 1, 0)
+                         FROM conversation_library_sections WHERE project_id = ?2
                          ON CONFLICT(project_id, name_key) DO NOTHING",
                         params![id, project_id, name, name_key],
                     )?;
@@ -213,6 +272,15 @@ impl Store {
             Ok(updated != 0)
         }).await
     }
+}
+
+fn section_name(value: &str) -> Result<(&str, String)> {
+    let name = value.trim();
+    ensure!(
+        !name.is_empty() && !name.chars().any(char::is_control),
+        "Enter a valid section name"
+    );
+    Ok((name, name.nfc().flat_map(char::to_lowercase).collect()))
 }
 
 fn searchable(value: &str) -> String {

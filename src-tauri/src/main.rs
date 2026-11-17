@@ -604,6 +604,7 @@ fn main() {
             ipc::list_conversations,
             conversation_runtime::conversation_library,
             conversation_runtime::conversation_library_sections,
+            conversation_runtime::organize_conversation_library_section,
             conversation_runtime::organize_conversation,
             conversation_goal_runtime::conversation_goal_overview,
             conversation_goal_runtime::start_conversation_goal,
