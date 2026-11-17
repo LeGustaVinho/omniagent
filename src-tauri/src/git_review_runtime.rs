@@ -16,6 +16,33 @@ fn review_error(error: anyhow::Error) -> String {
 }
 
 #[tauri::command]
+pub async fn git_discard_preview(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    hunk_id: Option<String>,
+) -> Result<omniagent::repository::git_review::GitDiscardPreview, String> {
+    store
+        .git_discard_preview(checkout_id, path, hunk_id)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_discard_changes(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    hunk_id: Option<String>,
+    snapshot: String,
+) -> Result<(), String> {
+    store
+        .git_discard_changes(checkout_id, path, hunk_id, snapshot)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn git_checkout_review(
     store: State<'_, Store>,
     checkout_id: String,

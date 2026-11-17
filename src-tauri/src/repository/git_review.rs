@@ -28,6 +28,7 @@ mod commit;
 mod comparison;
 mod conflicts;
 mod content;
+mod discard;
 mod history;
 mod hunks;
 mod permalink;
@@ -35,6 +36,7 @@ pub use comments::{GitReviewComment, GitReviewCommentRequest, GitReviewCommentSu
 pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
 pub use conflicts::GitConflictReview;
 pub use content::{GitDiffSource, GitFileSide, GitReviewDiff};
+pub use discard::GitDiscardPreview;
 pub use history::{GitFileHistory, GitFileVersion, GitFileVersionComparison};
 pub use hunks::GitReviewHunk;
 pub use permalink::GitPermalinkLines;

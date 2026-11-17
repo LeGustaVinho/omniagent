@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { excerptReference, type EditorExcerpt } from "@/editor-context";
 import { GitConflictReview } from "@/git-conflict-review";
+import { GitDiscardDialog } from "@/git-discard-dialog";
 import { GitDiffReview, type GitHunk, type GitTextComparison } from "@/git-diff-view";
 import { useGitReviewComments, type GitReviewScope } from "@/git-review-comments";
 import { GitDiffSourceSelect } from "@/git-workspace-frame";
@@ -53,6 +54,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
   const [source, setSource] = useState<ReviewSource>(initialSource);
   const [selection, setSelection] = useState(initialPath);
   const [conflict, setConflict] = useState<string>();
+  const [discard, setDiscard] = useState<{ path: string; hunkId?: string }>();
   const changeStage = useChangeStage(review);
   const conversationActions = useCheckoutConversationActions(review.checkoutId, !openConversation, (id) => openConversation?.(id));
   const files = source === "branch" ? [] : review.changes.flatMap((file) => {
@@ -106,6 +108,8 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
           hunkActions={(hunk) => [[
             ...(indexActions && comparison && diffRevision ? [{ label: source === "working" ? "Stage hunk" : "Unstage hunk",
               disabled: changeStage.isPending, run: () => changeStage.mutate({ path: comparison.path, source, hunkId: hunk.id, expected: diffRevision }) }] : []),
+            ...(indexActions && source === "working" && comparison ? [{ label: "Discard hunk…", destructive: true,
+              run: () => setDiscard({ path: comparison.path, hunkId: hunk.id }) }] : []),
             ...(openConversation && comparison && diffRevision ? [{ label: "Review hunk in conversation…", run: () => {
               const head = diffRevision.head ?? "Unborn";
               const index = diffRevision.index ?? "None";
@@ -125,6 +129,10 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
                 run: () => changeStage.mutate({ path: file.path, staged: true }) }] : []),
               ...(indexActions && entry?.staged ? [{ label: "Unstage file", disabled: changeStage.isPending,
                 run: () => changeStage.mutate({ path: file.path, staged: false }) }] : []),
+              ...(indexActions && source === "working" && (entry?.working === "M" || entry?.working === "D") ? [{
+                label: entry.working === "D" ? "Restore deleted file…" : "Discard file changes…",
+                destructive: entry.working === "M", run: () => setDiscard({ path: file.path }),
+              }] : []),
             ]];
           }} />
       </div>
@@ -132,6 +140,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
     </div>}
     {source !== "branch" && comments.dialog}
     {conversationActions.dialog}
+    {discard && <GitDiscardDialog checkoutId={review.checkoutId} selection={discard} close={() => setDiscard(undefined)} />}
     {conflict && <GitConflictReview key={conflict} checkoutId={review.checkoutId} checkoutRoot={review.root}
       path={conflict} openFile={openFile} close={() => setConflict(undefined)} />}
   </div>;

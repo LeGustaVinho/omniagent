@@ -33,6 +33,39 @@ pub(super) use replacement::lock_directories;
 use replacement::{FileSave, replace};
 pub(super) use replacement::{file_identity, open_directory_for_rename, open_for_rename, rename};
 
+pub(super) fn replace_reviewed_checkout_bytes(
+    root: &Path,
+    destination: &Path,
+    expected_sha256: &str,
+    edited: &[u8],
+    max: u64,
+    verify: impl Fn() -> Result<()>,
+) -> Result<()> {
+    use replacement::ReplacementStep;
+    verify()?;
+    match replace(root, destination, expected_sha256, edited, max, |step| {
+        if step == ReplacementStep::BeforeDisplacement {
+            verify()?;
+        }
+        Ok(())
+    })? {
+        FileSave::Verified { recovery, .. } => {
+            if let Some(recovery) = recovery {
+                recovery.clean_verified();
+            }
+            Ok(())
+        }
+        FileSave::Conflict(recovery) | FileSave::RecoveryRequired(recovery) => {
+            let copies = [recovery.displaced_path, recovery.edited_path]
+                .into_iter()
+                .flatten()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>();
+            anyhow::bail!("{}. Recovery copies: {}", recovery.message, copies.join(", "));
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum DocumentKind {
     Markdown,
