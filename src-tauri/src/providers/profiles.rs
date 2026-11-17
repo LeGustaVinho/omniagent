@@ -17,14 +17,18 @@ use crate::{
     model_catalog::{MODEL_CATALOG, ModelOption, ObservedModel},
     process::TerminalOutcome,
     process_io::{CapturedProcess, Stream},
+    repository::{checkout_root, verify_checkout},
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
     store::Store,
 };
 
 pub use super::sandbox::OsSandboxSupport;
 use super::{
-    Authentication, CliAdapter, CliSession, ProbeKind, Provider, ProviderEventData, ReportedModel,
-    SessionIntent, SessionMode, SessionOption, SessionRequest,
+    Authentication, Capability, CliAdapter, CliSession, ProbeKind, Provider, ProviderEventData,
+    ReportedModel, SessionIntent, SessionMode, SessionOption, SessionRequest,
+    capabilities::ReportedCapabilities,
+    configuration::inspect_profile,
+    skills::{SkillCatalog, SkillCatalogIssue},
 };
 
 mod account;
@@ -93,6 +97,8 @@ pub struct DesktopModel {
     pub option: ModelOption,
     pub efforts: Vec<String>,
     pub default_effort: Option<String>,
+    pub input_modalities: Option<Vec<String>>,
+    pub output_modalities: Option<Vec<String>>,
 }
 
 pub const DESKTOP_PERMISSION_REVISION: &str = "desktop-direct-v1";
@@ -104,11 +110,94 @@ pub struct DesktopProfile {
     pub account_binding: Option<String>,
 }
 
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopCapabilityReport {
+    protocol: Option<String>,
+    capabilities: Option<Vec<Capability>>,
+    prompt_formats: Option<DesktopPromptFormats>,
+    session_model: Option<String>,
+    tools: Option<Vec<String>>,
+    commands: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopPromptFormats {
+    image: Option<bool>,
+    audio: Option<bool>,
+    embedded_context: Option<bool>,
+}
+
+impl DesktopCapabilityReport {
+    fn observe(&mut self, event: &ProviderEventData) {
+        match event {
+            ProviderEventData::Handshake {
+                protocol,
+                capabilities,
+            } => {
+                self.protocol = Some(protocol.clone());
+                self.capabilities = Some(capabilities.clone());
+            }
+            ProviderEventData::PromptCapabilities {
+                image,
+                audio,
+                embedded_context,
+            } => {
+                self.prompt_formats = Some(DesktopPromptFormats {
+                    image: *image,
+                    audio: *audio,
+                    embedded_context: *embedded_context,
+                });
+            }
+            ProviderEventData::SessionToolsReported { tools } => self.tools = Some(tools.clone()),
+            ProviderEventData::AvailableCommands { names } => self.commands = Some(names.clone()),
+            ProviderEventData::SessionReady { model, .. } => self.session_model.clone_from(model),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopProviderInventory {
+    executable: PathBuf,
+    version: String,
+    models: Vec<DesktopModel>,
+    transport_report: DesktopCapabilityReport,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopProviderSkills {
+    checkout: PathBuf,
+    catalog: SkillCatalog,
+}
+
+pub fn desktop_provider_inventory(
+    configured: ConfiguredExecutable,
+) -> Result<DesktopProviderInventory> {
+    let (profile, transport_report) = inspect_desktop_profile(configured, None)?;
+    Ok(DesktopProviderInventory {
+        executable: profile.executable,
+        version: profile.version,
+        models: profile.models,
+        transport_report,
+    })
+}
+
 /// Query the CLI in a neutral directory with no prompt or project customizations.
 pub fn desktop_profile(
     configured: ConfiguredExecutable,
     model_id: Option<String>,
 ) -> Result<DesktopProfile> {
+    inspect_desktop_profile(configured, model_id).map(|(profile, _)| profile)
+}
+
+fn inspect_desktop_profile(
+    configured: ConfiguredExecutable,
+    model_id: Option<String>,
+) -> Result<(DesktopProfile, DesktopCapabilityReport)> {
     let provider = configured.provider;
     let check = probe_cli_profile(configured, false)?;
     let executable = PathBuf::from(
@@ -138,7 +227,7 @@ pub fn desktop_profile(
         model: model_id,
         effort: None,
     })?;
-    let models = run_probe(
+    let (models, transport_report) = run_probe(
         |request| DirectWindowsRunner.launch(request),
         &executable,
         &cwd,
@@ -149,7 +238,7 @@ pub fn desktop_profile(
                 process.input.send(frame.as_bytes())?;
             }
             let mut models: Option<Vec<ReportedModel>> = None;
-            let mut session_model = None;
+            let mut transport_report = DesktopCapabilityReport::default();
             let mut session_effort = None;
             loop {
                 let frame = process
@@ -160,6 +249,7 @@ pub fn desktop_profile(
                     process.input.send(frame.as_bytes())?;
                 }
                 for event in update.events {
+                    transport_report.observe(&event.data);
                     match event.data {
                         ProviderEventData::Error { .. } => bail!("The CLI could not list models"),
                         ProviderEventData::ModelInventory { models: inventory } => {
@@ -171,7 +261,6 @@ pub fn desktop_profile(
                                     || option.id == "thought_level"
                             });
                         }
-                        ProviderEventData::SessionReady { model, .. } => session_model = model,
                         _ => {}
                     }
                 }
@@ -192,22 +281,27 @@ pub fn desktop_profile(
                         &format!("desktop-direct:{}", provider.as_str()),
                         &observed,
                     );
-                    return Ok(options
+                    let model_options = options
                         .into_iter()
                         .zip(models)
                         .map(|(option, reported)| {
+                            let input_modalities = reported.input_modalities.clone();
+                            let output_modalities = reported.output_modalities.clone();
                             let (efforts, default_effort) = model_effort_levels(
                                 reported,
-                                session_model.as_deref(),
+                                transport_report.session_model.as_deref(),
                                 session_effort.as_ref(),
                             );
                             DesktopModel {
                                 option,
                                 efforts,
                                 default_effort,
+                                input_modalities,
+                                output_modalities,
                             }
                         })
-                        .collect());
+                        .collect();
+                    return Ok((model_options, transport_report));
                 }
             }
         },
@@ -221,12 +315,15 @@ pub fn desktop_profile(
         .unwrap_or_default(),
         _ => check.account_binding,
     };
-    Ok(DesktopProfile {
-        executable,
-        version,
-        models,
-        account_binding,
-    })
+    Ok((
+        DesktopProfile {
+            executable,
+            version,
+            models,
+            account_binding,
+        },
+        transport_report,
+    ))
 }
 
 fn model_effort_levels(
@@ -253,6 +350,42 @@ fn model_effort_levels(
 }
 
 impl Store {
+    pub async fn desktop_provider_skills(
+        &self,
+        provider: Provider,
+        checkout_id: String,
+    ) -> Result<DesktopProviderSkills> {
+        let cwd = checkout_root(self, checkout_id.clone()).await?;
+        let checkout = verify_checkout(self, checkout_id, cwd).await?;
+        let configured = self.configured_executable(provider).await?;
+        tokio::task::spawn_blocking(move || {
+            let installed = prerequisites::inspect_provider(configured);
+            let (configuration, entries, _) = inspect_profile(
+                provider,
+                installed.status.version.as_deref().unwrap_or_default(),
+                &checkout,
+                &ReportedCapabilities::default(),
+            )?;
+            let issues = configuration
+                .unresolved
+                .into_iter()
+                .map(|path| SkillCatalogIssue {
+                    path: Some(path),
+                    message: "Local configuration could not be inspected".into(),
+                })
+                .collect();
+            Ok(DesktopProviderSkills {
+                checkout: checkout.root,
+                catalog: SkillCatalog {
+                    entries,
+                    issues,
+                    reported: false,
+                },
+            })
+        })
+        .await?
+    }
+
     pub async fn configured_executable(&self, provider: Provider) -> Result<ConfiguredExecutable> {
         let executable = self
             .execute(move |connection| {

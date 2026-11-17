@@ -26,7 +26,10 @@ use omniagent::{
             },
             probe_plugins,
         },
-        profiles::{CliProbe, ConfiguredExecutable, probe_cli},
+        profiles::{
+            CliProbe, ConfiguredExecutable, DesktopProviderInventory, DesktopProviderSkills,
+            desktop_provider_inventory, probe_cli,
+        },
     },
     repository::ProjectCheckout,
     runs::{RunRecord, RunSnapshot, SubscriptionUpdate},
@@ -568,6 +571,46 @@ pub async fn probe_cli_executable(
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn provider_model_inventory(
+    store: State<'_, Store>,
+    provider: Provider,
+) -> Result<DesktopProviderInventory, String> {
+    let configured = store
+        .configured_executable(provider)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))?;
+    tauri::async_runtime::spawn_blocking(move || desktop_provider_inventory(configured))
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))?
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn provider_skill_inventory(
+    store: State<'_, Store>,
+    provider: Provider,
+    checkout_id: String,
+) -> Result<DesktopProviderSkills, String> {
+    store
+        .desktop_provider_skills(provider, checkout_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
+}
+
+#[tauri::command]
+pub async fn provider_capability_qualifications(
+    store: State<'_, Store>,
+    provider: Provider,
+    cursor: Option<omniagent::dispatch::QualificationCursor>,
+    checkout_id: Option<String>,
+) -> Result<omniagent::dispatch::QualificationPage, String> {
+    store
+        .provider_capability_qualifications(provider, cursor, checkout_id)
+        .await
+        .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
 
 #[tauri::command]

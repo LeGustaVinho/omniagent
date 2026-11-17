@@ -117,12 +117,14 @@ function MatrixTable({ rows }: { rows: MatrixRow[] }) {
   </div>;
 }
 
-function RecordedQualifications({ validationCheckoutId }: { validationCheckoutId: string | null }) {
+function RecordedQualifications({ validationCheckoutId, provider }: { validationCheckoutId: string | null; provider?: Provider }) {
   const [pages, setPages] = useState<(Cursor | null)[]>([null]);
   const cursor = pages.at(-1) ?? null;
   const query = useQuery({
-    queryKey: ["desktop-capability-qualifications", cursor, validationCheckoutId],
-    queryFn: () => invoke<QualificationPage>("desktop_capability_qualifications", { cursor, validationCheckoutId }),
+    queryKey: ["desktop-capability-qualifications", cursor, validationCheckoutId, provider],
+    queryFn: () => provider
+      ? invoke<QualificationPage>("provider_capability_qualifications", { cursor, provider, checkoutId: validationCheckoutId })
+      : invoke<QualificationPage>("desktop_capability_qualifications", { cursor, validationCheckoutId }),
     retry: false,
   });
   const next = query.data?.nextCursor;
@@ -140,14 +142,15 @@ function RecordedQualifications({ validationCheckoutId }: { validationCheckoutId
   </>;
 }
 
-export function QualificationMatrix({ examples = false, validationCheckoutId = null }: {
+export function QualificationMatrix({ examples = false, validationCheckoutId = null, provider }: {
   examples?: boolean;
   validationCheckoutId?: string | null;
+  provider?: Provider;
 }) {
   const [expanded, setExpanded] = useState(false);
   return <details className="settings-matrix" onToggle={(event) => setExpanded(event.currentTarget.open)}>
     <summary>Qualification matrix</summary>
     {examples ? <MatrixTable rows={exampleRows} /> : expanded &&
-      <RecordedQualifications key={validationCheckoutId} validationCheckoutId={validationCheckoutId} />}
+      <RecordedQualifications key={validationCheckoutId} validationCheckoutId={validationCheckoutId} provider={provider} />}
   </details>;
 }

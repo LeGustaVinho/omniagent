@@ -58,7 +58,7 @@ export function ProviderProfiles({
   if (examples) return <ProviderExamples {...examples} />;
   return (
     <>
-      <ProviderSettings />
+      <ProviderSettings checkoutId={checkoutId} />
       <section className="settings-system-group" data-setting="runner">
         <h3>Runners and capabilities</h3>
         <SettingRow id="linked-runner" label="Execution runner" description="Runner qualification includes the host build, checkout scope and effective filesystem permissions.">

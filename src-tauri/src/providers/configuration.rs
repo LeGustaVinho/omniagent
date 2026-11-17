@@ -44,7 +44,15 @@ pub(crate) fn inspect(
     layout: &CheckoutLayout,
     reported: &super::capabilities::ReportedCapabilities,
 ) -> anyhow::Result<(ConfigurationEvidence, Vec<SkillEntry>, InstructionInventory)> {
-    let provider = scope.provider;
+    inspect_profile(scope.provider, &scope.cli_version, layout, reported)
+}
+
+pub(super) fn inspect_profile(
+    provider: Provider,
+    cli_version: &str,
+    layout: &CheckoutLayout,
+    reported: &super::capabilities::ReportedCapabilities,
+) -> anyhow::Result<(ConfigurationEvidence, Vec<SkillEntry>, InstructionInventory)> {
     let checkout = &layout.root;
     let mut discovery = Discovery::default();
     let mut instructions = InstructionInventory::new(layout);
@@ -77,7 +85,7 @@ pub(crate) fn inspect(
                 &mut discovery,
                 profile.as_deref(),
                 managed.as_deref(),
-                &scope.cli_version,
+                cli_version,
             );
             for directory in layout.cwd.ancestors() {
                 discovery.files(
@@ -93,7 +101,7 @@ pub(crate) fn inspect(
                 discovery.skills(directory, ".claude/skills");
             }
             if layout.root != layout.primary_root
-                && instructions::claude_supports_agents(&scope.cli_version)
+                && instructions::claude_supports_agents(cli_version)
                 && matches!(
                     plain_metadata(&layout.root.join(".claude/skills")),
                     Ok(None)

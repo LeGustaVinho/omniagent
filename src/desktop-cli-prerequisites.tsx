@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { CheckCircle2, CircleAlert } from "lucide-react";
 import type { Provider } from "@/bindings/Provider";
 import { Button } from "@/components/ui/button";
 import { ripgrepStatusKey } from "@/ide-file-search";
@@ -24,10 +25,16 @@ export function useDesktopCliPrerequisites() {
   });
 }
 
-export function ExecutableInstallation({ status }: { status: CliPrerequisite }) {
+export function ExecutableInstallation({ status, compact }: { status: CliPrerequisite; compact?: boolean }) {
+  const needsAttention = Boolean(status.issue || !status.executable || !status.version);
   return <>
-    <span>{status.version ?? (status.executable ? "Version unverified" : "Unavailable")}</span>
-    {status.executable && <code className="block break-all">{status.executable}</code>}
+    <span className="executable-status" data-attention={needsAttention}>
+      {needsAttention ? <CircleAlert size={14} aria-hidden="true" /> : <CheckCircle2 size={14} aria-hidden="true" />}
+      {status.version ?? (status.executable ? "Version unverified" : "Unavailable")}
+    </span>
+    {status.executable && (compact
+      ? <details><summary>Executable path</summary><code className="block break-all">{status.executable}</code></details>
+      : <code className="block break-all">{status.executable}</code>)}
     {status.issue && <p className="settings-result settings-result-error">{status.issue}</p>}
   </>;
 }
@@ -35,13 +42,15 @@ export function ExecutableInstallation({ status }: { status: CliPrerequisite }) 
 export function DesktopCliPrerequisites() {
   const status = useDesktopCliPrerequisites();
   const client = useQueryClient();
+  const entries = status.data && [
+    { label: "Git for Windows", status: status.data.git },
+    ...status.data.providers.map(({ provider, status }) => ({ label: providerExecutableLabels[provider], status })),
+  ].sort((a, b) => Number(Boolean(b.status.issue || !b.status.version)) - Number(Boolean(a.status.issue || !a.status.version)));
   return <section aria-label="Desktop CLI installation">
     {status.isPending && <p role="status">Checking installed executables…</p>}
     {status.error && <p role="alert">{String(status.error)}</p>}
-    {status.data && <dl className="settings-facts">
-      <dt>Git for Windows</dt><dd><ExecutableInstallation status={status.data.git} /></dd>
-      {status.data.providers.map(({ provider, status: executable }) =>
-        <ExecutableRow key={provider} label={providerExecutableLabels[provider]} status={executable} />)}
+    {entries && <dl className="settings-facts">
+      {entries.map(({ label, status }) => <ExecutableRow key={label} label={label} status={status} />)}
     </dl>}
     <Button type="button" variant="outline" disabled={status.isFetching} onClick={() => {
       void client.invalidateQueries({ queryKey: desktopCliPrerequisitesKey });
@@ -51,5 +60,5 @@ export function DesktopCliPrerequisites() {
 }
 
 function ExecutableRow({ label, status }: { label: string; status: CliPrerequisite }) {
-  return <><dt>{label}</dt><dd><ExecutableInstallation status={status} /></dd></>;
+  return <><dt>{label}</dt><dd><ExecutableInstallation status={status} compact /></dd></>;
 }

@@ -65,7 +65,7 @@ impl Store {
     }
 }
 
-fn inspect_provider(configured: ConfiguredExecutable) -> ProviderPrerequisite {
+pub(super) fn inspect_provider(configured: ConfiguredExecutable) -> ProviderPrerequisite {
     let provider = configured.provider;
     let adapter = provider.adapter();
     let status = inspect(

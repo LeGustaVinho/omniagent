@@ -5,12 +5,12 @@ import type { AttachmentLimits } from "@/bindings/AttachmentLimits";
 import type { CliProbe } from "@/bindings/CliProbe";
 import type { ConfiguredExecutable } from "@/bindings/ConfiguredExecutable";
 import type { PluginInventory } from "@/bindings/PluginInventory";
-import type { PluginInventoryStatus } from "@/bindings/PluginInventoryStatus";
 import type { Provider } from "@/bindings/Provider";
 import { UserPluginManagement } from "@/cli-plugin-management";
 import { Button } from "@/components/ui/button";
 import { desktopCliPrerequisitesKey, ExecutableInstallation, providerExecutableLabels, useDesktopCliPrerequisites, type CliPrerequisite } from "@/desktop-cli-prerequisites";
 import { ExecutionProfileModelSettings } from "@/model-default-settings";
+import { ProviderInventory, providerModelInventoryKey, providerSkillInventoryKey } from "@/provider-inventory";
 import { useWorkspace } from "@/workspace-state";
 
 const AUTH_LABELS: Record<CliProbe["authentication"], string> = {
@@ -25,29 +25,20 @@ const PROTOCOL_LABELS: Record<CliProbe["protocol"], string> = {
   failed: "Negotiation failed",
 };
 
-const PLUGIN_STATUS: Record<PluginInventoryStatus, string> = {
-  reported: "Inventory reported",
-  partial: "Some inventory entries could not be read",
-  executable_missing: "Executable not found",
-  unsupported: "This CLI build does not support JSON plugin inventory",
-  probe_failed: "The plugin inventory check failed",
-  invalid_response: "The CLI returned an unrecognized inventory",
-};
-
 export function ProviderSettingsPanel() {
-  const projectId = useWorkspace((state) => state.checkout?.projectId);
+  const checkout = useWorkspace((state) => state.checkout);
   return (
     <section className="h-full overflow-auto p-6">
       <h1 className="mb-5 text-xl font-semibold tracking-tight">Provider settings</h1>
       <div className="grid max-w-3xl gap-4">
-        {projectId && <ProjectAttachmentSettings key={projectId} projectId={projectId} />}
-        <ProviderSettings />
+        {checkout && <ProjectAttachmentSettings key={checkout.projectId} projectId={checkout.projectId} />}
+        <ProviderSettings checkoutId={checkout?.checkoutId} />
       </div>
     </section>
   );
 }
 
-export function ProviderSettings() {
+export function ProviderSettings({ checkoutId }: { checkoutId?: string }) {
   const prerequisites = useDesktopCliPrerequisites();
   const profiles = useQuery({
     queryKey: ["cli-executables"],
@@ -60,7 +51,7 @@ export function ProviderSettings() {
       {profiles.isError && <p role="alert" className="text-sm text-red-300">{String(profiles.error)}</p>}
       {prerequisites.isPending && <p role="status" className="text-sm text-muted-foreground">Checking installed executables…</p>}
       {prerequisites.error && <p role="alert" className="text-sm text-red-300">{String(prerequisites.error)}</p>}
-      {profiles.data?.map((profile) => <ExecutableSettings key={profile.provider} profile={profile}
+      {profiles.data?.map((profile) => <ExecutableSettings key={profile.provider} profile={profile} checkoutId={checkoutId}
         installation={prerequisites.data?.providers.find(({ provider, configuredExecutable }) =>
           provider === profile.provider && configuredExecutable === profile.executable)?.status} />)}
     </div>
@@ -121,11 +112,12 @@ export function ProjectAttachmentSettings({ projectId }: { projectId: string }) 
   );
 }
 
-function ExecutableSettings({ profile, installation }: { profile: ConfiguredExecutable; installation?: CliPrerequisite }) {
+function ExecutableSettings({ profile, installation, checkoutId }: { profile: ConfiguredExecutable; installation?: CliPrerequisite; checkoutId?: string }) {
   const queryClient = useQueryClient();
   const [configured, setConfigured] = useState(profile.executable);
   const [path, setPath] = useState(profile.executable ?? "");
   const [probe, setProbe] = useState<CliProbe | null>(null);
+  const [showInventory, setShowInventory] = useState(false);
   const [pending, setPending] = useState<"save" | "cli" | "plugins" | null>(null);
   const [error, setError] = useState("");
   const requested = path.trim().replace(/^"(.*)"$/, "$1");
@@ -160,12 +152,21 @@ function ExecutableSettings({ profile, installation }: { profile: ConfiguredExec
     setPath(updated.executable ?? "");
     setProbe(null);
     void queryClient.invalidateQueries({ queryKey: ["conversation-models", provider] });
+    void queryClient.invalidateQueries({ queryKey: providerModelInventoryKey(provider) });
+    void queryClient.invalidateQueries({ queryKey: providerSkillInventoryKey(provider) });
     void queryClient.invalidateQueries({ queryKey: desktopCliPrerequisitesKey });
   }
 
   function submit(event: FormEvent) {
     event.preventDefault();
     if (requested && requested !== configured) void run("save", () => save(requested));
+  }
+
+  async function refreshPlugins() {
+    await run("plugins", async () => {
+      const result = await invoke<PluginInventory | null>("cli_plugin_inventory", { provider, refresh: true });
+      queryClient.setQueryData(pluginKey, result);
+    });
   }
 
   return (
@@ -185,10 +186,7 @@ function ExecutableSettings({ profile, installation }: { profile: ConfiguredExec
           {pending === "cli" ? "Checking CLI…" : "Check CLI"}
         </Button>
         <Button type="button" variant="outline" disabled={pending !== null || requested !== (configured ?? "")}
-          onClick={() => void run("plugins", async () => {
-            const result = await invoke<PluginInventory | null>("cli_plugin_inventory", { provider, refresh: true });
-            queryClient.setQueryData(pluginKey, result);
-          })}>{pending === "plugins" ? "Checking plugins…" : "Check plugins"}</Button>
+          onClick={() => { setShowInventory(true); void refreshPlugins(); }}>{pending === "plugins" ? "Checking plugins…" : "Check plugins"}</Button>
       </form>
       {observedInstallation && <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
         <dt className="text-muted-foreground">Installation</dt><dd><ExecutableInstallation status={observedInstallation} /></dd>
@@ -205,46 +203,14 @@ function ExecutableSettings({ profile, installation }: { profile: ConfiguredExec
         </dl>
       )}
       {inventory.isError && <p role="alert" className="mt-3 text-sm text-red-300">{String(inventory.error)}</p>}
-      {inventory.data && <PluginList inventory={inventory.data} />}
+      <details className="provider-inventory-report-toggle" open={showInventory}
+        onToggle={(event) => setShowInventory(event.currentTarget.open)}>
+        <summary>Inventory and capabilities</summary>
+        {showInventory && <ProviderInventory provider={provider} checkoutId={checkoutId} inventory={inventory.data}
+          refreshPlugins={refreshPlugins} pluginsRefreshing={pending === "plugins"} />}
+      </details>
       <UserPluginManagement key={configured ?? ""} provider={provider} disabled={pending !== null || requested !== (configured ?? "")} />
       <ExecutionProfileModelSettings provider={provider} />
     </section>
-  );
-}
-
-function PluginList({ inventory }: { inventory: PluginInventory }) {
-  const { report, checkedAt } = inventory;
-  const hasInventory = report.status === "reported" || report.status === "partial";
-  return (
-    <details className="mt-3 border-t border-border pt-3 text-sm">
-      <summary className="cursor-pointer font-medium">
-        {hasInventory ? `Installed plugins (${report.plugins.length})` : "Plugin inventory"}
-      </summary>
-      <p className="mt-2 text-muted-foreground" role="status">
-        {PLUGIN_STATUS[report.status]} · {new Date(checkedAt).toLocaleString()}
-      </p>
-      {report.executable && (
-        <p className="mt-1 break-all text-xs text-muted-foreground">
-          {report.executable}{report.version && ` · ${report.version}`}
-        </p>
-      )}
-      {hasInventory && !report.loadTelemetryReported && <p className="mt-1 text-muted-foreground">CLI profile inventory. In-session plugin loads are unconfirmed.</p>}
-      {report.plugins.length > 0 && (
-        <ul className="mt-2 max-h-64 space-y-2 overflow-auto pr-2">
-          {report.plugins.map((plugin, index) => (
-            <li key={`${plugin.id}-${plugin.scope ?? ""}-${index}`} className="rounded-md border border-border p-2">
-              <p className="break-words font-medium">{plugin.name ?? plugin.id}{plugin.version && ` · ${plugin.version}`}</p>
-              <p className="break-words text-xs text-muted-foreground">
-                {[plugin.enabled === null ? "Enablement unreported" : plugin.enabled ? "Enabled" : "Disabled",
-                  plugin.scope, plugin.marketplace, plugin.source, plugin.sourceLocation].filter(Boolean).join(" · ")}
-              </p>
-              {plugin.skills?.length ? <p className="mt-1 break-words text-xs">Skills · {plugin.skills.join(", ")}</p> : null}
-              {plugin.hooks?.length ? <p className="mt-1 break-words text-xs">Hooks · {plugin.hooks.join(", ")}</p> : null}
-              {plugin.mcpServers?.length ? <p className="mt-1 break-words text-xs">MCP servers · {plugin.mcpServers.join(", ")}</p> : null}
-            </li>
-          ))}
-        </ul>
-      )}
-    </details>
   );
 }

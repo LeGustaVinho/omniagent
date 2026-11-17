@@ -128,6 +128,26 @@ impl Store {
         cursor: Option<QualificationCursor>,
         validation_checkout_id: Option<String>,
     ) -> Result<QualificationPage> {
+        self.capability_qualifications(cursor, validation_checkout_id, None)
+            .await
+    }
+
+    pub async fn provider_capability_qualifications(
+        &self,
+        provider: Provider,
+        cursor: Option<QualificationCursor>,
+        checkout_id: Option<String>,
+    ) -> Result<QualificationPage> {
+        self.capability_qualifications(cursor, checkout_id, Some(provider))
+            .await
+    }
+
+    async fn capability_qualifications(
+        &self,
+        cursor: Option<QualificationCursor>,
+        validation_checkout_id: Option<String>,
+        provider: Option<Provider>,
+    ) -> Result<QualificationPage> {
         self.execute(move |db| {
             let mut query = db.prepare(
                 "WITH page AS MATERIALIZED (
@@ -137,6 +157,10 @@ impl Store {
                     JOIN dispatches d ON d.snapshot_id = s.id AND d.ordinal = 1
                     WHERE d.delivery = 'submitted'
                       AND (?1 IS NULL OR (r.created_at, r.id) < (?1, ?2))
+                      AND (?4 IS NULL OR ((?5 IS NULL OR r.checkout_id = ?5)
+                      AND EXISTS (SELECT 1 FROM agent_attempts a
+                         JOIN agent_sessions s ON s.id = a.agent_session_id
+                         WHERE a.run_id = r.id AND json_extract(s.scope, '$.provider') = ?4)))
                     ORDER BY r.created_at DESC, r.id DESC LIMIT ?3
                  )
                  SELECT page.id, page.created_at, page.checkout_id, a.conversation_id, s.payload
@@ -147,7 +171,13 @@ impl Store {
             let (stamp, id) = cursor.as_ref().map_or((None, None), |cursor| {
                 (Some(cursor.recorded_at), Some(cursor.run_id.as_str()))
             });
-            let mut rows = query.query(params![stamp, id, PAGE_SIZE as u32 + 1])?;
+            let mut rows = query.query(params![
+                stamp,
+                id,
+                PAGE_SIZE as u32 + 1,
+                provider.map(Provider::as_str),
+                validation_checkout_id
+            ])?;
             let mut records = Vec::with_capacity(PAGE_SIZE);
             while records.len() < PAGE_SIZE
                 && let Some(row) = rows.next()?
