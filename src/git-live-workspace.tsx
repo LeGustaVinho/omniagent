@@ -3,7 +3,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { GitCommitHorizontal, Plus, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
+import { ContextActions, useContextActionFeedback, type MenuAction } from "@/components/ui/context-actions";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { GitCheckoutChanges, comparisonFile, useGitCheckoutReview, type CheckoutReview, type Worktree } from "@/git-checkout-changes";
 import { GitDiffReview, type GitComparedFile } from "@/git-diff-view";
@@ -20,6 +20,8 @@ type HistoryEntry = { sha: string; author: string; committedAt: string; subject:
 type CommitRequest = { branch: string | null; expectedHead: string; sha: string; parent: string | null };
 type CommitFile = { path: string; previousPath: string | null; status: string };
 type CommitDetails = { message: string; parents: string[]; parent: string | null; files: CommitFile[]; comparisonUnavailable?: string | null };
+type CommitReference = { id: string; label: string; sha: string };
+type CommitComparison = { checkoutId: string; base: CommitReference; targets: CommitReference[]; initialTarget?: string };
 type WorktreeBase = { reference: string; label: string; expectedHead: string };
 
 const commitChangeLabels: Record<string, string> = { A: "Added", C: "Copied", D: "Deleted", M: "Modified", R: "Renamed", T: "Type changed" };
@@ -237,6 +239,7 @@ function WorktreeTable({ review, project, select, createFrom, openCheckoutWorksp
 function CommitHistory({ review, createFrom }: { review: CheckoutReview; createFrom: (base: WorktreeBase) => void }) {
   const [branch, setBranch] = useState("");
   const [selection, select] = useState<string>();
+  const [comparison, compare] = useState<CommitComparison>();
   const clipboard = useContextActionFeedback();
   const client = useQueryClient();
   const branchRef = review.branches.find((entry) => entry.reference === branch);
@@ -249,12 +252,27 @@ function CommitHistory({ review, createFrom }: { review: CheckoutReview; createF
   const selected = commits.find((commit) => commit.sha === selection) ?? commits[0];
   const requestFor = (sha: string): CommitRequest | undefined => expectedHead ? { branch: branch || null, expectedHead, sha, parent: null } : undefined;
   const selectedRequest = selected && requestFor(selected.sha);
+  const revisionOf = ({ sha, subject }: HistoryEntry): CommitReference => ({ id: sha, sha, label: subject || "Commit" });
+  const references: CommitReference[] = [
+    ...(review.revision.head ? [{ id: "HEAD", label: "Checkout HEAD", sha: review.revision.head }] : []),
+    ...review.branches.map(({ reference, name, sha }) => ({ id: reference, label: name, sha })),
+    ...commits.map(revisionOf),
+  ];
+  function comparisonActions(base: CommitReference): MenuAction[] {
+    const targets = references.filter(({ sha }) => sha !== base.sha);
+    const checkoutId = review.checkoutId;
+    return [
+      ...(targets.some(({ id }) => id === "HEAD") ? [{ label: "Compare with checkout HEAD", run: () => compare({ checkoutId, base, targets, initialTarget: "HEAD" }) }] : []),
+      ...(targets.some(({ id }) => id !== "HEAD") ? [{ label: "Compare with another reference…", run: () => compare({ checkoutId, base, targets }) }] : []),
+    ];
+  }
   function copy(text: string, copied: string) {
     void clipboard.run(() => navigator.clipboard.writeText(text), copied);
   }
   return <div className="delivery-body">
     <div className="delivery-main p-4">
       <ContextActions label="History branch" groups={branchRef ? [[
+        ...comparisonActions({ id: branchRef.reference, label: branchRef.name, sha: branchRef.sha }),
         { label: "Create worktree from this ref…", run: () => createFrom({
           reference: branchRef.reference, expectedHead: branchRef.sha, label: `${branchRef.name} · ${branchRef.sha.slice(0, 12)}`,
         }) },
@@ -276,6 +294,7 @@ function CommitHistory({ review, createFrom }: { review: CheckoutReview; createF
         {commits.map((commit) => <tr key={commit.sha}>
           <td><ContextActions label={`${commit.subject || "Commit"} ${commit.sha.slice(0, 12)}`} groups={[[
             { label: "Inspect commit", run: () => select(commit.sha) },
+            ...comparisonActions(revisionOf(commit)),
             { label: "Create worktree from this commit…", run: () => createFrom({
               reference: commit.sha, expectedHead: commit.sha, label: `${commit.sha.slice(0, 12)} · ${commit.subject || "Commit"}`,
             }) },
@@ -298,6 +317,7 @@ function CommitHistory({ review, createFrom }: { review: CheckoutReview; createF
     </div>
     {selectedRequest && <CommitDetailPanel key={JSON.stringify(selectedRequest)} checkoutId={review.checkoutId} selection={selectedRequest}
       historyRef={branchRef?.reference ?? review.revision.branch ?? "Checkout HEAD"} />}
+    {comparison && <CommitRangeDialog comparison={comparison} close={() => compare(undefined)} />}
   </div>;
 }
 
@@ -357,24 +377,58 @@ function CommitDetailPanel({ checkoutId, selection, historyRef }: { checkoutId: 
 function CommitFileDiff({ checkoutId, request, files, initialPath, close }: {
   checkoutId: string; request: CommitRequest; files: CommitFile[]; initialPath: string; close: () => void;
 }) {
-  const [path, select] = useState(initialPath);
+  return <FileDialog title="Committed file comparison" description={request.sha} className="file-comparison-dialog" onClose={close}>
+    <div className="file-comparison-body">
+      <CommittedDiff files={files} initialPath={initialPath} fileKey={["git-commit-diff", checkoutId, request]}
+        ranges={{ base: request.parent ? `Parent ${request.parent.slice(0, 12)}` : "Empty tree", revised: `Commit ${request.sha.slice(0, 12)}` }}
+        load={(path) => loadCommitFile(checkoutId, request, path)} />
+    </div>
+  </FileDialog>;
+}
+
+function CommitRangeDialog({ comparison, close }: { comparison: CommitComparison; close: () => void }) {
+  const { checkoutId, base, targets, initialTarget } = comparison;
+  const [target, setTarget] = useState(initialTarget ?? "");
+  const head = targets.find(({ id }) => id === target);
+  const range = head && { base: base.sha, head: head.sha };
+  const files = useQuery({
+    queryKey: ["git-commit-range", checkoutId, range],
+    queryFn: () => invoke<CommitFile[]>("git_compare_commits", { checkoutId, range }),
+    enabled: Boolean(range), retry: false,
+  });
+  const label = (ref: CommitReference) => `${ref.label} · ${ref.sha.slice(0, 12)}`;
+  return <FileDialog title="Compare commits" description={label(base)} className="file-comparison-dialog" onClose={close}>
+    <label className="delivery-field">Compare with
+      <select className="delivery-filter max-w-full" value={target} onChange={(event) => setTarget(event.currentTarget.value)}>
+        <option value="" disabled>Select a reference or commit</option>
+        {targets.map((ref) => <option key={ref.id} value={ref.id}>{label(ref)}</option>)}
+      </select>
+    </label>
+    {head && range && (files.error ? <InlineIssue>{String(files.error)}</InlineIssue> : files.isPending ?
+      <p role="status" className="text-sm">Loading committed changes…</p> : <div className="file-comparison-body">
+        <CommittedDiff key={head.id} files={files.data} fileKey={["git-commit-range-diff", checkoutId, range]}
+          ranges={{ base: label(base), revised: label(head) }} load={(path) => invoke("git_compare_commit_file", { checkoutId, range, path })} />
+      </div>)}
+  </FileDialog>;
+}
+
+function CommittedDiff({ files, initialPath, fileKey, ranges, load }: {
+  files: CommitFile[]; initialPath?: string; fileKey: readonly unknown[]; ranges: { base: string; revised: string };
+  load: (path: string) => Promise<GitComparedFile>;
+}) {
+  const [path, select] = useState(initialPath ?? files[0]?.path ?? "");
   const diff = useQuery({
-    queryKey: ["git-commit-diff", checkoutId, request, path],
-    queryFn: () => loadCommitFile(checkoutId, request, path),
+    queryKey: [...fileKey, path],
+    queryFn: () => load(path),
     enabled: Boolean(path), retry: false,
   });
   const snapshot = diff.error ? undefined : diff.data;
   const previousPath = files.find((file) => file.path === path)?.previousPath ?? undefined;
   const unavailable = snapshot && [snapshot.original, snapshot.modified].find((side) => side.status === "unavailable");
-  return <FileDialog title="Committed file comparison" description={request.sha} className="file-comparison-dialog" onClose={close}>
-    <div className="file-comparison-body">
-      <GitDiffReview source="commit" title="Commit changes"
-        ranges={{ base: request.parent ? `Parent ${request.parent.slice(0, 12)}` : "Empty tree", revised: `Commit ${request.sha.slice(0, 12)}` }}
-        files={files.map((file) => ({ path: file.path, previousPath: file.previousPath ?? undefined, kind: commitChangeLabels[file.status] ?? file.status }))}
-        selectedPath={path} select={select} comparison={comparisonFile(snapshot, previousPath)} empty={<p>No committed changes.</p>}
-        comparedFiles={{ selected: snapshot, load: (path) => loadCommitFile(checkoutId, request, path) }}
-        preview={path && (diff.isPending ? <p role="status" className="p-3 text-sm">Loading committed file versions…</p>
-          : diff.error || unavailable ? <div className="p-3"><InlineIssue>{diff.error ? String(diff.error) : unavailable?.reason}</InlineIssue></div> : undefined)} />
-    </div>
-  </FileDialog>;
+  return <GitDiffReview source="commit" title="Commit changes" ranges={ranges}
+    files={files.map((file) => ({ path: file.path, previousPath: file.previousPath ?? undefined, kind: commitChangeLabels[file.status] ?? file.status }))}
+    selectedPath={path} select={select} comparison={comparisonFile(snapshot, previousPath)} empty={<p>No committed changes.</p>}
+    comparedFiles={{ selected: snapshot, load }}
+    preview={path && (diff.isPending ? <p role="status" className="p-3 text-sm">Loading committed file versions…</p>
+      : diff.error || unavailable ? <div className="p-3"><InlineIssue>{diff.error ? String(diff.error) : unavailable?.reason}</InlineIssue></div> : undefined)} />;
 }

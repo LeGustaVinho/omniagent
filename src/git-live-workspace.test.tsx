@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import ChangesPanel from "@/changes-panel";
@@ -40,7 +40,7 @@ function openGit(overrides: Partial<WorkspaceProps> = {}) {
     openActivity={openActivity}
     {...overrides}
   /></QueryClientProvider>);
-  return { openActivity };
+  return { client, openActivity };
 }
 
 afterEach(() => {
@@ -496,6 +496,57 @@ it("opens the selected commit and compares the clicked file against the chosen m
   fireEvent.contextMenu(dialog.getByRole("button", { name: /notes\/old\.md.*notes\/new\.md/ }));
   await user.click(await screen.findByRole("menuitem", { name: "Copy patch" }));
   expect(await navigator.clipboard.readText()).toBe(patch);
+  expect(invoke).not.toHaveBeenCalledWith("git_checkout_diff", expect.anything());
+});
+
+it("compares the clicked whole commit with captured refs and offers the checkout HEAD shortcut", async () => {
+  const base = "a".repeat(40);
+  const oldHead = "b".repeat(40);
+  const newerHead = "c".repeat(40);
+  const oldTopic = "d".repeat(40);
+  const newerTopic = "e".repeat(40);
+  const topic = "refs/heads/feature";
+  let currentHead = oldHead;
+  let currentTopic = oldTopic;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, worktrees, root: checkout.checkoutRoot, managed: false, changes: [],
+      revision: { ...originalRevision, head: currentHead },
+      branches: branches.map((entry) => ({ ...entry, sha: entry.reference === topic ? currentTopic : currentHead })),
+    };
+    if (command === "git_checkout_history") return [
+      { sha: currentHead, subject: "Latest commit", author: "Person", committedAt: "2026-11-17T12:00:00Z" },
+      { sha: base, subject: "Historical base", author: "Person", committedAt: "2026-11-16T12:00:00Z" },
+    ];
+    if (command === "git_checkout_commit_details") return { message: "Commit details", parents: [], parent: null, files: [] };
+    if (command === "git_compare_commits") return [{ path: "README.md", status: "M", previousPath: null }];
+    if (command === "git_compare_commit_file") return {
+      path: "README.md", original: { status: "text", content: "Selected historical text" },
+      modified: { status: "text", content: (payload as { range: { head: string } }).range.head === oldTopic ? "Frozen reference text" : "Checkout HEAD text" },
+    };
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  const { client } = openGit({ target: "history" });
+  const olderCommit = await screen.findByRole("button", { name: /^Historical base/ });
+  fireEvent.contextMenu(olderCommit);
+  await user.click(await screen.findByRole("menuitem", { name: "Compare with another reference…" }));
+  let dialog = within(await screen.findByRole("dialog", { name: "Compare commits" }));
+  currentHead = newerHead;
+  currentTopic = newerTopic;
+  await act(async () => { await client.invalidateQueries({ queryKey: ["git-review", checkout.checkoutId] }); });
+  expect(dialog.getByRole("option", { name: `feature · ${oldTopic.slice(0, 12)}` })).toBeTruthy();
+  await user.selectOptions(dialog.getByLabelText("Compare with"), topic);
+  expect(await dialog.findByText("Frozen reference text")).toBeTruthy();
+  const range = { base, head: oldTopic };
+  expect(invoke).toHaveBeenCalledWith("git_compare_commits", { checkoutId: checkout.checkoutId, range });
+  expect(invoke).toHaveBeenCalledWith("git_compare_commit_file", { checkoutId: checkout.checkoutId, range, path: "README.md" });
+  await user.click(dialog.getByRole("button", { name: "Close dialog" }));
+  fireEvent.contextMenu(await screen.findByRole("button", { name: /^Historical base/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Compare with checkout HEAD" }));
+  dialog = within(await screen.findByRole("dialog", { name: "Compare commits" }));
+  expect(await dialog.findByText("Checkout HEAD text")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_compare_commits", { checkoutId: checkout.checkoutId, range: { base, head: newerHead } });
   expect(invoke).not.toHaveBeenCalledWith("git_checkout_diff", expect.anything());
 });
 

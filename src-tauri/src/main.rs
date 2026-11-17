@@ -513,6 +513,8 @@ fn main() {
             git_review_runtime::git_checkout_history,
             git_review_runtime::git_checkout_commit_details,
             git_review_runtime::git_checkout_commit_diff,
+            git_review_runtime::git_compare_commits,
+            git_review_runtime::git_compare_commit_file,
             git_review_runtime::git_checkout_file_history,
             git_review_runtime::git_compare_file_versions,
             git_review_runtime::git_file_permalink,

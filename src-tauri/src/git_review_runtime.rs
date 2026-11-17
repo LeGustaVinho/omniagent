@@ -113,6 +113,31 @@ pub async fn git_checkout_commit_diff(
 }
 
 #[tauri::command]
+pub async fn git_compare_commits(
+    store: State<'_, Store>,
+    checkout_id: String,
+    range: omniagent::repository::git_review::GitCommitRange,
+) -> Result<Vec<omniagent::repository::git_review::GitHistoryCommitFile>, String> {
+    store
+        .git_compare_commits(checkout_id, range)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_compare_commit_file(
+    store: State<'_, Store>,
+    checkout_id: String,
+    range: omniagent::repository::git_review::GitCommitRange,
+    path: String,
+) -> Result<omniagent::repository::git_review::GitHistoryCommitDiff, String> {
+    store
+        .git_compare_commit_file(checkout_id, range, path)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn git_checkout_file_history(
     store: State<'_, Store>,
     checkout_id: String,

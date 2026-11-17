@@ -897,6 +897,104 @@ async fn applies_only_the_reviewed_git_hunk_and_preserves_worktree_changes() -> 
 }
 
 #[tokio::test]
+async fn compares_frozen_commit_trees_even_after_their_refs_move() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("compared-trees");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    fs::write(root.join("state.txt"), "common ancestor\n")?;
+    fs::write(root.join("previous guide.md"), "guide contents\n")?;
+    let common = commit_fixture(&root, "Shared ancestor")?;
+    git(&root, &["switch", "--quiet", "-c", "topic"])?;
+    fs::write(root.join("state.txt"), "compared topic tree\n")?;
+    fs::write(root.join("topic.txt"), "right only\n")?;
+    fs::rename(
+        root.join("previous guide.md"),
+        root.join("revised guide.md"),
+    )?;
+    let head = commit_fixture(&root, "Topic tree")?;
+    git(&root, &["switch", "--quiet", "main"])?;
+    fs::write(root.join("state.txt"), "selected commit tree\n")?;
+    fs::write(root.join("main.txt"), "left only\n")?;
+    let base = commit_fixture(&root, "Selected tree")?;
+    fs::write(root.join("state.txt"), "working draft\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+    let store = Store::open(temp.path().join("review.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let range = GitCommitRange { base, head };
+    let files = store
+        .git_compare_commits(checkout.clone(), range.clone())
+        .await?;
+    let mut statuses = files
+        .iter()
+        .map(|f| (f.path.as_str(), f.status, f.previous_path.as_deref()))
+        .collect::<Vec<_>>();
+    statuses.sort_unstable();
+    assert_eq!(
+        statuses,
+        vec![
+            ("main.txt", 'D', None),
+            ("revised guide.md", 'R', Some("previous guide.md")),
+            ("state.txt", 'M', None),
+            ("topic.txt", 'A', None),
+        ]
+    );
+    git(
+        &root,
+        &["update-ref", "refs/heads/topic", &common, &range.head],
+    )?;
+    git(
+        &root,
+        &["update-ref", "refs/heads/main", &common, &range.base],
+    )?;
+    let diff = store
+        .git_compare_commit_file(checkout.clone(), range.clone(), "state.txt".into())
+        .await?;
+    assert_eq!(
+        diff.original,
+        GitFileSide::Text {
+            content: "selected commit tree\n".into()
+        }
+    );
+    assert_eq!(
+        diff.modified,
+        GitFileSide::Text {
+            content: "compared topic tree\n".into()
+        }
+    );
+    assert!(
+        matches!(diff.patch, super::patch::GitReviewPatch::Text { content } if content.contains("-selected commit tree\n+compared topic tree\n"))
+    );
+    let renamed = store
+        .git_compare_commit_file(checkout.clone(), range.clone(), "revised guide.md".into())
+        .await?;
+    assert_eq!(renamed.modified, renamed.original);
+    assert!(
+        store
+            .git_compare_commit_file(checkout.clone(), range, "previous guide.md".into())
+            .await
+            .is_err()
+    );
+    let blob = git(&root, &["rev-parse", "HEAD:state.txt"])?;
+    assert!(
+        store
+            .git_compare_commits(
+                checkout,
+                GitCommitRange {
+                    base: common,
+                    head: blob
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(fs::read(root.join("state.txt"))?, b"working draft\n");
+    Ok(())
+}
+
+#[tokio::test]
 async fn inspects_commit_messages_and_compares_exact_parent_files_in_the_selected_history()
 -> Result<()> {
     use super::{GitHistoryCommitRequest, patch::GitReviewPatch};

@@ -39,7 +39,10 @@ mod permalink;
 mod reviewed_files;
 mod saved_patch;
 pub use blame::GitLineBlame;
-pub use commit_history::{GitHistoryCommitDetails, GitHistoryCommitDiff, GitHistoryCommitRequest};
+pub use commit_history::{
+    GitCommitRange, GitHistoryCommitDetails, GitHistoryCommitDiff, GitHistoryCommitFile,
+    GitHistoryCommitRequest,
+};
 pub use comments::{GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface};
 pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
 pub use conflicts::{GitConflictProposal, GitConflictReview};

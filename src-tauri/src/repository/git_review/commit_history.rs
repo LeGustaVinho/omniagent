@@ -22,6 +22,12 @@ pub struct GitHistoryCommitRequest {
     pub parent: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitCommitRange {
+    pub base: String,
+    pub head: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHistoryCommitDetails {
@@ -75,28 +81,80 @@ impl Store {
             if let Some(reason) = details.comparison_unavailable {
                 anyhow::bail!("{reason}");
             }
-            let file = details
-                .files
-                .iter()
-                .find(|file| file.path == path)
-                .context("This path is outside the selected commit comparison.")?;
-            let previous_path = file.previous_path.as_deref();
-            let original = if let Some(parent) = details.parent {
-                content::read_tree(&view, &parent, previous_path.unwrap_or(&path))?
-            } else {
-                GitFileSide::Missing
-            };
-            let modified = content::read_tree(&view, &request.sha, &path)?;
-            let patch = patch::history_file(&view, &base, &request.sha, &path, previous_path);
-            Ok(GitHistoryCommitDiff {
-                path,
-                original,
-                modified,
-                patch,
-            })
+            compared_file(&view, &base, &request.sha, path, &details.files)
         })
         .await?
     }
+
+    pub async fn git_compare_commits(
+        &self,
+        checkout: String,
+        range: GitCommitRange,
+    ) -> Result<Vec<GitHistoryCommitFile>> {
+        let scope = self.git_review_scope(checkout).await?;
+        tokio::task::spawn_blocking(move || {
+            let view = open_commit_range(&scope, &range)?;
+            changed_files(&view, &range.base, &range.head)
+        })
+        .await?
+    }
+
+    pub async fn git_compare_commit_file(
+        &self,
+        checkout: String,
+        range: GitCommitRange,
+        path: String,
+    ) -> Result<GitHistoryCommitDiff> {
+        validate_path(&path)?;
+        let scope = self.git_review_scope(checkout).await?;
+        tokio::task::spawn_blocking(move || {
+            let view = open_commit_range(&scope, &range)?;
+            let files = changed_files(&view, &range.base, &range.head)?;
+            compared_file(&view, &range.base, &range.head, path, &files)
+        })
+        .await?
+    }
+}
+
+fn open_commit_range(scope: &ReviewScope, range: &GitCommitRange) -> Result<IsolatedGit> {
+    validate_oid(&range.base)?;
+    validate_oid(&range.head)?;
+    let view = open_comparison_view(scope, &range.head)?;
+    require_commit(&view, &range.base)?;
+    require_commit(&view, &range.head)?;
+    Ok(view)
+}
+
+fn open_comparison_view(scope: &ReviewScope, head: &str) -> Result<IsolatedGit> {
+    let paths = inspect(&scope.root)?;
+    ensure!(
+        paths.git_dir == scope.git_dir && paths.git_common_dir == scope.common,
+        "Checkout identity changed during commit review."
+    );
+    IsolatedGit::open(&paths, &scope.root, head)
+}
+
+fn compared_file(
+    view: &IsolatedGit,
+    base: &str,
+    head: &str,
+    path: String,
+    files: &[GitHistoryCommitFile],
+) -> Result<GitHistoryCommitDiff> {
+    let file = files
+        .iter()
+        .find(|file| file.path == path)
+        .context("This path is outside the selected commit comparison.")?;
+    let previous_path = file.previous_path.as_deref();
+    let original = content::read_tree(view, base, previous_path.unwrap_or(&path))?;
+    let modified = content::read_tree(view, head, &path)?;
+    let patch = patch::history_file(view, base, head, &path, previous_path);
+    Ok(GitHistoryCommitDiff {
+        path,
+        original,
+        modified,
+        patch,
+    })
 }
 
 fn inspect_commit(
@@ -113,12 +171,7 @@ fn inspect_commit(
         head == request.expected_head,
         "The selected history changed. Refresh the Git history and try again."
     );
-    let paths = inspect(&scope.root)?;
-    ensure!(
-        paths.git_dir == scope.git_dir && paths.git_common_dir == scope.common,
-        "Checkout identity changed during commit review."
-    );
-    let view = IsolatedGit::open(&paths, &scope.root, &head)?;
+    let view = open_comparison_view(scope, &head)?;
     let sha = request.sha.as_str();
     require_commit(&view, sha)?;
     let reachable = passive_output(&scope.root, &["merge-base", "--is-ancestor", sha, &head])?;
