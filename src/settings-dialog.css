@@ -11,10 +11,12 @@
   inset: 50% auto auto 50%;
   translate: -50% -50%;
   --settings-inset: 40px;
-  width: clamp(min(760px, calc(100vw - var(--settings-inset))), var(--panel-width, 1024px), calc(100vw - var(--settings-inset)));
+  width: clamp(700px, var(--panel-width, 1024px), calc(100vw - var(--settings-inset)));
   height: clamp(min(320px, calc(100dvh - var(--settings-inset))), var(--panel-height, 800px), calc(100dvh - var(--settings-inset)));
   display: flex;
   flex-direction: column;
+  padding-right: var(--panel-resize-hit-size);
+  padding-bottom: var(--panel-resize-hit-size);
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -555,6 +557,8 @@
 @media (max-width: 759px) {
   .settings-dialog {
     --settings-inset: 22px;
+    width: calc(100vw - var(--settings-inset));
+    padding-right: 0;
   }
 
   .settings-dialog > .panel-resize-handle[data-edge="right"],

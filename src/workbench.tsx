@@ -13,7 +13,7 @@ import { RealConversations, RealDiagnostics } from "@/desktop-dock";
 import { GitSimulationProvider } from "@/git-simulation";
 import { RunInspector, SimulationDiagnostics } from "@/inspection-panel";
 import { InspectorTabs } from "@/inspector-tabs";
-import { ResizablePanel } from "@/panel-resize";
+import { PanelResizeScope, ResizablePanel } from "@/panel-resize";
 import { useRunSubscription } from "@/run-projection";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import {
@@ -265,28 +265,38 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
                 onOpenOtherCheckout={onSelectCheckout} openSystem={() => showSettings("system")} />
             </RunInspectorNavigation.Provider>
           </div>
-          {preview && simulated && <div className="work-deck" key={"simulation-workspaces:" + preview.epoch}>
-            <WorkspaceViews nav={preview.navigation} context={simulated} sidebar={sidebar} onSidebarChange={changeSidebar}
-              compact={compact} openSystem={() => showSettings("system")} />
-          </div>}
+          {preview && simulated && <PanelResizeScope scope="simulation" key={"simulation-workspaces:" + preview.epoch}>
+            <div className="work-deck">
+              <WorkspaceViews nav={preview.navigation} context={simulated} sidebar={sidebar} onSidebarChange={changeSidebar}
+                compact={compact} openSystem={() => showSettings("system")} />
+            </div>
+          </PanelResizeScope>}
           {realQueue && <ResizablePanel className="work-queue-panel" edge="top" resizeKey="queue" resizeLabel="queue" hidden={Boolean(preview) || realQueue !== "open"}>
             <Suspense fallback={loading}><QueuePanel {...real} focusJob={queueFocus}
               active={!preview && realQueue === "open"} onClose={() => setRealQueue("closed")} /></Suspense>
           </ResizablePanel>}
           {previewQueue && simulated && <ResizablePanel className="work-queue-panel" edge="top" resizeKey="example-queue" resizeLabel="queue" key={"simulation-queue:" + preview?.epoch} hidden={previewQueue !== "open"}>
-            <Suspense fallback={loading}><QueuePanel {...simulated} onClose={() => setPreviewQueue("closed")} /></Suspense>
+            <PanelResizeScope scope="simulation">
+              <Suspense fallback={loading}><QueuePanel {...simulated} onClose={() => setPreviewQueue("closed")} /></Suspense>
+            </PanelResizeScope>
           </ResizablePanel>}
         </div>
-        {side && <SideInspector key={side.type === "activity" ? side.runId : side.target} side={side} compact={compact} close={closeSide}
-          plan={simulated && side.type === "changes" && side.target === "saved" && <SavedPlan />}>
-          <Suspense fallback={loading}>
-            {side.type === "activity" ? <RunInspector {...current} runId={side.runId} conversationId={side.conversationId}
-              focusQuestion={side.focusQuestion} onClose={closeSide} /> : <ChangesPanel {...current} target={side.target} />}
-          </Suspense>
-        </SideInspector>}
+        {side && <PanelResizeScope scope={preview ? "simulation" : null}>
+          <SideInspector key={side.type === "activity" ? side.runId : side.target} side={side} compact={compact} close={closeSide}
+            plan={simulated && side.type === "changes" && side.target === "saved" && <SavedPlan />}>
+            <Suspense fallback={loading}>
+              {side.type === "activity" ? <RunInspector {...current} runId={side.runId} conversationId={side.conversationId}
+                focusQuestion={side.focusQuestion} onClose={closeSide} /> : <PanelResizeScope scope="changes-inspector">
+                <ChangesPanel {...current} target={side.target} />
+              </PanelResizeScope>}
+            </Suspense>
+          </SideInspector>
+        </PanelResizeScope>}
       </div>
-      {settingsVisited && <Suspense fallback={null}><SettingsDialog key={preview?.epoch ?? "real"} {...current} open={Boolean(settingsPage)} initialPage={settingsPage}
-        onOpenChange={(open) => { if (!open) setSettingsPage(undefined); }} /></Suspense>}
+      {settingsVisited && <PanelResizeScope scope={preview ? "simulation" : null}>
+        <Suspense fallback={null}><SettingsDialog key={preview?.epoch ?? "real"} {...current} open={Boolean(settingsPage)} initialPage={settingsPage}
+          onOpenChange={(open) => { if (!open) setSettingsPage(undefined); }} /></Suspense>
+      </PanelResizeScope>}
       </GitSimulationProvider>
     </div>
   );

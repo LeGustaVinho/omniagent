@@ -231,7 +231,17 @@ button.agile-disclosure:hover { background: var(--muted); color: var(--foregroun
 .agile-description-views:not(.agile-description-split) .agile-description-reading > .panel-resize-handle { display: none; }
 .agile-description-reading-expanded .note-reading { min-height: 8.5rem; }
 
-.diff-files { display: flex; flex: none; flex-direction: column; height: var(--panel-height, auto); min-height: min(32px, 68%); max-height: clamp(min(32px, 68%), var(--panel-height, 11rem), 68%); border-bottom: 1px solid var(--border); }
+.diff-files {
+  --diff-files-min-height: min(calc(32px + var(--panel-resize-hit-size)), 68%);
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  height: var(--panel-height, auto);
+  min-height: var(--diff-files-min-height);
+  max-height: clamp(var(--diff-files-min-height), var(--panel-height, calc(11rem + var(--panel-resize-hit-size))), 68%);
+  padding-bottom: var(--panel-resize-hit-size);
+  border-bottom: 1px solid var(--border);
+}
 .diff-files-scroll { min-height: 0; overflow: auto; }
 .agile-ref { display: inline-flex; align-items: center; gap: .35rem; color: var(--primary); text-align: start; font-size: .75rem; }
 .agile-ref:hover { text-decoration: underline; }

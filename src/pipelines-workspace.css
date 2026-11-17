@@ -135,6 +135,7 @@
 
 .pipeline-palette {
   flex: 0 0 clamp(10rem, var(--panel-width, 14rem), 32%);
+  padding-right: var(--panel-resize-hit-size);
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -385,6 +386,7 @@
 @container pipelines (width < 920px) {
   .pipeline-palette {
     position: absolute;
+    padding-bottom: var(--panel-resize-hit-size);
     z-index: 6;
     inset-block-start: .5rem;
     inset-inline-start: .5rem;

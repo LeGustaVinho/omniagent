@@ -18,6 +18,7 @@
 .conv-workspace-main > .conv-pane { flex: 1; }
 .conv-navigation {
   display: flex;
+  padding-right: var(--panel-resize-hit-size);
   flex: 0 0 clamp(min(12rem, 45%), var(--panel-width, clamp(13.5rem, 24cqi, 16.5rem)), 45%);
   flex-direction: column;
   min-height: 0;

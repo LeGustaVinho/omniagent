@@ -2,6 +2,7 @@
   position: relative;
   --panel-width: initial;
   --panel-height: initial;
+  --panel-resize-hit-size: 8px;
 }
 
 .panel-resize-handle {
@@ -28,9 +29,9 @@
   opacity: 1;
 }
 
-.panel-resize-handle[aria-orientation="vertical"] { inset-block: 0; width: 8px; cursor: col-resize; }
+.panel-resize-handle[aria-orientation="vertical"] { inset-block: 0; width: var(--panel-resize-hit-size); cursor: col-resize; }
 .panel-resize-handle[aria-orientation="vertical"]::after { width: 2px; height: 28px; }
-.panel-resize-handle[aria-orientation="horizontal"] { inset-inline: 0; height: 8px; cursor: row-resize; }
+.panel-resize-handle[aria-orientation="horizontal"] { inset-inline: 0; height: var(--panel-resize-hit-size); cursor: row-resize; }
 .panel-resize-handle[aria-orientation="horizontal"]::after { width: 28px; height: 2px; }
 .panel-resize-handle[data-edge="left"] { left: 0; }
 .panel-resize-handle[data-edge="right"] { right: 0; }

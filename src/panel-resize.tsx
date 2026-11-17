@@ -1,5 +1,12 @@
-import { useId, useLayoutEffect, useRef, useState, type ComponentPropsWithRef, type KeyboardEvent, type PointerEvent } from "react";
+import { createContext, useContext, useId, useLayoutEffect, useRef, useState, type ComponentPropsWithRef, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import "./panel-resize.css";
+
+const PanelResizeContext = createContext("");
+
+export function PanelResizeScope({ scope, children }: { scope: "simulation" | "changes-inspector" | null; children: ReactNode }) {
+  const parent = useContext(PanelResizeContext);
+  return <PanelResizeContext value={scope ? `${parent}${scope}:` : parent}>{children}</PanelResizeContext>;
+}
 
 type ResizeEdge = "left" | "right" | "top" | "bottom";
 
@@ -21,7 +28,8 @@ export function ResizablePanel({ as: Panel = "div", id, resizeKey, resizeLabel, 
   </Panel>;
 }
 
-type Drag = { pointer: number; start: number; size: number; previous: string };
+type PanelSize = { size: number; previous: string };
+type Drag = PanelSize & { pointer: number; start: number };
 
 function ResizeHandle({ edge, panelId, resizeKey, label, centered }: {
   edge: ResizeEdge; panelId: string; resizeKey: string; label: string; centered?: boolean;
@@ -29,7 +37,8 @@ function ResizeHandle({ edge, panelId, resizeKey, label, centered }: {
   const across = edge === "left" || edge === "right";
   const dimension = across ? "width" : "height";
   const property = `--panel-${dimension}`;
-  const storageKey = `omniagent:panel-size:${resizeKey}:${dimension}`;
+  const scope = useContext(PanelResizeContext);
+  const storageKey = `omniagent:panel-size:${scope}${resizeKey}:${dimension}`;
   const direction = edge === "left" || edge === "top" ? -1 : 1;
   const handle = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | undefined>(undefined);
@@ -57,19 +66,28 @@ function ResizeHandle({ edge, panelId, resizeKey, label, centered }: {
     return () => observer.disconnect();
   }, [dimension, property, storageKey]);
 
-  function commit(panel: HTMLElement, size?: number) {
-    if (size === undefined) panel.style.removeProperty(property);
-    else panel.style.setProperty(property, `${Math.max(0, size)}px`);
+  function currentSize(panel: HTMLElement): PanelSize {
+    return { size: panel.getBoundingClientRect()[dimension], previous: panel.style.getPropertyValue(property) };
+  }
+
+  function reset(panel: HTMLElement) {
+    panel.style.removeProperty(property);
     try {
-      if (size === undefined) localStorage.removeItem(storageKey);
-      else {
-        // Persist the effective size after the layout has applied its minimum and maximum.
-        const effective = Math.round(panel.getBoundingClientRect()[dimension]);
-        if (effective > 0) {
-          panel.style.setProperty(property, `${effective}px`);
-          localStorage.setItem(storageKey, String(effective));
-        }
-      }
+      localStorage.removeItem(storageKey);
+    } catch { /* Keep the reset for this mount. */ }
+  }
+
+  function commit(panel: HTMLElement, size: number, before: PanelSize) {
+    panel.style.setProperty(property, `${Math.max(0, size)}px`);
+    const effective = Math.round(panel.getBoundingClientRect()[dimension]);
+    if (effective <= 0 || effective === Math.round(before.size)) {
+      // The CSS limit can be smaller than the saved size in a narrow viewport.
+      panel.style.setProperty(property, before.previous);
+      return;
+    }
+    panel.style.setProperty(property, `${effective}px`);
+    try {
+      localStorage.setItem(storageKey, String(effective));
     } catch { /* Keep the new size for this mount. */ }
   }
 
@@ -88,7 +106,7 @@ function ResizeHandle({ edge, panelId, resizeKey, label, centered }: {
     event.preventDefault();
     grip.setPointerCapture(event.pointerId);
     grip.dataset.dragging = "true";
-    drag.current = { pointer: event.pointerId, start: coordinate(event), size: panel.getBoundingClientRect()[dimension], previous: panel.style.getPropertyValue(property) };
+    drag.current = { pointer: event.pointerId, start: coordinate(event), ...currentSize(panel) };
   }
 
   function move(event: PointerEvent<HTMLDivElement>) {
@@ -104,7 +122,7 @@ function ResizeHandle({ edge, panelId, resizeKey, label, centered }: {
     if (!panel || interaction?.pointer !== event.pointerId) return;
     drag.current = undefined;
     delete grip.dataset.dragging;
-    if (event.type === "pointerup" && coordinate(event) !== interaction.start) commit(panel, dragSize(event, interaction));
+    if (event.type === "pointerup" && coordinate(event) !== interaction.start) commit(panel, dragSize(event, interaction), interaction);
     else panel.style.setProperty(property, interaction.previous);
   }
 
@@ -115,13 +133,14 @@ function ResizeHandle({ edge, panelId, resizeKey, label, centered }: {
     const forward = across ? "ArrowRight" : "ArrowDown";
     if (![backward, forward, "Home", "End", "Enter"].includes(event.key)) return;
     event.preventDefault();
-    if (event.key === "Enter") commit(panel);
-    else if (event.key === "Home") commit(panel, 0);
-    else if (event.key === "End") commit(panel, 100_000);
-    else {
-      const step = (event.shiftKey ? 40 : 16) * direction * (event.key === forward ? 1 : -1);
-      commit(panel, panel.getBoundingClientRect()[dimension] + step);
+    if (event.key === "Enter") {
+      reset(panel);
+      return;
     }
+    const before = currentSize(panel);
+    const step = (event.shiftKey ? 40 : 16) * direction * (event.key === forward ? 1 : -1);
+    const size = event.key === "Home" ? 0 : event.key === "End" ? 100_000 : before.size + step;
+    commit(panel, size, before);
   }
 
   return <div ref={handle} className="panel-resize-handle" data-edge={edge} role="separator" tabIndex={0}
@@ -129,5 +148,5 @@ function ResizeHandle({ edge, panelId, resizeKey, label, centered }: {
     aria-valuenow={position.percent} aria-valuetext={`${position.pixels} px`}
     title={`Resize ${label} (${dimension})`} onKeyDown={onKeyDown}
     onPointerDown={start} onPointerMove={move} onPointerUp={stop} onPointerCancel={stop} onLostPointerCapture={stop}
-    onDoubleClick={(event) => { if (event.currentTarget.parentElement) commit(event.currentTarget.parentElement); }} />;
+    onDoubleClick={(event) => { if (event.currentTarget.parentElement) reset(event.currentTarget.parentElement); }} />;
 }
