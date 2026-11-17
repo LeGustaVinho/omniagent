@@ -32,6 +32,8 @@ pub struct RepeatUntilConfiguration {
     pub feedback: Option<RepeatFeedback>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exports: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_attempt_budget: Option<u16>,
 }
 
 const MAX_EXPORTS: usize = 32;
@@ -39,6 +41,9 @@ const MAX_EXPORTS: usize = 32;
 impl RepeatUntilConfiguration {
     pub(super) fn valid(&self) -> bool {
         (1..=32).contains(&self.max_iterations)
+            && self
+                .delivery_attempt_budget
+                .is_none_or(|limit| (1..=32).contains(&limit))
             && [
                 &self.ready_input,
                 &self.completion_output,
@@ -186,6 +191,14 @@ pub(super) fn expand_repeat(
         "A repeat needs a typed stopping predicate and 1 to 32 iterations"
     );
     ensure!(
+        configuration.delivery_attempt_budget.is_none()
+            || body.workflow.nodes.iter().any(|node| matches!(
+                node.instance.kind,
+                BuiltinNode::Implement | BuiltinNode::Command
+            )),
+        "A shared attempt budget requires an implementation or command in the repeated delivery body"
+    );
+    ensure!(
         body.workflow
             .nodes
             .len()
@@ -304,14 +317,20 @@ pub(super) fn expand_repeat(
         ],
         wires: Vec::new(),
     };
-    if export_configuration.is_some() {
+    let has_failure_join =
+        export_configuration.is_some() || configuration.delivery_attempt_budget.is_some();
+    if has_failure_join {
         graph
             .nodes
             .push(node("failure", BuiltinNode::Join, NodeConfiguration::None));
-        graph.wires.extend([
-            wire("limit", "failed", "failure", "branches"),
-            wire("stop", "failed", "failure", "branches"),
-        ]);
+        graph
+            .wires
+            .push(wire("limit", "failed", "failure", "branches"));
+        if export_configuration.is_some() {
+            graph
+                .wires
+                .push(wire("stop", "failed", "failure", "branches"));
+        }
     }
     let mut calls = BTreeMap::<String, BoundSubflow>::new();
     for index in 1..=configuration.max_iterations {
@@ -330,9 +349,35 @@ pub(super) fn expand_repeat(
             },
         ));
         let previous = index - 1;
+        let ready = if index == 1 {
+            endpoint("start", &configuration.ready_input)
+        } else {
+            endpoint(&format!("condition-{previous}"), "unmatched")
+        };
+        let ready = if let Some(limit) = configuration.delivery_attempt_budget {
+            let id = format!("attempt-{index}");
+            graph.nodes.push(node(
+                &id,
+                BuiltinNode::DeliveryAttempt,
+                NodeConfiguration::DeliveryAttempt {
+                    ordinal: index,
+                    limit,
+                },
+            ));
+            graph.wires.push(Wire {
+                from: ready,
+                to: endpoint(&id, "ready"),
+            });
+            graph
+                .wires
+                .push(wire(&id, "exhausted", "failure", "branches"));
+            endpoint(&id, "admitted")
+        } else {
+            ready
+        };
         for input in body.inputs.keys() {
-            let source = if index > 1 && input == &configuration.ready_input {
-                endpoint(&format!("condition-{previous}"), "unmatched")
+            let source = if input == &configuration.ready_input {
+                ready.clone()
             } else if let Some(feedback) = &configuration.feedback
                 && index > 1
                 && input == &feedback.input
@@ -409,7 +454,14 @@ pub(super) fn expand_repeat(
             .collect(),
         None => [
             ("completed".into(), endpoint("stop", "joined")),
-            ("failed".into(), endpoint("limit", "failed")),
+            (
+                "failed".into(),
+                if has_failure_join {
+                    endpoint("failure", "joined")
+                } else {
+                    endpoint("limit", "failed")
+                },
+            ),
         ]
         .into(),
     };

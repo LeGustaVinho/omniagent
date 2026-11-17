@@ -106,6 +106,8 @@ export function wiredExecutionInputs(snapshot: WorkflowExecutionSnapshot, node: 
     const wire = snapshot.definition.wires.find(({ to }) => to.node === node.instance.id && to.port === port.name);
     if (!wire) {
       if (node.definition.kind === "agent" && port.name === "comparison") continue;
+      if (node.definition.kind === "agent" && port.name === "review_subject" &&
+        (node.instance.configuration.requirements as { reviewReuse?: boolean } | undefined)?.reviewReuse !== true) continue;
       if (["implement", "review_candidate"].includes(node.definition.kind) && port.name === "brief") continue;
       if (node.definition.kind === "accept_candidate" && node.instance.configuration.kind === "none"
         && ["quality", "build"].includes(port.name)) continue;

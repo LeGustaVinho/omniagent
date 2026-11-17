@@ -51,6 +51,8 @@ pub struct StageRequirementConfiguration {
     pub goal: Option<super::stage_goal::StageGoalConfiguration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<super::stage_plan::StagePlanConfiguration>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review_reuse: bool,
     #[serde(default, skip_serializing_if = "StageRequirements::is_empty")]
     pub stage: StageRequirements,
 }
@@ -222,6 +224,7 @@ impl StageRequirementConfiguration {
             && self.bound_role.is_none()
             && self.goal.is_none()
             && self.plan.is_none()
+            && !self.review_reuse
             && self.stage.is_empty()
     }
 

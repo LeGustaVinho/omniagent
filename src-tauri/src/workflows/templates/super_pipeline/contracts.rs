@@ -186,3 +186,10 @@ pub(super) fn review() -> Value {
     schema["else"] = json!({ "properties": { "findings": { "minItems": 1 } } });
     schema
 }
+
+pub(super) fn planning_review(subjects: &[&str]) -> Value {
+    let mut schema = review();
+    schema["properties"]["findings"]["items"]["properties"]["subject"] =
+        json!({ "enum": subjects });
+    schema
+}

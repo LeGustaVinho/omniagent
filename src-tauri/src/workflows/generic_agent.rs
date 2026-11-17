@@ -32,6 +32,7 @@ use super::{
     units::load_delivery_unit,
 };
 
+mod reuse;
 #[cfg(test)]
 mod tests;
 
@@ -45,6 +46,8 @@ pub struct WorkflowAgentResponse {
     pub checkout_id: String,
     pub prompt_artifact_id: String,
     pub comparison_artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reused_from_artifact_id: Option<String>,
 }
 
 pub(super) struct AgentStageOutcome {
@@ -66,7 +69,7 @@ impl AgentStageOutcome {
 }
 
 pub(super) fn optional_input(port: &str) -> bool {
-    port == "comparison"
+    matches!(port, "comparison" | "review_subject")
 }
 
 pub(super) fn prompt(artifact: Option<&WorkflowArtifact>) -> Result<&str> {
@@ -270,6 +273,9 @@ pub(super) fn evaluate(
         .iter()
         .map(|(port, artifact)| (port.clone(), artifact.id.clone()))
         .collect();
+    if let Some(outcome) = reuse::evaluate(db, run, node, unit, &input_ids)? {
+        return Ok(Some(outcome));
+    }
     let Some(job_id) = stage_job(db, project, &run.id, node_id, unit, &input_ids)? else {
         return Ok(None);
     };
@@ -414,6 +420,7 @@ fn record_response(
             .id
             .clone(),
         comparison_artifact_id: inputs.get("comparison").map(|artifact| artifact.id.clone()),
+        reused_from_artifact_id: None,
     })
 }
 

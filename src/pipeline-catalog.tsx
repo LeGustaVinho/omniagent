@@ -118,7 +118,7 @@ export function workflowRegistryGroups(definitions: WorkflowDefinition[],
   return groups.map((title) => ({
     title,
     entries: definitions.filter(({ kind }) =>
-      !["for_each_begin", "for_each_gate", "for_each_collect", "repeat_output"].includes(kind) && groupFor(kind) === title)
+      !["for_each_begin", "for_each_gate", "for_each_collect", "repeat_output", "delivery_attempt"].includes(kind) && groupFor(kind) === title)
       .map((entry) => ({
         id: entry.kind,
         label: entry.kind === "result" ? "Delivery result" : entry.title,

@@ -142,6 +142,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/125-workflow-integrated-checks.sql"),
     include_str!("../migrations/126-workflow-unit-actions.sql"),
     include_str!("../migrations/127-workflow-github-source-sync.sql"),
+    include_str!("../migrations/128-workflow-delivery-attempts.sql"),
+    include_str!("../migrations/129-workflow-agent-review-reuse.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

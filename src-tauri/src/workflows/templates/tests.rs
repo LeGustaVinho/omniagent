@@ -1,6 +1,9 @@
 use serde_json::{Value, json};
 
-use crate::workflows::tests::approved_delivery_repository;
+use crate::{
+    model_catalog::ModelSelection, providers::Provider,
+    workflows::tests::approved_delivery_repository,
+};
 
 use super::{
     super::authoring::package::{PackageArtifactKind, WorkflowPackagePublishOutcome},
@@ -136,6 +139,47 @@ async fn super_ai_audit_uses_verified_remediation_sha_for_the_next_round() -> Re
             FACTORY_REVISION,
         )
         .await?;
+    let model = ModelSelection {
+        provider: Provider::Codex,
+        profile_id: "desktop-direct:codex".into(),
+        model_id: "audit-fixture-model".into(),
+    };
+    let mut package = draft.package.clone();
+    let mut bindings = 0;
+    let mut bind = |configuration: &mut NodeConfiguration| {
+        if let NodeConfiguration::AgentRole {
+            model: selected, ..
+        } = configuration
+            && selected.is_none()
+        {
+            *selected = Some(model.clone());
+            bindings += 1;
+        }
+    };
+    for member in &mut package.members {
+        match &mut member.body {
+            PackageArtifactBody::Preset { configuration, .. }
+                if !member.references.contains_key("$preset") =>
+            {
+                bind(configuration)
+            }
+            PackageArtifactBody::Pipeline { graph }
+            | PackageArtifactBody::Subflow { graph, .. } => {
+                for node in &mut graph.nodes {
+                    if !member.references.contains_key(&node.id) {
+                        bind(&mut node.configuration);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(bindings > 20);
+    let bytes = serde_json::to_vec(&package)?.len();
+    eprintln!("Audit factory with {bindings} stage model bindings: {bytes} UTF-8 bytes");
+    let draft = store
+        .save_workflow_package(project.clone(), draft.id, draft.revision, package)
+        .await?;
     let WorkflowPackagePublishOutcome::Published { publication } = store
         .publish_reviewed_workflow_package(
             project.clone(),
@@ -151,6 +195,23 @@ async fn super_ai_audit_uses_verified_remediation_sha_for_the_next_round() -> Re
         .workflow_definition(project.clone(), root)
         .await?
         .unwrap();
+    let delivery = store
+        .workflow_definition(project.clone(), version_of(&publication, "task-delivery"))
+        .await?
+        .unwrap();
+    for node in definition.nodes.iter().chain(&delivery.nodes) {
+        if let NodeConfiguration::AgentRole {
+            model: selected, ..
+        } = &node.instance.configuration
+        {
+            assert_eq!(
+                selected.as_ref(),
+                Some(&model),
+                "unbound stage {}",
+                node.instance.id
+            );
+        }
+    }
     let trace = store
         .simulate_workflow_package_revision(
             project,
@@ -281,6 +342,24 @@ async fn super_ai_delivery_pins_the_reviewed_child_and_same_tree_build() -> Resu
                 && wire.to == endpoint(&format!("{attempt}::approve-high-risk-merge"), "evidence")
         }));
         let scope = format!("implementation::iteration-{round}::");
+        let budget = format!("implementation::attempt-{round}");
+        let budget_node = child
+            .nodes
+            .iter()
+            .find(|node| node.instance.id == budget)
+            .unwrap();
+        assert!(matches!(
+            &budget_node.instance.configuration,
+            NodeConfiguration::DeliveryAttempt { ordinal, limit } if *ordinal == round && *limit == 3
+        ));
+        assert!(child.wires.iter().any(|wire| {
+            wire.from == endpoint(&budget, "admitted")
+                && wire.to == endpoint(&format!("{scope}implement-green-instructions"), "ready")
+        }));
+        assert!(child.wires.iter().any(|wire| {
+            wire.from == endpoint(&budget, "exhausted")
+                && wire.to == endpoint("implementation::failure", "branches")
+        }));
         let reviews = child
             .nodes
             .iter()
@@ -381,6 +460,80 @@ async fn super_ai_planning_publishes_with_versioned_review_rounds() -> Result<()
             rounds, 3,
             "{section} should have three bounded review rounds"
         );
+    }
+    let reusable_reviews = definition
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                &node.instance.configuration,
+                NodeConfiguration::AgentRole { requirements, .. } if requirements.review_reuse
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reusable_reviews.len(), 36);
+    for review in reusable_reviews {
+        let agent = &review.instance.id;
+        let source = |port| {
+            definition
+                .wires
+                .iter()
+                .find(|wire| wire.to == endpoint(agent, port))
+                .map(|wire| &wire.from)
+                .unwrap()
+        };
+        assert_eq!(source("prompt").node, source("review_subject").node);
+        assert_eq!(source("prompt").port, "text");
+        assert_eq!(source("review_subject").port, "evidence");
+    }
+    for round in 1..=3 {
+        let scope = format!("specifications::iteration-{round}::");
+        let bdd = format!("{scope}write-bdd");
+        let sdd = format!("{scope}write-sdd");
+        let design = format!("{scope}write-design");
+        let strategy = format!("{scope}write-test-strategy");
+        let reviews = format!("{scope}cross-review-findings");
+        for (id, expected) in [
+            ("review-sdd", vec!["master-plan::stop", &sdd]),
+            ("review-bdd", vec![&sdd, &bdd]),
+            (
+                "review-design",
+                vec!["analyze-repository", "master-plan::stop", &sdd, &design],
+            ),
+            ("review-test-strategy", vec![&sdd, &bdd, &strategy]),
+            (
+                "review-global-consistency",
+                vec![
+                    "master-plan::stop",
+                    &sdd,
+                    &bdd,
+                    &design,
+                    &strategy,
+                    &reviews,
+                ],
+            ),
+        ] {
+            if id != "review-global-consistency" {
+                assert!(definition.wires.iter().any(|wire| {
+                    wire.from == endpoint(&format!("{scope}planning-artifacts-ready"), "joined")
+                        && wire.to == endpoint(&format!("{scope}{id}-instructions"), "ready")
+                }));
+            }
+            let prompt = format!("{scope}{id}-prompt");
+            let instructions = format!("{scope}{id}-instructions");
+            let actual = definition
+                .wires
+                .iter()
+                .filter_map(|wire| {
+                    (wire.to == endpoint(&prompt, "evidence") && wire.from.node != instructions)
+                        .then_some(wire.from.node.as_str())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual, expected,
+                "unexpected evidence for {id} in round {round}"
+            );
+        }
     }
     Ok(())
 }

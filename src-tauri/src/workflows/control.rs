@@ -1073,6 +1073,26 @@ impl<'a> Evaluation<'a> {
                 }
                 Parallel => (ControlStageState::Completed, Some("branches"), None, None),
                 Join => (ControlStageState::Completed, Some("joined"), None, None),
+                DeliveryAttempt => {
+                    let NodeConfiguration::DeliveryAttempt { ordinal, limit } =
+                        node.instance.configuration
+                    else {
+                        anyhow::bail!("Missing pinned delivery attempt budget");
+                    };
+                    let port = super::backlog::attempts::stage_port(
+                        self.db, self.run, node, unit, ordinal, limit,
+                    )?;
+                    if port == "admitted" {
+                        (ControlStageState::Completed, Some(port), None, None)
+                    } else {
+                        (
+                            ControlStageState::Failed,
+                            Some(port),
+                            Some("The task reached its shared delivery attempt limit"),
+                            None,
+                        )
+                    }
+                }
                 IterationLimit => (
                     ControlStageState::Failed,
                     Some("failed"),

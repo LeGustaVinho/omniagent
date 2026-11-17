@@ -12,6 +12,7 @@ use super::{
     ArtifactKind, ArtifactValue, BuiltinNode, NodeConfiguration, NodeInputs, PinnedNode,
     WorkflowArtifact, WorkflowRun,
     artifacts::{insert_scoped_artifact, load_artifact},
+    backlog::retry::{BacklogCiRetry, retry_backlog_ci_failure_in_tx},
     control::{refresh, require_stage},
     digest,
     inspection::record_workflow_input_ids,
@@ -498,22 +499,25 @@ impl PendingGithubAction {
         ci_reason: Option<&str>,
     ) -> Result<()> {
         db.execute_batch("SAVEPOINT github_ci_retry")?;
-        let reason = match crate::workflows::backlog::retry::retry_backlog_ci_failure_in_tx(
-            db,
-            &self.project,
-            &self.run,
-            artifact_id,
-        ) {
-            Ok(Some(_)) => {
+        let reason = match retry_backlog_ci_failure_in_tx(db, &self.project, &self.run, artifact_id)
+        {
+            Ok(BacklogCiRetry::Replanned) => {
                 db.execute_batch("RELEASE github_ci_retry")?;
                 return Ok(());
             }
-            Ok(None) => "No automatic CI retry is available for this delivery".to_owned(),
+            Ok(BacklogCiRetry::Unavailable) => {
+                "No automatic CI retry is available for this delivery".to_owned()
+            }
+            Ok(BacklogCiRetry::BudgetExhausted { limit, head_sha }) => {
+                format!(
+                    "The shared delivery attempt limit of {limit} was reached for failed GitHub revision {head_sha}"
+                )
+            }
             Err(error) => format!("Could not start the automatic CI retry. {error}"),
         };
         db.execute_batch("ROLLBACK TO github_ci_retry; RELEASE github_ci_retry")?;
         let reason = match ci_reason {
-            Some(ci_reason) => format!("{ci_reason}. {reason}"),
+            Some(ci_reason) => format!("{reason}. {ci_reason}"),
             None => reason,
         };
         db.execute(

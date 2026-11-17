@@ -91,6 +91,7 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
     for expected in ["brief.md", "missing.md"] {
         let configuration = RepeatUntilConfiguration {
             max_iterations: 2,
+            delivery_attempt_budget: None,
             ready_input: "go".into(),
             completion_output: "done".into(),
             evidence_output: "context".into(),

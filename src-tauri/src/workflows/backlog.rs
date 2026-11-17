@@ -19,6 +19,7 @@ use super::{
 
 const MAX_TASKS_PER_BATCH: usize = 256;
 
+pub(super) mod attempts;
 pub(super) mod execution;
 pub(crate) mod retry;
 #[cfg(test)]

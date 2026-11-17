@@ -5,6 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::attempts::{CiRepairBudget, ci_repair_budget};
+
 use crate::{
     repository::{
         IntegratedWorktreeBase, registered_checkout_head,
@@ -42,13 +44,19 @@ struct ChildScope {
     destination: String,
 }
 
+pub(crate) enum BacklogCiRetry {
+    Replanned,
+    Unavailable,
+    BudgetExhausted { limit: u16, head_sha: String },
+}
+
 /// Called after Wait for CI stores a failed result and before refreshing control receipts.
 pub(crate) fn retry_backlog_ci_failure_in_tx(
     db: &Connection,
     project: &str,
     child_run: &str,
     failed_ci_artifact_id: &str,
-) -> Result<Option<String>> {
+) -> Result<BacklogCiRetry> {
     let child: Option<ChildScope> = db.query_row(
         "SELECT t.pipeline_run_id, t.backlog_artifact_id, t.task_id, t.destination_branch
          FROM workflow_backlog_task_runs t
@@ -60,26 +68,19 @@ pub(crate) fn retry_backlog_ci_failure_in_tx(
         |row| Ok(ChildScope { parent: row.get(0)?, backlog: row.get(1)?, task: row.get(2)?, destination: row.get(3)? }),
     ).optional()?;
     let Some(child) = child else {
-        return Ok(None);
+        return Ok(BacklogCiRetry::Unavailable);
     };
     let run = load_workflow_run(db, project, child_run)?
         .context("The backlog child workflow disappeared")?;
     let current = run
         .plan_revision
+        .clone()
         .context("The backlog child has no selected plan")?;
     let plan_artifact = load_artifact(db, project, child_run, &current, ArtifactKind::Plan)?
         .context("The selected backlog plan is unavailable")?;
     let ArtifactValue::BacklogPlan(mut plan) = plan_artifact.value else {
-        return Ok(None);
+        return Ok(BacklogCiRetry::Unavailable);
     };
-    if let Some(repair) = &plan.repair {
-        if repair.failed_ci_artifact_id == failed_ci_artifact_id {
-            return Ok(Some(current));
-        }
-        if repair.attempt >= MAX_CI_REPAIRS {
-            return Ok(None);
-        }
-    }
     ensure!(
         plan.parent_run_id == child.parent
             && plan.backlog_artifact_id == child.backlog
@@ -88,6 +89,13 @@ pub(crate) fn retry_backlog_ci_failure_in_tx(
             && plan.destination_branch == child.destination,
         "The active backlog plan no longer belongs to the child task and destination"
     );
+    if plan
+        .repair
+        .as_ref()
+        .is_some_and(|repair| repair.failed_ci_artifact_id == failed_ci_artifact_id)
+    {
+        return Ok(BacklogCiRetry::Replanned);
+    }
     let start = &plan_artifact.node_instance_id;
     ensure!(
         load_pinned_node(db, project, child_run, start)?
@@ -104,10 +112,10 @@ pub(crate) fn retry_backlog_ci_failure_in_tx(
     )?
     .context("The failed GitHub CI evidence is unavailable")?;
     let ArtifactValue::GithubCi(ci) = proof_artifact.value else {
-        return Ok(None);
+        return Ok(BacklogCiRetry::Unavailable);
     };
     let Some(unit_id) = proof_artifact.unit_id else {
-        return Ok(None);
+        return Ok(BacklogCiRetry::Unavailable);
     };
     let terminal = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM workflow_github_actions
@@ -123,7 +131,7 @@ pub(crate) fn retry_backlog_ci_failure_in_tx(
         |row| row.get::<_, bool>(0),
     )?;
     if !terminal || proof_artifact.port != "ci" || !failed_check_for_revision(&ci) {
-        return Ok(None);
+        return Ok(BacklogCiRetry::Unavailable);
     }
     ensure!(
         load_pinned_node(db, project, child_run, &proof_artifact.node_instance_id)?
@@ -185,6 +193,25 @@ pub(crate) fn retry_backlog_ci_failure_in_tx(
         perform: false,
     };
     validate_published_pull_source(db, project, child_run, &current, &ci.pull, &request)?;
+
+    match ci_repair_budget(db, &run)? {
+        CiRepairBudget::Exhausted(limit) => {
+            return Ok(BacklogCiRetry::BudgetExhausted {
+                limit,
+                head_sha: pull.head_sha.clone(),
+            });
+        }
+        CiRepairBudget::NoCurrentAttempt => return Ok(BacklogCiRetry::Unavailable),
+        CiRepairBudget::Unmarked
+            if plan
+                .repair
+                .as_ref()
+                .is_some_and(|repair| repair.attempt >= MAX_CI_REPAIRS) =>
+        {
+            return Ok(BacklogCiRetry::Unavailable);
+        }
+        CiRepairBudget::Unmarked | CiRepairBudget::Available => {}
+    }
 
     let checkout = &ci.pull.checkout_id;
     ensure!(
@@ -248,7 +275,7 @@ pub(crate) fn retry_backlog_ci_failure_in_tx(
     ]);
 
     db.execute_batch("SAVEPOINT backlog_ci_retry")?;
-    let transition = (|| -> Result<String> {
+    let transition = (|| -> Result<()> {
         let next = insert_artifact(
             db,
             project,
@@ -280,13 +307,13 @@ pub(crate) fn retry_backlog_ci_failure_in_tx(
         );
         db.execute("UPDATE job_pipeline_releases SET revoked = 1 WHERE pipeline_run_id = ?1 AND plan_revision = ?2",
             params![child_run, current])?;
-        Ok(next.id)
+        Ok(())
     })();
     if transition.is_err() {
         db.execute_batch("ROLLBACK TO backlog_ci_retry")?;
     }
     db.execute_batch("RELEASE backlog_ci_retry")?;
-    transition.map(Some)
+    transition.map(|()| BacklogCiRetry::Replanned)
 }
 
 fn failed_check_for_revision(ci: &CiEvidence) -> bool {

@@ -141,6 +141,7 @@ fn delivery(presets: &mut Vec<PackageMember>) -> Result<PackageMember> {
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
+            delivery_attempt_budget: Some(3),
         }),
         ("task-evidence", "completed"),
         &[
@@ -346,7 +347,7 @@ fn verify_candidate(presets: &mut Vec<PackageMember>) -> Result<PackageMember> {
         "classify-merge-risk", "Candidate merge risk reviewer",
         "Classify the change using the structured candidate review reports, task scope and verified test evidence. Set highRisk when it changes security or compliance boundaries, handles sensitive data, performs destructive or irreversible operations, introduces material delivery or dependency risk, or when evidence is insufficient to safely classify the change.",
         contracts::risk(), ("risk-review-evidence", "completed"),
-        &[review_evidence, context[0], candidate, green], false,
+        &[review_evidence, context[0], candidate, green], AgentSetup::Direct,
     )?;
     reports.push(green);
     reports.push(("verify-quality", "checks"));

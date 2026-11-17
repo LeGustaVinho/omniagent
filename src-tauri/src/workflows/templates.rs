@@ -192,13 +192,22 @@ fn delivery_library() -> WorkflowPackage {
 }
 
 fn agent(key: &str, name: &str, kind: BuiltinNode, role: &str) -> PackageMember {
+    agent_preset(key, name, kind, agent_role(role))
+}
+
+fn agent_preset(
+    key: &str,
+    name: &str,
+    kind: BuiltinNode,
+    configuration: NodeConfiguration,
+) -> PackageMember {
     member(
         key,
         name,
         PackageDestination::Library,
         PackageArtifactBody::Preset {
             node_kind: kind,
-            configuration: agent_role(role),
+            configuration,
             editable_fields: vec!["role".into()],
         },
     )
