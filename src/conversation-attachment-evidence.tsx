@@ -1,6 +1,9 @@
 import { useMutation } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
+import { ContextActions } from "@/components/ui/context-actions";
+import { useAttachmentActions } from "@/conversation-attachment-actions";
+import { decodeArtifactBytes, downloadArtifact } from "@/download-artifact";
 
 export type AttachmentEvidence = {
   ordinal: number;
@@ -16,28 +19,37 @@ export type AttachmentEvidence = {
     | { method: "reference"; runnerPath: string; uri: string | null };
 };
 
-function SavedAttachment({ attachment, conversationId, runId }: {
+function SavedAttachment({ attachment, conversationId, runId, checkoutId }: {
   attachment: AttachmentEvidence;
   conversationId: string;
   runId: string;
+  checkoutId?: string;
 }) {
   const save = useMutation({
     mutationFn: async () => {
       const encoded = await invoke<string | null>("conversation_attachment_content", { conversationId, runId, index: attachment.ordinal });
       if (encoded === null) throw new Error("Saved attachment bytes are unavailable.");
-      const bytes = Uint8Array.from(atob(encoded), (byte) => byte.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes], { type: attachment.mimeType }));
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = attachment.name;
-      link.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      downloadArtifact(attachment.name, new Blob([decodeArtifactBytes(encoded)], { type: attachment.mimeType }));
     },
   });
   const { transport } = attachment;
+  const { path, checkout, clipboard, copy, feedback } = useAttachmentActions(attachment.source, attachment.name, checkoutId);
+  const runnerPath = transport.method === "excerpt" ? null : transport.runnerPath;
+  const uri = transport.method === "native" ? transport.resourceUri : transport.method === "reference" ? transport.uri : null;
+  const title = `${attachment.name} · ${transport.method === "native" ? "Native content" : transport.method === "excerpt" ? "Excerpt" : "File reference"}`;
   return <li className="grid gap-1 border-t border-border pt-2 text-xs">
-    <p className="font-medium">{attachment.name} · {transport.method === "native" ? "Native content" : transport.method === "excerpt" ? "Excerpt" : "File reference"}</p>
-    <p className="break-all text-muted-foreground">Source {attachment.source.kind === "checkout" ? attachment.source.relativePath : attachment.source.path}</p>
+    <ContextActions label={title} groups={[checkout, transport.method === "native" ? [
+      { label: "Download saved bytes", disabled: save.isPending, run: () => save.mutate() },
+    ] : [], [...clipboard,
+      { label: "Copy saved SHA-256", run: () => copy(attachment.sourceSha256) },
+      { label: "Copy message revision ID", run: () => copy(attachment.messageRevisionId) },
+      ...(transport.method === "excerpt" ? [{ label: "Copy saved excerpt", run: () => copy(transport.text) }] : []),
+      ...(runnerPath ? [{ label: "Copy runner path", run: () => copy(runnerPath) }] : []),
+      ...(uri ? [{ label: "Copy resource URI", run: () => copy(uri) }] : []),
+    ]]}>
+      <p className="font-medium">{title}</p>
+    </ContextActions>
+    <p className="break-all text-muted-foreground">Source {path}</p>
     <p className="break-all text-muted-foreground">Message revision {attachment.messageRevisionId}</p>
     <p className="break-all text-muted-foreground">SHA-256 {attachment.sourceSha256} · {attachment.sourceSize.toLocaleString()} bytes</p>
     {transport.method === "excerpt" ? <>
@@ -57,21 +69,23 @@ function SavedAttachment({ attachment, conversationId, runId }: {
         CLI reported read via {tool} · {path} · Event {eventSequence}
       </li>)}
     </ol>}
+    {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
     {save.error && <p role="alert">{String(save.error)}</p>}
   </li>;
 }
 
-export function SavedAttachments({ attachments, conversationId, runId }: {
+export function SavedAttachments({ attachments, conversationId, runId, checkoutId }: {
   attachments: AttachmentEvidence[];
   conversationId: string;
   runId: string;
+  checkoutId?: string;
 }) {
   if (!attachments.length) return null;
   return <details className="mt-2">
     <summary>Saved attachments</summary>
     <ol className="mt-2 grid gap-2" aria-label="Saved attachments">
       {attachments.map((attachment) => <SavedAttachment key={attachment.ordinal} attachment={attachment}
-        conversationId={conversationId} runId={runId} />)}
+        conversationId={conversationId} runId={runId} checkoutId={checkoutId} />)}
     </ol>
   </details>;
 }

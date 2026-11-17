@@ -8,6 +8,7 @@ import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "@/app";
 import type { Conversation } from "@/bindings/Conversation";
+import type { MessageRevision } from "@/bindings/MessageRevision";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { RunRecord } from "@/bindings/RunRecord";
 import { RealConversations } from "@/desktop-dock";
@@ -41,6 +42,7 @@ const selected: ProjectCheckout = {
 const other: ProjectCheckout = {
   projectId: "external", checkoutId: "external-review", repositoryRoot: "C:\\repos\\Audit", checkoutRoot: "C:\\worktrees\\audit-review",
 };
+const forkCheckout: ProjectCheckout = { ...selected, checkoutId: "new-fork-checkout", checkoutRoot: "C:\\worktrees\\launch-fork" };
 const archiveId = "older-chat";
 const liveId = "live-chat";
 const externalId = "external-chat";
@@ -49,7 +51,7 @@ const libraryTitle = "Archive review";
 const finalTitle = "Archive release";
 const draft = "Draft written before restart.";
 
-function repository() {
+function repository(archiveMessages: MessageRevision[] = []) {
   const layouts = new Map<string, string>();
   const conversations = new Map<string, Conversation>([
     [archiveId, { id: archiveId, checkoutId: selected.checkoutId, contextId: "archived-context", title: original }],
@@ -73,7 +75,7 @@ function repository() {
       checkoutId?: string; conversationId?: string; title?: string; query?: string; projectId?: string;
       archived?: boolean;
       change?: { type: string; pinned?: boolean; unread?: boolean; archived?: boolean; sectionId?: string; name?: string };
-      workspace?: string; layout?: string; runId?: string; after?: string; text?: string;
+      workspace?: string; layout?: string; runId?: string; after?: string; text?: string; choice?: string;
     };
     const layoutKey = `${input.checkoutId}:${input.workspace}`;
     const conversation = conversations.get(input.conversationId ?? "");
@@ -131,6 +133,16 @@ function repository() {
         return updated;
       }
       case "conversation_draft": return drafts.get(input.conversationId!) ?? "";
+      case "conversation_fork_checkout_settings":
+        return { projectDefault: "reuse_current_checkout", conversationOverride: null, effective: "reuse_current_checkout" };
+      case "conversation_queue_history_policy": return { projectDefault: "review", conversationOverride: null, effective: "review" };
+      case "preview_conversation_fork_checkout":
+        return { previewId: "fork-preview", choice: input.choice ?? "reuse_current_checkout", projectId: selected.projectId,
+          checkoutId: selected.checkoutId, checkoutRoot: selected.checkoutRoot, repositoryRoot: selected.repositoryRoot,
+          baseCommit: null, dirtyPaths: [], selectedPaths: [],
+          targetCheckoutRoot: input.choice === "create_separate_worktree" ? forkCheckout.checkoutRoot : null, targetBranch: "codex/launch-fork" };
+      case "fork_conversation_with_checkout":
+        return { id: "forked-chat", checkoutId: forkCheckout.checkoutId, contextId: "fork-context", title: `${original} (fork)` };
       case "conversation_reference_draft": return [];
       case "conversation_history_deletion_diffs": return [];
       case "conversation_attachment_draft": return { revision: null, files: [] };
@@ -140,7 +152,8 @@ function repository() {
       case "conversation_history":
         return { contextId: conversation?.contextId, messages: [{ messageId: "saved-user", revisionId: "saved-revision",
           role: "user", text: input.conversationId === archiveId ? "Saved conversation before provider shutdown."
-            : input.conversationId === externalId ? "Saved transcript in the audit worktree." : "Saved live prompt." }] };
+            : input.conversationId === externalId ? "Saved transcript in the audit worktree." : "Saved live prompt." },
+          ...(input.conversationId === archiveId ? archiveMessages : [])] };
       case "latest_conversation_run":
         if (input.conversationId === externalId) return null;
         return { id: input.conversationId === liveId ? "existing-run" : "previous-run", projectId: selected.projectId,
@@ -289,6 +302,66 @@ it("offers the shared context menu on a live library row and copies that row's t
   await user.click(await screen.findByRole("menuitem", { name: "Title" }));
   expect(await screen.findByText("Title copied.")).toBeTruthy();
   expect(await navigator.clipboard.readText()).toBe(original);
+});
+
+it("copies highlighted code and appends its own fenced block to the current draft without sending", async () => {
+  const source = 'const marker = "```";';
+  const block = `\`\`\`\`typescript\n${source}\n\`\`\`\``;
+  repository([{ messageId: "code", revisionId: "code-revision", role: "assistant", text: `Run this in a scratch file.\n\n${block}\n\nThen inspect its output.` }]);
+  const { user } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await user.click(await library().findByRole("button", { name: original }));
+  const code = await screen.findByLabelText("typescript code");
+  fireEvent.contextMenu(code);
+  expect(screen.queryByRole("menuitem", { name: "Copy message as Markdown" })).toBeNull();
+  await user.click(await screen.findByRole("menuitem", { name: "Copy code" }));
+  expect(await navigator.clipboard.readText()).toBe(`${source}\n`);
+
+  code.focus();
+  await user.keyboard("{Shift>}{F10}{/Shift}");
+  await user.click(await screen.findByRole("menuitem", { name: "Add code block to draft" }));
+  const expected = `${draft}\n\n${block}\n\n`;
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Message draft" })).toHaveProperty("value", expected));
+  expect(invoke).toHaveBeenCalledWith("save_conversation_draft", { conversationId: archiveId, text: expected });
+
+  const paragraph = screen.getByText("Run this in a scratch file.");
+  const range = document.createRange();
+  const snippet = "Run this";
+  range.setStart(paragraph.firstChild!, 0);
+  range.setEnd(paragraph.firstChild!, snippet.length);
+  const selection = window.getSelection()!;
+  selection.removeAllRanges();
+  selection.addRange(range);
+  fireEvent.contextMenu(paragraph);
+  await user.click(await screen.findByRole("menuitem", { name: "Quote selected text in draft" }));
+  const quoted = `${expected}> ${snippet}\n\n`;
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_conversation_draft", { conversationId: archiveId, text: quoted }));
+  expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
+});
+
+it("reviews a library fork against the clicked conversation before creating it", async () => {
+  repository();
+  const { user, onOpenOtherCheckout } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  fireEvent.contextMenu(await library().findByRole("button", { name: original }));
+  await user.click(await screen.findByRole("menuitem", { name: "Create fork…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Conversation history" }));
+  await waitFor(() => expect(dialog.getByRole("button", { name: "Create fork" })).not.toHaveProperty("disabled", true));
+  expect(dialog.getByRole("textbox", { name: "Fork title" })).toHaveProperty("value", `${original} (fork)`);
+  expect(invoke).toHaveBeenCalledWith("preview_conversation_fork_checkout", {
+    conversationId: archiveId, expectedContextId: "archived-context", choice: null, selectedPaths: [],
+  });
+  expect(invoke).not.toHaveBeenCalledWith("fork_conversation_with_checkout", expect.anything());
+  await user.selectOptions(dialog.getByRole("combobox", { name: "Fork checkout" }), "create_separate_worktree");
+  await dialog.findByText(`${forkCheckout.checkoutRoot} · codex/launch-fork`);
+  await user.click(dialog.getByRole("button", { name: "Create fork" }));
+  await waitFor(() => expect(onOpenOtherCheckout).toHaveBeenCalledExactlyOnceWith(forkCheckout, "forked-chat"));
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "fork_conversation_with_checkout")).toEqual([
+    ["fork_conversation_with_checkout", { request: {
+      conversationId: archiveId, expectedContextId: "archived-context", sourceContextId: null, throughRevision: null,
+      title: `${original} (fork)`, editedText: null, checkoutPreviewId: "fork-preview",
+    } }],
+  ]);
 });
 
 it("organizes conversations through the shared menu and reloads persisted sections, unread and archived state", async () => {

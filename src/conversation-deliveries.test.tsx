@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { ConversationDeliveries, type ConversationInput } from "@/conversation-deliveries";
@@ -57,7 +57,7 @@ it("shows the retained attachments and requests native bytes by original ordinal
           reportedReads: [{ eventSequence: "42", path: "before-rename.txt", tool: "Read" }] },
         { ...metadata, ordinal: 3, transport: { method: "native", encoding: "acp_resource", runnerPath: null, resourceUri: "file:///original" } },
       ],
-    }} conversationId="chat-id" runId="run-id" live={false} />
+    }} conversationId="chat-id" runId="run-id" live={false} checkoutId="original-run-checkout" />
   </QueryClientProvider>);
   expect(screen.getByText("Exact input is unavailable after attachment history was deleted.")).toBeTruthy();
   await user.click(screen.getByText("Saved attachments", { selector: "summary" }));
@@ -68,6 +68,15 @@ it("shows the retained attachments and requests native bytes by original ordinal
   expect(within(list.getByRole("list", { name: "CLI-reported reads" })).getByText(
     "CLI reported read via Read · before-rename.txt · Event 42",
   )).toBeTruthy();
-  await user.click(list.getByRole("button", { name: "Download saved bytes" }));
+  fireEvent.contextMenu(list.getByText("notes.txt · Excerpt"));
+  await user.click(screen.getByRole("menuitem", { name: "Copy saved excerpt" }));
+  expect(await navigator.clipboard.readText()).toBe("café ☕");
+  fireEvent.contextMenu(list.getByText("notes.txt · File reference"));
+  await user.click(screen.getByRole("menuitem", { name: "Show source in File Explorer" }));
+  expect(invoke).toHaveBeenCalledWith("open_checkout_item_in_shell", {
+    checkoutId: "original-run-checkout", relativePath: "docs/notes.txt", action: "reveal",
+  });
+  fireEvent.contextMenu(list.getByText("notes.txt · Native content"));
+  await user.click(screen.getByRole("menuitem", { name: "Download saved bytes" }));
   expect(invoke).toHaveBeenCalledWith("conversation_attachment_content", { conversationId: "chat-id", runId: "run-id", index: 3 });
 });

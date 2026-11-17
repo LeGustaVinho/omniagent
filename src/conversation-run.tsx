@@ -281,7 +281,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose 
       <ConversationResponseEvidence conversationId={conversationId} runId={run.id} live={live} evidence={projection} />
       <ConversationActivityContext {...scope} projectId={run.projectId} projection={projection} />
       <Button type="button" variant="outline" aria-expanded={showInput} onClick={() => setShowInput((visible) => !visible)}>Exact input</Button>
-      {showInput && <ConversationExactInput {...scope} />}
+      {showInput && <ConversationExactInput {...scope} checkoutId={run.checkoutId} />}
       </div>
     </ConversationSidePanel>
   );
@@ -330,7 +330,7 @@ export function ConversationActivityContext({ projectId, projection, ...scope }:
   </>;
 }
 
-export function ConversationExactInput({ conversationId, runId, live }: ConversationActivityScope) {
+export function ConversationExactInput({ conversationId, runId, live, checkoutId }: ConversationActivityScope & { checkoutId?: string }) {
   const input = useQuery({
     queryKey: ["conversation-run", runId, "input"],
     refetchInterval: live ? 400 : false,
@@ -340,6 +340,6 @@ export function ConversationExactInput({ conversationId, runId, live }: Conversa
     {input.isPending && <p className="text-xs text-muted-foreground">Loading input…</p>}
     {input.error && <p role="alert" className="text-sm text-red-300">{String(input.error)}</p>}
     {input.data === null && <p className="text-xs text-muted-foreground">No input has been prepared.</p>}
-    {input.data && <ConversationDeliveries input={input.data} conversationId={conversationId} runId={runId} live={live} />}
+    {input.data && <ConversationDeliveries input={input.data} conversationId={conversationId} runId={runId} live={live} checkoutId={checkoutId} />}
   </section>;
 }

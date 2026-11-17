@@ -154,17 +154,22 @@ export function ConversationSidebar({ checkoutId, onOpen, activeId, onRenamed }:
       <ul className="conv-session-list">
         {matching?.map((conversation) => (
           <li key={conversation.id}>
-            <ConversationRow title={conversation.title} available={(action) => action === "copy-title" || action === "rename"}
+            <ConversationRow title={conversation.title} available={(action) => ["open", "copy-id", "copy-title", "rename"].includes(action)}
               onAction={(action) => {
+                if (action === "open") {
+                  onOpen(conversation);
+                  return;
+                }
                 if (action === "rename") {
                   setRenaming(conversation);
                   setTitle(conversation.title);
                   rename.reset();
                   return;
                 }
-                void Promise.resolve().then(() => navigator.clipboard.writeText(conversation.title))
-                  .then(() => setNotice("Title copied."))
-                  .catch(() => setNotice("Couldn’t copy the title."));
+                const title = action === "copy-title";
+                void Promise.resolve().then(() => navigator.clipboard.writeText(title ? conversation.title : conversation.id))
+                  .then(() => setNotice(title ? "Title copied." : "Conversation ID copied."))
+                  .catch(() => setNotice("Couldn’t copy to the clipboard."));
               }}>
               <button type="button" className="conv-session-button" data-conversation-id={conversation.id}
                 aria-current={activeId === conversation.id ? "page" : undefined}
@@ -231,7 +236,7 @@ export function ConversationPanel({ params, api, containerApi }: IDockviewPanelP
     api.updateParameters({ title });
   }, [api, params.title, title]);
   return <ConversationContent key={params.conversationId} conversationId={params.conversationId}
-    title={title} checkoutId={checkoutId} visible={visible}
+    title={title} checkoutId={checkoutId} confirmedCheckoutId={savedTitle.data?.checkoutId} visible={visible}
     openFork={(conversation) => { if (containerApi) openConversation(containerApi, conversation); }} />;
 }
 
@@ -243,8 +248,8 @@ type ReviewedContinuation = {
   text: string;
 };
 
-function ConversationContent({ conversationId, title, checkoutId, visible, openFork }: PanelParams & {
-  checkoutId?: string; visible: boolean; openFork: (conversation: Conversation) => void;
+function ConversationContent({ conversationId, title, checkoutId, confirmedCheckoutId, visible, openFork }: PanelParams & {
+  checkoutId?: string; confirmedCheckoutId?: string; visible: boolean; openFork: (conversation: Conversation) => void;
 }) {
   const queryClient = useQueryClient();
   const library = useContext(ConversationLibraryNavigation);
@@ -544,6 +549,21 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
     });
   }
 
+  function appendToDraft(markdown: string) {
+    const current = queryClient.getQueryData<string>(draftKey) ?? "";
+    const separator = !current || current.endsWith("\n\n") ? "" : current.endsWith("\n") ? "\n" : "\n\n";
+    editDraft(`${current}${separator}${markdown}\n\n`);
+    requestAnimationFrame(() => composer.current?.focus());
+  }
+
+  function quoteInDraft(text: string) {
+    appendToDraft(text.split("\n").map((line) => `> ${line}`).join("\n"));
+  }
+
+  function copyMessageText(text: string) {
+    void Promise.resolve().then(() => navigator.clipboard.writeText(text)).catch(() => setDraftError("Could not copy to the clipboard."));
+  }
+
   function pickCustomization(option: ComposerCustomization) {
     const next = customizationPicker.pick(option);
     editDraft(next.text);
@@ -646,16 +666,19 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
         <ol className="conv-messages">
           {history.data?.messages.map((message) => (
             <ConversationMessage key={message.revisionId} role={message.role}
+              selectionMenu={(selection) => [[
+                { label: "Copy selected text", run: () => copyMessageText(selection) },
+                { label: "Quote selected text in draft", disabled: busy || historyBusy || !draft.isSuccess, run: () => quoteInDraft(selection) },
+              ]]}
               menu={[[
                 { label: "Copy message as Markdown", run: () => {
                   const markdown = message.role === "user" ? conversationSkillMessage(message.text) : message.text;
-                  void Promise.resolve().then(() => navigator.clipboard.writeText(markdown)).catch(() => setDraftError("Could not copy the message."));
+                  copyMessageText(markdown);
                 } },
-                { label: "Quote in draft", disabled: busy || !draft.isSuccess, run: () => {
+                { label: "Copy message revision ID", run: () => copyMessageText(message.revisionId) },
+                { label: "Quote in draft", disabled: busy || historyBusy || !draft.isSuccess, run: () => {
                   const markdown = message.role === "user" ? conversationSkillMessage(message.text) : message.text;
-                  const quoted = markdown.split("\n").map((line) => `> ${line}`).join("\n");
-                  editDraft(`${text ? `${text}\n\n` : ""}${quoted}\n\n`);
-                  requestAnimationFrame(() => composer.current?.focus());
+                  quoteInDraft(markdown);
                 } },
               ], [
                 { label: "Rewind here…", disabled: historyBusy, run: () => setHistoryAction({ kind: "rewind", revisionId: message.revisionId }) },
@@ -664,7 +687,10 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
                   run: () => setHistoryAction({ kind: "edit", revisionId: message.revisionId }) }] : []),
               ]]}
               actions={<ConversationMessageHistoryActions message={message} disabled={historyBusy} onAction={setHistoryAction} />}>
-              {message.role === "user" ? <p>{conversationSkillMessage(message.text)}</p> : <ConversationMarkdown>{message.text}</ConversationMarkdown>}
+              {message.role === "user" ? <p>{conversationSkillMessage(message.text)}</p> : <ConversationMarkdown
+                codeActions={{ addToDraft: appendToDraft, draftDisabled: busy || historyBusy || !draft.isSuccess }}>
+                {message.text}
+              </ConversationMarkdown>}
             </ConversationMessage>
           ))}
         </ol>
@@ -672,7 +698,7 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
         {latest.error && <p role="alert" className="conv-alert">{String(latest.error)}</p>}
         {activity.error && <p role="alert" className="conv-alert">{String(activity.error)}</p>}
         {live && activity.output && <div className="conv-stream" aria-label="Streaming response">
-          <ConversationMarkdown>{activity.output}</ConversationMarkdown>
+          <ConversationMarkdown codeActions={{}}>{activity.output}</ConversationMarkdown>
         </div>}
         {run && <ConversationRequests activity={activity} conversationId={conversationId} runId={run.id} />}
         {job?.job.mode === "approved_write" && attempt && !isLiveRun(attempt) && (
@@ -717,7 +743,8 @@ function ConversationContent({ conversationId, title, checkoutId, visible, openF
           </div>
         </div>}
       <form ref={composerForm} onSubmit={submit} className={`conv-composer ${attachments.hover ? "ring-2 ring-primary" : ""}`}>
-          <ConversationAttachments attachments={attachments} preview={attachmentReview} disabled={send.isPending || continueSend.isPending} />
+          <ConversationAttachments attachments={attachments} preview={attachmentReview} checkoutId={confirmedCheckoutId}
+            disabled={send.isPending || continueSend.isPending} />
           <ComposerCustomizationPicker picker={customizationPicker} onPick={pickCustomization}
             onRemove={(token) => editDraft(customizationPicker.remove(token))} />
           <ConversationReferenceChips references={references}

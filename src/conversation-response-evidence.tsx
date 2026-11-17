@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import type { ChildLocation } from "@/conversation-children";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
+import { downloadArtifact } from "@/download-artifact";
 
 export type ResponseObservation = { type: "assistant_delta" | "assistant_message" | "assistant_final"; text: string };
 
@@ -78,15 +80,32 @@ const responseLabels = {
 };
 
 function Responses({ title, items }: { title: string; items: ResponseItem[] }) {
+  const { copy, feedback, run } = useContextActionFeedback();
   if (!items.length) return null;
   return <details>
     <summary>{title}</summary>
     <ol aria-label={title} className="grid gap-2 text-xs">
-      {items.map((item, index) => <li key={index}>
-        <p className="text-muted-foreground">{responseLabels[item.status]}</p>
-        <p className="whitespace-pre-wrap break-words">{item.text}</p>
-      </li>)}
+      {items.map((item, index) => {
+        const { itemId, turnId } = item.location;
+        return <li key={index}>
+          <ContextActions label={`${responseLabels[item.status]} ${index + 1}`} groups={[[
+            { label: "Copy recorded response", run: () => copy(item.text) },
+            { label: "Download response as text", run: () => void run(async () => {
+              downloadArtifact(`${item.status}-response-${index + 1}.txt`, new Blob([item.text], { type: "text/plain;charset=utf-8" }));
+            }) },
+          ], [
+            ...(itemId ? [{ label: "Copy provider item ID", run: () => copy(itemId) }] : []),
+            ...(turnId ? [{ label: "Copy provider turn ID", run: () => copy(turnId) }] : []),
+          ]]}>
+            <div className="min-w-0 flex-1">
+              <p className="text-muted-foreground">{responseLabels[item.status]}</p>
+              <p className="whitespace-pre-wrap break-words">{item.text}</p>
+            </div>
+          </ContextActions>
+        </li>;
+      })}
     </ol>
+    {feedback && <p role={feedback.failed ? "alert" : "status"} className="text-xs">{feedback.text}</p>}
   </details>;
 }
 

@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { X } from "lucide-react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { MessageRevision } from "@/bindings/MessageRevision";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 
 type Source = {
   source: Conversation;
@@ -39,21 +40,36 @@ const roleLabel = { user: "User", assistant: "Assistant" };
 
 export function ReferencePreview({ reference }: { reference: ConversationReferencePreview }) {
   const { artifact, sourceTitle, projectName } = reference;
+  const { copy, feedback } = useContextActionFeedback();
   return <section aria-label="Exact conversation reference" className="grid min-w-0 gap-2">
     <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 text-xs">
       <dt>Conversation</dt><dd className="break-words">{sourceTitle}</dd>
       <dt>Source project</dt><dd className="break-words">{projectName}</dd>
       <dt>Saved context</dt><dd><code className="break-all">{artifact.sourceContextId}</code></dd>
-      <dt>Reference revision</dt><dd><code className="break-all">{artifact.id}</code></dd>
+      <dt>Reference revision</dt><dd><ContextActions label="reference revision" groups={[[
+        { label: "Copy reference revision ID", run: () => copy(artifact.id) },
+        { label: "Copy source context ID", run: () => copy(artifact.sourceContextId) },
+        { label: "Copy source conversation ID", run: () => copy(reference.sourceConversationId) },
+      ]]}><code className="min-w-0 break-all">{artifact.id}</code></ContextActions></dd>
     </dl>
     {artifact.kind === "summary"
-      ? <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs">{artifact.text}</pre>
+      ? <ContextActions label="saved summary" groups={[[{ label: "Copy saved summary", run: () => copy(artifact.text) }]]}>
+        <pre tabIndex={0} className="max-h-48 min-w-0 flex-1 overflow-auto whitespace-pre-wrap break-words text-xs">{artifact.text}</pre>
+      </ContextActions>
       : <ol className="grid max-h-48 gap-2 overflow-auto">
         {artifact.excerpts.map(({ role, text, source }) => <li key={source.origin.revisionId} className="min-w-0 border-t border-border pt-1">
-          <p className="break-all text-xs">{roleLabel[role]} · <code>{source.origin.revisionId}</code></p>
-          <pre className="whitespace-pre-wrap break-words text-xs">{text}</pre>
+          <ContextActions label={`${roleLabel[role]} excerpt`} groups={[[
+            { label: "Copy saved excerpt", run: () => copy(text) },
+            { label: "Copy source message revision ID", run: () => copy(source.origin.revisionId) },
+          ]]}>
+            <div className="min-w-0 flex-1">
+              <p className="break-all text-xs">{roleLabel[role]} · <code>{source.origin.revisionId}</code></p>
+              <pre tabIndex={0} className="whitespace-pre-wrap break-words text-xs">{text}</pre>
+            </div>
+          </ContextActions>
         </li>)}
       </ol>}
+    {feedback && <p role={feedback.failed ? "alert" : "status"} className="text-xs">{feedback.text}</p>}
   </section>;
 }
 
@@ -152,15 +168,25 @@ export function ConversationReferenceChips({ references, onRemove, disabled = fa
 }) {
   if (!references.length) return null;
   return <ul className="grid min-w-0 gap-1" aria-label="Attached conversation references">
-    {references.map((reference) => <li key={reference.id} className="flex min-w-0 items-start gap-1 rounded border border-border p-1">
-      <details className="min-w-0 flex-1 px-1">
+    {references.map((reference) => <ReferenceChip key={reference.id} reference={reference} disabled={disabled} remove={() => onRemove(reference.id)} />)}
+  </ul>;
+}
+
+function ReferenceChip({ reference, disabled, remove }: { reference: ConversationReferencePreview; disabled: boolean; remove: () => void }) {
+  const details = useRef<HTMLDetailsElement>(null);
+  return <li className="min-w-0 rounded border border-border p-1">
+    <ContextActions label={`${reference.sourceTitle} reference`} groups={[[
+      { label: "Show reference preview", run: () => { if (details.current) details.current.open = true; } },
+      { label: "Remove reference from draft", disabled, run: remove },
+    ]]}>
+      <details ref={details} className="min-w-0 flex-1 px-1">
         <summary className="cursor-pointer truncate text-xs" title={reference.sourceTitle}>
           {reference.sourceTitle} · {reference.artifact.kind === "summary" ? "Summary" : "Excerpt"}
         </summary>
         <ReferencePreview reference={reference} />
       </details>
       <button type="button" className="conv-icon-button" aria-label={`Remove reference to ${reference.sourceTitle}`}
-        disabled={disabled} onClick={() => onRemove(reference.id)}><X size={14} aria-hidden /></button>
-    </li>)}
-  </ul>;
+        disabled={disabled} onClick={remove}><X size={14} aria-hidden /></button>
+    </ContextActions>
+  </li>;
 }

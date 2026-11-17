@@ -3,8 +3,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Paperclip, X } from "lucide-react";
+import { ContextActions } from "@/components/ui/context-actions";
 import type { AttachmentLimits } from "@/bindings/AttachmentLimits";
 import type { ModelSelection } from "@/bindings/ModelSelection";
+import { useAttachmentActions } from "@/conversation-attachment-actions";
 import { SafeAttachmentMedia } from "@/repository-note-media";
 
 export type AttachmentDelivery = { kind: "native" | "reference" } | { kind: "excerpt"; start: number; end: number };
@@ -149,10 +151,11 @@ export function useConversationAttachmentReview({ conversationId, revision, cont
     error: mutation.variables?.key === key ? mutation.error : null, refresh: () => request.current?.() };
 }
 
-export function ConversationAttachments({ attachments, disabled, preview }: {
+export function ConversationAttachments({ attachments, disabled, preview, checkoutId }: {
   attachments: ReturnType<typeof useConversationAttachments>;
   disabled: boolean;
   preview?: ReturnType<typeof useConversationAttachmentReview>;
+  checkoutId?: string;
 }) {
   if (!attachments.enabled) return null;
   const unavailable = disabled || attachments.busy;
@@ -161,22 +164,9 @@ export function ConversationAttachments({ attachments, disabled, preview }: {
       <Paperclip className="size-3.5" aria-hidden /> Attach files
     </button>
     {attachments.draft.files.length > 0 && <ul aria-label="Draft files" className="grid gap-1">
-      {attachments.draft.files.map((file) => {
-        const { id, source } = file;
-        const path = pathOf(source);
-        const name = path.split(/[\\/]/).at(-1) ?? path;
-        const review = preview?.review?.files.find((entry) => entry.id === id);
-        return <li key={id} className="grid min-w-0 gap-1 rounded border border-border px-2 py-1 text-xs">
-          <div className="flex min-w-0 items-center justify-between">
-            <span title={path} className="truncate">{name} · {source.kind === "checkout" ? "Checkout" : "Selected external file"}</span>
-            <button type="button" className="conv-icon-button" aria-label={`Remove file ${name}`} disabled={unavailable}
-              onClick={() => attachments.change(id, { kind: "remove" })}><X size={14} aria-hidden /></button>
-          </div>
-          {review && <ReviewedAttachment key={`${id}:${review.delivery?.kind}:${review.excerpt?.start}:${review.excerpt?.end}`}
-            name={name} path={path} file={file} review={review} disabled={unavailable}
-            onDelivery={(delivery) => attachments.change(id, { kind: "set_delivery", delivery })} />}
-        </li>;
-      })}
+      {attachments.draft.files.map((file) => <DraftAttachmentRow key={file.id} file={file} checkoutId={checkoutId}
+        review={preview?.review?.files.find((entry) => entry.id === file.id)} disabled={unavailable}
+        change={(edit) => attachments.change(file.id, edit)} />)}
     </ul>}
     {attachments.draft.files.length > 0 && preview && <>
       {!preview.eligible && <p className="text-xs">Choose a conversation model to review file delivery.</p>}
@@ -190,9 +180,43 @@ export function ConversationAttachments({ attachments, disabled, preview }: {
   </div>;
 }
 
-function ReviewedAttachment({ name, path, file, review, disabled, onDelivery }: {
+function DraftAttachmentRow({ file, checkoutId, review, disabled, change }: {
+  file: Attachment; checkoutId?: string; review?: FileReview; disabled: boolean; change: (edit: Edit) => void;
+}) {
+  const path = pathOf(file.source);
+  const name = path.split(/[\\/]/).at(-1) ?? path;
+  const details = useRef<HTMLDetailsElement>(null);
+  const { checkout, clipboard, copy, feedback } = useAttachmentActions(file.source, name, checkoutId);
+  const excerpt = review?.excerpt?.text;
+  const sha = review?.metadata?.sha256;
+  const setDelivery = (delivery: AttachmentDelivery | null) => change({ kind: "set_delivery", delivery });
+  const remove = () => change({ kind: "remove" });
+  return <li className="grid min-w-0 gap-1 rounded border border-border px-2 py-1 text-xs">
+    <ContextActions label={path} groups={[checkout, review ? [
+      { label: "Show attachment review", run: () => { if (details.current) details.current.open = true; } },
+      { label: "Delivery", disabled, items: [
+        { label: "Automatic", disabled: file.delivery === null, run: () => setDelivery(null) },
+        ...review.alternatives.map((delivery) => ({ label: deliveryLabels[delivery.kind],
+          disabled: file.delivery?.kind === delivery.kind, run: () => setDelivery(delivery) })),
+      ] },
+    ] : [], [...clipboard,
+      ...(sha ? [{ label: "Copy reviewed SHA-256", run: () => copy(sha) }] : []),
+      ...(excerpt !== undefined ? [{ label: "Copy reviewed excerpt", run: () => copy(excerpt) }] : []),
+    ], [{ label: "Remove from draft", disabled, run: remove }]]}>
+      <span title={path} className="min-w-0 flex-1 truncate">{name} · {file.source.kind === "checkout" ? "Checkout" : "Selected external file"}</span>
+      <button type="button" className="conv-icon-button" aria-label={`Remove file ${name}`} disabled={disabled}
+        onClick={remove}><X size={14} aria-hidden /></button>
+    </ContextActions>
+    {feedback && <p role={feedback.failed ? "alert" : "status"} className="text-muted-foreground">{feedback.text}</p>}
+    {review && <ReviewedAttachment key={`${file.id}:${review.delivery?.kind}:${review.excerpt?.start}:${review.excerpt?.end}`}
+      details={details} name={name} path={path} file={file} review={review} disabled={disabled} onDelivery={setDelivery} />}
+  </li>;
+}
+
+function ReviewedAttachment({ name, path, file, review, disabled, onDelivery, details }: {
   name: string; path: string; file: Attachment; review: FileReview; disabled: boolean;
   onDelivery: (delivery: AttachmentDelivery | null) => void;
+  details: RefObject<HTMLDetailsElement | null>;
 }) {
   const current = review.delivery;
   const [start, setStart] = useState(current?.kind === "excerpt" ? String(current.start) : "0");
@@ -200,7 +224,7 @@ function ReviewedAttachment({ name, path, file, review, disabled, onDelivery }: 
   const from = Number(start);
   const to = Number(end);
   const alternatives = review.alternatives.filter((candidate) => candidate.kind !== file.delivery?.kind);
-  return <details open={Boolean(review.blocker)} className="min-w-0">
+  return <details ref={details} open={Boolean(review.blocker)} className="min-w-0">
     <summary className="cursor-pointer">{current ? deliveryLabels[current.kind] : "Delivery unavailable"}
       {review.metadata && ` · ${review.metadata.size.toLocaleString()} bytes`}</summary>
     <div className="grid gap-2 py-1">
