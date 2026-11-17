@@ -132,6 +132,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/115-visual-pipeline-executors.sql"),
     include_str!("../migrations/116-workflow-trigger-optional-markdown.sql"),
     include_str!("../migrations/117-conversation-library-organization.sql"),
+    include_str!("../migrations/118-checkout-document-history.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -142,6 +143,7 @@ pub struct Store {
     pub(crate) event_signal: watch::Sender<()>,
     pub(crate) job_signal: watch::Sender<()>,
     pub(crate) note_index_locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
+    pub(crate) document_write_locks: Arc<Mutex<HashMap<(String, String), Weak<tokio::sync::Mutex<()>>>>>,
 }
 
 pub enum DraftKey {
@@ -215,6 +217,7 @@ impl Store {
             event_signal: watch::channel(()).0,
             job_signal: watch::channel(()).0,
             note_index_locks: Arc::default(),
+            document_write_locks: Arc::default(),
         })
     }
 
@@ -342,6 +345,39 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_history_migration_links_earlier_editor_captures_without_rewriting_bodies() -> Result<()> {
+        let mut db = Connection::open_in_memory()?;
+        db.pragma_update(None, "foreign_keys", "ON")?;
+        migrate(&mut db, 117)?;
+        db.execute_batch(
+            "INSERT INTO projects (id, git_common_dir, root) VALUES ('project', 'fixture.git', 'fixture');
+             INSERT INTO checkouts (id, project_id, git_dir, root) VALUES ('checkout', 'project', 'fixture.git', 'fixture');",
+        )?;
+        let protected = protection::protect(b"prior bytes")?;
+        for (id, at) in [("editor-later", 200), ("source-earlier", 100), ("workflow-input", 300)] {
+            db.execute(
+                "INSERT INTO repository_markdown_revisions (checkout_id, id, path, sha256, body, captured_at)
+                 VALUES ('checkout', ?1, 'note.md', ?2, ?3, ?4)",
+                params![id, "0".repeat(64), protected, at],
+            )?;
+        }
+        migrate(&mut db, 118)?;
+        let entries = db.prepare(
+            "SELECT history.revision_id, history.origin, history.recorded_at, revision.body
+             FROM checkout_document_history history JOIN repository_markdown_revisions revision
+             ON revision.checkout_id = history.checkout_id AND revision.id = history.revision_id
+             ORDER BY history.position",
+        )?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Vec<u8>>(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(entries, vec![
+            ("source-earlier".into(), "captured".into(), 100, protected.clone()),
+            ("editor-later".into(), "captured".into(), 200, protected),
+        ]);
+        assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
+        Ok(())
+    }
 
     #[test]
     fn iteration_migration_preserves_workflow_artifacts_and_completion_inputs() -> Result<()> {

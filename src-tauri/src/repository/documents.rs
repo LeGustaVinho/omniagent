@@ -2,6 +2,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -18,10 +19,12 @@ use super::{
 };
 
 mod format;
+pub(super) mod history;
 mod movement;
 mod replacement;
 
 use format::{EditorFormat, encode};
+pub use history::{CheckoutDocumentHistoryPage, CheckoutDocumentHistoryText};
 pub use movement::RepositoryDocumentMove;
 pub(super) use movement::proposed_move_paths;
 pub(super) use replacement::lock_directories;
@@ -185,6 +188,7 @@ impl Store {
             head,
             raw_markdown,
             file.identity,
+            None,
         )
         .await?;
         Ok(RepositoryDocumentOpen::Document { document })
@@ -277,6 +281,7 @@ impl Store {
                 }
             })
             .await?;
+        let before_save = expected.revision.clone();
         let write = move || {
             let head = base_commit(&root)?;
             let edited = encode(&expected.markdown, &markdown);
@@ -297,6 +302,22 @@ impl Store {
         // Settle and record the revision even if the caller closes the editor.
         let store = self.clone();
         tokio::spawn(async move {
+            let lock = {
+                let mut locks = store
+                    .document_write_locks
+                    .lock()
+                    .expect("editor write locks");
+                locks.retain(|_, lock| lock.strong_count() > 0);
+                let existing = locks
+                    .entry((checkout.clone(), relative.clone()))
+                    .or_default();
+                existing.upgrade().unwrap_or_else(|| {
+                    let lock = Arc::default();
+                    *existing = Arc::downgrade(&lock);
+                    lock
+                })
+            };
+            let _guard = lock.lock().await;
             let (head, destination, result) = if let Some((project, owner)) = managed {
                 with_managed_worktree_writer(&store, project, checkout.clone(), owner, move |_| {
                     write()
@@ -324,6 +345,7 @@ impl Store {
                     head,
                     String::from_utf8(file.bytes)?,
                     file.identity,
+                    Some(before_save),
                 )
                 .await
             }
@@ -365,6 +387,7 @@ async fn remember_document(
     head: Option<String>,
     raw_markdown: String,
     file_identity: String,
+    before_save: Option<RepositoryMarkdownRevision>,
 ) -> Result<RepositoryDocument> {
     let format = EditorFormat::from_raw(&raw_markdown);
     let revision = store
@@ -375,6 +398,7 @@ async fn remember_document(
             hash(raw_markdown.as_bytes()),
             head,
             raw_markdown,
+            before_save,
         )
         .await?;
     Ok(RepositoryDocument {

@@ -22,6 +22,10 @@ vi.mock("@/ide-code-editor", () => ({
       </button>}
     </>,
 }));
+vi.mock("@/git-diff-view", () => ({
+  MonacoComparison: ({ file }: { file: { original: string; modified: string } }) =>
+    <div aria-label="Compared local versions"><pre>{file.original}</pre><pre>{file.modified}</pre></div>,
+}));
 const terminalProps = vi.hoisted(() => vi.fn());
 vi.mock("@/ide-terminal", () => ({
   ExampleTerminal: () => null,
@@ -86,6 +90,7 @@ function fixture(extraSources: Record<string, string> = {}) {
       expectedRevision?: string; expectedDraftRevision?: string | null; markdown?: string; channel?: { onmessage: Notice };
       relativeDirectory?: string; name?: string; directory?: boolean;
       contents?: string;
+      position?: number;
       operation?: "copy" | "move" | "recycle"; edits?: ItemEdit[];
     };
     const id = args.checkoutId;
@@ -94,6 +99,12 @@ function fixture(extraSources: Record<string, string> = {}) {
       case "save_workbench_layout": layouts.set(id, args.layout!); return;
       case "list_repository_source_files": return [disk.get(id)?.document.revision.relativePath, "docs/Guide.md", ...Object.keys(extraSources)].filter(Boolean);
       case "list_checkout_folders": return folders.get(id) ?? [];
+      case "checkout_document_history": return { entries: [
+        { position: 2, revisionId: "opened-m1", recordedAt: 250, origin: "saved" },
+        { position: 1, revisionId: "historical-m0", recordedAt: 200, origin: "before_save" },
+      ], nextBefore: null };
+      case "checkout_document_history_text": return { text: args.position === 1 ? "fn historical() {}" : disk.get(id)?.document.markdown,
+        lineEndings: "none", utf8Bom: false };
       case "create_checkout_item": {
         const path = [args.relativeDirectory, args.name].filter(Boolean).join("/");
         if (!args.directory) {
@@ -176,6 +187,44 @@ it("uses the clicked row for the Explorer, even with another source file active"
   });
   expect(views()).toHaveLength(1);
   expect(screen.getByRole("button", { name: "review.rs" }).getAttribute("aria-current")).toBe("page");
+});
+
+it("compares local history in the clicked checkout and loads a revision as a protected unsaved edit", async () => {
+  const service = fixture();
+  render(<IdeWorkspace {...propsFor(alternate)} />);
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  const row = screen.getByRole("button", { name: "review.rs" });
+  fireEvent.click(row);
+  const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
+  fireEvent.change(editor, { target: { value: "fn existing_draft() {}" } });
+  await waitFor(() => expect(service.drafts.get(alternate)?.markdown).toBe("fn existing_draft() {}"));
+
+  fireEvent.contextMenu(row);
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Show local history" }));
+  const history = await screen.findByRole("dialog", { name: "Local file history" });
+  fireEvent.click(await within(history).findByRole("button", { name: /Before saving/ }));
+  const comparison = await within(history).findByLabelText("Compared local versions");
+  expect(comparison.textContent).toBe("fn historical() {}fn existing_draft() {}");
+  expect(invoke).toHaveBeenCalledWith("checkout_document_history_text", { checkoutId: alternate, path: file, position: 1 });
+
+  fireEvent.click(within(history).getByRole("button", { name: "Load text into editor" }));
+  expect((await within(history).findByRole("alert")).textContent).toContain("Save or discard the current file draft");
+  expect(service.drafts.get(alternate)?.markdown).toBe("fn existing_draft() {}");
+  fireEvent.click(within(history).getByRole("button", { name: "Close dialog" }));
+  fireEvent.change(editor, { target: { value: "fn other_worktree() {}" } });
+  await waitFor(() => expect(service.drafts.has(alternate)).toBe(false));
+
+  fireEvent.contextMenu(row);
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Show local history" }));
+  const reopened = await screen.findByRole("dialog", { name: "Local file history" });
+  fireEvent.click(await within(reopened).findByRole("button", { name: /Before saving/ }));
+  const load = within(reopened).getByRole("button", { name: "Load text into editor" });
+  await waitFor(() => expect((load as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(load);
+  await waitFor(() => expect(service.drafts.get(alternate)?.markdown).toBe("fn historical() {}"));
+  expect(editor.value).toBe("fn historical() {}");
+  expect(service.disk.get(alternate)?.document.markdown).toBe("fn other_worktree() {}");
+  expect(service.disk.get(main)?.document.markdown).toBe("fn original() {}");
 });
 
 it("renames the underlying file and keeps split editor tabs on the renamed path", async () => {

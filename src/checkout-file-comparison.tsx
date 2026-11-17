@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { lazy, Suspense, useRef, useState } from "react";
+import { CheckoutDocumentHistory } from "@/checkout-document-history";
 import type { MenuAction } from "@/components/ui/context-actions";
 import type { GitTextComparison } from "@/git-diff-view";
 import { compareGitFileVersions, gitFileText, type GitFileVersion } from "@/git-file-versions";
@@ -10,27 +11,32 @@ type TextState = { content: string; saved: string; external?: string };
 type Comparison = { labels: [string, string]; file?: GitTextComparison; error?: string };
 const MonacoComparison = lazy(() => import("@/git-diff-view").then(({ MonacoComparison }) => ({ default: MonacoComparison })));
 
-export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, copy, report, openHistory }: {
+export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, copy, report, openHistory, restoreLocalText, canRestore }: {
   checkoutId: string;
   simulated: boolean;
   bufferAt: (path: string) => TextState | undefined;
   copy: (text: string, message: string) => void;
   report: (message: string) => void;
   openHistory?: (path: string) => void;
+  restoreLocalText?: (path: string, text: string) => Promise<void>;
+  canRestore?: (path: string) => boolean;
 }) {
   const [selected, setSelected] = useState<string>();
   const [comparison, setComparison] = useState<Comparison>();
+  const [history, showHistory] = useState<{ path: string }>();
   const [layout, setLayout] = useState<"split" | "unified">("split");
   const request = useRef(0);
 
-  async function read(path: string) {
-    const local = bufferAt(path);
-    if (local) return local.content;
+  async function readDisk(path: string) {
     if (simulated) throw new Error(`No text is available for ${path}.`);
     const note = /\.(?:md|markdown)$/i.test(path);
     const open = await invoke<{ status: string; document?: { markdown: string } }>(note ? "open_repository_document" : "open_repository_source_file", { checkoutId, path });
     if (open.status !== "document" || !open.document) throw new Error(`Could not read ${path} as text.`);
     return open.document.markdown;
+  }
+
+  async function read(path: string) {
+    return bufferAt(path)?.content ?? readDisk(path);
   }
 
   async function compare(labels: [string, string], input: [Promise<string>, Promise<string>], path: string) {
@@ -82,6 +88,7 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, cop
         ] : []),
       ] }] : []),
       ...(!simulated && openHistory ? [{ label: "Show file history", run: () => openHistory(path) }] : []),
+      ...(!simulated ? [{ label: "Show local history", run: () => showHistory({ path }) }] : []),
     ];
   }
 
@@ -107,5 +114,8 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, cop
     </div>
   </FileDialog>;
 
-  return { actions, selectionActions, dialog };
+  return { actions, selectionActions, dialog: history ? <CheckoutDocumentHistory key={history.path} checkoutId={checkoutId} path={history.path}
+    editorText={bufferAt(history.path)?.content} readDisk={() => readDisk(history.path)}
+    restore={restoreLocalText && canRestore?.(history.path) !== false ? (text) => restoreLocalText(history.path, text) : undefined}
+    onClose={() => showHistory(undefined)} /> : dialog };
 }

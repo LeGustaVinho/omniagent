@@ -468,6 +468,8 @@ fn main() {
             ide_source_runtime::open_repository_source_file,
             ide_source_runtime::save_repository_source_file,
             ide_source_runtime::read_repository_source_revision,
+            ide_source_runtime::checkout_document_history,
+            ide_source_runtime::checkout_document_history_text,
             ide_source_runtime::list_repository_source_drafts,
             ide_source_runtime::read_repository_source_draft,
             ide_source_runtime::save_repository_source_draft,

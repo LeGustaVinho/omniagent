@@ -146,6 +146,7 @@ impl Store {
                 head,
                 String::from_utf8(file.bytes)?,
                 file.identity,
+                None,
             )
             .await
             {

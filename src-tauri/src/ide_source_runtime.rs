@@ -7,7 +7,10 @@ use omniagent::{
     },
     repository::{
         RepositoryMarkdown,
-        documents::{RepositoryDocumentOpen, RepositoryDocumentSave},
+        documents::{
+            CheckoutDocumentHistoryPage, CheckoutDocumentHistoryText, RepositoryDocumentOpen,
+            RepositoryDocumentSave,
+        },
     },
     store::Store,
 };
@@ -65,6 +68,32 @@ pub async fn read_repository_source_revision(
 ) -> Result<Option<RepositoryMarkdown>, String> {
     store
         .repository_source_revision(checkout_id, revision_id)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn checkout_document_history(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: PathBuf,
+    before: Option<i64>,
+) -> Result<CheckoutDocumentHistoryPage, String> {
+    store
+        .checkout_document_history(checkout_id, path, before)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn checkout_document_history_text(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: PathBuf,
+    position: i64,
+) -> Result<CheckoutDocumentHistoryText, String> {
+    store
+        .checkout_document_history_text(checkout_id, path, position)
         .await
         .map_err(report)
 }

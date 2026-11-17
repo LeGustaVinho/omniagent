@@ -399,7 +399,17 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem });
   const revealNote = (path: string) => { setSidebar(true); setDisplay("tree"); setReveal({ path }); };
   const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated, bufferAt: (path) => notes[path],
-    copy: menu.copy, report: setProblem, openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)) });
+    copy: menu.copy, report: setProblem, openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)),
+    restoreLocalText: async (path, content) => {
+      const canonical = await loadNote(path);
+      if (canonical !== path) throw new Error("This note now resolves to a different path.");
+      await repository.loadLocalRevision(path, content);
+      watchNote(path);
+      setGraph(false);
+      setMode("source");
+      dock.open(path);
+      setStatus(`Loaded a local revision of ${path} into the editor`);
+    } });
   async function openSelected(paths: readonly string[]) {
     const request = ++lastOpen.current;
     const loaded = simulated ? paths : await Promise.all(paths.map(loadNote));

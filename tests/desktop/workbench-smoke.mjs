@@ -1906,14 +1906,16 @@ test("compares committed branches and registers a manual worktree in the real Gi
   }
 });
 
-test("opens file history with the keyboard and recycles only the clicked checkout file", { timeout: 90_000 }, async (t) => {
+test("opens Git and local file history and recycles only the clicked checkout file", { timeout: 90_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Explorer context checkout");
   const retained = "retained.txt";
+  const original = "Original retained text\n";
+  const updated = "Original retained textx\n";
   const removed = `OmniAgent-context-smoke-${randomUUID()}.txt`;
   git(scratch, "init", "-q", "-b", "main", repo);
   git(repo, "config", "core.autocrlf", "false");
-  await writeFile(join(repo, retained), "Original retained text\n");
+  await writeFile(join(repo, retained), original);
   git(repo, "add", retained);
   git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
     "-c", "commit.gpgsign=false", "commit", "-qm", "Retained file revision");
@@ -1936,6 +1938,30 @@ test("opens file history with the keyboard and recycles only the clicked checkou
     await history.$("button*=Retained file revision").waitForDisplayed();
 
     await click(browser, '.work-rail button[aria-label="IDE"]');
+    await click(ide, `button=${retained}`);
+    const editor = ide.$(".code-editor .view-lines");
+    await editor.waitForDisplayed();
+    await editor.$(".view-line:first-child").click();
+    await browser.action("key").down(Key.End).up(Key.End).perform();
+    await browser.keys("x");
+    const source = { checkoutId: checkout.checkoutId, path: retained };
+    await browser.waitUntil(async () => (await invoke(browser, "read_repository_source_draft", source))?.markdown === updated);
+    await click(ide, 'button[aria-label="Save file"]');
+    await browser.waitUntil(async () => (await readFile(join(repo, retained), "utf8")) === updated);
+
+    await retainedRow.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Show local history"]');
+    const localHistory = browser.$('[role="dialog"].file-comparison-dialog');
+    await click(localHistory, "button*=Before saving");
+    await localHistory.$('select[aria-label="Revision comparison"]').selectByAttribute("value", "text");
+    const preview = localHistory.$('[aria-label="Local revision preview"] pre');
+    await preview.waitForDisplayed();
+    assert.equal(await preview.getText(), original.trimEnd());
+    await click(localHistory, "button=Load text into editor");
+    await localHistory.waitForExist({ reverse: true });
+    assert.equal((await invoke(browser, "read_repository_source_draft", source))?.markdown, original);
+    assert.equal(await readFile(join(repo, retained), "utf8"), updated);
+
     const root = ide.$("button=Checkout root");
     await root.waitForDisplayed();
     await root.click({ button: "right" });
@@ -1962,7 +1988,7 @@ test("opens file history with the keyboard and recycles only the clicked checkou
     await confirmation.waitForExist({ reverse: true, timeout: 15_000 });
     await disposableRow.waitForExist({ reverse: true });
     await assert.rejects(access(join(repo, removed)), { code: "ENOENT" });
-    assert.equal(await readFile(join(repo, retained), "utf8"), "Original retained text\n");
+    assert.equal(await readFile(join(repo, retained), "utf8"), updated);
   } finally {
     await browser?.deleteSession().catch(() => undefined);
     driver.kill();

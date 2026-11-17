@@ -264,6 +264,22 @@ function useRepositoryFileBuffers<CatalogEntry>(
     void serialize(path, () => persist(path)).catch(report);
   }, [change, persist, report, serialize]);
 
+  const loadLocalRevision = useCallback((path: string, content: string) => serialize(path, async () => {
+    const previous = current.current.notes[path];
+    if (!previous || previous.sourceProblem) throw new Error(`Open an available ${noun} before loading a revision.`);
+    if (previous.content !== previous.saved || previous.incoming || previous.draftRevision) {
+      throw new Error(`Save or discard the current ${noun} draft before loading a revision.`);
+    }
+    if (previous.content === content) return;
+    const applied = { ...previous, content };
+    change(path, () => applied);
+    try { await persist(path); }
+    catch (failure) {
+      change(path, (note) => note === applied ? previous : note);
+      throw failure;
+    }
+  }), [change, noun, persist, serialize]);
+
   const save = useCallback((path: string) => serialize(path, async () => {
     const note = current.current.notes[path];
     if (!note) return false;
@@ -327,5 +343,5 @@ function useRepositoryFileBuffers<CatalogEntry>(
     delete failures[path];
     publish({ notes, failures });
   }, [publish, stopWatching]);
-  return { ...state, catalog, refreshCatalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget };
+  return { ...state, catalog, refreshCatalog, draftPaths, error, clearError: () => setError(""), load, save, update, resolve, watch, stopWatching, getNote, forget, loadLocalRevision };
 }
