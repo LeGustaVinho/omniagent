@@ -2252,6 +2252,74 @@ test("opens Git and local file history and recycles only the clicked checkout fi
   }
 });
 
+test("converts IDE encoding and line endings only after reviewing the saved bytes", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Source format checkout");
+  const file = "encoding.txt";
+  const source = join(repo, file);
+  const original = Buffer.from("Café\r\nSecond\n");
+  git(scratch, "init", "-q", "-b", "main", repo);
+  git(repo, "config", "core.autocrlf", "false");
+  await writeFile(source, original);
+  git(repo, "add", ".");
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Seed mixed line endings");
+  const utf16 = (text) => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]);
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    await click(browser, '.work-rail button[aria-label="IDE"]');
+    const ide = browser.$('[aria-label="IDE workspace"]');
+    await click(ide, `button=${file}`);
+    const review = async (saved, action, option) => {
+      await ide.$(`[aria-label="Saved file format ${saved}"]`).click({ button: "right" });
+      const menu = browser.$(`//*[@role="menuitem"][normalize-space(.)="${action}"]`);
+      await menu.waitForDisplayed();
+      await menu.moveTo();
+      await click(browser, `//*[@role="menuitem"][normalize-space(.)="${option}"]`);
+      const dialog = browser.$('[role="dialog"].file-dialog');
+      await dialog.$('[aria-label="Converted initial bytes"]').waitForDisplayed();
+      return dialog;
+    };
+
+    const preview = await review("UTF-8, Mixed line endings", "Change encoding", "UTF-16 LE with BOM");
+    assert.match(await preview.$('[aria-label="Converted initial bytes"]').getText(), /^FF FE/);
+    await click(preview, "button=Cancel");
+    await preview.waitForExist({ reverse: true });
+    assert.deepEqual(await readFile(source), original);
+
+    const encoding = await review("UTF-8, Mixed line endings", "Change encoding", "UTF-16 LE with BOM");
+    await click(encoding, "button=Convert and save");
+    await encoding.waitForExist({ reverse: true });
+    assert.deepEqual(await readFile(source), utf16("Café\r\nSecond\n"));
+
+    const endings = await review("UTF-16 LE with BOM, Mixed line endings", "Convert line endings", "CRLF");
+    await click(endings, "button=Convert and save");
+    await endings.waitForExist({ reverse: true });
+    assert.deepEqual(await readFile(source), utf16("Café\r\nSecond\r\n"));
+
+    const line = ide.$(".code-editor .view-line:first-child");
+    await line.waitForDisplayed();
+    await line.click();
+    await browser.action("key").down(Key.End).up(Key.End).perform();
+    await browser.keys("!");
+    await click(ide, 'button[aria-label="Save file"]');
+    await browser.waitUntil(async () => (await readFile(source)).equals(utf16("Café!\r\nSecond\r\n")));
+    const history = await invoke(browser, "checkout_document_history", { checkoutId: checkout.checkoutId, path: file, before: null });
+    const newest = await invoke(browser, "checkout_document_history_text", { checkoutId: checkout.checkoutId, path: file, position: history.entries[0].position });
+    assert.equal(newest.encoding, "utf16_le");
+    assert.equal(newest.lineEndings, "crlf");
+    assert.equal(newest.text, "Café!\nSecond\n");
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
 test("detaches the selected dirty editor into a native window and returns it with its draft", { timeout: 90_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Detached editor checkout");
@@ -2438,7 +2506,7 @@ test("opens OmniAgent file links in a running desktop and on cold launch", { tim
     const target = await invoke(browser, "register_project", { directory: linked });
     await selectCheckout(browser, primary);
     const query = new URLSearchParams({ checkout: target.checkoutId, path: file, line: "2", column: "3" });
-    const link = `omniagent://open-file?${query}`;
+    const link = `omniagent://open-file/?${query}`;
 
     await showTestApplication(browser, application, [link]);
     const ide = browser.$('[aria-label="IDE workspace"]');

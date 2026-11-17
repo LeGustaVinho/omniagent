@@ -1,19 +1,23 @@
 import { ContextActions } from "@/components/ui/context-actions";
 import type { EditorSettings } from "@/ide-code-editor";
-import type { NoteBuffer } from "@/repository-note-buffers";
+import { lineEndingLabels, savedEncoding, sourceEncodingLabels, type FileFormat, type SourceEncoding, type SourceFormatChange } from "@/source-file-format";
 
-const endingsLabels = { none: "No line breaks", lf: "LF", crlf: "CRLF", cr: "CR", mixed: "Mixed line endings" };
 const indentationSizes = [2, 4, 8];
+const encodings = Object.keys(sourceEncodingLabels) as SourceEncoding[];
+const selectableLineEndings = ["lf", "crlf", "cr"] as const;
 
-export function EditorStatus({ path, saved, settings, format, copy }: {
+export function EditorStatus({ path, saved, settings, format, copy, onChangeFormat, canConvert = saved }: {
   path: string;
   saved: boolean;
   settings?: EditorSettings;
-  format?: NoteBuffer["format"];
+  format?: FileFormat;
   copy: (text: string, status: string) => void;
+  onChangeFormat?: (change: SourceFormatChange) => void;
+  canConvert?: boolean;
 }) {
-  const encoding = format?.utf8Bom ? "UTF-8 with BOM" : "UTF-8";
-  const lineEndings = format && endingsLabels[format.lineEndings];
+  const encodingId = savedEncoding(format);
+  const encoding = sourceEncodingLabels[encodingId];
+  const lineEndings = format && lineEndingLabels[format.lineEndings];
   const language = settings?.languages.find(({ id }) => settings.language === id)?.label ?? settings?.language;
   return <div className="ide-status-details">
     <span>{saved ? "Saved" : "Unsaved changes"}</span>
@@ -33,7 +37,14 @@ export function EditorStatus({ path, saved, settings, format, copy }: {
         <span className="ide-status-setting" tabIndex={0}>{settings.insertSpaces ? `Spaces: ${settings.tabSize}` : `Tab size: ${settings.tabSize}`}</span>
       </ContextActions>
     </>}
-    <ContextActions label="saved file format" groups={[[
+    <ContextActions label="saved file format" groups={[onChangeFormat && format ? [
+      { label: "Change encoding", disabled: !canConvert, items: encodings.map((value) => ({
+        label: sourceEncodingLabels[value], disabled: value === encodingId, run: () => onChangeFormat({ encoding: value }),
+      })) },
+      { label: "Convert line endings", disabled: !canConvert || format.lineEndings === "none", items: selectableLineEndings.map((value) => ({
+        label: lineEndingLabels[value], disabled: value === format.lineEndings, run: () => onChangeFormat({ lineEndings: value }),
+      })) },
+    ] : [], [
       { label: "Copy encoding", run: () => copy(encoding, "Copied encoding") },
       ...(lineEndings ? [{ label: "Copy line ending format", run: () => copy(lineEndings, "Copied line ending format") }] : []),
       { label: "Copy saved file format", run: () => copy([path, encoding, lineEndings].filter(Boolean).join(" · "), "Copied saved file format") },

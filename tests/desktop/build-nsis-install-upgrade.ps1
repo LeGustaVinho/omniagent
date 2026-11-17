@@ -44,8 +44,9 @@ try {
             productName = $product
             identifier = $identifier
             version = $version
+            plugins = @{ 'deep-link' = @{ desktop = @{ schemes = @("omniagent-nsis-$tag") } } }
             bundle = @{ createUpdaterArtifacts = $false }
-        } | ConvertTo-Json | Set-Content -LiteralPath $config -Encoding utf8NoBOM
+        } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $config -Encoding utf8NoBOM
         node node_modules/@tauri-apps/cli/tauri.js build --target x86_64-pc-windows-msvc --bundles nsis --ci --no-sign --config $config -- --locked
         if ($LASTEXITCODE) { throw "NSIS build $version failed" }
         $bundle = Join-Path $snapshot "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/${product}_${version}_x64-setup.exe"

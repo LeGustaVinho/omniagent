@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render as renderElement, screen, waitFor, with
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import IdeWorkspace from "@/ide-workspace";
+import type { FileFormat } from "@/source-file-format";
 import type { ItemEdit } from "@/checkout-item-operations";
 import type { EditorExcerpt } from "@/editor-context";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -57,12 +58,13 @@ const propsFor = (checkoutId: string): WorkspaceProps => ({
   checkout: { checkoutId, projectId: "project", repositoryRoot: "C:\\repo", checkoutRoot: `C:\\${checkoutId}` },
   simulation: null, openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn(), startSimulation: vi.fn(),
 });
-const documentAt = (checkoutId: string, rev: string, text: string, path = file) => ({
+const documentAt = (checkoutId: string, rev: string, text: string, path = file, format?: FileFormat) => ({
   status: "document",
   document: {
     revision: { id: rev, checkoutId, relativePath: path, sha256: rev, baseCommit: null },
     markdown: text,
     fileIdentity: rev,
+    ...format,
   },
 });
 
@@ -161,6 +163,55 @@ function fixture(extraSources: Record<string, string> = {}) {
     },
   };
 }
+
+const views = () => screen.getAllByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
+const closeButtons = () => screen.getAllByRole("button", { name: "Close review.rs" });
+
+function render(element: ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return renderElement(element, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
+}
+
+it("previews an exact checkout file format and saves only after confirming the reviewed bytes", async () => {
+  const { disk } = fixture();
+  const source = "fn original() {}\n";
+  disk.set(alternate, documentAt(alternate, "a1", source, file, { utf8Bom: false, encoding: "utf8", lineEndings: "lf" }));
+  const native = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation((command, args) => {
+    if (command === "preview_repository_source_format") return Promise.resolve({
+      originalEncoding: "utf8", originalLineEndings: "lf", encoding: "utf16_le", lineEndings: "lf",
+      originalBytes: 17, convertedBytes: 36, originalPrefix: "66 6E 20", convertedPrefix: "FF FE 66 00 6E 00 20 00", sha256: "reviewed",
+    });
+    if (command === "save_repository_source_format") {
+      const converted = documentAt(alternate, "a2", source, file, { utf8Bom: false, encoding: "utf16_le", lineEndings: "lf" });
+      disk.set(alternate, converted);
+      return Promise.resolve({ ...converted, status: "saved" });
+    }
+    return native(command, args);
+  });
+  render(<IdeWorkspace {...propsFor(alternate)} target={file} />);
+  await screen.findByRole("textbox", { name: editorLabel });
+  const review = async () => {
+    fireEvent.contextMenu(await screen.findByLabelText("Saved file format UTF-8, LF"));
+    fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Change encoding" }), { key: "ArrowRight" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "UTF-16 LE with BOM" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review file format conversion" });
+    await within(dialog).findByText("UTF-16 LE with BOM · LF · 36 bytes");
+    expect(within(dialog).getByLabelText("Converted initial bytes").textContent).toBe("FF FE 66 00 6E 00 20 00");
+    return dialog;
+  };
+  const args = { checkoutId: alternate, path: file, expectedRevision: "a1", change: { encoding: "utf16_le" } };
+  const first = await review();
+  expect(invoke).toHaveBeenCalledWith("preview_repository_source_format", args);
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "save_repository_source_format")).toHaveLength(0);
+  fireEvent.click(within(first).getByRole("button", { name: "Cancel" }));
+  const second = await review();
+  fireEvent.click(within(second).getByRole("button", { name: "Convert and save" }));
+  await screen.findByLabelText("Saved file format UTF-16 LE with BOM, LF");
+  expect(invoke).toHaveBeenCalledWith("save_repository_source_format", { ...args, previewSha256: "reviewed" });
+  expect(disk.get(main)?.document.revision.id).toBe("m1");
+  expect((screen.getByRole("textbox", { name: editorLabel }) as HTMLTextAreaElement).value).toBe(source);
+});
 
 const views = () => screen.getAllByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
 const closeButtons = () => screen.getAllByRole("button", { name: "Close review.rs" });

@@ -7,10 +7,10 @@ use serde::Serialize;
 use crate::store::Store;
 
 use super::{
-    EditorFormat, LineEndings, RepositoryMarkdownRevision, checkout_root, relative_name,
-    verify_checkout,
+    DocumentKind, LineEndings, RawDocument, RepositoryMarkdownRevision, TextEncoding,
+    checkout_root, relative_name, verify_checkout,
 };
-use crate::repository::markdown::load_markdown;
+use crate::repository::markdown::load_document_payload;
 
 const PAGE_SIZE: usize = 30;
 
@@ -35,6 +35,7 @@ pub struct CheckoutDocumentHistoryPage {
 pub struct CheckoutDocumentHistoryText {
     pub text: String,
     pub utf8_bom: bool,
+    pub encoding: TextEncoding,
     pub line_endings: LineEndings,
 }
 
@@ -75,9 +76,10 @@ impl Store {
                 "SELECT revision_id FROM checkout_document_history WHERE checkout_id = ?1 AND path = ?2 AND position = ?3",
                 params![checkout, path, position], |row| row.get(0),
             ).optional()?.context("the local revision does not belong to this file and checkout")?;
-            let document = load_markdown(db, &checkout, &revision)?.context("the local revision is unavailable")?;
-            let format = EditorFormat::from_raw(&document.markdown);
-            Ok(CheckoutDocumentHistoryText { text: format.markdown, utf8_bom: format.bom, line_endings: format.endings })
+            let kind = if DocumentKind::Source.contains_revision(&revision) { DocumentKind::Source } else { DocumentKind::Markdown };
+            let (_, body) = load_document_payload(db, &checkout, &revision)?.context("the local revision is unavailable")?;
+            let format = RawDocument::from_bytes(kind, &body)?.format();
+            Ok(CheckoutDocumentHistoryText { text: format.markdown, utf8_bom: format.encoding == TextEncoding::Utf8Bom, encoding: format.encoding, line_endings: format.endings })
         }).await
     }
 }

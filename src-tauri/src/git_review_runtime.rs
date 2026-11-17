@@ -2,9 +2,9 @@ use omniagent::{
     diagnostics,
     repository::git_review::{
         GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions, GitCheckoutReview,
-        GitConflictReview, GitDiffSource, GitFileHistory, GitFileVersion, GitFileVersionComparison,
-        GitPermalinkLines, GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface,
-        GitReviewCommit, GitReviewDiff, GitReviewRevision, SavedGitAttempt,
+        GitConflictProposal, GitConflictReview, GitDiffSource, GitFileHistory, GitFileVersion,
+        GitFileVersionComparison, GitPermalinkLines, GitReviewComment, GitReviewCommentRequest,
+        GitReviewCommentSurface, GitReviewCommit, GitReviewDiff, GitReviewRevision, SavedGitAttempt,
     },
     repository::{ManualGitWorktree, ProjectCheckout, create_git_worktree as create_worktree},
     store::Store,
@@ -13,6 +13,33 @@ use tauri::{AppHandle, Manager, State};
 
 fn review_error(error: anyhow::Error) -> String {
     diagnostics::preview(&format!("{error:#}"))
+}
+
+#[tauri::command]
+pub async fn git_discard_preview(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    hunk_id: Option<String>,
+) -> Result<omniagent::repository::git_review::GitDiscardPreview, String> {
+    store
+        .git_discard_preview(checkout_id, path, hunk_id)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_discard_changes(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    hunk_id: Option<String>,
+    snapshot: String,
+) -> Result<(), String> {
+    store
+        .git_discard_changes(checkout_id, path, hunk_id, snapshot)
+        .await
+        .map_err(review_error)
 }
 
 #[tauri::command]
@@ -115,6 +142,20 @@ pub async fn git_mark_conflict_resolved(
 ) -> Result<(), String> {
     store
         .git_mark_conflict_resolved(checkout_id, path, expected)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_apply_conflict_resolution(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    expected: String,
+    proposal: GitConflictProposal,
+) -> Result<(), String> {
+    store
+        .git_apply_conflict_resolution(checkout_id, path, expected, proposal)
         .await
         .map_err(review_error)
 }

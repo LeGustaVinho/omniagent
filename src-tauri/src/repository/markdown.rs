@@ -17,7 +17,11 @@ use crate::{
     store::Store,
 };
 
-use super::{base_commit, checkout_root, documents::DocumentKind, verify_checkout};
+use super::{
+    base_commit, checkout_root,
+    documents::{DocumentKind, RawDocument},
+    verify_checkout,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,7 +113,7 @@ impl Store {
         path: String,
         sha256: String,
         base_commit: Option<String>,
-        markdown: String,
+        bytes: Vec<u8>,
         before_save: Option<RepositoryMarkdownRevision>,
     ) -> Result<RepositoryMarkdownRevision> {
         self.execute(move |db| {
@@ -127,7 +131,7 @@ impl Store {
                 params![revision.checkout_id, revision.id], |row| row.get(0),
             )?;
             if !existing {
-                insert_revision(&transaction, &revision, &protection::protect(markdown.as_bytes())?)?;
+                insert_revision(&transaction, &revision, &protection::protect(&bytes)?)?;
             }
             if let Some(before) = before_save.as_ref().filter(|before| before.sha256 != revision.sha256) {
                 super::documents::history::append_save(&transaction, before, &revision)?;
@@ -242,16 +246,30 @@ pub(crate) fn load_markdown(
     checkout: &str,
     revision: &str,
 ) -> Result<Option<RepositoryMarkdown>> {
+    load_document_payload(db, checkout, revision)?
+        .map(|(revision, bytes)| {
+            let markdown = if DocumentKind::Source.contains_revision(&revision.id) {
+                RawDocument::from_bytes(DocumentKind::Source, &bytes)?.raw_text()
+            } else {
+                String::from_utf8(bytes)?
+            };
+            Ok(RepositoryMarkdown { revision, markdown })
+        })
+        .transpose()
+}
+
+pub(super) fn load_document_payload(
+    db: &Connection,
+    checkout: &str,
+    revision: &str,
+) -> Result<Option<(RepositoryMarkdownRevision, Vec<u8>)>> {
     let row = db.query_row(
         "SELECT id, checkout_id, path, sha256, base_commit, body FROM repository_markdown_revisions
          WHERE checkout_id = ?1 AND id = ?2",
         params![checkout, revision], |row| Ok((decode_revision(row)?, row.get::<_, Vec<u8>>(5)?)),
     ).optional()?;
-    row.map(|(revision, body)| {
-        let markdown = String::from_utf8(protection::unprotect(&body)?)?;
-        Ok(RepositoryMarkdown { revision, markdown })
-    })
-    .transpose()
+    row.map(|(revision, body)| Ok((revision, protection::unprotect(&body)?)))
+        .transpose()
 }
 
 pub(crate) fn workflow_markdown_revision(

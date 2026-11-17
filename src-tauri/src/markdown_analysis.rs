@@ -398,6 +398,12 @@ static OBSIDIAN_TOKENS: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid Obsidian token pattern")
 });
 
+pub(crate) fn valid_tag_name(name: &str) -> bool {
+    let token = format!("#{name}");
+    OBSIDIAN_TOKENS.find(&token).is_some_and(|found| found.as_str() == token)
+        && !name.chars().all(|ch| ch.is_numeric() || ch == '/')
+}
+
 struct SyntaxSpan<'a, 's> {
     map: &'a SourceMap<'s>,
     range: Range<usize>,

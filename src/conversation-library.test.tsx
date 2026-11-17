@@ -108,6 +108,9 @@ function repository({ leakForeignResults = false, archiveMessages = [] as Messag
         });
       case "conversation_library_sections":
         return sections.filter(({ projectId }) => projectId === input.projectId);
+      case "export_conversation_markdown":
+        if (!conversation || conversation.checkoutId !== input.checkoutId) throw new Error("Wrong export scope");
+        return true;
       case "organize_conversation": {
         if (!conversation || conversation.checkoutId !== input.checkoutId) throw new Error("Wrong organization scope");
         const change = input.change!;
@@ -403,6 +406,24 @@ it("organizes conversations through the shared menu and reloads persisted sectio
   expect(await library().findByRole("region", { name: "Release notes" })).toBeTruthy();
   await reopened.user.click(library().getByRole("button", { name: original }));
   await waitFor(() => expect(library().getByRole("button", { name: original }).getAttribute("aria-description")).toBeNull());
+});
+
+it("exports the clicked conversation using its actual checkout, including from Archived", async () => {
+  repository();
+  const { user, onOpenOtherCheckout } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  async function choose(title: string, action: string) {
+    fireEvent.contextMenu(await library().findByRole("button", { name: title }));
+    await user.click(await screen.findByRole("menuitem", { name: action }));
+  }
+  await choose("Linked worktree review", "Export conversation as Markdown…");
+  expect(invoke).toHaveBeenCalledWith("export_conversation_markdown", { checkoutId: linked.checkoutId, conversationId: linkedId });
+  expect(await library().findByText("Conversation exported as Markdown.")).toBeTruthy();
+  await choose("Linked worktree review", "Archive");
+  await user.click(library().getByRole("button", { name: "Archived" }));
+  await choose("Linked worktree review", "Export conversation as Markdown…");
+  await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "export_conversation_markdown")).toHaveLength(2));
+  expect(onOpenOtherCheckout).not.toHaveBeenCalled();
 });
 
 it("opens a same-project linked worktree and only shows another project's conversations after switching repositories", async () => {

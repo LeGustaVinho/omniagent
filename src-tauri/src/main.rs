@@ -6,6 +6,7 @@ mod composer_customization_ipc;
 mod composer_suggestion_ipc;
 mod conversation_attachment_ipc;
 mod conversation_compaction_ipc;
+mod conversation_export_ipc;
 mod conversation_continuation_runtime;
 mod conversation_fork_runtime;
 mod conversation_goal_runtime;
@@ -291,6 +292,7 @@ fn main() {
             app.manage(ipc::EventSubscriptions::default());
             app.manage(note_runtime::NoteWatches::default());
             app.manage(note_runtime::NoteMergePreviews::default());
+            app.manage(note_runtime::NoteTagRenamePreviews::default());
             app.manage(note_index_runtime::NoteIndexWatches::default());
             app.manage(ide_source_runtime::SourceWatches::default());
             app.manage(manual_terminal::ManualTerminals::default());
@@ -488,6 +490,8 @@ fn main() {
             ide_source_runtime::list_repository_source_files,
             ide_source_runtime::open_repository_source_file,
             ide_source_runtime::save_repository_source_file,
+            ide_source_runtime::preview_repository_source_format,
+            ide_source_runtime::save_repository_source_format,
             ide_source_runtime::read_repository_source_revision,
             ide_source_runtime::checkout_document_history,
             ide_source_runtime::checkout_document_history_text,
@@ -511,8 +515,11 @@ fn main() {
             git_review_runtime::git_compare_file_versions,
             git_review_runtime::git_file_permalink,
             git_review_runtime::git_checkout_diff,
+            git_review_runtime::git_discard_preview,
+            git_review_runtime::git_discard_changes,
             git_review_runtime::git_conflict_review,
             git_review_runtime::git_mark_conflict_resolved,
+            git_review_runtime::git_apply_conflict_resolution,
             git_review_runtime::git_branch_comparison,
             git_review_runtime::git_branch_comparison_diff,
             git_review_runtime::git_review_comments,
@@ -549,6 +556,8 @@ fn main() {
             note_runtime::extract_repository_note_selection,
             note_runtime::preview_markdown_merge,
             note_runtime::stage_markdown_merge,
+            note_runtime::preview_markdown_tag_rename,
+            note_runtime::stage_markdown_tag_rename,
             note_runtime::watch_repository_note,
             note_runtime::unwatch_repository_note,
             ipc::active_checkout,
@@ -621,6 +630,7 @@ fn main() {
             ipc::rename_conversation,
             ipc::conversation_messages,
             ipc::conversation_history,
+            conversation_export_ipc::export_conversation_markdown,
             ipc::rewind_conversation_history,
             conversation_runtime::conversation_history_inspection,
             conversation_runtime::conversation_history_revision,

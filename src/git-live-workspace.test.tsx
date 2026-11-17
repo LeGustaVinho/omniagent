@@ -245,6 +245,73 @@ it("reviews conflict stages from the clicked path and stages only the explicitly
   expect(invoke).not.toHaveBeenCalledWith("set_git_path_staged", expect.anything());
 });
 
+it("previews a chosen side and an edited combination before writing a working result without staging", async () => {
+  const path = "src/merge.ts";
+  const local = "export const first = 1;\r\n";
+  const incoming = "export const second = 2;\n";
+  let working: string | undefined;
+  let version = 0;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, root: checkout.checkoutRoot, worktrees, branches, managed: false,
+      revision: originalRevision, changes: [{ path, working: "U", staged: "U" }],
+    };
+    if (command === "git_review_comments") return [];
+    if (command === "git_conflict_review") return {
+      path, revision: originalRevision, snapshot: `confirmed-snapshot-${version}`, proposalBlocked: null,
+      resolutionBlocked: working === undefined ? "Create the working result before staging." : null,
+      base: null,
+      local: { objectId: "local-blob", mode: "100644", file: { status: "text", content: local } },
+      incoming: { objectId: "incoming-blob", mode: "100644", file: { status: "text", content: incoming } },
+      working: working === undefined ? { status: "missing" } : { status: "text", content: working },
+    };
+    if (command === "git_apply_conflict_resolution") {
+      const { proposal } = payload as { proposal: { kind: string; content: string } };
+      working = proposal.kind === "local" ? local : proposal.content;
+      version += 1;
+      return;
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  const user = userEvent.setup();
+  openGit();
+  await user.click(await screen.findByRole("button", { name: "Review conflict" }));
+  const review = within(await screen.findByRole("dialog", { name: "Review Git conflict" }));
+  expect(await review.findByText("File absent in this version.")).toBeTruthy();
+  await user.click(review.getByRole("button", { name: "Local · stage 2" }));
+  await user.click(review.getByRole("button", { name: "Use local version…" }));
+  const create = review.getByRole("button", { name: "Create working result" });
+  expect(create).toHaveProperty("disabled", true);
+  expect(review.getByLabelText("Proposed working result").textContent).toBe(local);
+  await user.click(review.getByRole("checkbox", { name: /I reviewed the proposed contents and want to create/ }));
+  expect(invoke).not.toHaveBeenCalledWith("git_apply_conflict_resolution", expect.anything());
+  await user.click(create);
+  expect(await review.findByText("Working result saved. Review it to stage the resolution.")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_apply_conflict_resolution", {
+    checkoutId: checkout.checkoutId, path, expected: "confirmed-snapshot-0", proposal: { kind: "local", objectId: "local-blob" },
+  });
+
+  await user.click(review.getByRole("button", { name: "Incoming · stage 3" }));
+  await user.click(review.getByRole("button", { name: "Combine manually…" }));
+  const result = review.getByRole("textbox", { name: "Proposed working result" });
+  expect(result).toHaveProperty("value", incoming);
+  const confirmed = review.getByRole("checkbox", { name: /I reviewed the proposed contents and want to replace/ });
+  const replace = review.getByRole("button", { name: "Replace working result" });
+  await user.click(confirmed);
+  const combined = local.replace(/\r\n/g, "\n") + incoming;
+  fireEvent.change(result, { target: { value: combined } });
+  expect(confirmed).toHaveProperty("checked", false);
+  expect(replace).toHaveProperty("disabled", true);
+  await user.click(confirmed);
+  await user.click(replace);
+  expect(await review.findByText("Working result saved. Review it to stage the resolution.")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("git_apply_conflict_resolution", {
+    checkoutId: checkout.checkoutId, path, expected: "confirmed-snapshot-1", proposal: { kind: "combined", content: combined },
+  });
+  expect(invoke).not.toHaveBeenCalledWith("git_mark_conflict_resolved", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("set_git_path_staged", expect.anything());
+});
+
 it("registers a manual worktree from the shared dialog and selects the returned checkout", async () => {
   const tree = { checkoutId: "manually-created", root: "D:/worktrees/new-local", branch: "new-local", head: "current-main", managed: false };
   let created = false;

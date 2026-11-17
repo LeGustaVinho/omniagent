@@ -11,6 +11,7 @@ import type { RunRecord } from "@/bindings/RunRecord";
 import { Button } from "@/components/ui/button";
 import { ConversationLibraryGroup, ConversationLibraryLayout } from "@/conversation-layout";
 import { ConversationRow, type ConversationAction } from "@/conversation-menu";
+import { useConversationTranscriptExport } from "@/conversation-transcript-export";
 import { ConversationHistoryControls } from "@/conversation-history-controls";
 import { ConversationLibraryNavigation, type OpenLibraryConversation } from "@/conversation-library-navigation";
 import { ConversationReferenceSelection, type ConversationReferencePreview } from "@/conversation-reference";
@@ -209,6 +210,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   const [sectionConversation, setSectionConversation] = useState<ConversationIdentity>();
   const [sectionName, setSectionName] = useState("");
   const [notice, setNotice] = useState("");
+  const exportTranscript = useConversationTranscriptExport(setNotice);
   const list = useConversationLibrary(query, projectId, true, archived);
   const sections = useQuery({
     queryKey: [...sectionKey, projectId],
@@ -236,7 +238,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
       if (change.type === "archive") setNotice(change.archived ? "Conversation moved to Archived." : "Conversation restored.");
     },
   });
-  const error = open.error ?? inspect.error ?? openFork.error ?? list.error ?? sections.error ?? startError ??
+  const error = open.error ?? inspect.error ?? openFork.error ?? exportTranscript.error ?? list.error ?? sections.error ?? startError ??
     (!sectionConversation ? organize.error : undefined);
 
   function rowAction(action: ConversationAction, entry: ConversationLibraryEntry, sectionId?: string) {
@@ -244,6 +246,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
     if (action === "open") open.mutate(entry);
     if (action === "activity") inspect.mutate(entry);
     if (action === "fork") setForking(entry);
+    if (action === "export-markdown") exportTranscript.mutate(conversation);
     if (action === "rename") setRenaming(conversation);
     if (action === "new-section") {
       organize.reset();
@@ -287,6 +290,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
                 available={(action) => ["rename", "copy-title", "copy-id", "copy-worktree"].includes(action) ||
                   (action === "open" && !open.isPending) || (action === "activity" && !inspect.isPending && Boolean(inspector && entry.status && entry.checkout.projectId === checkout.projectId)) ||
                   (action === "fork" && !openFork.isPending) ||
+                  (action === "export-markdown" && !exportTranscript.isPending) ||
                   (!organize.isPending && ["pin", "unread", "archive", "move", "new-section"].includes(action))}
                 onAction={(action, sectionId) => rowAction(action, entry, sectionId)}>
                 <button type="button" className="conv-session-button items-start" disabled={open.isPending}

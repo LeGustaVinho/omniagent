@@ -296,6 +296,66 @@ it("refuses extraction if the source buffer changes while reviewing the selectio
 });
 
 
+it("opens tag rename from the indexed tag menu, previews occurrences, and keeps blocked drafts intact", async () => {
+  const fixture = mockRepository();
+  const ipc = vi.mocked(invoke);
+  const repository = ipc.getMockImplementation()!;
+  const doc = documentAt(release, "release-1", releaseSource);
+  const draftMarkdown = releaseSource + "\n#delivery/QA\n";
+  let previewCount = 0;
+  ipc.mockImplementation(async (command, args) => {
+    if (command === "rebuild_repository_note_index") return [
+      { id: 1, path: release, title: "Release notes", tags: ["release"], frontmatter: null },
+      { id: 2, path: checklist, title: "Launch notes", tags: [], frontmatter: checklistProperties },
+    ];
+    if (command === "preview_markdown_tag_rename") {
+      expect(args).toEqual({ checkoutId, source: "release", destination: "delivery", includeNested: true });
+      return { id: "tag-preview", source: "release", destination: "delivery",
+        files: [{ path: release, revisionId: doc.revision.id, occurrences: [
+          { line: 12, before: "#release/QA", after: "#delivery/QA", property: true },
+        ] }],
+        blocked: ++previewCount === 1 ? [checklist] : [], warnings: [],
+      };
+    }
+    if (command === "stage_markdown_tag_rename") {
+      expect(args).toEqual({ checkoutId, previewId: "tag-preview" });
+      const draft = { base: doc.revision, revision: "tag-draft", markdown: draftMarkdown };
+      fixture.drafts.set(release, draft);
+      return [draft];
+    }
+    return repository(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(release);
+  const details = screen.getByRole("button", { name: "Note details" });
+  if (details.getAttribute("aria-expanded") === "false") await user.click(details);
+  await user.click(screen.getByRole("button", { name: "Properties" }));
+  fireEvent.contextMenu(await screen.findByRole("button", { name: "#release" }));
+  await user.click(screen.getByRole("menuitem", { name: "Rename tag in checkout…" }));
+
+  const input = within(await screen.findByRole("dialog", { name: "Rename tag" }));
+  await user.type(input.getByRole("textbox", { name: "New tag name" }), "delivery");
+  await user.click(input.getByRole("checkbox", { name: "Include nested tags" }));
+  await user.click(input.getByRole("button", { name: "Review occurrences" }));
+  const reviewed = within(await screen.findByRole("dialog", { name: "Review tag rename" }));
+  expect(reviewed.getByText("#release/QA")).toBeTruthy();
+  expect(reviewed.getByText("#delivery/QA")).toBeTruthy();
+  expect(reviewed.getByText("Line 12 · Property")).toBeTruthy();
+  expect(reviewed.getByRole("list", { name: "Affected drafts" }).textContent).toBe(checklist);
+  expect((reviewed.getByRole("button", { name: "Stage drafts" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(ipc).not.toHaveBeenCalledWith("stage_markdown_tag_rename", expect.anything());
+  await user.click(reviewed.getByRole("button", { name: "Back" }));
+  await user.click(input.getByRole("button", { name: "Review occurrences" }));
+  await user.click(reviewed.getByRole("button", { name: "Stage drafts" }));
+  const result = within(await screen.findByRole("dialog", { name: "Tag rename result" }));
+  expect(result.getByRole("list", { name: "Pending tag drafts" }).textContent).toBe(release);
+  expect(fixture.writes).not.toHaveBeenCalled();
+  await waitFor(() => expect(view.state.doc.toString()).toBe(draftMarkdown));
+});
+
+
 it("previews a note merge and reports the exact remaining drafts when a reviewed save conflicts", async () => {
   const fixture = mockRepository();
   const ipc = vi.mocked(invoke);

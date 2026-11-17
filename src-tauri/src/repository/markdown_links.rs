@@ -487,7 +487,7 @@ fn is_markdown(path: &str) -> bool {
     without_note_extension(path).len() != path.len()
 }
 
-fn fold(value: &str) -> String {
+pub(super) fn fold(value: &str) -> String {
     value.nfc().collect::<String>().to_lowercase()
 }
 
