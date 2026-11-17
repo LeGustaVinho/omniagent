@@ -23,12 +23,14 @@ use super::{
     verify_checkout, with_managed_worktree_writer,
 };
 
+mod comments;
 mod commit;
 mod comparison;
 mod content;
 mod history;
 mod hunks;
 mod permalink;
+pub use comments::{GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface};
 pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
 pub use content::{GitDiffSource, GitFileSide, GitReviewDiff};
 pub use history::{GitFileHistory, GitFileVersion, GitFileVersionComparison};
@@ -241,8 +243,18 @@ impl Store {
                 .into_iter()
                 .find(|entry| entry.path == path && source.contains(entry))
                 .context("the selected path is no longer in this comparison")?;
-            let diff = content::read_diff(&review, &entry, source)?;
+            let mut diff = content::read_diff(&review, &entry, source)?;
             review.verify()?;
+            diff.comment_scope = comments::GitReviewCommentScope::from_comparison(
+                &scope.id,
+                &path,
+                comments::GitReviewCommentSource::Checkout {
+                    source,
+                    revision: diff.revision.clone(),
+                },
+                (&path, &diff.original),
+                (&path, &diff.modified),
+            )?;
             Ok(diff)
         })
         .await?

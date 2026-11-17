@@ -116,6 +116,67 @@ it("opens file history at the selected worktree and compares a renamed file to i
   expect(openWorkspace).toHaveBeenCalledWith("knowledge", path);
 });
 
+it("anchors a comment to the clicked hunk line and adds the retained feedback to an unsent draft", async () => {
+  const path = "src/example.txt";
+  const body = "Check how this handles a missing value.";
+  const excerpt = "reviewed text\r\n";
+  const scope = {
+    snapshot: "recorded-comparison",
+    source: { kind: "checkout", source: "working", revision: originalRevision },
+    original: { path, sha256: "original-digest", lineCount: 2 },
+    modified: { path, sha256: "modified-digest", lineCount: 2 },
+  };
+  const comment = { id: "comment-1", path, scope, side: "modified", startLine: 2, endLine: 2,
+    excerpt, body, createdAt: 0, resolved: false };
+  let saved = false;
+  const openWorkspace = vi.fn();
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, root: checkout.checkoutRoot, worktrees, branches, managed: false,
+      revision: originalRevision, changes: [{ path, working: "M", staged: null }],
+    };
+    if (command === "git_checkout_diff") return {
+      path, revision: originalRevision, commentScope: scope,
+      original: { status: "text", content: "unchanged\nbase text\n" },
+      modified: { status: "text", content: "unchanged\r\nreviewed text\r\n" },
+      hunks: [{ id: "example-hunk", header: "@@ -1,2 +1,2 @@", originalLine: 1, modifiedLine: 1,
+        patch: "diff --git a/src/example.txt b/src/example.txt\n@@ -1,2 +1,2 @@\n unchanged\n-base text\n+reviewed text\r\n" }],
+    };
+    if (command === "git_review_comments") return saved ? [comment] : [];
+    if (command === "git_add_review_comment") { saved = true; return comment; }
+    if (command === "list_conversations") return [{ id: "draft-id", checkoutId: checkout.checkoutId, title: "Existing conversation" }];
+    if (command === "append_checkout_context_to_conversation") return;
+    throw new Error(`Unexpected ${command}`);
+  });
+  openGit({ openWorkspace });
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Review hunks" }));
+  fireEvent.contextMenu(await screen.findByText("+reviewed text"));
+  const menu = within(await screen.findByRole("menu"));
+  expect(menu.queryByRole("menuitem", { name: "Add review comment on base line…" })).toBeNull();
+  await user.click(menu.getByRole("menuitem", { name: "Add review comment on revised line…" }));
+  const add = within(await screen.findByRole("dialog", { name: "Add review comment" }));
+  expect(add.getByText("src/example.txt:2 · Revised")).toBeTruthy();
+  await user.type(add.getByRole("textbox", { name: "Comment" }), body);
+  expect(invoke).not.toHaveBeenCalledWith("git_add_review_comment", expect.anything());
+  await user.click(add.getByRole("button", { name: "Save comment" }));
+  expect(invoke).toHaveBeenCalledWith("git_add_review_comment", { checkoutId: checkout.checkoutId, request: {
+    path, source: scope.source, snapshot: scope.snapshot, side: "modified", startLine: 2, endLine: 2, body,
+  } });
+  fireEvent.contextMenu(await screen.findByText(body));
+  await user.click(await screen.findByRole("menuitem", { name: "Add review comment to conversation…" }));
+  const append = within(await screen.findByRole("dialog", { name: "Add checkout context" }));
+  expect(append.getByLabelText("Selected text").textContent).toBe(excerpt);
+  await append.findByRole("option", { name: "Existing conversation" });
+  await user.selectOptions(append.getByRole("combobox", { name: "Conversation" }), "draft-id");
+  expect(invoke).not.toHaveBeenCalledWith("append_checkout_context_to_conversation", expect.anything());
+  await user.click(append.getByRole("button", { name: "Add to draft" }));
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("conversations", "draft-id"));
+  expect(invoke).toHaveBeenCalledWith("append_checkout_context_to_conversation", { checkoutId: checkout.checkoutId, conversationId: "draft-id",
+    context: expect.stringContaining(`${body}\n\nSource: src/example.txt:2 · Revised · Index → worktree · HEAD current-main · Index old-index`) });
+  expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
+});
+
 it("registers a manual worktree from the shared dialog and selects the returned checkout", async () => {
   const tree = { checkoutId: "manually-created", root: "D:/worktrees/new-local", branch: "new-local", head: "current-main", managed: false };
   let created = false;

@@ -4,18 +4,19 @@ use serde::{Deserialize, Serialize};
 use crate::store::Store;
 
 use super::{
-    GitFileSide, IsolatedGit, ReviewScope, base_commit, branch_reference, content, inspect,
-    passive, validate_oid, validate_path,
+    GitFileSide, IsolatedGit, ReviewScope, base_commit, branch_reference,
+    comments::{GitReviewCommentScope, GitReviewCommentSource},
+    content, inspect, passive, validate_oid, validate_path,
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitBranchRange {
     pub base_reference: String,
     pub head_reference: Option<String>,
 }
 
-#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitBranchRevisions {
     pub base: String,
@@ -37,10 +38,12 @@ pub struct GitBranchComparisonFile {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitBranchDiff {
     pub path: String,
     pub original: GitFileSide,
     pub modified: GitFileSide,
+    pub comment_scope: Option<GitReviewCommentScope>,
 }
 
 impl Store {
@@ -75,10 +78,18 @@ impl Store {
             );
             let original = content::read_tree(&view, &revisions.merge_base, &path)?;
             let modified = content::read_tree(&view, &revisions.head, &path)?;
+            let comment_scope = GitReviewCommentScope::from_comparison(
+                &scope.id,
+                &path,
+                GitReviewCommentSource::Branch { range, revisions },
+                (&path, &original),
+                (&path, &modified),
+            )?;
             Ok(GitBranchDiff {
                 path,
                 original,
                 modified,
+                comment_scope,
             })
         })
         .await?

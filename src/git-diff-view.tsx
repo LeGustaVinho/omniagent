@@ -1,11 +1,12 @@
 import { ChevronDown, ChevronRight, ChevronUp, Columns2, ExternalLink, FileCode2, FileImage, GitCompare, Rows3, X } from "lucide-react";
-import type { editor } from "monaco-editor";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { editor, IRange } from "monaco-editor";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
 import { excerptReference, markdownExcerpt, type EditorExcerpt } from "@/editor-context";
 import { ResizablePanel } from "@/panel-resize";
 import { InlineIssue } from "@/tasks-git-ui";
 import { ContextActions, useContextActionFeedback, type MenuGroups } from "@/components/ui/context-actions";
+import type { GitReviewAnnotations, GitReviewSide } from "@/git-review-comments";
 
 export type GitTextComparison = {
   path: string;
@@ -20,7 +21,7 @@ export type GitTextComparison = {
 export type GitHunk = { id: string; header: string; patch: string; originalLine: number; modifiedLine: number };
 
 type DiffLayout = "auto" | "split" | "unified";
-type DiffSide = "original" | "modified";
+type DiffSide = GitReviewSide;
 type ExcerptHandler = (selection: EditorExcerpt, revision: string, instruction?: string) => void;
 
 type GitDiffRow = {
@@ -55,7 +56,7 @@ function ChangeCounts({ additions, deletions }: { additions: number; deletions: 
 }
 
 export function GitDiffReview({ source, title, ranges, files, selectedPath, select, comparison, preview, empty, notice,
-  allowSavedPatch, openFile, openLine, addExcerpt, fileActions, hunkActions, footer, onClose }: {
+  allowSavedPatch, openFile, openLine, addExcerpt, fileActions, hunkActions, reviewAnnotations, reviewPanel, footer, onClose }: {
   source: string;
   title: string;
   ranges: { base: string; revised: string };
@@ -72,6 +73,8 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   addExcerpt?: ExcerptHandler;
   fileActions?: (file: GitDiffRow) => MenuGroups;
   hunkActions?: (hunk: GitHunk) => MenuGroups;
+  reviewAnnotations?: GitReviewAnnotations;
+  reviewPanel?: ReactNode;
   footer?: ReactNode;
   onClose?: () => void;
 }) {
@@ -83,7 +86,19 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   const selected = files.find((file) => file.path === selectedPath);
   const hasHunks = Boolean(comparison?.hunks?.length);
   const hasPatch = Boolean(hasHunks || allowSavedPatch && comparison?.patch);
+  const patchLineNumbers = useMemo(() => comparison ? {
+    original: !/\r(?!\n)/.test(comparison.original),
+    modified: !/\r(?!\n)/.test(comparison.modified),
+  } : undefined, [comparison]);
+  const [reviewLocation, setReviewLocation] = useState<GitReviewAnnotations["location"]>();
   const showingPatch = hasPatch && Boolean(selected && patchPath === selected.path);
+  if (reviewLocation !== reviewAnnotations?.location) {
+    setReviewLocation(reviewAnnotations?.location);
+    if (reviewAnnotations?.location) {
+      setPatchPath(undefined);
+      if (reviewAnnotations.location.side === "original") setLayout("split");
+    }
+  }
   useEffect(() => {
     if (instance && requestedLine !== undefined) {
       const editor = instance.getModifiedEditor();
@@ -122,6 +137,7 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
       <span className="font-medium wrap-anywhere text-foreground">{ranges.revised}</span>
     </div>
     {notice}
+    {reviewPanel}
     {copyError && <div className="p-3"><InlineIssue>{copyError}</InlineIssue></div>}
     {files.length === 0 ? <div className="delivery-empty"><GitCompare size={22} aria-hidden />{empty}</div>
       : <div className="flex min-h-0 flex-1 flex-col">
@@ -173,14 +189,14 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
                         <button type="button" className="block w-full truncate border-b border-border bg-muted/30 p-2 text-left font-mono text-xs" onClick={goToHunk}>
                           {hunk.header}
                         </button>
-                        <PatchLines value={hunk.patch.slice(hunk.patch.indexOf("\n@@ ") + 1)} />
+                        <HunkPatchLines hunk={hunk} review={reviewAnnotations} lineNumbers={patchLineNumbers} />
                       </div>
                     </ContextActions>
                   </section>;
                 })}
               </div> : <UnifiedPatch file={comparison} />)
                 : <MonacoComparison key={comparison.path} file={comparison} layout={layout} ready={setInstance}
-                  revisions={{ original: ranges.base, modified: ranges.revised }} openLine={openLine} addExcerpt={addExcerpt} />))}
+                  revisions={{ original: ranges.base, modified: ranges.revised }} openLine={openLine} addExcerpt={addExcerpt} review={reviewAnnotations} />))}
             </div>}
         </div>}
         {footer && <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-3 py-2">{footer}</footer>}
@@ -194,6 +210,34 @@ function PatchLines({ value }: { value: string }) {
   </pre>;
 }
 
+function HunkPatchLines({ hunk, review, lineNumbers }: {
+  hunk: GitHunk; review?: GitReviewAnnotations; lineNumbers?: Record<DiffSide, boolean>;
+}) {
+  const value = hunk.patch.slice(hunk.patch.indexOf("\n@@ ") + 1);
+  const scope = review?.scope;
+  if (!scope || !lineNumbers) return <PatchLines value={value} />;
+  let original = hunk.originalLine;
+  let modified = hunk.modifiedLine;
+  return <div className="overflow-auto p-3 font-mono text-xs leading-5">
+    {value.split("\n").map((line, index) => {
+      const prefix = line[0];
+      const originalLine = prefix === " " || prefix === "-" ? original++ : 0;
+      const modifiedLine = prefix === " " || prefix === "+" ? modified++ : 0;
+      const actions = ([["original", originalLine, "base"], ["modified", modifiedLine, "revised"]] as const)
+        .filter(([side, number]) => lineNumbers[side] && number > 0 && number <= scope[side].lineCount)
+        .map(([side, number, label]) => ({
+          label: `Add review comment on ${label} line…`,
+          run: () => review.add({ side, startLine: number, endLine: number }),
+        }));
+      const className = prefix === "+" ? "bg-green-500/15" : prefix === "-" ? "bg-red-500/15" : "";
+      const label = [originalLine && `Base line ${originalLine}`, modifiedLine && `Revised line ${modifiedLine}`].filter(Boolean).join(" · ");
+      return <ContextActions key={index} label={label} groups={[actions]} className={`diff-patch-line ${className}`}>
+        <span className={`block min-w-0 flex-1 whitespace-pre ${className}`}>{line || " "}</span>
+      </ContextActions>;
+    })}
+  </div>;
+}
+
 function UnifiedPatch({ file }: { file: GitTextComparison }) {
   if (file.patch) return <PatchLines value={file.patch} />;
   return <div className="grid min-h-40 gap-3 overflow-auto p-3 sm:grid-cols-2">
@@ -202,24 +246,27 @@ function UnifiedPatch({ file }: { file: GitTextComparison }) {
   </div>;
 }
 
-export function MonacoComparison({ file, layout, ready, revisions, openLine, addExcerpt }: {
+export function MonacoComparison({ file, layout, ready, revisions, openLine, addExcerpt, review }: {
   file: GitTextComparison; layout: DiffLayout; ready?: (instance: editor.IStandaloneDiffEditor | null) => void;
   revisions?: Record<DiffSide, string>;
   openLine?: (line: number) => void;
   addExcerpt?: ExcerptHandler;
+  review?: GitReviewAnnotations;
 }) {
   const anchor = useRef<HTMLDivElement>(null);
   const instance = useRef<editor.IStandaloneDiffEditor | null>(null);
+  const [opened, setOpened] = useState<editor.IStandaloneDiffEditor | null>(null);
   const [error, setError] = useState(false);
   const layoutSetting = useRef(layout);
   layoutSetting.current = layout;
   const { copy, feedback } = useContextActionFeedback();
-  const actions = useRef({ revisions, openLine, addExcerpt, copy });
-  actions.current = { revisions, openLine, addExcerpt, copy };
+  const actions = useRef({ revisions, openLine, addExcerpt, copy, review });
+  actions.current = { revisions, openLine, addExcerpt, copy, review };
 
   useEffect(() => {
     const host = anchor.current;
     if (!host) return;
+    const commentScope = actions.current.review?.scope;
     let active = true;
     let original: editor.ITextModel | undefined;
     let modified: editor.ITextModel | undefined;
@@ -243,7 +290,7 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
         hideUnchangedRegions: { enabled: true, contextLineCount: 3 },
         ignoreTrimWhitespace: false,
         scrollBeyondLastLine: false,
-        glyphMargin: false,
+        glyphMargin: Boolean(actions.current.review),
         folding: false,
         minimap: { enabled: false },
         renderOverviewRuler: false,
@@ -259,8 +306,22 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
       for (const side of ["original", "modified"] as const) {
         const sideEditor = side === "original" ? opened.getOriginalEditor() : opened.getModifiedEditor();
         const path = side === "original" ? file.originalPath ?? file.path : file.path;
-        function selection(): EditorExcerpt | undefined {
-          const range = sideEditor.getSelection();
+        let clickedRange: IRange | undefined;
+        if (commentScope?.[side].lineCount) {
+          sideEditor.onMouseDown(({ target, event }) => {
+            clickedRange = undefined;
+            if (target.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || event.rightButton) return;
+            const current = actions.current.review;
+            const comment = current?.comments.find((entry) => entry.side === side && entry.startLine === target.position?.lineNumber);
+            if (comment) current?.show(comment.id);
+          });
+          sideEditor.onKeyDown(() => { clickedRange = undefined; });
+          sideEditor.onContextMenu(({ target }) => {
+            const position = target.position;
+            clickedRange = position ? sideEditor.getSelections()?.find((range) => range.containsPosition(position)) : undefined;
+          });
+        }
+        function selection(range: IRange | null = sideEditor.getSelection()): EditorExcerpt | undefined {
           const model = sideEditor.getModel();
           if (!range || !model) return;
           const { startLineNumber: startLine, endLineNumber, endColumn } = range;
@@ -286,11 +347,21 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
         if (side === "modified" && actions.current.openLine) sideEditor.addAction({ id: "omniagent.open-working-diff-line",
           label: "Go to line in working file", contextMenuGroupId: "9_omniagent-diff",
           run: () => { const line = sideEditor.getPosition()?.lineNumber; if (line) actions.current.openLine?.(line); } });
+        if (commentScope?.[side].lineCount) sideEditor.addAction({
+          id: `omniagent.review-comment-${side}-diff`, label: "Add review comment…", contextMenuGroupId: "9_omniagent-diff",
+          run: () => {
+            const range = selection(clickedRange);
+            clickedRange = undefined;
+            const current = actions.current.review;
+            if (range && current?.scope?.snapshot === commentScope.snapshot) current.add({ side, startLine: range.startLine, endLine: range.endLine });
+          },
+        });
       }
       theme();
       themeObserver = new MutationObserver(theme);
       themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-app-theme", "data-app-motion", "style", "class"] });
       ready?.(opened);
+      setOpened(opened);
     }).catch(() => { if (active) setError(true); });
 
     return () => {
@@ -307,6 +378,37 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
   useEffect(() => {
     instance.current?.updateOptions({ renderSideBySide: layout !== "unified", useInlineViewWhenSpaceIsLimited: layout === "auto" });
   }, [layout]);
+
+  useEffect(() => {
+    if (!opened || opened !== instance.current) return;
+    const decorations = (["original", "modified"] as const).map((side) => {
+      const target = side === "original" ? opened.getOriginalEditor() : opened.getModifiedEditor();
+      return target.createDecorationsCollection((review?.comments ?? []).filter((comment) => comment.side === side).flatMap((comment) => [{
+        range: { startLineNumber: comment.startLine, startColumn: 1, endLineNumber: comment.endLine, endColumn: 1 },
+        options: {
+          isWholeLine: true,
+          className: "diff-review-comment-lines",
+          glyphMarginHoverMessage: { value: markdownExcerpt({ text: comment.body.slice(0, 800) }) },
+          hoverMessage: { value: markdownExcerpt({ text: comment.body.slice(0, 800) }) },
+        },
+      }, {
+        range: { startLineNumber: comment.startLine, startColumn: 1, endLineNumber: comment.startLine, endColumn: 1 },
+        options: { glyphMarginClassName: "diff-review-comment-marker", glyphMarginHoverMessage: { value: "Open review comment" } },
+      }]));
+    });
+    return () => { if (opened === instance.current) decorations.forEach((collection) => collection.clear()); };
+  }, [opened, review?.comments]);
+
+  useEffect(() => {
+    const location = review?.location;
+    if (!opened || opened !== instance.current || !location) return;
+    opened.updateOptions({ hideUnchangedRegions: { enabled: false } });
+    const target = location.side === "original" ? opened.getOriginalEditor() : opened.getModifiedEditor();
+    const endColumn = target.getModel()?.getLineMaxColumn(location.endLine) ?? 1;
+    target.setSelection({ startLineNumber: location.startLine, startColumn: 1, endLineNumber: location.endLine, endColumn });
+    target.revealLineInCenter(location.startLine);
+    target.focus();
+  }, [opened, review?.location]);
 
   return error ? <><div className="p-2"><InlineIssue>Diff editor unavailable. Showing the text comparison.</InlineIssue></div><UnifiedPatch file={file} /></>
     : <div className="flex h-full min-h-45 w-full min-w-0 flex-col overflow-hidden">

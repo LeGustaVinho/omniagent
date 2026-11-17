@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use crate::providers::configuration::{open_locked_local_file, plain_metadata};
 
 use super::super::{documents::lock_directories, isolated_git::IsolatedGit};
-use super::{GitPathStatus, GitReviewHunk, GitReviewRevision, LiveReview, hunks, validate_oid};
+use super::{
+    GitPathStatus, GitReviewHunk, GitReviewRevision, LiveReview, comments::GitReviewCommentScope,
+    hunks, validate_oid,
+};
 
 const MAX_DIFF_SIDE_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -55,6 +58,7 @@ pub struct GitReviewDiff {
     pub original: GitFileSide,
     pub modified: GitFileSide,
     pub hunks: Vec<GitReviewHunk>,
+    pub comment_scope: Option<GitReviewCommentScope>,
 }
 
 pub(super) fn read_diff(
@@ -84,6 +88,7 @@ pub(super) fn read_diff(
         original,
         modified,
         hunks,
+        comment_scope: None,
     })
 }
 

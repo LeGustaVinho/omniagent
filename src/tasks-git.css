@@ -257,6 +257,19 @@ button.agile-disclosure:hover { background: var(--muted); color: var(--foregroun
 .diff-file-row:is(:hover, [aria-expanded="true"]) { background: var(--muted); }
 .diff-file-row[aria-expanded="true"] { box-shadow: inset 2px 0 var(--primary); }
 .context-actions-target.diff-hunk-menu { align-items: flex-start; }
+.diff-patch-line .context-actions-more { height: 1.25rem; }
+.diff-review-comment-lines { outline: 1px solid color-mix(in srgb, var(--primary) 45%, transparent); outline-offset: -1px; }
+.monaco-editor .diff-review-comment-marker::after {
+  content: "";
+  display: block;
+  width: 9px;
+  height: 9px;
+  margin: 5px auto;
+  border: 1px solid var(--primary-foreground);
+  border-radius: 50%;
+  background: var(--primary);
+  cursor: pointer;
+}
 
 .delivery-field {
   display: grid;

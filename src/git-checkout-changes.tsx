@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { excerptReference, type EditorExcerpt } from "@/editor-context";
 import { GitDiffReview, type GitHunk, type GitTextComparison } from "@/git-diff-view";
+import { useGitReviewComments, type GitReviewScope } from "@/git-review-comments";
 import { GitDiffSourceSelect } from "@/git-workspace-frame";
 import { DeliveryDetailPanel, InlineIssue } from "@/tasks-git-ui";
 
@@ -15,7 +16,7 @@ export type Worktree = { checkoutId: string | null; root: string; branch: string
 export type CheckoutReview = { checkoutId: string; root: string; revision: ReviewRevision; managed: boolean; changes: FileStatus[]; branches: Branch[]; worktrees: Worktree[] };
 type FileSide = { status: "missing" } | { status: "text"; content: string } | { status: "unavailable"; reason: string };
 type Source = "working" | "staged";
-type TextDiff = { path: string; original: FileSide; modified: FileSide; hunks?: GitHunk[]; revision?: ReviewRevision };
+type TextDiff = { path: string; original: FileSide; modified: FileSide; hunks?: GitHunk[]; revision?: ReviewRevision; commentScope?: GitReviewScope | null };
 type BranchRevisions = { base: string; head: string; mergeBase: string };
 const reviewSources = ["working", "staged", "branch"] as const;
 type ReviewSource = typeof reviewSources[number];
@@ -59,6 +60,12 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
     enabled: !!path, refetchInterval: 2500, retry: false,
   });
   const comparison = useMemo(() => diff.error ? null : comparisonFile(diff.data), [diff.data, diff.error]);
+  const comments = useGitReviewComments({
+    checkoutId: review.checkoutId, surface: source, comparisonPath: comparison?.path,
+    scope: comparison ? diff.data?.commentScope : undefined, language: comparison?.language,
+    startContextText: openConversation ? conversationActions.startContextText : undefined,
+    enabled: source !== "branch",
+  });
   const diffRevision = diff.data?.revision;
   const unavailable = diff.data && [diff.data.original, diff.data.modified].find((side) => side.status === "unavailable");
   const canOpen = source === "working" && comparison && diff.data?.modified.status === "text" && openFile;
@@ -84,6 +91,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
           empty={<p>{source === "working" ? "No working changes." : "No staged changes."}</p>}
           onClose={onClose} openFile={canOpen ? () => openFile(comparison.path) : undefined}
           openLine={canOpen ? (line) => openFile(comparison.path, line) : undefined} addExcerpt={addDiffExcerpt}
+          reviewAnnotations={comments.annotations} reviewPanel={comments.panel}
           hunkActions={(hunk) => [[
             ...(indexActions && comparison && diffRevision ? [{ label: source === "working" ? "Stage hunk" : "Unstage hunk",
               disabled: changeStage.isPending, run: () => changeStage.mutate({ path: comparison.path, source, hunkId: hunk.id, expected: diffRevision }) }] : []),
@@ -110,6 +118,7 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
       </div>
       {indexActions && <IndexOperations review={review} changeStage={changeStage} />}
     </div>}
+    {source !== "branch" && comments.dialog}
     {conversationActions.dialog}
   </div>;
 }
@@ -140,6 +149,10 @@ function GitBranchComparison({ review, onClose, startContextText }: { review: Ch
     enabled: Boolean(path && revisions), retry: false,
   });
   const comparison = useMemo(() => diff.error ? null : comparisonFile(diff.data), [diff.data, diff.error]);
+  const comments = useGitReviewComments({
+    checkoutId, surface: "branch", comparisonPath: comparison?.path,
+    scope: comparison ? diff.data?.commentScope : undefined, language: comparison?.language, startContextText,
+  });
   const unavailable = diff.data && [diff.data.original, diff.data.modified].find((side) => side.status === "unavailable");
   const options = review.branches.map(({ name, reference }) => <option key={reference} value={reference}>{name}</option>);
   return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -163,6 +176,7 @@ function GitBranchComparison({ review, onClose, startContextText }: { review: Ch
       </label>
     </div>
     <GitDiffReview source="branch" title="Branch comparison" files={files} selectedPath={path} select={setSelection} comparison={comparison}
+      reviewAnnotations={comments.annotations} reviewPanel={comments.panel}
       ranges={{
         base: `Merge base of ${base?.name ?? "selected branch"}${revisions ? ` · ${revisions.mergeBase.slice(0, 12)}` : ""}`,
         revised: `${head ? head.name : "Checkout HEAD"}${revisions ? ` · ${revisions.head.slice(0, 12)}` : ""}`,
@@ -179,6 +193,7 @@ function GitBranchComparison({ review, onClose, startContextText }: { review: Ch
         : summary.isPending ? <p role="status">Loading branch comparison…</p>
         : <p>No committed changes since the merge base.</p>}
       onClose={onClose} />
+    {comments.dialog}
   </div>;
 }
 

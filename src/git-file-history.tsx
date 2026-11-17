@@ -2,10 +2,12 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { ContextActions } from "@/components/ui/context-actions";
 import type { CheckoutReview } from "@/git-checkout-changes";
 import { MonacoComparison } from "@/git-diff-view";
 import { compareGitFileVersions, gitFilePermalink, gitFileText } from "@/git-file-versions";
+import { useGitReviewComments } from "@/git-review-comments";
 import { GitWorkspaceTable } from "@/git-workspace-frame";
 import { InlineIssue } from "@/tasks-git-ui";
 
@@ -41,8 +43,8 @@ function comparisonFor(entry: Entry, view: View, reference?: Entry) {
   }
 }
 
-export function GitFileHistoryView({ review, path, openFile, clear }: { review: CheckoutReview; path: string;
-  openFile?: () => void; clear: () => void }) {
+export function GitFileHistoryView({ review, path, openFile, openConversation, clear }: { review: CheckoutReview; path: string;
+  openFile?: () => void; openConversation?: (id: string) => void; clear: () => void }) {
   const { checkoutId } = review;
   const [branch, setBranch] = useState("");
   const [picked, select] = useState<{ sha: string; view: View }>();
@@ -80,6 +82,17 @@ export function GitFileHistoryView({ review, path, openFile, clear }: { review: 
     return { file: { path: entry.path, originalPath, language: /\.(md|markdown)$/i.test(entry.path) ? "markdown" : "plaintext",
       original: gitFileText(original), modified: gitFileText(modified) }, empty: original.status === "missing" && modified.status === "missing" };
   }, [load.data, entry, comparison, path]);
+  const conversation = useCheckoutConversationActions(checkoutId, !openConversation, (id) => openConversation?.(id));
+  const comments = useGitReviewComments({
+    checkoutId, surface: "versions", matchPath: path, comparisonPath: path, language: sides?.file?.language,
+    scope: view !== "contents" && sides?.file && !load.error ? load.data?.commentScope : undefined,
+    startContextText: openConversation ? conversation.startContextText : undefined,
+  });
+  const [reviewLocation, setReviewLocation] = useState(comments.annotations.location);
+  if (reviewLocation !== comments.annotations.location) {
+    setReviewLocation(comments.annotations.location);
+    if (comments.annotations.location?.side === "original") setLayout("split");
+  }
 
   async function copy(read: () => string | Promise<string>, message: string) {
     setError("");
@@ -137,6 +150,7 @@ export function GitFileHistoryView({ review, path, openFile, clear }: { review: 
       {history.hasNextPage && <Button className="mt-2" type="button" variant="outline" disabled={history.isFetchingNextPage}
         onClick={() => void history.fetchNextPage()}>{history.isFetchingNextPage ? "Loading older revisions…" : "Load older revisions"}</Button>}
     </div>
+    {comments.panel}
     {comparison && <div className="flex min-h-0 flex-1 flex-col" aria-label="File revision comparison">
       <div className="delivery-toolbar delivery-filters">
         <span className="wrap-anywhere text-xs" aria-label="File revisions in comparison">{comparison.ranges.filter(Boolean).join(" → ")}</span>
@@ -157,8 +171,11 @@ export function GitFileHistoryView({ review, path, openFile, clear }: { review: 
           : load.error || sides?.error ? <div className="p-3"><InlineIssue>{load.error ? String(load.error) : sides?.error}</InlineIssue></div>
             : sides?.empty ? <p className="p-3 text-sm">This file is absent from both revisions.</p>
               : sides?.file && (view === "contents" ? <pre className="p-3 font-mono text-xs">{sides.file.modified}</pre>
-                : <MonacoComparison file={sides.file} layout={layout} revisions={{ original: comparison.ranges[0]!, modified: comparison.ranges[1]! }} />)}
+                : <MonacoComparison file={sides.file} layout={layout} review={comments.annotations}
+                  revisions={{ original: comparison.ranges[0]!, modified: comparison.ranges[1]! }} />)}
       </div>
     </div>}
+    {comments.dialog}
+    {conversation.dialog}
   </section>;
 }

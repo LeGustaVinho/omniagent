@@ -2,7 +2,8 @@ use omniagent::{
     diagnostics,
     repository::git_review::{
         GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions, GitCheckoutReview,
-        GitDiffSource, GitFileHistory, GitFileVersion, GitFileVersionComparison, GitPermalinkLines,
+        GitDiffSource, GitFileHistory, GitFileVersion, GitFileVersionComparison,
+        GitPermalinkLines, GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface,
         GitReviewCommit, GitReviewDiff, GitReviewRevision, SavedGitAttempt,
     },
     repository::{ManualGitWorktree, ProjectCheckout, create_git_worktree as create_worktree},
@@ -115,6 +116,44 @@ pub async fn git_branch_comparison_diff(
 ) -> Result<GitBranchDiff, String> {
     store
         .git_branch_comparison_diff(checkout_id, range, expected, path)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_review_comments(
+    store: State<'_, Store>,
+    checkout_id: String,
+    surface: GitReviewCommentSurface,
+    path: Option<String>,
+) -> Result<Vec<GitReviewComment>, String> {
+    store
+        .git_review_comments(checkout_id, surface, path)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_add_review_comment(
+    store: State<'_, Store>,
+    checkout_id: String,
+    request: GitReviewCommentRequest,
+) -> Result<GitReviewComment, String> {
+    store
+        .git_add_review_comment(checkout_id, request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_set_review_comment_resolved(
+    store: State<'_, Store>,
+    checkout_id: String,
+    comment_id: String,
+    resolved: bool,
+) -> Result<(), String> {
+    store
+        .git_set_review_comment_resolved(checkout_id, comment_id, resolved)
         .await
         .map_err(review_error)
 }

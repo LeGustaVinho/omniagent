@@ -28,6 +28,149 @@ fn commit_fixture(root: &Path, message: &str) -> Result<String> {
 }
 
 #[tokio::test]
+async fn persists_reviewed_line_ranges_and_rejects_stale_or_cross_checkout_anchors() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("comment-repo");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let path = "example.txt";
+    fs::write(root.join(path), "original\nbase second\n")?;
+    commit_fixture(&root, "Base")?;
+    let raw = "first\r\nsecond α\r\nthird β\rfourth\n";
+    fs::write(root.join(path), raw)?;
+
+    let database = temporary.path().join("review.sqlite");
+    let store = Store::open(database.clone())?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let scope = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?
+        .comment_scope
+        .context("commentable working comparison")?;
+    let request = |side: &str, start: u64, end: u64| {
+        serde_json::from_value::<GitReviewCommentRequest>(serde_json::json!({
+            "path": path, "source": &scope.source, "snapshot": &scope.snapshot, "side": side,
+            "startLine": start, "endLine": end, "body": "Explain the original behavior",
+        }))
+    };
+    let comment = serde_json::to_value(
+        store
+            .git_add_review_comment(checkout.clone(), request("modified", 2, 4)?)
+            .await?,
+    )?;
+    assert_eq!(comment["excerpt"], "second α\r\nthird β\rfourth\n");
+    assert_eq!(comment["scope"]["snapshot"], scope.snapshot);
+    let id = comment["id"]
+        .as_str()
+        .context("stored review comment ID")?
+        .to_owned();
+    assert!(
+        store
+            .git_add_review_comment(checkout.clone(), request("modified", 5, 5)?)
+            .await
+            .is_err()
+    );
+    let original = serde_json::to_value(
+        store
+            .git_add_review_comment(checkout.clone(), request("original", 2, 2)?)
+            .await?,
+    )?;
+    assert_eq!(original["excerpt"], "base second\n");
+
+    let worktree = temporary.path().join("linked");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            &worktree.to_string_lossy(),
+        ],
+    )?;
+    fs::write(worktree.join(path), raw)?;
+    let linked = register(&store, worktree).await?.checkout_id;
+    assert_ne!(linked, checkout);
+    assert!(
+        store
+            .git_add_review_comment(linked.clone(), request("modified", 2, 4)?)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .git_set_review_comment_resolved(linked.clone(), id.clone(), true)
+            .await
+            .is_err()
+    );
+    let payload_is_protected = store
+        .execute(|db| {
+            Ok(db.query_row(
+                "SELECT count(*) = 0 FROM git_review_comments
+         WHERE instr(payload, CAST('Explain the original behavior' AS BLOB)) > 0",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .await?;
+    assert!(payload_is_protected);
+    drop(store);
+
+    let store = Store::open(database)?;
+    fs::write(
+        root.join(path),
+        raw.replace("second α", "different contents"),
+    )?;
+    assert!(
+        store
+            .git_add_review_comment(checkout.clone(), request("modified", 2, 4)?)
+            .await
+            .is_err()
+    );
+    let revised = store
+        .git_checkout_diff(checkout.clone(), path.into(), GitDiffSource::Working)
+        .await?
+        .comment_scope
+        .context("updated worktree comparator")?;
+    assert_ne!(scope.snapshot, revised.snapshot);
+    store
+        .git_set_review_comment_resolved(checkout.clone(), id.clone(), true)
+        .await?;
+    let saved = serde_json::to_value(
+        store
+            .git_review_comments(
+                checkout.clone(),
+                GitReviewCommentSurface::Working,
+                Some(path.into()),
+            )
+            .await?,
+    )?;
+    let retained = saved
+        .as_array()
+        .context("persisted comments")?
+        .iter()
+        .find(|entry| entry["id"] == id)
+        .context("retained review comment")?;
+    assert_eq!(retained["excerpt"], comment["excerpt"]);
+    assert_eq!(retained["scope"], comment["scope"]);
+    assert_eq!(retained["resolved"], true);
+    assert!(
+        store
+            .git_review_comments(linked, GitReviewCommentSurface::Working, None)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        store
+            .git_review_comments(checkout, GitReviewCommentSurface::Staged, None)
+            .await?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn follows_file_renames_and_keeps_disk_index_and_commits_distinct() -> Result<()> {
     let temporary = tempfile::tempdir()?;
     let root = temporary.path().join("file-history");
@@ -336,7 +479,41 @@ async fn compares_pinned_branch_versions_without_reading_dirty_worktree_content(
             content: "committed topic text\n".into()
         }
     );
+    let scope = diff
+        .comment_scope
+        .context("commentable branch comparison")?;
+    let request = || {
+        serde_json::from_value::<GitReviewCommentRequest>(serde_json::json!({
+            "path": "README.md", "source": &scope.source, "snapshot": &scope.snapshot,
+            "side": "modified", "startLine": 1, "endLine": 1, "body": "Check this committed wording",
+        }))
+    };
+    let comment = serde_json::to_value(
+        store
+            .git_add_review_comment(checkout.clone(), request()?)
+            .await?,
+    )?;
+    assert_eq!(comment["excerpt"], "committed topic text\n");
+    assert_eq!(comment["scope"]["source"]["revisions"]["base"], base);
+    assert_eq!(comment["scope"]["source"]["revisions"]["head"], feature);
+    assert_eq!(
+        comment["scope"]["source"]["revisions"]["mergeBase"],
+        ancestor
+    );
     git(&root, &["update-ref", "refs/heads/topic", &base, &feature])?;
+    assert!(
+        store
+            .git_add_review_comment(checkout.clone(), request()?)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .git_review_comments(checkout.clone(), GitReviewCommentSurface::Branch, None)
+            .await?
+            .len(),
+        1
+    );
     let stale = store
         .git_branch_comparison_diff(checkout, range(), expected(), "README.md".into())
         .await;

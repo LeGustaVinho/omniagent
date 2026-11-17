@@ -75,6 +75,7 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
           select={(id) => { setCreating(false); setCheckout(id); }} close={() => setCreating(false)} />}
         {tab === "History" && (historyPath ? <GitFileHistoryView key={JSON.stringify([checkoutId, historyPath])} review={review.data} path={historyPath}
           openFile={activeCheckout ? () => openWorkspaceFile(props.openWorkspace, historyPath) : undefined}
+          openConversation={activeCheckout ? (id) => props.openWorkspace("conversations", id) : undefined}
           clear={() => setHistoryPath(undefined)} /> : <CommitHistory key={checkoutId} review={review.data} />)}
       </>}
     </>}

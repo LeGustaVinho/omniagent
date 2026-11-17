@@ -49,7 +49,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
   }
 
   function startContextText(selection: ContextText, instruction?: string) {
-    if (simulated || !selection.text.trim()) return;
+    if (simulated || (!selection.text.trim() && !(selection.text && instruction?.trim()))) return;
     setTargets(undefined);
     setExcerpt({ selection, instruction });
     setDestination(instruction ? newConversation : "");

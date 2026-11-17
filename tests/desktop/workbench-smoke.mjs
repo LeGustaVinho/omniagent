@@ -1906,6 +1906,59 @@ test("compares committed branches and registers a manual worktree in the real Gi
   }
 });
 
+test("keeps a line review comment bound to its saved Git snapshot", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Inline review checkout");
+  const path = "sample.rs";
+  const commentText = "Check this exact review revision";
+  git(scratch, "init", "-q", "-b", "main", repo);
+  git(repo, "config", "core.autocrlf", "false");
+  await writeFile(join(repo, path), "fn original() {}\n");
+  git(repo, "add", path);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Review base");
+  await writeFile(join(repo, path), "fn revised() {}\n");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    await click(browser, '.work-rail button[aria-label="Git"]');
+    const gitView = browser.$('[aria-label="Git workspace"]');
+    await click(gitView, "button=Review hunks");
+    const editedLine = gitView.$('.//*[@aria-label="Git hunks"]//span[normalize-space(.)="+fn revised() {}"]');
+    await editedLine.waitForDisplayed();
+    await editedLine.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Add review comment on revised line…"]');
+    const dialog = browser.$('[role="dialog"].file-dialog');
+    await dialog.waitForDisplayed();
+    await dialog.$("textarea").setValue(commentText);
+    await click(dialog, "button=Save comment");
+    const saved = gitView.$('[data-review-comment]');
+    await saved.waitForDisplayed();
+    assert.match(await saved.getText(), /sample\.rs:1 · Revised/);
+    assert.match(await saved.getText(), /Current comparison/);
+    assert.ok((await saved.getText()).includes(commentText));
+
+    await writeFile(join(repo, path), "fn latest() {}\n");
+    await browser.refresh();
+    await click(browser, '.work-rail button[aria-label="Git"]');
+    const reloaded = browser.$('[aria-label="Git workspace"]');
+    await click(reloaded, "summary*=Review comments");
+    const persisted = reloaded.$('[data-review-comment]');
+    await persisted.waitForDisplayed();
+    assert.match(await persisted.getText(), /Saved snapshot/);
+    assert.ok((await persisted.getText()).includes(commentText));
+    await click(persisted, "summary=Reviewed text and revision");
+    assert.equal(await persisted.$("pre").getText(), "fn revised() {}");
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
 test("opens Git and local file history and recycles only the clicked checkout file", { timeout: 90_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Explorer context checkout");

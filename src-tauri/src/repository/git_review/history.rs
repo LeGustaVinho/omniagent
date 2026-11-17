@@ -5,7 +5,9 @@ use crate::store::Store;
 
 use super::{
     GitFileSide, GitReviewRevision, IsolatedGit, LiveReview, ReviewScope, base_commit,
-    branch_reference, content, inspect, validate_oid, validate_path,
+    branch_reference,
+    comments::{GitReviewCommentScope, GitReviewCommentSource},
+    content, inspect, validate_oid, validate_path,
 };
 
 #[derive(Debug, Serialize)]
@@ -29,7 +31,7 @@ pub struct GitFileHistoryEntry {
     pub status: char,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GitFileVersion {
     Head,
@@ -38,11 +40,22 @@ pub enum GitFileVersion {
     Commit { sha: String, path: String },
 }
 
+impl GitFileVersion {
+    fn path<'a>(&'a self, fallback: &'a str) -> &'a str {
+        match self {
+            Self::Commit { path, .. } => path,
+            _ => fallback,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitFileVersionComparison {
     pub revision: GitReviewRevision,
     pub original: GitFileSide,
     pub modified: GitFileSide,
+    pub comment_scope: Option<GitReviewCommentScope>,
 }
 
 impl Store {
@@ -74,16 +87,36 @@ impl Store {
         let scope = self.git_review_scope(checkout).await?;
         tokio::task::spawn_blocking(move || {
             let review = LiveReview::open(&scope)?;
-            let original = match base {
+            let original = match base.as_ref() {
                 Some(version) => read_version(&review, &path, version)?,
                 None => GitFileSide::Missing,
             };
-            let modified = read_version(&review, &path, revised)?;
+            let modified = read_version(&review, &path, &revised)?;
             review.verify()?;
+            let uses_live_revision = base
+                .as_ref()
+                .is_some_and(|version| !matches!(version, GitFileVersion::Commit { .. }))
+                || !matches!(revised, GitFileVersion::Commit { .. });
+            let original_path = base
+                .as_ref()
+                .map_or(path.as_str(), |version| version.path(&path));
+            let modified_path = revised.path(&path);
+            let comment_scope = GitReviewCommentScope::from_comparison(
+                &scope.id,
+                &path,
+                GitReviewCommentSource::Versions {
+                    base: base.clone(),
+                    revised: revised.clone(),
+                    revision: uses_live_revision.then(|| review.revision.clone()),
+                },
+                (original_path, &original),
+                (modified_path, &modified),
+            )?;
             Ok(GitFileVersionComparison {
                 revision: review.revision,
                 original,
                 modified,
+                comment_scope,
             })
         })
         .await?
@@ -219,16 +252,16 @@ fn parse_history(output: &str) -> Result<Vec<GitFileHistoryEntry>> {
     Ok(entries)
 }
 
-fn read_version(review: &LiveReview, path: &str, version: GitFileVersion) -> Result<GitFileSide> {
+fn read_version(review: &LiveReview, path: &str, version: &GitFileVersion) -> Result<GitFileSide> {
     match version {
         GitFileVersion::Head => content::read_head(review, path),
         GitFileVersion::Index => content::read_index(review, path),
         GitFileVersion::Worktree => content::read_worktree(&review.root, path),
         GitFileVersion::Commit { sha, path } => {
-            validate_oid(&sha)?;
-            validate_path(&path)?;
-            require_commit(&review.view, &sha)?;
-            content::read_tree(&review.view, &sha, &path)
+            validate_oid(sha)?;
+            validate_path(path)?;
+            require_commit(&review.view, sha)?;
+            content::read_tree(&review.view, sha, path)
         }
     }
 }
