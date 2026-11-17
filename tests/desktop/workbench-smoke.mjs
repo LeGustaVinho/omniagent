@@ -569,7 +569,7 @@ function runRows(browser, runId) {
     const timeline = Array.from(document.querySelectorAll('ol[aria-label="Run events"]')).find(
       (list) => list.closest("section")?.querySelector("h1")?.textContent === "Run " + prefix,
     );
-    return timeline ? Array.from(timeline.children, (row) => row.lastElementChild.textContent) : [];
+    return timeline ? Array.from(timeline.children, (row) => row.querySelector("span + span")?.textContent) : [];
   }, runId.slice(0, 8));
 }
 
@@ -1931,8 +1931,7 @@ test("opens file history with the keyboard and recycles only the clicked checkou
     await retainedRow.waitForDisplayed();
     await browser.execute((name) => document.querySelector(`[aria-label="IDE workspace"] button[title="${CSS.escape(name)}"]`).focus(), retained);
     await browser.keys([Key.Shift, Key.F10]);
-    const menu = browser.$('[role="menu"].context-actions-menu');
-    await click(menu, './/*[@role="menuitem"][normalize-space(.)="Show file history"]');
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Show file history"]');
     const history = browser.$('[aria-label="File history"]');
     await history.$("button*=Retained file revision").waitForDisplayed();
 
@@ -1940,7 +1939,7 @@ test("opens file history with the keyboard and recycles only the clicked checkou
     const root = ide.$("button=Checkout root");
     await root.waitForDisplayed();
     await root.click({ button: "right" });
-    const templates = menu.$('.//*[@role="menuitem"][normalize-space(.)="New from template"]');
+    const templates = browser.$('//*[@role="menuitem"][normalize-space(.)="New from template"]');
     await templates.waitForDisplayed();
     await templates.moveTo();
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Markdown note"]');
@@ -1955,7 +1954,7 @@ test("opens file history with the keyboard and recycles only the clicked checkou
     const disposableRow = ide.$(`button[title="${removed}"]`);
     await disposableRow.waitForDisplayed();
     await disposableRow.click({ button: "right" });
-    await click(menu, './/*[@role="menuitem"][normalize-space(.)="Move to Recycle Bin…"]');
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Move to Recycle Bin…"]');
     const confirmation = browser.$('[role="dialog"].file-dialog');
     await confirmation.waitForDisplayed();
     assert.ok((await confirmation.getText()).includes(removed));
