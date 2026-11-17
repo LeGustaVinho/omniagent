@@ -46,7 +46,7 @@ it("previews only the clicked hunk or inactive file and applies the confirmed sn
   expect(invoke).not.toHaveBeenCalledWith("git_discard_changes", expect.anything());
   await user.click(discard.getByRole("button", { name: "Cancel" }));
 
-  fireEvent.contextMenu(within(screen.getByRole("region", { name: "Changed files" })).getByRole("button", { name: /deleted\.txt\s*Deleted/ }));
+  fireEvent.contextMenu(within(screen.getByRole("region", { name: "Changed files" })).getByRole("button", { name: `${clicked} · Deleted` }));
   await user.click(await screen.findByRole("menuitem", { name: "Restore deleted file…" }));
   const restore = within(await screen.findByRole("dialog", { name: "Restore deleted file" }));
   expect(invoke).toHaveBeenCalledWith("git_discard_preview", { checkoutId, path: clicked, hunkId: null });

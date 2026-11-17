@@ -77,13 +77,15 @@ it("renders the selected PDF page to a bounded canvas with labeled navigation", 
   });
   const getViewport = vi.fn(({ scale }: { scale: number }) => ({ width: 2_800 * scale, height: 1_400 * scale }));
   const renderPage = vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() }));
-  const getPage = vi.fn(async () => ({ getViewport, render: renderPage }));
+  const getTextContent = vi.fn(async () => ({ items: [{ str: "Release checklist", hasEOL: true }] }));
+  const getPage = vi.fn(async () => ({ getViewport, render: renderPage, getTextContent }));
   const destroy = vi.fn(async () => undefined);
   pdf.getDocument.mockImplementation(() => ({ promise: Promise.resolve({ numPages: 2, getPage }), destroy }));
 
   const { unmount } = showAttachment([path], title);
   const canvas = await screen.findByLabelText<HTMLCanvasElement>(`${title} page 1`);
   await waitFor(() => expect(canvas.hidden).toBe(false));
+  expect(getTextContent).toHaveBeenCalledTimes(1);
   expect(pdf.GlobalWorkerOptions.workerSrc).toContain("pdf.worker.min.mjs");
   const parameters = pdf.getDocument.mock.lastCall?.[0];
   expect(parameters).toMatchObject({ enableXfa: false, useSystemFonts: true });
