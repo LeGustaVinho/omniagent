@@ -109,6 +109,20 @@ pub async fn git_file_permalink(
 }
 
 #[tauri::command]
+pub async fn git_checkout_line_blame(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+    line: usize,
+    editor_text: String,
+) -> Result<omniagent::repository::git_review::GitLineBlame, String> {
+    store
+        .git_checkout_line_blame(checkout_id, path, line, editor_text)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn git_checkout_diff(
     store: State<'_, Store>,
     checkout_id: String,

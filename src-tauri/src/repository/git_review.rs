@@ -23,6 +23,7 @@ use super::{
     verify_checkout, with_managed_worktree_writer,
 };
 
+mod blame;
 mod comments;
 mod commit;
 mod comparison;
@@ -32,6 +33,7 @@ mod discard;
 mod history;
 mod hunks;
 mod permalink;
+pub use blame::GitLineBlame;
 pub use comments::{GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface};
 pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
 pub use conflicts::{GitConflictProposal, GitConflictReview};

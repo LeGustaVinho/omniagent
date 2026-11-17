@@ -504,7 +504,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                       onQuickFixShown={finishQuickFix} onSettings={reportEditorSettings}
                       onCopy={menu.copy} onExcerpt={simulated ? undefined : conversationActions.startExcerpt}
                       onOmniAgentLink={simulated ? undefined : menu.copyOmniAgentLink}
-                      onPermalink={simulated ? undefined : menu.copyPermalink} />
+                      onPermalink={simulated ? undefined : menu.copyPermalink} blameCheckoutId={simulated ? undefined : checkout.checkoutId} />
                   </Suspense>
                 </div>
               );
