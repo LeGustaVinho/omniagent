@@ -24,7 +24,6 @@ import { useWorkspaceSize } from "@/workbench-panel";
 import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
 import { SourceFormatDialog } from "@/source-format-dialog";
 import type { SourceFormatChange } from "@/source-file-format";
-import { IdeProblems, problemReference, type FileProblem } from "@/ide-problems";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const Editor = lazy(() => import("@/ide-code-editor").then(({ CodeEditor }) => ({ default: CodeEditor })));

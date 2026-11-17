@@ -213,14 +213,6 @@ it("previews an exact checkout file format and saves only after confirming the r
   expect((screen.getByRole("textbox", { name: editorLabel }) as HTMLTextAreaElement).value).toBe(source);
 });
 
-const views = () => screen.getAllByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
-const closeButtons = () => screen.getAllByRole("button", { name: "Close review.rs" });
-
-function render(element: ReactElement) {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return renderElement(element, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
-}
-
 it("uses the clicked row for the Explorer, even with another source file active", async () => {
   fixture();
   render(<IdeWorkspace {...propsFor(alternate)} />);
