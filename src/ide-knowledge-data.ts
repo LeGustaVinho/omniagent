@@ -169,12 +169,12 @@ export interface FileSearchResult {
   lineText?: string | null;
 }
 
-export function findFileText(files: readonly ExampleFile[], query: string, content: boolean): FileSearchResult[] {
-  const term = query.trim().toLowerCase();
+export function findFileText(files: readonly ExampleFile[], query: string, content: boolean, literalContent = false): FileSearchResult[] {
+  const term = (literalContent ? query : query.trim()).toLowerCase();
   if (!term) return [];
   const output: FileSearchResult[] = [];
   for (const file of files) {
-    if (file.path.toLowerCase().includes(term)) output.push({ path: file.path, line: 1, excerpt: file.path });
+    if (!literalContent && file.path.toLowerCase().includes(term)) output.push({ path: file.path, line: 1, excerpt: file.path });
     if (!content) continue;
     for (const [index, line] of file.content.split("\n").entries()) {
       const position = line.toLowerCase().indexOf(term);

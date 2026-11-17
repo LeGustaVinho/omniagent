@@ -7,7 +7,7 @@ import {
   FileCaption, FileDialog, FileDock, FileSidebar, FileTree, FileUnavailable,
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
-import { ExampleFileSearch, matchReference, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget, type FileSearchScope } from "@/ide-file-search";
+import { ExampleFileSearch, matchReference, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget, type EditorSearchRequest, type FileSearchScope } from "@/ide-file-search";
 import { noteWindowTarget } from "@/file-editor-popout";
 import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { useCheckoutFilePreview } from "@/checkout-file-preview";
@@ -65,6 +65,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const [searchScope, setSearchScope] = useState<FileSearchScope | undefined>(() => requestedFolder ? { kind: "folder", path: requestedFolder } : undefined);
   const [reveal, setReveal] = useState<{ path: string }>();
   const [query, setQuery] = useState("");
+  const [editorSearch, setEditorSearch] = useState<EditorSearchRequest>();
   const [examples, setExamples] = useState(() => newBuffers(simulated, simulation?.scenario === "recovery"));
   const files: Record<string, NoteBuffer> = simulated ? examples : source.files;
   const [jumps, setJumps] = useState<Record<string, { line: number; column?: number; token: number }>>({});
@@ -98,7 +99,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     ...(simulated ? exampleNotes : []),
   ];
   const results = findFileText(filesForSearch.filter(({ path }) => !searchScope || (searchScope.kind === "file"
-    ? path === searchScope.path : path.startsWith(`${searchScope.path}/`))), query, true);
+    ? path === searchScope.path : path.startsWith(`${searchScope.path}/`))), query, true, Boolean(editorSearch));
   const paths = simulated ? filesForSearch.map(({ path }) => path)
     : [...new Set([...source.catalog, ...source.draftPaths, ...Object.keys(source.files)])];
   const markerEntries = Object.entries(markers).flatMap(([path, items]) => items.map((item) => ({ path, ...item })));
@@ -376,6 +377,11 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     setSearchScope(path ? { kind: "folder", path } : undefined);
     setNavigator("search");
   };
+  const searchEditorText = (text: string) => {
+    searchInFolder("");
+    if (simulated) setQuery(text);
+    setEditorSearch((previous) => ({ checkoutId: checkout.checkoutId, text, sequence: (previous?.sequence ?? 0) + 1 }));
+  };
   const searchScopeActions = (path: string) => {
     const folder = containingFolder(path);
     return [
@@ -446,9 +452,10 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
         </div>
         <div className="file-sidebar-scroll">
           {navigator === "search" ? (simulated
-            ? <ExampleFileSearch query={query} setQuery={setQuery} results={results} onOpen={openSearchMatch} actions={searchActions}
+            ? <ExampleFileSearch query={query} setQuery={(text) => { setEditorSearch(undefined); setQuery(text); }} results={results}
+              onOpen={openSearchMatch} actions={searchActions} literalContent={Boolean(editorSearch)}
               fileActions={searchFileActions} scope={searchScope} onClear={() => setSearchScope(undefined)} />
-            : <ProjectFileSearch checkoutId={checkout.checkoutId} scope={searchScope} onOpen={openSearchMatch} actions={searchActions}
+            : <ProjectFileSearch checkoutId={checkout.checkoutId} scope={searchScope} editorSearch={editorSearch} onOpen={openSearchMatch} actions={searchActions}
               fileActions={searchFileActions} onClear={() => setSearchScope(undefined)} />)
             : <><p className="file-sidebar-note" title={simulated ? undefined : checkout.checkoutRoot}>
               {simulated ? "EXAMPLE WORKTREE" : fileName(checkout.checkoutRoot.replaceAll("\\", "/"))}</p>
@@ -518,7 +525,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                     <Editor scope={scope} path={path} content={entry.content} models={models} update={update} problems={report} jump={jumps[path]}
                       quickFix={quickFix?.panelId === panelId && dock.api?.activePanel?.id === panelId ? quickFix : undefined}
                       onQuickFixShown={finishQuickFix} onSettings={reportEditorSettings}
-                      onCopy={menu.copy} onExcerpt={simulated ? undefined : conversationActions.startExcerpt}
+                      onCopy={menu.copy} onSearchText={searchEditorText} onExcerpt={simulated ? undefined : conversationActions.startExcerpt}
                       onOmniAgentLink={simulated ? undefined : menu.copyOmniAgentLink}
                       onPermalink={simulated ? undefined : menu.copyPermalink} blameCheckoutId={simulated ? undefined : checkout.checkoutId} />
                   </Suspense>
