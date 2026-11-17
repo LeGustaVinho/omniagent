@@ -767,23 +767,23 @@ async function verifyPendingInstructions(browser, application, scratch) {
       await clickConversation(browser, title);
       return browser.$(`section[aria-label="${title}"]`);
     };
-    const panel = await open();
-    await panel.$("button=Stop").waitForDisplayed();
+    const initialPanel = await open();
+    await initialPanel.$("button=Stop").waitForDisplayed();
     await browser.waitUntil(() => access(join(repo, "desktop-slot-1")).then(() => true, () => false),
       { timeout: 30_000, timeoutMsg: "The active turn did not reach the CLI" });
-    await panel.$(".model-picker-trigger").click();
+    await initialPanel.$(".model-picker-trigger").click();
     await click(browser, `.model-picker-menu [role="menuitemradio"][aria-label="${fixture.option.name}"]`);
     const pending = () => invoke(browser, "pending_conversation_instructions", scope);
-    const instruction = (text) => panel.$(`.//li[p[text()="${text}"]]`);
-    const draft = panel.$("textarea[id^=draft-]");
+    const instruction = (panel, text) => panel.$(`.//li[p[text()="${text}"]]`);
+    const draft = initialPanel.$("textarea[id^=draft-]");
     const obsolete = "Replace this queued instruction";
     const removed = "Remove this queued instruction";
     for (const text of [obsolete, removed]) {
       await draft.setValue(text);
-      const queue = panel.$("button=Queue for next turn");
+      const queue = initialPanel.$("button=Queue for next turn");
       await queue.waitForEnabled();
       await queue.click();
-      await instruction(text).waitForDisplayed();
+      await instruction(initialPanel, text).waitForDisplayed();
       await draft.waitForEnabled();
     }
     const original = await pending();
@@ -793,20 +793,43 @@ async function verifyPendingInstructions(browser, application, scratch) {
 
     await browser.refresh();
     await waitForRuntime(browser);
-    await open();
+    const panel = await open();
     assert.deepEqual((await pending()).map(({ id, contextId }) => [id, contextId]),
       original.map(({ id, contextId }) => [id, contextId]));
-    await instruction(obsolete).$("button=Edit instruction").click();
+    await click(instruction(panel, obsolete), "button=Edit instruction");
     const edited = "Run the revised queued instruction";
-    await panel.$('textarea[aria-label="Pending instruction text"]').setValue(edited);
-    await panel.$("button=Save instruction").click();
-    await instruction(edited).waitForDisplayed();
-    await instruction(removed).$("button=Remove instruction").click();
-    await instruction(removed).waitForExist({ reverse: true });
-    const [updated] = await pending();
+    const editField = panel.$('textarea[aria-label="Pending instruction text"]');
+    await editField.waitForEnabled();
+    await editField.setValue(edited);
+    assert.equal(await editField.getValue(), edited);
+    await click(panel, "button=Save instruction");
+
+    const first = original[0];
+    let observed;
+    await browser.waitUntil(async () => {
+      observed = (await pending()).find(({ id }) => id === first.id);
+      return observed?.text === edited && observed.revisionId !== first.revisionId;
+    }, { timeout: 15_000, timeoutMsg: "Saving from the editor did not persist the revised queued instruction" }).catch(async (cause) => {
+      const alerts = await browser.execute(() => Array.from(
+        document.querySelectorAll('section[aria-label="Edit pending instructions"] [role="alert"]'),
+        (alert) => alert.textContent,
+      )).catch(() => []);
+      const state = observed && { revisionId: observed.revisionId, text: observed.text, editable: observed.editable, delivery: observed.delivery };
+      throw new Error(`Queued instruction persistence was not confirmed (${JSON.stringify({ state: state ?? null, alerts })})`, { cause });
+    });
+    assert.equal(observed.contextId, first.contextId);
+    await instruction(panel, edited).waitForDisplayed({
+      timeout: 10_000, timeoutMsg: `The persisted revision ${observed.revisionId} did not appear in the pending instructions panel`,
+    });
+
+    await click(instruction(panel, removed), "button=Remove instruction");
+    await instruction(panel, removed).waitForExist({ reverse: true });
+    const [updated, ...remaining] = await pending();
     assert.equal(updated.id, original[0].id);
     assert.notEqual(updated.revisionId, original[0].revisionId);
     assert.equal(updated.contextId, original[0].contextId);
+    assert.equal(updated.revisionId, observed.revisionId);
+    assert.deepEqual(remaining, []);
     await writeFile(release, "");
     await panel.$("p=The revised instruction ran.").waitForDisplayed({ timeout: 30_000 });
     assert.equal(await readFile(join(repo, "queued-instruction-dispatched"), "utf8"), edited);
