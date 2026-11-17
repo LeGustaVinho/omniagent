@@ -22,6 +22,9 @@ use crate::repository::{
     documents::replace_reviewed_checkout_bytes,
 };
 
+mod untracked;
+use untracked::ReviewedRecycle;
+
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 
@@ -29,8 +32,14 @@ const MAX_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 #[serde(tag = "status", rename_all = "snake_case")]
 enum PreviewFile {
     Missing,
-    Text { content: String },
-    Bytes { size: usize, sha256: String, reason: &'static str },
+    Text {
+        content: String,
+    },
+    Bytes {
+        size: u64,
+        sha256: String,
+        reason: &'static str,
+    },
 }
 
 impl PreviewFile {
@@ -51,7 +60,7 @@ impl PreviewFile {
             "The file exceeds the text preview limit."
         };
         Self::Bytes {
-            size: bytes.len(),
+            size: bytes.len() as u64,
             sha256: digest(bytes),
             reason,
         }
@@ -75,19 +84,32 @@ impl Store {
         path: String,
         hunk_id: Option<String>,
     ) -> Result<GitDiscardPreview> {
+        self.review_discard(checkout, path, DiscardSelection::Tracked(hunk_id))
+            .await
+    }
+
+    pub async fn git_recycle_untracked_preview(
+        &self,
+        checkout: String,
+        path: String,
+    ) -> Result<GitDiscardPreview> {
+        self.review_discard(checkout, path, DiscardSelection::Untracked)
+            .await
+    }
+
+    async fn review_discard(
+        &self,
+        checkout: String,
+        path: String,
+        selection: DiscardSelection,
+    ) -> Result<GitDiscardPreview> {
         verify_discard_path(&path)?;
         let scope = self.git_review_scope(checkout).await?;
         tokio::task::spawn_blocking(move || {
             let review = LiveReview::open(&scope)?;
-            let prepared = prepare(&scope, &review, &path, hunk_id.as_deref())?;
+            let prepared = selection.prepare(&scope, &review, &path)?;
             review.verify()?;
-            Ok(GitDiscardPreview {
-                path,
-                snapshot: prepared.snapshot,
-                hunk: prepared.hunk,
-                before: PreviewFile::from_bytes(prepared.before.as_deref()),
-                after: PreviewFile::from_bytes(Some(&prepared.after)),
-            })
+            Ok(prepared.into_preview(path))
         })
         .await?
     }
@@ -97,6 +119,27 @@ impl Store {
         checkout: String,
         path: String,
         hunk_id: Option<String>,
+        snapshot: String,
+    ) -> Result<()> {
+        self.apply_discard(checkout, path, DiscardSelection::Tracked(hunk_id), snapshot)
+            .await
+    }
+
+    pub async fn git_recycle_untracked(
+        &self,
+        checkout: String,
+        path: String,
+        snapshot: String,
+    ) -> Result<()> {
+        self.apply_discard(checkout, path, DiscardSelection::Untracked, snapshot)
+            .await
+    }
+
+    async fn apply_discard(
+        &self,
+        checkout: String,
+        path: String,
+        selection: DiscardSelection,
         snapshot: String,
     ) -> Result<()> {
         verify_discard_path(&path)?;
@@ -115,9 +158,9 @@ impl Store {
             let _index_lock =
                 lock_git_file(&git_dir.join("index.lock")).context("lock the worktree index")?;
             review.verify()?;
-            let prepared = prepare(&scope, &review, &path, hunk_id.as_deref())?;
+            let prepared = selection.prepare(&scope, &review, &path)?;
             ensure!(
-                prepared.snapshot == snapshot,
+                prepared.snapshot() == snapshot,
                 "the reviewed Git changes no longer match; review them again"
             );
             runtime.block_on(store.execute(move |db| {
@@ -135,6 +178,69 @@ impl Store {
                 with_managed_worktree_writer(self, project, checkout, owner, move |_| write()).await
             }
             None => tokio::task::spawn_blocking(write).await?,
+        }
+    }
+}
+
+enum DiscardSelection {
+    Tracked(Option<String>),
+    Untracked,
+}
+
+enum ReviewedDiscard {
+    Tracked(PreparedDiscard),
+    Untracked(ReviewedRecycle),
+}
+
+impl DiscardSelection {
+    fn prepare(
+        self,
+        scope: &ReviewScope,
+        review: &LiveReview,
+        path: &str,
+    ) -> Result<ReviewedDiscard> {
+        match self {
+            Self::Tracked(hunk_id) => {
+                prepare(scope, review, path, hunk_id.as_deref()).map(ReviewedDiscard::Tracked)
+            }
+            Self::Untracked => {
+                ReviewedRecycle::prepare(scope, review, path).map(ReviewedDiscard::Untracked)
+            }
+        }
+    }
+}
+
+impl ReviewedDiscard {
+    fn snapshot(&self) -> &str {
+        match self {
+            Self::Tracked(review) => &review.snapshot,
+            Self::Untracked(review) => &review.snapshot,
+        }
+    }
+
+    fn into_preview(self, path: String) -> GitDiscardPreview {
+        match self {
+            Self::Tracked(review) => GitDiscardPreview {
+                path,
+                snapshot: review.snapshot,
+                hunk: review.hunk,
+                before: PreviewFile::from_bytes(review.before.as_deref()),
+                after: PreviewFile::from_bytes(Some(&review.after)),
+            },
+            Self::Untracked(review) => GitDiscardPreview {
+                path,
+                snapshot: review.snapshot,
+                hunk: None,
+                before: review.preview,
+                after: PreviewFile::Missing,
+            },
+        }
+    }
+
+    fn apply(self, root: &Path, relative: &str, review: &LiveReview) -> Result<()> {
+        match self {
+            Self::Tracked(prepared) => prepared.apply(root, relative, review),
+            Self::Untracked(prepared) => prepared.apply(relative, review),
         }
     }
 }

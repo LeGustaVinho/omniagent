@@ -416,6 +416,13 @@ fn copy_entry(source: &Path, destination: &Path, directory: bool) -> Result<()> 
 }
 
 fn recycle(path: &Path) -> Result<()> {
+    recycle_checked(path, || Ok(()))
+}
+
+pub(in crate::repository) fn recycle_checked(
+    path: &Path,
+    verify: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let _apartment = Apartment::initialize()?;
     let name = path
         .as_os_str()
@@ -434,6 +441,7 @@ fn recycle(path: &Path) -> Result<()> {
         )?;
         let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(name.as_ptr()), None)?;
         operation.DeleteItem(&item, None)?;
+        verify()?;
         operation.PerformOperations()?;
         ensure!(
             !operation.GetAnyOperationsAborted()?.as_bool(),

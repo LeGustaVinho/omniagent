@@ -21,11 +21,22 @@ pub async fn git_discard_preview(
     checkout_id: String,
     path: String,
     hunk_id: Option<String>,
+    untracked: Option<bool>,
 ) -> Result<omniagent::repository::git_review::GitDiscardPreview, String> {
-    store
-        .git_discard_preview(checkout_id, path, hunk_id)
-        .await
-        .map_err(review_error)
+    if untracked == Some(true) {
+        if hunk_id.is_some() {
+            return Err("Select the whole untracked file.".into());
+        }
+        store
+            .git_recycle_untracked_preview(checkout_id, path)
+            .await
+            .map_err(review_error)
+    } else {
+        store
+            .git_discard_preview(checkout_id, path, hunk_id)
+            .await
+            .map_err(review_error)
+    }
 }
 
 #[tauri::command]
@@ -35,11 +46,22 @@ pub async fn git_discard_changes(
     path: String,
     hunk_id: Option<String>,
     snapshot: String,
+    untracked: Option<bool>,
 ) -> Result<(), String> {
-    store
-        .git_discard_changes(checkout_id, path, hunk_id, snapshot)
-        .await
-        .map_err(review_error)
+    if untracked == Some(true) {
+        if hunk_id.is_some() {
+            return Err("Select the whole untracked file.".into());
+        }
+        store
+            .git_recycle_untracked(checkout_id, path, snapshot)
+            .await
+            .map_err(review_error)
+    } else {
+        store
+            .git_discard_changes(checkout_id, path, hunk_id, snapshot)
+            .await
+            .map_err(review_error)
+    }
 }
 
 #[tauri::command]

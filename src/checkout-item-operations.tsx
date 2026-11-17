@@ -18,6 +18,11 @@ type ItemChange = { origin: symbol; checkoutId: string; operation: Operation; co
 const useFileClipboard = create<{ value?: Clipboard }>(() => ({}));
 const itemsChangedEvent = "omniagent:checkout-items-changed";
 
+export function publishCheckoutItemChanges(checkoutId: string, operation: Operation, completed: ItemEdit[], origin = Symbol()) {
+  if (operation !== "copy") reconcileFavoriteItems(checkoutId, (path) => changedItemPath(path, completed));
+  window.dispatchEvent(new CustomEvent<ItemChange>(itemsChangedEvent, { detail: { origin, checkoutId, operation, completed } }));
+}
+
 export function itemIncludesPath(item: { path: string; kind: "file" | "folder" }, path: string) {
   const original = item.path.toLowerCase();
   const relative = path.toLowerCase();
@@ -96,11 +101,8 @@ export function useCheckoutItemOperations({ checkoutId, simulated, folders, refr
 
   async function reflectChanges(operation: Operation, completed: ItemEdit[], verb: string) {
     if (!completed.length) return;
-    if (operation !== "copy") {
-      reconcileFavoriteItems(checkoutId, (path) => changedItemPath(path, completed));
-      onChanged(completed);
-    }
-    window.dispatchEvent(new CustomEvent<ItemChange>(itemsChangedEvent, { detail: { origin: origin.current, checkoutId, operation, completed } }));
+    if (operation !== "copy") onChanged(completed);
+    publishCheckoutItemChanges(checkoutId, operation, completed, origin.current);
     const count = completed.length;
     status(`${verb} ${count} ${count === 1 ? "item" : "items"}`);
     await refreshTree().catch((failure: unknown) => report(String(failure)));
