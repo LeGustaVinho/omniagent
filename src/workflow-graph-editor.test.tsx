@@ -86,6 +86,39 @@ it("opens actions for the clicked node, connection, and canvas independently", a
   expect(screen.getByTestId(edge)).toBeTruthy();
 });
 
+it("requires the reusable review's prompt and subject from the same evidence collector", () => {
+  const collector: WorkflowDefinition = {
+    kind: "collect_evidence", title: "Collect evidence", revision: 1, configuration: "none",
+    executor: "collect_evidence", effect: "none", inputs: [control("ready")],
+    outputs: [control("completed"), data("text", "rendered_text"), data("evidence", "evidence_set")],
+  };
+  const agent: WorkflowDefinition = {
+    kind: "agent", title: "Agent", revision: 2, configuration: "agent_role", executor: "read_only_agent",
+    effect: "invoke_model", inputs: [control("ready"), data("prompt", "rendered_text"),
+      data("comparison", "comparison_results"), data("review_subject", "evidence_set")], outputs: [control("completed")],
+  };
+  const definitions = { start, brief: collector, other: collector, agent };
+  const graph: WorkflowGraph = {
+    name: "Selective review",
+    nodes: [
+      { id: "start", kind: "start", configuration: { kind: "none" } },
+      { id: "brief", kind: "collect_evidence", configuration: { kind: "none" } },
+      { id: "other", kind: "collect_evidence", configuration: { kind: "none" } },
+      { id: "agent", kind: "agent", configuration: { kind: "agent_role", role: "reviewer", requirements: { reviewReuse: true } } },
+    ],
+    wires: [
+      wire("start", "start", "brief", "ready"), wire("start", "start", "other", "ready"),
+      wire("brief", "completed", "agent", "ready"), wire("brief", "text", "agent", "prompt"),
+    ],
+  };
+  const diagnostic = "agent review reuse requires prompt and review subject from the same Collect Evidence node.";
+  expect(graphProblems(graph, definitions)).toEqual([diagnostic]);
+  expect(graphProblems({ ...graph, wires: [...graph.wires, wire("other", "evidence", "agent", "review_subject")] },
+    definitions)).toEqual([diagnostic]);
+  expect(graphProblems({ ...graph, wires: [...graph.wires, wire("brief", "evidence", "agent", "review_subject")] },
+    definitions)).toEqual([]);
+});
+
 it("opens the real Library and searches the same definitions used by the Builder", async () => {
   const ipc = vi.mocked(invoke);
   ipc.mockImplementation(async (command) => {

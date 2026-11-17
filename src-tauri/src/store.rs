@@ -144,6 +144,19 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/127-workflow-github-source-sync.sql"),
     include_str!("../migrations/128-checkout-document-history.sql"),
     include_str!("../migrations/129-git-review-comments.sql"),
+    include_str!("../migrations/130-workflow-delivery-attempts.sql"),
+    include_str!("../migrations/131-workflow-agent-review-reuse.sql"),
+];
+// Branch snapshots used some numbers for different migrations. Table names identify the schema
+// already installed, regardless of the original number stored in user_version.
+const BRANCH_MIGRATIONS: &[(usize, &str)] = &[
+    (118, "workflow_automatic_runs"),
+    (119, "workflow_backlog_epics"),
+    (120, "workflow_backlog_executions"),
+    (128, "checkout_document_history"),
+    (129, "git_review_comments"),
+    (130, "workflow_delivery_attempts"),
+    (131, "workflow_agent_review_reuses"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;
@@ -328,15 +341,12 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
     if version as usize > MIGRATIONS.len() {
         bail!("SQLite schema {version} is newer than this build");
     }
-    if matches!(version, 118 | 119)
-        && target >= 128
-        && has_table(&tx, "checkout_document_history")?
-        && !has_table(&tx, "workflow_automatic_runs")?
-    {
-        // The context-menu branch used 118 and 119 before the pipeline migrations.
-        for (index, script) in MIGRATIONS.iter().enumerate().take(version as usize).skip(117) {
-            tx.execute_batch(script)
-                .with_context(|| format!("reconcile branch schema migration {}", index + 1))?;
+    if matches!(version, 118..=120 | 128..=129) && target >= 128 {
+        for &(number, table) in BRANCH_MIGRATIONS {
+            if number <= version as usize && !has_table(&tx, table)? {
+                tx.execute_batch(MIGRATIONS[number - 1])
+                    .with_context(|| format!("reconcile branch schema migration {number}"))?;
+            }
         }
     }
     for (index, script) in MIGRATIONS
@@ -345,10 +355,9 @@ fn migrate_through(db: &mut Connection, target: usize, check_references: bool) -
         .enumerate()
         .skip(version as usize)
     {
-        let already_applied = match index + 1 {
-            128 => has_table(&tx, "checkout_document_history")?,
-            129 => has_table(&tx, "git_review_comments")?,
-            _ => false,
+        let already_applied = match BRANCH_MIGRATIONS.iter().find(|(number, _)| *number == index + 1) {
+            Some((_, table)) => has_table(&tx, table)?,
+            None => false,
         };
         if !already_applied {
             tx.execute_batch(script)

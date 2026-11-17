@@ -35,6 +35,7 @@ pub(super) fn fix_failed_checks() -> WorkflowPackage {
             until: ConditionPredicate::CandidateChecksPassed,
             feedback: None,
             exports: Vec::new(),
+            delivery_attempt_budget: None,
         }),
     ));
     graph.wires.extend([

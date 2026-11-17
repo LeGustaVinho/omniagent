@@ -7,14 +7,14 @@ import { Button } from "@/components/ui/button";
 import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { ModelPicker } from "@/components/model-picker";
 import type { ModelSelection } from "@/bindings/ModelSelection";
-import { availableModelSelection, useLiveModelOptions } from "@/live-models";
+import { availableModelSelection, LIVE_MODEL_PROVIDERS, useLiveModelOptions } from "@/live-models";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { PackagePublicationPreview, WorkflowPackageGraphEditing, WorkflowPackageReview, usePackagePreview } from "@/workflow-package-review";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
 import { WorkflowExchangeDownload, WorkflowExchangePanel } from "@/workflow-exchange";
 import { WorkflowLaunchPicker } from "@/workflow-launch";
 import { WorkflowReusableDerivation, type ReusableBody, type ReusableReference } from "@/workflow-reusable";
-import type { WorkflowCanvasEdit, WorkflowGraph, WorkflowLayout } from "@/workflow-graph-model";
+import type { WorkflowCanvasEdit, WorkflowGraph, WorkflowLayout, WorkflowNodeConfiguration } from "@/workflow-graph-model";
 import "./pipeline-builder-landing.css";
 
 type Version = { kind: string; id: string; revision: string; destination: "project" | "library" };
@@ -62,6 +62,33 @@ function packageGraphs(text: string) {
     });
   } catch {
     return [];
+  }
+}
+
+function unconfiguredStageModels(text: string) {
+  try {
+    const draft = JSON.parse(text) as Package;
+    if (!Array.isArray(draft?.members)) return null;
+    const stages: WorkflowNodeConfiguration[] = [];
+    function add(configuration?: WorkflowNodeConfiguration) {
+      if (configuration?.kind !== "agent_role" || configuration.model != null) return;
+      const role = configuration.requirements as { boundRole?: unknown; roleTemplate?: unknown } | undefined;
+      if (!role?.boundRole && !role?.roleTemplate) stages.push(configuration);
+    }
+    for (const member of draft.members) {
+      if (member?.body?.kind === "preset" && !member.references?.["$preset"]) {
+        add(member.body.configuration);
+      }
+      const graph = member?.body?.graph;
+      if (Array.isArray(graph?.nodes)) {
+        for (const node of graph.nodes) {
+          if (node?.id && !Object.hasOwn(member.references ?? {}, node.id)) add(node.configuration);
+        }
+      }
+    }
+    return { draft, stages };
+  } catch {
+    return null;
   }
 }
 
@@ -287,6 +314,11 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
   const [confirmation, setConfirmation] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [selection, setSelection] = useState<ModelSelection | null>(null);
+  const [showStageModels, setShowStageModels] = useState(false);
+  const [stageModelSelection, setStageModelSelection] = useState<ModelSelection | null>(null);
+  const unconfigured = unconfiguredStageModels(text)?.stages.length ?? 0;
+  const stageModels = useLiveModelOptions(LIVE_MODEL_PROVIDERS, showStageModels && unconfigured > 0 && !draft.publication);
+  const stageModel = availableModelSelection(stageModels.options, stageModelSelection);
   const models = useLiveModelOptions(providers, !draft.publication);
   const model = availableModelSelection(models.options, selection);
   const scoped = { projectId, draftId: draft.id };
@@ -328,6 +360,13 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
     client.setQueryData(packageKey(projectId, next.id), next);
     void client.invalidateQueries({ queryKey: packagesKey(projectId), exact: true });
     openWorkspace("pipelines", packageDraftTarget(next.id));
+  }
+  function applyStageModel() {
+    if (!stageModel) return;
+    const missing = unconfiguredStageModels(currentText.current);
+    if (!missing?.stages.length) return;
+    for (const stage of missing.stages) stage.model = stageModel;
+    setText(JSON.stringify(missing.draft, null, 2));
   }
   if (draft.publication) {
     return <section aria-label="Package publication receipt" className="pipeline-stack">
@@ -386,6 +425,17 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
     </div>
     {revisionConflict && <p role="alert">A newer revision is available. Your edits remain here.</p>}
     {save.error && <p role="alert">{String(save.error)}</p>}
+    {unconfigured > 0 && <details className="pipeline-evidence" onToggle={(event) => setShowStageModels(event.currentTarget.open)}>
+      <summary>Configure stage models</summary>
+      {showStageModels && <div className="pipeline-stack pt-2">
+        <ModelPicker label="Pipeline stage model" options={stageModels.options} loading={stageModels.loading} disabled={busy}
+          selection={{ mode: "single", selected: stageModelSelection, onChange: setStageModelSelection }} />
+        {stageModels.errors[0] && <p role="alert">{String(stageModels.errors[0])}</p>}
+        <Button type="button" variant="outline" className="w-fit" disabled={!stageModel || busy} onClick={applyStageModel}>
+          Apply to {unconfigured} unconfigured {unconfigured === 1 ? "stage" : "stages"}
+        </Button>
+      </div>}
+    </details>}
     <WorkflowPackageGraphEditing projectId={projectId} checkoutId={checkoutId} draftId={draft.id} savedRevision={draft.revision}
       graphs={packageGraphs(text)} draftPresets={draftPresets} layouts={draft.layouts} canvasByMember={canvasByMember}
       changeCanvas={(key, canvas) => setCanvases((previous) => {

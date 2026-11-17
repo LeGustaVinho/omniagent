@@ -274,6 +274,12 @@ impl PendingWorkflowAgent {
         store: &Store,
         submission: WorkflowAgentSubmission,
     ) -> Result<()> {
+        if store
+            .try_reuse_automatic_review(&submission, &self.key)
+            .await?
+        {
+            return Ok(());
+        }
         store
             .submit_automatic_workflow_agent(submission, self.key.clone())
             .await?;

@@ -58,6 +58,7 @@ pub enum BuiltinNode {
     RepeatUntil,
     RepeatOutput,
     IterationLimit,
+    DeliveryAttempt,
     BuildList,
     ForEach,
     ForEachBegin,
@@ -70,7 +71,11 @@ impl BuiltinNode {
     pub(super) fn generated_iteration(self) -> bool {
         matches!(
             self,
-            Self::ForEachBegin | Self::ForEachGate | Self::ForEachCollect | Self::RepeatOutput
+            Self::ForEachBegin
+                | Self::ForEachGate
+                | Self::ForEachCollect
+                | Self::RepeatOutput
+                | Self::DeliveryAttempt
         )
     }
 
@@ -78,6 +83,7 @@ impl BuiltinNode {
         matches!(
             self,
             Self::Implement
+                | Self::DeliveryAttempt
                 | Self::ReviewCandidate
                 | Self::VerifyCandidate
                 | Self::VerifyTestPhase
@@ -186,6 +192,7 @@ pub enum ConfigurationKind {
     SubflowEntry,
     RepeatUntil,
     RepeatOutput,
+    DeliveryAttempt,
     BuildList,
     ForEach,
     ForEachBegin,
@@ -273,6 +280,10 @@ pub enum NodeConfiguration {
     },
     RepeatUntil(super::repetition::RepeatUntilConfiguration),
     RepeatOutput(super::repetition::RepeatOutputConfiguration),
+    DeliveryAttempt {
+        ordinal: u16,
+        limit: u16,
+    },
     BuildList(super::iteration::BuildListConfiguration),
     ForEach(super::iteration::ForEachConfiguration),
     ForEachBegin(super::iteration::ForEachBeginConfiguration),
@@ -330,6 +341,7 @@ pub enum Executor {
     RepeatSubflow,
     SelectRepeatOutput,
     StopAtIterationLimit,
+    ReserveDeliveryAttempt,
     BuildList,
     ExpandForEach,
     BindIterationList,
@@ -387,6 +399,10 @@ pub(super) fn supports_pinned_execution(pinned: &NodeDefinition) -> bool {
     if pinned.kind == BuiltinNode::TypedStart && pinned.revision == 1 {
         current.revision = 1;
         current.outputs.retain(|port| port.name != "plan");
+    }
+    if pinned.kind == BuiltinNode::Agent && pinned.revision == 1 {
+        current.revision = 1;
+        current.inputs.retain(|port| port.name != "review_subject");
     }
     if matches!(
         pinned.kind,
@@ -762,6 +778,7 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
                 ("ready", Control),
                 ("prompt", Data(RenderedText)),
                 ("comparison", Data(ComparisonResults)),
+                ("review_subject", Data(EvidenceSet)),
             ],
             &[
                 ("completed", Control),
@@ -1125,6 +1142,15 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             &[("failed", Control)],
         ),
         (
+            DeliveryAttempt,
+            "Reserve delivery attempt",
+            Executor::ReserveDeliveryAttempt,
+            ConfigurationKind::DeliveryAttempt,
+            Effect::ChangeTaskRecords,
+            &[("ready", Control)],
+            &[("admitted", Control), ("exhausted", Control)],
+        ),
+        (
             RepeatOutput,
             "Select approved iteration",
             Executor::SelectRepeatOutput,
@@ -1231,7 +1257,8 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
                     | BuiltinNode::ReviewCandidate
                     | BuiltinNode::RunBacklog
                     | BuiltinNode::MaterializeBacklog
-                    | BuiltinNode::VerifyCommit => 2,
+                    | BuiltinNode::VerifyCommit
+                    | BuiltinNode::Agent => 2,
                     _ => 1,
                 },
                 title: title.into(),
@@ -1386,6 +1413,9 @@ impl NodeConfiguration {
             }
             (Self::RepeatOutput(configuration), ConfigurationKind::RepeatOutput) => {
                 configuration.valid()
+            }
+            (Self::DeliveryAttempt { ordinal, limit }, ConfigurationKind::DeliveryAttempt) => {
+                (1..=32).contains(ordinal) && (1..=32).contains(limit)
             }
             (Self::BuildList(configuration), ConfigurationKind::BuildList) => configuration.valid(),
             (Self::ForEach(configuration), ConfigurationKind::ForEach) => configuration.valid(),

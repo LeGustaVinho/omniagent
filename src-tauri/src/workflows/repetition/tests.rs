@@ -9,6 +9,7 @@ use super::*;
 fn repeat_gates_writers_and_waits_for_their_outcomes() -> Result<()> {
     let configuration = RepeatUntilConfiguration {
         max_iterations: 2,
+        delivery_attempt_budget: None,
         ready_input: "go".into(),
         completion_output: "done".into(),
         evidence_output: "evidence".into(),

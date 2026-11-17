@@ -308,6 +308,7 @@ fn simulate_graph(
     let mut by_node = HashMap::new();
     let mut steps: Vec<TraceStep> = Vec::new();
     let mut trace_bytes = 0;
+    let mut delivery_attempts = 0;
     while let Some(index) = ready.pop_front() {
         let node = &definition.nodes[index];
         let mut data = BTreeMap::new();
@@ -362,7 +363,13 @@ fn simulate_graph(
             inputs,
             &data,
             routed_failures.contains(&index),
+            delivery_attempts,
         )?;
+        if node.instance.kind == BuiltinNode::DeliveryAttempt
+            && step.outputs.contains_key("admitted")
+        {
+            delivery_attempts += 1;
+        }
         trace_bytes += serde_json::to_vec(&step)?.len() + 1;
         ensure!(
             trace_bytes <= 4 * 1024 * 1024,
@@ -413,6 +420,7 @@ fn trace_node(
     inputs: Vec<TraceInput>,
     data: &BTreeMap<String, &Value>,
     routed_failure: bool,
+    delivery_attempts: u16,
 ) -> Result<TraceStep> {
     use BuiltinNode::*;
     let kind = node.instance.kind;
@@ -690,6 +698,19 @@ fn trace_node(
         }
         Parallel => Some("branches"),
         Join => Some("joined"),
+        DeliveryAttempt => {
+            let NodeConfiguration::DeliveryAttempt { limit, .. } = node.instance.configuration
+            else {
+                anyhow::bail!("Missing pinned delivery attempt budget");
+            };
+            if delivery_attempts >= limit {
+                step.state = TraceState::Failed;
+                step.reason = Some("The task reached its shared delivery attempt limit.".into());
+                step.outputs.insert("exhausted".into(), control_output());
+                return Ok(step);
+            }
+            Some("admitted")
+        }
         IterationLimit => {
             step.state = TraceState::Failed;
             step.reason = Some("The workflow reached its configured iteration limit.".into());

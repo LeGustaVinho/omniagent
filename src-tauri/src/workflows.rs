@@ -350,6 +350,37 @@ fn compile_resolved_graph<'definition>(
                 "Update the verification node to a version that accepts approved test strategy"
             );
         }
+        if let NodeConfiguration::AgentRole { requirements, .. } = &node.instance.configuration
+            && requirements.review_reuse
+        {
+            let source = |port| {
+                graph
+                    .wires
+                    .iter()
+                    .find(|wire| wire.to.node == node.instance.id && wire.to.port == port)
+                    .map(|wire| &wire.from)
+            };
+            let verified_subject =
+                source("prompt")
+                    .zip(source("review_subject"))
+                    .is_some_and(|(prompt, subject)| {
+                        prompt.node == subject.node
+                            && prompt.port == "text"
+                            && subject.port == "evidence"
+                            && indexes.get(prompt.node.as_str()).is_some_and(|&index| {
+                                nodes[index].instance.kind == BuiltinNode::CollectEvidence
+                            })
+                    });
+            ensure!(
+                node.instance.kind == BuiltinNode::Agent
+                    && requirements.goal.is_none()
+                    && requirements.plan.is_none()
+                    && source("comparison").is_none()
+                    && verified_subject,
+                "Review reuse on {} requires prompt and review subject from the same Collect Evidence node",
+                node.instance.id
+            );
+        }
         for port in &node.definition.inputs {
             let connected = incoming.contains(&(node.instance.id.as_str(), port.name.as_str()));
             if matches!(
@@ -370,6 +401,9 @@ fn compile_resolved_graph<'definition>(
             }
             use agile_nodes::ManageWorkConfiguration as Work;
             let conditionally_required = match (&node.instance.configuration, port.name.as_str()) {
+                (NodeConfiguration::AgentRole { requirements, .. }, "review_subject") => {
+                    Some(requirements.review_reuse)
+                }
                 (NodeConfiguration::ManageWork { action }, "task") => {
                     Some(matches!(action, Work::Link | Work::CreateSubtask))
                 }
@@ -445,6 +479,18 @@ fn compile_resolved_graph<'definition>(
         }
     }
     ensure!(visited == nodes.len(), "workflow graph contains a cycle");
+    let mut attempt_limits = nodes
+        .iter()
+        .filter_map(|node| match node.instance.configuration {
+            NodeConfiguration::DeliveryAttempt { limit, .. } => Some(limit),
+            _ => None,
+        });
+    if let Some(limit) = attempt_limits.next() {
+        ensure!(
+            attempt_limits.all(|other| other == limit),
+            "Workflow delivery gates must share the same attempt budget"
+        );
+    }
     if enforce_release {
         control::validate_release_wires(&nodes, &graph.wires)?;
         maintenance::validate_activation_wires(&nodes, &graph.wires)?;

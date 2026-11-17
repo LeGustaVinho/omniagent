@@ -147,6 +147,13 @@ export function LoopFields({ configuration, disabled, subflow, onChange }: Field
     <SubflowPortField label="Subflow completion output" value={text(configuration.completionOutput)} ports={subflow?.outputs.filter(control)}
       disabled={disabled} onChange={(completionOutput) => onChange({ ...configuration, completionOutput })} />
     {repeat ? <>
+      <label>Shared delivery attempt budget<input type="number" min={1} max={MAX_ITERATION_ITEMS} step={1} disabled={disabled}
+        value={typeof configuration.deliveryAttemptBudget === "number" ? configuration.deliveryAttemptBudget : ""}
+        onChange={(event) => {
+          const { deliveryAttemptBudget: _previous, ...rest } = configuration;
+          const { value, valueAsNumber } = event.currentTarget;
+          onChange(value === "" ? rest : { ...rest, deliveryAttemptBudget: valueAsNumber });
+        }} /></label>
       <SubflowPortField label="Subflow evidence output" value={text(configuration.evidenceOutput)} ports={subflow?.outputs.filter(data)}
         disabled={disabled} onChange={(evidenceOutput) => onChange({ ...configuration, evidenceOutput })} />
       <PredicateFields label="Stopping condition" value={configuration.until} disabled={disabled}

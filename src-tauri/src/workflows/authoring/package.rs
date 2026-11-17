@@ -34,7 +34,7 @@ pub(crate) use publish::{
 pub use simulation::{WorkflowSimulation, WorkflowSimulationScenario};
 
 const MAX_MEMBERS: usize = 32;
-const MAX_PACKAGE_BYTES: usize = 192 * 1024;
+const MAX_PACKAGE_BYTES: usize = 256 * 1024;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -371,9 +371,10 @@ fn validate_structure(package: &WorkflowPackage) -> Result<()> {
         package.members.len() <= MAX_MEMBERS,
         "A package supports up to {MAX_MEMBERS} related artifacts"
     );
+    let package_bytes = serde_json::to_vec(package)?.len();
     ensure!(
-        serde_json::to_vec(package)?.len() <= MAX_PACKAGE_BYTES,
-        "The package exceeds {MAX_PACKAGE_BYTES} UTF-8 bytes"
+        package_bytes <= MAX_PACKAGE_BYTES,
+        "The package contains {package_bytes} UTF-8 bytes and exceeds the {MAX_PACKAGE_BYTES}-byte limit"
     );
     let mut keys = BTreeSet::new();
     for member in &package.members {

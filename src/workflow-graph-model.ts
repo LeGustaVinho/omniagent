@@ -235,8 +235,11 @@ export function configurationProblem(configuration: WorkflowNodeConfiguration, d
         readyInput !== itemInput && completionOutput !== resultOutput ? null : "Choose distinct input and output ports on the pinned subflow.";
     }
     case "repeat_until": {
-      const { maxIterations, readyInput, completionOutput, evidenceOutput, until } = configuration;
+      const { maxIterations, deliveryAttemptBudget, readyInput, completionOutput, evidenceOutput, until } = configuration;
       if (!validIterationLimit(maxIterations)) return `Enter a maximum between 1 and ${MAX_ITERATION_ITEMS} iterations.`;
+      if (deliveryAttemptBudget !== undefined && !validIterationLimit(deliveryAttemptBudget)) {
+        return `Enter a delivery attempt budget between 1 and ${MAX_ITERATION_ITEMS}.`;
+      }
       if (![readyInput, completionOutput, evidenceOutput].every(namedPort)) return "Select the required subflow ports.";
       const feedback = configuration.feedback as { input?: unknown; output?: unknown } | undefined;
       if (feedback && (!namedPort(feedback.input) || !namedPort(feedback.output) || feedback.input === readyInput)) {
@@ -338,6 +341,18 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
     }
     const configuration = configurationProblem(node.configuration, definition, backlogBound?.(node.id));
     if (configuration) problems.push(`${definition.title} · ${node.id} · ${configuration}`);
+    const requirements = node.configuration.requirements as { reviewReuse?: boolean; goal?: unknown; plan?: unknown } | undefined;
+    const reuse = requirements?.reviewReuse === true;
+    if (reuse) {
+      const input = (port: string) => graph.wires.find(({ to }) => to.node === node.id && to.port === port)?.from;
+      const prompt = input("prompt");
+      const subject = input("review_subject");
+      if (node.kind !== "agent" || requirements?.goal || requirements?.plan || input("comparison") ||
+        !prompt || !subject || prompt.port !== "text" || subject.port !== "evidence" || prompt.node !== subject.node ||
+        !graph.nodes.some((candidate) => candidate.id === prompt.node && candidate.kind === "collect_evidence")) {
+        problems.push(`${node.id} review reuse requires prompt and review subject from the same Collect Evidence node.`);
+      }
+    }
     for (const port of definition.inputs) {
       const wired = graph.wires.some(({ to }) => to.node === node.id && to.port === port.name);
       if (node.configuration.kind === "mcp_tool" && port.name === "arguments") {
@@ -357,6 +372,8 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
         const selected = node.configuration.strategyChecks;
         const required = node.configuration.kind === "staged_checks" && Array.isArray(selected) && selected.length > 0;
         if (wired !== required) problems.push(`${node.id}.strategy requires a connection when configured to use approved test strategy.`);
+      } else if (node.kind === "agent" && port.name === "review_subject") {
+        if (wired && !reuse) problems.push(`${node.id}.review_subject requires review reuse to be enabled.`);
       } else if (((node.kind === "approval" || node.kind === "summarize_result") && port.name === "evidence") ||
         (node.kind === "build_text" && port.name === "values") ||
         (node.kind === "agent" && port.name === "comparison") ||

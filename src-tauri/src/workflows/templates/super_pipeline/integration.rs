@@ -6,23 +6,29 @@ const KEY: &str = "integration-audit";
 const REGRESSION_CHECK: &str = "Pipeline regression";
 const BUILD_CHECK: &str = "Pipeline build";
 
-const AUDITORS: &[Reviewer] = &[
-    Reviewer {
+struct Auditor {
+    id: &'static str,
+    role: &'static str,
+    instruction: &'static str,
+}
+
+const AUDITORS: &[Auditor] = &[
+    Auditor {
         id: "audit-requirements",
         role: "Integrated requirements auditor",
         instruction: "Audit the delivered behavior against the Master Plan and every applicable SDD requirement and acceptance criterion. Give exact IDs and verify behavior against the integrated SHA.",
     },
-    Reviewer {
+    Auditor {
         id: "audit-bdd",
         role: "Integrated BDD auditor",
         instruction: "Audit the positive, negative and boundary BDD scenarios. Cite each failing, missing or unverified scenario and the expected behavior.",
     },
-    Reviewer {
+    Auditor {
         id: "audit-architecture",
         role: "Integrated architecture auditor",
         instruction: "Audit the integrated changes against the approved design, dependencies, interfaces, architecture, and reuse conventions. Identify contradictions and unresolved integration trade-offs.",
     },
-    Reviewer {
+    Auditor {
         id: "audit-code-quality",
         role: "Integrated code quality auditor",
         instruction: "Inspect the integrated changes for maintainability, security, performance, dependency risk, consistency and regression exposure. Include concrete repository paths and evidence.",
@@ -153,7 +159,7 @@ pub(super) fn audit_round(presets: &mut Vec<PackageMember>) -> Result<PackageMem
             contracts::review(),
             audited,
             &[integrated, ("regression", "evidence"), context],
-            false,
+            AgentSetup::Direct,
         )?);
     }
     reports.push(("regression-passed", "object"));
@@ -177,7 +183,7 @@ pub(super) fn audit_round(presets: &mut Vec<PackageMember>) -> Result<PackageMem
     let notes = flow.generate_agent(
         "review-documentation-cleanup", "Integration documentation and cleanup reviewer",
         "Inspect the exact integrated Git SHA using read-only tools and the integration audit. Produce the release summary and check README, architecture, usage, migration, tests and changelog for updates required by the approved changes. Check for temporary staged artifacts and outdated paths introduced by the delivered work. If any edits are needed, set needsChanges to true and report precise, testable findings with paths and relevant approved requirement or scenario IDs. Use only concrete evidence and preserve intentional files.",
-        contracts::documentation_review(), ("integration-gate", "passed"), &[integrated, audit, context], false,
+        contracts::documentation_review(), ("integration-gate", "passed"), &[integrated, audit, context], AgentSetup::Direct,
     )?;
     flow.fixed(
         "documentation-changes",
@@ -220,12 +226,12 @@ pub(super) fn audit_round(presets: &mut Vec<PackageMember>) -> Result<PackageMem
     let proposal = flow.generate_agent(
         "write-remediation-backlog", "Integration remediation planner",
         "Turn actionable audit, regression, documentation, or cleanup findings into atomic tasks using existing SDD and BDD IDs. Use unique permanent task keys prefixed with 'integration-' that identify the integration SHA and specific findings. Preserve all accepted contract behavior. Specify tests that fail for the verified issue. For documentation and cleanup, consider executable examples, links, file presence or absence, or repository conventions tied to approved criteria. Include explicit dependency edges only when needed.",
-        contracts::backlog(), ("remediation-evidence", "completed"), &[revision], false,
+        contracts::backlog(), ("remediation-evidence", "completed"), &[revision], AgentSetup::Direct,
     )?;
     let reviewed = flow.generate_agent(
         "review-remediation-backlog", "Integration remediation reviewer",
         "Verify that every remediation task addresses a concrete finding, has unique IDs and valid dependencies, references approved SDD and BDD scenarios, and has testable scope. Reject proposals for unavailable infrastructure or unverified findings.",
-        contracts::review(), ("write-remediation-backlog", "completed"), &[proposal, revision], false,
+        contracts::review(), ("write-remediation-backlog", "completed"), &[proposal, revision], AgentSetup::Direct,
     )?;
     flow.collect(
         "remediation-review",
