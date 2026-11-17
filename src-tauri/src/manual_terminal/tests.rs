@@ -199,6 +199,13 @@ async fn powershell_uses_the_verified_worktree_and_streams_input_output_resize_a
     );
     assert!(terminal_size(0, 24).is_err());
     let (info, session, mut output) = open_terminal(&terminals, &store, linked.checkout_id).await?;
+    let child_directory = worktree.join("child folder");
+    fs::create_dir(&child_directory)?;
+    session.write("Set-Location -LiteralPath 'child folder'\r".into())?;
+    let observed = format!("]633;P;OmniAgentCwd={};{}", info.terminal_id,
+        STANDARD.encode(dunce::canonicalize(&child_directory)?.to_str().context("fixture path")?));
+    output.wait_for(&session, |bytes| contains(bytes, &observed)).await?;
+    session.write("Set-Location ..\r".into())?;
     assert!(
         terminals
             .find(&primary.checkout_id, &info.terminal_id)
@@ -224,6 +231,9 @@ async fn powershell_uses_the_verified_worktree_and_streams_input_output_resize_a
     output
         .wait_for(&session, |bytes| contains(bytes, "OMNI_SIZE=112x34"))
         .await?;
+    let (split_info, split, mut split_output) =
+        open_terminal(&terminals, &store, info.checkout_id.clone()).await?;
+    assert_ne!(split_info.terminal_id, info.terminal_id);
     session.write("exit 7\r".into())?;
     assert_eq!(output.exited().await?, 7);
     assert!(
@@ -231,6 +241,12 @@ async fn powershell_uses_the_verified_worktree_and_streams_input_output_resize_a
             .find(&info.checkout_id, &info.terminal_id)?
             .is_none()
     );
+    split.write("Write-Output ('OMNI'+'_SPLIT_STILL_LIVE')\r".into())?;
+    split_output
+        .wait_for(&split, |bytes| contains(bytes, "OMNI_SPLIT_STILL_LIVE"))
+        .await?;
+    split.write("exit 0\r".into())?;
+    assert_eq!(split_output.exited().await?, 0);
     let db = rusqlite::Connection::open(database)?;
     let managed: (u32, u32) = db.query_row(
         "SELECT (SELECT count(*) FROM jobs), (SELECT count(*) FROM runs)",
@@ -413,7 +429,10 @@ async fn ide_edit_search_terminal_and_git_review_share_the_managed_worktree() ->
         [ProjectSearchMatch {
             path: PATH.into(),
             line: 2,
-            excerpt: MATCH.into()
+            excerpt: MATCH.into(),
+            columns: vec![1],
+            occurrences: 1,
+            line_text: Some(MATCH.into()),
         }]
     );
     let primary_search = store

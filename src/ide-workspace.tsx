@@ -9,6 +9,7 @@ import {
 } from "@/ide-file-workspace";
 import { ExampleFileSearch, matchReference, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget, type FileSearchScope } from "@/ide-file-search";
 import { noteWindowTarget } from "@/file-editor-popout";
+import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { containingFolder, fileContextActions, fileHistoryTarget, noteRenameTarget, openNotesTarget, readSourceLineTarget, readTerminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
@@ -17,12 +18,12 @@ import { useCheckoutFileComparison } from "@/checkout-file-comparison";
 import { exampleNotes, exampleSources, fileName, findFileText, normalizeRepositoryPath, type FileSearchResult } from "@/ide-knowledge-data";
 import type { CodeModel, CodeProblem, EditorLocation, EditorSettings } from "@/ide-code-editor";
 import { EditorStatus } from "@/ide-editor-status";
-import { IdeProblems, problemReference, type FileProblem } from "@/ide-problems";
-import { ResizablePanel } from "@/panel-resize";
-import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
 import { SourceFormatDialog } from "@/source-format-dialog";
 import type { SourceFormatChange } from "@/source-file-format";
 import { IdeProblems, problemReference, type FileProblem } from "@/ide-problems";
+import { useTerminalSessions } from "@/ide-terminal-sessions";
+import { ResizablePanel } from "@/panel-resize";
+import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const Editor = lazy(() => import("@/ide-code-editor").then(({ CodeEditor }) => ({ default: CodeEditor })));
@@ -69,16 +70,14 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const [editorSettings, setEditorSettings] = useState<Record<string, EditorSettings>>({});
   const [quickFix, setQuickFix] = useState<(EditorLocation & { panelId: string })>();
   const [bottom, setBottom] = useState<"terminal" | "problems" | null>("terminal");
-  const [terminalFolders, setTerminalFolders] = useState<string[]>([""]);
-  const [terminalFolder, setTerminalFolder] = useState("");
-  const [autoStartRoot, setAutoStartRoot] = useState(false);
-  const [clearRevisions, setClearRevisions] = useState<Record<string, number>>({});
+  const terminals = useTerminalSessions();
+  const { openDirectory } = terminals;
+  const [terminalRename, setTerminalRename] = useState<{ id: string; title: string }>();
+  const [exampleClearRevision, setExampleClearRevision] = useState(0);
   const openTerminal = useCallback((folder: string) => {
     setBottom("terminal");
-    setTerminalFolder(folder);
-    if (!folder) setAutoStartRoot(true);
-    setTerminalFolders((previous) => previous.includes(folder) ? previous : [...previous, folder]);
-  }, []);
+    openDirectory(folder);
+  }, [openDirectory]);
   const [status, setStatus] = useState(simulation?.scenario === "recovery" ? "Recovered unsaved changes in src/health.ts" : "");
   const [problem, setProblem] = useState("");
   const [dialog, setDialog] = useState<IdeDialog>();
@@ -530,35 +529,46 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
           }} />
         </div>
 
-        {bottom && <ResizablePanel className="ide-bottom" edge="top" resizeKey="ide-bottom" resizeLabel="IDE bottom panel">
+        <ResizablePanel className="ide-bottom" hidden={!bottom} edge="top" resizeKey="ide-bottom" resizeLabel="IDE bottom panel">
           <div className="ide-bottom-toolbar">
             <button type="button" className="fw-btn" aria-pressed={bottom === "terminal"} onClick={() => setBottom("terminal")}><TerminalSquare size={14} /> Terminal</button>
             <button type="button" className="fw-btn" aria-pressed={bottom === "problems"} onClick={() => setBottom("problems")}><CircleAlert size={14} /> Problems{markerEntries.length ? ` (${markerEntries.length})` : ""}</button>
-            {bottom === "terminal" && !simulated && terminalFolders.length > 1 && <>
-              <select aria-label="Terminal directory" className="delivery-filter" value={terminalFolder} onChange={(event) => setTerminalFolder(event.currentTarget.value)}>
-                {terminalFolders.map((folder) => <option key={folder} value={folder}>{folder || "Checkout root"}</option>)}
+            {bottom === "terminal" && !simulated && terminals.panes.length > 1 && (
+              <select aria-label="Terminal session" className="delivery-filter" value={terminals.active} onChange={(event) => terminals.select(event.currentTarget.value)}>
+                {terminals.panes.map(({ id, title }) => <option key={id} value={id}>{title}</option>)}
               </select>
-              {terminalFolder && <button type="button" className="fw-btn" onClick={() => {
-                setTerminalFolders((previous) => previous.filter((folder) => folder !== terminalFolder));
-                setTerminalFolder("");
-              }}>Close folder terminal</button>}
-            </>}
+            )}
             <div className="file-toolbar">
               <button type="button" className="fw-icon" title="Clear terminal" aria-label="Clear terminal" disabled={bottom !== "terminal"}
-                onClick={() => setClearRevisions((previous) => ({ ...previous, [terminalFolder]: (previous[terminalFolder] ?? 0) + 1 }))}><Trash2 size={14} /></button>
+                onClick={() => simulated ? setExampleClearRevision((previous) => previous + 1) : terminals.clear()}><Trash2 size={14} /></button>
             </div>
           </div>
           <div className="ide-bottom-body">
             <div className="ide-terminal-container" hidden={bottom !== "terminal"}>
               <Suspense fallback={<p className="file-help">Loading terminal…</p>}>
-                {simulated ? <Terminal clearRevision={clearRevisions[""] ?? 0} />
-                  : terminalFolders.map((folder) => <div key={folder} className="h-full min-h-0" hidden={folder !== terminalFolder}>
-                    <WorktreeTerminal checkoutId={checkout.checkoutId} active={bottom === "terminal" && folder === terminalFolder}
-                      onOpenFile={(path, line, column) => openFile(path, line, false, column)}
-                      clearRevision={clearRevisions[folder] ?? 0} onContextText={(text) => conversationActions.startContextText({
-                        title: "PowerShell output", reference: `PowerShell · ${folder || "Checkout root"}`, text,
-                      })} {...(folder ? { relativeDirectory: folder, autoStart: true } : autoStartRoot ? { autoStart: true } : {})} />
-                  </div>)}
+                {simulated ? <Terminal clearRevision={exampleClearRevision} /> : <div className="ide-terminal-panes">
+                  {terminals.panes.map(({ id, directory, title, clearRevision, autoStart, generation }) => {
+                    const order = terminals.visible.indexOf(id);
+                    const visible = bottom === "terminal" && order >= 0;
+                    const active = visible && terminals.active === id;
+                    const sessionActions: MenuGroups = [[
+                      { label: "Rename terminal…", run: () => setTerminalRename({ id, title }) },
+                      { label: "Duplicate terminal", run: () => terminals.duplicate(id, false) },
+                      { label: "Split terminal", run: () => terminals.duplicate(id, true) },
+                      { label: "Close terminal session", run: () => terminals.close(id) },
+                    ]];
+                    return <div key={`${id}:${generation ?? 0}`} className="ide-terminal-pane" hidden={!visible} data-side={order > 0 ? "right" : undefined} style={{ order }}>
+                      <ContextActions className="ide-terminal-title" label={`${title} terminal`} groups={sessionActions}>
+                        <button className="fw-btn" type="button" aria-pressed={active} title={directory || "Checkout root"} onClick={() => terminals.select(id)}>{title}</button>
+                      </ContextActions>
+                      <WorktreeTerminal checkoutId={checkout.checkoutId} active={active} visible={visible} sessionActions={sessionActions}
+                        onFocus={() => terminals.select(id)} onOpenFile={(path, line, column) => openFile(path, line, false, column)}
+                        clearRevision={clearRevision} onContextText={(text) => conversationActions.startContextText({
+                          title: "PowerShell output", reference: `PowerShell · ${title}`, text,
+                        })} {...(directory ? { relativeDirectory: directory } : {})} {...(autoStart ? { autoStart: true } : {})} />
+                    </div>;
+                  })}
+                </div>}
               </Suspense>
             </div>
             {bottom === "problems" && <IdeProblems issues={markerEntries} simulated={simulated}
@@ -568,7 +578,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                 text: `${issue.label}: ${issue.message}`,
               }, instruction)} />}
           </div>
-        </ResizablePanel>}
+        </ResizablePanel>
         {active && buffer && <footer className="ide-statusbar">
           <EditorStatus path={active} saved={!dirty(active)} settings={editorSettings[active]} format={buffer.format} copy={menu.copy}
             canConvert={!dirty(active) && !source.files[active]?.sourceProblem && !source.files[active]?.draftRevision}
@@ -587,6 +597,19 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
           setStatus(`Converted and saved ${dialog.path}`);
           setDialog(undefined);
         }} />}
+      {terminalRename && <FileDialog title="Rename terminal" description="Choose a name for this terminal session." onClose={() => setTerminalRename(undefined)}>
+        <form onSubmit={(event) => {
+          event.preventDefault();
+          const title = terminalRename.title.trim();
+          if (!title) return;
+          terminals.rename(terminalRename.id, title);
+          setTerminalRename(undefined);
+        }}>
+          <label className="file-field">Terminal name<input autoFocus value={terminalRename.title} maxLength={80}
+            onChange={(event) => setTerminalRename({ id: terminalRename.id, title: event.currentTarget.value })} /></label>
+          <div className="file-dialog-footer"><button type="submit" className="fw-btn fw-primary" disabled={!terminalRename.title.trim()}>Rename</button></div>
+        </form>
+      </FileDialog>}
       {dialog?.kind === "close" && <FileDialog title="Save changes?" description={`${dialog.path} has unsaved changes.`} onClose={cancelClose}
         ownerPanel={dialog.api}>
         <div className="file-dialog-footer">

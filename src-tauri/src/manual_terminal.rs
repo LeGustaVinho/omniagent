@@ -31,6 +31,19 @@ use windows_sys::Win32::System::{
 #[cfg(test)]
 mod tests;
 
+const POWERSHELL_PROMPT: &str = r#"
+$global:__OmniAgentPromptToken = $env:OMNIAGENT_PROMPT_TOKEN
+Remove-Item Env:OMNIAGENT_PROMPT_TOKEN -ErrorAction SilentlyContinue
+$global:__OmniAgentOriginalPrompt = (Get-Item Function:prompt).ScriptBlock
+function global:prompt {
+    $location = $ExecutionContext.SessionState.Path.CurrentLocation
+    $path = if ($location.Provider.Name -eq 'FileSystem') { $location.ProviderPath } else { '' }
+    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$path))
+    [Console]::Write([string][char]27 + ']633;P;OmniAgentCwd=' + $global:__OmniAgentPromptToken + ';' + $payload + [char]7)
+    & $global:__OmniAgentOriginalPrompt
+}
+"#;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManualTerminalInfo {
@@ -190,10 +203,15 @@ fn launch(
         dunce::canonicalize(root)? == root,
         "The checkout directory changed before launch"
     );
+    let terminal_id = Uuid::new_v4().to_string();
+    let encoded = STANDARD.encode(
+        POWERSHELL_PROMPT.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>(),
+    );
     let mut command = CommandBuilder::new(windows_powershell()?);
-    command.args(["-NoLogo", "-NoProfile"]);
+    command.args(["-NoLogo", "-NoProfile", "-NoExit", "-EncodedCommand", &encoded]);
     command.cwd(root);
     command.env("TERM", "xterm-256color");
+    command.env("OMNIAGENT_PROMPT_TOKEN", &terminal_id);
     let job = create_job().context("Create the manual terminal process job")?;
     let pair = native_pty_system()
         .openpty(size)
@@ -211,7 +229,6 @@ fn launch(
     }
     drop(pair.slave);
 
-    let terminal_id = Uuid::new_v4().to_string();
     let session = Arc::new(ManualSession {
         checkout_id: checkout_id.clone(),
         _work: work,
@@ -417,10 +434,11 @@ pub async fn resolve_manual_terminal_file(
     store: State<'_, Store>,
     checkout_id: String,
     relative_directory: Option<String>,
+    observed_directory: Option<String>,
     path: String,
 ) -> Result<String, String> {
     omniagent::repository::terminal_file_links::resolve_terminal_file(
-        &store, checkout_id, relative_directory, path,
+        &store, checkout_id, relative_directory, observed_directory, path,
     )
     .await
     .map_err(|_| "This terminal reference does not resolve to a file in the current checkout.".into())

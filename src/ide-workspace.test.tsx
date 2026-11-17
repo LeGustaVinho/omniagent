@@ -5,9 +5,9 @@ import { act, cleanup, fireEvent, render as renderElement, screen, waitFor, with
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import IdeWorkspace from "@/ide-workspace";
-import type { FileFormat } from "@/source-file-format";
 import type { ItemEdit } from "@/checkout-item-operations";
 import type { EditorExcerpt } from "@/editor-context";
+import type { FileFormat } from "@/source-file-format";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -30,8 +30,10 @@ vi.mock("@/git-diff-view", () => ({
 const terminalProps = vi.hoisted(() => vi.fn());
 vi.mock("@/ide-terminal", () => ({
   ExampleTerminal: () => null,
-  ManualTerminal: ({ onContextText: _onContextText, onOpenFile: _onOpenFile, ...props }: {
+  ManualTerminal: ({ onContextText: _onContextText, onOpenFile: _onOpenFile, onFocus: _onFocus,
+    sessionActions: _sessionActions, visible: _visible, ...props }: {
     checkoutId: string; active: boolean; clearRevision?: number; onContextText?: unknown; onOpenFile?: unknown;
+    onFocus?: unknown; sessionActions?: unknown; visible?: boolean;
   }) => {
     terminalProps(props);
     return null;
@@ -432,7 +434,7 @@ it("opens a folder terminal from the keyboard menu and keeps the root session mo
     checkoutId: main, active: true, relativeDirectory: "src", autoStart: true, clearRevision: 0,
   }));
   expect(terminalProps).toHaveBeenCalledWith({ checkoutId: main, active: false, clearRevision: 0 });
-  expect((screen.getByRole("combobox", { name: "Terminal directory" }) as HTMLSelectElement).value).toBe("src");
+  expect((screen.getByRole("combobox", { name: "Terminal session" }) as HTMLSelectElement).value).toBe("src");
 });
 
 it("creates an empty folder under the clicked parent and refreshes the tree", async () => {
@@ -517,6 +519,44 @@ it("exposes the shared Clear terminal control in the active worktree", async () 
   fireEvent.click(screen.getByRole("button", { name: "Problems" }));
   expect(clear.disabled).toBe(true);
   expect(terminalProps).toHaveBeenLastCalledWith({ checkoutId: main, active: false, clearRevision: 1 });
+});
+
+it("splits a scoped terminal, renames and duplicates its sessions, and closes the selected pane", async () => {
+  fixture();
+  const { container } = render(<IdeWorkspace {...propsFor(main)} />);
+  const folder = await screen.findByRole("button", { name: "src" });
+  fireEvent.contextMenu(folder);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Open terminal here" }));
+  const panes = () => within(container.querySelector(".ide-terminal-panes")!);
+  fireEvent.contextMenu(await panes().findByRole("button", { name: "src" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Split terminal" }));
+  expect(panes().getByRole("button", { name: "src" })).toBeTruthy();
+  const split = panes().getByRole("button", { name: "src (2)" });
+  expect(split.getAttribute("aria-pressed")).toBe("true");
+  expect(terminalProps).toHaveBeenCalledWith({ checkoutId: main, active: true, clearRevision: 0, relativeDirectory: "src", autoStart: true });
+  fireEvent.contextMenu(split);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Rename terminal…" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Rename terminal" }));
+  fireEvent.change(dialog.getByRole("textbox", { name: "Terminal name" }), { target: { value: "Checks" } });
+  fireEvent.click(dialog.getByRole("button", { name: "Rename" }));
+  fireEvent.contextMenu(panes().getByRole("button", { name: "Checks" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Duplicate terminal" }));
+  expect(panes().queryByRole("button", { name: "Checks" })).toBeNull();
+  const duplicate = panes().getByRole("button", { name: "src (3)" });
+  expect(duplicate.getAttribute("aria-pressed")).toBe("true");
+
+  fireEvent.contextMenu(duplicate);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Close terminal session" }));
+  expect(panes().queryByRole("button", { name: "src (3)" })).toBeNull();
+  expect(panes().getByRole("button", { name: "src" }).getAttribute("aria-pressed")).toBe("true");
+  fireEvent.change(screen.getByRole("combobox", { name: "Terminal session" }), { target: { value: "omni-terminal:1" } });
+  expect(panes().getByRole("button", { name: "Checks" })).toBeTruthy();
+
+  const terminalButton = container.querySelector(".ide-terminal-pane:not([hidden])");
+  fireEvent.click(screen.getByRole("button", { name: "Toggle bottom panel" }));
+  expect(terminalButton?.isConnected).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Toggle bottom panel" }));
+  expect(panes().getByRole("button", { name: "Checks" })).toBeTruthy();
 });
 
 it("opens the checkout explorer, shares edits across splits, and prompts only on the last dirty close", async () => {

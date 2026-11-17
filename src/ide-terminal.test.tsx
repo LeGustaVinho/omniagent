@@ -17,6 +17,7 @@ type FixtureTerminal = {
   clear: ReturnType<typeof vi.fn>;
   linkProvider?: ILinkProvider;
   selected: string;
+  onOsc?: (data: string) => boolean;
 };
 type TerminalChannel = { onmessage: (event: { kind: "output"; data: string } | { kind: "exited"; exitCode: number }) => void };
 
@@ -26,6 +27,7 @@ const fixture = vi.hoisted(() => ({
   onResize: [] as (() => void)[],
   findNext: vi.fn<(text: string) => boolean>(),
   lines: [] as { text: string; isWrapped: boolean }[],
+  cursorRow: 0,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -55,10 +57,20 @@ vi.mock("@xterm/xterm", () => ({
       return { dispose: () => { this.linkProvider = undefined; } };
     }
     getSelection() { return this.selected; }
+    getSelectionPosition() { return undefined; }
+    onOsc?: (data: string) => boolean;
+    parser = { registerOscHandler: (_id: number, handler: (data: string) => boolean) => {
+      this.onOsc = handler;
+      return { dispose: () => { this.onOsc = undefined; } };
+    } };
+    registerMarker() {
+      let onDispose: (() => void) | undefined;
+      return { line: fixture.cursorRow, onDispose: (listener: () => void) => { onDispose = listener; }, dispose: () => onDispose?.() };
+    }
     attachCustomKeyEventHandler = vi.fn();
     onSelectionChange = () => ({ dispose: vi.fn() });
     get buffer() {
-      return { active: { length: fixture.lines.length, viewportY: 0, getLine: (index: number) => {
+      return { active: { type: "normal", length: fixture.lines.length, viewportY: 0, baseY: 0, cursorY: fixture.cursorRow, getLine: (index: number) => {
         const line = fixture.lines[index];
         if (!line) return;
         const cells = Array.from(line.text).flatMap((character) => character === "界" ? [{ string: character, width: 2 }, { string: "", width: 0 }] : [{ string: character, width: 1 }]);
@@ -94,6 +106,7 @@ beforeEach(() => {
   fixture.terminals.length = 0;
   fixture.onResize.length = 0;
   fixture.lines = [];
+  fixture.cursorRow = 0;
   fixture.dimensions = { cols: 96, rows: 25 };
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(768);
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(420);
@@ -274,4 +287,27 @@ it("keeps an unverified reference and a late resolution from navigating", async 
   rerender(view(true));
   await act(async () => { pending.resolve("src/file.ts"); });
   expect(onOpenFile).not.toHaveBeenCalled();
+});
+
+it("keeps each relative file reference bound to its authenticated PowerShell prompt directory", async () => {
+  fixture.lines = [{ text: "src/main.ts:1", isWrapped: false }, { text: "src/main.ts:2", isWrapped: false }];
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "start_manual_terminal") return { checkoutId: "checkout", terminalId: "session-token" };
+    if (command === "resolve_manual_terminal_file") return (args as { observedDirectory: string }).observedDirectory + "/src/main.ts";
+    return undefined;
+  });
+  const onOpenFile = vi.fn();
+  render(<ManualTerminal checkoutId="checkout" active autoStart onOpenFile={onOpenFile} />);
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  const terminal = fixture.terminals[0]!;
+  const cwd = (token: string, path: string) => terminal.onOsc?.(`P;OmniAgentCwd=${token};${btoa(path)}`);
+  cwd("session-token", String.raw`C:\checkout`);
+  fixture.cursorRow = 1;
+  cwd("session-token", String.raw`C:\checkout\subdirectory`);
+  cwd("forged-token", String.raw`C:\unrelated`);
+  for (const line of [1, 2]) await act(async () => terminal.linkProvider?.provideLinks(line, (links) => {
+    links?.[0]?.activate(new MouseEvent("mouseup", { ctrlKey: true }), `src/main.ts:${line}`);
+  }));
+  expect(onOpenFile).toHaveBeenNthCalledWith(1, String.raw`C:\checkout/src/main.ts`, 1, undefined);
+  expect(onOpenFile).toHaveBeenNthCalledWith(2, String.raw`C:\checkout\subdirectory/src/main.ts`, 2, undefined);
 });
