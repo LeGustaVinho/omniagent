@@ -1,7 +1,7 @@
 import { autocompletion, type Completion } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, redo, undo } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import { defaultHighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
+import { codeFolding, defaultHighlightStyle, ensureSyntaxTree, foldable, foldEffect, foldedRanges, syntaxHighlighting, syntaxTree, unfoldEffect } from "@codemirror/language";
 import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
 import { Compartment, EditorSelection, EditorState, StateEffect, StateField, Transaction } from "@codemirror/state";
 import {
@@ -258,13 +258,11 @@ function noteContextAt(editor: EditorView, path: string, offset: number): NoteCo
           break;
         }
       }
-      if (!hit.link && !hit.attachment) {
-        const fallback = headings(doc.toString()).find((entry) => entry.line === line.number);
-        if (fallback) {
-          hit.anchor = fallback.anchor;
-          hit.anchorKind = "heading";
-          hit.anchorLine = fallback.line;
-        }
+      const fallback = headings(doc.toString()).find((entry) => entry.line === line.number);
+      if (fallback) {
+        hit.anchor = fallback.anchor;
+        hit.anchorKind = "heading";
+        hit.anchorLine = fallback.line;
       }
     }
   }
@@ -276,6 +274,28 @@ function noteContextAt(editor: EditorView, path: string, offset: number): NoteCo
     hit.selection = { from, to, text, source: doc.toString() };
   }
   return hit;
+}
+
+function sourceSectionMenu(editor: EditorView, hit: NoteContextHit): MenuGroups {
+  if (hit.anchorKind !== "heading" || !hit.anchorLine) return [];
+  const { state } = editor;
+  const { doc } = state;
+  const header = doc.line(hit.anchorLine);
+  const tree = ensureSyntaxTree(state, doc.length, 40);
+  if (!tree) return [];
+  let heading = tree.resolveInner(header.to, -1);
+  while (heading.parent && !/^(?:ATX|Setext)Heading[1-6]$/.test(heading.name)) heading = heading.parent;
+  if (!/^(?:ATX|Setext)Heading[1-6]$/.test(heading.name) || doc.lineAt(heading.from).number !== header.number) return [];
+  const from = doc.lineAt(heading.to).to;
+  const to = foldable(state, header.from, header.to)?.to;
+  if (to === undefined || from >= to) return [];
+  const range = { from, to };
+  let folded = false;
+  foldedRanges(state).between(from, to, (start, end) => { if (start === from && end === to) folded = true; });
+  return [[{ label: folded ? "Expand section" : "Collapse section", run: () => {
+    if (editor.state.doc !== doc || !editor.dom.isConnected) return;
+    editor.dispatch({ effects: (folded ? unfoldEffect : foldEffect).of(range), selection: EditorSelection.cursor(header.from) });
+  } }]];
 }
 
 function sourceFormattingMenu(editor: EditorView, offset: number, hit: NoteContextHit): MenuGroups {
@@ -335,7 +355,7 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
     const show = (editor: EditorView, pos: number, point: { x: number; y: number }) => {
       if (!fresh.current.contextActions) return false;
       const hit = noteContextAt(editor, path, pos);
-      const groups = [...fresh.current.contextActions(hit), ...sourceFormattingMenu(editor, pos, hit)];
+      const groups = [...fresh.current.contextActions(hit), ...sourceSectionMenu(editor, hit), ...sourceFormattingMenu(editor, pos, hit)];
       return openContextMenu(hit.link?.alias || hit.link?.target || hit.attachment?.label || hit.anchor || hit.tag || "Note source", groups, point, () => {
         if (editor.dom.isConnected && !editor.dom.closest("[hidden]")) editor.focus();
       });
@@ -346,7 +366,7 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
       state: EditorState.create({
         doc: fresh.current.source,
         extensions: [
-          markdown({ base: markdownLanguage }), lineNumbers(), highlightActiveLine(), drawSelection(), history(), search({ top: true }),
+          markdown({ base: markdownLanguage }), codeFolding(), lineNumbers(), highlightActiveLine(), drawSelection(), history(), search({ top: true }),
           keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           editorTheme,

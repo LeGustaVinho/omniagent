@@ -1,5 +1,5 @@
-import { createContext, isValidElement, useContext, useEffect, useId, useRef, type ComponentPropsWithoutRef, type ReactNode } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import { createContext, isValidElement, useContext, useEffect, useId, useRef, useState, type ComponentPropsWithoutRef, type ReactNode } from "react";
+import ReactMarkdown, { type Components, type Options as MarkdownOptions } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -59,6 +59,49 @@ function markReadingLine(line: number) {
     const target = blocks.findLastIndex(({ type, position }) => type === "element" && position !== undefined && position.start.line <= line);
     if (target === -1) return;
     blocks.splice(target, 0, { type: "element", tagName: "span", properties: { dataNoteLineTarget: "" }, children: [] });
+  };
+}
+
+function readingSections(collapsed: ReadonlySet<string>) {
+  const headingLevel = (node: ReadingNode) => node.position && /^h[1-6]$/.test(node.tagName ?? "") ? Number(node.tagName?.[1]) : undefined;
+  const headingText = (node: ReadingNode): string => node.value ?? node.children?.map(headingText).join("") ?? "";
+  return function decorateSections(tree: ReadingNode) {
+    function visit(parent: ReadingNode) {
+      const children = parent.children;
+      if (!children?.length) return;
+      children.forEach(visit);
+      if (!children.some(headingLevel)) return;
+      const sections: { key: string; level: number; heading: ReadingNode; body: ReadingNode }[] = [];
+      const stack: typeof sections = [];
+      const output: ReadingNode[] = [];
+      let marker: ReadingNode | undefined;
+      for (const node of children) {
+        if (node.properties?.dataNoteLineTarget === "") {
+          marker = node;
+          continue;
+        }
+        if (node.tagName === "section" && node.properties?.dataFootnotes !== undefined) stack.length = 0;
+        const level = headingLevel(node);
+        if (level) while (stack.length && stack[stack.length - 1]!.level >= level) stack.pop();
+        const target = stack.at(-1)?.body.children ?? output;
+        if (marker) { target.push(marker); marker = undefined; }
+        target.push(node);
+        if (!level) continue;
+        const key = JSON.stringify([node.properties?.["data-note-source"], node.position?.start.line, headingText(node)]);
+        const body: ReadingNode = { type: "element", tagName: "div", properties: { "data-note-section-body": key, hidden: collapsed.has(key) }, children: [] };
+        const section = { key, level, heading: node, body };
+        target.push(body);
+        sections.push(section);
+        stack.push(section);
+      }
+      for (const { key, heading, body } of sections) {
+        if (!body.children?.some((child) => (child.type === "element" && child.properties?.dataNoteLineTarget !== "") || child.value?.trim())) continue;
+        heading.properties = { ...heading.properties, "data-note-section": key,
+          ...(collapsed.has(key) ? { "data-note-section-collapsed": "true", "aria-description": "Collapsed section" } : {}) };
+      }
+      parent.children = output;
+    }
+    visit(tree);
   };
 }
 
@@ -265,6 +308,8 @@ export function NoteReading(props: ReadingProps) {
   const { path, content, files, jump, resolveLinks, contextActions } = props;
   const anchorScope = useId() + "-";
   const root = useRef<HTMLDivElement>(null);
+  const lastJump = useRef<{ path: string; token: number; renderedLine?: number }>(undefined);
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const { open: openContextMenu, overlay } = useNoteContextMenu();
   const { markdown, renderedLine, origins } = readingDocument(content, path, files, resolveLinks ? (link, from) => {
     const target = resolveLinks(link, from);
@@ -272,25 +317,53 @@ export function NoteReading(props: ReadingProps) {
     return [{ path: target.location.path, anchor: target.location.anchor ?? undefined }];
   } : undefined, jump?.line);
   const properties = getProperties(content);
+  const plugins: NonNullable<MarkdownOptions["rehypePlugins"]> = [[markReadingOrigins, origins]];
+  if (renderedLine !== undefined) plugins.push([markReadingLine, renderedLine]);
+  if (contextActions) plugins.push([readingSections, collapsed]);
   const open = (target: EventTarget | null, point: { x: number; y: number }) => {
     if (!contextActions || !root.current || !(target instanceof Element)) return false;
     const hit = readingNoteContext(root.current, target, path);
+    const heading = target.closest<HTMLElement>("[data-note-section]");
+    const section = heading?.dataset.noteSection;
+    const groups = [...contextActions(hit), ...(section ? [[{
+      label: collapsed.has(section) ? "Expand section" : "Collapse section",
+      run: () => setCollapsed((previous) => {
+        const next = new Set(previous);
+        if (next.has(section)) next.delete(section);
+        else next.add(section);
+        return next;
+      }),
+    }]] : [])];
     const focused = root.current.ownerDocument.activeElement;
-    return openContextMenu(hit.link?.alias || hit.link?.target || hit.attachment?.label || hit.anchor || hit.tag || "Note reading", contextActions(hit), point, () => {
-      if (focused instanceof HTMLElement && focused.isConnected) focused.focus();
+    return openContextMenu(hit.link?.alias || hit.link?.target || hit.attachment?.label || hit.anchor || hit.tag || "Note reading", groups, point, () => {
+      if (focused instanceof HTMLElement && focused.isConnected && !focused.closest("[hidden]")) focused.focus();
+      else heading?.focus();
     });
   };
   useEffect(() => {
     if (!jump || !root.current) return;
+    const previous = lastJump.current;
+    if (previous?.path === path && previous.token === jump.token && previous.renderedLine === renderedLine) return;
     const key = jump.anchor && anchorKey(jump.anchor);
     const anchor = key && [...root.current.querySelectorAll("[data-note-anchor]")].find((entry) =>
       entry.getAttribute("data-note-anchor") === key);
-    const sourceTarget = !anchor && jump.line && [...root.current.querySelectorAll<HTMLElement>(
+    const sourceTarget = jump.line && [...root.current.querySelectorAll<HTMLElement>(
       "h1[data-note-line], h2[data-note-line], h3[data-note-line], h4[data-note-line], h5[data-note-line], h6[data-note-line], [data-note-anchor][data-note-line]",
     )].find((element) => element.dataset.noteSource === path && Number(element.dataset.noteLine) === jump.line);
-    const target = anchor || sourceTarget || root.current.querySelector("[data-note-line-target]")?.nextElementSibling;
-    target?.scrollIntoView?.({ block: "start" });
-  }, [jump, path, renderedLine]);
+    const target = sourceTarget || anchor || root.current.querySelector("[data-note-line-target]")?.nextElementSibling;
+    if (!target) return;
+    const foldedSections = new Set<string>();
+    for (let parent = target.closest<HTMLElement>("[data-note-section-body][hidden]"); parent;
+      parent = parent.parentElement?.closest<HTMLElement>("[data-note-section-body][hidden]") ?? null) {
+      if (parent.dataset.noteSectionBody) foldedSections.add(parent.dataset.noteSectionBody);
+    }
+    if (foldedSections.size) {
+      setCollapsed((previous) => new Set([...previous].filter((section) => !foldedSections.has(section))));
+      return;
+    }
+    lastJump.current = { path, token: jump.token, renderedLine };
+    target.scrollIntoView?.({ block: "start" });
+  }, [jump, path, renderedLine, collapsed]);
 
   return (
     <div className="note-reading" ref={root} aria-label={`Reading view for ${path}`} onContextMenu={(event) => {
@@ -309,8 +382,7 @@ export function NoteReading(props: ReadingProps) {
         </dl>}
         <ReadingContext.Provider value={{ ...props, anchorScope }}>
           <ReactMarkdown skipHtml urlTransform={(url) => trustedPreviewUrl(url, path)} remarkPlugins={markdownPlugins}
-            rehypePlugins={renderedLine === undefined ? [[markReadingOrigins, origins], ...readingPlugins]
-              : [[markReadingOrigins, origins], [markReadingLine, renderedLine], ...readingPlugins]}
+            rehypePlugins={[...plugins, ...readingPlugins]}
             components={components}>
             {markdown}
           </ReactMarkdown>

@@ -287,6 +287,7 @@
 .note-reading-properties dt { color: var(--muted-foreground); }
 .note-file-view :is(.note-media-image, video), .note-pdf-preview { display: block; max-width: 100%; }
 .note-reading article :is(h1,h2,h3,h4,h5,h6) { font-weight: 600; line-height: 1.28; scroll-margin: 14px; }
+.note-reading [data-note-section-collapsed]::after { content: '…' / ''; margin-inline-start: .5em; color: var(--muted-foreground); }
 .note-reading article h1 { margin: 4px 0 19px; font-size: 27px; letter-spacing: -.025em; }
 .note-reading article h2 { margin: 27px 0 9px; font-size: 19px; letter-spacing: -.015em; }
 .note-reading article h3 { margin: 22px 0 6px; font-size: 15px; }

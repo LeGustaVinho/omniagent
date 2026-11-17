@@ -674,7 +674,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         ] : []),
       ]);
     }
-    if (reading && line) groups.push([{ label: "Go to source", run: () => open(path, line, anchor, "source") }]);
+    if (reading && line) groups.push([{ label: anchorKind === "heading" ? "Edit heading in source" : "Go to source",
+      run: () => open(path, hitAnchorLine ?? line, anchor, "source") }]);
     if (property) groups.push([
       { label: "Copy property name", run: () => menu.copy(property.name, "Copied property name") },
       { label: "Copy property value", run: () => menu.copy(property.value, "Copied property value") },

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { EditorView } from "@codemirror/view";
-import { syntaxTree } from "@codemirror/language";
+import { foldedRanges, syntaxTree } from "@codemirror/language";
 import { invoke } from "@tauri-apps/api/core";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
@@ -138,6 +138,27 @@ it("changes the clicked Setext heading while the editor cursor is elsewhere", ()
   fireEvent.click(screen.getByRole("menuitem", { name: "Heading 4" }));
   expect(view.state.doc.toString()).toBe("## Release ##\n\n#### Release\n\nKeep the details intact.");
   command("Undo");
+  expect(view.state.doc.toString()).toBe(source);
+});
+
+it.each(["source", "live"] as const)("folds the exact duplicate heading and keeps the full Setext title in %s mode", (mode) => {
+  const source = "# Milestone\n\nFirst body\n\nMilestone\n=========\n\nSecond body\n\n# Next\n\nKeep the last section.";
+  const { view, onChange } = openSource(source, mode, true);
+  const second = source.indexOf("\nMilestone\n") + 1;
+  vi.spyOn(view, "posAtCoords").mockReturnValue(second + 1);
+  select(view, source.indexOf("First body"));
+  fireEvent.contextMenu(view.contentDOM);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Collapse section" }));
+  const expectedRange = { from: source.indexOf("\n\nSecond body"), to: source.indexOf("\n\n# Next") };
+  const ranges: { from: number; to: number }[] = [];
+  foldedRanges(view.state).between(0, source.length, (from, to) => { ranges.push({ from, to }); });
+  expect(ranges).toEqual([expectedRange]);
+  expect(view.state.doc.toString()).toBe(source);
+  expect(onChange).not.toHaveBeenCalled();
+
+  fireEvent.contextMenu(view.contentDOM);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Expand section" }));
+  expect(foldedRanges(view.state).size).toBe(0);
   expect(view.state.doc.toString()).toBe(source);
 });
 
