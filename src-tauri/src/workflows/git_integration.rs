@@ -44,6 +44,7 @@ mod commit_intent;
 mod destination_drift;
 mod history_integration;
 mod history_deletion;
+mod replay_acceptance;
 mod maintenance_handoff;
 mod merge_policy;
 mod milestones;
