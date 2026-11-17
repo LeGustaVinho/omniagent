@@ -725,8 +725,10 @@ export async function verifyAuditFactory({ browser, application, checkout, invok
 
   await setWindow(browser, invoke, 1440, 900);
   await openBuilder(browser);
-  await click(browser.$("summary=Start from a template"));
-  await click(browser.$(`button[aria-label="Create ${factoryName} draft"]`));
+  await click(browser.$("button=Start from a template"));
+  const templates = browser.$('[role="dialog"]');
+  await templates.$("h2=Workflow templates").waitForDisplayed({ timeout });
+  await click(templates.$(`button[aria-label="Create ${factoryName} draft"]`));
   const editor = browser.$('[aria-label="Workflow package editor"]');
   await textIsVisible(browser, editor.$("h1"), factoryName);
   let draft;
