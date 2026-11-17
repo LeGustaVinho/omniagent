@@ -2,6 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
+import { updateProperty } from "@/knowledge-document";
 import { NotePropertyEditor } from "@/note-property-editor";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -20,6 +21,19 @@ it("submits a committed YAML property edit through the active note buffer", asyn
 
   expect(invoke).toHaveBeenCalledWith("replace_note_property", { markdown: source, key: "status", value: "done" });
   await waitFor(() => expect(update).toHaveBeenCalledWith(edited));
+});
+
+it("applies example properties through the same form without writing to the repository", () => {
+  const source = "---\nstatus: ready\n---\n# Release\n";
+  const update = vi.fn();
+  render(<NotePropertyEditor name="status" value="ready" read={() => source} update={update} replace={updateProperty} />);
+
+  fireEvent.change(screen.getByRole("textbox", { name: "status" }), { target: { value: "done" } });
+  expect(update).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+  expect(update).toHaveBeenCalledWith(source.replace("ready", "done"));
+  expect(invoke).not.toHaveBeenCalled();
 });
 
 it("does not let a delayed property response replace newer Source edits", async () => {

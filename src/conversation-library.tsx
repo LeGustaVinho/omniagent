@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { MessageSquare, Pencil, Search } from "lucide-react";
+import { MessageSquare, Search } from "lucide-react";
 import { Popover } from "radix-ui";
 import { createContext, useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
 import { ConversationLibraryLayout } from "@/conversation-layout";
+import { ConversationRow, type ConversationAction } from "@/conversation-menu";
 import { ConversationReferenceSelection, type ConversationReferencePreview } from "@/conversation-reference";
 
 type ConversationLibraryEntry = {
@@ -112,6 +113,8 @@ function openEntry(onOpen: OpenLibraryConversation, { checkout, conversation }: 
   return onOpen(checkout, conversation.id);
 }
 
+const libraryActionAvailable = (action: ConversationAction) => action === "rename" || action === "copy-title";
+
 export function ConversationLibrary({ checkout, activeId, startPending, startError, onStart, onOpen }: {
   checkout: ProjectCheckout;
   activeId?: string;
@@ -123,6 +126,7 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
   const [projectId, setProjectId] = useState<string | null>(checkout.projectId);
   const [query, setQuery] = useState("");
   const [renaming, setRenaming] = useState<ConversationIdentity>();
+  const [notice, setNotice] = useState("");
   const list = useConversationLibrary(query, projectId);
   const open = useMutation({ mutationFn: (entry: ConversationLibraryEntry) => openEntry(onOpen, entry) });
   const registered = useQuery({
@@ -133,6 +137,16 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
     item.projectId, item.repositoryRoot.split(/[\\/]/).filter(Boolean).at(-1) ?? item.repositoryRoot,
   ]));
   const error = open.error ?? list.error ?? registered.error ?? startError;
+
+  function rowAction(action: ConversationAction, conversation: ConversationIdentity) {
+    if (action === "rename") setRenaming(conversation);
+    if (action === "copy-title") {
+      setNotice("");
+      void Promise.resolve().then(() => navigator.clipboard.writeText(conversation.title))
+        .then(() => setNotice("Title copied."))
+        .catch(() => setNotice("Couldn’t copy the title."));
+    }
+  }
 
   return <ConversationLibraryLayout query={query} searchLabel="Search conversation titles" onQuery={setQuery}
     onCreate={onStart} creating={startPending} filters={
@@ -149,7 +163,8 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
       {list.data?.map((entry) => <li key={entry.conversation.id}>
         {renaming?.id === entry.conversation.id
           ? <ConversationTitleEditor conversation={renaming} onClose={() => setRenaming(undefined)} />
-          : <div className="conv-session-row">
+          : <ConversationRow title={entry.conversation.title} available={libraryActionAvailable}
+            onAction={(action) => rowAction(action, entry.conversation)}>
             <button type="button" className="conv-session-button items-start" disabled={open.isPending}
               aria-label={entry.conversation.title} aria-describedby={`library-metadata-${entry.conversation.id}`}
               aria-current={entry.conversation.id === activeId ? "page" : undefined} onClick={() => open.mutate(entry)}>
@@ -159,11 +174,10 @@ export function ConversationLibrary({ checkout, activeId, startPending, startErr
                 <ConversationMetadata entry={entry} id={`library-metadata-${entry.conversation.id}`} />
               </span>
             </button>
-            <button type="button" className="conv-icon-button" aria-label={`Rename ${entry.conversation.title}`}
-              title="Rename conversation" onClick={() => setRenaming(entry.conversation)}><Pencil aria-hidden /></button>
-          </div>}
+          </ConversationRow>}
       </li>)}
     </ul>
+    {notice && <p className="conv-sidebar-note" role="status">{notice}</p>}
   </ConversationLibraryLayout>;
 }
 

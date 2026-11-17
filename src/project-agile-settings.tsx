@@ -9,6 +9,7 @@ import { availableModelSelection, LIVE_MODEL_PROVIDERS, useLiveModelOptions } fr
 import { useProjectModelDefaults } from "@/model-defaults";
 import { useTaskAssignments } from "@/task-assignment";
 import type { Item, Work } from "@/project-agile-model";
+import { SettingRow } from "@/settings-controls";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type ChecklistMode = "track_progress" | "run_by_item";
@@ -24,6 +25,13 @@ const branchLabels = { independent: "Independent", shared_branch_per_task: "Shar
 const checklistOptions = Object.entries(checklistLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>);
 const branchOptions = Object.entries(branchLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>);
 
+export const projectWorkModeSettings = {
+  checklist: { id: "checklist-mode", label: "Default checklist mode",
+    description: "Tasks and Sub-Tasks can override how checklist items are sent to an agent." },
+  branch: { id: "branch-strategy", label: "Agile branch strategy",
+    description: "Applies when provisioning worktrees for Tasks and Sub-Tasks." },
+};
+
 export function ProjectWorkModes({ projectId }: { projectId: string }) {
   const [open, setOpen] = useState(false);
   return <details className="pipeline-form m-4" onToggle={(event) => setOpen(event.currentTarget.open)}>
@@ -32,7 +40,7 @@ export function ProjectWorkModes({ projectId }: { projectId: string }) {
   </details>;
 }
 
-function ProjectWorkModeControls({ projectId }: { projectId: string }) {
+export function ProjectWorkModeControls({ projectId, settings = false }: { projectId: string; settings?: boolean }) {
   const client = useQueryClient();
   const key = ["project-tasks", projectId, "work-modes"];
   const checklist = useQuery({ queryKey: [...key, "checklist"], queryFn: () => invoke<ChecklistMode>("project_checklist_mode", { projectId }) });
@@ -44,16 +52,29 @@ function ProjectWorkModeControls({ projectId }: { projectId: string }) {
     onSuccess: () => client.invalidateQueries({ queryKey: ["project-tasks", projectId] }),
   });
   const error = checklist.error ?? branch.error ?? saveChecklist.error ?? saveBranch.error;
+  const { checklist: checklistSetting, branch: branchSetting } = projectWorkModeSettings;
+  const checklistControl = <select id={settings ? checklistSetting.id : undefined}
+    aria-describedby={settings ? `${checklistSetting.id}-description` : undefined}
+    value={saveChecklist.isPending ? saveChecklist.variables : checklist.data ?? ""}
+    disabled={!checklist.data || saveChecklist.isPending} onChange={(event) => saveChecklist.mutate(event.currentTarget.value as ChecklistMode)}>
+    {!checklist.data && <option value="">{checklist.isPending ? "Loading…" : "Mode unavailable"}</option>}{checklistOptions}
+  </select>;
+  const branchControl = <select id={settings ? branchSetting.id : undefined}
+    aria-describedby={settings ? `${branchSetting.id}-description` : undefined}
+    value={saveBranch.isPending ? saveBranch.variables : branch.data ?? ""}
+    disabled={!branch.data || saveBranch.isPending} onChange={(event) => saveBranch.mutate(event.currentTarget.value as BranchStrategy)}>
+    {!branch.data && <option value="">{branch.isPending ? "Loading…" : "Strategy unavailable"}</option>}{branchOptions}
+  </select>;
+  const warning = error && <p role="alert">{String(error)}</p>;
+  if (settings) return <>
+    <SettingRow {...branchSetting}>{branchControl}</SettingRow>
+    <SettingRow {...checklistSetting}>{checklistControl}</SettingRow>
+    {warning}
+  </>;
   return <div className="pipeline-actions mt-2">
-    <label>Project checklist mode <select value={saveChecklist.isPending ? saveChecklist.variables : checklist.data ?? ""}
-      disabled={!checklist.data || saveChecklist.isPending} onChange={(event) => saveChecklist.mutate(event.currentTarget.value as ChecklistMode)}>
-      {!checklist.data && <option value="">Loading…</option>}{checklistOptions}
-    </select></label>
-    <label>Project branch strategy <select value={saveBranch.isPending ? saveBranch.variables : branch.data ?? ""}
-      disabled={!branch.data || saveBranch.isPending} onChange={(event) => saveBranch.mutate(event.currentTarget.value as BranchStrategy)}>
-      {!branch.data && <option value="">Loading…</option>}{branchOptions}
-    </select></label>
-    {error && <p role="alert">{String(error)}</p>}
+    <label>Project checklist mode {checklistControl}</label>
+    <label>Project branch strategy {branchControl}</label>
+    {warning}
   </div>;
 }
 

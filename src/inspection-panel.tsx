@@ -1,19 +1,25 @@
 import { invoke } from "@tauri-apps/api/core";
 import { JobFailurePanel } from "@/job-failure";
 import { useQuery } from "@tanstack/react-query";
-import { FlaskConical, LibraryBig } from "lucide-react";
 import { useState } from "react";
-import { DiagnosticsCard, DiagnosticsWorkspace, type DiagnosticView } from "@/diagnostics-workspace";
+import { DesktopDiagnostics, DiagnosticsWorkspace, type DiagnosticView } from "@/diagnostics-workspace";
+import { SimulationFixture } from "@/fixture-panels";
 import type { RunRecord } from "@/bindings/RunRecord";
 import type { CommandJobOutput } from "@/bindings/CommandJobOutput";
 import type { DownstreamWait } from "@/bindings/DownstreamWait";
 import { Button } from "@/components/ui/button";
-import { ConversationActivity, ConversationRequests, StopConversation, isLiveRun, useConversationRun } from "@/conversation-run";
+import { ConversationChecklistProgress } from "@/conversation-checklist-progress";
+import { ConversationApprovalEvidence, ObservedConversationResponse } from "@/conversation-response-evidence";
+import {
+  ConversationActivityAgents, ConversationActivityContext, ConversationActivityTimeline, ConversationExactInput,
+  ConversationRequests, StopConversation, conversationRunStatus, isLiveRun, useConversationRun,
+} from "@/conversation-run";
 import { deliveryBase, deliveryBranch, deliveryNotePath, deliveryRunId, deliveryTaskId } from "@/tasks-demo-data";
 import type { DeliveryStep, QuestionFocus, WorkspaceProps } from "@/workbench-contract";
-import { RunOrchestrationPanel } from "@/run-orchestration";
+import { RunArtifactEvidence, RunOrchestrationPanel } from "@/run-orchestration";
 import { RunPlanHistory } from "@/run-plan-history";
 import { RunInspectionLayout } from "@/run-inspection-layout";
+import { RunInspectorNavigation } from "@/run-inspector-navigation";
 
 const steps: Record<DeliveryStep, string> = {
   note: "Ready to plan", question: "Waiting for input", plan: "Awaiting implementation approval",
@@ -135,16 +141,46 @@ function RecordedConversationRun({ conversationId, projectId, runId, focusQuesti
   if (current.error || !run || !owner) return <RunInspectionLayout title="Conversation attempt" runId={runId}>
     {current.error ? <p role="alert">{String(current.error)}</p> : <p role="status">Loading execution…</p>}
   </RunInspectionLayout>;
-  return <RunInspectionLayout title="Conversation attempt">
-    <ConversationRequests conversationId={owner} runId={runId} activity={activity} focusQuestion={focusQuestion} />
-    {activity.live && <StopConversation {...activity} />}
-    {activity.error && <p role="alert">{String(activity.error)}</p>}
-    <ConversationActivity key={run.id} embedded conversationId={owner} run={run} projection={activity.projection} onClose={onClose}
-      navigation={{ openActivity, openWorkspace }} />
-    {!activity.live && <DownstreamHistory projectId={projectId} runId={runId} openActivity={openActivity} />}
-    {(run.status === "failed" || run.status === "interrupted") && <JobFailurePanel projectId={projectId} runId={runId} />}
-    <RunPlanHistory projectId={projectId} runId={runId} openActivity={openActivity} />
-  </RunInspectionLayout>;
+  const { live, projection } = activity;
+  const scope = { conversationId: owner, runId, live };
+  const attempt = { projectId, conversationId: owner, runId };
+  const navigation = { openActivity, openWorkspace };
+  const showNotice = activity.inputs.length > 0 || activity.savedQuestions.length > 0 || Boolean(activity.error);
+  return <RunInspectionLayout key={run.id} as="aside" label="Conversation activity" title="Conversation attempt"
+    runId={run.id} status={conversationRunStatus(run)}
+    actions={live && <StopConversation {...activity} />}
+    notice={showNotice && <>
+      <ConversationRequests conversationId={owner} runId={runId} activity={activity} focusQuestion={focusQuestion} />
+      {activity.error && <p role="alert">{String(activity.error)}</p>}
+    </>}
+    pages={[
+      { id: "overview", name: "Overview", content: <>
+        {(run.status === "failed" || run.status === "interrupted") && <JobFailurePanel projectId={projectId} runId={runId} />}
+        <RunOrchestrationPanel scope={attempt} live={live} navigation={navigation} showArtifacts={false} />
+        <ConversationChecklistProgress projectId={projectId} runId={runId} live={live} />
+        {!live && <DownstreamHistory projectId={projectId} runId={runId} openActivity={openActivity} />}
+      </> },
+      { id: "timeline", name: "Timeline", content: <>
+        <h3>Events</h3>
+        <ConversationActivityTimeline {...scope} projection={projection} />
+        <RunPlanHistory projectId={projectId} runId={runId} openActivity={openActivity} />
+      </> },
+      { id: "agents", name: "Agents", content: <ConversationActivityAgents {...scope} projection={projection} openActivity={openActivity} /> },
+      { id: "context", name: "Context", content: <ConversationActivityContext {...scope} projectId={projectId} projection={projection} /> },
+      { id: "input", name: "Exact input", content: <ConversationExactInput {...scope} /> },
+      { id: "approvals", name: "Approvals", content: <><h3>Approval history</h3><ConversationApprovalEvidence {...scope} /></> },
+      { id: "artifacts", name: "Artifacts", content: <>
+        <h3>Recorded output</h3>
+        <RunInspectorNavigation.Provider value={{ ...navigation, activeRunId: runId, openGitAttempt: (id) => {
+          openWorkspace("git", `attempt:${id}`);
+          onClose();
+        } }}>
+          <RunArtifactEvidence scope={attempt} live={live} navigation={navigation} />
+        </RunInspectorNavigation.Provider>
+        {projection && <ObservedConversationResponse evidence={projection} />}
+        {projection && !projection.responses.items.length && <p>No response text recorded.</p>}
+      </> },
+    ]} />;
 }
 
 function DownstreamHistory({ projectId, runId, openActivity }: Pick<RecordedRunProps, "projectId" | "runId" | "openActivity">) {
@@ -176,32 +212,14 @@ function DownstreamHistory({ projectId, runId, openActivity }: Pick<RecordedRunP
 
 export function SimulationDiagnostics({ openSystem, openActivity, simulation }: WorkspaceProps & { openSystem?: () => void }) {
   const [view, setView] = useState<DiagnosticView>("desktop");
-  const [fixtureStatus, setFixtureStatus] = useState<"Idle" | "Waiting for input" | "Succeeded" | "Interrupted">("Idle");
-  const [input, setInput] = useState("");
-
-  return <DiagnosticsWorkspace active={view} onSelect={setView} desktop={<div className="diagnostics-cards">
-    <DiagnosticsCard title="Windows qualification" icon={FlaskConical}
-      action={openSystem && <Button variant="outline" onClick={openSystem}>System settings</Button>}>
-      <p>Review provider, WebView2 and installer status for this scenario.</p>
-    </DiagnosticsCard>
-    <DiagnosticsCard title="Recorded attempt" icon={LibraryBig}
-      action={<Button variant="outline" onClick={() => openActivity(deliveryRunId)}>Open run inspector</Button>}>
-      <p>{simulation && steps[simulation.delivery]}</p>
-    </DiagnosticsCard>
-  </div>} fixtures={<DiagnosticsCard title="Process fixture" icon={FlaskConical}>
-    <div className="grid gap-3">
-      <p role="status">{fixtureStatus}</p>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button onClick={() => { setFixtureStatus("Waiting for input"); setInput(""); }}>Start fixture</Button>
-        {fixtureStatus === "Waiting for input" && <Button variant="outline" onClick={() => setFixtureStatus("Interrupted")}>Cancel run</Button>}
-      </div>
-      {fixtureStatus === "Waiting for input" && <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => { event.preventDefault(); setFixtureStatus("Succeeded"); }}>
-        <label className="grid min-w-0 gap-1">Fixture input
-          <input className="rounded-md border border-input bg-background px-2 py-1" value={input} onChange={(event) => setInput(event.target.value)} />
-        </label>
-        <Button type="submit" disabled={!input.trim()}>Send input</Button>
-      </form>}
-      {fixtureStatus === "Succeeded" && <pre className="work-fixture-output">Input received: {input}</pre>}
-    </div>
-  </DiagnosticsCard>} />;
+  return <DiagnosticsWorkspace active={view} onSelect={setView} fixtures={<SimulationFixture />}
+    desktop={<DesktopDiagnostics openSystem={openSystem} openAttempt={() => openActivity(deliveryRunId)}
+      installation={<dl className="settings-facts">
+        <dt>Runtime</dt><dd>Windows 11 · WebView2</dd>
+        {simulation && <><dt>Recorded attempt</dt><dd>{steps[simulation.delivery]}</dd></>}
+      </dl>}
+      executables={<dl className="settings-facts">
+        <dt>Git for Windows</dt><dd>Available in this scenario</dd>
+        <dt>Codex</dt><dd>Example executable</dd>
+      </dl>} />} />;
 }

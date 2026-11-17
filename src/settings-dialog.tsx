@@ -1,16 +1,20 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import { ArrowLeft, Bot, Braces, ChevronRight, Cpu, GitPullRequest, HardDrive, Monitor, Moon, Paperclip, Search, Settings2, Shield, SlidersHorizontal, Sun, Workflow, X, type LucideIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useEffect, useRef, useState } from "react";
 import type { AppearanceSettings } from "@/bindings/AppearanceSettings";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { CandidateGateSettings } from "@/candidate-gate-settings";
-import { deliveryGitSetting } from "@/delivery-git-policy";
-import { DeliveryGitSettings, SimulatedDeliveryGitSettings } from "@/delivery-git-settings";
+import { deliveryGitSetting, type DestinationDriftPolicy } from "@/delivery-git-policy";
+import { DeliveryGitSettings, SimulatedDeliveryGitSettings, deliveryMilestoneSetting, destinationDriftSetting } from "@/delivery-git-settings";
 import { Button } from "@/components/ui/button";
 import { ProjectQueueHistoryPolicy } from "@/conversation-history-controls";
 import { CustomizationsSettings } from "@/customizations-panel";
 import { ProjectModelSettings, projectModelSettings } from "@/model-default-settings";
+import { ProjectWorkModeControls } from "@/project-agile-settings";
 import { ProjectAttachmentSettings } from "@/provider-settings";
+import { CapacityEditor, managedCapacitySetting, QueueCapacitySettings } from "@/queue-policy";
 import { defaultAppearance, useAppearancePresentation, useEditableAppearance } from "@/settings-appearance";
 import { SettingRow } from "@/settings-controls";
 import { PolicyForm, policyFields } from "@/settings-policies";
@@ -51,7 +55,7 @@ const pages: readonly Page[] = [
     { id: "provider-paths", label: "Executable paths", description: "Codex, Claude Code, Gemini, Antigravity, PATH, authentication, CLI protocol and plugin inventory" },
     { id: "runner", label: "Runners and capabilities", description: "Direct Windows host, Hyper-V guest, sandbox, verified capability profile" },
   ] },
-  { id: "capacity", scope: "device", title: "Execution capacity", icon: Cpu, entries: policyFields.capacity },
+  { id: "capacity", scope: "device", title: "Execution capacity", icon: Cpu, entries: [managedCapacitySetting, ...policyFields.capacity] },
   { id: "system", scope: "device", title: "System", icon: HardDrive, entries: [
     { id: "environment", label: "Current installation", description: "Build, local data directory, runtime" },
     { id: "qualification", label: "Prerequisites and qualification", description: "Windows, WebView2, Git for Windows, ripgrep, CLI, model, runner" },
@@ -65,7 +69,8 @@ const pages: readonly Page[] = [
   { id: "conversation", scope: "project", title: "Conversation defaults", icon: SlidersHorizontal, entries: [projectModelSettings.conversation, ...policyFields.conversation] },
   { id: "git", scope: "project", title: "Git and delivery", icon: GitPullRequest, entries: [
     deliveryGitSetting,
-    ...policyFields.git,
+    deliveryMilestoneSetting,
+    destinationDriftSetting,
     { id: "candidate-gates", label: "Candidate verification checks", description: "Build commands, test commands and required checks" },
   ] },
   { id: "automation", scope: "project", title: "Workflow automation", icon: Workflow, entries: policyFields.automation },
@@ -174,6 +179,9 @@ function SettingsSession({
   const [mobilePage, setMobilePage] = useState(() => pageFromLink(initialPage));
   const [query, setQuery] = useState("");
   const [exampleAppearance, setExampleAppearance] = useState(defaultAppearance);
+  const [exampleCapacity, setExampleCapacity] = useState(3);
+  const [exampleBranch, setExampleBranch] = useState("main");
+  const [exampleDrift, setExampleDrift] = useState<DestinationDriftPolicy>("pause");
   const [disposablePolicies, setDisposablePolicies] = useState<Partial<Record<PageId, Record<string, string>>>>({});
   const [approvedExample, setApprovedExample] = useState(false);
   const providerExamples = useProviderExamples();
@@ -251,6 +259,12 @@ function SettingsSession({
         </>;
       case "providers":
         return <ProviderProfiles examples={simulation ? providerExamples : undefined} start={simulate} />;
+      case "capacity":
+        return <>
+          {simulation ? <CapacityEditor key={exampleCapacity} capacity={exampleCapacity} settings onSave={setExampleCapacity} />
+            : <QueueCapacitySettings key={checkout?.projectId} projectId={checkout?.projectId} />}
+          {policy("capacity")}
+        </>;
       case "attachments":
         return simulation ? policy("attachments") : checkout && <ProjectAttachmentSettings key={checkout.projectId} projectId={checkout.projectId} />;
       case "customizations":
@@ -277,16 +291,16 @@ function SettingsSession({
           <ProjectSubagentControls key={checkout.projectId} projectId={checkout.projectId} />
           <ProjectSubagentAuditControl key={`audit-${checkout.projectId}`} projectId={checkout.projectId} />
           <ProjectQuestionTimeout key={`timeout-${checkout.projectId}`} projectId={checkout.projectId} />
-          <PolicyForm fields={policyFields.execution.filter(({ id }) => !["planning-model", "implementation-model", "subagent-policy", "subagent-cap", "subagent-audit", "live-wait"].includes(id))}
+          <ProjectWorkModeControls key={`modes-${checkout.projectId}`} projectId={checkout.projectId} settings />
+          <PolicyForm fields={policyFields.execution.filter(({ id }) => !["planning-model", "implementation-model", "subagent-policy", "subagent-cap", "subagent-audit", "live-wait", "branch-strategy", "checklist-mode"].includes(id))}
             stored={undefined} simulate={simulate} />
         </>;
       case "git":
-        if (simulation) return <><SimulatedDeliveryGitSettings />{policy("git")}</>;
-        if (!checkout) return policy("git");
-        return <>
+        if (simulation) return <SimulatedDeliveryGitSettings branch={exampleBranch} drift={exampleDrift}
+          onBranchChange={setExampleBranch} onDriftChange={setExampleDrift} />;
+        return checkout && <>
           <CandidateGateSettings key={checkout.projectId} projectId={checkout.projectId} />
           <DeliveryGitSettings key={`delivery-${checkout.projectId}`} projectId={checkout.projectId} />
-          <PolicyForm fields={policyFields.git} stored={undefined} simulate={simulate} />
         </>;
       case "automation":
         if (simulation || !checkout) return policy("automation");
@@ -297,8 +311,6 @@ function SettingsSession({
             openActivity(runId);
           }} />
         </>;
-      default:
-        return policy(currentPage.id);
     }
   }
 
@@ -482,5 +494,3 @@ function CustomizationExample({ approved, approve }: { approved: boolean; approv
     </section>
   </div>;
 }
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";

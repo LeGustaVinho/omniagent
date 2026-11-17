@@ -190,6 +190,7 @@ export async function runInstalledProtectedInspector({ application, checkout, re
       const frame = exact.$("pre");
       await frame.waitForDisplayed({ timeout: 20_000 });
       assert.equal(await frame.getProperty("textContent"), input.frames.join(""));
+      await click(activity, "button=Context");
       await click(activity, "button=Dispatch inventory");
       const displayed = activity.$('section[aria-label="Saved dispatch inventory"]');
       const selected = displayed.$(skillList);

@@ -49,12 +49,12 @@ function readActions(props: ConversationMenuProps) {
 function ConversationMenuContent({ variant, ...props }: ConversationMenuProps & { variant: "context" | "dropdown" }) {
   const { Item, Separator, Sub, SubTrigger, SubContent, Portal } = variant === "context" ? ContextMenu : DropdownMenu;
   const { organize, section, fork, copy, retain } = readActions(props);
-  const available = (action: ConversationAction) => props.available?.(action) ?? true;
+  const availableItems = (items: ItemDescription[]) => items.filter(({ action }) => props.available?.(action) ?? true);
+  const retentionItems = availableItems(retain);
 
   function item({ action, label, icon, section }: ItemDescription) {
     return (
-      <Item key={`${action}:${section ?? ""}`} className="conv-menu-item" disabled={!available(action)}
-        title={available(action) ? undefined : "Integration pending"}
+      <Item key={`${action}:${section ?? ""}`} className="conv-menu-item"
         data-destructive={action === "delete" ? "" : undefined}
         onSelect={() => props.onAction(action, section)}>
         {icon}<span>{label}</span>
@@ -63,26 +63,27 @@ function ConversationMenuContent({ variant, ...props }: ConversationMenuProps & 
   }
 
   function submenu(label: string, icon: ReactNode, actions: ItemDescription[]) {
+    const items = availableItems(actions);
+    if (!items.length) return null;
     return (
       <Sub>
-        <SubTrigger className="conv-menu-item" disabled={!actions.some(({ action }) => available(action))}>
+        <SubTrigger className="conv-menu-item">
           {icon}<span>{label}</span><ChevronRight className="conv-menu-chevron" />
         </SubTrigger>
-        <Portal><SubContent className="conv-menu" collisionPadding={8}>{actions.map(item)}</SubContent></Portal>
+        <Portal><SubContent className="conv-menu" collisionPadding={8}>{items.map(item)}</SubContent></Portal>
       </Sub>
     );
   }
 
   return (
     <>
-      {organize.map(item)}
+      {availableItems(organize).map(item)}
       {submenu("Section", <ListPlus />, section)}
       <Separator className="conv-menu-separator" />
-      {item(fork)}
+      {availableItems([fork]).map(item)}
       {submenu("Copy", <Clipboard />, copy)}
-      <Separator className="conv-menu-separator" />
-      {retain.map(item)}
-      {props.available && <p className="conv-menu-note">Unavailable actions · Integration pending</p>}
+      {retentionItems.length > 0 && <Separator className="conv-menu-separator" />}
+      {retentionItems.map(item)}
     </>
   );
 }

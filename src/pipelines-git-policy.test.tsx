@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { SimulatedDeliveryGitSettings } from "@/delivery-git-settings";
-import { GitSimulationProvider, useGitSimulation } from "@/git-simulation";
+import { GitSimulationProvider } from "@/git-simulation";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { deliveryCommitSha } from "@/tasks-demo-data";
 import { exampleCheckout, nextDeliveryStep, type DeliveryStep } from "@/workbench-contract";
@@ -14,11 +14,9 @@ vi.mock("@xyflow/react", async (importOriginal) => ({
 }));
 
 function PipelineScenario() {
-  const git = useGitSimulation();
   const [delivery, setDelivery] = useState<DeliveryStep>("note");
   return <>
-    <SimulatedDeliveryGitSettings />
-    <button type="button" onClick={() => git.setMergeRequired(true)}>Require verified merge</button>
+    <SimulatedDeliveryGitSettings branch="main" drift="pause" onBranchChange={() => {}} onDriftChange={() => {}} />
     <PipelinesWorkspace checkout={exampleCheckout} simulation={{
       scenario: "pipelines", epoch: 1, delivery,
       advanceDelivery: (action) => setDelivery((step) => nextDeliveryStep(step, action)),
@@ -46,7 +44,8 @@ it.each([false, true])("uses the Settings policy in the pipeline simulation, man
   const policy = screen.getByLabelText("After accepting a diff") as HTMLSelectElement;
   expect(policy.value).toBe("automatic_commit_user_merge");
   if (manual) fireEvent.change(policy, { target: { value: "user_commits_and_merges" } });
-  fireEvent.click(screen.getByRole("button", { name: "Require verified merge" }));
+  fireEvent.change(screen.getByLabelText("Complete repository work at"), { target: { value: "verified_merge" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save completion settings" }));
   fireEvent.click(screen.getByRole("button", { name: "Run pipeline" }));
   const inspector = within(screen.getByRole("complementary", { name: "Stage inspector" }));
   const inspect = (name: string) => fireEvent.change(inspector.getByLabelText("Inspect stage"), { target: { value: name } });

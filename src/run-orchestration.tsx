@@ -12,6 +12,7 @@ import { GoalVerificationPanel } from "@/goal-verification-panel";
 import { WorktreeEvidence } from "@/worktree-evidence";
 import { AttemptDeliveryHistory } from "@/repository-delivery-history";
 import type { WorkspaceProps } from "@/workbench-contract";
+import { workflowRunTarget } from "@/workflow-execution-model";
 
 type Scope = { projectId: string; runId: string; conversationId?: string };
 type SourceDocument = { revisionId: string; checkoutId: string; path: string; sha256: string; baseCommit: string | null };
@@ -86,9 +87,10 @@ function SavedDescriptions({ descriptions }: { descriptions: WorkDescriptions })
   </details>;
 }
 
-function OrchestrationDetails({ data, scope, live, navigation }: {
+function OrchestrationDetails({ data, scope, live, navigation, showArtifacts }: {
   data: Orchestration; scope: Scope; live: boolean;
   navigation?: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
+  showArtifacts: boolean;
 }) {
   const { context, document, goal, job, policy, route, stagePin, taskDescriptions, unit } = data;
   const stage = job?.stage;
@@ -154,33 +156,61 @@ function OrchestrationDetails({ data, scope, live, navigation }: {
     {taskDescriptions && <SavedDescriptions descriptions={taskDescriptions} />}
     {navigation && <div className="flex flex-wrap gap-2">
       {taskId && <Button variant="outline" onClick={() => navigation.openWorkspace("tasks", taskId)}>Open task</Button>}
-      {stage && <Button variant="outline" onClick={() => navigation.openWorkspace("pipelines", stage.pipelineRunId)}>Open workflow</Button>}
+      {stage && <Button variant="outline" onClick={() => navigation.openWorkspace("pipelines",
+        stagePin ? workflowRunTarget(stage.pipelineRunId) : stage.pipelineRunId)}>Open workflow</Button>}
       {requestingRun && <Button variant="outline" onClick={() => navigation.openActivity(requestingRun)}>Open requesting attempt</Button>}
     </div>}
-    {job && <WorktreeEvidence projectId={scope.projectId} runId={scope.runId} ownerTaskId={job.ownerTaskId} />}
-    {job?.taskId && <AttemptDeliveryHistory projectId={scope.projectId} runId={scope.runId} navigation={navigation} />}
+    {showArtifacts && job && <AttemptArtifacts scope={scope} job={job} navigation={navigation} />}
   </>;
 }
 
-export function RunOrchestrationPanel({ scope, live, navigation }: {
+function AttemptArtifacts({ scope, job, navigation }: {
+  scope: Scope;
+  job: NonNullable<Orchestration["job"]>;
+  navigation?: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
+}) {
+  return <>
+    <WorktreeEvidence projectId={scope.projectId} runId={scope.runId} ownerTaskId={job.ownerTaskId} />
+    {job.taskId && <AttemptDeliveryHistory projectId={scope.projectId} runId={scope.runId} navigation={navigation} />}
+  </>;
+}
+
+function useRunOrchestration(scope: Scope, live: boolean, enabled = true) {
+  return useQuery({
+    queryKey: ["run-orchestration", scope.projectId, scope.runId, scope.conversationId],
+    queryFn: () => invoke<Orchestration | null>("run_orchestration", scope),
+    enabled,
+    refetchInterval: enabled && live ? 1500 : false,
+  });
+}
+
+export function RunArtifactEvidence({ scope, live, navigation }: {
   scope: Scope; live: boolean;
   navigation?: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
 }) {
+  const record = useRunOrchestration(scope, live);
+  if (record.isPending) return <p role="status">Loading worktree and delivery records…</p>;
+  if (record.error) return <p role="alert">{String(record.error)}</p>;
+  const job = record.data?.job;
+  return job ? <AttemptArtifacts scope={scope} job={job} navigation={navigation} />
+    : <p>No worktree or delivery record for this attempt.</p>;
+}
+
+export function RunOrchestrationPanel({ scope, live, navigation, showArtifacts = true }: {
+  scope: Scope; live: boolean;
+  navigation?: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
+  showArtifacts?: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
   const [showRevisions, setShowRevisions] = useState(false);
-  const record = useQuery({
-    queryKey: ["run-orchestration", scope.projectId, scope.runId, scope.conversationId],
-    queryFn: () => invoke<Orchestration | null>("run_orchestration", scope),
-    enabled: expanded,
-    refetchInterval: expanded && live ? 1500 : false,
-  });
+  const record = useRunOrchestration(scope, live, expanded);
   return <details onToggle={(event) => setExpanded(event.currentTarget.open)} className="min-w-0">
-    <summary>Orchestration and worktree</summary>
+    <summary>{showArtifacts ? "Orchestration and worktree" : "Orchestration details"}</summary>
     {expanded && <div className="grid gap-2">
       {record.isPending && <p role="status">Loading routing and policy…</p>}
       {record.error && <p role="alert">{String(record.error)}</p>}
       {record.data === null && <p>Orchestration evidence is unavailable.</p>}
-      {record.data && <OrchestrationDetails data={record.data} scope={scope} live={live} navigation={navigation} />}
+      {record.data && <OrchestrationDetails data={record.data} scope={scope} live={live} navigation={navigation} showArtifacts={showArtifacts} />}
       {scope.conversationId && <details onToggle={(event) => setShowRevisions(event.currentTarget.open)}>
         <summary>Context revisions</summary>
         {showRevisions && <ConversationPreviousRevisions conversationId={scope.conversationId} />}

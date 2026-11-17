@@ -2,7 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -196,7 +196,9 @@ it("persists library and tab renames, restores older history and draft, and shar
   await waitFor(() => expect(layouts.get(layoutKey)).toContain(original));
   const oldLayout = layouts.get(layoutKey)!;
 
-  await first.user.click(library().getByRole("button", { name: `Rename ${original}` }));
+  library().getByRole("button", { name: original }).focus();
+  await first.user.keyboard("{Shift>}{F10}{/Shift}");
+  await first.user.click(await screen.findByRole("menuitem", { name: "Rename" }));
   await rename(first.user, `  ${libraryTitle}  `);
   expect(await screen.findByRole("tab", { name: libraryTitle })).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("rename_conversation", { checkoutId: selected.checkoutId, conversationId: archiveId, title: libraryTitle });
@@ -237,6 +239,23 @@ it("persists library and tab renames, restores older history and draft, and shar
   await waitFor(() => expect(library().getByRole("button", { name: finalTitle }).getAttribute("aria-current")).toBe("page"));
   expect(screen.getAllByRole("tab", { name: finalTitle })).toHaveLength(1);
   expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
+});
+
+it("offers the shared context menu on a live library row and copies that row's title", async () => {
+  repository();
+  const { user } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  const row = await library().findByRole("button", { name: original });
+  fireEvent.contextMenu(row);
+  const menu = await screen.findByRole("menu");
+  expect(within(menu).getByRole("menuitem", { name: "Rename" })).toBeTruthy();
+  expect(within(menu).queryByRole("menuitem", { name: "Archive" })).toBeNull();
+  const copy = within(menu).getByRole("menuitem", { name: "Copy" });
+  copy.focus();
+  await user.keyboard("{ArrowRight}");
+  await user.click(await screen.findByRole("menuitem", { name: "Title" }));
+  expect(await screen.findByText("Title copied.")).toBeTruthy();
+  expect(await navigator.clipboard.readText()).toBe(original);
 });
 
 it("opens an all-project result in its own worktree from the actual application shell", async () => {

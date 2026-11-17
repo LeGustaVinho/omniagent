@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
+import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { defaultAppearance, useAppAppearance } from "@/settings-appearance";
 import SettingsDialog from "@/settings-dialog";
 import { exampleCheckout, type SimulationSession } from "@/workbench-contract";
@@ -18,10 +19,12 @@ function AppearanceRoot() {
   return null;
 }
 
-function openSettings(options: { initialPage?: string; simulation: SimulationSession | null }) {
+function openSettings({ checkout = exampleCheckout, ...options }: {
+  initialPage?: string; simulation: SimulationSession | null; checkout?: ProjectCheckout | null;
+}) {
   render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
     {!options.simulation && <AppearanceRoot />}
-    <SettingsDialog checkout={exampleCheckout} open onOpenChange={unusedAction}
+    <SettingsDialog checkout={checkout} open onOpenChange={unusedAction}
       openActivity={unusedAction} openChanges={unusedAction} openWorkspace={unusedAction}
       startSimulation={unusedAction} {...options} />
   </QueryClientProvider>);
@@ -108,6 +111,39 @@ it("stages the verified backup only after confirmation and reports the pending r
   expect(await screen.findByText(/Restore staged\. Quit OmniAgent/)).toBeTruthy();
 });
 
+it("saves execution capacity in the same device scheduler used by the queue", async () => {
+  let limit = 3;
+  invoke.mockImplementation(async (command: string, args?: { capacity?: number }) => {
+    switch (command) {
+      case "appearance_settings": return defaultAppearance;
+      case "project_job_queue": return { settings: { paused: false, capacity: limit }, active: 0, jobs: [] };
+      case "set_job_queue_capacity": return { paused: false, capacity: limit = args!.capacity! };
+      default: throw new Error(`Unexpected command ${command}`);
+    }
+  });
+  openSettings({ initialPage: "capacity", simulation: null });
+  const user = userEvent.setup();
+  const capacity = () => screen.getByRole<HTMLInputElement>("spinbutton", { name: "Simultaneous managed runs" });
+  const save = () => screen.getByRole<HTMLButtonElement>("button", { name: "Save capacity" });
+  await waitFor(() => expect(capacity().value).toBe("3"));
+  await user.clear(capacity());
+  expect(save().disabled).toBe(true);
+  await user.type(capacity(), "5");
+  await user.click(save());
+  expect(invoke).toHaveBeenCalledWith("project_job_queue", { projectId: exampleCheckout.projectId });
+  expect(invoke).toHaveBeenCalledWith("set_job_queue_capacity", { capacity: 5 });
+  await waitFor(() => expect(save().disabled && !capacity().disabled).toBe(true));
+  expect(capacity().value).toBe("5");
+});
+
+it("explains how to load execution capacity without fabricating a checkout", () => {
+  invoke.mockResolvedValue(defaultAppearance);
+  openSettings({ initialPage: "capacity", simulation: null, checkout: null });
+  expect(screen.getByRole<HTMLInputElement>("spinbutton", { name: "Simultaneous managed runs" }).disabled).toBe(true);
+  expect(screen.getByText("Open a repository to load execution capacity.")).toBeTruthy();
+  expect(invoke.mock.calls.some(([command]) => command === "project_job_queue")).toBe(false);
+});
+
 it("saves Git automation independently of its completion milestone and destination drift policy", async () => {
   invoke.mockImplementation(async (command: string, args?: { policy?: unknown }) => {
     switch (command) {
@@ -151,6 +187,10 @@ it("saves Git automation independently of its completion milestone and destinati
   expect(invoke).toHaveBeenCalledWith("set_delivery_destination_drift_policy", {
     projectId: exampleCheckout.projectId, policy: "prepare_and_recheck",
   });
+  await user.type(screen.getByRole("searchbox", { name: "Search settings" }), "destination branch advances");
+  await user.click(screen.getByRole("button", { name: "When the destination branch advances in Git and delivery" }));
+  expect(document.activeElement).toBe(drift);
+  expect(document.querySelectorAll("#destination-drift")).toHaveLength(1);
 });
 
 it("focuses the matching control when the same settings search result is opened again", async () => {

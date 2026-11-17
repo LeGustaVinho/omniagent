@@ -1,9 +1,10 @@
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import {
-  Background, Controls, Handle, MarkerType, Position, ReactFlow, addEdge, applyEdgeChanges, applyNodeChanges, useUpdateNodeInternals,
+  Handle, MarkerType, Position, addEdge, applyEdgeChanges, applyNodeChanges, useUpdateNodeInternals,
 } from "@xyflow/react";
 import type { Node, NodeProps } from "@xyflow/react";
-import { ArrowUpRight, Check, CircleAlert, CirclePlay, GitBranch, GitCommitHorizontal, GitMerge, Layers3, ListChecks, Plus, Save, ShieldCheck, Workflow, X } from "lucide-react";
+import { ArrowUpRight, Check, CircleAlert, CirclePlay, Layers3, Plus, Save, ShieldCheck, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
@@ -12,12 +13,17 @@ import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import { RepositoryDeliveryWorkspace } from "@/repository-delivery";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { useGitSimulation } from "@/git-simulation";
-import { PipelineCatalog } from "@/pipeline-catalog";
+import { PipelineCatalog, PipelineNodeCatalog, workflowGraphRegistryQuery, workflowRegistryGroups } from "@/pipeline-catalog";
 import { PipelineAuthoringEditor, ProjectPipelineDrafts } from "@/workflow-authoring";
+import { WorkflowExchangePanel } from "@/workflow-exchange";
+import { WorkflowMaintenanceSettings } from "@/workflow-maintenance";
+import { WorkflowSettingsProposals } from "@/workflow-settings-proposals";
 import { WorkflowExecutionWorkspace } from "@/workflow-execution";
+import { WorkflowExecutionStateBadge } from "@/workflow-execution-state";
+import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
 import { WorkflowComparisons } from "@/workflow-comparison";
 import { WorkflowTriggers } from "@/workflow-triggers";
-import { PipelineCanvasFrame, PipelineInspectorHeader, PipelineTabs, PipelineToolbar, PipelineWorkspaceFrame } from "@/pipeline-layout";
+import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRolesTemplatesHeading, PipelineRunsEmpty, PipelineSectionHeading, PipelineTabs, PipelineToolbar, PipelineWorkspaceFrame } from "@/pipeline-layout";
 import { deliveryBranch, deliveryCommitSha, deliveryMergeSha, deliveryRunId } from "@/tasks-demo-data";
 import {
   advancePipelineRun, beginPipelineRun, createDeliveryWorkflow, createStage, declineStage, interruptStage, resolveStage,
@@ -25,7 +31,6 @@ import {
 } from "./pipelines-model";
 import type { PipelineRun, Stage, StageEdge, StageKind, StageStatus, WorkflowRevision } from "./pipelines-model";
 import { ComparisonView, PendingPipeline, PipelineMaintenance, RoleEditor, TemplateHistory } from "./pipelines-secondary";
-import "@xyflow/react/dist/style.css";
 
 const panels = ["Builder", "Runs", "Roles & templates", "Library", "Compare", "Maintenance"] as const;
 type View = typeof panels[number];
@@ -35,30 +40,24 @@ const productionTabs = [
   { id: "delivery", label: "Repository delivery" },
   { id: "runs", label: "Runs" },
   { id: "templates", label: "Roles & templates" },
+  { id: "library", label: "Library" },
   { id: "compare", label: "Compare models" },
   { id: "automations", label: "Automation rules" },
+  { id: "maintenance", label: "Maintenance" },
 ] as const;
 type ProductionView = (typeof productionTabs)[number]["id"];
 type RenderNode = Node<Stage & { status?: StageStatus; inputSide?: Position; outputSide?: Position }, "stage">;
 
-const stageIcons = {
-  plan: ListChecks, condition: GitBranch, review: ListChecks, join: GitMerge, task: Layers3,
-  approval: ShieldCheck, implementation: Workflow, verify: Check, accept: ShieldCheck,
-  commit: GitCommitHorizontal, merge: GitMerge,
-};
-
 function StageCard({ id, data, selected }: NodeProps<RenderNode>) {
-  const Icon = stageIcons[data.kind];
   const update = useUpdateNodeInternals();
   useEffect(() => update(id), [id, data.inputSide, data.outputSide, update]);
-  return (
-    <div className="pipeline-node" data-selected={selected} data-status={data.status ?? "draft"}>
+  return <WorkflowGraphNodeCard compact title={data.title || "Untitled stage"} selected={selected}
+    detail={data.status ? undefined : data.mode}
+    headerContent={data.status && <WorkflowExecutionStateBadge status={data.status === "succeeded" ? "completed" : data.status} />}
+    handles={<>
       <Handle type="target" position={data.inputSide ?? Position.Left} />
-      <div className="pipeline-node-title"><Icon size={14} /><strong>{data.title || "Untitled stage"}</strong></div>
-      <small>{data.status ?? data.mode}</small>
       <Handle type="source" position={data.outputSide ?? Position.Right} />
-    </div>
-  );
+    </>} />;
 }
 
 const nodeTypes = { stage: StageCard };
@@ -199,6 +198,28 @@ function StageRunDetails({ run, activeId, actions, links }: {
   );
 }
 
+function PipelineLibrary({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
+  const registry = useQuery(workflowGraphRegistryQuery);
+  return <section className="pipeline-view-content pipeline-stack" aria-label="Workflow library">
+    <PipelineSectionHeading title="Library" icon={<Layers3 size={20} aria-hidden />} />
+    <WorkflowExchangePanel projectId={checkout.projectId} openWorkspace={openWorkspace} />
+    {registry.isPending && <p role="status">Loading node definitions…</p>}
+    {registry.error && <p role="alert">{String(registry.error)}</p>}
+    {registry.data && <PipelineNodeCatalog groups={workflowRegistryGroups(registry.data)} />}
+  </section>;
+}
+
+function ProjectPipelineMaintenance({ checkout, openActivity }: Pick<WorkspaceProps, "checkout" | "openActivity">) {
+  return <section className="pipeline-view-content pipeline-stack" aria-label="Workflow maintenance">
+    <PipelineSectionHeading title="Maintenance" description="Review settings proposals and configure the release workflow."
+      icon={<ShieldCheck size={20} aria-hidden />} />
+    <div className="pipeline-two-columns">
+      <div className="pipeline-box"><WorkflowSettingsProposals checkout={checkout} onOpenRun={openActivity} /></div>
+      <div className="pipeline-box"><WorkflowMaintenanceSettings checkout={checkout} /></div>
+    </div>
+  </section>;
+}
+
 export default function PipelinesWorkspace(props: WorkspaceProps) {
   if (props.simulation) return <PreviewPipelinesWorkspace {...props} />;
   const { view, draftId, runId } = productionRoute(props.target);
@@ -209,6 +230,8 @@ export default function PipelinesWorkspace(props: WorkspaceProps) {
         : view === "compare" ? <WorkflowComparisons key={props.checkout.checkoutId} {...props} />
           : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
           : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} />
+          : view === "library" ? <PipelineLibrary {...props} />
+          : view === "maintenance" ? <ProjectPipelineMaintenance {...props} />
           : draftId ? <PipelineAuthoringEditor key={draftId} {...props} draftId={draftId} />
             : view === "drafts" ? <ProjectPipelineDrafts {...props} /> : <RepositoryDeliveryWorkspace {...props} />}
     </div>
@@ -417,9 +440,11 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
         </PipelineToolbar>
         {(status || resultLinks.length > 0) && <p className="pipeline-banner" role="status">{status}{resultLinks.length > 0 ? " Comparison inputs · " + resultLinks.join(", ") : ""}</p>}
         {issues.length > 0 && <div className="pipeline-banner pipeline-warning" role="alert"><CircleAlert size={17} /><ul>{issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul></div>}
-        <PipelineCanvasFrame canvasLabel="Simulation graph canvas" inspectorLabel="Stage inspector"
-          canvas={graph && (view === "Builder" || inspectingRun) ? (
-              <ReactFlow<RenderNode, StageEdge>
+        {view === "Runs" && !inspectingRun ? <PipelineRunsEmpty onOpenBuilder={() => setView("Builder")} /> :
+          <PipelineCanvasFrame canvasLabel="Simulation graph canvas" inspectorLabel="Stage inspector"
+          canvas={graph ? (
+              <PipelineGraphCanvas<RenderNode, StageEdge>
+                interactive={view === "Builder"}
                 key={view}
                 nodes={nodes}
                 edges={graph.edges}
@@ -447,15 +472,10 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
                 onConnect={(connection) => {
                   if (view === "Builder") setDraft((document) => document && { ...document, edges: addEdge(connection, document.edges) });
                 }}
-              >
-                <Background gap={18} size={1} />
-                <Controls position="bottom-left" showInteractive={view === "Builder"} />
-              </ReactFlow>
+              />
             ) : (
               <div className="pipeline-grid">
-                {simulation
-                  ? <div className="pipeline-empty"><div className="pipeline-empty-icon"><CirclePlay size={22} /></div><h3>No runs yet</h3><p>Run a workflow in the builder to pin its stages and decisions.</p><Button variant="outline" onClick={() => setView("Builder")}>Open builder</Button></div>
-                  : <PendingPipeline label={view === "Runs" ? "No pipeline runs" : "No pipeline selected"} onSimulate={simulate} />}
+                <PendingPipeline label="No pipeline selected" onSimulate={simulate} />
               </div>
             )}
           inspector={<>
@@ -476,10 +496,10 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
             ) : view === "Builder" && !simulation ? (
               <RepositoryMarkdownPicker key={props.checkout.checkoutId} checkoutId={props.checkout.checkoutId} />
             ) : <p className="pipeline-note">Stage properties appear here when a workflow is open.</p>}
-          </>} />
+          </>} />}
       </div>
       <div className="pipeline-view pipeline-view-content" hidden={view !== "Roles & templates"}>
-        <div className="pipeline-section-heading"><div><h2>Roles & templates</h2><p>Set reusable instructions, tools and review requirements.</p></div><Layers3 size={20} /></div>
+        <PipelineRolesTemplatesHeading />
         {draft ? <div className="pipeline-stack">
           <div className="pipeline-actions"><Button variant="outline" onClick={() => {
             setDraft({ label: "Untitled workflow", revision: revisions.at(-1)?.revision ?? 0, nodes: [], edges: [], roles: draft.roles });
@@ -494,6 +514,7 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
         <ComparisonView simulated={Boolean(simulation)} onSimulate={simulate} onUse={(ids) => { setDraft((document) => document && { ...document, comparisonRuns: ids }); setView("Builder"); setStatus("Selected comparison responses linked to the workflow draft."); }} />
       </div>
       <div className="pipeline-view pipeline-view-content" hidden={view !== "Library"}>
+        <PipelineSectionHeading title="Library" icon={<Layers3 size={20} aria-hidden />} />
         <PipelineCatalog />
       </div>
       <div className="pipeline-view pipeline-view-content" hidden={view !== "Maintenance"}>

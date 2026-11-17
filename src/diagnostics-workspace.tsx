@@ -39,28 +39,34 @@ export function DiagnosticsWorkspace({ active, onSelect, desktop, fixtures }: {
   </section>;
 }
 
-export function DiagnosticsCard({ title, icon: Icon, children, action }: {
-  title: string; icon: LucideIcon; children: ReactNode; action?: ReactNode;
+export function DiagnosticsCard({ title, icon: Icon, children, action, heading: Heading = "h2" }: {
+  title: string; icon: LucideIcon; children: ReactNode; action?: ReactNode; heading?: "h1" | "h2";
 }) {
   const id = useId();
   return <section className="diagnostics-card" aria-labelledby={id}>
     <div className="diagnostics-card-heading">
       <span className="diagnostics-icon"><Icon size={17} aria-hidden="true" /></span>
-      <h2 id={id}>{title}</h2>
+      <Heading id={id} className="text-[15px] font-[650] [overflow-wrap:anywhere]">{title}</Heading>
     </div>
     <div className="diagnostics-card-body">{children}</div>
     {action && <div className="diagnostics-card-actions">{action}</div>}
   </section>;
 }
 
-export function DesktopDiagnostics({ openSystem }: { openSystem?: () => void }) {
+export function DesktopDiagnostics({ openSystem, installation = <SystemInstallation />,
+  executables = <DesktopCliPrerequisites />, openAttempt }: {
+  openSystem?: () => void; installation?: ReactNode; executables?: ReactNode; openAttempt?: () => void;
+}) {
   return <div className="diagnostics-cards">
     <DiagnosticsCard title="Current installation" icon={HardDrive}
-      action={openSystem && <Button type="button" variant="outline" onClick={openSystem}>System settings</Button>}>
-      <SystemInstallation />
+      action={(openSystem || openAttempt) && <>
+        {openSystem && <Button type="button" variant="outline" onClick={openSystem}>System settings</Button>}
+        {openAttempt && <Button type="button" variant="outline" onClick={openAttempt}>Open run inspector</Button>}
+      </>}>
+      {installation}
     </DiagnosticsCard>
     <DiagnosticsCard title="Installed executables" icon={TerminalSquare}>
-      <DesktopCliPrerequisites />
+      {executables}
     </DiagnosticsCard>
   </div>;
 }

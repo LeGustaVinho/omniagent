@@ -1,7 +1,7 @@
 import { DndContext, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { ChevronDown, ChevronRight, GitBranch, GitCommitHorizontal, GripVertical } from "lucide-react";
 import { Fragment, useState } from "react";
-import { AgileKanbanColumn, AgileWorkCard } from "@/agile-layout";
+import { AgileKanbanColumn, AgileTableFrame, AgileWorkCard } from "@/agile-layout";
 import { DeliveryStatus } from "@/tasks-git-ui";
 import type { VerifiedMerge } from "@/delivery-merge-model";
 import { canMove, questionBlockerLabel, recordedMergeForCommit, statusLabel, workLabel, workflowStates, type AgileRow, type EvidenceTarget, type Item, type TaskQuestionBlocker, type WorkflowStatus } from "@/project-agile-model";
@@ -196,8 +196,7 @@ export function ProjectAgileTable({ rows, matches, selected, busy, openWork, ope
       </Fragment>;
     });
   }
-  return <div className="overflow-auto"><table className="delivery-table agile-table" aria-label="Agile table">
-    <thead><tr><th>Work</th><th>State</th><th>Checklist</th><th>Branch</th><th>Commit</th></tr></thead>
-    <tbody>{renderRows(children.get(undefined) ?? [], 0)}</tbody>
-  </table></div>;
+  return <AgileTableFrame columns={["Work", "State", "Checklist", "Branch", "Commit"]}>
+    {renderRows(children.get(undefined) ?? [], 0)}
+  </AgileTableFrame>;
 }

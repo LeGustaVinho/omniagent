@@ -1,9 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
+import { Columns2 } from "lucide-react";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { ModelPicker, ModelRatingMeters } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
+import { PipelineComparisonCard, PipelineComparisonSetup } from "@/pipeline-comparison-layout";
+import { PipelineSectionHeading } from "@/pipeline-layout";
 import { sameModelSelection, useLiveModelOptions } from "@/live-models";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { ComparisonCandidateOutcome, comparisonOutcome, type CandidateOutcome } from "@/workflow-comparison-outcomes";
@@ -64,15 +67,19 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
   });
 
   return <section className="pipeline-stack min-h-0 overflow-auto p-4" aria-label="Model comparisons">
-    <h1 className="text-lg font-semibold">Compare models</h1>
-    <form className="pipeline-stack pipeline-form pipeline-box" onSubmit={(event) => { event.preventDefault(); if (canRun) run.mutate(); }}>
+    <PipelineSectionHeading title="Compare models" icon={<Columns2 size={20} aria-hidden />} />
+    <PipelineComparisonSetup onSubmit={(event) => { event.preventDefault(); if (canRun) run.mutate(); }} request={<>
       <label>Shared request<textarea rows={4} value={prompt} onChange={(event) => setPrompt(event.currentTarget.value)} /></label>
       <label>Git commit<input spellCheck={false} value={commit} onChange={(event) => setCommit(event.currentTarget.value)} placeholder="Full commit SHA" /></label>
       {source.error && <p role="alert">{String(source.error)}</p>}
       {source.data === null && <p className="text-sm text-muted-foreground">Create a Git commit to use this checkout for comparison.</p>}
+      <p className="text-sm text-muted-foreground">Each candidate runs independently using the same request and a clean, read-only checkout at this commit.</p>
+      {run.error && <p role="alert">{String(run.error)}</p>}
+      <Button type="submit" disabled={!canRun}>{run.isPending ? "Preparing comparison…" : "Start comparison"}</Button>
+    </>} candidates={<>
       <ModelPicker label="Comparison candidates" options={modelsQuery.options} loading={modelsQuery.loading}
         selection={{ mode: "multiple", selected: models, onChange: setModels }} />
-      {models.length > 0 && <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3" aria-label="Candidate order">
+      {models.length > 0 && <ol className="grid gap-2" aria-label="Candidate order">
         {models.map((selection) => {
           const option = modelsQuery.options.find((entry) => sameModelSelection(entry.selection, selection));
           return <li key={JSON.stringify(selection)} className="rounded-md border border-border p-2 text-sm">
@@ -81,10 +88,7 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
           </li>;
         })}
       </ol>}
-      <p className="text-sm text-muted-foreground">Each candidate runs independently using the same request and a clean, read-only checkout at this commit.</p>
-      {run.error && <p role="alert">{String(run.error)}</p>}
-      <Button type="submit" disabled={!canRun}>{run.isPending ? "Preparing comparison…" : "Start comparison"}</Button>
-    </form>
+    </>} />
     {groups.error && <p role="alert">{String(groups.error)}</p>}
     {result && <section className="pipeline-stack pipeline-box" aria-label="Saved comparison">
       <label className="pipeline-form">Comparison <select value={result.id} onChange={(event) => setActiveId(event.currentTarget.value)}>
@@ -94,23 +98,21 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob }: Wo
       <h2 className="text-base font-medium">{comparisonOutcome(result.candidates.map(({ state }) => state))}</h2>
       {environment.error && <p role="alert">{String(environment.error)}</p>}
       {outcomes.error && <p role="alert">{String(outcomes.error)}</p>}
-      <ol className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3" aria-label="Comparison results">
+      <ol className="pipeline-results" aria-label="Comparison results">
         {result.candidates.map((candidate) => {
           const rating = candidate.modelReference
             ? candidate.modelReference.rating
             : modelsQuery.options.find((entry) => sameModelSelection(entry.selection, candidate.selection))?.rating ?? null;
-          return <li key={candidate.jobId} className="pipeline-box pipeline-stack">
-            <header><h2>{candidate.modelReference?.name ?? candidate.selection.modelId}</h2><small>{candidate.selection.provider}</small>
-              <ModelRatingMeters rating={rating} />
-            </header>
-            <p role="status">{candidate.state.replaceAll("_", " ")}</p>
+          return <PipelineComparisonCard key={candidate.jobId} name={candidate.modelReference?.name ?? candidate.selection.modelId}
+            state={candidate.state} rating={rating}>
+            <p className="pipeline-meta">{candidate.selection.provider}</p>
             <ComparisonCandidateOutcome outcome={outcomes.data?.find((result) => result.jobId === candidate.jobId && result.runId === candidate.runId)}
               succeeded={candidate.state === "succeeded"} />
             <ComparisonEnvironment environment={environment.data?.find((entry) => entry.jobId === candidate.jobId && entry.dispatchId === candidate.dispatchId)} />
             {candidate.runId && candidate.conversationId && <Button type="button" variant="outline"
               onClick={() => openActivity(candidate.runId!, candidate.conversationId!)}>Open execution</Button>}
             {!candidate.runId && openQueueJob && <Button type="button" variant="outline" onClick={() => openQueueJob(candidate.jobId)}>Open queued job</Button>}
-          </li>;
+          </PipelineComparisonCard>;
         })}
       </ol>
       <ComparisonSyntheses key={result.id} projectId={projectId} group={result} outcomes={outcomes.data} options={modelsQuery.options}

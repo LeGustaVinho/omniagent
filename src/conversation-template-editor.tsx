@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { EffortSelect } from "@/components/effort-select";
 import { ModelPicker } from "@/components/model-picker";
 import { sameModelSelection, useLiveModelOptions } from "@/live-models";
+import { PipelineRolesTemplatesHeading } from "@/pipeline-layout";
 import type { Capability } from "@/bindings/Capability";
 import type { JobRole } from "@/bindings/JobRole";
 import type { ModelSelection } from "@/bindings/ModelSelection";
@@ -102,7 +103,7 @@ export function ConversationTemplateEditor({ checkout, openWorkspace }: { checko
   }
 
   return <div className="pipeline-view pipeline-view-content">
-    <header className="pipeline-section-heading"><h2>Roles &amp; templates</h2></header>
+    <PipelineRolesTemplatesHeading />
     <div className="pipeline-two-columns">
       <section className="pipeline-box pipeline-stack">
         <h3>Conversation templates</h3>

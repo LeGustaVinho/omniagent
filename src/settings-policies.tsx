@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
+import { projectWorkModeSettings } from "@/project-agile-settings";
 import { IntegrationNotice, SettingRow } from "@/settings-controls";
 import { exampleSettingsModels } from "@/settings-models";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -23,11 +24,6 @@ type Field = {
 export const policyFields = {
   capacity: [
     {
-      id: "managed-capacity", label: "Simultaneous managed runs", kind: "number",
-      description: "Limit ordinary jobs, managed subagents and isolated side requests across this device.",
-      min: 1, max: 32, initial: "3",
-    },
-    {
       id: "notifications", label: "Desktop notifications", kind: "toggle", initial: "true",
       description: "Notify when work needs input, waits for approval or finishes.",
     },
@@ -47,13 +43,11 @@ export const policyFields = {
       placeholder: "Use the OmniAgent data directory",
     },
     {
-      id: "branch-strategy", label: "Agile branch strategy", kind: "choice", initial: "isolated",
-      description: "Applies when provisioning worktrees for Tasks and Sub-Tasks.",
+      ...projectWorkModeSettings.branch, kind: "choice", initial: "isolated",
       options: [["isolated", "Branch per work item"], ["shared", "Shared branch per Task"]],
     },
     {
-      id: "checklist-mode", label: "Default checklist mode", kind: "choice", initial: "track",
-      description: "Tasks and Sub-Tasks can override how checklist items are sent to an agent.",
+      ...projectWorkModeSettings.checklist, kind: "choice", initial: "track",
       options: [["track", "Track progress"], ["by-item", "Run by item"]],
     },
     {
@@ -108,18 +102,6 @@ export const policyFields = {
     {
       id: "compact-threshold", label: "Compaction threshold (%)", kind: "number", min: 10, max: 100, initial: "80",
       description: "Percentage of the available dialogue budget, accounting for required context and reserved output.",
-    },
-  ],
-  git: [
-    {
-      id: "destination-drift", label: "When the destination moves", kind: "choice", initial: "pause",
-      description: "A changed candidate goes through checks and any applicable approval again.",
-      options: [["pause", "Pause and review the update"], ["prepare", "Prepare a conflict-free update and rerun checks"]],
-    },
-    {
-      id: "completion-milestone", label: "Task completion milestone", kind: "choice", initial: "committed",
-      description: "Choose the required Git evidence for repository work to reach Completed.",
-      options: [["committed", "Verified commit"], ["merged", "Verified merge"]],
     },
   ],
   automation: [

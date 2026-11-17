@@ -1,7 +1,10 @@
+import { queryOptions } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import { Plus, Search } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { type StageKind } from "@/pipelines-model";
+import { portType, type WorkflowDefinition, type WorkflowPort } from "@/workflow-graph-model";
 
 type CatalogNode = {
   label: string;
@@ -86,6 +89,45 @@ export type PipelineCatalogEntry = {
 };
 
 export type PipelineCatalogGroup = { title: string; entries: PipelineCatalogEntry[] };
+
+const catalogGroups = [
+  ["Entry and results", ["start", "typed_start", "load_context", "load_work_context", "summarize_result", "result"]],
+  ["Data", ["build_list", "set_fields", "filter_map_list", "build_text"]],
+  ["Control", ["condition", "parallel", "join", "for_each", "repeat_until", "iteration_limit", "subflow"]],
+  ["Decisions", ["request_input", "approval", "approve_implementation"]],
+  ["Agile", ["link_work", "find_work", "update_progress", "manage_work"]],
+  ["Agents and execution", ["agent", "plan", "review_plan", "implement", "review_candidate", "compare_models", "command", "mcp_tool"]],
+] as const;
+
+function groupFor(kind: string) {
+  return catalogGroups.find(([, kinds]) => (kinds as readonly string[]).includes(kind))?.[0] ?? "Git and quality";
+}
+
+function describePorts(ports: WorkflowPort[]) {
+  return ports.map(({ name, value }) => `${name} (${portType(value)})`).join(", ") || "None";
+}
+
+export const workflowGraphRegistryQuery = queryOptions({
+  queryKey: ["workflow-graph-registry"], staleTime: Infinity,
+  queryFn: () => invoke<WorkflowDefinition[]>("workflow_graph_registry"),
+});
+
+export function workflowRegistryGroups(definitions: WorkflowDefinition[],
+  configure: (definition: WorkflowDefinition) => Pick<PipelineCatalogEntry, "action" | "unavailable"> = () => ({})): PipelineCatalogGroup[] {
+  const groups = [...catalogGroups.map(([title]) => title), "Git and quality"];
+  return groups.map((title) => ({
+    title,
+    entries: definitions.filter(({ kind }) =>
+      !["for_each_begin", "for_each_gate", "for_each_collect"].includes(kind) && groupFor(kind) === title)
+      .map((entry) => ({
+        id: entry.kind,
+        label: entry.kind === "result" ? "Delivery result" : entry.title,
+        input: describePorts(entry.inputs),
+        output: describePorts(entry.outputs),
+        ...configure(entry),
+      })),
+  }));
+}
 
 export function PipelineNodeCatalog({ groups, searchLabel = "Search pipeline nodes", compact = false }: {
   groups: PipelineCatalogGroup[]; searchLabel?: string; compact?: boolean;

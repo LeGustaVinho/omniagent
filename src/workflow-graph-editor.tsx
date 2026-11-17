@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { Background, Controls, Handle, MarkerType, Position, ReactFlow, useUpdateNodeInternals,
+import { Handle, MarkerType, Position, useUpdateNodeInternals,
   type Connection, type Edge, type Node, type NodeChange, type NodeProps } from "@xyflow/react";
 import { Plus, Redo2, Trash2, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { PipelineNodeCatalog, type PipelineCatalogGroup } from "@/pipeline-catalog";
-import { PipelineCanvasFrame, PipelineInspectorHeader, PipelineToolbar } from "@/pipeline-layout";
+import { PipelineNodeCatalog, workflowRegistryGroups } from "@/pipeline-catalog";
+import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineToolbar } from "@/pipeline-layout";
 import { WorkflowAgileFields } from "@/workflow-agile-editor";
 import { CommandNodeConfiguration } from "@/workflow-command";
 import { DecisionNodeFields, type WorkflowDecisionConfiguration } from "@/workflow-decision-editor";
@@ -72,11 +72,13 @@ function WorkflowCard({ id, data, selected }: NodeProps<CanvasNode>) {
     problem={data.problem} readOnly={data.readOnly} inputs={definition?.inputs ?? []} outputs={definition?.outputs ?? []} portActions={data.portActions} />;
 }
 
-export function WorkflowGraphNodeCard({ title, detail, inputs, outputs, selected, problem, readOnly, headerContent, portActions }: {
-  title: string; detail?: string; inputs: WorkflowPort[]; outputs: WorkflowPort[]; selected?: boolean;
+export function WorkflowGraphNodeCard({ title, detail, inputs = [], outputs = [], selected, problem, readOnly, headerContent, portActions, compact, handles }: {
+  title: string; detail?: string; inputs?: WorkflowPort[]; outputs?: WorkflowPort[]; selected?: boolean;
   problem?: boolean; readOnly?: boolean; headerContent?: ReactNode; portActions?: PortActions;
+  compact?: boolean; handles?: ReactNode;
 }) {
-  return <article className="workflow-node-card" data-selected={selected || undefined} data-problem={problem || undefined}>
+  return <article className="workflow-node-card" data-compact={compact || undefined} data-selected={selected || undefined} data-problem={problem || undefined}>
+    {handles}
     <header><strong>{title}</strong>{detail && <small>{detail}</small>}{headerContent}</header>
     {(inputs.length > 0 || outputs.length > 0) && <div className="workflow-node-ports">
       <WorkflowPortColumn ports={inputs} side="input" readOnly={readOnly} actions={portActions} />
@@ -118,23 +120,6 @@ const readTheme = (): "light" | "dark" => document.documentElement.dataset.appTh
 type PendingConnection = { from: WorkflowEndpoint; replacing?: string };
 type EditorHistory = { past: WorkflowEditorState[]; future: WorkflowEditorState[] };
 const historyLimit = 32;
-
-const catalogGroups = [
-  ["Entry and results", ["start", "typed_start", "load_context", "load_work_context", "summarize_result", "result"]],
-  ["Data", ["build_list", "set_fields", "filter_map_list", "build_text"]],
-  ["Control", ["condition", "parallel", "join", "for_each", "repeat_until", "iteration_limit", "subflow"]],
-  ["Decisions", ["request_input", "approval", "approve_implementation"]],
-  ["Agile", ["link_work", "find_work", "update_progress", "manage_work"]],
-  ["Agents and execution", ["agent", "plan", "review_plan", "implement", "review_candidate", "compare_models", "command", "mcp_tool"]],
-] as const;
-
-function groupFor(kind: string) {
-  return catalogGroups.find(([, kinds]) => (kinds as readonly string[]).includes(kind))?.[0] ?? "Git and quality";
-}
-
-function describePorts(ports: WorkflowPort[]) {
-  return ports.map(({ name, value }) => `${name} (${portType(value)})`).join(", ") || "None";
-}
 
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
   allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode, historyScope }: {
@@ -316,17 +301,11 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       } };
   });
   const entryKind = catalog.some(({ kind }) => kind === "typed_start") && !graph.nodes.some(({ kind }) => kind === "start") ? "typed_start" : "start";
-  const groups: PipelineCatalogGroup[] = [...catalogGroups.map(([title]) => title), "Git and quality"].map((title) => ({
-    title,
-    entries: catalog.filter(({ kind }) => (!isStartNode(kind) || kind === entryKind) &&
-      !["for_each_begin", "for_each_gate", "for_each_collect"].includes(kind) && groupFor(kind) === title)
-      .map((entry) => {
-        const alreadyPresent = isStartNode(entry.kind) && graph.nodes.some(({ kind }) => isStartNode(kind));
-        const label = entry.kind === "result" ? "Delivery result" : entry.title;
-        return { id: entry.kind, label, input: describePorts(entry.inputs), output: describePorts(entry.outputs),
-          action: alreadyPresent || disabled ? undefined : () => add(entry), unavailable: alreadyPresent ? "Already on the canvas" : undefined };
-      }),
-  }));
+  const groups = workflowRegistryGroups(catalog.filter(({ kind }) => !isStartNode(kind) || kind === entryKind), (entry) => {
+    const alreadyPresent = isStartNode(entry.kind) && graph.nodes.some(({ kind }) => isStartNode(kind));
+    return { action: alreadyPresent || disabled ? undefined : () => add(entry),
+      unavailable: alreadyPresent ? "Already on the canvas" : undefined };
+  });
 
   return <section aria-label="Pipeline graph editor" className="workflow-graph" onKeyDown={(event) => {
     if (event.key === "Escape" && pending) { setPending(undefined); setConnectionError(null); }
@@ -358,7 +337,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       inspectorClassName="workflow-graph-inspector pipeline-form pipeline-stack" palette={catalogOpen && !disabled ?
         <section aria-label="Node catalog"><PipelineNodeCatalog groups={groups} searchLabel="Search node catalog" compact /></section> : undefined}
       canvas={<div className="workflow-graph-canvas">
-        <ReactFlow<CanvasNode, Edge> nodes={canvasNodes} edges={edges} nodeTypes={nodeTypes} colorMode={theme}
+        <PipelineGraphCanvas<CanvasNode, Edge> interactive={!disabled} nodes={canvasNodes} edges={edges} nodeTypes={nodeTypes} colorMode={theme}
           fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2}
           nodesDraggable={!disabled} nodesConnectable={!disabled} edgesReconnectable={!disabled}
           deleteKeyCode={disabled ? null : ["Backspace", "Delete"]}
@@ -374,9 +353,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
           onNodeClick={(_, selectedNode) => { select(selectedNode.id); setConnectionError(null); }}
           onConnect={(candidate) => { const wire = connectionWire(candidate); if (wire) connect(wire); }}
           onReconnect={(previous, candidate) => { const wire = connectionWire(candidate); if (wire) connect(wire, previous.id); }}
-        >
-          <Background gap={18} size={1} /><Controls showInteractive={!disabled} />
-        </ReactFlow>
+        />
       </div>}
       inspector={<>
         <PipelineInspectorHeader detail="Configuration" title={definition?.title ?? "Select a node"} />

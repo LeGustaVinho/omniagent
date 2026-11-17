@@ -1,12 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
 import type { IDockviewPanelProps } from "dockview-react";
-import { useState, type FormEvent } from "react";
+import { FlaskConical } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import type { FixtureInputEvidence } from "@/bindings/FixtureInputEvidence";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
+import type { RunEvent } from "@/bindings/RunEvent";
 import type { RunRecord } from "@/bindings/RunRecord";
 import type { RunStatus } from "@/bindings/RunStatus";
 import { Button } from "@/components/ui/button";
+import { DiagnosticsCard } from "@/diagnostics-workspace";
 import { fixtureProjection } from "@/run-projection";
 import { openFixtureRun } from "@/workspace-tabs";
 import { useWorkspace } from "@/workspace-state";
@@ -20,6 +23,76 @@ const STATUS_LABELS: Record<RunStatus, string> = {
   failed: "Failed",
   interrupted: "Interrupted",
 };
+
+type FixtureEvent = Pick<RunEvent, "seq" | "data">;
+type FixtureInput = { value: string; onChange: (value: string) => void; onSend: () => void; disabled?: boolean };
+type FixtureProcessProps = {
+  title: string;
+  heading?: "h1" | "h2";
+  status: string;
+  events?: FixtureEvent[];
+  error?: string;
+  pending?: boolean;
+  start?: () => void;
+  cancel?: () => void;
+  input?: FixtureInput;
+  children?: ReactNode;
+};
+
+function StartFixtureButton({ start, pending }: { start: () => void; pending?: boolean }) {
+  return <Button type="button" onClick={start} disabled={pending}>{pending ? "Starting…" : "Start fixture"}</Button>;
+}
+
+function FixtureProcess({ title, heading, status, events, error, pending, start, cancel, input, children }: FixtureProcessProps) {
+  return <DiagnosticsCard title={title} icon={FlaskConical} heading={heading}>
+    <div className="grid gap-3">
+      <p role="status">{status}</p>
+      {error && <p role="alert" className="text-destructive">{error}</p>}
+      {(start || cancel) && <div className="flex flex-wrap items-center gap-2">
+        {start && <StartFixtureButton start={start} pending={pending} />}
+        {cancel && <Button type="button" variant="outline" onClick={cancel} disabled={pending}>Cancel run</Button>}
+      </div>}
+      {events && <ol aria-label="Run events" className="max-h-96 min-h-36 overflow-auto rounded-md border border-border bg-background p-3 font-mono text-xs">
+        {events.map(({ seq, data }) => <li key={seq} className="flex gap-3 py-1.5">
+          <span className="w-14 shrink-0 text-muted-foreground">{data.type === "status" ? "state" : data.stream}</span>
+          <span className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">
+            {data.type === "status" ? STATUS_LABELS[data.status] : data.preview}
+          </span>
+        </li>)}
+      </ol>}
+      {input && <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => {
+        event.preventDefault();
+        if (!pending && !input.disabled) input.onSend();
+      }}>
+        <label className="grid min-w-32 flex-1 gap-1">Fixture input
+          <input className="min-w-0 rounded-md border border-input bg-background px-3 py-2 font-mono outline-ring"
+            value={input.value} onChange={(event) => input.onChange(event.target.value)} />
+        </label>
+        <Button type="submit" disabled={pending || input.disabled}>Send input</Button>
+      </form>}
+      {children}
+    </div>
+  </DiagnosticsCard>;
+}
+
+export function SimulationFixture() {
+  const [status, setStatus] = useState<"idle" | "waiting_for_input" | "succeeded" | "cancelled">("idle");
+  const [input, setInput] = useState("");
+  const events: FixtureEvent[] = [];
+  if (status !== "idle") events.push({ seq: "1", data: { type: "status", status: "waiting_for_input" } });
+  if (status === "succeeded") {
+    events.push({ seq: "2", data: { type: "output", stream: "stdout", preview: `Input received: ${input}` } });
+  }
+  if (status === "succeeded" || status === "cancelled") events.push({ seq: "3", data: { type: "status", status } });
+
+  return <FixtureProcess title="Process fixture" status={status === "idle" ? "Idle" : STATUS_LABELS[status]}
+    events={status === "idle" ? undefined : events}
+    start={status !== "waiting_for_input" ? () => { setInput(""); setStatus("waiting_for_input"); } : undefined}
+    cancel={status === "waiting_for_input" ? () => setStatus("cancelled") : undefined}
+    input={status === "waiting_for_input" ? {
+      value: input, onChange: setInput, onSend: () => setStatus("succeeded"), disabled: !input.trim(),
+    } : undefined} />;
+}
 
 export function FixtureListPanel({ containerApi }: IDockviewPanelProps) {
   const checkout = useWorkspace((state) => state.checkout);
@@ -50,9 +123,7 @@ function FixtureList({ checkout, onOpen }: { checkout: ProjectCheckout; onOpen: 
     <section className="h-full overflow-auto px-6 py-6">
       <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold tracking-tight">Fixture runs</h1>
-        <Button onClick={() => void start()} disabled={starting}>
-          {starting ? "Starting…" : "Start fixture"}
-        </Button>
+        <StartFixtureButton start={() => void start()} pending={starting} />
       </header>
       {error && <p role="alert" className="mb-3 text-sm text-red-300">{error}</p>}
       {isPending && <p role="status" className="text-sm text-muted-foreground">Loading runs…</p>}
@@ -100,8 +171,7 @@ function FixtureRun({ checkoutId, runId }: { checkoutId: string; runId: string }
     }
   }
 
-  function send(event: FormEvent) {
-    event.preventDefault();
+  function send() {
     void action(async () => {
       await invoke("send_fixture_input", { ...scope, input });
       setInput("");
@@ -110,57 +180,30 @@ function FixtureRun({ checkoutId, runId }: { checkoutId: string; runId: string }
 
   const active = run && ["starting", "running", "waiting_for_input"].includes(run.status);
   return (
-    <section className="flex h-full flex-col gap-4 overflow-auto p-5">
-      <header className="flex flex-wrap items-start justify-between gap-2">
-        <div>
-          <h1 className="font-mono text-lg font-medium">Run {runId.slice(0, 8)}</h1>
-          <p className="mt-1 text-sm text-muted-foreground" role="status">
-            {run ? STATUS_LABELS[run.status] : isPending ? "Loading run…" : "Run not found in this checkout"}
-          </p>
-        </div>
-        {active && (
-          <Button variant="outline" disabled={pending} onClick={() => void action(() => invoke("cancel_fixture", scope))}>
-            Cancel run
-          </Button>
+    <div className="h-full overflow-auto p-5">
+      <FixtureProcess title={`Run ${runId.slice(0, 8)}`} heading="h1"
+        status={run ? STATUS_LABELS[run.status] : isPending ? "Loading run…" : "Run not found in this checkout"}
+        events={data?.recentEvents.filter((event) => event.runId === runId)} error={error} pending={pending}
+        cancel={active ? () => void action(() => invoke("cancel_fixture", scope)) : undefined}
+        input={run?.status === "waiting_for_input" ? { value: input, onChange: setInput, onSend: send } : undefined}>
+        {run && (
+          <div className="text-sm">
+            <Button variant="outline" disabled={pending} onClick={() => {
+              if (evidence !== undefined) setEvidence(undefined);
+              else void action(async () => setEvidence(await invoke<FixtureInputEvidence | null>("fixture_input_evidence", scope)));
+            }}>
+              {evidence === undefined ? "Inspect protected input" : "Hide protected input"}
+            </Button>
+            {evidence === null && <p className="mt-2 text-muted-foreground">No input recorded.</p>}
+            {evidence && (
+              <div className="mt-2 rounded-md border border-border p-3">
+                <p className="text-xs text-muted-foreground">{evidence.sent ? "Sent to fixture" : "Prepared input"}</p>
+                <pre className="mt-2 whitespace-pre-wrap break-all text-xs">{evidence.text}</pre>
+              </div>
+            )}
+          </div>
         )}
-      </header>
-      {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
-      <ol aria-label="Run events" className="min-h-36 flex-1 overflow-auto rounded-md border border-border bg-background p-3 font-mono text-xs">
-        {data?.recentEvents.filter((event) => event.runId === runId).map((event) => (
-          <li key={event.seq} className="flex gap-3 py-1.5">
-            <span className="w-14 shrink-0 text-muted-foreground">{event.data.type === "status" ? "state" : event.data.stream}</span>
-            <span className="min-w-0 break-all">
-              {event.data.type === "status" ? STATUS_LABELS[event.data.status] : event.data.preview}
-            </span>
-          </li>
-        ))}
-      </ol>
-      {run?.status === "waiting_for_input" && (
-        <form onSubmit={send} className="flex flex-wrap items-end gap-2">
-          <label className="min-w-32 flex-1 text-sm">
-            Fixture input
-            <input className="mt-1 block w-full rounded-md border border-border bg-background px-3 py-2 font-mono outline-ring" value={input} onChange={(event) => setInput(event.target.value)} />
-          </label>
-          <Button type="submit" disabled={pending}>Send input</Button>
-        </form>
-      )}
-      {run && (
-        <div className="text-sm">
-          <Button variant="outline" disabled={pending} onClick={() => {
-            if (evidence !== undefined) setEvidence(undefined);
-            else void action(async () => setEvidence(await invoke<FixtureInputEvidence | null>("fixture_input_evidence", scope)));
-          }}>
-            {evidence === undefined ? "Inspect protected input" : "Hide protected input"}
-          </Button>
-          {evidence === null && <p className="mt-2 text-muted-foreground">No input recorded.</p>}
-          {evidence && (
-            <div className="mt-2 rounded-md border border-border p-3">
-              <p className="text-xs text-muted-foreground">{evidence.sent ? "Sent to fixture" : "Prepared input"}</p>
-              <pre className="mt-2 whitespace-pre-wrap break-all text-xs">{evidence.text}</pre>
-            </div>
-          )}
-        </div>
-      )}
-    </section>
+      </FixtureProcess>
+    </div>
   );
 }

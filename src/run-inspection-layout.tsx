@@ -7,20 +7,22 @@ type InspectionPage = { id: string; name: string; content: ReactNode };
 type InspectionStatus = { label: string; tone?: "progress" | "warning" | "success" | "danger" };
 
 export function RunInspectionLayout({
-  title, label = "Run activity", runId, status, actions, pages, children,
+  as: Container = "section", title, label = "Run activity", runId, status, actions, notice, pages, children,
 }: {
+  as?: "section" | "aside";
   title: string;
   label?: string;
   runId?: string;
   status?: InspectionStatus;
   actions?: ReactNode;
+  notice?: ReactNode;
   pages?: InspectionPage[];
   children?: ReactNode;
 }) {
   const [page, setPage] = useState("");
   const currentPage = pages?.find(({ id }) => id === page) ?? pages?.[0];
 
-  return <section className="work-inspection run-inspection" aria-label={label}>
+  return <Container className="work-inspection run-inspection" aria-label={label}>
     <header className="run-inspection-header">
       <span className="run-inspection-icon"><Activity size={17} aria-hidden="true" /></span>
       <div className="run-inspection-identity">
@@ -32,6 +34,7 @@ export function RunInspectionLayout({
         <CircleDot size={13} aria-hidden="true" /> {status.label}
       </p>}
     </header>
+    {notice && <div className="work-inspection-body run-inspection-body">{notice}</div>}
     {pages && currentPage ? <Tabs.Root value={currentPage.id} onValueChange={setPage} activationMode="manual">
       <Tabs.List className="work-inspection-tabs run-inspection-tabs" aria-label="Run details">
         {pages.map(({ id, name }) => <Tabs.Trigger key={id} value={id}>{name}</Tabs.Trigger>)}
@@ -40,5 +43,5 @@ export function RunInspectionLayout({
         {content}
       </Tabs.Content>)}
     </Tabs.Root> : <div className="work-inspection-body run-inspection-body">{children}</div>}
-  </section>;
+  </Container>;
 }

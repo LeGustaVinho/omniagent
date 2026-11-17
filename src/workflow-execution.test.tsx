@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import type { ComponentType } from "react";
+import { useState, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
@@ -52,6 +52,19 @@ function job(nodeId: string, attempts: ExecutionJob["attempts"], kind: Job["kind
 }
 const output = (nodeInstanceId: string, id: string, port: string, kind: string, evidence: unknown, unitId: string | null = null): ExecutionOutput => ({
   current: true, inputReceipts: [], artifact: { id, nodeInstanceId, port, value: { kind, evidence }, unitId, workflowRunId: runId },
+});
+
+it("opens the real Builder from the Runs empty state", async () => {
+  vi.mocked(invoke).mockResolvedValue([]);
+  const openWorkspace = vi.fn();
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <PipelinesWorkspace checkout={exampleCheckout} target="runs" simulation={null} startSimulation={vi.fn()}
+      openWorkspace={openWorkspace} openActivity={vi.fn()} openChanges={vi.fn()} />
+  </QueryClientProvider>);
+  const runs = within(screen.getByRole("region", { name: "Workflow runs" }));
+  await runs.findByRole("heading", { name: "No runs yet" });
+  await userEvent.setup().click(runs.getByRole("button", { name: "Open builder" }));
+  expect(openWorkspace).toHaveBeenCalledWith("pipelines", "drafts");
 });
 
 it("queues an authored planner with the pinned role model and exact wired context", async () => {
@@ -308,6 +321,9 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
     outcome: "conditions_met", allowsHuman: false, decisionArtifactId: "approval-receipt" as string | null };
   vi.mocked(invoke).mockImplementation(async (command, input) => {
     switch (command) {
+      case "workflow_trigger_rules": return [];
+      case "workflow_trigger_activations": return [{ ruleId: "trigger-rule", ruleName: "Review", ruleRevision: 1,
+        eventId: "trigger-event", workId: "linked-subtask", runId, outcome: "launched", recordedAt: "2026-11-16T00:00:00Z" }];
       case "list_repository_deliveries": return [snapshot.run, { ...snapshot.run, id: "newer-run", version: { id: "pipeline", revision: "new-edited-draft" } }];
       case "inspect_workflow_execution": expect(input).toEqual({ projectId, runId }); return snapshot;
       case "workflow_approval_stage":
@@ -336,10 +352,18 @@ it("shows real pinned stages, failure and dependency evidence, and opens the exa
       default: throw new Error(`Unexpected ${command}`);
     }
   });
-  const props = { checkout: exampleCheckout, target: `run:${runId}`, simulation: null, startSimulation: vi.fn(),
+  const props = { checkout: exampleCheckout, simulation: null, startSimulation: vi.fn(),
     openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(), openQueueJob: vi.fn() };
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><PipelinesWorkspace {...props} /></QueryClientProvider>);
+  function NavigablePipelines() {
+    const [target, setTarget] = useState<string | undefined>("automations");
+    return <PipelinesWorkspace {...props} target={target} openWorkspace={(area, next) => {
+      props.openWorkspace(area, next);
+      if (area === "pipelines" && target === "automations") setTarget(next);
+    }} />;
+  }
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><NavigablePipelines /></QueryClientProvider>);
   const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Open execution" }));
   expect(await screen.findByRole("heading", { name: "Recorded pipeline title" })).toBeTruthy();
   expect(screen.getByText("linked-subtask")).toBeTruthy();
   expect(screen.getByText("trigger-item")).toBeTruthy();

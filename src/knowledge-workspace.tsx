@@ -541,12 +541,10 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                       resolution.kind === "missing_anchor" ? link.anchor : undefined, entry.source.line ?? undefined, !link.wiki);
                   }} />}
                 {inspector === "properties" && <section aria-label="Properties"><h3>Properties</h3>
-                  {getProperties(source).map(({ key, value }, index) => simulated
-                    ? <label className="note-property-row" key={`${key}:${index}`}>{key}
-                      <input value={value} onChange={(event) => update(active, updateProperty(source, key, event.target.value))} />
-                    </label>
-                    : <NotePropertyEditor key={`${active}:${key}:${index}`} name={key} value={value}
-                      read={() => getNote(active)?.content} update={(content) => update(active, content)} />)}
+                  {getProperties(source).map(({ key, value }, index) =>
+                    <NotePropertyEditor key={`${active}:${key}:${index}`} name={key} value={value}
+                      read={() => simulated ? note?.content : getNote(active)?.content}
+                      replace={simulated ? updateProperty : undefined} update={(content) => update(active, content)} />)}
                   {getProperties(source).length === 0 && <p className="file-help">This note has no frontmatter properties.</p>}
                 </section>}
                 {inspector === "attachments" && <section aria-label="Attachments"><h3>Attachments</h3>

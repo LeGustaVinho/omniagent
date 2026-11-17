@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import type { Capability } from "@/bindings/Capability";
 import type { JobRule } from "@/bindings/JobRule";
 import type { JobWorkspace } from "@/bindings/JobWorkspace";
 import type { RequiredCustomization } from "@/bindings/RequiredCustomization";
 import { Button } from "@/components/ui/button";
-import { customizationLabel } from "@/queue-model";
+import { customizationLabel, projectQueueQuery } from "@/queue-model";
+import { SettingRow } from "@/settings-controls";
 import { InlineIssue } from "@/tasks-git-ui";
 
 const field = "rounded border border-border bg-background px-2 py-1 text-sm";
@@ -24,6 +25,12 @@ const customizationFields = [
   ["executable_entry", "Required executable customization IDs"],
 ] as const;
 
+export const managedCapacitySetting = {
+  id: "managed-capacity",
+  label: "Simultaneous managed runs",
+  description: "Set how many managed jobs can run at the same time across projects on this device.",
+};
+
 export function QueuePolicy({ projectId, checkoutId, capacity }: {
   projectId: string;
   checkoutId: string;
@@ -39,7 +46,7 @@ export function QueuePolicy({ projectId, checkoutId, capacity }: {
     <details className="border-b border-border px-3 py-2 text-sm" onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary className="w-fit cursor-pointer font-medium">Queue settings</summary>
       {open && <div className="grid gap-4 py-2">
-        <CapacityEditor key={capacity} capacity={capacity} />
+        <LiveCapacityEditor key={capacity} capacity={capacity} />
         {rules.isPending && <p role="status">Loading project rules…</p>}
         {rules.isError && <InlineIssue>{String(rules.error)}</InlineIssue>}
         {rules.data && <RuleEditor key={projectId} projectId={projectId} checkoutId={checkoutId} rules={rules.data} />}
@@ -48,29 +55,63 @@ export function QueuePolicy({ projectId, checkoutId, capacity }: {
   );
 }
 
-function CapacityEditor({ capacity }: { capacity: number }) {
+export function QueueCapacitySettings({ projectId }: { projectId?: string }) {
+  if (!projectId) return <CapacityEditor settings issue="Open a repository to load execution capacity." />;
+  return <ProjectQueueCapacitySettings projectId={projectId} />;
+}
+
+function ProjectQueueCapacitySettings({ projectId }: { projectId: string }) {
+  const queue = useQuery(projectQueueQuery(projectId));
+  const capacity = queue.data?.settings.capacity;
+  return <LiveCapacityEditor key={capacity} capacity={capacity} settings pending={queue.isPending}
+    error={queue.error} />;
+}
+
+function LiveCapacityEditor({ capacity, settings, pending, error }: {
+  capacity?: number;
+  settings?: boolean;
+  pending?: boolean;
+  error?: Error | null;
+}) {
   const client = useQueryClient();
-  const [value, setValue] = useState(String(capacity));
   const mutation = useMutation({
     mutationFn: (capacity: number) => invoke("set_job_queue_capacity", { capacity }),
     onSuccess: () => client.invalidateQueries({ queryKey: ["project-job-queue"] }),
   });
-  return (
-    <form className="grid gap-1.5" onSubmit={(event) => {
-      event.preventDefault();
-      mutation.mutate(Number(value));
-    }}>
-      <label className="flex w-fit items-center gap-2">
-        Managed execution slots across projects
-        <input className={field + " w-24"} type="number" min={1} max={4_294_967_295} required value={value}
-          onChange={(event) => setValue(event.target.value)} />
-      </label>
-      <Button type="submit" variant="outline" className="justify-self-start" disabled={mutation.isPending || Number(value) === capacity}>
-        Save capacity
-      </Button>
-      {mutation.isError && <InlineIssue>{String(mutation.error)}</InlineIssue>}
-    </form>
-  );
+  return <CapacityEditor capacity={capacity} settings={settings} pending={pending || mutation.isPending}
+    error={mutation.error ?? error} onSave={mutation.mutate} />;
+}
+
+export function CapacityEditor({ capacity, settings, pending, onSave, error, issue }: {
+  capacity?: number;
+  settings?: boolean;
+  pending?: boolean;
+  onSave?: (capacity: number) => void;
+  error?: Error | null;
+  issue?: string;
+}) {
+  const queueId = useId();
+  const id = settings ? managedCapacitySetting.id : queueId;
+  const [draft, setDraft] = useState<string>();
+  const value = draft ?? String(capacity ?? "");
+  const slots = Number(value);
+  const max = 4_294_967_295;
+  const canSave = !pending && capacity !== undefined && slots !== capacity && Number.isInteger(slots) && slots >= 1 && slots <= max;
+  const input = <input id={id} className={field + " w-24"} type="number" min={1} max={max} required
+    disabled={pending || capacity === undefined} value={value} onChange={(event) => setDraft(event.target.value)}
+    aria-describedby={settings ? `${id}-description` : undefined} />;
+  const controls = <>
+    {settings ? input : <label className="flex w-fit items-center gap-2">Managed execution slots across projects {input}</label>}
+    <Button type="submit" variant="outline" className="justify-self-start" disabled={!canSave}>Save capacity</Button>
+    {issue && <p className="text-muted-foreground">{issue}</p>}
+    {pending && capacity === undefined && <p role="status">Loading execution capacity…</p>}
+    {error && <InlineIssue>{String(error)}</InlineIssue>}
+  </>;
+  const form = <form className="grid gap-1.5" onSubmit={(event) => {
+    event.preventDefault();
+    if (canSave) onSave?.(slots);
+  }}>{controls}</form>;
+  return settings ? <SettingRow {...managedCapacitySetting}>{form}</SettingRow> : form;
 }
 
 function RuleEditor({ projectId, checkoutId, rules }: { projectId: string; checkoutId: string; rules: JobRule[] }) {

@@ -55,6 +55,14 @@ function FileSearchResults({ results, onOpen }: { results: readonly FileSearchRe
   </ul>;
 }
 
+function FileSearchField({ label, query, onChange }: { label: string; query: string; onChange: (query: string) => void }) {
+  return <label className="file-field">
+    <Search size={15} aria-hidden="true" />
+    <input type="search" autoFocus value={query} onChange={(event) => onChange(event.currentTarget.value)}
+      placeholder={label} aria-label={label} />
+  </label>;
+}
+
 export function ExampleFileSearch({ query, setQuery, results, onOpen }: {
   query: string;
   setQuery: (query: string) => void;
@@ -62,11 +70,7 @@ export function ExampleFileSearch({ query, setQuery, results, onOpen }: {
   onOpen: OpenMatch;
 }) {
   return <div className="file-search">
-    <label className="file-field">
-      <Search size={15} aria-hidden />
-      <input type="search" autoFocus value={query} onChange={(event) => setQuery(event.currentTarget.value)}
-        placeholder="Search files and content" aria-label="Search files and content" />
-    </label>
+    <FileSearchField label="Search files and content" query={query} onChange={setQuery} />
     {query.trim() && <p className="file-help" role="status">{results.length ? `${results.length} matches` : "No files match your search"}</p>}
     <FileSearchResults results={results} onOpen={onOpen} />
   </div>;
@@ -93,11 +97,7 @@ export function ProjectFileSearch({ checkoutId, onOpen }: { checkoutId: string; 
     if (!query || !ripgrep.data?.executable || results.isFetching) return;
     setSubmitted({ checkoutId, query, sequence: (submitted?.sequence ?? 0) + 1 });
   }}>
-    <label className="file-field">
-      <Search size={15} aria-hidden="true" />
-      <input type="search" autoFocus value={query} onChange={(event) => setQuery(event.target.value)}
-        placeholder="Search file contents" aria-label="Search file contents" />
-    </label>
+    <FileSearchField label="Search file contents" query={query} onChange={setQuery} />
     <button type="submit" className="fw-btn fw-outlined" disabled={!query || !ripgrep.data?.executable || results.isFetching}>Search</button>
     {ripgrep.isPending && <p className="file-help" role="status">Checking ripgrep…</p>}
     {ripgrep.error && <p className="file-help" role="alert">{String(ripgrep.error)}</p>}

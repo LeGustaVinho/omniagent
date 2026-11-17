@@ -34,6 +34,13 @@ export function AgileWorkspaceFrame({ title, view, onViewChange, action, filters
   </section>;
 }
 
+export function AgileTableFrame({ columns, children }: { columns: readonly string[]; children: ReactNode }) {
+  return <div className="overflow-auto"><table className="delivery-table agile-table" aria-label="Agile table">
+    <thead><tr>{columns.map((column) => <th key={column} scope="col">{column}</th>)}</tr></thead>
+    <tbody>{children}</tbody>
+  </table></div>;
+}
+
 export function AgileSearch({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   return <label className="agile-search">
     <Search size={15} aria-hidden="true" />

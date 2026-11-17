@@ -326,7 +326,6 @@ button:disabled { cursor: default; }
 .model-meter::-webkit-meter-optimum-value { background: var(--model-meter-fill); }
 
 .work-inspection { min-height: 0; overflow: auto; font-size: 13px; }
-.conv-activity.conv-activity-embedded { position: static; inset: auto; width: 100%; max-width: none; border-left: 0; box-shadow: none; }
 .work-inspection-title { display: flex; flex-wrap: wrap; gap: 6px; justify-content: space-between; padding: 16px 16px 8px; font-weight: 640; }
 .work-inspection-title code { color: var(--muted-foreground); font-size: 11px; }
 .work-tag { display: inline-flex; gap: 5px; align-items: center; margin: 0 16px 12px; padding: 3px 7px; background: var(--muted); border-radius: 6px; }

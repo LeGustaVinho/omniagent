@@ -1,11 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useId, useState, type FormEvent } from "react";
 
-export function NotePropertyEditor({ name, value, read, update }: {
+export function NotePropertyEditor({ name, value, read, update, replace }: {
   name: string;
   value: string;
   read: () => string | undefined;
   update: (markdown: string) => void;
+  replace?: (markdown: string, name: string, value: string) => string;
 }) {
   const inputId = useId();
   const [pending, setPending] = useState<string>();
@@ -19,7 +20,8 @@ export function NotePropertyEditor({ name, value, read, update }: {
     setSaving(true);
     setError("");
     try {
-      const edited = await invoke<string>("replace_note_property", { markdown, key: name, value: pending });
+      const edited = replace ? replace(markdown, name, pending)
+        : await invoke<string>("replace_note_property", { markdown, key: name, value: pending });
       if (read() !== markdown) {
         setError("The note changed. Review the property and apply it again.");
         return;

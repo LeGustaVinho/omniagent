@@ -7,10 +7,11 @@ import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import { liveModelsQuery, sameModelSelection } from "@/live-models";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
-import { graphProblems, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowGraph, type WorkflowLayout } from "@/workflow-graph-model";
+import { graphProblems, type WorkflowDefinitions, type WorkflowGraph, type WorkflowLayout } from "@/workflow-graph-model";
 import { WorkflowPublicationControls, type WorkflowPublication } from "@/workflow-publication";
 import { WorkflowPackageEditor, WorkflowPackageList, type PackageDraft, type PackageSummary } from "@/workflow-authoring-package";
 import { WorkflowLaunchPicker, preferredWorkflowRevision } from "@/workflow-launch";
+import { workflowGraphRegistryQuery } from "@/pipeline-catalog";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -214,7 +215,7 @@ function AuthoringRevisionEditor({ projectId, checkoutId, draft, revision }: { p
   const client = useQueryClient();
   const original: WorkflowEditorState = { graph: revision.graph, layout: revision.layout ?? {}, updateDefinitions: {} };
   const [editor, setEditor] = useState(original);
-  const registry = useQuery({ queryKey: ["workflow-graph-registry"], queryFn: () => invoke<WorkflowDefinition[]>("workflow_graph_registry"), staleTime: Infinity });
+  const registry = useQuery(workflowGraphRegistryQuery);
   const catalog = registry.data ?? [];
   const definitions = editorDefinitions(editor, revision.definitions ?? {}, catalog);
   const problems = graphProblems(editor.graph, definitions);

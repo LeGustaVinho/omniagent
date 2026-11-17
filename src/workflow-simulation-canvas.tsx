@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Background, Controls, MarkerType, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
-import { PipelineCanvasFrame, PipelineInspectorHeader } from "@/pipeline-layout";
+import { MarkerType, type Edge, type Node, type NodeProps } from "@xyflow/react";
+import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader } from "@/pipeline-layout";
 import { WorkflowExecutionStateBadge, workflowExecutionStateLabel } from "@/workflow-execution-state";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
 import { initialNodePositions, wireKey, type WorkflowEndpoint, type WorkflowLayout, type WorkflowPort, type WorkflowWire } from "@/workflow-graph-model";
@@ -88,15 +88,13 @@ export function WorkflowSimulationCanvas({ graph, steps, renderStep }: {
     <PipelineCanvasFrame className="rounded-md border border-border"
       canvasLabel="Simulated workflow graph" inspectorLabel="Simulation node evidence"
       canvas={<div className="absolute inset-0">
-        <ReactFlow<CanvasNode, CanvasEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} colorMode={theme}
+        <PipelineGraphCanvas<CanvasNode, CanvasEdge> nodes={nodes} edges={edges} nodeTypes={nodeTypes} colorMode={theme}
           fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2}
           nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null}
           onNodeClick={(_, node) => select(node.id)}
           onNodesChange={(changes) => {
             for (const change of changes) if (change.type === "select" && change.selected) select(change.id);
-          }}>
-          <Background gap={18} size={1} /><Controls showInteractive={false} />
-        </ReactFlow>
+          }} />
       </div>}
       inspector={<>
         <PipelineInspectorHeader detail="Simulation details" title={active?.title ?? "No stage selected"}>

@@ -106,11 +106,33 @@ it("opens actual routing, context decisions, and saved sources in the same inspe
   expect(patch.tagName).toBe("PRE");
   expect(patch.isContentEditable).toBeFalsy();
   await user.click(screen.getByRole("button", { name: "Open workflow" }));
-  expect(navigation.openWorkspace).toHaveBeenCalledWith("pipelines", "flow");
+  expect(navigation.openWorkspace).toHaveBeenCalledWith("pipelines", "run:flow");
   await user.click(screen.getByText("Context revisions"));
   await user.click(await screen.findByRole("button", { name: /Before rewind/ }));
   expect(await screen.findByText("Dialogue from the superseded context")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("conversation_history_revision", { conversationId: "chat", contextId: "old-conversation-context" });
+});
+
+it("opens delivery controls for a historical attempt without a graph pin", async () => {
+  const scope = { projectId: "project", runId: "old-attempt" };
+  const navigation = { openActivity: vi.fn(), openWorkspace: vi.fn() };
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command !== "run_orchestration") throw new Error(command);
+    return {
+      job: {
+        id: "job", kind: "agent", taskId: null, ownerTaskId: null, origin: { type: "pipeline" },
+        operatorRequested: false, stage: { nodeInstanceId: "plan", pipelineRunId: "legacy-delivery" },
+      },
+      stagePin: null,
+    };
+  });
+  render(<QueryClientProvider client={new QueryClient()}>
+    <RunOrchestrationPanel scope={scope} live={false} navigation={navigation} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(screen.getByText("Orchestration and worktree"));
+  await user.click(await screen.findByRole("button", { name: "Open workflow" }));
+  expect(navigation.openWorkspace).toHaveBeenCalledWith("pipelines", "legacy-delivery");
 });
 
 it("shows the Epic, Task, and Sub-Task description revisions pinned to the inspected attempt", async () => {

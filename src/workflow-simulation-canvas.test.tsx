@@ -7,19 +7,22 @@ import { afterEach, expect, it, vi } from "vitest";
 import { WorkflowSimulationCanvas, type WorkflowSimulationGraph, type WorkflowSimulationStep } from "@/workflow-simulation-canvas";
 
 vi.mock("@xyflow/react", async (original) => {
-  type CanvasNode = { id: string; data: unknown; ariaLabel: string };
+  type CanvasNode = { id: string; data: unknown; ariaLabel: string; measured?: { width: number; height: number } };
   return {
     ...await original<typeof import("@xyflow/react")>(),
     Handle: ({ id, isConnectable }: { id: string; isConnectable: boolean }) => <span data-port={id} data-connectable={isConnectable} />,
     Controls: () => null,
     Background: () => null,
-    ReactFlow: ({ nodes, edges, nodeTypes, onNodeClick, nodesDraggable, nodesConnectable, edgesReconnectable, deleteKeyCode }: {
+    ReactFlow: ({ nodes, edges, nodeTypes, onNodeClick, onNodesChange, nodesDraggable, nodesConnectable, edgesReconnectable, deleteKeyCode }: {
       nodes: CanvasNode[]; edges: { id: string; ariaLabel: string; data: { state: string } }[];
       nodeTypes: { simulation: ComponentType<CanvasNode> }; onNodeClick: (event: unknown, node: CanvasNode) => void;
+      onNodesChange: (changes: import("@xyflow/react").NodeChange[]) => void;
       nodesDraggable: boolean; nodesConnectable: boolean; edgesReconnectable: boolean; deleteKeyCode: string | null;
     }) => <div data-testid="trace-flow" data-editable={nodesDraggable || nodesConnectable || edgesReconnectable || deleteKeyCode !== null}>
-      {nodes.map((node) => <div key={node.id}>
+      {nodes.map((node) => <div key={node.id} data-testid={node.id} data-width={node.measured?.width}>
         <button type="button" aria-label={node.ariaLabel} onClick={() => onNodeClick(undefined, node)}>Inspect</button>
+        <button type="button" aria-label={"Measure " + node.id}
+          onClick={() => onNodesChange([{ id: node.id, type: "dimensions", dimensions: { width: 248, height: 104 } }])}>Measure</button>
         <nodeTypes.simulation {...node} />
       </div>)}
       <ul aria-label="Simulated edges">{edges.map((edge) => <li key={edge.id} data-signal={edge.data.state}>{edge.ariaLabel}</li>)}</ul>
@@ -60,9 +63,11 @@ it("keeps the saved simulation graph read-only and highlights only the recorded 
 
   const user = userEvent.setup();
   const inspector = within(screen.getByRole("complementary", { name: "Simulation node evidence" }));
+  await user.click(canvas.getByRole("button", { name: "Measure branch" }));
   await user.click(canvas.getByRole("button", { name: "Verify · checks::verify · Waiting" }));
   expect(inspector.getByRole("heading", { name: "Verify" })).toBeTruthy();
   expect(inspector.getByText("Evidence for checks::verify")).toBeTruthy();
   await user.selectOptions(inspector.getByRole("combobox", { name: "Inspect simulated stage" }), "checks::recheck");
   expect(inspector.getByText("Evidence for checks::recheck")).toBeTruthy();
+  expect(canvas.getByTestId("branch").getAttribute("data-width")).toBe("248");
 });

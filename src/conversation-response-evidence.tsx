@@ -117,40 +117,54 @@ export function ConversationResponseEvidence({ conversationId, runId, live, evid
   live: boolean;
   evidence?: ResponseEvidence;
 }) {
+  return <>
+    {evidence && <ObservedConversationResponse evidence={evidence} />}
+    <details>
+      <summary>Approvals</summary>
+      <ConversationApprovalEvidence conversationId={conversationId} runId={runId} live={live} />
+    </details>
+  </>;
+}
+
+export function ObservedConversationResponse({ evidence }: { evidence: ResponseEvidence }) {
+  return <>
+    <Responses title="Final responses" items={evidence.responses.items.filter((item) => item.status === "final")} />
+    <Responses title="Provisional and recorded responses" items={evidence.responses.items.filter((item) => item.status !== "final")} />
+    {evidence.reasoning.length > 0 ? <details>
+      <summary>Reported reasoning</summary>
+      <ol aria-label="Reported reasoning" className="grid gap-1 text-xs">
+        {evidence.reasoning.map((entry, index) => <li key={index}>
+          <p className="text-muted-foreground">{entry.summary ? "Provider reasoning summary" : "Provider reasoning text"}</p>
+          <p className="whitespace-pre-wrap break-words">{entry.text}</p>
+        </li>)}
+      </ol>
+    </details> : evidence.reasoningTokens !== undefined && <p className="text-xs text-muted-foreground">Reasoning text unavailable.</p>}
+    <Usage evidence={evidence} />
+  </>;
+}
+
+export function ConversationApprovalEvidence({ conversationId, runId, live }: {
+  conversationId: string;
+  runId: string;
+  live: boolean;
+}) {
   const approvals = useQuery({
     queryKey: ["conversation-run", runId, "approval-evidence", conversationId, live],
     queryFn: () => invoke<Approval[]>("conversation_approvals", { conversationId, runId }),
     refetchInterval: live ? 400 : false,
   });
   return <>
-    {evidence && <>
-      <Responses title="Final responses" items={evidence.responses.items.filter((item) => item.status === "final")} />
-      <Responses title="Provisional and recorded responses" items={evidence.responses.items.filter((item) => item.status !== "final")} />
-      {evidence.reasoning.length > 0 ? <details>
-        <summary>Reported reasoning</summary>
-        <ol aria-label="Reported reasoning" className="grid gap-1 text-xs">
-          {evidence.reasoning.map((entry, index) => <li key={index}>
-            <p className="text-muted-foreground">{entry.summary ? "Provider reasoning summary" : "Provider reasoning text"}</p>
-            <p className="whitespace-pre-wrap break-words">{entry.text}</p>
-          </li>)}
-        </ol>
-      </details> : evidence.reasoningTokens !== undefined && <p className="text-xs text-muted-foreground">Reasoning text unavailable.</p>}
-      <Usage evidence={evidence} />
-    </>}
-    <details>
-      <summary>Approvals</summary>
-      {approvals.isPending && <p className="text-xs text-muted-foreground">Loading approval history…</p>}
-      {approvals.error && <p role="alert" className="text-xs">{String(approvals.error)}</p>}
-      {approvals.data?.length === 0 && <p className="text-xs text-muted-foreground">No approval requests recorded.</p>}
-      {Boolean(approvals.data?.length) && <ol aria-label="Approval history" className="grid gap-2 text-xs">
-        {approvals.data?.map((approval) => <li key={approval.eventSequence}>
-          <p>{approval.operation}{approval.location.parentItemId && " · Child tool request"}</p>
-          {approval.description && <p className="whitespace-pre-wrap break-words">{approval.description}</p>}
-          <p className="text-muted-foreground">
-            {deliveryLabels[approval.delivery]}{approval.decision && ` · ${decisionLabels[approval.decision]}`} · Event {approval.eventSequence}
-          </p>
-        </li>)}
-      </ol>}
-    </details>
+    {approvals.isPending && <p className="text-xs text-muted-foreground">Loading approval history…</p>}
+    {approvals.error && <p role="alert" className="text-xs">{String(approvals.error)}</p>}
+    {approvals.data?.length === 0 && <p className="text-xs text-muted-foreground">No approval requests recorded.</p>}
+    {Boolean(approvals.data?.length) && <ol aria-label="Approval history" className="grid gap-2 text-xs">
+      {approvals.data?.map((approval) => <li key={approval.eventSequence}>
+        <p>{approval.operation}{approval.location.parentItemId && " · Child tool request"}</p>
+        {approval.description && <p className="whitespace-pre-wrap break-words">{approval.description}</p>}
+        <p className="text-muted-foreground">
+          {deliveryLabels[approval.delivery]}{approval.decision && ` · ${decisionLabels[approval.decision]}`} · Event {approval.eventSequence}
+        </p>
+      </li>)}
+    </ol>}
   </>;
 }

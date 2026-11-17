@@ -245,69 +245,100 @@ export function ConversationRequests({ activity, conversationId, runId, focusQue
   );
 }
 
-export function ConversationActivity({ conversationId, run, projection, onClose, embedded, navigation }: {
+export function ConversationActivity({ conversationId, run, projection, onClose }: {
   conversationId: string;
   run: RunRecord;
   projection?: Projection;
   onClose: () => void;
-  embedded?: boolean;
-  navigation?: Pick<WorkspaceProps, "openActivity" | "openWorkspace">;
 }) {
   const [showInput, setShowInput] = useState(false);
   const heading = useRef<HTMLButtonElement>(null);
   const live = isLiveRun(run);
   useEffect(() => { heading.current?.focus(); }, []);
-  const input = useQuery({
-    queryKey: ["conversation-run", run.id, "input"],
-    enabled: showInput,
-    refetchInterval: showInput && live ? 400 : false,
-    queryFn: () => invoke<ConversationInput | null>("conversation_input", { conversationId, runId: run.id }),
-  });
+  const scope = { conversationId, runId: run.id, live };
   return (
-    <aside className={embedded ? "conv-activity conv-activity-embedded" : "conv-activity"} aria-label="Conversation activity" onKeyDown={(event) => {
+    <aside className="conv-activity" aria-label="Conversation activity" onKeyDown={(event) => {
       if (event.key !== "Escape") return;
       event.stopPropagation();
       onClose();
     }}>
-      {!embedded && <header className="conv-activity-heading">
+      <header className="conv-activity-heading">
         <Activity className="size-4" aria-hidden /><h2>Activity</h2>
         <button ref={heading} type="button" className="conv-icon-button ml-auto" aria-label="Close activity" onClick={onClose}>
           <X aria-hidden />
         </button>
-      </header>}
+      </header>
       <div className="conv-activity-content">
       <dl>
         <dt>Execution</dt><dd role="status">{labels[run.status]}</dd>
         <dt>Run ID</dt><dd className="break-all font-mono">{run.id}</dd>
       </dl>
-      <RunOrchestrationPanel scope={{ projectId: run.projectId, conversationId, runId: run.id }} live={live} navigation={navigation} />
-      <ConversationAgentTree conversationId={conversationId} runId={run.id} live={live}
-        delegation={projection?.delegation ?? emptyProjection.delegation} openActivity={navigation?.openActivity} />
-      <ConversationSubagentQuotaPanel conversationId={conversationId} runId={run.id} live={live} />
+      <RunOrchestrationPanel scope={{ projectId: run.projectId, conversationId, runId: run.id }} live={live} />
+      <ConversationActivityAgents {...scope} projection={projection} />
       <ConversationChecklistProgress projectId={run.projectId} runId={run.id} live={live} />
-      <AttemptSubagentAudit conversationId={conversationId} runId={run.id} live={live} gaps={projection?.auditGaps ?? []} />
-      <ConversationQuestionTimeline conversationId={conversationId} runId={run.id} live={live} />
-      {Boolean(projection?.tools.length) && <details>
-        <summary>Tool activity</summary>
-        <ol>{projection?.tools.map((tool, index) => <li key={index}>{tool.name} · {tool.phase}</li>)}</ol>
-      </details>}
-      {Boolean(projection?.fileReads.length) && <details>
-        <summary>Reported file reads after input</summary>
-        <ol>{projection?.fileReads.map((read, index) => <li key={index} className="break-all text-xs">{read.path} · {read.tool}</li>)}</ol>
-      </details>}
+      <ConversationActivityTimeline {...scope} projection={projection} />
       <ConversationResponseEvidence conversationId={conversationId} runId={run.id} live={live} evidence={projection} />
-      <ConversationInventory conversationId={conversationId} runId={run.id} />
-      <ConversationProfile projectId={run.projectId} conversationId={conversationId} runId={run.id} live={live} />
+      <ConversationActivityContext {...scope} projectId={run.projectId} projection={projection} />
       <Button type="button" variant="outline" aria-expanded={showInput} onClick={() => setShowInput((visible) => !visible)}>Exact input</Button>
-      {showInput && (
-        <section className="min-w-0 rounded-md border border-border bg-card p-3" aria-label="Exact provider input">
-          {input.isPending && <p className="text-xs text-muted-foreground">Loading input…</p>}
-          {input.error && <p role="alert" className="text-sm text-red-300">{String(input.error)}</p>}
-          {input.data === null && <p className="text-xs text-muted-foreground">No input has been prepared.</p>}
-          {input.data && <ConversationDeliveries input={input.data} conversationId={conversationId} runId={run.id} live={live} />}
-        </section>
-      )}
+      {showInput && <ConversationExactInput {...scope} />}
       </div>
     </aside>
   );
+}
+
+type ConversationActivityScope = { conversationId: string; runId: string; live: boolean };
+type ActivityProjection = ConversationActivityScope & { projection?: Projection };
+
+export function conversationRunStatus(run: RunRecord) {
+  const { status } = run;
+  const tone = status === "failed" || status === "interrupted" ? "danger"
+    : status === "succeeded" ? "success" : status === "waiting_for_input" ? "warning"
+      : isLiveRun(run) ? "progress" : undefined;
+  return { label: labels[status], tone } as const;
+}
+
+export function ConversationActivityAgents({ conversationId, runId, live, projection, openActivity }: ActivityProjection & {
+  openActivity?: WorkspaceProps["openActivity"];
+}) {
+  return <>
+    <ConversationAgentTree conversationId={conversationId} runId={runId} live={live}
+      delegation={projection?.delegation ?? emptyProjection.delegation} openActivity={openActivity} />
+    <ConversationSubagentQuotaPanel conversationId={conversationId} runId={runId} live={live} />
+    <AttemptSubagentAudit conversationId={conversationId} runId={runId} live={live} gaps={projection?.auditGaps ?? []} />
+  </>;
+}
+
+export function ConversationActivityTimeline({ projection, ...scope }: ActivityProjection) {
+  return <>
+    <ConversationQuestionTimeline {...scope} />
+    {!!projection?.tools.length && <details>
+      <summary>Tool activity</summary>
+      <ol>{projection.tools.map((tool, index) => <li key={index}>{tool.name} · {tool.phase}</li>)}</ol>
+    </details>}
+  </>;
+}
+
+export function ConversationActivityContext({ projectId, projection, ...scope }: ActivityProjection & { projectId: string }) {
+  return <>
+    <ConversationInventory conversationId={scope.conversationId} runId={scope.runId} />
+    <ConversationProfile projectId={projectId} {...scope} />
+    {!!projection?.fileReads.length && <details>
+      <summary>Reported file reads after input</summary>
+      <ol>{projection.fileReads.map((read, index) => <li key={index} className="break-all text-xs">{read.path} · {read.tool}</li>)}</ol>
+    </details>}
+  </>;
+}
+
+export function ConversationExactInput({ conversationId, runId, live }: ConversationActivityScope) {
+  const input = useQuery({
+    queryKey: ["conversation-run", runId, "input"],
+    refetchInterval: live ? 400 : false,
+    queryFn: () => invoke<ConversationInput | null>("conversation_input", { conversationId, runId }),
+  });
+  return <section className="min-w-0 rounded-md border border-border bg-card p-3" aria-label="Exact provider input">
+    {input.isPending && <p className="text-xs text-muted-foreground">Loading input…</p>}
+    {input.error && <p role="alert" className="text-sm text-red-300">{String(input.error)}</p>}
+    {input.data === null && <p className="text-xs text-muted-foreground">No input has been prepared.</p>}
+    {input.data && <ConversationDeliveries input={input.data} conversationId={conversationId} runId={runId} live={live} />}
+  </section>;
 }

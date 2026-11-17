@@ -46,6 +46,27 @@ const plan: WorkflowDefinition = { kind: "plan", title: "Plan", revision: 1, con
   inputs: [control("ready"), data("context", "markdown")], outputs: [control("planned"), data("plan", "plan")] };
 const wire = (from: string, output: string, to: string, input: string) => ({ from: { node: from, port: output }, to: { node: to, port: input } });
 
+it("opens the real Library and searches the same definitions used by the Builder", async () => {
+  const ipc = vi.mocked(invoke);
+  ipc.mockResolvedValue([start, context, plan]);
+  const openWorkspace = vi.fn();
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target="library" openWorkspace={openWorkspace}
+      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
+  </QueryClientProvider>);
+  const tabs = within(screen.getByRole("navigation", { name: "Pipelines views" }));
+  expect(tabs.getByRole("button", { name: "Library" }).getAttribute("aria-current")).toBe("page");
+  const library = within(screen.getByRole("region", { name: "Workflow library" }));
+  await library.findByRole("heading", { name: "Load context" });
+  expect(ipc).toHaveBeenCalledWith("workflow_graph_registry");
+  await user.type(library.getByRole("searchbox", { name: "Search pipeline nodes" }), "planned");
+  expect(library.queryByRole("heading", { name: "Load context" })).toBeNull();
+  expect(library.getByRole("heading", { name: "Plan" })).toBeTruthy();
+  await user.click(tabs.getByRole("button", { name: "Maintenance" }));
+  expect(openWorkspace).toHaveBeenCalledWith("pipelines", "maintenance");
+});
+
 it("opens a protected draft, reviews an affected port upgrade, wires typed nodes, and restores the saved graph and layout", async () => {
   const graph: WorkflowGraph = {
     name: "Versioned review",

@@ -331,6 +331,20 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   await writeFile(file, markdown, { flag: "wx" });
 
   await openBuilder(browser);
+  const views = browser.$('[aria-label="Pipelines views"]');
+  await click(views.$("button=Library"));
+  const library = browser.$('[aria-label="Workflow library"]');
+  await library.$("h4=Find work").waitForDisplayed({ timeout });
+  await library.$("summary=Import or export workflow packages").waitForDisplayed({ timeout });
+  await click(views.$("button=Maintenance"));
+  const maintenance = browser.$('[aria-label="Workflow maintenance"]');
+  await maintenance.$("h3=Settings and template proposals").waitForDisplayed({ timeout });
+  await maintenance.$("summary=Maintenance workflow").waitForDisplayed({ timeout });
+  await click(views.$("button=Compare models"));
+  const comparison = browser.$('[aria-label="Model comparisons"]');
+  await comparison.$("h3=Request and context").waitForDisplayed({ timeout });
+  await comparison.$("h3=Candidates").waitForDisplayed({ timeout });
+  await click(views.$("button=Builder"));
   await click(browser.$("button=New pipeline"));
   const dialog = browser.$('[role="dialog"]');
   const name = dialog.$(".//input[@aria-label='Pipeline name'] | .//label[normalize-space(.)='Pipeline name']/input");
@@ -374,6 +388,8 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   }, { timeout, timeoutMsg: "Dragging Load context did not move its canvas position" });
   const positioned = await nodePosition(browser);
   await click(browser.$(`${canvas} .react-flow__controls-fitview`));
+  // Leave room for the pointer outside the canvas's edge-panning zones during the connection.
+  await click(browser.$(`${canvas} .react-flow__controls-zoomout`));
 
   await drag(browser, await locate(browser, handle(start, "start")), await locate(browser, handle(load, "ready")));
   await browser.$(edge(control)).waitForDisplayed({ timeout });

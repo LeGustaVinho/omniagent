@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { ArrowRight, Check, CircleAlert, Clock3, Columns2, FileCode2, GitBranch, ListChecks, Plus, ShieldCheck } from "lucide-react";
+import { PipelineComparisonCard, PipelineComparisonSetup } from "@/pipeline-comparison-layout";
+import { PipelineSectionHeading } from "@/pipeline-layout";
 import { Button } from "@/components/ui/button";
 import { EffortSelect } from "@/components/effort-select";
-import { ModelPicker, ModelRatingMeters } from "@/components/model-picker";
+import { ModelPicker } from "@/components/model-picker";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { exampleModelEfforts } from "@/model-effort-examples";
@@ -168,47 +170,40 @@ export function ComparisonView({ simulated, onSimulate, onUse }: { simulated: bo
   const title = active ? "Comparison in progress" : successful && failed ? "Partial result" : successful ? "Comparison complete" : "Comparison failed";
   return (
     <div className="pipeline-stack">
-      <div className="pipeline-section-heading"><div><h2>Compare models</h2><p>Use one pinned request and context for independently reported responses.</p></div><Columns2 size={20} /></div>
+      <PipelineSectionHeading title="Compare models" description="Use one pinned request and context for independently reported responses."
+        icon={<Columns2 size={20} aria-hidden />} />
       {!simulated && <PendingPipeline label="No model comparisons" onSimulate={onSimulate} />}
-      <div className="pipeline-two-columns">
-        <section className="pipeline-box pipeline-form pipeline-stack">
-          <h3>Shared request</h3>
+      <PipelineComparisonSetup onSubmit={(event) => { event.preventDefault(); start(); }} request={<>
           <label>Prompt<textarea rows={4} value={prompt} onChange={(event) => setPrompt(event.currentTarget.value)} disabled={!simulated || active} /></label>
           <label>Pinned context<select value={context} onChange={(event) => setContext(event.currentTarget.value)} disabled={!simulated || active}>
             {!simulated && <option value="">Select a source revision</option>}
             {simulated && sampleContexts.map((source) => <option key={source}>{source}</option>)}
           </select></label>
           {simulated && <p className="pipeline-note"><ShieldCheck size={15} /> Verified read-only example · clean comparison checkout · one slot</p>}
-          <Button onClick={start} disabled={!simulated || !prompt.trim() || !context || selection.length < 2 || active}>Start comparison</Button>
-        </section>
-        <section className="pipeline-box">
-          <h3>Candidates</h3>
+          <Button type="submit" disabled={!simulated || !prompt.trim() || !context || selection.length < 2 || active}>Start comparison</Button>
+        </>} candidates={<>
           <fieldset disabled={!simulated || active}>
             <ModelPicker label="Select models" options={simulated ? orderedModels : []} selection={{ mode: "multiple", selected: selection, onChange: setSelection }} />
           </fieldset>
-
-        </section>
-      </div>
+      </>} />
       {run && (
         <>
           <div className="pipeline-section-heading" aria-live="polite"><div><h2>{title}</h2><p>{successful} completed · {failed} failed · {run.candidates.length} candidates</p></div></div>
-          <div className="pipeline-results">
+          <ol className="pipeline-results" aria-label="Comparison results">
             {run.candidates.map(({ selection: candidate, status }, index) => {
               const model = getSampleModel(candidate.modelId);
               const response = responseExamples[index % responseExamples.length];
               return (
-                <article key={candidate.modelId} className="pipeline-box pipeline-stack">
-                  <div className="pipeline-card-heading"><h3>{model?.name ?? candidate.modelId}</h3><span className="pipeline-status" data-status={status}>{status}</span></div>
-                  <ModelRatingMeters rating={model?.rating ?? null} />
+                <PipelineComparisonCard key={candidate.modelId} name={model?.name ?? candidate.modelId} state={status} rating={model?.rating ?? null}>
                   <p className="pipeline-meta">{candidate.provider} · {status === "completed" ? "1.2 s · 356 input / 92 output tokens" : status === "failed" ? "0.8 s · usage unavailable" : "Usage pending"}</p>
                   {status === "completed" && <><p>{response}</p><details className="pipeline-evidence"><summary>Reported reasoning</summary><p>Checked the pinned release criteria and the proposed verification boundary.</p></details></>}
                   {status === "failed" && <p className="pipeline-warning"><CircleAlert size={15} /> Example provider timed out.</p>}
                   <details className="pipeline-evidence"><summary>Context and dispatch</summary><p>{run.prompt}</p><p className="pipeline-meta">{run.context} · read-only tools · {candidate.provider} reported its own instruction inventory.</p></details>
                   {status === "completed" && <label className="pipeline-checkline"><input type="checkbox" checked={included.includes(candidate.modelId)} onChange={(event) => setIncluded(event.currentTarget.checked ? [...included, candidate.modelId] : included.filter((id) => id !== candidate.modelId))} /> Use this result</label>}
-                </article>
+                </PipelineComparisonCard>
               );
             })}
-          </div>
+          </ol>
           {!active && successful > 0 && <section className="pipeline-box pipeline-stack">
             <div className="pipeline-card-heading"><h3>Synthesis</h3><ListChecks size={16} /></div>
             <p className="pipeline-meta">Create a separate result from selected candidate runs.</p>
@@ -242,7 +237,7 @@ export function PipelineMaintenance({ simulation, startSimulation, openWorkspace
   const [pluginHistory, setPluginHistory] = useState<string[]>([]);
   return (
     <div className="pipeline-stack">
-      <div className="pipeline-section-heading"><div><h2>Maintenance</h2><p>Review field-level proposals and follow the build candidate to its evidence.</p></div><ShieldCheck size={20} /></div>
+      <PipelineSectionHeading title="Maintenance" description="Review proposals and candidate build evidence." icon={<ShieldCheck size={20} aria-hidden />} />
       {!simulation ? <PendingPipeline label="No maintenance proposals" onSimulate={() => startSimulation("pipelines")} /> : <>
         <div className="pipeline-two-columns">
           <section className="pipeline-box pipeline-stack">

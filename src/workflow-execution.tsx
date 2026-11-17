@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { Background, Controls, MarkerType, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
+import { MarkerType, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import { Button } from "@/components/ui/button";
-import { PipelineCanvasFrame, PipelineInspectorHeader, PipelineToolbar } from "@/pipeline-layout";
+import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRunsEmpty, PipelineToolbar } from "@/pipeline-layout";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
 import { initialNodePositions, wireKey } from "@/workflow-graph-model";
@@ -148,15 +148,13 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker }: {
       </details>}
     </header>
     <PipelineCanvasFrame className="workflow-run-frame" canvasLabel="Workflow execution graph" inspectorLabel="Execution node evidence"
-      canvas={<ReactFlow<ExecutionNode, Edge> key={subflowPath} nodes={nodes} edges={edges} nodeTypes={executionNodeTypes}
+      canvas={<PipelineGraphCanvas<ExecutionNode, Edge> key={subflowPath} nodes={nodes} edges={edges} nodeTypes={executionNodeTypes}
         nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false} deleteKeyCode={null}
         onNodeClick={(_, node) => setSelected(node.id)} onNodesChange={(changes) => {
           const selectedNode = changes.find((change) => change.type === "select" && change.selected);
           if (selectedNode?.type === "select") setSelected(selectedNode.id);
         }} colorMode={theme}
-        fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2}>
-        <Background gap={18} size={1} /><Controls position="bottom-left" showInteractive={false} />
-      </ReactFlow>}
+        fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2} />}
       inspector={<>
         <PipelineInspectorHeader detail="Execution details" title={active?.node.definition.title ?? "No stage selected"}>
           <label className="workflow-execution-field">Inspect execution node
@@ -219,13 +217,16 @@ export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: str
     {execution.data ? <WorkflowExecutionCanvas key={execution.data.run.id}
       snapshot={execution.data} navigation={props} runPicker={runPicker} /> : <>
       <PipelineToolbar><div className="workflow-run-selectors">{runPicker}</div></PipelineToolbar>
-      <div className="workflow-runs-empty">
-        {runId && execution.isPending && <p role="status">Loading workflow execution…</p>}
-        {!runId && runs.isPending && <p role="status">Loading workflow runs…</p>}
-        {execution.data === null && <p>The requested execution is unavailable in this project.</p>}
-        {!runId && (runs.data?.length === 0 ? <p>No workflow runs are recorded for this project.</p>
-          : runs.data && <p>Select a saved workflow run to inspect its graph and evidence.</p>)}
-      </div>
+      {!runId && runs.data?.length === 0 ? (
+        <PipelineRunsEmpty onOpenBuilder={() => openWorkspace("pipelines", "drafts")} />
+      ) : (
+        <div className="workflow-runs-empty">
+          {runId && execution.isPending && <p role="status">Loading workflow execution…</p>}
+          {!runId && runs.isPending && <p role="status">Loading workflow runs…</p>}
+          {execution.data === null && <p>The requested execution is unavailable in this project.</p>}
+          {!runId && runs.data && <p>Select a saved workflow run to inspect its graph and evidence.</p>}
+        </div>
+      )}
     </>}
   </section>;
 }

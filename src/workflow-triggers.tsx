@@ -5,6 +5,7 @@ import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import type { WorkflowStartSchema } from "@/workflow-launch-fields";
+import { workflowRunTarget } from "@/workflow-execution-model";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type Version = { id: string; revision: string };
@@ -62,14 +63,14 @@ export function WorkflowTriggers({ checkout, openWorkspace }: Pick<WorkspaceProp
     <h3>Recent activations</h3>
     {activations.error && <p role="alert">{String(activations.error)}</p>}
     {activations.data?.length === 0 && <p className="pipeline-note">No rule activations recorded.</p>}
-    {activations.data?.map((activation) => <article className="pipeline-evidence pipeline-stack" key={activation.ruleId + ":" + activation.eventId}>
+    {activations.data?.map(({ runId, ...activation }) => <article className="pipeline-evidence pipeline-stack" key={activation.ruleId + ":" + activation.eventId}>
       <strong>{activation.ruleName} · revision {activation.ruleRevision}</strong>
       <span>{outcomes[activation.outcome]} · <time dateTime={activation.recordedAt}>{new Date(activation.recordedAt).toLocaleString()}</time></span>
       <span>Event <code>{activation.eventId}</code></span>
       {activation.detail && activation.outcome === "failed" && <p>{activation.detail}</p>}
       <div className="pipeline-actions">
         <Button variant="outline" onClick={() => openWorkspace("tasks", activation.workId)}>Open work item</Button>
-        {activation.runId && <Button variant="outline" onClick={() => openWorkspace("pipelines", activation.runId ?? undefined)}>Open execution</Button>}
+        {runId && <Button variant="outline" onClick={() => openWorkspace("pipelines", workflowRunTarget(runId))}>Open execution</Button>}
       </div>
     </article>)}
   </section>;

@@ -84,13 +84,6 @@
 .run-inspection-body[hidden] { display: none; }
 .run-inspection-body > :is(section, aside, details, dl, ol, ul) { width: 100%; min-width: 0; }
 
-.run-inspection-body .conv-activity-embedded {
-  flex: none;
-  border: 1px solid var(--border);
-  border-radius: .5rem;
-}
-
-.run-inspection-body .conv-activity-content { overflow: visible; }
 .run-inspection-body .conv-requests { margin: 0; }
 .run-inspection-attempts > ul > li {
   padding: .5rem .65rem;

@@ -208,29 +208,6 @@
 .pipeline-inspector > header > h2,
 .pipeline-section-heading h2 { font-size: 1rem; font-weight: 630; }
 
-.pipeline-node {
-  display: grid;
-  gap: 0.16rem;
-  width: 9.8rem;
-  padding: 0.73rem;
-  border: 1px solid var(--border);
-  border-inline-start: 3px solid var(--border);
-  border-radius: 0.55rem;
-  background: var(--card);
-  color: var(--foreground);
-  box-shadow: 0 4px 12px #0002;
-}
-
-.pipeline-node[data-selected="true"] {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 1px var(--primary);
-}
-
-.pipeline-node strong { font-weight: 630; overflow-wrap: anywhere; }
-.pipeline-node small { color: var(--muted-foreground); text-transform: capitalize; }
-.pipeline-node .react-flow__handle { background: var(--primary); border-color: var(--card); }
-.pipeline-node-title { display: flex; align-items: flex-start; gap: 0.35rem; }
-.pipeline-node-title svg { flex: none; margin-block-start: 0.1rem; color: var(--muted-foreground); }
 .pipeline-stage-jump { display: none; }
 .pipeline-stage-jump select { width: 100%; margin-block-start: 0.35rem; padding: 0.3rem 0.55rem; border: 1px solid var(--border); border-radius: 0.35rem; background: var(--background); }
 
@@ -294,16 +271,11 @@
 }
 
 .pipeline-self-start { justify-self: start; }
-.pipeline-status[data-status="running"],
-.pipeline-node[data-status="running"] { border-inline-start-color: var(--primary); }
-.pipeline-status[data-status="failed"],
-.pipeline-node[data-status="failed"] { border-inline-start-color: #ef757f; }
+.pipeline-status[data-status="running"] { border-inline-start-color: var(--primary); }
+.pipeline-status[data-status="failed"] { border-inline-start-color: #ef757f; }
 .pipeline-status[data-status="completed"],
-.pipeline-status[data-status="succeeded"],
-.pipeline-node[data-status="succeeded"] { border-inline-start-color: #58c996; }
-.pipeline-status[data-status="waiting"],
-.pipeline-node[data-status="waiting"] { border-inline-start-color: #e7ad51; }
-.pipeline-node[data-status="skipped"] { opacity: 0.72; }
+.pipeline-status[data-status="succeeded"] { border-inline-start-color: #58c996; }
+.pipeline-status[data-status="waiting"] { border-inline-start-color: #e7ad51; }
 .pipeline-warning { color: #d37d26; }
 [data-app-theme="dark"] .pipeline-warning { color: #e7ad51; }
 
@@ -431,7 +403,6 @@
 }
 
 @media (forced-colors: active) {
-  .pipeline-node[data-selected="true"],
   .workflow-node-card[data-selected],
   .pipeline-tabs button[aria-current="page"] { outline: 2px solid Highlight; outline-offset: 2px; }
 }

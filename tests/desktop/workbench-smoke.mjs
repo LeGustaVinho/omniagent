@@ -250,19 +250,71 @@ async function checkDisplayPreferences(browser) {
   await emulateDisplay(browser, "Emulation.setEmulatedMedia", { features: [] });
 }
 
+async function checkSharedWorkspaceNavigation(browser, expectedCapacity) {
+  const views = [
+    ["Conversations", ".conv-workspace"],
+    ["IDE", '[aria-label="IDE workspace"] button[aria-label="Toggle bottom panel"]'],
+    ["Tasks", '[aria-label="Tasks workspace"] [aria-label="Agile view"]'],
+    ["Pipelines", '[aria-label="Pipelines workspace"] [aria-label="Pipelines views"]'],
+    ["Git", '[aria-label="Git workspace"] [aria-label="Git views"]'],
+    ["Diagnostics", '[aria-label="Diagnostics workspace"] [aria-label="Diagnostic views"]'],
+    ["Knowledge", '[aria-label="Knowledge workspace"] button[aria-label="Note details"]'],
+  ];
+  const shown = ".work-deck:not([hidden]) .work-view:not([hidden])";
+  for (const [area, landmark] of views) {
+    const rail = `.work-rail button[aria-label="${area}"]`;
+    await click(browser, rail);
+    assert.equal(await browser.$(rail).getAttribute("aria-current"), "page");
+    const pane = browser.$(shown);
+    await pane.$(landmark).waitForDisplayed({ timeoutMsg: `${area} did not render its shared controls` });
+    if (area === "Tasks") {
+      await click(pane, "button=Table");
+      await pane.$('table[aria-label="Agile table"]').waitForDisplayed();
+      await click(pane, "button=Kanban");
+    }
+    assert.equal(await browser.execute(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, area);
+  }
+  const queueButton = '.work-rail button[aria-label="Queue"]';
+  const wasOpen = await browser.$(queueButton).getAttribute("aria-pressed") === "true";
+  if (!wasOpen) await click(browser, queueButton);
+  await browser.$('.work-queue-panel:not([hidden]) [aria-label="Queue states"]').waitForDisplayed();
+  if (!wasOpen) await click(browser, queueButton);
+  await click(browser, '.work-rail button[aria-label="Settings"]');
+  const settings = browser.$('.settings-dialog');
+  await settings.$('[aria-label="Settings categories"]').waitForDisplayed();
+  await click(settings, 'button=Execution capacity');
+  const capacity = settings.$('input#managed-capacity');
+  await capacity.waitForEnabled();
+  assert.equal(await capacity.getValue(), String(expectedCapacity));
+  await click(browser, 'button[aria-label="Close settings"]');
+}
+
+async function checkConversationActivity(browser) {
+  const inspectorSelector = '.work-inspector[data-kind="activity"]';
+  const tabsSelector = '[role="tablist"][aria-label="Run details"]';
+  const activity = browser.$(inspectorSelector);
+  const tabs = activity.$(tabsSelector);
+  await tabs.waitForDisplayed();
+  const names = await browser.execute((selector) =>
+    Array.from(document.querySelectorAll(selector), (tab) => tab.textContent), `${inspectorSelector} ${tabsSelector} [role="tab"]`);
+  assert.deepEqual(names, ["Overview", "Timeline", "Agents", "Context", "Exact input", "Approvals", "Artifacts"]);
+  await click(tabs, 'button=Timeline');
+  await activity.$('h3=Events').waitForDisplayed();
+  return activity;
+}
+
 async function checkSimulation(browser, checkout) {
   const conversationScope = { checkoutId: checkout.checkoutId };
   const before = await invoke(browser, "list_conversations", conversationScope);
   const settingsBefore = await invoke(browser, "appearance_settings");
+  const queueBefore = await invoke(browser, "project_job_queue", { projectId: checkout.projectId });
+  const realCapacity = queueBefore.settings.capacity;
   await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 1440, height: 900 } } });
-  for (const area of ["IDE", "Tasks", "Pipelines", "Knowledge", "Git"]) {
-    await click(browser, 'button[aria-label="' + area + '"]');
-    assert.equal(await browser.$('button[aria-label="' + area + '"]').getAttribute("aria-current"), "page");
-  }
-  await click(browser, 'button[aria-label="Knowledge"]');
+  await checkSharedWorkspaceNavigation(browser, realCapacity);
   await click(browser, '.work-titlebar button[title="Try a workflow with example data"]');
   const simulation = browser.$('[aria-label="Simulation controls"]');
   await simulation.waitForDisplayed();
+  await checkSharedWorkspaceNavigation(browser, 3);
 
   const shown = ".work-deck:not([hidden]) .work-view:not([hidden])";
   const knowledge = browser.$(shown);
@@ -347,11 +399,16 @@ async function checkSimulation(browser, checkout) {
   await capture(browser, "09-agile-table");
   await click(browser.$(shown), "button=Kanban");
   await click(browser, 'button[aria-label="Queue"]');
-  await browser.$('[aria-label="Execution queue"]').waitForDisplayed();
+  const queue = browser.$('.work-queue-panel:not([hidden]) [aria-label="Execution queue"]');
+  await queue.waitForDisplayed();
   await capture(browser, "10-queue");
   await click(browser, "button=Start attempt");
   await click(browser, "button=Capture candidate");
-  await click(browser, 'button[aria-label="Close queue"]');
+  await click(queue, 'button=Inspect attempt');
+  const activity = await checkConversationActivity(browser);
+  await capture(browser, "10-activity-simulate");
+  await click(activity, 'button[aria-label="Close activity"]');
+  await click(queue, 'button[aria-label="Close queue"]');
   await click(browser.$(shown), "button=Run verification");
   await click(browser.$(shown), "button=Review saved diff");
   const changes = () => browser.$('.work-inspector[data-kind="changes"]');
@@ -384,7 +441,7 @@ async function checkSimulation(browser, checkout) {
   await click(browser, "button=Resume from checkpoint");
   await browser.$("button=Start attempt").waitForEnabled();
   await scenario.selectByAttribute("value", "pipelines");
-  await browser.$(".react-flow").waitForDisplayed();
+  await browser.$(shown).$(".react-flow").waitForDisplayed();
   await capture(browser, "03-pipelines");
   await click(browser.$(shown), "button=Roles & templates");
   const roles = browser.$(shown).$(".pipeline-view:not([hidden])");
@@ -409,6 +466,9 @@ async function checkSimulation(browser, checkout) {
   await catalog.$("h4=Merge").waitForDisplayed();
   await capture(browser, "03-node-library");
   await click(browser.$(shown).$('[aria-label="Pipelines views"]'), "button=Builder");
+  const demoCanvas = browser.$(shown).$('[aria-label="Simulation graph canvas"]');
+  await demoCanvas.$(".workflow-node-card[data-selected]").waitForDisplayed();
+  await demoCanvas.$(".react-flow__controls-fitview").waitForDisplayed();
   await click(browser.$(shown), "button=Add node");
   const nodePicker = browser.$('.pipeline-catalog-dialog');
   await nodePicker.$('input[aria-label="Search pipeline nodes"]').setValue("result artifact");
@@ -458,10 +518,8 @@ async function checkSimulation(browser, checkout) {
   await click(browser, 'button[aria-label="Close settings"]');
   await scenario.selectByAttribute("value", "pipelines");
   await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width: 640, height: 440 } } });
-  for (const area of ["Pipelines", "Git", "Tasks", "IDE", "Knowledge", "Conversations", "Diagnostics"]) {
-    await click(browser, 'button[aria-label="' + area + '"]');
-    assert.equal(await browser.execute(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true);
-  }
+  await browser.waitUntil(() => browser.execute(() => Math.abs(window.innerWidth - 640) <= 4));
+  await checkSharedWorkspaceNavigation(browser, 3);
   await click(browser, 'button[aria-label="Settings"]');
   await click(browser, "button=Appearance");
   await browser.$('[data-setting="theme"]').waitForDisplayed();
@@ -482,6 +540,7 @@ async function checkSimulation(browser, checkout) {
     await invoke(browser, "plugin:window|set_size", { label: "main", value: { Logical: { width, height } } });
     await browser.waitUntil(() => browser.execute((wanted) => Math.abs(window.innerWidth - wanted) <= 4, width));
     assert.equal(await browser.execute(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true);
+    if (width === 640) await checkSharedWorkspaceNavigation(browser, realCapacity);
     await capture(browser, "05-workspace-" + width);
   }
   if (process.env.OMNIAGENT_UI_TEST_DISPLAY === "1") await checkDisplayPreferences(browser);
@@ -645,10 +704,19 @@ async function verifyDetachedJob(browser, application, scratch) {
     assert.equal(completed.job.latestAttempt.status, runtime.status);
     const after = await openConversation();
     await after.$("p=The queued job ran with the WebView detached.").waitForDisplayed();
-    await after.$("button=Activity").click();
-    const status = browser.$('[aria-label="Conversation activity"] dl [role="status"]');
+    await click(after, 'button=Activity');
+    const activity = await checkConversationActivity(browser);
+    const status = activity.$('.run-inspection-header [role="status"]');
     await status.waitForDisplayed();
     assert.equal(await status.getText(), "Completed");
+    assert.equal(await browser.execute(() => {
+      const entries = document.querySelector('.work-deck:not([hidden]) .work-view:not([hidden]) .conv-library-entries');
+      return entries.scrollWidth <= entries.clientWidth + 1;
+    }), true, "Conversation rows must fit the library while Activity is open");
+    await click(activity.$('[aria-label="Run details"]'), 'button=Artifacts');
+    await activity.$('h3=Recorded output').waitForDisplayed();
+    await capture(browser, "10-activity-real");
+    await click(activity, 'button[aria-label="Close activity"]');
   } finally {
     await writeFile(release, "");
     if (detached) {
@@ -1350,11 +1418,13 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
       const messages = await invoke(browser, "conversation_messages", { conversationId: conversation.id });
       assert.deepEqual(messages.map(({ text }) => text), [prompt, "OMNIAGENT_DESKTOP_REPLY"]);
       await panel.$("button=Activity").click();
-      await panel.$("button=Exact input").click();
-      await panel.$('section[aria-label="Exact provider input"] pre').waitForDisplayed();
-      const wire = JSON.parse(await panel.$('section[aria-label="Exact provider input"] pre').getText());
+      const activity = browser.$('.work-inspector[data-kind="activity"]');
+      await click(activity, "button=Exact input");
+      const providerInput = activity.$('section[aria-label="Exact provider input"] pre');
+      await providerInput.waitForDisplayed();
+      const wire = JSON.parse(await providerInput.getText());
       assert.equal(wire.params.input[0].text, prompt);
-      await panel.$('button[aria-label="Close activity"]').click();
+      await click(activity, 'button[aria-label="Close activity"]');
 
       await panel.$('select:has(option[value="plan"])').selectByAttribute("value", "plan");
       const researchRows = Array.from({ length: 40 }, (_, index) => `Research row ${index + 1}`).join("\n");

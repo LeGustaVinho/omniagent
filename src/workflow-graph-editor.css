@@ -16,9 +16,13 @@
 .workflow-version-review { border: 1px solid var(--border); border-radius: .4rem; padding: .5rem; font-size: .75rem; }
 .workflow-version-review p, .workflow-version-review ul { margin: .35rem 0; }
 .workflow-node-card { width: 248px; min-height: 5.25rem; border: 1px solid var(--border); border-radius: .6rem; background: var(--card); color: var(--card-foreground); font-size: .75rem; box-shadow: 0 3px 10px #0002; }
+.workflow-node-card[data-compact] { width: 9.8rem; min-height: 0; }
+.workflow-node-card[data-compact] > header { border-bottom: 0; }
+.workflow-node-card[data-compact] > .react-flow__handle { background: var(--primary); border-color: var(--card); }
 .workflow-node-card[data-selected] { outline: 2px solid var(--primary); }
 .workflow-node-card[data-problem] { border-color: var(--destructive); }
 .workflow-node-card header { display: grid; padding: .6rem .7rem; border-bottom: 1px solid var(--border); gap: .15rem; }
+.workflow-node-card header strong { overflow-wrap: anywhere; }
 .workflow-node-card header small, .workflow-port-column small { color: var(--muted-foreground); }
 .workflow-node-ports { display: grid; grid-template-columns: 1fr 1fr; }
 .workflow-port-column { display: grid; align-content: start; }

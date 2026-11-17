@@ -1,3 +1,4 @@
+import { AgileTableFrame } from "@/agile-layout";
 import { ChevronDown, ChevronRight, GitBranch, GitCommitHorizontal } from "lucide-react";
 import { Fragment, useState } from "react";
 import { DeliveryStatus } from "@/tasks-git-ui";
@@ -72,8 +73,7 @@ export function AgileTable({ items, matches, selected, onSelect, onCheck, eviden
     });
   }
 
-  return <table className="delivery-table agile-table">
-    <thead><tr><th>Work</th><th>State</th><th>Priority</th><th>Assignment</th><th>Branch</th><th>Commit</th></tr></thead>
-    <tbody>{rows(children.get(undefined) ?? [], 0)}</tbody>
-  </table>;
+  return <AgileTableFrame columns={["Work", "State", "Priority", "Assignment", "Branch", "Commit"]}>
+    {rows(children.get(undefined) ?? [], 0)}
+  </AgileTableFrame>;
 }

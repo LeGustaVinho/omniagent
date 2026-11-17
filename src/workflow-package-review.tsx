@@ -1,6 +1,7 @@
 import { useState, type Dispatch, type SetStateAction } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import { workflowGraphRegistryQuery } from "@/pipeline-catalog";
 import { Button } from "@/components/ui/button";
 import { WorkflowSimulationCanvas, type WorkflowSimulationGraph } from "@/workflow-simulation-canvas";
 import { WorkflowStartValueField, initialWorkflowStartFields, initialWorkflowStartValue,
@@ -65,9 +66,7 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
   const graph = graphs.find(({ key }) => key === selection) ?? graphs[0];
   const show = Boolean(graph);
   const preview = usePackagePreview(projectId, draftId, savedRevision, show);
-  const registry = useQuery({ queryKey: ["workflow-graph-registry"], enabled: show, staleTime: Infinity,
-    queryFn: () => invoke<WorkflowDefinition[]>("workflow_graph_registry"),
-  });
+  const registry = useQuery({ ...workflowGraphRegistryQuery, enabled: show });
   if (!graph) return null;
   const pinned = preview.data?.members.find(({ key }) => key === graph.key)?.graphDefinitions ?? {};
   const error = preview.error ?? registry.error;

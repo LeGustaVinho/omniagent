@@ -34,7 +34,7 @@ it("activates a project rule for a selected immutable workflow and shows its exe
       openWorkspace={openWorkspace} />
   </QueryClientProvider>);
   fireEvent.click(await screen.findByRole("button", { name: "Open execution" }));
-  expect(openWorkspace).toHaveBeenCalledWith("pipelines", "run-a");
+  expect(openWorkspace).toHaveBeenCalledWith("pipelines", "run:run-a");
   fireEvent.click(screen.getByRole("button", { name: "New rule" }));
   fireEvent.change(screen.getByRole("textbox", { name: "Rule name" }), { target: { value: "Review on Ready" } });
   fireEvent.change(screen.getByRole("combobox", { name: "Event" }), { target: { value: "state_changed" } });
