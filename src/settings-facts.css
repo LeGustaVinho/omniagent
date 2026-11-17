@@ -17,3 +17,7 @@
 .settings-facts code {
   font-size: 12px;
 }
+.executable-status { display: inline-flex; align-items: center; gap: 6px; }
+.executable-status svg { color: var(--success); }
+.executable-status[data-attention="true"] svg { color: var(--warning); }
+.settings-facts details summary { color: var(--muted-foreground); cursor: pointer; }

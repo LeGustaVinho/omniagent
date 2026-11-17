@@ -297,6 +297,9 @@ it("requires explicit review when the staged revision changes with a commit mess
   const commit = screen.getByRole("button", { name: "Commit staged changes" }) as HTMLButtonElement;
   await waitFor(() => expect(commit.disabled).toBe(true));
   expect(invoke).not.toHaveBeenCalledWith("commit_git_index", expect.anything());
+  await user.click(screen.getByRole("button", { name: "Review staged changes" }));
+  expect(commit.disabled).toBe(true);
+  expect((screen.getByLabelText("Commit message") as HTMLTextAreaElement).value).toBe("Describe the staged changes");
   await user.click(screen.getByRole("button", { name: "Use current index" }));
   await user.click(commit);
   expect(invoke).toHaveBeenCalledWith("commit_git_index", {

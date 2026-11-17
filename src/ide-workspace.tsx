@@ -11,6 +11,8 @@ import { ExampleFileSearch, noteSearchTarget, ProjectFileSearch } from "@/ide-fi
 import { exampleNotes, exampleSources, fileName, findFileText, normalizeRepositoryPath } from "@/ide-knowledge-data";
 import type { CodeModel, CodeProblem } from "@/ide-code-editor";
 import { ResizablePanel } from "@/panel-resize";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
+import { useWorkspaceSize } from "@/workbench-panel";
 import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -43,7 +45,9 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const dock = useFileDock({ checkoutId: checkout.checkoutId, workspace: "ide", simulated, initialPath: firstPath });
   const source = useRepositorySourceBuffers(checkout.checkoutId, !simulated);
   const { load: loadSource, watch: watchSource, update: updateSource } = source;
-  const [sidebar, setSidebar] = useFileSidebar();
+  const workspace = useRef<HTMLElement>(null);
+  const sidebarToggle = useRef<HTMLButtonElement>(null);
+  const [sidebar, setSidebar, sidebarDrawer] = useFileSidebar(useWorkspaceSize(workspace).width);
   const [navigator, setNavigator] = useState<"files" | "search">("files");
   const [query, setQuery] = useState("");
   const [examples, setExamples] = useState(() => newBuffers(simulated, simulation?.scenario === "recovery"));
@@ -112,6 +116,14 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     });
   }, [dock.open, loadSource, openWorkspace, simulated, watchSource]);
 
+  function chooseFile(path: string, line?: number) {
+    openFile(path, line);
+    if (sidebarDrawer) {
+      setSidebar(false);
+      if (!markdownPath(path)) requestAnimationFrame(() => sidebarToggle.current?.focus({ preventScroll: true }));
+    }
+  }
+
   useEffect(() => {
     if (simulated || !dock.ready || !dock.api) return;
     const api = dock.api;
@@ -164,8 +176,11 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     }
     setProblem("");
     if (!simulated) {
+      const saving = `Saving ${path}…`;
+      setStatus(saving);
       source.clearError();
       if (!await source.save(path)) {
+        setStatus((current) => current === saving ? "" : current);
         if (source.getFile(path)?.external !== undefined) setDialog({ kind: "conflict", path });
         return false;
       }
@@ -228,33 +243,36 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   };
 
   return (
-    <section className="file-workspace" aria-label="IDE workspace" onKeyDown={(event) => {
+    <section ref={workspace} className="file-workspace" aria-label="IDE workspace" onKeyDown={(event) => {
       if (!event.ctrlKey && !event.metaKey) return;
       if (event.key.toLowerCase() === "s" && active && buffer) { event.preventDefault(); void save(active); }
       if (event.key.toLowerCase() === "p") { event.preventDefault(); setSidebar(true); setNavigator("search"); }
     }}>
-      {sidebar && <FileSidebar name="IDE navigation">
+      <FileSidebar name="IDE navigation" open={sidebar} drawer={sidebarDrawer} onClose={() => {
+        setSidebar(false);
+        requestAnimationFrame(() => sidebarToggle.current?.focus({ preventScroll: true }));
+      }}>
         <div className="file-sidebar-heading"><FolderTree size={16} /><h2>Explorer</h2>
           <div className="file-toolbar">
             <button type="button" className="fw-icon" title="Files" aria-label="Files" aria-pressed={navigator === "files"} onClick={() => setNavigator("files")}><Files size={15} /></button>
-            <button type="button" className="fw-icon" title="Search" aria-label="Search" aria-pressed={navigator === "search"} onClick={() => setNavigator("search")}><FileSearch2 size={15} /></button>
+            <ControlTooltip label="Search files" shortcut="Ctrl+P"><button type="button" className="fw-icon" aria-label="Search" aria-pressed={navigator === "search"} onClick={() => setNavigator("search")}><FileSearch2 size={16} aria-hidden="true" /></button></ControlTooltip>
           </div>
         </div>
         <div className="file-sidebar-scroll">
           {navigator === "search" ? (simulated
-            ? <ExampleFileSearch query={query} setQuery={setQuery} results={results} onOpen={openFile} />
-            : <ProjectFileSearch checkoutId={checkout.checkoutId} onOpen={openFile} />)
+            ? <ExampleFileSearch query={query} setQuery={setQuery} results={results} onOpen={chooseFile} />
+            : <ProjectFileSearch checkoutId={checkout.checkoutId} onOpen={chooseFile} />)
             : <><p className="file-sidebar-note" title={simulated ? undefined : checkout.checkoutRoot}>
               {simulated ? "EXAMPLE WORKTREE" : fileName(checkout.checkoutRoot.replaceAll("\\", "/"))}</p>
-              <FileTree paths={paths} active={active} onOpen={openFile} checkoutId={checkout.checkoutId} workspace="ide" simulated={simulated} /></>}
+              <FileTree paths={paths} active={active} onOpen={chooseFile} checkoutId={checkout.checkoutId} workspace="ide" simulated={simulated} /></>}
         </div>
-      </FileSidebar>}
+      </FileSidebar>
       <div className="file-workspace-main">
         <header className="file-workspace-header">
-          <SidebarToggle open={sidebar} setOpen={setSidebar} label="Toggle IDE navigation" />
+          <SidebarToggle open={sidebar} setOpen={setSidebar} label="Toggle IDE navigation" buttonRef={sidebarToggle} />
           <Code2 size={17} /><h1>IDE</h1>
           <div className="file-toolbar">
-            <button type="button" className="fw-icon" aria-label="Save file" title="Save file (Ctrl+S)" disabled={!active || !dirty(active)} onClick={() => { if (active) void save(active); }}><Save size={15} /></button>
+            <ControlTooltip label="Save file" shortcut="Ctrl+S"><button type="button" className="fw-icon" aria-label="Save file" disabled={!active || !dirty(active)} onClick={() => { if (active) void save(active); }}><Save size={16} aria-hidden="true" /></button></ControlTooltip>
             <button type="button" className="fw-icon" aria-label="Split editor" title="Split editor" disabled={!buffer} onClick={() => { if (active) dock.split(active); }}><SplitSquareHorizontal size={15} /></button>
             <button type="button" className="fw-icon" aria-label="Open changes" title="Open changes" onClick={() => openChanges("working")}><GitCompareArrows size={15} /></button>
             <button type="button" className="fw-icon" aria-label="Toggle bottom panel" title="Toggle bottom panel" aria-expanded={Boolean(bottom)} onClick={() => setBottom(bottom ? null : "terminal")}><PanelBottom size={15} /></button>

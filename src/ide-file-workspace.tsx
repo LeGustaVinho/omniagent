@@ -4,10 +4,12 @@ import {
   type IDockviewPanelHeaderProps, type IDockviewPanelProps, type SerializedDockview,
 } from "dockview-react";
 import { FileCode2, FileText, Folder, FolderOpen, PanelLeftClose, X } from "lucide-react";
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Dialog } from "radix-ui";
 import { fileName } from "@/ide-knowledge-data";
-import { ResizablePanel } from "@/panel-resize";
+import { WorkbenchPanel } from "@/workbench-panel";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
+import { CopyFilePath, PathText } from "@/components/ui/file-path";
 import "dockview/dist/styles/dockview.css";
 import "./ide-knowledge.css";
 
@@ -267,7 +269,8 @@ function PersistentFolderTree({ storageKey, ...props }: { storageKey: string; tr
 export function FileCaption({ path, revision }: { path: string; revision: number | string }) {
   const label = typeof revision === "number" ? `r${revision}` : revision;
   return <div className="ide-file-caption">
-    <span title={path}>{path.replaceAll("/", " / ")}</span>
+    <PathText path={path} />
+    <CopyFilePath path={path} />
     <span title={`Revision ${label}`}>{label}</span>
   </div>;
 }
@@ -286,8 +289,19 @@ export function FileUnavailable({ title, path, detail, onSimulate }: {
   );
 }
 
-export function FileSidebar({ name, children }: { name: string; children: ReactNode }) {
-  return <ResizablePanel as="aside" className="file-workspace-sidebar" aria-label={name} edge="right" resizeKey={name} resizeLabel={name}>{children}</ResizablePanel>;
+export function FileSidebar({ name, drawer, open, onClose, children }: {
+  name: string; drawer: boolean; open: boolean; onClose: () => void; children: ReactNode;
+}) {
+  return <WorkbenchPanel as="aside" drawer={drawer} open={open} label={name} onClose={onClose}
+    drawerClass="file-workspace-drawer" className="file-workspace-sidebar" aria-label={name}
+    edge="right" resizeKey={name} resizeLabel={name}>
+    {drawer && <header className="work-panel-header">
+      <span>{name}</span>
+      <ControlTooltip label={`Close ${name}`}><button className="fw-icon" type="button" aria-label={`Close ${name}`}
+        onClick={onClose}><X size={16} aria-hidden="true" /></button></ControlTooltip>
+    </header>}
+    {children}
+  </WorkbenchPanel>;
 }
 
 export function FileDialog({ title, description, onClose, children }: {
@@ -320,21 +334,17 @@ export function FileDialog({ title, description, onClose, children }: {
   );
 }
 
-export function SidebarToggle({ open, setOpen, label }: { open: boolean; setOpen: (open: boolean) => void; label: string }) {
+export function SidebarToggle({ open, setOpen, label, buttonRef }: {
+  open: boolean; setOpen: (open: boolean) => void; label: string; buttonRef?: Ref<HTMLButtonElement>;
+}) {
   return (
-    <button type="button" className="fw-icon" aria-label={label} aria-expanded={open}
-      onClick={() => setOpen(!open)} title={label}><PanelLeftClose size={16} /></button>
+    <ControlTooltip label={label}><button ref={buttonRef} type="button" className="fw-icon" aria-label={label} aria-expanded={open}
+      onClick={() => setOpen(!open)}><PanelLeftClose size={16} aria-hidden="true" /></button></ControlTooltip>
   );
 }
 
-export function useFileSidebar() {
-  const [open, setOpen] = useState(() => window.innerWidth >= 960);
-  useEffect(() => {
-    const viewport = window.matchMedia?.("(min-width: 960px)");
-    if (!viewport) return;
-    const update = () => setOpen(viewport.matches);
-    viewport.addEventListener("change", update);
-    return () => viewport.removeEventListener("change", update);
-  }, []);
-  return [open, setOpen] as const;
+export function useFileSidebar(width: number) {
+  const drawer = width < 840;
+  const [preference, setPreference] = useState<boolean>();
+  return [preference ?? !drawer, setPreference, drawer] as const;
 }

@@ -127,7 +127,7 @@ export function QueueRecoveryButton({ action, disabled, onClick }: { action: Rec
 }
 
 export function QueueLayout({
-  occupancy, paused, actions, controls, view, onViewChange, jobs, onSelect, selected, onDeselect, state, onClose,
+  occupancy, paused, actions, controls, view, onViewChange, jobs, onSelect, selected, onDeselect, state, onClose, needsAttention,
 }: {
   occupancy?: { active: number; capacity: number; description?: string };
   paused: boolean;
@@ -141,6 +141,7 @@ export function QueueLayout({
   onDeselect: () => void;
   state?: ReactNode;
   onClose?: () => void;
+  needsAttention?: number;
 }) {
   const list = useRef<HTMLDivElement>(null);
   const filters = useRef<HTMLElement>(null);
@@ -188,7 +189,10 @@ export function QueueLayout({
     <div className="queue-content">
       <nav ref={filters} className="queue-filters" aria-label="Queue states">
         {queueViews.map((entry) => <button key={entry} type="button" className="delivery-tab" aria-pressed={view === entry}
-          onClick={() => onViewChange(entry)}>{entry}</button>)}
+          onClick={() => onViewChange(entry)}>
+          {entry === "Needs input" ? "Needs attention" : entry}
+          {entry === "Needs input" && needsAttention !== undefined && <span className="queue-filter-count">{needsAttention}</span>}
+        </button>)}
       </nav>
       {controls && <div className="queue-controls">{controls}</div>}
       <div className="delivery-body queue-body">

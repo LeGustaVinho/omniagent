@@ -1,6 +1,6 @@
 import { X } from "lucide-react";
 import { Dialog } from "radix-ui";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { InlineIssue } from "@/tasks-git-ui";
 
@@ -20,6 +20,7 @@ export function GitWorktreeDialog({ revisions, defaultBase, existingBranches, pa
   create: (draft: WorktreeDraft) => void;
   onClose: () => void;
 }) {
+  const opener = useRef(document.activeElement);
   const [branchName, setBranchName] = useState("");
   const [branchSelect, setBranchSelect] = useState("");
   const [existing, setExisting] = useState(false);
@@ -33,10 +34,17 @@ export function GitWorktreeDialog({ revisions, defaultBase, existingBranches, pa
   return <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
     <Dialog.Portal>
       <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60" />
-      <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[min(31rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 overflow-auto rounded-xl border border-border bg-card p-5 shadow-xl">
+      <Dialog.Content className="git-worktree-dialog fixed left-1/2 top-1/2 z-60 max-h-[calc(100dvh-2rem)] w-[min(31rem,calc(100vw-2rem))] overflow-auto rounded-xl border border-border bg-card p-5"
+        onCloseAutoFocus={(event) => {
+          const trigger = opener.current;
+          if (trigger instanceof HTMLElement && trigger.isConnected && !trigger.matches(":disabled")) {
+            event.preventDefault();
+            trigger.focus({ preventScroll: true });
+          }
+        }}>
         <header className="mb-3 flex items-center justify-between gap-2">
           <Dialog.Title className="font-semibold">New worktree</Dialog.Title>
-          <Dialog.Close aria-label="Close worktree setup" disabled={busy}><X size={16} /></Dialog.Close>
+          <Dialog.Close className="ui-icon-button grid place-items-center" aria-label="Close worktree setup" disabled={busy}><X size={16} /></Dialog.Close>
         </header>
         <Dialog.Description className="mb-4 text-sm text-muted-foreground">Choose the branch, starting revision and path for the new checkout.</Dialog.Description>
         <form className="grid gap-3" onSubmit={(event) => { event.preventDefault(); if (canCreate) create(draft); }}>

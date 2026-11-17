@@ -1,6 +1,6 @@
 import {
   AlertCircle, BookOpen, BookOpenText, FilePenLine, FileText, GitFork, Link2,
-  ListTree, Network, PanelRight, Paperclip, RotateCw, Save, Search, SplitSquareHorizontal, Wand2,
+  ListTree, Network, PanelRight, Paperclip, RotateCw, Save, Search, SplitSquareHorizontal, Wand2, X,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
@@ -20,7 +20,8 @@ import type { NoteJump } from "@/knowledge-editor";
 import { useRepositoryNotes, type NoteBuffer, type NoteRevision } from "@/repository-note-buffers";
 import { RepositoryNoteMedia } from "@/repository-note-media";
 import { NotePropertyEditor } from "@/note-property-editor";
-import { ResizablePanel } from "@/panel-resize";
+import { useWorkspaceSize, WorkbenchPanel } from "@/workbench-panel";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { KnowledgeLinks, KnowledgeOutline, KnowledgeSearch, type KnowledgeLocation, type KnowledgeOutgoingLink } from "@/knowledge-navigation";
 import { useRepositoryNoteIndex } from "@/repository-note-index";
 import { RepositoryNoteRename } from "@/repository-note-rename";
@@ -100,7 +101,13 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const [examples, setNotes] = useState(() => initialNotes(simulated, simulation?.scenario === "recovery"));
   const repository = useRepositoryNotes(checkout.checkoutId, !simulated);
   const notes = simulated ? examples : repository.notes;
-  const [sidebar, setSidebar] = useFileSidebar();
+  const workspace = useRef<HTMLElement>(null);
+  const detailSpace = useRef<HTMLDivElement>(null);
+  const sidebarToggle = useRef<HTMLButtonElement>(null);
+  const inspectorToggle = useRef<HTMLButtonElement>(null);
+  const workspaceWidth = useWorkspaceSize(workspace).width;
+  const [sidebar, setSidebar, sidebarDrawer] = useFileSidebar(workspaceWidth);
+  const detailsDrawer = useWorkspaceSize(detailSpace).width < 800;
   const [display, setDisplay] = useState<"tree" | "search">("tree");
   const [query, setQuery] = useState("");
   const [focusSearch, requestSearchFocus] = useState(0);
@@ -112,7 +119,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     placeholderData: (previous, query) => query?.queryKey[1] === checkout.checkoutId ? previous : undefined,
     queryFn: () => invoke<NoteGraphProjection["edges"]>("repository_note_edges", { checkoutId: checkout.checkoutId }),
   });
-  const [inspector, setInspector] = useState<Inspector | null>(window.innerWidth >= 1180 ? "outline" : null);
+  const [inspectorOverride, setInspector] = useState<Inspector | null>();
   const [mode, setMode] = useState<NoteMode>("live");
   const [editAlongsideReading, setEditAlongsideReading] = useState<ReadonlySet<string>>(() => new Set());
   const [jumps, setJumps] = useState<Record<string, NoteJump>>({});
@@ -127,6 +134,9 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const { load: loadNote, watch: watchNote, getNote } = repository;
   const active = dock.path;
   const note = active ? notes[active] : undefined;
+  const inspector = inspectorOverride === undefined
+    ? note && workspaceWidth >= 1040 && !detailsDrawer ? "outline" : null
+    : inspectorOverride;
   const savedNote = active ? repository.notes[active] : undefined;
   const canLaunchFromNote = Boolean(savedNote && !savedNote.sourceProblem && !isDirty(savedNote));
   const notePlans = useRepositoryNotePlans(checkout.projectId, savedNote && !savedNote.sourceProblem ? savedNote.base : undefined);
@@ -221,6 +231,21 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     });
   }, [dock.open, getNote, loadNote, simulated, watchNote]);
 
+  function closeNavigation() {
+    setSidebar(false);
+    requestAnimationFrame(() => sidebarToggle.current?.focus({ preventScroll: true }));
+  }
+
+  function closeInspector() {
+    setInspector(null);
+    requestAnimationFrame(() => inspectorToggle.current?.focus({ preventScroll: true }));
+  }
+
+  function chooseNote(path: string, line?: number, anchor?: string) {
+    open(path, line, anchor);
+    if (sidebarDrawer) closeNavigation();
+  }
+
   useEffect(() => {
     if (simulated || !dock.ready || !active) return;
     let current = true;
@@ -277,9 +302,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       return false;
     }
     if (!simulated) {
+      const saving = `Saving ${path}…`;
+      setStatus(saving);
       const saved = await repository.save(path);
       if (saved) setStatus(`Saved ${path}`);
       else {
+        setStatus((current) => current === saving ? "" : current);
         const incoming = getNote(path)?.external;
         if (incoming !== undefined) setDialog({ kind: "conflict", path, external: incoming });
       }
@@ -417,38 +445,39 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   };
 
   return (
-    <section className="file-workspace knowledge-workspace" aria-label="Knowledge workspace" onKeyDown={(event) => {
+    <section ref={workspace} className="file-workspace knowledge-workspace" aria-label="Knowledge workspace" onKeyDown={(event) => {
       if (!event.ctrlKey && !event.metaKey) return;
       if (event.key.toLowerCase() === "s" && active && note) { event.preventDefault(); save(active); }
       if (event.key.toLowerCase() === "p") {
         event.preventDefault(); setSidebar(true); setDisplay("search"); requestSearchFocus((before) => before + 1);
       }
     }}>
-      {sidebar && <FileSidebar name="Knowledge navigation">
+      <FileSidebar name="Knowledge navigation" open={sidebar && !(sidebarDrawer && detailsDrawer && inspector && !graph)} drawer={sidebarDrawer} onClose={closeNavigation}>
         <div className="file-sidebar-heading">
           <BookOpen size={16} /><h2>Notes</h2>
           <div className="file-toolbar">
             <button type="button" className="fw-icon" aria-label="Show notes" title="Show notes" aria-pressed={display === "tree"} onClick={() => setDisplay("tree")}><ListTree size={15} /></button>
-            <button type="button" className="fw-icon" aria-label="Search notes" title="Search notes" aria-pressed={display === "search"} onClick={() => setDisplay("search")}><Search size={15} /></button>
+            <ControlTooltip label="Search notes" shortcut="Ctrl+P"><button type="button" className="fw-icon" aria-label="Search notes" aria-pressed={display === "search"} onClick={() => setDisplay("search")}><Search size={16} aria-hidden="true" /></button></ControlTooltip>
           </div>
         </div>
         <div className="file-sidebar-scroll">
           {display === "search" ? <KnowledgeSearch query={query} onQueryChange={setQuery} results={matches}
             pending={!simulated && noteIndex.searching} error={!simulated && noteIndex.error ? String(noteIndex.error) : undefined}
-            focusRequest={focusSearch} onOpen={openLocation} />
-            : <FileTree paths={catalog.map(({ path }) => path)} active={active} onOpen={open}
+            focusRequest={focusSearch} onOpen={({ path, line, anchor }) => chooseNote(path, line ?? undefined, anchor ?? undefined)} />
+            : <FileTree paths={catalog.map(({ path }) => path)} active={active} onOpen={chooseNote}
               checkoutId={checkout.checkoutId} workspace="knowledge" simulated={simulated} />}
         </div>
-      </FileSidebar>}
-      <div className="file-workspace-main">
+      </FileSidebar>
+      <div className="file-workspace-main" ref={detailSpace}>
         <header className="file-workspace-header">
-          <SidebarToggle open={sidebar} setOpen={setSidebar} label="Toggle Knowledge navigation" />
+          <SidebarToggle open={sidebar} setOpen={setSidebar} label="Toggle Knowledge navigation" buttonRef={sidebarToggle} />
           <BookOpenText size={17} /><h1>Knowledge</h1>
           <div className="file-toolbar">
             {!simulated && <button type="button" className="fw-icon" title="Rebuild note index" aria-label="Rebuild note index"
               disabled={noteIndex.index.isFetching} onClick={() => { void noteIndex.index.refetch(); }}><RotateCw size={15} /></button>}
             <button type="button" className="fw-btn note-graph-toggle" aria-pressed={graph} onClick={() => setGraph(!graph)}><Network size={15} />Graph</button>
-            <button type="button" className="fw-icon" title="Note details" aria-label="Note details" aria-expanded={Boolean(inspector)} onClick={() => setInspector(inspector ? null : "outline")}><PanelRight size={16} /></button>
+            <ControlTooltip label="Note details"><button ref={inspectorToggle} type="button" className="fw-icon" aria-label="Note details"
+              aria-expanded={Boolean(inspector && !graph)} onClick={() => { setGraph(false); setInspector(inspector && !graph ? null : "outline"); }}><PanelRight size={16} aria-hidden="true" /></button></ControlTooltip>
           </div>
         </header>
         {dock.error && <p role="alert" className="file-status"><AlertCircle size={15} />{dock.error}</p>}
@@ -468,8 +497,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
             ))}
           </div>
           <div className="file-toolbar">
-            <button type="button" className="fw-icon" title="Save note (Ctrl+S)" aria-label="Save note" disabled={!isDirty(note)}
-              onClick={() => { if (active) save(active); }}><Save size={15} /></button>
+            <ControlTooltip label="Save note" shortcut="Ctrl+S"><button type="button" className="fw-icon" aria-label="Save note" disabled={!isDirty(note)}
+              onClick={() => { if (active) save(active); }}><Save size={16} aria-hidden="true" /></button></ControlTooltip>
             <button type="button" className="fw-icon" title="Split Reading view" aria-label="Split Reading view" disabled={!note}
               onClick={() => {
                 if (!active) return;
@@ -541,12 +570,15 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                     : <p role="status" className="file-help">Loading note graph…</p>}
               </Suspense>}
           </div>}
-          {inspector && !graph && <ResizablePanel as="aside" className="note-inspector" aria-label="Note details"
+          {inspector && !graph && <WorkbenchPanel as="aside" className="note-inspector" aria-label="Note details"
+            drawer={detailsDrawer} open drawerClass="note-inspector-drawer" label="Note details" onClose={closeInspector}
             edge="left" resizeKey="note-details" resizeLabel="note details">
             <div className="note-inspector-views">
               {([[ListTree, "outline", "Outline"], [Link2, "links", "Links"], [FileText, "properties", "Properties"], [Paperclip, "attachments", "Attachments"]] as const)
-                .map(([Icon, view, label]) => <button type="button" key={view} className="fw-icon" aria-label={label} aria-pressed={view === inspector} title={label}
-                  onClick={() => setInspector(view)}><Icon size={16} /></button>)}
+                .map(([Icon, view, label]) => <ControlTooltip label={label} key={view}><button type="button" className="fw-icon" aria-label={label} aria-pressed={view === inspector}
+                  onClick={() => setInspector(view)}><Icon size={16} aria-hidden="true" /></button></ControlTooltip>)}
+              <ControlTooltip label="Close note details"><button type="button" className="fw-icon ml-auto" aria-label="Close note details"
+                onClick={closeInspector}><X size={16} aria-hidden="true" /></button></ControlTooltip>
             </div>
             <div className="note-inspector-content">
               {!active || !note ? <p className="file-help">Open a note to see its details.</p> : <>
@@ -584,7 +616,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
                 </section>}
               </>}
             </div>
-          </ResizablePanel>}
+          </WorkbenchPanel>}
         </div>
 
         {active && note && !graph && <footer className="ide-statusbar note-statusbar" aria-label="Note status and actions">

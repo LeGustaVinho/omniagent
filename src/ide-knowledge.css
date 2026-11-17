@@ -1,5 +1,8 @@
-.file-workspace {
+:is(.file-workspace, .file-workspace-drawer, .note-inspector-drawer) {
   --file-muted: var(--muted-foreground, #a9a9b0);
+}
+
+.file-workspace {
   display: flex;
   flex: 1;
   min-width: 0;
@@ -11,10 +14,9 @@
   container-type: inline-size;
 }
 
-.file-workspace button { cursor: pointer; }
-.file-workspace button:disabled, .file-dialog button:disabled { cursor: default; opacity: .5; }
-.file-workspace :is(button, input, select, textarea):focus-visible,
-.file-dialog :is(button, input, select, textarea):focus-visible {
+:is(.file-workspace, .file-workspace-drawer, .note-inspector-drawer) button { cursor: pointer; }
+:is(.file-workspace, .file-workspace-drawer, .note-inspector-drawer, .file-dialog) button:disabled { cursor: default; opacity: .5; }
+:is(.file-workspace, .file-workspace-drawer, .note-inspector-drawer, .file-dialog) :is(button, input, select, textarea):focus-visible {
   outline: 2px solid var(--ring, var(--primary));
   outline-offset: -1px;
 }
@@ -23,7 +25,7 @@
   display: flex;
   flex-direction: column;
   padding-right: var(--panel-resize-hit-size);
-  width: clamp(min(180px, 36%), var(--panel-width, 248px), 36%);
+  width: clamp(180px, var(--panel-width, 248px), calc(100% - 600px));
   flex: none;
   min-height: 0;
   border-right: 1px solid var(--border);
@@ -49,7 +51,7 @@
 .file-workspace-header h1 { font-size: 14px; }
 .file-sidebar-heading svg, .file-workspace-header > svg { flex-shrink: 0; color: var(--file-muted); }
 .file-toolbar { display: flex; align-items: center; gap: 5px; margin-left: auto; }
-.file-sidebar-scroll { flex: 1; min-height: 0; overflow: auto; padding: 7px; }
+.file-sidebar-scroll { flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 7px; }
 .file-sidebar-note { margin: 12px 9px; font-size: 12px; line-height: 1.6; color: var(--file-muted); }
 .file-workspace-main { min-height: 0; min-width: 0; display: flex; flex: 1; flex-direction: column; }
 .file-dock-body { display: flex; flex: 1; min-height: 0; min-width: 0; position: relative; }
@@ -70,7 +72,7 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  min-height: 29px;
+  min-height: 32px;
   gap: 6px;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -79,7 +81,7 @@
   font-size: 12px;
   white-space: nowrap;
 }
-.fw-icon { padding: 4px; width: 30px; }
+.fw-icon { padding: 4px; width: 32px; }
 .fw-btn:hover:not(:disabled), .fw-icon:hover:not(:disabled) { background: var(--muted); }
 .fw-btn[aria-pressed=true] { background: var(--muted); border-color: var(--border); }
 .fw-icon[aria-pressed=true] { background: var(--muted); color: var(--primary); }
@@ -96,6 +98,7 @@
   display: flex;
   align-items: center;
   width: 100%;
+  min-width: 0;
   gap: 7px;
   min-height: 30px;
   border-radius: 6px;
@@ -108,7 +111,7 @@
 .file-tree :is(summary, .file-tree-row):hover { background: var(--muted); }
 .file-tree-row[aria-current=page] { background: var(--muted); box-shadow: inset 2px 0 var(--primary); }
 .file-tree-row svg, .file-tree summary svg { flex-shrink: 0; color: var(--file-muted); }
-.file-tree-row span { overflow: hidden; text-overflow: ellipsis; }
+.file-tree-row > :is(span, small) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .file-field { display: flex; align-items: center; gap: 7px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; min-width: 0; }
 .file-field input { color: inherit; background: transparent; outline: none; min-width: 0; flex: 1; padding: 6px 0; font-size: 12px; }
 .file-field:focus-within { border-color: var(--primary); }
@@ -116,9 +119,10 @@
 .file-help { color: var(--muted-foreground); margin: 10px 0; font-size: 12px; line-height: 1.5; }
 .file-search { display: flex; flex-direction: column; gap: 4px; }
 .file-search-results { padding: 0; margin: 0; list-style: none; }
-.file-search-results button {
+.file-search-results button:not(.context-actions-more) {
   display: grid;
   width: 100%;
+  min-width: 0;
   gap: 2px;
   overflow: hidden;
   padding: 6px 8px;
@@ -126,8 +130,8 @@
   text-align: left;
   font-size: 12px;
 }
-.file-search-results button:hover { background: var(--muted); }
-.file-search-results button > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-search-results button:not(.context-actions-more):hover { background: var(--muted); }
+.file-search-results button:not(.context-actions-more) > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-search-results span { color: var(--file-muted); }
 .file-search-results strong { font-weight: 600; }
 
@@ -139,10 +143,15 @@
   padding: 0 4px 0 8px;
   font-size: 12px;
 }
-.file-tab-label > span { white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.file-tab-label > span { min-width: 0; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.file-tab-label > :is(button, svg) { flex: none; }
 .file-tab-label > i { background: var(--primary); width: 5px; height: 5px; border-radius: 50%; flex: 0 0 5px; }
 .file-tab-label button { display: grid; place-items: center; width: 22px; height: 23px; border-radius: 5px; color: var(--muted-foreground); }
 .file-tab-label button:hover { background: var(--muted); color: var(--foreground); }
+
+@media (hover: none) {
+  :is(.file-sidebar-scroll, .file-tab-label, .note-inspector-content) .context-actions-more { opacity: 1; }
+}
 
 .file-unavailable { display: flex; height: 100%; min-height: 140px; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 22px; text-align: center; overflow: auto; }
 .file-unavailable h2 { margin: 2px 0 0; font-size: 15px; font-weight: 600; }
@@ -191,23 +200,23 @@
 .file-dialog-comparison h3 { margin: 0 0 6px; font-size: 12px; }
 .file-dialog-comparison pre { height: 180px; margin: 0; padding: 9px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; font-size: 11px; background: var(--background); }
 
+.file-workspace-sidebar[hidden] { display: none; }
+.file-workspace-drawer {
+  position: fixed;
+  z-index: 60;
+  inset: 0 auto 0 0;
+  width: clamp(min(224px, 90vw), var(--panel-width, 300px), calc(100vw - 24px));
+  box-shadow: var(--shadow-overlay);
+  animation: ui-reveal var(--motion-overlay) ease-out;
+}
 @container (width < 912px) {
-  .file-workspace-sidebar {
-    position: absolute;
-    z-index: 10;
-    top: 44px;
-    left: 0;
-    bottom: 0;
-    width: clamp(min(180px, 80%), var(--panel-width, 248px), 80%);
-    box-shadow: 7px 0 25px rgb(0 0 0 / .24);
-  }
-  .file-workspace { position: relative; }
   .file-workspace-header { padding-inline: 7px; }
 }
 
 .ide-file-view, .code-editor { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; flex: 1; }
 .ide-file-caption { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: 6px 13px; color: var(--muted-foreground); font-size: 11px; min-height: 27px; border-bottom: 1px solid var(--border); }
 .ide-file-caption > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ide-file-caption > :is(.ui-file-path, .file-breadcrumbs) { flex: 1; min-width: 0; }
 .ide-file-caption > :last-child { flex: 0 1 auto; max-width: 40%; font-variant-numeric: tabular-nums; }
 .code-editor-target { flex: 1; min-height: 0; min-width: 0; }
 .code-editor > p { position: absolute; top: 16px; left: 16px; margin: 0; }
@@ -245,14 +254,14 @@
 .note-status-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .note-statusbar .fw-primary { padding-inline: 9px; }
 
-.note-inspector { display: flex; flex-direction: column; width: clamp(min(168px, 38%), var(--panel-width, 216px), 38%); flex: none; min-height: 0; border-left: 1px solid var(--border); background: var(--card); overflow: hidden; }
+.note-inspector { display: flex; flex-direction: column; width: clamp(168px, var(--panel-width, 216px), calc(100% - 600px)); flex: none; min-height: 0; border-left: 1px solid var(--border); background: var(--card); overflow: hidden; }
 .note-inspector-views { display: flex; gap: 5px; padding: 5px 8px; border-bottom: 1px solid var(--border); }
 .note-inspector-views [aria-pressed=true] { color: var(--primary); background: var(--muted); }
 .note-inspector-content { overflow: auto; padding: 12px; }
 .note-inspector-content h3 { margin: 5px 0 8px; color: var(--muted-foreground); font-size: 11px; font-weight: 600; }
 .note-inspector-content section + section { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
-.note-inspector-content section button { display: block; width: 100%; padding: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 5px; text-align: left; font-size: 12px; }
-.note-inspector-content section button:hover { background: var(--muted); }
+.note-inspector-content section button:not(.context-actions-more) { display: block; width: 100%; min-width: 0; padding: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 5px; text-align: left; font-size: 12px; }
+.note-inspector-content section button:not(.context-actions-more):hover { background: var(--muted); }
 .note-property-row { display: grid; gap: 3px; margin-bottom: 7px; font-size: 11px; }
 .note-property-row input { width: 100%; }
 .note-attachment-row strong, .note-attachment-row small { display: block; overflow: hidden; text-overflow: ellipsis; }
@@ -309,8 +318,13 @@
 .note-graph-node-list { display: flex; flex-wrap: wrap; min-height: 0; margin: 0; padding: 5px 10px; gap: 5px; list-style: none; overflow: auto; }
 .note-graph-node-list .fw-btn { min-height: 25px; }
 
-@container (width < 870px) {
-  .note-inspector { position: absolute; inset: 0 0 0 auto; z-index: 9; width: clamp(min(168px, 82%), var(--panel-width, 216px), 82%); box-shadow: -8px 0 25px rgb(0 0 0 / .22); }
+.note-inspector-drawer {
+  position: fixed;
+  z-index: 60;
+  inset: 0 0 0 auto;
+  width: clamp(min(224px, 90vw), var(--panel-width, 300px), calc(100vw - 24px));
+  box-shadow: var(--shadow-overlay);
+  animation: ui-reveal var(--motion-overlay) ease-out;
 }
 @container (width < 470px) {
   .note-mode-bar { flex-wrap: wrap; gap: 2px; padding: 4px 5px; }

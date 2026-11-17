@@ -62,11 +62,6 @@ function LiveTaskDetails({
     state={saved ? statusLabel(saved.state) : undefined} note={question ? undefined : waiting}
     closeLabel="Close detail" close={close} navigation={<AgileDetailTabs view={view} onViewChange={selectView} />}>
     <div className="pipeline-stack" hidden={view !== "Overview"}>
-      <AgileWorkRelations parent={parentWork && workRelation(parentWork)} children={childWork.map(workRelation)} openWork={openWork} title="Sub-Tasks" />
-      {feasible.length > 0 && <label className="delivery-field">Move work to <select className="delivery-filter" value="" disabled={busy} onChange={(event) => {
-        const next = feasible.find(({ value }) => value === event.currentTarget.value)?.value;
-        if (next) move({ ...task, workflow: saved }, next);
-      }}><option value="">Choose a state</option>{feasible.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}</select></label>}
       {question && <section className="pipeline-form pipeline-stack" aria-label="Task question blocker">
         <p role="status">{questionBlockerLabel(question)}</p>
         <Button type="button" variant="outline"
@@ -80,6 +75,11 @@ function LiveTaskDetails({
         <h4>Job blockers</h4>
         <TaskJobLinks row={task} openQueueJob={links.openQueueJob} />
       </section>}
+      {feasible.length > 0 && <label className="delivery-field">Move work to <select className="delivery-filter" value="" disabled={busy} onChange={(event) => {
+        const next = feasible.find(({ value }) => value === event.currentTarget.value)?.value;
+        if (next) move({ ...task, workflow: saved }, next);
+      }}><option value="">Choose a state</option>{feasible.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}</select></label>}
+      <AgileWorkRelations parent={parentWork && workRelation(parentWork)} children={childWork.map(workRelation)} openWork={openWork} title="Sub-Tasks" />
       <section className="agile-checklist pipeline-form" aria-label="Task checklist">
         <h4 className="font-medium">Checklist</h4>
         {checklist.data?.items.map((item) => <label key={item.id} className="agile-check">
@@ -270,7 +270,7 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
   }) : [];
   const normalizedSearch = search.trim().toLocaleLowerCase();
   const byParticipant = hasParticipantFilter(participantFilter);
-  const hasFilters = Boolean(search || filterStatus || byParticipant);
+  const filterCount = [normalizedSearch, filterStatus, participantFilter.agent, participantFilter.provider, participantFilter.model].filter(Boolean).length;
   const matched = rows.filter(({ title, status, attempts }) => (!filterStatus || status === filterStatus) &&
     title.toLocaleLowerCase().includes(normalizedSearch) && (!byParticipant || attempts?.some((attempt) => matchesParticipant(attempt, participantFilter))));
   const kanbanRows = matched.filter(({ kind }) => kind === level);
@@ -344,9 +344,9 @@ export function ProjectTasksWorkspace(props: WorkspaceProps) {
       </select>
       <AgileParticipantFilters key={projectId} attempts={participants.flatMap(({ data }) => data ?? [])}
         value={participantFilter} onChange={setParticipantFilter} />
-      {hasFilters && <button type="button" className="delivery-tab" onClick={() => {
+      {filterCount > 0 && <button type="button" className="delivery-tab agile-filter-reset" aria-label="Clear filters" onClick={() => {
         setSearch(""); setFilterStatus(""); setParticipantFilter({ agent: "", provider: "", model: null });
-      }}>Clear filters</button>}
+      }}>Clear filters <span>{filterCount}</span></button>}
     </>}>
       <div className="delivery-body">
         <div className="delivery-main">

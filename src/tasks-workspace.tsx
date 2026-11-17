@@ -390,6 +390,7 @@ function PreviewTasksWorkspace(props: WorkspaceProps) {
     return { ...item, state: children.some(({ state }) => state === "Completed") ? "Completed" : "Cancelled" };
   });
   const filter = query.trim().toLocaleLowerCase();
+  const filterCount = [filter, stateFilter, agentFilter, modelFilter, providerFilter].filter(Boolean).length;
   const visible = work.filter((task) => {
     const participants = recordedParticipants(task, simulation?.delivery);
     const matchingModels = deliveryModels.filter((model) => model.selection.modelId === task.assignment?.modelId
@@ -426,9 +427,9 @@ function PreviewTasksWorkspace(props: WorkspaceProps) {
         <ModelPicker label="Filter tasks by model" layout="inline" options={deliveryModels}
           selection={{ mode: "single", selected: deliveryModels.find(({ selection }) => selection.modelId === modelFilter)?.selection ?? null,
             onChange: ({ modelId }) => setModelFilter(modelId), reset: { label: "All models", onSelect: () => setModelFilter("") } }} />
-        {(filter || stateFilter || providerFilter || agentFilter || modelFilter) && <button className="delivery-tab" type="button" onClick={() => {
+        {filterCount > 0 && <button className="delivery-tab agile-filter-reset" type="button" aria-label="Clear filters" onClick={() => {
           setQuery(""); setStateFilter(""); setProviderFilter(""); setAgentFilter(""); setModelFilter("");
-        }}>Clear filters</button>}
+        }}>Clear filters <span>{filterCount}</span></button>}
       </>}>
       <div className="delivery-body">
         <div className="delivery-main">

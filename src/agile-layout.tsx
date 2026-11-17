@@ -1,12 +1,15 @@
 import { LayoutGrid, List, Search, X } from "lucide-react";
 import { Dialog } from "radix-ui";
-import type { ComponentProps, CSSProperties, ReactNode, Ref } from "react";
-import { DeliveryDetailPanel, DeliveryStatus } from "@/tasks-git-ui";
+import { createContext, useContext, useRef, type ComponentProps, type CSSProperties, type ReactNode, type Ref } from "react";
+import { DeliveryStatus } from "@/tasks-git-ui";
+import { useWorkspaceSize, WorkbenchPanel } from "@/workbench-panel";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
 import "./agile-layout.css";
 
 type BoardView = "kanban" | "table";
 const workDetailViews = ["Overview", "Workflow", "Work history", "Context", "Changes"] as const;
 export type WorkDetailView = (typeof workDetailViews)[number];
+const CompactTaskDetails = createContext(false);
 
 export function AgileWorkspaceFrame({ title, view, onViewChange, action, filters, children }: {
   title: string;
@@ -16,7 +19,9 @@ export function AgileWorkspaceFrame({ title, view, onViewChange, action, filters
   filters?: ReactNode;
   children: ReactNode;
 }) {
-  return <section className="delivery-view agile-workspace" aria-label="Tasks workspace">
+  const workspace = useRef<HTMLElement>(null);
+  const compact = useWorkspaceSize(workspace).width < 872;
+  return <section ref={workspace} className="delivery-view agile-workspace" aria-label="Tasks workspace">
     <header className="delivery-toolbar agile-workspace-heading">
       <h2>{title}</h2>
       <nav className="agile-view-switch" aria-label="Agile view">
@@ -30,7 +35,7 @@ export function AgileWorkspaceFrame({ title, view, onViewChange, action, filters
       <div className="agile-workspace-action">{action}</div>
     </header>
     {filters && <div className="delivery-toolbar delivery-filters agile-filters" role="group" aria-label="Work filters">{filters}</div>}
-    {children}
+    <CompactTaskDetails.Provider value={compact}>{children}</CompactTaskDetails.Provider>
   </section>;
 }
 
@@ -76,7 +81,18 @@ export function AgileDetailFrame({ label, title, identity, state, note, closeLab
   label: string; title: string; identity: string; state?: string; note?: string;
   closeLabel: string; close: () => void; navigation?: ReactNode; children: ReactNode;
 }) {
-  return <DeliveryDetailPanel label={label} resizeKey="task-details">
+  const drawer = useContext(CompactTaskDetails);
+  const opener = useRef(document.activeElement);
+  function dismiss() {
+    close();
+    const trigger = opener.current;
+    requestAnimationFrame(() => {
+      if (trigger instanceof HTMLElement && trigger.getClientRects().length) trigger.focus({ preventScroll: true });
+    });
+  }
+  return <WorkbenchPanel as="aside" className="delivery-detail agile-detail-panel" aria-label={label} open
+    drawer={drawer} label={label} drawerClass="agile-detail-drawer" onClose={dismiss}
+    edge="left" resizeKey="task-details" resizeLabel={label}>
     <section className="agile-detail-frame" aria-label={title}>
       <header className="agile-detail-heading">
         <div className="min-w-0">
@@ -86,14 +102,14 @@ export function AgileDetailFrame({ label, title, identity, state, note, closeLab
             <DeliveryStatus>{state}</DeliveryStatus>{note && <span> · {note}</span>}
           </p>}
         </div>
-        <button className="agile-icon-button" onClick={close} type="button" aria-label={closeLabel}>
+        <ControlTooltip label={closeLabel}><button className="agile-icon-button" onClick={dismiss} type="button" aria-label={closeLabel}>
           <X size={16} aria-hidden="true" />
-        </button>
+        </button></ControlTooltip>
       </header>
       {navigation}
       <div className="delivery-detail-content agile-detail-content">{children}</div>
     </section>
-  </DeliveryDetailPanel>;
+  </WorkbenchPanel>;
 }
 
 export function AgileDetailTabs({ view, onViewChange }: { view: WorkDetailView; onViewChange: (view: WorkDetailView) => void }) {

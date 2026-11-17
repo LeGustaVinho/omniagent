@@ -6,16 +6,19 @@
   justify-items: center;
   overflow: auto;
   padding: clamp(1rem, 5vw, 2.5rem);
+  background: radial-gradient(ellipse at 50% 15%, color-mix(in srgb, var(--primary) 8%, var(--background)), var(--background) 66%);
 }
 
 .launch-card {
   display: grid;
-  gap: 1.125rem;
+  gap: 20px;
   width: min(100%, 34rem);
   padding: clamp(1.25rem, 5vw, 2rem);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   background: var(--card);
+  box-shadow: var(--shadow-overlay);
+  animation: ui-reveal var(--motion-overlay) ease-out;
 }
 
 .launch-card h1 {

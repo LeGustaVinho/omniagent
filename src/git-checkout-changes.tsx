@@ -1,10 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { PanelRight, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { GitDiffReview, type GitTextComparison } from "@/git-diff-view";
 import { GitDiffSourceSelect } from "@/git-workspace-frame";
-import { DeliveryDetailPanel, InlineIssue } from "@/tasks-git-ui";
+import { InlineIssue } from "@/tasks-git-ui";
+import { useWorkspaceSize, WorkbenchPanel } from "@/workbench-panel";
 
 type ReviewRevision = { branch: string | null; head: string | null; index: string | null };
 type FileStatus = { path: string; staged: string | null; working: string | null };
@@ -42,6 +44,10 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
 }) {
   const [source, setSource] = useState<ReviewSource>(initialSource);
   const [selection, setSelection] = useState<string>();
+  const view = useRef<HTMLDivElement>(null);
+  const indexTrigger = useRef<HTMLButtonElement>(null);
+  const indexDrawer = useWorkspaceSize(view).width < 872;
+  const [indexOpen, setIndexOpen] = useState(false);
   const files = source === "branch" ? [] : review.changes.flatMap((file) => {
     const status = file[source];
     return status ? [{ path: file.path, kind: statusLabels[status] ?? status }] : [];
@@ -55,10 +61,17 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
   const comparison = useMemo(() => diff.error ? null : comparisonFile(diff.data), [diff.data, diff.error]);
   const unavailable = diff.data && [diff.data.original, diff.data.modified].find((side) => side.status === "unavailable");
   const canOpen = source === "working" && comparison && diff.data?.modified.status === "text" && openFile;
-  return <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+  function closeIndex() {
+    setIndexOpen(false);
+    requestAnimationFrame(() => indexTrigger.current?.focus({ preventScroll: true }));
+  }
+
+  return <div ref={view} className="flex min-h-0 min-w-0 flex-1 flex-col">
     <div className="delivery-toolbar delivery-filters">
       <GitDiffSourceSelect sources={reviewSources} value={source} onChange={(next) => { setSource(next); setSelection(undefined); }} />
       {source === "working" && openPanel && <Button className="ml-auto px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={openPanel}>Open changes panel</Button>}
+      {source !== "branch" && indexActions && indexDrawer && <Button type="button" ref={indexTrigger} variant="outline"
+        aria-expanded={indexOpen} onClick={() => setIndexOpen(true)}><PanelRight size={16} aria-hidden="true" /> Index</Button>}
     </div>
     {source === "branch" ? <GitBranchComparison review={review} onClose={onClose} /> : <div className="delivery-body">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -71,7 +84,15 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
           empty={<p>{source === "working" ? "No working changes." : "No staged changes."}</p>}
           onClose={onClose} openFile={canOpen ? () => openFile(comparison.path) : undefined} />
       </div>
-      {indexActions && <IndexOperations review={review} />}
+      {indexActions && <IndexOperations review={review} drawer={indexDrawer} open={!indexDrawer || indexOpen}
+        onClose={closeIndex} reviewingStaged={source === "staged"} onReviewStaged={() => {
+        setSource("staged");
+        setSelection(undefined);
+        if (indexDrawer) {
+          setIndexOpen(false);
+          requestAnimationFrame(() => view.current?.querySelector<HTMLElement>(".diff-file-row")?.focus());
+        }
+      }} />}
     </div>}
   </div>;
 }
@@ -139,7 +160,9 @@ function GitBranchComparison({ review, onClose }: { review: CheckoutReview; onCl
   </div>;
 }
 
-function IndexOperations({ review }: { review: CheckoutReview }) {
+function IndexOperations({ review, reviewingStaged, onReviewStaged, drawer, open, onClose }: {
+  review: CheckoutReview; reviewingStaged: boolean; onReviewStaged: () => void; drawer: boolean; open: boolean; onClose: () => void;
+}) {
   const client = useQueryClient();
   const changeStage = useMutation({
     mutationFn: ({ path, staged }: { path: string; staged: boolean }) => invoke("set_git_path_staged", {
@@ -151,7 +174,11 @@ function IndexOperations({ review }: { review: CheckoutReview }) {
     ]),
   });
   const stagedCount = review.changes.filter((file) => file.staged).length;
-  return <DeliveryDetailPanel label="Stage files" resizeKey="git-stage">
+  return <WorkbenchPanel as="aside" className="delivery-detail git-index-panel" label="Index" aria-label="Stage files"
+    open={open} drawer={drawer} drawerClass="git-index-drawer" onClose={onClose}
+    edge="left" resizeKey="git-stage" resizeLabel="index">
+    {drawer && <header className="work-panel-header"><span>Index</span><Button type="button" variant="ghost" className="ui-icon-button"
+      aria-label="Close index" onClick={onClose}><X size={16} aria-hidden="true" /></Button></header>}
     <div className="delivery-detail-content grid content-start gap-3 p-3.5">
       <div>
         <h3 className="text-sm font-semibold">Index</h3>
@@ -172,12 +199,14 @@ function IndexOperations({ review }: { review: CheckoutReview }) {
         </li>)}
       </ul> : <p className="text-sm text-muted-foreground">This worktree has a clean index and working tree.</p>}
       {review.managed ? <p className="text-xs text-muted-foreground">Commit approved changes from the linked Task delivery.</p>
-        : <CommitIndex review={review} />}
+        : <CommitIndex review={review} reviewingStaged={reviewingStaged} onReviewStaged={onReviewStaged} />}
     </div>
-  </DeliveryDetailPanel>;
+  </WorkbenchPanel>;
 }
 
-function CommitIndex({ review }: { review: CheckoutReview }) {
+function CommitIndex({ review, reviewingStaged, onReviewStaged }: {
+  review: CheckoutReview; reviewingStaged: boolean; onReviewStaged: () => void;
+}) {
   const client = useQueryClient();
   const [message, setMessage] = useState("");
   const [expected, setExpected] = useState<ReviewRevision>();
@@ -203,7 +232,9 @@ function CommitIndex({ review }: { review: CheckoutReview }) {
     </label>
     {changed && <>
       <p role="status" className="text-xs">The staged index or branch changed. Review the current staged changes before committing.</p>
-      <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs" onClick={() => { setExpected(review.revision); commit.reset(); }}>Use current index</Button>
+      {reviewingStaged
+        ? <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs" onClick={() => { setExpected(review.revision); commit.reset(); }}>Use current index</Button>
+        : <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs" onClick={onReviewStaged}>Review staged changes</Button>}
     </>}
     <Button type="submit" className="px-2.5 py-1.5 text-xs" disabled={!ready}>{commit.isPending ? "Committing…" : "Commit staged changes"}</Button>
     {commit.error && <InlineIssue>{String(commit.error)}</InlineIssue>}

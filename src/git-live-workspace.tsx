@@ -33,8 +33,8 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
   const activeCheckout = checkoutId === props.checkout.checkoutId;
 
   return <GitWorkspaceFrame tabs={tabs} active={tab} select={setTab} controls={tab !== "Saved attempts" && <>
-    <label className="ml-auto min-w-0"><span className="sr-only">Git worktree</span>
-      <select className="delivery-filter w-full max-w-60" value={checkoutId} onChange={(event) => setCheckout(event.currentTarget.value)}>
+    <label className="ml-auto flex min-w-0 items-center gap-2"><span className="text-xs text-muted-foreground">Inspect worktree</span>
+      <select aria-label="Git worktree" className="delivery-filter w-full max-w-60" value={checkoutId} onChange={(event) => setCheckout(event.currentTarget.value)}>
         {!trees.some(({ checkoutId: id }) => id === checkoutId) && <option value={checkoutId}>{branch ?? (activeCheckout ? props.checkout.checkoutRoot : checkoutId)}</option>}
         {trees.map((tree) => <option key={tree.checkoutId} value={tree.checkoutId}>{tree.branch ?? "Detached HEAD"} · {tree.root}</option>)}
       </select>
@@ -45,8 +45,9 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
   </>}>
     {tab === "Saved attempts" ? <SavedGitDiffs projectId={props.checkout.projectId} target={props.target} openActivity={props.openActivity} /> : <>
       {review.isPending && <p role="status" className="p-4 text-sm text-muted-foreground">Loading Git review…</p>}
-      {review.error && <div className="p-4"><InlineIssue>{String(review.error)}</InlineIssue></div>}
-      {review.data && !review.error && <>
+      {review.error && <div className="grid justify-items-start gap-2 p-4"><InlineIssue>{String(review.error)}</InlineIssue>
+        <Button type="button" variant="outline" onClick={() => void review.refetch()}>Retry review</Button></div>}
+      {review.data && <>
         {tab === "Changes" && <GitCheckoutChanges key={checkoutId} review={review.data} indexActions
           openFile={activeCheckout ? (path) => props.openWorkspace(/\.(md|markdown)$/i.test(path) ? "knowledge" : "ide", path) : undefined}
           openPanel={activeCheckout ? () => props.openChanges("working") : undefined} />}

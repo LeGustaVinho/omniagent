@@ -147,7 +147,7 @@ export function AgileWorkEditor({ kind, setKind, values, change, parents, states
     {error && <p role="alert">{error}</p>}
     <div className="agile-dialog-actions">
       <Button type="button" variant="outline" disabled={busy} onClick={cancel}>Cancel</Button>
-      <Button type="submit" disabled={busy || !valid}>{saveLabel}</Button>
+      <Button type="submit" disabled={busy || !valid}>{busy ? "Saving…" : saveLabel}</Button>
     </div>
   </form>;
 }

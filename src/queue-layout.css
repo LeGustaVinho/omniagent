@@ -34,6 +34,13 @@
 
 .queue-actions { margin-inline-start: auto; }
 .queue-layout .queue-icon-button { width: 2rem; padding: 0; }
+.queue-filter-count {
+  margin-inline-start: 6px;
+  padding-inline: 5px;
+  border-radius: 4px;
+  background: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
 
 .queue-content {
   display: flex;
@@ -86,7 +93,6 @@
 .queue-job-reason { color: var(--muted-foreground); }
 .queue-compact-label { display: none; }
 .queue-layout .delivery-status { white-space: normal; }
-.queue-layout .delivery-status::before { flex: none; }
 
 .queue-detail-header {
   display: flex;

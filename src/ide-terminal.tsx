@@ -22,7 +22,7 @@ export function ExampleTerminal({ clearRevision }: { clearRevision: number }) {
   useEffect(() => {
     const element = mount.current;
     if (!element) return;
-    const { terminal, fit } = openTerminal(element, 300);
+    const { terminal, fit, stopTheme } = openTerminal(element, 300);
     instance.current = terminal;
     const resize = new ResizeObserver(() => {
       if (element.clientWidth && element.clientHeight) fit.fit();
@@ -58,6 +58,7 @@ export function ExampleTerminal({ clearRevision }: { clearRevision: number }) {
     });
     return () => {
       resize.disconnect();
+      stopTheme();
       input.dispose();
       terminal.dispose();
       instance.current = undefined;
@@ -73,20 +74,30 @@ export function ExampleTerminal({ clearRevision }: { clearRevision: number }) {
 }
 
 function openTerminal(element: HTMLElement, scrollback: number) {
-  const light = getComputedStyle(document.documentElement).colorScheme === "light";
+  const root = document.documentElement;
+  function palette() {
+    const style = getComputedStyle(root);
+    return {
+      background: style.getPropertyValue("--background").trim() || "#11151d",
+      foreground: style.getPropertyValue("--foreground").trim() || "#eef2fa",
+      cursor: style.getPropertyValue("--primary").trim() || "#afb2ff",
+    };
+  }
   const terminal = new Terminal({
     cursorBlink: false,
-    fontFamily: '"Geist Mono", Consolas, monospace',
+    fontFamily: '"Geist Mono Variable", Consolas, monospace',
     fontSize: 12,
     rows: 8,
     scrollback,
     screenReaderMode: true,
-    theme: { background: light ? "#f7f7f9" : "#191919", foreground: light ? "#242428" : "#e7e7ec", cursor: light ? "#4a42b8" : "#a7a3ff" },
+    theme: palette(),
   });
   const fit = new FitAddon();
   terminal.loadAddon(fit);
   terminal.open(element);
-  return { terminal, fit };
+  const observer = new MutationObserver(() => { terminal.options.theme = palette(); });
+  observer.observe(root, { attributes: true, attributeFilter: ["data-app-theme"] });
+  return { terminal, fit, stopTheme: () => observer.disconnect() };
 }
 
 type Session = { checkoutId: string; terminalId: string };
@@ -117,7 +128,7 @@ export function ManualTerminal({ checkoutId, active, clearRevision = 0 }: {
   useEffect(() => {
     const element = mount.current;
     if (!element || request?.checkoutId !== checkoutId) return;
-    const { terminal, fit } = openTerminal(element, 1000);
+    const { terminal, fit, stopTheme } = openTerminal(element, 1000);
     let session: Session | undefined;
     let disposed = false;
     let stopped = false;
@@ -200,6 +211,7 @@ export function ManualTerminal({ checkoutId, active, clearRevision = 0 }: {
     return () => {
       disposed = true;
       resize.disconnect();
+      stopTheme();
       input.dispose();
       terminal.dispose();
       attachment.current = undefined;

@@ -145,10 +145,7 @@ function JobDetails({ inspection, checkout, openWorkspace, openActivity, onDepen
   const running = attempt && ["starting", "running", "waiting_for_input"].includes(attempt.status);
   const savedQuestions = inspection.questionWait && !running && !pending && job.queueState !== "cancelled";
   const pipeline = job.pipeline;
-
-  return <>
-        {attempt?.cancelRequested && <InlineIssue>Cancellation requested. Waiting for the runtime to confirm the outcome.</InlineIssue>}
-        <QueueJobFacts facts={[
+  const facts = [
           { label: "Job ID", value: job.id, mono: true },
           { label: "Requester", value: jobRequester(inspection) },
           { label: "Worktree", value: ownCheckout ? checkout.checkoutRoot : job.checkoutId, mono: true },
@@ -166,7 +163,10 @@ function JobDetails({ inspection, checkout, openWorkspace, openActivity, onDepen
           { label: "Attempt", value: attempt ? `#${attempt.ordinal}` : "Awaiting dispatch" },
           ...(attempt ? [{ label: "Run ID", value: attempt.runId, mono: true }] : []),
           ...(attempt?.recovery ? [{ label: "Recovery", value: attempt.recovery === "resume" ? "Resumed from checkpoint" : "Retried saved input" }] : []),
-        ]} />
+  ];
+
+  return <>
+        {attempt?.cancelRequested && <InlineIssue>Cancellation requested. Waiting for the runtime to confirm the outcome.</InlineIssue>}
         {attempt && !inspection.questionWait && (!job.downstreamWait || job.downstreamWait.state === "needs_review")
           && (attempt.status === "failed" || attempt.status === "interrupted") &&
           <JobFailurePanel projectId={job.projectId} runId={attempt.runId}
@@ -222,6 +222,7 @@ function JobDetails({ inspection, checkout, openWorkspace, openActivity, onDepen
           {attempt?.previousRunId && <QueueButton variant="outline" onClick={() => openActivity(attempt.previousRunId!, conversationId)}>Inspect previous attempt</QueueButton>}
           {requestingRunId && <QueueButton variant="outline" onClick={() => openActivity(requestingRunId, job.context?.conversationId)}>{job.operatorRequested ? "Open parent run" : "Open requesting run"}</QueueButton>}
         </QueueJobActions>
+        <QueueJobFacts facts={facts} />
   </>;
 }
 
@@ -260,7 +261,9 @@ export default function LiveQueue({ checkout, openActivity, openWorkspace, onClo
 
   const occupancy = query.data && { active: query.data.active, capacity: query.data.settings.capacity, description: "Scheduler occupancy across projects" };
 
-  return <QueueLayout occupancy={occupancy} paused={settings?.paused ?? false} onClose={onClose}
+  const needsAttention = query.data?.jobs.filter((inspection) => matchesQueueView(queueJobState(inspection), "Needs input")).length;
+
+  return <QueueLayout occupancy={occupancy} paused={settings?.paused ?? false} onClose={onClose} needsAttention={needsAttention}
     view={view} onViewChange={setView} onSelect={setSelected} onDeselect={() => setSelected(undefined)}
     actions={<>
       {active && <AddQueueJobButton disabled={showSetup} onClick={() => setSetup({ checkoutId: checkout.checkoutId })} />}

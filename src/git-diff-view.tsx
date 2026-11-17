@@ -4,6 +4,8 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
 import { ResizablePanel } from "@/panel-resize";
 import { InlineIssue } from "@/tasks-git-ui";
+import { ControlTooltip } from "@/components/ui/control-tooltip";
+import { CopyFilePath, PathText } from "@/components/ui/file-path";
 
 export type GitTextComparison = {
   path: string;
@@ -98,21 +100,25 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
         <ResizablePanel as="section" className="diff-files" aria-label="Changed files"
           edge="bottom" resizeKey="git-changed-files" resizeLabel="changed files">
           <div className="diff-files-scroll">
-          {files.map((file) => <button type="button" key={file.path} className="diff-file-row" aria-expanded={selected?.path === file.path}
+          {files.map((file) => <ControlTooltip key={file.path} label={file.previousPath ? `${file.previousPath} → ${file.path}` : file.path}>
+            <button type="button" className="diff-file-row" aria-label={`${file.path} · ${file.kind}`} aria-expanded={selected?.path === file.path}
             onClick={() => { select(selected?.path === file.path ? "" : file.path); setPatchPath(undefined); }}>
             {selected?.path === file.path ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} className="text-muted-foreground" aria-hidden />}
             {file.kind === "Binary" ? <FileImage size={14} className="text-muted-foreground" aria-hidden /> : <FileCode2 size={14} className="text-muted-foreground" aria-hidden />}
-            <span className="min-w-0 flex-1 truncate font-mono" title={file.path}>{file.previousPath && `${file.previousPath} → `}{file.path}</span>
+            <span className="flex min-w-0 flex-1 font-mono">
+              {file.previousPath && <span className="truncate">{file.previousPath} → </span>}<PathText path={file.path} />
+            </span>
             <span className="text-muted-foreground">{file.kind}</span>
             {file.additions !== undefined && file.deletions !== undefined && file.kind !== "Binary" && <ChangeCounts additions={file.additions} deletions={file.deletions} />}
-          </button>)}
+          </button></ControlTooltip>)}
           </div>
         </ResizablePanel>
         {selected && <div className="flex min-h-0 flex-1 flex-col">
-          {(hasPatch || openFile) && <div className="flex flex-wrap items-center gap-1 border-b border-border px-2 py-1">
+          <div className="flex flex-wrap items-center gap-1 border-b border-border px-2 py-1">
+            <CopyFilePath path={selected.path} />
             {hasPatch && <button className="delivery-tab" type="button" aria-pressed={showingPatch} onClick={() => setPatchPath(showingPatch ? undefined : selected.path)}>{showingPatch ? "Compare side by side" : "View saved patch"}</button>}
             {openFile && <button className="delivery-tab" type="button" onClick={openFile}>Open file <ExternalLink size={12} aria-hidden className="ml-1 inline-block" /></button>}
-          </div>}
+          </div>
           {selected.kind === "Binary"
             ? <div className="delivery-empty"><FileImage size={22} aria-hidden /><p>Binary file. Text comparison is unavailable.</p></div>
             : <div className="min-h-0 flex-1 overflow-auto">

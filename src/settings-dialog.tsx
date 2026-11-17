@@ -254,7 +254,9 @@ function SettingsSession({
           {!simulation && save.isError && <p className="settings-result settings-result-error" role="alert">
             Appearance preference could not be saved. The last saved value was restored.
           </p>}
-          {!simulation && save.isSuccess && <span className="sr-only" role="status">Appearance saved</span>}
+          {!simulation && (save.isPending || save.isSuccess) && <p className="settings-result" role="status">
+            {save.isPending ? "Saving…" : "Appearance saved"}
+          </p>}
           <fieldset disabled={!simulation && (preferences.isPending || preferences.isError)}>
             <AppearanceControls settings={appearance} update={changeAppearance} />
           </fieldset>

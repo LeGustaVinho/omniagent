@@ -104,7 +104,10 @@ function SimulatedQueue({ simulation, openWorkspace, openActivity, onClose }: Wo
     setJobs((items) => items.map((job) => job.id === id ? { ...job, state, reason } : job));
   }
 
+  const needsAttention = allJobs.filter((job) => matchesQueueView(job.state, "Needs input")).length;
+
   return <QueueLayout occupancy={simulation ? { active, capacity: 3 } : undefined} paused={paused} onClose={onClose}
+    needsAttention={needsAttention}
     view={view} onViewChange={setView} onSelect={setSelected} onDeselect={() => setSelected("")}
     actions={<>
       <AddQueueJobButton disabled={!simulation || Boolean(adding)} onClick={() => setAdding({})} />

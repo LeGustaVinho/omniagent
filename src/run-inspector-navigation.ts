@@ -6,4 +6,5 @@ export const RunInspectorNavigation = createContext<{
   openWorkspace?: WorkspaceProps["openWorkspace"];
   activeRunId?: string;
   openGitAttempt?: (runId: string) => void;
+  openProviders?: () => void;
 } | undefined>(undefined);

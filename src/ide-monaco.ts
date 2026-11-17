@@ -33,7 +33,7 @@ export function loadMonaco(): Promise<Monaco> {
         inherit: true,
         rules: [],
         colors: {
-          "editor.background": "#191919",
+          "editor.background": "#11151d",
           "diffEditor.insertedTextBackground": "#31975C55",
           "diffEditor.removedTextBackground": "#C6495355",
           "diffEditor.insertedLineBackground": "#22523564",
@@ -41,6 +41,12 @@ export function loadMonaco(): Promise<Monaco> {
           "diffEditorGutter.insertedLineBackground": "#28563C",
           "diffEditorGutter.removedLineBackground": "#623139",
         },
+      });
+      monaco.editor.defineTheme("omniagent-light", {
+        base: "vs",
+        inherit: true,
+        rules: [],
+        colors: { "editor.background": "#f7f9fd" },
       });
       return monaco;
     }).catch((error: unknown) => {
@@ -54,5 +60,5 @@ export function loadMonaco(): Promise<Monaco> {
 export function monacoTheme(): string {
   const root = document.documentElement;
   const light = getComputedStyle(root).colorScheme === "light";
-  return matchMedia("(forced-colors: active)").matches ? (light ? "hc-light" : "hc-black") : (light ? "vs" : "omniagent-dark");
+  return matchMedia("(forced-colors: active)").matches ? (light ? "hc-light" : "hc-black") : (light ? "omniagent-light" : "omniagent-dark");
 }

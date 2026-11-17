@@ -1,4 +1,4 @@
-import { AlertCircle, CircleOff, FlaskConical } from "lucide-react";
+import { AlertCircle, CheckCircle2, CircleDot, CircleOff, Clock3, FlaskConical } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { ResizablePanel } from "@/panel-resize";
@@ -6,14 +6,18 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import "@/tasks-git.css";
 
 const statusTone: Record<string, string> = {
-  "In Progress": "progress", "In Review": "progress", Running: "progress", Ready: "progress",
-  Blocked: "warm", "Waiting for input": "warm", Interrupted: "warm", Conflicted: "warm", Paused: "warm",
+  "In Progress": "progress", "In Review": "progress", Running: "progress", Starting: "progress", Ready: "progress",
+  Blocked: "warm", "Waiting for input": "warm", "Waiting for approval": "warm", "Needs review": "warm",
+  Interrupted: "warm", Conflicted: "warm", Paused: "warm",
   Completed: "success", Verified: "success", Accepted: "success", Merged: "success", Succeeded: "success",
   Failed: "danger",
 };
 
 export function DeliveryStatus({ children }: { children: string }) {
-  return <span className="delivery-status" data-tone={statusTone[children]}>{children}</span>;
+  const tone = statusTone[children];
+  const Icon = tone === "success" ? CheckCircle2 : tone === "danger" ? AlertCircle :
+    tone === "warm" || children === "Queued" || children === "Waiting for jobs" ? Clock3 : CircleDot;
+  return <span className="delivery-status" data-tone={tone}><Icon size={13} aria-hidden="true" />{children}</span>;
 }
 
 export function DeliveryDetailPanel({ label, resizeKey, className, children }: {

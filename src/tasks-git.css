@@ -30,6 +30,7 @@
 
 .delivery-filter {
   min-width: 0;
+  min-height: 32px;
   padding: 0.375rem 0.625rem;
   border: 1px solid var(--border);
   border-radius: 0.375rem;
@@ -40,11 +41,13 @@
 
 .delivery-tab {
   cursor: pointer;
+  min-height: 32px;
   padding: 0.375rem 0.625rem;
   border-radius: 0.375rem;
   white-space: nowrap;
   color: var(--muted-foreground);
   font-size: 0.8125rem;
+  transition: background-color var(--motion-control), color var(--motion-control);
 }
 
 .delivery-tab:hover,
@@ -75,13 +78,7 @@
   white-space: nowrap;
 }
 
-.delivery-status::before {
-  width: 0.48rem;
-  height: 0.48rem;
-  border-radius: 50%;
-  background: currentColor;
-  content: "";
-}
+.delivery-status svg { flex: none; }
 
 .delivery-status[data-tone="progress"] { color: var(--primary); }
 .delivery-status[data-tone="warm"] { color: var(--warning, #ebbd70); }
@@ -263,6 +260,12 @@ button.agile-disclosure:hover { background: var(--muted); color: var(--foregroun
   font-size: 0.8125rem;
 }
 
+.delivery-toolbar > .delivery-field {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
+}
+
 @container delivery-view (max-width: 50rem) {
   .delivery-body { flex-direction: column; }
   .delivery-detail {
@@ -276,7 +279,6 @@ button.agile-disclosure:hover { background: var(--muted); color: var(--foregroun
 }
 
 @media (forced-colors: active) {
-  .delivery-status::before { forced-color-adjust: none; background: CanvasText; }
   .delivery-column[data-over="true"], .delivery-card[data-selected="true"] { border-color: Highlight; }
   .delivery-tab[aria-pressed="true"] { outline: 1px solid Highlight; outline-offset: -1px; }
   .delivery-table tbody tr:has(button[aria-pressed="true"]) > :first-child { border-inline-start: 2px solid Highlight; }
@@ -288,3 +290,14 @@ button.agile-disclosure:hover { background: var(--muted); color: var(--foregroun
 }
 
 .delivery-tab:disabled:hover { background: transparent; }
+.git-worktree-dialog { transform: translate(-50%, -50%); box-shadow: var(--shadow-overlay); animation: ui-reveal var(--motion-overlay) ease-out; }
+.git-index-panel { flex-basis: clamp(272px, var(--panel-width, 340px), calc(100% - 600px)); }
+.git-index-panel[hidden] { display: none; }
+.git-index-drawer {
+  position: fixed;
+  z-index: 60;
+  inset: 0 0 0 auto;
+  width: clamp(min(270px, 90vw), var(--panel-width, 360px), calc(100vw - 24px));
+  box-shadow: var(--shadow-overlay);
+  animation: ui-reveal var(--motion-overlay) ease-out;
+}

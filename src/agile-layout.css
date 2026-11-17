@@ -8,8 +8,9 @@
 .agile-search > svg { position: absolute; inset-inline-start: .6rem; top: 50%; transform: translateY(-50%); color: var(--muted-foreground); pointer-events: none; }
 .agile-search > input { width: 100%; }
 
-.agile-column-heading { display: flex; align-items: center; justify-content: space-between; gap: .35rem; padding: .2rem .25rem; }
+.agile-column-heading { position: sticky; inset-block-start: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: .35rem; padding: 6px 8px; border-radius: 4px; background: var(--card); }
 .agile-column-count { color: var(--muted-foreground); font-size: .75rem; font-variant-numeric: tabular-nums; }
+.agile-filter-reset span { margin-inline-start: 4px; padding-inline: 5px; border-radius: 4px; background: var(--muted); font-variant-numeric: tabular-nums; }
 .agile-work-card { position: relative; }
 .agile-work-card-meta { display: flex; align-items: center; justify-content: space-between; gap: .4rem; color: var(--muted-foreground); }
 .agile-work-card-meta small { font-size: .69rem; line-height: 1.3; }
@@ -19,6 +20,16 @@
 .agile-work-card-content:empty { display: none; }
 
 .agile-detail-frame { display: flex; flex: 1; min-height: 0; min-width: 0; flex-direction: column; }
+.agile-detail-panel { flex-basis: clamp(272px, var(--panel-width, 360px), calc(100% - 600px)); }
+.agile-detail-panel[hidden] { display: none; }
+.agile-detail-drawer {
+  position: fixed;
+  z-index: 60;
+  inset: 0 0 0 auto;
+  width: clamp(min(270px, 90vw), var(--panel-width, 360px), calc(100vw - 24px));
+  box-shadow: var(--shadow-overlay);
+  animation: ui-reveal var(--motion-overlay) ease-out;
+}
 .agile-detail-heading { display: flex; flex: none; align-items: flex-start; justify-content: space-between; gap: .75rem; padding: .8rem .9rem; border-bottom: 1px solid var(--border); }
 .agile-detail-heading h3 { margin-block: .2rem; font-size: .95rem; font-weight: 650; line-height: 1.4; overflow-wrap: anywhere; }
 .agile-detail-identity, .agile-detail-status { color: var(--muted-foreground); font-size: .75rem; }
@@ -54,27 +65,29 @@
 .agile-workspace :is(button, input, select, textarea, summary):focus-visible,
 .agile-dialog :is(button, input, select):focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
-.agile-icon-button { flex: none; padding: .25rem; border-radius: .3rem; color: var(--muted-foreground); }
+.agile-icon-button { display: inline-grid; place-items: center; flex: none; width: 32px; min-height: 32px; border-radius: 6px; color: var(--muted-foreground); }
 .agile-icon-button:hover:not(:disabled) { background: var(--muted); color: var(--foreground); }
 .agile-icon-button:disabled { opacity: .5; }
-.agile-dialog-overlay { position: fixed; z-index: 50; inset: 0; background: rgb(0 0 0 / .6); }
+.agile-dialog-overlay { position: fixed; z-index: 70; inset: 0; background: rgb(0 0 0 / .6); }
 .agile-dialog {
   position: fixed;
-  z-index: 50;
+  z-index: 71;
   inset-block-start: 50%;
   inset-inline-start: 50%;
   transform: translate(-50%, -50%);
   width: min(36rem, calc(100vw - 2rem));
   max-height: min(47rem, calc(100dvh - 2rem));
   overflow: auto;
+  scroll-padding-block-end: 68px;
   padding: 1.1rem 1.25rem;
   border: 1px solid var(--border);
   border-radius: .75rem;
   background: var(--card);
-  box-shadow: 0 16px 38px rgb(0 0 0 / .28);
+  box-shadow: var(--shadow-overlay);
+  animation: ui-reveal var(--motion-overlay) ease-out;
 }
 .agile-dialog-heading { display: flex; justify-content: space-between; align-items: center; gap: .7rem; margin-block-end: 1rem; font-size: 1rem; font-weight: 650; }
-.agile-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; margin-block-start: .5rem; }
+.agile-dialog-actions { position: sticky; inset-block-end: -1.1rem; z-index: 1; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin: 8px -1.25rem -1.1rem; padding: 12px 1.25rem; border-top: 1px solid var(--border); background: var(--card); }
 .agile-editor-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr)); gap: .55rem; }
 
 @container delivery-view (max-width: 50rem) {
