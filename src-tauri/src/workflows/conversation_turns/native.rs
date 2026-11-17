@@ -16,7 +16,7 @@ use super::{
 };
 use crate::workflows::{WorkflowRun, generic_agent, launch::launch_entry_in_tx};
 
-pub(super) const WORKFLOW_ID: &str = "omniagent:direct-conversation";
+pub(in crate::workflows) const WORKFLOW_ID: &str = "omniagent:direct-conversation";
 const AGENT_ID: &str = "conversation-agent";
 
 fn graph() -> Result<WorkflowDefinition> {

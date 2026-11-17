@@ -7,7 +7,9 @@ use crate::workflows::{
     BuiltinNode, CommandConfiguration, ConfigurationKind, Endpoint, NodeConfiguration,
     NodeDefinition, WorkflowDefinition, WorkflowGraph, WorkflowRevision,
     command::validate_command_binding,
-    compile_resolved_graph, digest,
+    compile_resolved_graph,
+    conversation_turns::DIRECT_WORKFLOW_ID,
+    digest,
     mcp_tools::{McpToolConfiguration, validate_mcp_binding, validate_reusable_mcp_binding},
     registry::supports_pinned_execution,
     role_templates::{
@@ -131,11 +133,11 @@ impl Store {
                 }
             }
             let mut legacy = db.prepare(
-                "SELECT w.workflow_id, w.revision FROM workflow_revisions w WHERE w.project_id = ?1
+                "SELECT w.workflow_id, w.revision FROM workflow_revisions w WHERE w.project_id = ?1 AND w.workflow_id <> ?2
                  AND NOT EXISTS(SELECT 1 FROM workflow_published_heads h
                     WHERE h.project_id = w.project_id AND h.workflow_id = w.workflow_id)",
             )?;
-            let legacy = legacy.query_map([&project], |row| Ok(PackageArtifactVersion {
+            let legacy = legacy.query_map(params![project, DIRECT_WORKFLOW_ID], |row| Ok(PackageArtifactVersion {
                 destination: PackageDestination::Project, kind: PackageArtifactKind::Pipeline,
                 id: row.get(0)?, revision: row.get(1)?,
             }))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1476,6 +1478,9 @@ pub(super) fn load_published(
     project: &str,
     version: &PackageArtifactVersion,
 ) -> Result<Option<PublishedPackageArtifact>> {
+    if version.kind == PackageArtifactKind::Pipeline && version.id == DIRECT_WORKFLOW_ID {
+        return Ok(None);
+    }
     if let Some(artifact) = stored_artifact(db, project, version)? {
         return Ok(Some(artifact));
     }

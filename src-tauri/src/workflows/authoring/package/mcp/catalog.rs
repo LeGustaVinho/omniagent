@@ -1,4 +1,5 @@
 use super::*;
+use crate::workflows::conversation_turns::DIRECT_WORKFLOW_ID;
 
 const PAGE_SIZE: usize = 6;
 const CHUNK_BYTES: usize = 3 * 1024;
@@ -93,7 +94,7 @@ fn published_page(db: &Connection, project: &str, offset: usize) -> Result<Value
            SELECT ?1, 'pipeline', workflow_id, revision FROM workflow_published_heads WHERE project_id = ?2
            UNION
            SELECT ?1, 'pipeline', entry.workflow_id, entry.revision FROM workflow_revisions entry
-             WHERE entry.project_id = ?2 AND NOT EXISTS (
+             WHERE entry.project_id = ?2 AND entry.workflow_id <> ?5 AND NOT EXISTS (
                SELECT 1 FROM workflow_published_heads head WHERE head.project_id = entry.project_id AND head.workflow_id = entry.workflow_id
              )
          )
@@ -104,7 +105,8 @@ fn published_page(db: &Connection, project: &str, offset: usize) -> Result<Value
             scope,
             project,
             i64::try_from(PAGE_SIZE + 1)?,
-            i64::try_from(offset)?
+            i64::try_from(offset)?,
+            DIRECT_WORKFLOW_ID,
         ],
         |row| {
             Ok((

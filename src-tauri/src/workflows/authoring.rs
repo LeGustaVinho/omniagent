@@ -15,9 +15,8 @@ use crate::{
 };
 
 use super::{
-    BuiltinNode, NodeDefinition, WorkflowDefinition, WorkflowGraph, WorkflowRevision, builtin_registry,
-    compile,
-    runtime::load_definition,
+    BuiltinNode, NodeDefinition, WorkflowDefinition, WorkflowGraph, WorkflowRevision,
+    builtin_registry, compile, conversation_turns::DIRECT_WORKFLOW_ID, runtime::load_definition,
 };
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
@@ -103,11 +102,11 @@ impl Store {
     pub async fn workflow_authoring_bases(&self, project: String) -> Result<Vec<AuthoringBase>> {
         self.execute(move |db| {
             let mut statement = db.prepare(
-                "SELECT definition FROM workflow_revisions WHERE project_id = ?1
+                "SELECT definition FROM workflow_revisions WHERE project_id = ?1 AND workflow_id <> ?2
                  ORDER BY workflow_id, revision",
             )?;
             statement
-                .query_map([project], |row| row.get::<_, Vec<u8>>(0))?
+                .query_map(params![project, DIRECT_WORKFLOW_ID], |row| row.get::<_, Vec<u8>>(0))?
                 .map(|payload| {
                     let definition: WorkflowDefinition = open(&payload?)?;
                     Ok(AuthoringBase {
@@ -140,6 +139,7 @@ impl Store {
             ).context("Open a project conversation to start authoring")?;
             let id = new_id();
             let pinned = base.as_ref().map(|version| {
+                ensure!(version.id != DIRECT_WORKFLOW_ID, "The direct conversation pipeline is managed by the app");
                 load_definition(&tx, &project, version)?.context("The selected workflow revision is outside this project")
             }).transpose()?;
             let draft_scope = DraftScope {

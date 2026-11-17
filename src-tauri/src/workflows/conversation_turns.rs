@@ -38,7 +38,7 @@ mod native;
 mod tests;
 pub(crate) use dispatch::prepare_next_conversation_stage;
 use dispatch::{RunningTurn, TurnState};
-pub(super) use native::{NativeOutcome, native_outcome};
+pub(super) use native::{NativeOutcome, WORKFLOW_ID as DIRECT_WORKFLOW_ID, native_outcome};
 pub(crate) use native::{is_conversation_template, launch_direct_turn, pin_direct_conversation};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
