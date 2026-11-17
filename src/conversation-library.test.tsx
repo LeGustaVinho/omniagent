@@ -7,6 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "@/app";
+import { activeCustomizationDraft } from "@/active-customization-draft";
 import type { Conversation } from "@/bindings/Conversation";
 import type { MessageRevision } from "@/bindings/MessageRevision";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
@@ -273,11 +274,13 @@ it("moves an already open conversation to the side with the same mounted compose
   await screen.findByRole("region", { name: "Conversation library" });
   await user.click(await library().findByRole("button", { name: original }));
   const input = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" });
+  await waitFor(() => expect(activeCustomizationDraft(selected.checkoutId)?.conversationId).toBe(archiveId));
   const edited = `${draft}\nRetain this unsent edit across a split.`;
   fireEvent.change(input, { target: { value: edited } });
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_conversation_draft", { conversationId: archiveId, text: edited }));
   await user.click(library().getByRole("button", { name: "Live handoff" }));
   const companion = await screen.findByRole("tab", { name: "Live handoff" });
+  await waitFor(() => expect(activeCustomizationDraft(selected.checkoutId)).toBeUndefined());
   const originalTab = () => screen.getByRole("tab", { name: original });
   expect(originalTab().closest(".dv-groupview")).toBe(companion.closest(".dv-groupview"));
 
@@ -287,6 +290,7 @@ it("moves an already open conversation to the side with the same mounted compose
   await user.click(await screen.findByRole("menuitem", { name: "Open conversation to the side" }));
   await waitFor(() => expect(originalTab().closest(".dv-groupview")).not.toBe(companion.closest(".dv-groupview")));
   await waitFor(() => expect(screen.getAllByRole("textbox", { name: "Message draft" })).toContain(input));
+  await waitFor(() => expect(activeCustomizationDraft(selected.checkoutId)?.conversationId).toBe(archiveId));
   expect(input.value).toBe(edited);
   expect(screen.getAllByRole("tab", { name: original })).toHaveLength(1);
   expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());

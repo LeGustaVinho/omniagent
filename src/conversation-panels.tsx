@@ -33,6 +33,7 @@ import { ConversationSuggestionButton, useConversationSuggestion } from "@/conve
 import { ConversationCompactionControl, useConversationCompaction } from "@/conversation-compaction";
 import { ConversationMarkdown, type ConversationCode } from "@/conversation-markdown";
 import { ConversationCodeFileDialog } from "@/conversation-code-file";
+import { registerActiveCustomizationDraft } from "@/active-customization-draft";
 import { readDraft, saveDraft } from "@/conversation-draft-writes";
 import { ConversationRow } from "@/conversation-menu";
 import { useConversationTranscriptExport } from "@/conversation-transcript-export";
@@ -237,6 +238,11 @@ export function ConversationPanel({ params, api, containerApi }: IDockviewPanelP
     return () => listener.dispose();
   }, [api]);
   const visible = useSyncExternalStore(subscribe, () => api.isVisible);
+  const subscribeActive = useCallback((update: () => void) => {
+    const listener = containerApi?.onDidActivePanelChange?.(update);
+    return () => listener?.dispose();
+  }, [containerApi]);
+  const active = useSyncExternalStore(subscribeActive, () => Boolean(containerApi?.activePanel && containerApi.activePanel.id === api.id));
   useEffect(() => {
     if (api.renderer !== "always") api.setRenderer("always");
   }, [api]);
@@ -246,7 +252,7 @@ export function ConversationPanel({ params, api, containerApi }: IDockviewPanelP
     api.updateParameters({ title });
   }, [api, params.title, title]);
   return <ConversationContent key={params.conversationId} conversationId={params.conversationId}
-    title={title} checkoutId={checkoutId} confirmedCheckoutId={savedTitle.data?.checkoutId} visible={visible}
+    title={title} checkoutId={checkoutId} confirmedCheckoutId={savedTitle.data?.checkoutId} visible={visible} active={active}
     openFork={(conversation) => { if (containerApi) openConversation(containerApi, conversation); }} />;
 }
 
@@ -258,8 +264,8 @@ type ReviewedContinuation = {
   text: string;
 };
 
-function ConversationContent({ conversationId, title, checkoutId, confirmedCheckoutId, visible, openFork }: PanelParams & {
-  checkoutId?: string; confirmedCheckoutId?: string; visible: boolean; openFork: (conversation: Conversation) => void;
+function ConversationContent({ conversationId, title, checkoutId, confirmedCheckoutId, visible, active, openFork }: PanelParams & {
+  checkoutId?: string; confirmedCheckoutId?: string; visible: boolean; active: boolean; openFork: (conversation: Conversation) => void;
 }) {
   const queryClient = useQueryClient();
   const library = useContext(ConversationLibraryNavigation);
@@ -600,6 +606,13 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
     : history.data?.contextId && !latest.isPending && !latestJob.isPending && !send.isPending && !recover.isPending)));
   const queueNext = busy || instructions.data.some((instruction) => !instruction.recordedContext);
   const historyBusy = live || isLiveRun(attempt) || send.isPending || continueSend.isPending || steer.isPending;
+  const canReceiveCustomization = active && visible && Boolean(library) && !busy && !historyBusy && draft.isSuccess
+    && !composingGoal && !isSideQuestion && !movingCheckout;
+  const customizationSelection = selected?.option.selectable ? selection : null;
+  useEffect(() => {
+    if (!canReceiveCustomization || !checkoutId || checkoutId !== confirmedCheckoutId || mode === "goal") return;
+    return registerActiveCustomizationDraft({ checkoutId, conversationId, title, selection: customizationSelection, effort: effectiveEffort, mode });
+  }, [canReceiveCustomization, checkoutId, confirmedCheckoutId, conversationId, title, customizationSelection, effectiveEffort, mode]);
   const steerRun = canSend && !hasReferences && !hasAttachments && !hasSkills && !steer.isPending && !isSideQuestion && !composingGoal && run?.status === "running"
     && steeringPreview.data && !instructions.data.some((item) => item.editable && !item.recordedContext) ? run.id : undefined;
 
