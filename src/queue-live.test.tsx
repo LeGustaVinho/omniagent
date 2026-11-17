@@ -6,8 +6,9 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobInspection } from "@/bindings/JobInspection";
+import { isGitCheckoutTarget } from "@/file-context-actions";
+import type { LiveQueueProps } from "@/queue-live";
 import QueuePanel from "@/queue-panel";
-import type { QueueJobFocus, WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
@@ -39,7 +40,7 @@ const runningJob: JobInspection = {
   recoveryActions: [],
 };
 
-function renderQueue(overrides: Partial<WorkspaceProps> & { active?: boolean; focusJob?: QueueJobFocus } = {}) {
+function renderQueue(overrides: Partial<LiveQueueProps> = {}) {
   const openActivity = vi.fn();
   const openWorkspace = vi.fn();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
@@ -70,6 +71,76 @@ describe("project queue", () => {
     await user.click(menu.getByRole("menuitem", { name: "Pause job" }));
     expect(invoke).toHaveBeenCalledWith("set_pending_job_state", { projectId, jobId: queuedJob.job.id, state: "paused" });
     expect(within(screen.getByRole("complementary", { name: "Selected job" })).getByRole("heading", { name: "Agent job" })).toBeTruthy();
+  });
+
+  it("focuses the exact pending approval and opens the blocker from the clicked wait reason", async () => {
+    const approvalId = "priority-approval";
+    const approval: JobInspection = { ...queuedJob, blockers: [...queuedJob.blockers, { type: "approval", approvalId }] };
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "project_job_queue") return { settings: { paused: false, capacity: 3 }, active: 1, jobs: [runningJob, approval] };
+      if (command === "pending_job_approval_request") {
+        expect(args).toEqual({ projectId, approvalId });
+        return { instructions: "Details for explicit approval" };
+      }
+    });
+    const user = userEvent.setup();
+    renderQueue();
+    const table = within(await screen.findByRole("table", { name: "Jobs" }));
+    await user.click(table.getByRole("button", { name: "Agent job" }));
+    fireEvent.contextMenu(table.getByRole("button", { name: "Conversation turn" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Review pending approval" }));
+    const selected = within(screen.getByRole("complementary", { name: "Selected job" }));
+    expect(selected.getByRole("heading", { name: "Conversation turn" })).toBeTruthy();
+    const prompt = await selected.findByText(`Waiting for approval ${approvalId}.`);
+    await waitFor(() => expect(document.activeElement).toBe(prompt));
+    expect(await selected.findByLabelText("Requested instructions")).toHaveProperty("textContent", "Details for explicit approval");
+    expect(invoke).not.toHaveBeenCalledWith("decide_job_approval", expect.anything());
+
+    fireEvent.contextMenu(prompt);
+    await user.click(await screen.findByRole("menuitem", { name: "Copy approval ID" }));
+    expect(await navigator.clipboard.readText()).toBe(approvalId);
+
+    const dependency = table.getByText(`Dependency ${runningJob.job.id} is running.`);
+    fireEvent.contextMenu(dependency);
+    await user.click(await screen.findByRole("menuitem", { name: "Inspect dependency" }));
+    expect(selected.getByRole("heading", { name: "Agent job" })).toBeTruthy();
+  });
+
+  it("copies only the clicked job's registered worktree and switches scope only on explicit navigation", async () => {
+    const linked = { ...checkout, checkoutId: "exact-worktree", checkoutRoot: "C:/worktrees/exact" };
+    const otherProject = { ...checkout, projectId: "another-project", checkoutId: "foreign-worktree", checkoutRoot: "C:/worktrees/foreign" };
+    const foreignJob = { ...runningJob, job: { ...runningJob.job, checkoutId: otherProject.checkoutId } };
+    const worktreeJob = { ...queuedJob, job: { ...queuedJob.job, checkoutId: linked.checkoutId, taskId: "linked-task" } };
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "project_job_queue") return { settings: { paused: false, capacity: 3 }, active: 1, jobs: [foreignJob, worktreeJob] };
+      if (command === "registered_checkouts") return [checkout, otherProject, linked];
+    });
+    const onOpenRegisteredWorktree = vi.fn<NonNullable<LiveQueueProps["onOpenRegisteredWorktree"]>>(async () => {});
+    const user = userEvent.setup();
+    const { openWorkspace } = renderQueue({ onOpenRegisteredWorktree });
+    fireEvent.contextMenu(await screen.findByRole("button", { name: "Agent job" }));
+    const foreignMenu = within(await screen.findByRole("menu", { name: "Agent job job-1" }));
+    expect(foreignMenu.queryByRole("menuitem", { name: "Open worktree in Git" })).toBeNull();
+    expect(foreignMenu.queryByRole("menuitem", { name: "Copy worktree path" })).toBeNull();
+    await user.keyboard("{Escape}");
+
+    const row = screen.getByRole("button", { name: "Conversation turn" });
+    fireEvent.contextMenu(row);
+    await user.click(await screen.findByRole("menuitem", { name: "Copy worktree path" }));
+    expect(await navigator.clipboard.readText()).toBe(linked.checkoutRoot);
+    expect(onOpenRegisteredWorktree).not.toHaveBeenCalled();
+    expect(openWorkspace).not.toHaveBeenCalled();
+    fireEvent.contextMenu(row);
+    await user.click(await screen.findByRole("menuitem", { name: "Copy job reference" }));
+    expect(await navigator.clipboard.readText()).toContain(`Job ${queuedJob.job.id}\nWorktree ${linked.checkoutId}\nTask linked-task`);
+    expect(onOpenRegisteredWorktree).not.toHaveBeenCalled();
+
+    fireEvent.contextMenu(row);
+    await user.click(await screen.findByRole("menuitem", { name: "Open worktree in Git" }));
+    expect(onOpenRegisteredWorktree).toHaveBeenCalledWith(linked, { workspace: "git", target: expect.any(String) });
+    const destination = vi.mocked(onOpenRegisteredWorktree).mock.calls.at(0)?.[1];
+    expect(isGitCheckoutTarget(destination?.target)).toBe(true);
+    expect(openWorkspace).not.toHaveBeenCalled();
   });
 
   it("moves keyboard focus between a job, its details, and the active filter", async () => {

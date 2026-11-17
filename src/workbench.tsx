@@ -291,6 +291,7 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
           </PanelResizeScope>}
           {realQueue && <ResizablePanel className="work-queue-panel" edge="top" resizeKey="queue" resizeLabel="queue" hidden={Boolean(preview) || realQueue !== "open"}>
             <Suspense fallback={loading}><QueuePanel {...real} focusJob={queueFocus}
+              onOpenRegisteredWorktree={(source, destination) => onSelectCheckout(source, undefined, destination)}
               active={!preview && realQueue === "open"} onClose={() => setRealQueue("closed")} /></Suspense>
           </ResizablePanel>}
           {previewQueue && simulated && <ResizablePanel className="work-queue-panel" edge="top" resizeKey="example-queue" resizeLabel="queue" key={"simulation-queue:" + preview?.epoch} hidden={previewQueue !== "open"}>

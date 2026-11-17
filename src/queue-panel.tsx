@@ -5,14 +5,14 @@ import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { Provider } from "@/bindings/Provider";
 import type { SessionMode } from "@/bindings/SessionMode";
 import { deliveryBranch, deliveryModels, deliveryRunId, deliveryTaskId, modelName } from "@/tasks-demo-data";
-import LiveQueue from "@/queue-live";
+import LiveQueue, { type LiveQueueProps } from "@/queue-live";
 import {
   AddQueueJobButton, PendingQueueJobActions, QueueButton, QueueEmpty, QueueJobActions, QueueJobFacts, QueueJobForm,
   QueueLayout, QueuePauseButton, QueueRecoveryButton, type QueueJobDraft,
 } from "@/queue-layout";
 import { matchesQueueView, type JobState, type QueueView } from "@/queue-model";
 import { InlineIssue } from "@/tasks-git-ui";
-import type { DeliveryAction, DeliveryStep, QueueJobFocus, WorkspaceProps } from "@/workbench-contract";
+import type { DeliveryAction, DeliveryStep, WorkspaceProps } from "@/workbench-contract";
 
 interface Job {
   id: string;
@@ -58,7 +58,7 @@ function SimulatedJobForm({ parent, onAdd, onCancel }: { parent?: Job; onAdd: (d
     allowWrite={!parent || parent.mode === "approved_write"} onSubmit={onAdd} onCancel={onCancel} />;
 }
 
-export default function QueuePanel(props: WorkspaceProps & { onClose?: () => void; active?: boolean; focusJob?: QueueJobFocus }) {
+export default function QueuePanel(props: LiveQueueProps) {
   return props.simulation ? <SimulatedQueue {...props} /> : <LiveQueue {...props} />;
 }
 
