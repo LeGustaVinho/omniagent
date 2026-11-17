@@ -1542,8 +1542,8 @@ test("runs fixtures in the Windows desktop", { timeout: 240_000 }, async (t) => 
 test("recovers unsent chat and dirty source after a Windows desktop crash and retains deleted history links", { timeout: 120_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Recovery checkout");
-  const path = "recovery-source.ts";
-  const original = "// recover this buffer";
+  const path = "RecoverySource.cs";
+  const original = 'class RecoverySource { string Value = "draft"; } // buffer';
   const edited = `${original}x`;
   git(scratch, "init", "-q", repo);
   await writeFile(join(repo, path), original);
@@ -1602,6 +1602,11 @@ test("recovers unsent chat and dirty source after a Windows desktop crash and re
       return { ide, text };
     };
     const { text } = await openSource();
+    await browser.waitUntil(() => browser.execute(() => {
+      const tokens = document.querySelectorAll('.code-editor .view-lines span[class^="mtk"]');
+      const colors = new Set([...tokens].map((token) => getComputedStyle(token).color));
+      return colors.size > 1;
+    }), { timeout: 5_000, timeoutMsg: "The C# source should render with syntax highlighting" });
     await text.click();
     await browser.waitUntil(() => browser.execute(() => !!document.activeElement?.closest(".code-editor .monaco-editor")),
       { timeout: 5_000, timeoutMsg: "The source editor did not receive keyboard focus" });

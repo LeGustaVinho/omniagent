@@ -15,15 +15,6 @@ export interface CodeModel {
   synchronizing: boolean;
 }
 
-function languageFor(path: string) {
-  const extension = path.split(".").at(-1);
-  const languages: Record<string, string> = {
-    ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", json: "json",
-    css: "css", html: "html", rs: "rust", toml: "ini", ps1: "powershell", txt: "plaintext",
-  };
-  return languages[extension ?? ""] ?? "plaintext";
-}
-
 export function CodeEditor({ scope, path, content, models, update, problems, jump }: {
   scope: string;
   path: string;
@@ -52,7 +43,8 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
       const uri = monaco.Uri.from({ scheme: "omni-source", path: `/${scope}/${path}` });
       let record = models.get(path);
       if (!record) {
-        const model = monaco.editor.createModel(fresh.current.content, languageFor(path), uri);
+        const language = /\.toml$/i.test(path) ? "ini" : undefined;
+        const model = monaco.editor.createModel(fresh.current.content, language, uri);
         record = {
           model,
           synchronizing: false,
