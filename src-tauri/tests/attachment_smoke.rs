@@ -949,12 +949,31 @@ async fn verify_fallback_routes(provider: Provider, model: &str) -> Result<()> {
             })
             .filter_map(|entry| entry.path.file_name())
             .collect();
+        let previous = serde_json::to_value(&capability_scope)?;
+        let current = serde_json::to_value(&observed)?;
+        let differing_fields = |before: &Value, after: &Value| -> Result<Vec<String>> {
+            let before = before
+                .as_object()
+                .context("Expected previous capability fields")?;
+            let after = after
+                .as_object()
+                .context("Expected current capability fields")?;
+            Ok(before
+                .keys()
+                .chain(after.keys())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .filter(|key| before.get(*key) != after.get(*key))
+                .cloned()
+                .collect())
+        };
+        let scope_changes = differing_fields(&previous, &current)?;
+        let config_changes =
+            differing_fields(&previous["configuration"], &current["configuration"])?;
         bail!(
-            "{provider:?} did not apply the qualified request envelope ({run_status:?}). Matching scope: {}, observed model: {:?} -> {:?}, matching configuration: {}, changed sources: {changed_sources:?}, matching unresolved paths: {}, plugin inventory: {prior_plugin_status:?} -> {plugin_status:?}",
-            capability_scope == observed,
+            "{provider:?} did not apply the qualified request envelope ({run_status:?}). Scope changes: {scope_changes:?}, observed model: {:?} -> {:?}, configuration changes: {config_changes:?}, changed sources: {changed_sources:?}, matching unresolved paths: {}, plugin inventory: {prior_plugin_status:?} -> {plugin_status:?}",
             capability_scope.reported_model,
             observed.reported_model,
-            capability_scope.configuration == observed.configuration,
             capability_scope.configuration.unresolved == observed.configuration.unresolved,
         );
     }

@@ -1169,4 +1169,57 @@ mod tests {
         assert!(!directory.exists());
         Ok(())
     }
+
+    #[test]
+    fn checkout_reference_rejects_a_junction_added_after_preview() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = dunce::canonicalize(temp.path())?;
+        let checkout = root.join("checkout");
+        let inside = checkout.join("docs");
+        let outside = root.join("outside");
+        for directory in [&checkout, &inside, &outside] {
+            std::fs::create_dir(directory)?;
+        }
+        for directory in [&inside, &outside] {
+            std::fs::write(directory.join("reference.txt"), b"same content")?;
+        }
+        let source = AttachmentSource::Checkout {
+            relative_path: std::path::PathBuf::from("docs").join("reference.txt"),
+        };
+        let preview = AttachmentPreview::read_with_delivery(
+            &checkout,
+            source.clone(),
+            AttachmentDelivery::Reference,
+        )?;
+        let captured = preview.capture(&checkout, AttachmentLimits::default())?;
+        std::fs::remove_file(inside.join("reference.txt"))?;
+        std::fs::remove_dir(&inside)?;
+        let junction = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "New-Item -ItemType Junction -Path $env:OMNI_TEST_JUNCTION -Target $env:OMNI_TEST_TARGET -ErrorAction Stop | Out-Null",
+            ])
+            .env("OMNI_TEST_JUNCTION", &inside)
+            .env("OMNI_TEST_TARGET", &outside)
+            .output()?;
+        ensure!(
+            junction.status.success(),
+            "could not create the Windows junction fixture: {}",
+            String::from_utf8_lossy(&junction.stderr)
+        );
+        assert_eq!(
+            std::fs::read(inside.join("reference.txt"))?,
+            b"same content"
+        );
+        let new_preview =
+            AttachmentPreview::read_with_delivery(&checkout, source, AttachmentDelivery::Reference);
+        let revalidation = captured.validate_reference(&checkout);
+        std::fs::remove_dir(&inside)?;
+        assert!(new_preview.is_err());
+        assert!(revalidation.is_err());
+        assert!(outside.join("reference.txt").is_file());
+        Ok(())
+    }
 }
