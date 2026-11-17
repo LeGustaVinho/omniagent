@@ -23,7 +23,9 @@ pub fn remove_pipeline_automation_and_context_tables(db: &Connection) -> Result<
          DROP TABLE workflow_backlog_tasks;
          DROP TABLE workflow_backlog_epics;
          DROP TABLE workflow_automatic_agents;
-         DROP TABLE workflow_automatic_runs;",
+         DROP TABLE workflow_automatic_runs;
+         DROP TABLE conversation_library_organization;
+         DROP TABLE conversation_library_sections;",
     )?;
     Ok(())
 }
