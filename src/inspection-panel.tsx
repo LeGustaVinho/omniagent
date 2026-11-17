@@ -215,7 +215,8 @@ function RecordedConversationRun({ conversationId, projectId, checkoutId, runId,
       { id: "timeline", name: "Timeline", content: <>
         <h3>Events</h3>
         <ConversationActivityTimeline {...scope} projection={projection} />
-        <RunPlanHistory projectId={projectId} runId={runId} openActivity={openActivity} />
+        <RunPlanHistory projectId={projectId} runId={runId} openActivity={openActivity}
+          draftDestination={{ checkoutId, open: (id) => { openWorkspace("conversations", id); onClose(); } }} />
       </> },
       { id: "agents", name: "Agents", content: <ConversationActivityAgents {...scope} projection={projection} openActivity={openActivity} /> },
       { id: "context", name: "Context", content: <ConversationActivityContext {...scope} projectId={projectId} projection={projection} /> },
