@@ -129,7 +129,7 @@ button:disabled { cursor: default; }
   border-radius: 8px;
   box-shadow: 0 10px 26px #0006;
 }
-.work-project-popover button {
+.work-project-option {
   width: 100%;
   display: flex;
   align-items: center;
@@ -138,10 +138,10 @@ button:disabled { cursor: default; }
   padding: 7px;
   text-align: left;
 }
-.work-project-popover button:hover, .work-project-popover button[aria-current] { background: var(--muted); }
-.work-project-popover button svg { flex: none; }
-.work-project-popover button span { display: grid; min-width: 0; font-size: 13px; }
-.work-project-popover button small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground); }
+.work-project-option:hover, .work-project-option[aria-current] { background: var(--muted); }
+.work-project-option svg { flex: none; }
+.work-project-option span { display: grid; min-width: 0; font-size: 13px; }
+.work-project-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground); }
 
 .work-mark, .work-start-icon {
   display: grid;

@@ -159,10 +159,10 @@ it("compares live paths and sends the current index, branch and HEAD for each st
   await user.click(screen.getByRole("button", { name: "Worktrees" }));
   const table = screen.getByRole("table", { name: "Git worktrees" });
   const external = within(table).getByRole("row", { name: /C:\/external/ });
-  expect((within(external).getByRole("button") as HTMLButtonElement).disabled).toBe(true);
+  expect(within(external).getByRole<HTMLButtonElement>("button", { name: "Use worktree" }).disabled).toBe(true);
   const linked = within(table).getByRole("row", { name: /C:\/linked/ });
-  await user.click(within(linked).getByRole("button", { name: "Use worktree" }));
-  await user.click(screen.getByRole("button", { name: "History" }));
+  fireEvent.contextMenu(within(linked).getByText("C:/linked"));
+  await user.click(await screen.findByRole("menuitem", { name: "Open worktree history" }));
   await user.selectOptions(await screen.findByLabelText("History branch"), "refs/heads/feature");
   await screen.findByText("Linked history");
   expect(invoke).toHaveBeenCalledWith("git_checkout_history", { checkoutId: "linked-task", branch: "refs/heads/feature" });

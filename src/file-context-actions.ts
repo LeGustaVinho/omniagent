@@ -85,5 +85,5 @@ export function fileContextActions({ checkout, simulated, status, report }: {
       ...(!simulated ? [{ label: "Absolute path", run: () => copy(absolute, "Copied absolute path") }] : []),
     ], disabled: !path && simulated }]];
   }
-  return { copy, location };
+  return { copy, location, reveal: (path: string) => shell(path, "reveal") };
 }

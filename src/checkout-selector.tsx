@@ -5,6 +5,8 @@ import { Popover } from "radix-ui";
 import { useState } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
+import { ContextActions } from "@/components/ui/context-actions";
+import { fileContextActions } from "@/file-context-actions";
 
 function basename(path: string) {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
@@ -18,6 +20,7 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
   const registered = useQuery({
     queryKey: ["registered-checkouts"],
     queryFn: () => invoke<ProjectCheckout[]>("registered_checkouts"),
@@ -27,6 +30,7 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
   async function select(checked: ProjectCheckout) {
     setPending(true);
     setError("");
+    setStatus("");
     try {
       await onSelect(checked);
       setOpen(false);
@@ -53,15 +57,27 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
         <h2 className="text-[13px] font-semibold">Repositories and worktrees</h2>
         {registered.isPending && <p role="status">Loading checkouts…</p>}
         {(error || registered.error) && <p role="alert">{error || String(registered.error)}</p>}
+        {status && <p role="status">{status}</p>}
         {registered.data?.length === 0 && <p>No registered repositories yet.</p>}
         <ul>
-          {registered.data?.map((item) => <li key={item.checkoutId}>
-            <button type="button" aria-current={item.checkoutId === checkout?.checkoutId ? "true" : undefined}
-              disabled={pending} onClick={() => void select(item)} title={item.checkoutRoot}>
-              {item.checkoutRoot === item.repositoryRoot ? <FolderGit2 size={16} /> : <GitFork size={16} />}
-              <span><strong>{basename(item.repositoryRoot)}</strong><small>{item.checkoutRoot}</small></span>
-            </button>
-          </li>)}
+          {registered.data?.map((item) => {
+            const selected = item.checkoutId === checkout?.checkoutId;
+            const actions = fileContextActions({ checkout: item, simulated: false, status: setStatus,
+              report: (message) => { setStatus(""); setError(message); } });
+            return <li key={item.checkoutId}>
+              <ContextActions label={item.checkoutRoot} groups={[[
+                { label: "Use this worktree", disabled: selected || pending, run: () => void select(item) },
+                { label: "Copy repository path", run: () => actions.copy(item.repositoryRoot, "Copied repository path") },
+                { label: "Copy checkout ID", run: () => actions.copy(item.checkoutId, "Copied checkout ID") },
+              ], ...actions.location({ kind: "root", path: "" })]}>
+                <button className="work-project-option" type="button" aria-current={selected ? "true" : undefined}
+                  disabled={pending} onClick={() => void select(item)} title={item.checkoutRoot}>
+                  {item.checkoutRoot === item.repositoryRoot ? <FolderGit2 size={16} /> : <GitFork size={16} />}
+                  <span><strong>{basename(item.repositoryRoot)}</strong><small>{item.checkoutRoot}</small></span>
+                </button>
+              </ContextActions>
+            </li>;
+          })}
         </ul>
       </Popover.Content>
     </Popover.Portal>
