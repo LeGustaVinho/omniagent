@@ -882,7 +882,10 @@ export function WorkflowPackageReview({ projectId, draftId, savedRevision }: { p
   const preview = usePackagePreview(projectId, draftId, revision, open);
   const member = preview.data?.members.find(({ key }) => key === selection) ?? preview.data?.members[0];
   return <WorkflowBuilderDialog title="Review workflow package" description="Inspect a saved revision and try its stages with sample inputs."
-    wide open={open} onOpenChange={setOpen} trigger={<Button type="button" variant="outline">
+    wide open={open} onOpenChange={(next) => {
+      if (next) setRevision(savedRevision);
+      setOpen(next);
+    }} trigger={<Button type="button" variant="outline">
       <FlaskConical size={15} aria-hidden /> Review changes and simulate
     </Button>}>
     {open && <section className="pipeline-stack pipeline-form" aria-label="Review workflow package">

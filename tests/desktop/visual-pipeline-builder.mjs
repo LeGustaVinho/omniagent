@@ -785,7 +785,7 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
     initialPipeline.references[id] = { source: "draft", key };
     packageDocument.members.push({
       key, name: id, destination: "project",
-      body: { kind: "prompt", prompt: { text: "Review the candidate.", executor: "agent", inputs: {}, outputs: {}, routes: [], delegates: [] } },
+      body: { kind: "prompt", prompt: { text: "Review the candidate.", executor: "agent", inputs: {}, outputs: {}, routes: ["concluido"], delegates: [] } },
       references: { role: { source: "draft", key: "fixture-role" } },
     });
   }
@@ -801,7 +801,8 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
   const promptSettings = inspector.$('[aria-label="Prompt settings"]');
   await select(inspector, "Inspect node", "prompt");
   await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Card title']/input"), "Evaluate changes");
-  await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Prompt']/textarea"), "Evaluate the desktop prompt fixture.");
+  const promptText = promptSettings.$('textarea[placeholder="Describe the work and expected result."]');
+  await replaceText(browser, promptText, "Evaluate the desktop prompt fixture.");
   await click(promptSettings.$("summary*=Inputs and outputs"));
   await click(promptSettings.$("button=Suggest with AI"));
   const suggestion = browser.$('[role="dialog"].workflow-builder-dialog');
@@ -814,7 +815,7 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
 
   await select(inspector, "Inspect node", "prompt-2");
   await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Card title']/input"), "Read summary");
-  await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Prompt']/textarea"), "Read the desktop prompt fixture summary.");
+  await replaceText(browser, promptText, "Read the desktop prompt fixture summary.");
   await click(promptSettings.$("summary*=Inputs and outputs"));
   await click(promptSettings.$("button=Add input"));
   await replaceText(browser, promptSettings.$(".//label[normalize-space(.)='Input 1 name']/input"), "summary");
@@ -849,6 +850,13 @@ export async function verifyVisualPromptBuilder({ browser, checkout, invoke, cap
 
   await click(browser.$("button=Review changes and simulate"));
   const review = browser.$('[role="dialog"].workflow-builder-dialog');
+  const reviewRevision = review.$(".//label[starts-with(normalize-space(.), 'Review saved revision')]/select");
+  await reviewRevision.waitForDisplayed({ timeout });
+  assert.equal(await reviewRevision.getValue(), saved.revision);
+  const preview = await invoke(browser, "preview_workflow_package_revision", { ...draftScope, revision: saved.revision });
+  const pipelinePreview = preview.members.find(({ key }) => key === "pipeline");
+  assert.equal(pipelinePreview.simulatable, true, pipelinePreview.diagnostics.join("\n"));
+  assert.ok(pipelinePreview.sampleNodes.some(({ prompt }) => prompt), "The reviewed revision should expose Prompt samples");
   await click(review.$("summary=Prompt responses"));
   const chooseRoute = review.$('select[aria-label="Sample route for prompt::execute"]');
   async function simulateRoute(route) {
