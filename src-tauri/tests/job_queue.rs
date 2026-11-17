@@ -23,6 +23,7 @@ use omniagent::{
 mod schema;
 
 fn remove_recent_schema(db: &rusqlite::Connection) -> Result<()> {
+    schema::remove_pipeline_automation_and_context_tables(db)?;
     schema::restore_question_view_before_structured_planning(db)?;
     db.execute_batch(
         "DROP TABLE workflow_agile_stage_actions;

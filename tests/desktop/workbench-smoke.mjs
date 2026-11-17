@@ -2275,17 +2275,24 @@ test("converts IDE encoding and line endings only after reviewing the saved byte
     await click(browser, '.work-rail button[aria-label="IDE"]');
     const ide = browser.$('[aria-label="IDE workspace"]');
     await click(ide, `button=${file}`);
+    const focusMenuItem = async (label) => {
+      const item = browser.$(`//*[@role="menuitem"][normalize-space(.)="${label}"]`);
+      await item.waitForDisplayed();
+      assert.equal(await browser.execute((text) => {
+        const target = [...document.querySelectorAll('[role="menuitem"]')]
+          .find((entry) => entry.textContent?.trim() === text);
+        if (!(target instanceof HTMLElement)) return false;
+        target.focus();
+        return document.activeElement === target;
+      }, label), true);
+    };
     const review = async (saved, action, option) => {
       const format = ide.$(`[aria-label="Saved file format ${saved}"]`);
       await format.waitForDisplayed();
       await format.click({ button: "right" });
-      const menu = browser.$(`//*[@role="menuitem"][normalize-space(.)="${action}"]`);
-      await menu.waitForDisplayed();
-      await browser.execute((item) => item.focus(), menu);
+      await focusMenuItem(action);
       await browser.keys(Key.ArrowRight);
-      const choice = browser.$(`//*[@role="menuitem"][normalize-space(.)="${option}"]`);
-      await choice.waitForDisplayed();
-      await browser.execute((item) => item.focus(), choice);
+      await focusMenuItem(option);
       await browser.keys(Key.Enter);
       const dialog = browser.$('[role="dialog"].file-dialog');
       await dialog.waitForDisplayed();
