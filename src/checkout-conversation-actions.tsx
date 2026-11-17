@@ -10,7 +10,7 @@ import { FileDialog, type FileTreeTarget } from "@/ide-file-workspace";
 import { fileName } from "@/ide-knowledge-data";
 
 const newConversation = "new";
-type ContextText = { title: string; reference: string; text: string; language?: string };
+type ContextText = { title: string; reference: string; text: string; language?: string; confirmSource?: () => Promise<void> };
 
 export function useCheckoutConversationActions(checkoutId: string, simulated: boolean, openConversation: (id: string) => void) {
   const client = useQueryClient();
@@ -79,6 +79,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
     setBusy(true);
     setError("");
     try {
+      await excerpt?.selection.confirmSource?.();
       let conversationId = destination;
       if (destination === newConversation) {
         const title = excerpt?.selection.title ?? (targets?.length === 1 ? fileName(targets[0]!.path) : "Selected checkout files");

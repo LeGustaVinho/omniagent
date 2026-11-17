@@ -87,7 +87,7 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
     <Button type="button" variant="ghost" aria-label="Refresh Git review" title="Refresh Git review" onClick={() => void review.refetch()}><RefreshCw size={15} aria-hidden /></Button>
   </>}>
     {tab === "Saved attempts" ? <SavedGitDiffs projectId={props.checkout.projectId} target={savedWorktree ? undefined : props.target}
-      worktree={savedWorktree} openActivity={props.openActivity} /> : <>
+      worktree={savedWorktree} workspace={props} openActivity={props.openActivity} /> : <>
       {review.isPending && <p role="status" className="p-4 text-sm text-muted-foreground">Loading Git review…</p>}
       {review.error && <div className="p-4"><InlineIssue>{String(review.error)}</InlineIssue></div>}
       {review.data && !review.error && <>

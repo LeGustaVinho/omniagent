@@ -28,7 +28,7 @@ export default function ChangesPanel(props: ChangesPanelProps) {
   const activeSource = source ?? (saved ? "saved" : "working");
   if (simulation) return <SimulatedChanges key={activeSource} {...props} simulation={simulation} source={activeSource} />;
   if (activeSource === "saved") return <SavedGitDiffs key={checkout.projectId}
-    projectId={checkout.projectId} target={target} openActivity={openActivity} onClose={onClose} />;
+    projectId={checkout.projectId} target={target} workspace={props} openActivity={openActivity} onClose={onClose} />;
   return <LiveChanges key={checkout.checkoutId} {...props} source={activeSource === "staged" ? "staged" : "working"} />;
 }
 
