@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use omniagent::{
     conversations::SessionScope,
     dispatch::EventSource,
@@ -17,7 +18,8 @@ use omniagent::{
             EvidenceOrigin, ObservedResult, PolicyBlocker,
         },
         profiles::{ConfiguredExecutable, DESKTOP_PERMISSION_REVISION, desktop_profile, probe_cli},
-        side::{self, SideInput, SideOutcome, SidePin, SideRoute, SideSource},
+        side::{self, OutputFixture, SideInput, SideOutcome, SidePin, SideRoute, SideSource},
+        suggestions::SuggestionOutcome,
     },
     repository,
     runner::{CONTRACT_VERSION, DirectWindowsRunner, LaunchRequest, Runner},
@@ -25,6 +27,7 @@ use omniagent::{
     store::Store,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 fn input(id: &str, source: Option<SideSource>, question: &str) -> SideInput {
     SideInput {
@@ -313,7 +316,7 @@ async fn desktop_claude_validates_side_requests_and_reuses_the_scoped_proof() ->
 }
 
 #[tokio::test]
-#[ignore = "requires an identifiable signed-in Codex CLI and GPT-6 Luna model usage"]
+#[ignore = "requires an identifiable signed-in Codex CLI, GPT-6 Luna, a browser, and Windows speech synthesis"]
 async fn desktop_codex_validates_side_requests_and_reuses_the_scoped_proof() -> Result<()> {
     desktop_validates_side_requests(Provider::Codex).await
 }
@@ -327,7 +330,8 @@ async fn desktop_validates_side_requests(provider: Provider) -> Result<()> {
         .current_dir(&path)
         .status()?;
     assert!(status.success());
-    let store = Store::open(fixture.path().join("fixture.sqlite"))?;
+    let database = fixture.path().join("fixture.sqlite");
+    let store = Store::open(database.clone())?;
     let checkout = dunce::canonicalize(path)?;
     let project = repository::register(&store, checkout.clone()).await?;
     let conversation = store
@@ -502,23 +506,24 @@ async fn desktop_validates_side_requests(provider: Provider) -> Result<()> {
 
     let current = store.conversation(conversation.id.clone()).await?;
     let enqueue = |purpose, question: &str| {
-        let (store, id, context, scope, question) = (
+        let (store, id, context, source, scope, question) = (
             store.clone(),
             current.id.clone(),
             current.context_id.clone(),
+            (purpose == SidePurpose::Suggestion).then(|| source_run.clone()),
             scope.clone(),
             question.to_owned(),
         );
         async move {
             let result = store
-                .enqueue_side_request(id, Some(context), None, scope, purpose, question)
+                .enqueue_side_request(id, Some(context), source, scope, purpose, question)
                 .await?;
             match result {
                 SideSubmission::Queued { job_id } => Ok(job_id),
                 SideSubmission::Unavailable { reason, .. } => {
                     bail!("side request was unavailable: {reason:?}")
                 }
-                SideSubmission::Skipped => bail!("side request was skipped"),
+                SideSubmission::Skipped => bail!("{purpose:?} side request was skipped"),
             }
         }
     };
@@ -574,29 +579,123 @@ async fn desktop_validates_side_requests(provider: Provider) -> Result<()> {
     store
         .set_composer_suggestion_mode(ComposerSuggestionMode::Omniagent)
         .await?;
-    let suggestion_id = enqueue(SidePurpose::Suggestion, "").await?;
-    wait(suggestion_id)
-        .await
-        .context("running a suggestion in the same queue")?;
-    let records = store.saved_side_requests(current.id.clone()).await?;
-    let suggested = records
-        .iter()
-        .find(|record| record.purpose == SidePurpose::Suggestion)
-        .and_then(|record| record.response.as_ref())
-        .context("missing composer suggestion attempt")?;
-    assert!(
-        matches!(&suggested.outcome, SideOutcome::Answered { text, .. } if !text.trim().is_empty())
-    );
+    match store
+        .composer_native_suggestion(
+            current.id.clone(),
+            current.context_id.clone(),
+            source_run.clone(),
+            scope.clone(),
+        )
+        .await?
+    {
+        SuggestionOutcome::Unavailable => {
+            let suggestion_id = enqueue(SidePurpose::Suggestion, "").await?;
+            wait(suggestion_id)
+                .await
+                .context("running a suggestion in the same queue")?;
+            let records = store.saved_side_requests(current.id.clone()).await?;
+            let suggested = records
+                .iter()
+                .find(|record| record.purpose == SidePurpose::Suggestion)
+                .and_then(|record| record.response.as_ref())
+                .context("missing composer suggestion attempt")?;
+            assert!(
+                matches!(&suggested.outcome, SideOutcome::Answered { text, .. } if !text.trim().is_empty())
+            );
+        }
+        SuggestionOutcome::Available { text } => assert!(!text.trim().is_empty()),
+        outcome => bail!("suggestion did not settle on the source run: {outcome:?}"),
+    }
+    let mut output_runs = Vec::new();
+    if provider == Provider::Codex {
+        for (fixture, kind) in [
+            (OutputFixture::AudioGeneration, "audio_generation"),
+            (OutputFixture::BrowserControl, "browser_control"),
+            (OutputFixture::HostControl, "host_control"),
+        ] {
+            let queued = store
+                .enqueue_side_request_with_fixture(
+                    current.id.clone(),
+                    Some(current.context_id.clone()),
+                    Some(source_run.clone()),
+                    scope.clone(),
+                    SidePurpose::Validation,
+                    String::new(),
+                    Some(fixture),
+                )
+                .await?;
+            let SideSubmission::Queued { job_id } = queued else {
+                bail!(
+                    "the profile did not admit the {kind} fixture: {}",
+                    serde_json::to_string(&queued)?
+                );
+            };
+            wait(job_id.clone())
+                .await
+                .with_context(|| format!("running the {kind} fixture"))?;
+            output_runs.push((job_id, fixture, kind));
+        }
+    }
     let history = store.conversation_history(current.id.clone()).await?;
     assert_eq!(history.messages.len(), 2);
     assert_eq!(
         serde_json::to_value(
             store
-                .dispatch_profile_evidence(job.project_id, current.id, source_run)
+                .dispatch_profile_evidence(
+                    job.project_id.clone(),
+                    current.id.clone(),
+                    source_run.clone()
+                )
                 .await?
         )?,
         historical,
     );
     scheduler.shutdown().await?;
+    if !output_runs.is_empty() {
+        let reopened = Store::open(database)?;
+        let saved = reopened.saved_side_requests(current.id.clone()).await?;
+        for (job_id, fixture, kind) in output_runs {
+            let record = saved
+                .iter()
+                .find(|record| record.job.id == job_id)
+                .context("missing persisted fixture")?;
+            assert_eq!(record.source_run_id, source_run);
+            assert_eq!(record.output_fixture, Some(fixture));
+            assert_eq!(record.provider, scope.provider);
+            assert_eq!(record.profile_id, scope.profile_id);
+            assert_eq!(record.model, scope.model);
+            let run = record
+                .job
+                .latest_attempt
+                .as_ref()
+                .context("missing fixture attempt")?;
+            assert_eq!(run.status, RunStatus::Succeeded);
+            let receipt = record
+                .response
+                .as_ref()
+                .and_then(|response| response.output_fixture.as_ref())
+                .context("missing provider-correlated fixture receipt")?;
+            assert!(!receipt.provider_call_id.is_empty());
+            assert_eq!(receipt.checked_at, record.evidence_checked_at);
+            assert!(receipt.checked_at.is_some());
+            let result = serde_json::to_value(&receipt.result)?;
+            assert_eq!(result["kind"], kind);
+            let audio = reopened
+                .side_output_fixture_audio(
+                    job.project_id.clone(),
+                    current.id.clone(),
+                    run.run_id.clone(),
+                )
+                .await?;
+            if fixture == OutputFixture::AudioGeneration {
+                let wave = STANDARD.decode(audio.context("missing protected WAV")?)?;
+                assert_eq!(&wave[..4], b"RIFF");
+                assert_eq!(result["sha256"], format!("{:x}", Sha256::digest(&wave)));
+            } else {
+                assert!(audio.is_none());
+            }
+            eprintln!("Verified persisted {kind} on the recorded Codex profile");
+        }
+    }
     Ok(())
 }
