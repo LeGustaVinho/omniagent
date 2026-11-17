@@ -276,7 +276,11 @@ impl RecoverySource {
         // A write may already have affected the candidate even when delivery was uncertain.
         // Keep its recovery pending review until a reconciled worktree checkpoint is available.
         if mode == SessionMode::ApprovedWrite && (self.launch_requested || self.dispatched) {
-            return if self.reconciled_writer { vec![RecoveryAction::Retry] } else { Vec::new() };
+            return if self.reconciled_writer {
+                vec![RecoveryAction::Retry]
+            } else {
+                Vec::new()
+            };
         }
         let mut actions = vec![RecoveryAction::Retry];
         if self.dispatched || self.result_context_id != self.input_context_id {

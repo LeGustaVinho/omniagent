@@ -10,14 +10,18 @@ use omniagent::{
     customizations::CustomizationInventory,
     evidence::FixtureInputEvidence,
     jobs::{
-        AttemptSubagentAudit, ConversationSubagentAudit, ConversationSubagentQuota, ProjectSubagentPolicy,
-        QueueHistoryPolicy, QueueHistorySettings, SubagentAuditPolicy, SubagentLimitMode,
+        AttemptSubagentAudit, ConversationSubagentAudit, ConversationSubagentQuota,
+        ProjectSubagentPolicy, QueueHistoryPolicy, QueueHistorySettings, SubagentAuditPolicy,
+        SubagentLimitMode,
     },
     providers::{
         Provider,
         plugins::{
-            PluginInventory, probe_plugins,
-            management::{ClaudeUserPluginOutcome, ClaudeUserPluginPreview, ClaudeUserPluginRequest},
+            PluginInventory,
+            management::{
+                ClaudeUserPluginOutcome, ClaudeUserPluginPreview, ClaudeUserPluginRequest,
+            },
+            probe_plugins,
         },
         profiles::{CliProbe, ConfiguredExecutable, probe_cli},
     },
@@ -271,7 +275,9 @@ pub async fn settings_patch_allowlist(
     store: State<'_, Store>,
     project_id: String,
 ) -> Result<SettingsPatchAllowlist, String> {
-    store.settings_patch_allowlist(project_id).await
+    store
+        .settings_patch_allowlist(project_id)
+        .await
         .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
 
@@ -282,7 +288,9 @@ pub async fn set_settings_patch_allowlist(
     expected_revision: i64,
     grants: BTreeSet<SettingsAutoGrant>,
 ) -> Result<SettingsPatchAllowlist, String> {
-    store.set_settings_patch_allowlist(project_id, expected_revision, grants).await
+    store
+        .set_settings_patch_allowlist(project_id, expected_revision, grants)
+        .await
         .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
 
@@ -292,7 +300,9 @@ pub async fn settings_proposals(
     project_id: String,
     offset: i64,
 ) -> Result<Vec<SettingsProposal>, String> {
-    store.settings_proposals(project_id, offset).await
+    store
+        .settings_proposals(project_id, offset)
+        .await
         .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
 
@@ -304,7 +314,9 @@ pub async fn review_settings_proposal(
     expected_review_revision: String,
     accept: bool,
 ) -> Result<SettingsProposal, String> {
-    store.review_settings_proposal(project_id, proposal_id, expected_review_revision, accept).await
+    store
+        .review_settings_proposal(project_id, proposal_id, expected_review_revision, accept)
+        .await
         .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
 
@@ -314,7 +326,9 @@ pub async fn template_display_label(
     project_id: String,
     template_id: String,
 ) -> Result<TemplateDisplayLabel, String> {
-    store.template_display_label(project_id, template_id).await
+    store
+        .template_display_label(project_id, template_id)
+        .await
         .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
 
@@ -327,7 +341,15 @@ pub async fn set_template_display_label(
     expected_revision: i64,
     label: Option<String>,
 ) -> Result<TemplateDisplayLabel, String> {
-    store.set_template_display_label(project_id, template_id, template_revision, expected_revision, label).await
+    store
+        .set_template_display_label(
+            project_id,
+            template_id,
+            template_revision,
+            expected_revision,
+            label,
+        )
+        .await
         .map_err(|error| omniagent::diagnostics::preview(&error.to_string()))
 }
 
@@ -361,7 +383,11 @@ pub async fn conversation_subagent_quota(
     run_id: Option<String>,
 ) -> Result<ConversationSubagentQuota, String> {
     let result = match run_id {
-        Some(run) => store.conversation_run_subagent_quota(conversation_id, run).await,
+        Some(run) => {
+            store
+                .conversation_run_subagent_quota(conversation_id, run)
+                .await
+        }
         None => store.conversation_subagent_quota(conversation_id).await,
     };
     result.map_err(|error| error.to_string())
@@ -426,7 +452,10 @@ pub async fn attempt_subagent_audit(
     conversation_id: String,
     run_id: String,
 ) -> Result<Option<AttemptSubagentAudit>, String> {
-    store.attempt_subagent_audit(conversation_id, run_id).await.map_err(|error| error.to_string())
+    store
+        .attempt_subagent_audit(conversation_id, run_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -482,7 +511,10 @@ pub async fn cli_executables(store: State<'_, Store>) -> Result<Vec<ConfiguredEx
 pub async fn desktop_cli_prerequisites(
     store: State<'_, Store>,
 ) -> Result<omniagent::providers::profiles::DesktopCliPrerequisites, String> {
-    store.desktop_cli_prerequisites().await.map_err(|error| error.to_string())
+    store
+        .desktop_cli_prerequisites()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

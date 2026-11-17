@@ -43,7 +43,10 @@ pub enum BuiltinNode {
 
 impl BuiltinNode {
     pub(super) fn generated_iteration(self) -> bool {
-        matches!(self, Self::ForEachBegin | Self::ForEachGate | Self::ForEachCollect)
+        matches!(
+            self,
+            Self::ForEachBegin | Self::ForEachGate | Self::ForEachCollect
+        )
     }
 
     pub(super) fn per_unit(self) -> bool {
@@ -132,16 +135,27 @@ pub enum NodeConfiguration {
         role: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<ModelSelection>,
-        #[serde(default, skip_serializing_if = "super::stage_requirements::StageRequirementConfiguration::is_empty")]
+        #[serde(
+            default,
+            skip_serializing_if = "super::stage_requirements::StageRequirementConfiguration::is_empty"
+        )]
         requirements: super::stage_requirements::StageRequirementConfiguration,
     },
-    RequiredChecks { names: Vec<String> },
+    RequiredChecks {
+        names: Vec<String>,
+    },
     Command(CommandConfiguration),
     McpTool(McpToolConfiguration),
     // Authoring only. Publication resolves this against the exact referenced preset.
-    PresetOverrides { fields: serde_json::Map<String, serde_json::Value> },
-    Condition { predicate: ConditionPredicate },
-    SubflowEntry { outputs: Vec<Port> },
+    PresetOverrides {
+        fields: serde_json::Map<String, serde_json::Value>,
+    },
+    Condition {
+        predicate: ConditionPredicate,
+    },
+    SubflowEntry {
+        outputs: Vec<Port>,
+    },
     RepeatUntil(super::repetition::RepeatUntilConfiguration),
     BuildList(super::iteration::BuildListConfiguration),
     ForEach(super::iteration::ForEachConfiguration),
@@ -375,7 +389,12 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             Executor::ReportSelectedGit,
             ConfigurationKind::None,
             Effect::ReadEvidence,
-            &[("ready", Control), ("git", Data(GitInspection)), ("review", Data(Review)), ("checks", Data(Checks))],
+            &[
+                ("ready", Control),
+                ("git", Data(GitInspection)),
+                ("review", Data(Review)),
+                ("checks", Data(Checks)),
+            ],
             &[("published", Control), ("report", Data(DiffReport))],
         ),
         (
@@ -438,8 +457,16 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             Executor::ExecuteCommand,
             ConfigurationKind::Command,
             Effect::WriteRepository,
-            &[("ready", Control), ("release", Data(Release)), ("worktree", Data(Worktree))],
-            &[("completed", Control), ("failed", Control), ("result", Data(CommandResult))],
+            &[
+                ("ready", Control),
+                ("release", Data(Release)),
+                ("worktree", Data(Worktree)),
+            ],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("result", Data(CommandResult)),
+            ],
         ),
         (
             McpTool,
@@ -448,7 +475,11 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             ConfigurationKind::McpTool,
             Effect::InvokeLocalTool,
             &[("ready", Control), ("arguments", Evidence)],
-            &[("completed", Control), ("failed", Control), ("result", Data(McpToolResult))],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("result", Data(McpToolResult)),
+            ],
         ),
         (
             Condition,
@@ -511,7 +542,11 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             ConfigurationKind::BuildList,
             Effect::ReadEvidence,
             &[("ready", Control), ("value", Evidence)],
-            &[("completed", Control), ("failed", Control), ("items", Data(JsonList))],
+            &[
+                ("completed", Control),
+                ("failed", Control),
+                ("items", Data(JsonList)),
+            ],
         ),
         (
             ForEach,
@@ -520,7 +555,11 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             ConfigurationKind::ForEach,
             Effect::None,
             &[("ready", Control), ("items", Data(JsonList))],
-            &[("completed", Control), ("results", Data(IterationResults)), ("failed", Control)],
+            &[
+                ("completed", Control),
+                ("results", Data(IterationResults)),
+                ("failed", Control),
+            ],
         ),
         (
             ForEachBegin,
@@ -529,7 +568,11 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             ConfigurationKind::ForEachBegin,
             Effect::ReadEvidence,
             &[("ready", Control), ("items", Data(JsonList))],
-            &[("ready", Control), ("failed", Control), ("items", Data(JsonList))],
+            &[
+                ("ready", Control),
+                ("failed", Control),
+                ("items", Data(JsonList)),
+            ],
         ),
         (
             ForEachGate,
@@ -537,7 +580,11 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             Executor::GateIterationItem,
             ConfigurationKind::ForEachGate,
             Effect::ReadEvidence,
-            &[("ready", Control), ("items", Data(JsonList)), ("previous", Evidence)],
+            &[
+                ("ready", Control),
+                ("items", Data(JsonList)),
+                ("previous", Evidence),
+            ],
             &[("iterate", Control), ("item", Data(JsonItem))],
         ),
         (
@@ -546,7 +593,12 @@ pub fn builtin_registry() -> Vec<NodeDefinition> {
             Executor::CollectIterationResults,
             ConfigurationKind::ForEachCollect,
             Effect::ReadEvidence,
-            &[("ready", Control), ("items", Data(JsonList)), ("finished", Control), ("result", Evidence)],
+            &[
+                ("ready", Control),
+                ("items", Data(JsonList)),
+                ("finished", Control),
+                ("result", Evidence),
+            ],
             &[("completed", Control), ("results", Data(IterationResults))],
         ),
         (
@@ -613,10 +665,20 @@ impl NodeConfiguration {
     pub(super) fn matches(&self, kind: ConfigurationKind) -> bool {
         match (self, kind) {
             (Self::None, ConfigurationKind::None) => true,
-            (Self::AgentRole { role, model, requirements }, ConfigurationKind::AgentRole) => {
-                !role.trim().is_empty() && requirements.is_valid() && model.as_ref().is_none_or(|selection| {
-                    !selection.profile_id.trim().is_empty() && !selection.model_id.trim().is_empty()
-                })
+            (
+                Self::AgentRole {
+                    role,
+                    model,
+                    requirements,
+                },
+                ConfigurationKind::AgentRole,
+            ) => {
+                !role.trim().is_empty()
+                    && requirements.is_valid()
+                    && model.as_ref().is_none_or(|selection| {
+                        !selection.profile_id.trim().is_empty()
+                            && !selection.model_id.trim().is_empty()
+                    })
             }
             (Self::RequiredChecks { names }, ConfigurationKind::RequiredChecks) => {
                 names.iter().all(|name| !name.trim().is_empty())
@@ -627,12 +689,20 @@ impl NodeConfiguration {
             (Self::SubflowEntry { outputs }, ConfigurationKind::SubflowEntry) => {
                 super::subflow::valid_entry_ports(outputs)
             }
-            (Self::RepeatUntil(configuration), ConfigurationKind::RepeatUntil) => configuration.valid(),
+            (Self::RepeatUntil(configuration), ConfigurationKind::RepeatUntil) => {
+                configuration.valid()
+            }
             (Self::BuildList(configuration), ConfigurationKind::BuildList) => configuration.valid(),
             (Self::ForEach(configuration), ConfigurationKind::ForEach) => configuration.valid(),
-            (Self::ForEachBegin(configuration), ConfigurationKind::ForEachBegin) => configuration.valid(),
-            (Self::ForEachGate(configuration), ConfigurationKind::ForEachGate) => configuration.valid(),
-            (Self::ForEachCollect(configuration), ConfigurationKind::ForEachCollect) => configuration.valid(),
+            (Self::ForEachBegin(configuration), ConfigurationKind::ForEachBegin) => {
+                configuration.valid()
+            }
+            (Self::ForEachGate(configuration), ConfigurationKind::ForEachGate) => {
+                configuration.valid()
+            }
+            (Self::ForEachCollect(configuration), ConfigurationKind::ForEachCollect) => {
+                configuration.valid()
+            }
             _ => false,
         }
     }

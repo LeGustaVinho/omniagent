@@ -38,20 +38,20 @@ use super::{
     },
 };
 
-mod attached_merge;
 mod agile_checklists;
+mod attached_merge;
 mod commit_intent;
+mod delivery_acceptance;
 mod destination_drift;
-mod history_integration;
+mod factory_templates;
 mod history_deletion;
-mod replay_acceptance;
+mod history_integration;
+mod live_cli_acceptance;
 mod maintenance_handoff;
 mod merge_policy;
 mod milestones;
-mod live_cli_acceptance;
-mod delivery_acceptance;
 mod mode_selection;
-mod factory_templates;
+mod replay_acceptance;
 
 #[tokio::test]
 async fn verified_commit_publishes_ordered_units_and_accepts_only_the_manual_working_branch()
@@ -1227,7 +1227,8 @@ async fn capture_implementation(
             fs::write(root.join(name), format!("{name}\n"))?;
         }
         Ok(())
-    }).await
+    })
+    .await
 }
 
 async fn capture_implementation_changes(

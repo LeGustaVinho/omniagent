@@ -33,16 +33,9 @@ async fn published_task_delivery_preserves_order_and_requires_its_verified_merge
                 required: false,
                 action: CandidateGateAction::Command {
                     executable: repository::git_path()?,
-                    arguments: [
-                        "grep",
-                        "-q",
-                        "^first[.]txt$",
-                        "HEAD",
-                        "--",
-                        "first.txt",
-                    ]
-                    .map(str::to_owned)
-                    .to_vec(),
+                    arguments: ["grep", "-q", "^first[.]txt$", "HEAD", "--", "first.txt"]
+                        .map(str::to_owned)
+                        .to_vec(),
                     timeout_seconds: Some(20),
                 },
             }],

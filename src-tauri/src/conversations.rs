@@ -27,13 +27,13 @@ use crate::{
 mod approval_evidence;
 pub mod compaction;
 pub(crate) mod continuation;
-pub mod fork_checkout;
 pub mod draft_files;
+pub mod fork_checkout;
 mod history;
 mod library;
 pub(crate) mod native_fork;
-pub mod references;
 pub(crate) mod reference_delivery;
+pub mod references;
 pub use approval_evidence::{ApprovalDelivery, ConversationApprovalEvidence};
 pub use continuation::{
     ContinuationChoice, ContinuationInspection, ContinuationLevel, ContinuationSettings,
@@ -409,7 +409,13 @@ impl Store {
                     None => (Vec::new(), "clear"),
                 };
                 let context = switch_history(&tx, &conversation_id, &entries)?;
-                history::record_history_replacement(&tx, &conversation_id, &base_id, &context, action)?;
+                history::record_history_replacement(
+                    &tx,
+                    &conversation_id,
+                    &base_id,
+                    &context,
+                    action,
+                )?;
                 tx.commit()?;
                 Ok(context)
             })
@@ -711,12 +717,14 @@ impl Store {
                 | ProviderEventData::QuestionReplySettled { .. }
                 | ProviderEventData::SteeringSettled { .. }
         );
-        let protected_image = if source == EventSource::Provider && event.location.parent_item_id.is_none() {
-            crate::providers::generated_image::take_generated_image_bytes(&mut event.data)
-                .map(|bytes| protection::protect(&bytes)).transpose()?
-        } else {
-            None
-        };
+        let protected_image =
+            if source == EventSource::Provider && event.location.parent_item_id.is_none() {
+                crate::providers::generated_image::take_generated_image_bytes(&mut event.data)
+                    .map(|bytes| protection::protect(&bytes))
+                    .transpose()?
+            } else {
+                None
+            };
         let payload = protection::protect(&serde_json::to_vec(&event)?)?;
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1555,8 +1563,7 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         (
             AttemptHistory::Automatic
             | AttemptHistory::QueuedInstruction {
-                force_fresh: false,
-                ..
+                force_fresh: false, ..
             },
             Some(prior),
             None,
@@ -1587,9 +1594,12 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         && recorded.is_none()
         && matches!(
             history,
-            AttemptHistory::Automatic | AttemptHistory::QueuedInstruction { force_fresh: false, .. }
-        )
-    {
+            AttemptHistory::Automatic
+                | AttemptHistory::QueuedInstruction {
+                    force_fresh: false,
+                    ..
+                }
+        ) {
         native_fork::qualify(db, &conversation, &scope, &allocation, &entries)?
     } else {
         None
@@ -1618,9 +1628,11 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
                 "INSERT INTO agent_sessions(id, conversation_id, scope, native_subagent_limit) VALUES (?1, ?2, ?3, ?4)",
                 params![id, conversation_id, serialized, allocation.native_allowance],
             )?;
-        let (intent, consumed) = native_fork.as_ref().map_or((SessionIntent::Start, 0), |fork| {
-            (fork.intent(), entries.len())
-        });
+        let (intent, consumed) = native_fork
+            .as_ref()
+            .map_or((SessionIntent::Start, 0), |fork| {
+                (fork.intent(), entries.len())
+            });
         (id, None, intent, consumed)
     };
 
@@ -1634,7 +1646,13 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
         input_context_id.clone()
     } else if let AttemptHistory::QueuedInstruction { revision_id, .. } = &history {
         entries.push(revision_id.clone());
-        write_context_from(db, &conversation_id, &entries, recorded.is_none(), Some(input_context_id))?
+        write_context_from(
+            db,
+            &conversation_id,
+            &entries,
+            recorded.is_none(),
+            Some(input_context_id),
+        )?
     } else {
         let encrypted = if let (Some((_, reply)), Some((_, form))) = (&answer, &answered_request) {
             let values = serde_json::json!({"question": form, "answer": reply.values});
@@ -1661,7 +1679,13 @@ fn insert_attempt(db: &Connection, prepared: PreparedAttempt) -> Result<AttemptP
             );
             entries.push(instruction);
         }
-        write_context_from(db, &conversation_id, &entries, recorded.is_none(), Some(input_context_id))?
+        write_context_from(
+            db,
+            &conversation_id,
+            &entries,
+            recorded.is_none(),
+            Some(input_context_id),
+        )?
     };
     let input = load_messages(db, &conversation_id, &entries[consumed..])?;
     let input = match (consumed, compacted) {
@@ -2026,11 +2050,21 @@ fn write_context(
     activate: bool,
 ) -> Result<String> {
     let predecessor: Option<String> = if activate {
-        db.query_row("SELECT active_context_id FROM conversations WHERE id = ?1", [conversation_id], |row| row.get(0))?
+        db.query_row(
+            "SELECT active_context_id FROM conversations WHERE id = ?1",
+            [conversation_id],
+            |row| row.get(0),
+        )?
     } else {
         None
     };
-    write_context_from(db, conversation_id, entries, activate, predecessor.as_deref())
+    write_context_from(
+        db,
+        conversation_id,
+        entries,
+        activate,
+        predecessor.as_deref(),
+    )
 }
 
 fn write_context_from(
@@ -2247,8 +2281,8 @@ mod tests {
 
     mod attachment_composer_acceptance;
     mod comparison;
-    mod stage_plugin_roles;
     mod stage_image_qualification;
+    mod stage_plugin_roles;
     mod stage_requirements_workflow;
 
     use super::*;
@@ -2625,11 +2659,18 @@ mod tests {
                 )
                 .await?;
         }
-        let pending = store.conversation_approvals(chat.id.clone(), first.id.clone()).await?;
+        let pending = store
+            .conversation_approvals(chat.id.clone(), first.id.clone())
+            .await?;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].delivery, ApprovalDelivery::Pending);
         assert_eq!(pending[0].operation, "shell");
-        assert!(store.conversation_approvals(chat.id.clone(), second.id.clone()).await?.is_empty());
+        assert!(
+            store
+                .conversation_approvals(chat.id.clone(), second.id.clone())
+                .await?
+                .is_empty()
+        );
         assert!(
             store
                 .prepare_permission_decision(
@@ -2688,10 +2729,14 @@ mod tests {
             )
             .await?;
         store.recover_agent_attempts_after_restart().await?;
-        let denied = store.conversation_approvals(chat.id.clone(), first.id.clone()).await?;
+        let denied = store
+            .conversation_approvals(chat.id.clone(), first.id.clone())
+            .await?;
         assert_eq!(denied[0].decision, Some(ApprovalDecision::Deny));
         assert_eq!(denied[0].delivery, ApprovalDelivery::Submitted);
-        let unconfirmed = store.conversation_approvals(other.id, second.id.clone()).await?;
+        let unconfirmed = store
+            .conversation_approvals(other.id, second.id.clone())
+            .await?;
         assert_eq!(unconfirmed[0].decision, Some(ApprovalDecision::Cancel));
         assert_eq!(unconfirmed[0].delivery, ApprovalDelivery::Unconfirmed);
         assert!(
@@ -3558,15 +3603,21 @@ mod tests {
             runner: scope.runner.clone(),
             bridge_available: true,
         };
-        let project: String = store.execute({
-            let checkout = conversation.checkout_id.clone();
-            move |db| Ok(db.query_row(
-                "SELECT project_id FROM checkouts WHERE id = ?1",
-                [checkout],
-                |row| row.get(0),
-            )?)
-        }).await?;
-        let task = store.create_project_task(project.clone(), "Goal question task".into()).await?;
+        let project: String = store
+            .execute({
+                let checkout = conversation.checkout_id.clone();
+                move |db| {
+                    Ok(db.query_row(
+                        "SELECT project_id FROM checkouts WHERE id = ?1",
+                        [checkout],
+                        |row| row.get(0),
+                    )?)
+                }
+            })
+            .await?;
+        let task = store
+            .create_project_task(project.clone(), "Goal question task".into())
+            .await?;
         let goal = store
             .start_conversation_goal(
                 JobContext {
@@ -3624,17 +3675,32 @@ mod tests {
         drop(store);
 
         let store = Store::open(database)?;
-        let inspector = store.run_orchestration(
-            project.clone(), attempt.run.id.clone(), Some(conversation.id.clone()),
-        ).await?.context("The goal inspector is unavailable after restart")?;
+        let inspector = store
+            .run_orchestration(
+                project.clone(),
+                attempt.run.id.clone(),
+                Some(conversation.id.clone()),
+            )
+            .await?
+            .context("The goal inspector is unavailable after restart")?;
         let inspector = serde_json::to_value(inspector)?;
-        let goals = store.project_task_goals(project.clone(), task.id.clone()).await?;
-        let linked = serde_json::to_value(goals.first().context("The linked goal is unavailable after restart")?)?;
+        let goals = store
+            .project_task_goals(project.clone(), task.id.clone())
+            .await?;
+        let linked = serde_json::to_value(
+            goals
+                .first()
+                .context("The linked goal is unavailable after restart")?,
+        )?;
         assert_eq!(linked["revisionId"], goal.id);
         assert_eq!(linked["blocker"], "Waiting for input");
         assert_eq!(linked["attempt"]["runId"], attempt.run.id);
         assert_eq!(inspector["goal"], linked);
-        let task_state = serde_json::to_value(store.project_task_delivery_state(project.clone(), task.id).await?)?;
+        let task_state = serde_json::to_value(
+            store
+                .project_task_delivery_state(project.clone(), task.id)
+                .await?,
+        )?;
         assert_eq!(task_state["state"], "blocked");
         assert_eq!(task_state["questionBlocker"]["runId"], attempt.run.id);
         assert_eq!(task_state["questionBlocker"]["requestId"], 44);
@@ -4463,7 +4529,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn goal_verification_checks_each_sealed_criterion_without_completing_the_task() -> Result<()> {
+    async fn goal_verification_checks_each_sealed_criterion_without_completing_the_task()
+    -> Result<()> {
         use crate::jobs::{
             AdmissionEnvironment, GoalCriterionEvidence, GoalCriterionStatus, GoalDefinition,
             GoalTurnAction, GoalTurnReport, GoalVerificationStatus, JobContext,
@@ -4473,8 +4540,12 @@ mod tests {
         scope.executable = std::env::current_exe()?;
         let database = scope.checkout.join("store.sqlite");
         let before = store.conversation(conversation.id.clone()).await?;
-        let project = crate::repository::register(&store, scope.checkout.clone()).await?.project_id;
-        let task = store.create_project_task(project, "Goal result".into()).await?;
+        let project = crate::repository::register(&store, scope.checkout.clone())
+            .await?
+            .project_id;
+        let task = store
+            .create_project_task(project, "Goal result".into())
+            .await?;
         let definition = GoalDefinition {
             objective: "Deliver the goal result for review".into(),
             criteria: vec!["Check output".into(), "Review the exact result".into()],
@@ -4482,65 +4553,189 @@ mod tests {
             max_seconds: None,
             token_budget: None,
         };
-        let goal = store.start_conversation_goal(
-            JobContext { conversation_id: before.id.clone(), context_id: before.context_id },
-            scope.clone(), Some(task.id.clone()), definition.clone(), None,
-        ).await?;
-        let attempt = store.claim_next_job(AdmissionEnvironment {
-            runner: scope.runner.clone(), bridge_available: true,
-        }).await?.context("the goal was not admitted")?;
+        let goal = store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: before.id.clone(),
+                    context_id: before.context_id,
+                },
+                scope.clone(),
+                Some(task.id.clone()),
+                definition.clone(),
+                None,
+            )
+            .await?;
+        let attempt = store
+            .claim_next_job(AdmissionEnvironment {
+                runner: scope.runner.clone(),
+                bridge_available: true,
+            })
+            .await?
+            .context("the goal was not admitted")?;
         let run = attempt.run.id.clone();
         let project = attempt.run.project_id.clone();
-        assert!(store.goal_verification(project.clone(), run.clone()).await?.is_none());
+        assert!(
+            store
+                .goal_verification(project.clone(), run.clone())
+                .await?
+                .is_none()
+        );
         store.mark_agent_running(run.clone()).await?;
         let dispatch = prepare_fixture_dispatch(&store, &attempt).await?;
         store.settle_dispatch(dispatch, Delivery::Submitted).await?;
-        let report = GoalTurnReport { action: GoalTurnAction::Review, evidence: "Agent reported all criteria done.".into() };
-        store.record_goal_turn_report(run.clone(), report.clone()).await?;
-        store.record_agent_observation(run.clone(), EventSource::Provider, ProviderEvent {
-            location: ProviderLocation::default(),
-            data: ProviderEventData::TurnFinished { outcome: TurnOutcome::Completed },
-        }).await?;
-        store.finish_observed_agent_attempt(
-            run.clone(), RunStatus::Succeeded, Some("Recorded output".into()), None, true
-        ).await?;
-        let pending = store.goal_verification(project.clone(), run.clone()).await?.unwrap();
+        let report = GoalTurnReport {
+            action: GoalTurnAction::Review,
+            evidence: "Agent reported all criteria done.".into(),
+        };
+        store
+            .record_goal_turn_report(run.clone(), report.clone())
+            .await?;
+        store
+            .record_agent_observation(
+                run.clone(),
+                EventSource::Provider,
+                ProviderEvent {
+                    location: ProviderLocation::default(),
+                    data: ProviderEventData::TurnFinished {
+                        outcome: TurnOutcome::Completed,
+                    },
+                },
+            )
+            .await?;
+        store
+            .finish_observed_agent_attempt(
+                run.clone(),
+                RunStatus::Succeeded,
+                Some("Recorded output".into()),
+                None,
+                true,
+            )
+            .await?;
+        let pending = store
+            .goal_verification(project.clone(), run.clone())
+            .await?
+            .unwrap();
         assert_eq!(pending.revision_id, goal.id);
         assert_eq!(pending.status, GoalVerificationStatus::Verifying);
-        assert!(pending.criteria.iter().all(|criterion| criterion.status == GoalCriterionStatus::Pending));
-        assert!(store.list_goal_criterion_evidence(project.clone(), run.clone()).await?.is_empty());
-        let approval = |approved| GoalCriterionEvidence::OperatorReview { approved, note: Some("Inspected the recorded result".into()) };
-        assert!(store.record_goal_criterion_evidence("foreign".into(), run.clone(), 1, approval(true)).await.is_err());
-        assert!(store.record_goal_criterion_evidence(project.clone(), run.clone(), 0, approval(true)).await.is_err());
-        assert!(store.record_goal_criterion_evidence(project.clone(), run.clone(), 1,
-            GoalCriterionEvidence::CandidateGate { verification_id: "foreign".into(), gate_index: 0 }
-        ).await.is_err());
-        let failed = store.record_goal_criterion_evidence(project.clone(), run.clone(), 1, approval(false)).await?;
+        assert!(
+            pending
+                .criteria
+                .iter()
+                .all(|criterion| criterion.status == GoalCriterionStatus::Pending)
+        );
+        assert!(
+            store
+                .list_goal_criterion_evidence(project.clone(), run.clone())
+                .await?
+                .is_empty()
+        );
+        let approval = |approved| GoalCriterionEvidence::OperatorReview {
+            approved,
+            note: Some("Inspected the recorded result".into()),
+        };
+        assert!(
+            store
+                .record_goal_criterion_evidence("foreign".into(), run.clone(), 1, approval(true))
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .record_goal_criterion_evidence(project.clone(), run.clone(), 0, approval(true))
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .record_goal_criterion_evidence(
+                    project.clone(),
+                    run.clone(),
+                    1,
+                    GoalCriterionEvidence::CandidateGate {
+                        verification_id: "foreign".into(),
+                        gate_index: 0
+                    }
+                )
+                .await
+                .is_err()
+        );
+        let failed = store
+            .record_goal_criterion_evidence(project.clone(), run.clone(), 1, approval(false))
+            .await?;
         assert_eq!(failed.status, GoalVerificationStatus::Failed);
-        let pending = store.record_goal_criterion_evidence(project.clone(), run.clone(), 1, approval(true)).await?;
+        let pending = store
+            .record_goal_criterion_evidence(project.clone(), run.clone(), 1, approval(true))
+            .await?;
         assert_eq!(pending.status, GoalVerificationStatus::Verifying);
-        let completed = store.record_goal_criterion_evidence(project.clone(), run.clone(), 2, approval(true)).await?;
+        let completed = store
+            .record_goal_criterion_evidence(project.clone(), run.clone(), 2, approval(true))
+            .await?;
         assert_eq!(completed.status, GoalVerificationStatus::Completed);
-        assert_eq!(store.record_goal_criterion_evidence(project.clone(), run.clone(), 2, approval(true)).await?, completed);
-        assert!(store.record_goal_criterion_evidence(project.clone(), run.clone(), 2, approval(false)).await.is_err());
+        assert_eq!(
+            store
+                .record_goal_criterion_evidence(project.clone(), run.clone(), 2, approval(true))
+                .await?,
+            completed
+        );
+        assert!(
+            store
+                .record_goal_criterion_evidence(project.clone(), run.clone(), 2, approval(false))
+                .await
+                .is_err()
+        );
         drop(store);
 
         let store = Store::open(database)?;
-        assert_eq!(store.goal_verification(project.clone(), run.clone()).await?, Some(completed.clone()));
-        let saved = store.active_conversation_goal(conversation.id.clone()).await?.unwrap();
+        assert_eq!(
+            store
+                .goal_verification(project.clone(), run.clone())
+                .await?,
+            Some(completed.clone())
+        );
+        let saved = store
+            .active_conversation_goal(conversation.id.clone())
+            .await?
+            .unwrap();
         assert_eq!(saved.checkpoint.unwrap().report, Some(report));
         assert_eq!(saved.verification, Some(completed.clone()));
-        assert!(store.agent_observations(conversation.id.clone(), run.clone(), 0).await?.iter().any(|event| matches!(
-            event.event.data, ProviderEventData::TurnFinished { outcome: TurnOutcome::Completed }
-        )));
-        assert!(store.project_task_delivery_state(project.clone(), task.id).await?.unwrap().completion.is_none());
+        assert!(
+            store
+                .agent_observations(conversation.id.clone(), run.clone(), 0)
+                .await?
+                .iter()
+                .any(|event| matches!(
+                    event.event.data,
+                    ProviderEventData::TurnFinished {
+                        outcome: TurnOutcome::Completed
+                    }
+                ))
+        );
+        assert!(
+            store
+                .project_task_delivery_state(project.clone(), task.id)
+                .await?
+                .unwrap()
+                .completion
+                .is_none()
+        );
         let current = store.conversation(conversation.id.clone()).await?;
-        let replacement = store.start_conversation_goal(
-            JobContext { conversation_id: conversation.id, context_id: current.context_id },
-            scope, None, definition, None,
-        ).await?;
+        let replacement = store
+            .start_conversation_goal(
+                JobContext {
+                    conversation_id: conversation.id,
+                    context_id: current.context_id,
+                },
+                scope,
+                None,
+                definition,
+                None,
+            )
+            .await?;
         assert_ne!(replacement.id, goal.id);
-        assert_eq!(store.goal_verification(project, run).await?, Some(completed));
+        assert_eq!(
+            store.goal_verification(project, run).await?,
+            Some(completed)
+        );
         Ok(())
     }
 
@@ -5043,8 +5238,7 @@ mod tests {
                 observed("native-session"),
             )
             .await?;
-        let goal_frame =
-            r#"{"id":16,"method":"thread/goal/set","params":{"threadId":"native-session","objective":"Verify the accepted plan"}}"#;
+        let goal_frame = r#"{"id":16,"method":"thread/goal/set","params":{"threadId":"native-session","objective":"Verify the accepted plan"}}"#;
         let prepared_start = ProviderEvent {
             location: ProviderLocation {
                 session_id: Some("native-session".into()),
@@ -5056,7 +5250,9 @@ mod tests {
                 frame: goal_frame.as_bytes().to_vec(),
             },
         };
-        store.record_agent_observation(run.run.id.clone(), EventSource::Application, prepared_start).await?;
+        store
+            .record_agent_observation(run.run.id.clone(), EventSource::Application, prepared_start)
+            .await?;
         let turn = |id: &str, data: ProviderEventData| {
             store.record_agent_observation(
                 run.run.id.clone(),
@@ -5101,9 +5297,15 @@ mod tests {
             },
         )
         .await?;
-        turn("provider-2", ProviderEventData::Usage {
-            input: Some(70), output: Some(50), cached_input: None,
-        }).await?;
+        turn(
+            "provider-2",
+            ProviderEventData::Usage {
+                input: Some(70),
+                output: Some(50),
+                cached_input: None,
+            },
+        )
+        .await?;
         turn("provider-2", completed()).await?;
         let control = |source, data| {
             store.record_agent_observation(
@@ -5259,18 +5461,37 @@ mod tests {
                 ("provider-2".into(), "completed".into(), "provider-2".into()),
             ]
         );
-        let goals = store.project_task_goals(project.clone(), task.id.clone()).await?;
+        let goals = store
+            .project_task_goals(project.clone(), task.id.clone())
+            .await?;
         assert_eq!(goals.len(), 1);
         let evidence = serde_json::to_value(&goals[0])?;
         assert_eq!(evidence["revisionId"], goal.id);
         assert_eq!(evidence["continuationOwner"], "native");
-        assert_eq!(evidence["definition"]["criteria"][0], "Collect fixture evidence");
+        assert_eq!(
+            evidence["definition"]["criteria"][0],
+            "Collect fixture evidence"
+        );
         assert_eq!(evidence["attempt"]["runId"], run.run.id);
         assert_eq!(evidence["evidence"]["nativeStart"]["frame"], goal_frame);
-        assert_eq!(evidence["evidence"]["nativeTurns"].as_array().unwrap().len(), 2);
-        assert_eq!(evidence["evidence"]["nativeObservation"]["observation"]["evaluation"]["evaluator"], "fixture evaluator");
+        assert_eq!(
+            evidence["evidence"]["nativeTurns"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            evidence["evidence"]["nativeObservation"]["observation"]["evaluation"]["evaluator"],
+            "fixture evaluator"
+        );
         assert_eq!(evidence["evidence"]["usage"]["outputTokens"], 50);
-        assert!(store.project_task_goals("foreign".into(), task.id.clone()).await?.is_empty());
+        assert!(
+            store
+                .project_task_goals("foreign".into(), task.id.clone())
+                .await?
+                .is_empty()
+        );
         let revision = store
             .active_pipeline_goal(project, stage.pipeline_run_id, stage.node_instance_id)
             .await?
@@ -5381,8 +5602,12 @@ mod tests {
             let through_revision = if retain_message {
                 let history = store.conversation_history(conversation.id.clone()).await?;
                 Some(
-                    history.messages.first().context("Missing rewind boundary")?
-                        .revision_id.clone(),
+                    history
+                        .messages
+                        .first()
+                        .context("Missing rewind boundary")?
+                        .revision_id
+                        .clone(),
                 )
             } else {
                 None
@@ -5399,7 +5624,11 @@ mod tests {
                 .await?;
             let changed_history = store.conversation_history(conversation.id.clone()).await?;
             assert_eq!(
-                changed_history.messages.iter().map(|message| &message.revision_id).collect::<Vec<_>>(),
+                changed_history
+                    .messages
+                    .iter()
+                    .map(|message| &message.revision_id)
+                    .collect::<Vec<_>>(),
                 through_revision.iter().collect::<Vec<_>>()
             );
             let pending = store
@@ -5545,7 +5774,11 @@ mod tests {
         );
         assert!(store.claim_next_job(env.clone()).await?.is_none());
         let stale = store
-            .resume_goal_after_review(project.clone(), goal.id.clone(), reviewed_before_clear.review_token)
+            .resume_goal_after_review(
+                project.clone(),
+                goal.id.clone(),
+                reviewed_before_clear.review_token,
+            )
             .await
             .unwrap_err();
         assert!(stale.to_string().contains("checkpoint or scope changed"));
@@ -5554,8 +5787,14 @@ mod tests {
             .await?
             .and_then(|overview| overview.transition)
             .context("Missing retained goal review")?;
-        assert_eq!(retained.checkpoint_run_id.as_deref(), Some(first.run.id.as_str()));
-        assert_eq!(retained.checkpoint_context_id, reviewed_before_clear.checkpoint_context_id);
+        assert_eq!(
+            retained.checkpoint_run_id.as_deref(),
+            Some(first.run.id.as_str())
+        );
+        assert_eq!(
+            retained.checkpoint_context_id,
+            reviewed_before_clear.checkpoint_context_id
+        );
         store
             .resume_goal_after_review(project, goal.id, retained.review_token)
             .await?;
@@ -6364,16 +6603,20 @@ mod tests {
         confirm(&store, &original).await?;
         let history = store.conversation_history(conversation.id.clone()).await?;
         let submitted = "/btw Is there a side answer?";
-        store.save_conversation_draft(conversation.id.clone(), submitted.into()).await?;
+        store
+            .save_conversation_draft(conversation.id.clone(), submitted.into())
+            .await?;
         async fn counts(store: &Store) -> Result<(i64, i64, i64)> {
-            store.execute(|db| {
-                Ok(db.query_row(
-                    "SELECT (SELECT count(*) FROM jobs), (SELECT count(*) FROM runs),
+            store
+                .execute(|db| {
+                    Ok(db.query_row(
+                        "SELECT (SELECT count(*) FROM jobs), (SELECT count(*) FROM runs),
                             (SELECT count(*) FROM dispatches)",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )?)
-            }).await
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )?)
+                })
+                .await
         }
         let before = counts(&store).await?;
         scope.provider = Provider::Antigravity;
@@ -6393,8 +6636,16 @@ mod tests {
         drop(store);
         let reopened = Store::open(directory.path().join("store.sqlite"))?;
         assert_eq!(counts(&reopened).await?, before);
-        assert!(reopened.saved_side_requests(conversation.id.clone()).await?.is_empty());
-        assert_eq!(reopened.conversation_draft(conversation.id.clone()).await?, submitted);
+        assert!(
+            reopened
+                .saved_side_requests(conversation.id.clone())
+                .await?
+                .is_empty()
+        );
+        assert_eq!(
+            reopened.conversation_draft(conversation.id.clone()).await?,
+            submitted
+        );
         let after = reopened.conversation_history(conversation.id).await?;
         assert_eq!(after.context_id, history.context_id);
         assert_eq!(after.messages, history.messages);
@@ -6402,8 +6653,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn composer_native_suggestion_uses_only_the_exact_recent_completed_result() -> Result<()> {
-        use crate::{jobs::{ComposerSuggestionMode, SidePurpose, SideSubmission}, providers::suggestions::{SuggestionOutcome, SuggestionSource}};
+    async fn composer_native_suggestion_uses_only_the_exact_recent_completed_result() -> Result<()>
+    {
+        use crate::{
+            jobs::{ComposerSuggestionMode, SidePurpose, SideSubmission},
+            providers::suggestions::{SuggestionOutcome, SuggestionSource},
+        };
 
         let (_dir, store, chat, scope) = setup().await?;
         let attempt = prepare(&store, &chat.id, scope.clone(), "Main prompt").await?;
@@ -6412,38 +6667,151 @@ mod tests {
         let snapshot = prepare_fixture_dispatch_with_capabilities(&store, &attempt, None).await?;
         store.settle_dispatch(snapshot, Delivery::Submitted).await?;
         let location = ProviderLocation {
-            session_id: Some("exact-session".into()), turn_id: Some("exact-turn".into()),
-            item_id: Some("exact-result".into()), ..Default::default()
+            session_id: Some("exact-session".into()),
+            turn_id: Some("exact-turn".into()),
+            item_id: Some("exact-result".into()),
+            ..Default::default()
         };
         let source = SuggestionSource {
-            provider_session_id: "exact-session".into(), provider_turn_id: Some("exact-turn".into()),
-            provider_result_id: Some("exact-result".into()), message_id: attempt.input.last().unwrap().message_id.clone(),
+            provider_session_id: "exact-session".into(),
+            provider_turn_id: Some("exact-turn".into()),
+            provider_result_id: Some("exact-result".into()),
+            message_id: attempt.input.last().unwrap().message_id.clone(),
         };
-        let suggest = |source: SuggestionSource, text: &str| source.settlement(SuggestionOutcome::Available { text: text.into() });
+        let suggest = |source: SuggestionSource, text: &str| {
+            source.settlement(SuggestionOutcome::Available { text: text.into() })
+        };
         for (authority, event) in [
-            (EventSource::Provider, ProviderEvent { location: location.clone(), data: ProviderEventData::SessionReady { model: scope.model.clone(), effort: scope.effort.clone() } }),
-            (EventSource::Provider, suggest(source.clone(), "Premature output")),
-            (EventSource::Provider, ProviderEvent { location, data: ProviderEventData::TurnFinished { outcome: TurnOutcome::Completed } }),
-            (EventSource::Application, suggest(source.clone(), "Untrusted application output")),
-            (EventSource::Provider, suggest(SuggestionSource { message_id: "other-message".into(), ..source.clone() }, "Stale output")),
-            (EventSource::Provider, suggest(source, "Review the timeout handling.")),
+            (
+                EventSource::Provider,
+                ProviderEvent {
+                    location: location.clone(),
+                    data: ProviderEventData::SessionReady {
+                        model: scope.model.clone(),
+                        effort: scope.effort.clone(),
+                    },
+                },
+            ),
+            (
+                EventSource::Provider,
+                suggest(source.clone(), "Premature output"),
+            ),
+            (
+                EventSource::Provider,
+                ProviderEvent {
+                    location,
+                    data: ProviderEventData::TurnFinished {
+                        outcome: TurnOutcome::Completed,
+                    },
+                },
+            ),
+            (
+                EventSource::Application,
+                suggest(source.clone(), "Untrusted application output"),
+            ),
+            (
+                EventSource::Provider,
+                suggest(
+                    SuggestionSource {
+                        message_id: "other-message".into(),
+                        ..source.clone()
+                    },
+                    "Stale output",
+                ),
+            ),
+            (
+                EventSource::Provider,
+                suggest(source, "Review the timeout handling."),
+            ),
         ] {
-            store.record_agent_observation(run.clone(), authority, event).await?;
+            store
+                .record_agent_observation(run.clone(), authority, event)
+                .await?;
         }
-        store.finish_agent_attempt(run.clone(), RunStatus::Succeeded, Some("Main response".into())).await?;
+        store
+            .finish_agent_attempt(
+                run.clone(),
+                RunStatus::Succeeded,
+                Some("Main response".into()),
+            )
+            .await?;
         let after = store.conversation(chat.id.clone()).await?;
-        let active = || store.composer_native_suggestion(chat.id.clone(), after.context_id.clone(), run.clone(), scope.clone());
-        assert_eq!(active().await?, SuggestionOutcome::Available { text: "Review the timeout handling.".into() });
-        let different_model = SessionScope { model: Some("different-model".into()), ..scope.clone() };
-        assert_eq!(store.composer_native_suggestion(chat.id.clone(), after.context_id.clone(), run.clone(), different_model).await?, SuggestionOutcome::Ineligible);
-        assert_eq!(store.composer_native_suggestion(chat.id.clone(), chat.context_id, run.clone(), scope.clone()).await?, SuggestionOutcome::Ineligible);
-        store.save_conversation_draft(chat.id.clone(), "Typed while the suggestion was pending".into()).await?;
+        let active = || {
+            store.composer_native_suggestion(
+                chat.id.clone(),
+                after.context_id.clone(),
+                run.clone(),
+                scope.clone(),
+            )
+        };
+        assert_eq!(
+            active().await?,
+            SuggestionOutcome::Available {
+                text: "Review the timeout handling.".into()
+            }
+        );
+        let different_model = SessionScope {
+            model: Some("different-model".into()),
+            ..scope.clone()
+        };
+        assert_eq!(
+            store
+                .composer_native_suggestion(
+                    chat.id.clone(),
+                    after.context_id.clone(),
+                    run.clone(),
+                    different_model
+                )
+                .await?,
+            SuggestionOutcome::Ineligible
+        );
+        assert_eq!(
+            store
+                .composer_native_suggestion(
+                    chat.id.clone(),
+                    chat.context_id,
+                    run.clone(),
+                    scope.clone()
+                )
+                .await?,
+            SuggestionOutcome::Ineligible
+        );
+        store
+            .save_conversation_draft(
+                chat.id.clone(),
+                "Typed while the suggestion was pending".into(),
+            )
+            .await?;
         assert_eq!(active().await?, SuggestionOutcome::Ineligible);
-        store.save_conversation_draft(chat.id.clone(), String::new()).await?;
-        store.set_composer_suggestion_mode(ComposerSuggestionMode::Omniagent).await?;
-        assert!(matches!(store.enqueue_side_request(chat.id.clone(), Some(after.context_id), Some(run), scope.clone(), SidePurpose::Suggestion, String::new()).await?, SideSubmission::Skipped));
+        store
+            .save_conversation_draft(chat.id.clone(), String::new())
+            .await?;
+        store
+            .set_composer_suggestion_mode(ComposerSuggestionMode::Omniagent)
+            .await?;
+        assert!(matches!(
+            store
+                .enqueue_side_request(
+                    chat.id.clone(),
+                    Some(after.context_id),
+                    Some(run),
+                    scope.clone(),
+                    SidePurpose::Suggestion,
+                    String::new()
+                )
+                .await?,
+            SideSubmission::Skipped
+        ));
         assert!(store.conversation_draft(chat.id.clone()).await?.is_empty());
-        assert_eq!(store.conversation_messages(chat.id.clone()).await?.iter().map(|message| message.text.as_str()).collect::<Vec<_>>(), ["Main prompt", "Main response"]);
+        assert_eq!(
+            store
+                .conversation_messages(chat.id.clone())
+                .await?
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Main prompt", "Main response"]
+        );
         Ok(())
     }
 
@@ -6492,8 +6860,16 @@ mod tests {
             }
             fn launch(&self, request: LaunchRequest<'_>) -> io::Result<CapturedProcess> {
                 assert_ne!(request.checkout, self.source_checkout);
-                assert!(request.arguments.contains(&std::ffi::OsStr::new("--no-session-persistence")));
-                assert!(!request.arguments.contains(&std::ffi::OsStr::new("--resume")));
+                assert!(
+                    request
+                        .arguments
+                        .contains(&std::ffi::OsStr::new("--no-session-persistence"))
+                );
+                assert!(
+                    !request
+                        .arguments
+                        .contains(&std::ffi::OsStr::new("--resume"))
+                );
                 assert!(
                     request
                         .arguments
@@ -6597,10 +6973,20 @@ mod tests {
             provider_session_id: phase07_side_privacy::PRIMARY_SESSION.into(),
             provider_turn_id: Some("primary-turn".into()),
             provider_result_id: None,
-            message_id: completed.input.last().context("missing source message")?.message_id.clone(),
+            message_id: completed
+                .input
+                .last()
+                .context("missing source message")?
+                .message_id
+                .clone(),
         };
-        store.record_agent_observation(completed.run.id.clone(), EventSource::Application,
-            source.settlement(SuggestionOutcome::Unavailable)).await?;
+        store
+            .record_agent_observation(
+                completed.run.id.clone(),
+                EventSource::Application,
+                source.settlement(SuggestionOutcome::Unavailable),
+            )
+            .await?;
         store
             .finish_agent_attempt(
                 completed.run.id.clone(),
@@ -6692,14 +7078,42 @@ mod tests {
             assert!(!wire.contains("Ignored untrusted text"));
         }
         outputs.lock().unwrap().clear();
-        let request_suggestion = || store.enqueue_side_request(chat.id.clone(), Some(current.context_id.clone()),
-            Some(completed.run.id.clone()), scope.clone(), SidePurpose::Suggestion, String::new());
-        assert_eq!(store.composer_suggestion_mode().await?, ComposerSuggestionMode::Native);
-        assert_eq!(store.composer_native_suggestion(chat.id.clone(), current.context_id.clone(), completed.run.id.clone(), scope.clone()).await?,
-            SuggestionOutcome::Unavailable);
-        assert!(matches!(request_suggestion().await?, SideSubmission::Skipped));
-        store.set_composer_suggestion_mode(ComposerSuggestionMode::Off).await?;
-        assert!(matches!(request_suggestion().await?, SideSubmission::Skipped));
+        let request_suggestion = || {
+            store.enqueue_side_request(
+                chat.id.clone(),
+                Some(current.context_id.clone()),
+                Some(completed.run.id.clone()),
+                scope.clone(),
+                SidePurpose::Suggestion,
+                String::new(),
+            )
+        };
+        assert_eq!(
+            store.composer_suggestion_mode().await?,
+            ComposerSuggestionMode::Native
+        );
+        assert_eq!(
+            store
+                .composer_native_suggestion(
+                    chat.id.clone(),
+                    current.context_id.clone(),
+                    completed.run.id.clone(),
+                    scope.clone()
+                )
+                .await?,
+            SuggestionOutcome::Unavailable
+        );
+        assert!(matches!(
+            request_suggestion().await?,
+            SideSubmission::Skipped
+        ));
+        store
+            .set_composer_suggestion_mode(ComposerSuggestionMode::Off)
+            .await?;
+        assert!(matches!(
+            request_suggestion().await?,
+            SideSubmission::Skipped
+        ));
         store
             .set_composer_suggestion_mode(ComposerSuggestionMode::Omniagent)
             .await?;
@@ -6709,15 +7123,21 @@ mod tests {
         else {
             anyhow::bail!("The current completed turn should qualify for a suggestion");
         };
-        assert!(matches!(request_suggestion().await?, SideSubmission::Skipped));
+        assert!(matches!(
+            request_suggestion().await?,
+            SideSubmission::Skipped
+        ));
         let before = store.conversation_messages(chat.id.clone()).await?;
         let worker = JobScheduler::start(store.clone(), runner.clone(), None);
         let suggestions = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(endpoint) = outputs.lock().unwrap().first().cloned() { return endpoint; }
+                if let Some(endpoint) = outputs.lock().unwrap().first().cloned() {
+                    return endpoint;
+                }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-        }).await?;
+        })
+        .await?;
         suggestions.send(Ok(OutputFrame { stream: Stream::Stdout,
             data: json!({"type":"result","subtype":"success","is_error":false,"session_id":"side-only",
                 "result":r#"{"prompt":"Ask about cancellation handling."}"#,"modelUsage":{"side-selected":{}}}).to_string()
@@ -6725,17 +7145,32 @@ mod tests {
         let answer = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let records = store.saved_side_requests(chat.id.clone()).await?;
-                if let Some(response) = records.into_iter().find(|record| record.job.id == suggestion_id)
-                    .and_then(|record| record.response) { return Ok::<_, anyhow::Error>(response.outcome); }
+                if let Some(response) = records
+                    .into_iter()
+                    .find(|record| record.job.id == suggestion_id)
+                    .and_then(|record| record.response)
+                {
+                    return Ok::<_, anyhow::Error>(response.outcome);
+                }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-        }).await??;
-        assert!(matches!(answer, SideOutcome::Answered { text, .. } if text == "Ask about cancellation handling."));
+        })
+        .await??;
+        assert!(
+            matches!(answer, SideOutcome::Answered { text, .. } if text == "Ask about cancellation handling.")
+        );
         assert!(store.conversation_draft(chat.id.clone()).await?.is_empty());
         assert_eq!(store.conversation_messages(chat.id.clone()).await?, before);
         worker.shutdown().await?;
         outputs.lock().unwrap().clear();
-        phase07_side_privacy::queue_question(&store, &chat.id, &current.context_id, &scope, "side-private-cancel").await?;
+        phase07_side_privacy::queue_question(
+            &store,
+            &chat.id,
+            &current.context_id,
+            &scope,
+            "side-private-cancel",
+        )
+        .await?;
         store
             .save_conversation_draft(chat.id.clone(), "Main turn after the side pin".into())
             .await?;
@@ -6765,7 +7200,11 @@ mod tests {
             .claim_next_job(env.clone())
             .await?
             .context("Regular work should have priority")?;
-        assert!(store.scheduled_suggestion_enabled(main.run.id.clone()).await?);
+        assert!(
+            store
+                .scheduled_suggestion_enabled(main.run.id.clone())
+                .await?
+        );
         store.mark_agent_running(main.run.id.clone()).await?;
         assert_eq!(
             main.input.last().unwrap().text,
@@ -6773,9 +7212,21 @@ mod tests {
         );
         let dispatch = prepare_fixture_dispatch(&store, &main).await?;
         store.settle_dispatch(dispatch, Delivery::Submitted).await?;
-        phase07_side_privacy::stream_main(&store, &main, "Main delta before side cancellation").await?;
-        for question in ["side-private-finish", "side-private-attempted-tool", "side-private-restart"] {
-            phase07_side_privacy::queue_question(&store, &chat.id, &main.context_id, &scope, question).await?;
+        phase07_side_privacy::stream_main(&store, &main, "Main delta before side cancellation")
+            .await?;
+        for question in [
+            "side-private-finish",
+            "side-private-attempted-tool",
+            "side-private-restart",
+        ] {
+            phase07_side_privacy::queue_question(
+                &store,
+                &chat.id,
+                &main.context_id,
+                &scope,
+                question,
+            )
+            .await?;
         }
         let scheduler = JobScheduler::start(store.clone(), runner, None);
         let wait = |index: usize, status: RunStatus| {
@@ -6831,8 +7282,16 @@ mod tests {
                 .outcome,
             SideOutcome::Cancelled
         );
-        assert_eq!(store.latest_conversation_run(chat.id.clone()).await?.unwrap().status, RunStatus::Running);
-        phase07_side_privacy::stream_main(&store, &main, "Main delta after side cancellation").await?;
+        assert_eq!(
+            store
+                .latest_conversation_run(chat.id.clone())
+                .await?
+                .unwrap()
+                .status,
+            RunStatus::Running
+        );
+        phase07_side_privacy::stream_main(&store, &main, "Main delta after side cancellation")
+            .await?;
         let send = |index: usize, data: Value| {
             let outputs = outputs.clone();
             async move {
@@ -6859,7 +7318,13 @@ mod tests {
         ).await?;
         let second = wait(1, RunStatus::Succeeded).await?;
         let saved_job_id = second.job.id.clone();
-        let saved_side_run_id = second.job.latest_attempt.as_ref().context("missing side attempt")?.run_id.clone();
+        let saved_side_run_id = second
+            .job
+            .latest_attempt
+            .as_ref()
+            .context("missing side attempt")?
+            .run_id
+            .clone();
         assert!(
             matches!(second.response.unwrap().outcome, SideOutcome::Answered { ref text, .. } if text == "protected-response-canary")
         );
@@ -6902,7 +7367,13 @@ mod tests {
         );
         let interrupted = wait(3, RunStatus::Running).await?;
         let removed_job_id = interrupted.job.id.clone();
-        let removed_run_id = interrupted.job.latest_attempt.as_ref().unwrap().run_id.clone();
+        let removed_run_id = interrupted
+            .job
+            .latest_attempt
+            .as_ref()
+            .unwrap()
+            .run_id
+            .clone();
         let checkpoint_path = database.with_file_name("side-recovery.sqlite");
         store.execute({
             let path = checkpoint_path.to_string_lossy().into_owned();
@@ -6958,20 +7429,30 @@ mod tests {
             SideOutcome::Interrupted
         );
         assert!(
-            store.delete_conversation_side_question("other-conversation".into(), removed_job_id.clone())
-                .await.is_err()
+            store
+                .delete_conversation_side_question(
+                    "other-conversation".into(),
+                    removed_job_id.clone()
+                )
+                .await
+                .is_err()
         );
         assert!(
-            store.delete_conversation_side_question(chat.id.clone(), validation_id)
-                .await.is_err()
+            store
+                .delete_conversation_side_question(chat.id.clone(), validation_id)
+                .await
+                .is_err()
         );
-        store.delete_conversation_side_question(chat.id.clone(), removed_job_id.clone()).await?;
+        store
+            .delete_conversation_side_question(chat.id.clone(), removed_job_id.clone())
+            .await?;
         let _ = send(
             3,
             json!({"type":"result","subtype":"success","is_error":false,"session_id":"side-only","result":"late-private-side-answer","modelUsage":{"side-selected":{}}}),
         ).await;
         scheduler.shutdown().await?;
-        phase07_side_privacy::finish_main(&store, &main, "Main answer after side cancellation").await?;
+        phase07_side_privacy::finish_main(&store, &main, "Main answer after side cancellation")
+            .await?;
         drop(store);
         let reopened = Store::open(database.clone())?;
         reopened.recover_agent_attempts_after_restart().await?;
@@ -6983,8 +7464,15 @@ mod tests {
         );
         assert!(!saved.iter().any(|record| record.job.id == removed_job_id));
         let assert_without_side = |text: &str| {
-            for canary in ["side-private", "protected-response-canary", "late-private-side-answer"] {
-                assert!(!text.contains(canary), "side evidence was included in main context");
+            for canary in [
+                "side-private",
+                "protected-response-canary",
+                "late-private-side-answer",
+            ] {
+                assert!(
+                    !text.contains(canary),
+                    "side evidence was included in main context"
+                );
             }
         };
         let history = reopened.conversation_history(chat.id.clone()).await?;
@@ -6992,52 +7480,127 @@ mod tests {
         let selected = ConversationSelection {
             conversation_id: chat.id.clone(),
             context_id: history.context_id.clone(),
-            spans: history.messages.iter().map(|message| SelectedMessageSpan {
-                revision_id: message.revision_id.clone(),
-                byte_range: None,
-            }).collect(),
+            spans: history
+                .messages
+                .iter()
+                .map(|message| SelectedMessageSpan {
+                    revision_id: message.revision_id.clone(),
+                    byte_range: None,
+                })
+                .collect(),
         };
         let mut invalid_selection = selected.clone();
-        invalid_selection.spans = vec![SelectedMessageSpan { revision_id: saved_job_id.clone(), byte_range: None }];
-        assert!(reopened.capture_conversation_excerpt(invalid_selection).await.is_err());
-        assert!(reopened.select_conversation_context(
-            chat.id.clone(), history.context_id.clone(), vec![saved_job_id.clone()],
-        ).await.is_err());
-        let excerpt = reopened.capture_conversation_excerpt(selected.clone()).await?;
+        invalid_selection.spans = vec![SelectedMessageSpan {
+            revision_id: saved_job_id.clone(),
+            byte_range: None,
+        }];
+        assert!(
+            reopened
+                .capture_conversation_excerpt(invalid_selection)
+                .await
+                .is_err()
+        );
+        assert!(
+            reopened
+                .select_conversation_context(
+                    chat.id.clone(),
+                    history.context_id.clone(),
+                    vec![saved_job_id.clone()],
+                )
+                .await
+                .is_err()
+        );
+        let excerpt = reopened
+            .capture_conversation_excerpt(selected.clone())
+            .await?;
         let excerpt = serde_json::to_string(&excerpt)?;
         assert!(excerpt.contains("Original permitted source"));
         assert_without_side(&excerpt);
         for query in ["side-private-finish", "protected-response-canary"] {
-            assert!(reopened.conversation_library(Some(query.into()), None).await?.is_empty());
+            assert!(
+                reopened
+                    .conversation_library(Some(query.into()), None)
+                    .await?
+                    .is_empty()
+            );
         }
-        assert!(reopened.agent_dispatch(chat.id.clone(), saved_side_run_id.clone()).await?.is_none());
-        assert!(reopened.agent_observations(chat.id.clone(), saved_side_run_id, 0).await?.is_empty());
-        assert!(reopened.agent_dispatch(chat.id.clone(), removed_run_id.clone()).await?.is_none());
+        assert!(
+            reopened
+                .agent_dispatch(chat.id.clone(), saved_side_run_id.clone())
+                .await?
+                .is_none()
+        );
+        assert!(
+            reopened
+                .agent_observations(chat.id.clone(), saved_side_run_id, 0)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .agent_dispatch(chat.id.clone(), removed_run_id.clone())
+                .await?
+                .is_none()
+        );
 
-        phase07_side_privacy::verify_after_restart(&reopened, &chat, &scope, &profile, &assert_without_side).await?;
+        phase07_side_privacy::verify_after_restart(
+            &reopened,
+            &chat,
+            &scope,
+            &profile,
+            &assert_without_side,
+        )
+        .await?;
 
         let history = reopened.conversation_history(chat.id.clone()).await?;
-        let fork = reopened.fork_conversation(
-            chat.id.clone(), history.context_id.clone(), None, "Fork with main context".into(),
-        ).await?;
+        let fork = reopened
+            .fork_conversation(
+                chat.id.clone(),
+                history.context_id.clone(),
+                None,
+                "Fork with main context".into(),
+            )
+            .await?;
         let fork_history = reopened.conversation_history(fork.id.clone()).await?;
         assert_without_side(&format!("{:?}", fork_history.messages));
         assert_eq!(fork_history.messages.len(), history.messages.len());
         assert!(reopened.saved_side_requests(fork.id).await?.is_empty());
-        let through = history.messages.first().context("missing committed prefix")?.revision_id.clone();
-        reopened.rewind_conversation_history(chat.id.clone(), history.context_id, Some(through)).await?;
+        let through = history
+            .messages
+            .first()
+            .context("missing committed prefix")?
+            .revision_id
+            .clone();
+        reopened
+            .rewind_conversation_history(chat.id.clone(), history.context_id, Some(through))
+            .await?;
         let rewound = reopened.conversation_history(chat.id.clone()).await?;
         assert_eq!(rewound.messages.len(), 1);
         assert_without_side(&format!("{:?}", rewound.messages));
-        assert!(reopened.saved_side_requests(chat.id.clone()).await?.iter().any(|record| record.job.id == saved_job_id));
+        assert!(
+            reopened
+                .saved_side_requests(chat.id.clone())
+                .await?
+                .iter()
+                .any(|record| record.job.id == saved_job_id)
+        );
 
-        reopened.delete_conversation_side_question(chat.id.clone(), saved_job_id.clone()).await?;
-        reopened.delete_conversation_side_question(chat.id.clone(), saved_job_id.clone()).await?;
+        reopened
+            .delete_conversation_side_question(chat.id.clone(), saved_job_id.clone())
+            .await?;
+        reopened
+            .delete_conversation_side_question(chat.id.clone(), saved_job_id.clone())
+            .await?;
         drop(reopened);
         let reopened = Store::open(database)?;
         reopened.recover_agent_attempts_after_restart().await?;
-        assert!(reopened.saved_side_requests(chat.id).await?.iter().all(|record|
-            record.job.id != saved_job_id && record.job.id != removed_job_id));
+        assert!(
+            reopened
+                .saved_side_requests(chat.id)
+                .await?
+                .iter()
+                .all(|record| record.job.id != saved_job_id && record.job.id != removed_job_id)
+        );
         reopened.execute(move |db| {
             let count: i64 = db.query_row(
                 "SELECT count(*) FROM job_side_requests s JOIN jobs j ON j.id = s.job_id
@@ -8297,17 +8860,44 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         }).await??;
-        let active_context = store.conversation(conversation.id.clone()).await?.context_id;
-        assert!(store.can_steer_conversation_draft(
-            conversation.id.clone(), run.clone(), active_context.clone(), scope.clone(),
-        ).await?);
-        let other_model = SessionScope { model: Some("other-model".into()), ..scope.clone() };
-        assert!(!store.can_steer_conversation_draft(
-            conversation.id.clone(), run.clone(), active_context.clone(), other_model,
-        ).await?);
-        assert!(!store.can_steer_conversation_draft(
-            conversation.id.clone(), run.clone(), conversation.context_id.clone(), scope.clone(),
-        ).await?);
+        let active_context = store
+            .conversation(conversation.id.clone())
+            .await?
+            .context_id;
+        assert!(
+            store
+                .can_steer_conversation_draft(
+                    conversation.id.clone(),
+                    run.clone(),
+                    active_context.clone(),
+                    scope.clone(),
+                )
+                .await?
+        );
+        let other_model = SessionScope {
+            model: Some("other-model".into()),
+            ..scope.clone()
+        };
+        assert!(
+            !store
+                .can_steer_conversation_draft(
+                    conversation.id.clone(),
+                    run.clone(),
+                    active_context.clone(),
+                    other_model,
+                )
+                .await?
+        );
+        assert!(
+            !store
+                .can_steer_conversation_draft(
+                    conversation.id.clone(),
+                    run.clone(),
+                    conversation.context_id.clone(),
+                    scope.clone(),
+                )
+                .await?
+        );
         let followup = enqueue("Handle this instruction now").await?;
         let pending = store
             .pending_conversation_instructions(conversation.id.clone(), scheduler.environment())
@@ -8317,7 +8907,9 @@ mod tests {
             .find(|entry| entry.id == followup.id)
             .context("Missing pending steering instruction")?;
         assert_eq!(
-            store.queued_steering_revision(conversation.id.clone(), followup.id.clone()).await?,
+            store
+                .queued_steering_revision(conversation.id.clone(), followup.id.clone())
+                .await?,
             Some(instruction.revision_id.clone()),
         );
         assert!(
@@ -8352,10 +8944,17 @@ mod tests {
             .unwrap();
         assert_eq!(linked.run_id, run);
         assert_eq!(linked.status, RunStatus::Succeeded);
-        let history = serde_json::to_value(store.conversation_instruction_deliveries(conversation.id.clone()).await?)?;
+        let history = serde_json::to_value(
+            store
+                .conversation_instruction_deliveries(conversation.id.clone())
+                .await?,
+        )?;
         assert!(history.as_array().unwrap().iter().any(|delivery| {
-            delivery["instructionId"] == followup.id && delivery["revisionId"] == instruction.revision_id
-                && delivery["runId"] == run && delivery["route"] == "steering" && delivery["state"] == "accepted"
+            delivery["instructionId"] == followup.id
+                && delivery["revisionId"] == instruction.revision_id
+                && delivery["runId"] == run
+                && delivery["route"] == "steering"
+                && delivery["state"] == "accepted"
         }));
         assert!(
             store
@@ -8798,12 +9397,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_conversation_reference_survives_restart_and_reaches_the_exact_dispatch() -> Result<()> {
+    async fn queued_conversation_reference_survives_restart_and_reaches_the_exact_dispatch()
+    -> Result<()> {
+        use super::references::ConversationReferenceSelection;
         use crate::{
             dispatch::{DispatchSourceRevision, SelectedMessageSpan},
             jobs::AdmissionEnvironment,
         };
-        use super::references::ConversationReferenceSelection;
 
         let (_dir, store, source, scope) = setup().await?;
         std::fs::write(&scope.executable, b"fixture")?;
@@ -8812,56 +9412,154 @@ mod tests {
         confirm(&store, &source_turn).await?;
         let history = store.conversation_history(source.id.clone()).await?;
         let chosen = &history.messages[0];
-        let destination = store.create_conversation(source.checkout_id, "Reference destination".into()).await?;
-        let preview = store.preview_conversation_reference(
-            destination.id.clone(), source.id.clone(),
-            ConversationReferenceSelection::Messages {
-                context_id: history.context_id.clone(),
-                spans: vec![SelectedMessageSpan { revision_id: chosen.revision_id.clone(), byte_range: None }],
-            },
-        ).await?;
+        let destination = store
+            .create_conversation(source.checkout_id, "Reference destination".into())
+            .await?;
+        let preview = store
+            .preview_conversation_reference(
+                destination.id.clone(),
+                source.id.clone(),
+                ConversationReferenceSelection::Messages {
+                    context_id: history.context_id.clone(),
+                    spans: vec![SelectedMessageSpan {
+                        revision_id: chosen.revision_id.clone(),
+                        byte_range: None,
+                    }],
+                },
+            )
+            .await?;
         let prompt = "Explain the referenced conversation.";
-        store.save_conversation_draft(destination.id.clone(), prompt.into()).await?;
-        store.edit_conversation_reference_draft(destination.id.clone(), preview.id.clone(), true).await?;
-        store.replace_conversation_message(source.id.clone(), history.context_id, chosen.message_id.clone(), "Replacement".into()).await?;
+        store
+            .save_conversation_draft(destination.id.clone(), prompt.into())
+            .await?;
+        store
+            .edit_conversation_reference_draft(destination.id.clone(), preview.id.clone(), true)
+            .await?;
+        store
+            .replace_conversation_message(
+                source.id.clone(),
+                history.context_id,
+                chosen.message_id.clone(),
+                "Replacement".into(),
+            )
+            .await?;
         drop(store);
 
         let database = scope.checkout.join("store.sqlite");
         let store = Store::open(database.clone())?;
-        assert_eq!(store.conversation_reference_draft(destination.id.clone()).await?, [preview.clone()]);
-        assert!(store.submit_conversation_continuation(destination.id.clone(), destination.context_id.clone(), scope.clone(), prompt.into()).await.is_err());
-        assert_eq!(store.conversation_draft(destination.id.clone()).await?, prompt);
-        assert!(matches!(store.submit_conversation_with_references(
-            destination.id.clone(), destination.context_id, scope.clone(), prompt.into(), vec![preview.id.clone()],
-        ).await?, ContinuationInspection::Queued { .. }));
-        assert!(store.conversation_reference_draft(destination.id.clone()).await?.is_empty());
-        assert!(store.conversation_draft(destination.id.clone()).await?.is_empty());
+        assert_eq!(
+            store
+                .conversation_reference_draft(destination.id.clone())
+                .await?,
+            [preview.clone()]
+        );
+        assert!(
+            store
+                .submit_conversation_continuation(
+                    destination.id.clone(),
+                    destination.context_id.clone(),
+                    scope.clone(),
+                    prompt.into()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.conversation_draft(destination.id.clone()).await?,
+            prompt
+        );
+        assert!(matches!(
+            store
+                .submit_conversation_with_references(
+                    destination.id.clone(),
+                    destination.context_id,
+                    scope.clone(),
+                    prompt.into(),
+                    vec![preview.id.clone()],
+                )
+                .await?,
+            ContinuationInspection::Queued { .. }
+        ));
+        assert!(
+            store
+                .conversation_reference_draft(destination.id.clone())
+                .await?
+                .is_empty()
+        );
+        assert!(
+            store
+                .conversation_draft(destination.id.clone())
+                .await?
+                .is_empty()
+        );
 
-        let plan = store.claim_next_job(AdmissionEnvironment { runner: scope.runner.clone(), bridge_available: false })
-            .await?.context("Reference turn was not admitted")?;
+        let plan = store
+            .claim_next_job(AdmissionEnvironment {
+                runner: scope.runner.clone(),
+                bridge_available: false,
+            })
+            .await?
+            .context("Reference turn was not admitted")?;
         let run_id = plan.run.id.clone();
-        let message_revision_id = plan.input.last().context("Missing admitted turn")?.revision_id.clone();
+        let message_revision_id = plan
+            .input
+            .last()
+            .context("Missing admitted turn")?
+            .revision_id
+            .clone();
         assert_eq!(plan.input.last().unwrap().text, prompt);
         let runner = Arc::new(FixtureRunner(WireLog {
-            store: store.clone(), runtime: tokio::runtime::Handle::current(), conversation: destination.id.clone(), frames: Arc::default(),
+            store: store.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            conversation: destination.id.clone(),
+            frames: Arc::default(),
         }));
-        assert_eq!(start_managed_turn(store.clone(), runner, plan, None).wait().await?, RunStatus::Succeeded);
+        assert_eq!(
+            start_managed_turn(store.clone(), runner, plan, None)
+                .wait()
+                .await?,
+            RunStatus::Succeeded
+        );
         drop(store);
         let reopened = Store::open(database)?;
-        let evidence = reopened.agent_dispatch(destination.id.clone(), run_id.clone()).await?.context("Missing dispatch")?;
-        let reference = SubmittedConversationReference { message_revision_id, reference: preview.clone() };
-        assert_eq!(evidence.snapshot.conversation_references, [reference.clone()]);
+        let evidence = reopened
+            .agent_dispatch(destination.id.clone(), run_id.clone())
+            .await?
+            .context("Missing dispatch")?;
+        let reference = SubmittedConversationReference {
+            message_revision_id,
+            reference: preview.clone(),
+        };
+        assert_eq!(
+            evidence.snapshot.conversation_references,
+            [reference.clone()]
+        );
         assert_eq!(evidence.snapshot.scope.checkout, scope.checkout);
         let wire: Value = serde_json::from_slice(&evidence.frames[0])?;
-        let text = wire["params"]["input"][0]["text"].as_str().context("Missing provider input")?;
-        let (_, payload) = text.split_once("(JSON data):\n").context("Missing quoted wire input")?;
-        assert_eq!(serde_json::from_str::<Vec<SubmittedConversationReference>>(payload)?, [reference]);
-        let lineage = reopened.dispatch_lineage(destination.id.clone(), run_id.clone()).await?.context("Missing lineage")?;
+        let text = wire["params"]["input"][0]["text"]
+            .as_str()
+            .context("Missing provider input")?;
+        let (_, payload) = text
+            .split_once("(JSON data):\n")
+            .context("Missing quoted wire input")?;
+        assert_eq!(
+            serde_json::from_str::<Vec<SubmittedConversationReference>>(payload)?,
+            [reference]
+        );
+        let lineage = reopened
+            .dispatch_lineage(destination.id.clone(), run_id.clone())
+            .await?
+            .context("Missing lineage")?;
         assert!(lineage.sources.iter().any(|entry| matches!(entry,
             DispatchSourceRevision::ConversationReference { source_conversation_id, artifact_revision_id, .. }
             if source_conversation_id == &source.id && artifact_revision_id == preview.artifact.id())));
-        assert!(reopened.dispatches_using_message(source.id, chosen.revision_id.clone()).await?
-            .iter().any(|entry| entry.run_id == run_id && entry.conversation_id == destination.id));
+        assert!(
+            reopened
+                .dispatches_using_message(source.id, chosen.revision_id.clone())
+                .await?
+                .iter()
+                .any(|entry| entry.run_id == run_id && entry.conversation_id == destination.id)
+        );
         Ok(())
     }
 

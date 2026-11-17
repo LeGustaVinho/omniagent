@@ -15,8 +15,8 @@ use crate::{
 
 use super::{
     Conversation, ConversationHistory, MessageRole, SessionScope, activate_context,
-    check_idle_base, context_entries, continuation::fork_history, fork_checkout::require_implicit_reuse, load_conversation, load_messages,
-    new_id,
+    check_idle_base, context_entries, continuation::fork_history,
+    fork_checkout::require_implicit_reuse, load_conversation, load_messages, new_id,
 };
 
 #[derive(Debug, Serialize)]
@@ -69,21 +69,39 @@ pub(super) fn retained_prefix(
     Ok(entries)
 }
 
-pub(super) fn require_user_revision(db: &Connection, source: &Conversation, revision: &str) -> Result<()> {
-    let selected = load_messages(db, &source.id, &[revision.into()])?.pop().context("message is missing")?;
-    ensure!(selected.role == MessageRole::User, "Only a user message can be edited in a fork");
+pub(super) fn require_user_revision(
+    db: &Connection,
+    source: &Conversation,
+    revision: &str,
+) -> Result<()> {
+    let selected = load_messages(db, &source.id, &[revision.into()])?
+        .pop()
+        .context("message is missing")?;
+    ensure!(
+        selected.role == MessageRole::User,
+        "Only a user message can be edited in a fork"
+    );
     Ok(())
 }
 
-pub(super) fn edit_fork_message(db: &Connection, fork: &mut Conversation, encrypted: Vec<u8>) -> Result<()> {
+pub(super) fn edit_fork_message(
+    db: &Connection,
+    fork: &mut Conversation,
+    encrypted: Vec<u8>,
+) -> Result<()> {
     let mut copied = context_entries(db, &fork.id, &fork.context_id)?;
     let original = copied.pop().context("the fork has no selected message")?;
     let revised = new_id();
-    db.execute("INSERT INTO message_revisions(id, message_id, revision, content)
+    db.execute(
+        "INSERT INTO message_revisions(id, message_id, revision, content)
          SELECT ?1, message_id, revision + 1, ?3 FROM message_revisions WHERE id = ?2",
-         params![revised, original, encrypted])?;
-    db.execute("INSERT INTO message_attachments(message_revision_id, payload)
-         SELECT ?1, payload FROM message_attachments WHERE message_revision_id = ?2", params![revised, original])?;
+        params![revised, original, encrypted],
+    )?;
+    db.execute(
+        "INSERT INTO message_attachments(message_revision_id, payload)
+         SELECT ?1, payload FROM message_attachments WHERE message_revision_id = ?2",
+        params![revised, original],
+    )?;
     super::reference_delivery::copy_references(db, &original, &revised)?;
     copied.push(revised);
     fork.context_id = activate_context(db, &fork.id, &copied)?;

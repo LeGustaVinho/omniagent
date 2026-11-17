@@ -13,7 +13,8 @@ use crate::{
     customizations::{CustomizationKind, LaunchReview, ReviewState},
     mcp_bridge::{
         AUTHORING_TOOLS, BridgeLaunch, GET_JOB_STATUS, INSPECT_OMNIAGENT, INSPECT_SCOPE,
-        REPORT_GOAL_PROGRESS, REQUEST_PERMISSION, SERVER_NAME, SETTINGS_TOOLS, SUBMIT_JOB, WAIT_FOR_JOBS,
+        REPORT_GOAL_PROGRESS, REQUEST_PERMISSION, SERVER_NAME, SETTINGS_TOOLS, SUBMIT_JOB,
+        WAIT_FOR_JOBS,
     },
     repository::CheckoutLayout,
     runner::Runner,

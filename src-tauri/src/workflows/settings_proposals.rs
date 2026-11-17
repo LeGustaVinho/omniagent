@@ -27,7 +27,9 @@ pub(super) fn template_label_for_display(
     project: &str,
     template_id: &str,
 ) -> Result<Option<String>> {
-    Ok(resources::read_template_label(db, project, template_id)?.display_label.value)
+    Ok(resources::read_template_label(db, project, template_id)?
+        .display_label
+        .value)
 }
 
 const MAX_CHANGES: usize = 8;

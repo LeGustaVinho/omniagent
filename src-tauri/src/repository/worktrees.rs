@@ -26,8 +26,8 @@ use super::{
     writers::assign_shared_scope,
 };
 
-pub(super) mod strategy;
 pub(super) mod conversation;
+pub(super) mod strategy;
 
 use strategy::{
     BranchStrategy, TaskBranchStrategy, branch_strategy_for_scope, pin_branch_strategy,
@@ -74,10 +74,17 @@ pub struct WorktreeStart {
 }
 
 impl WorktreeStart {
-    pub(crate) fn restored_by(&self, observed: &GitStartingState, index_entries: Option<&str>) -> bool {
+    pub(crate) fn restored_by(
+        &self,
+        observed: &GitStartingState,
+        index_entries: Option<&str>,
+    ) -> bool {
         fn untracked(state: &GitStartingState) -> impl Iterator<Item = (&str, &str)> {
             state.changes.iter().flat_map(|changes| {
-                changes.untracked.iter().map(|entry| (entry.path.as_str(), entry.sha256.as_str()))
+                changes
+                    .untracked
+                    .iter()
+                    .map(|entry| (entry.path.as_str(), entry.sha256.as_str()))
             })
         }
         let index_matches = match self.index_entries_digest.as_deref() {
@@ -94,7 +101,10 @@ impl WorktreeStart {
 }
 
 pub(crate) fn observe_interrupted_writer(
-    db: &Connection, project: &str, owner: &str, start: &WorktreeStart,
+    db: &Connection,
+    project: &str,
+    owner: &str,
+    start: &WorktreeStart,
 ) -> Result<(GitStartingState, Option<String>)> {
     let (worktree, git_dir, common) = load_worktree(db, project, owner)?
         .context("The writer's managed worktree is unavailable")?;
@@ -525,11 +535,18 @@ fn branch_head(git: &Path, root: &Path, branch: &str) -> Result<Option<String>> 
 
 fn materialize(git: &Path, source: &Source, provision: &Provision) -> Result<CheckoutPaths> {
     let (checkout, status) = materialize_base(git, source, provision)?;
-    ensure!(status.is_empty(), "the new worktree contains unreviewed changes");
+    ensure!(
+        status.is_empty(),
+        "the new worktree contains unreviewed changes"
+    );
     Ok(checkout)
 }
 
-fn materialize_base(git: &Path, source: &Source, provision: &Provision) -> Result<(CheckoutPaths, Vec<String>)> {
+fn materialize_base(
+    git: &Path,
+    source: &Source,
+    provision: &Provision,
+) -> Result<(CheckoutPaths, Vec<String>)> {
     // The source may have changed while the provision intent was being saved.
     validate_source(source)?;
     let root = &provision.root;
@@ -710,19 +727,29 @@ pub(crate) async fn capture_worktree_start(store: &Store, run_id: String) -> Res
     };
     let saved = tokio::task::spawn_blocking(move || {
         let paths = verify_managed(&worktree, &git_dir, &common)?;
-        ensure!(checkpoint.is_none() || reconciled.is_none(),
-            "The reconciled writer cannot use a different worktree checkpoint");
+        ensure!(
+            checkpoint.is_none() || reconciled.is_none(),
+            "The reconciled writer cannot use a different worktree checkpoint"
+        );
         let (starting, index_entries_digest) = match checkpoint {
-            Some((Some(payload), Some(true))) => {
-                (super::candidates::recheck_candidate(&worktree, &git_dir, &common, &payload)?, None)
-            }
+            Some((Some(payload), Some(true))) => (
+                super::candidates::recheck_candidate(&worktree, &git_dir, &common, &payload)?,
+                None,
+            ),
             Some(_) => anyhow::bail!("The continuation has no confirmed worktree candidate"),
             None if writes => {
-                let observed = super::candidates::capture_git_before_writer(&worktree, &git_dir, &common)?;
+                let observed =
+                    super::candidates::capture_git_before_writer(&worktree, &git_dir, &common)?;
                 if let Some(previous) = reconciled {
-                    ensure!(previous.worktree == worktree && previous.git_common_dir == Path::new(&common)
-                        && previous.restored_by(&observed.state, observed.index_entries_digest.as_deref()),
-                        "The reconciled writer checkout changed before retry");
+                    ensure!(
+                        previous.worktree == worktree
+                            && previous.git_common_dir == Path::new(&common)
+                            && previous.restored_by(
+                                &observed.state,
+                                observed.index_entries_digest.as_deref()
+                            ),
+                        "The reconciled writer checkout changed before retry"
+                    );
                 }
                 (observed.state, observed.index_entries_digest)
             }

@@ -259,7 +259,9 @@ pub(super) fn capture_git(
 }
 
 pub(super) fn capture_git_before_writer(
-    worktree: &ManagedWorktree, git_dir: &str, common: &str,
+    worktree: &ManagedWorktree,
+    git_dir: &str,
+    common: &str,
 ) -> Result<GitCapture> {
     stable_git_capture(worktree, git_dir, common, None, true)
 }
@@ -339,7 +341,10 @@ fn read_git(
     let view = IsolatedGit::open(&paths, &worktree.root, &head)?;
     view.copy_index(&paths)?;
     let index_entries_digest = measure_index
-        .then(|| view.read(&["ls-files", "--stage", "-v", "-z"]).map(|entries| digest(&entries)))
+        .then(|| {
+            view.read(&["ls-files", "--stage", "-v", "-z"])
+                .map(|entries| digest(&entries))
+        })
         .transpose()?;
     let status = read_status(&view)?;
     let staged = patch(&view, &["--cached"])?;

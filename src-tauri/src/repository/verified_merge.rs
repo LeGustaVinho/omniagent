@@ -13,7 +13,10 @@ use uuid::Uuid;
 use crate::{
     protection,
     store::Store,
-    tasks::{WorkStateChanges, delivery_merge_candidate, load_delivery_milestone_policy, pipeline_work_origin, record_verified_task_merge},
+    tasks::{
+        WorkStateChanges, delivery_merge_candidate, load_delivery_milestone_policy,
+        pipeline_work_origin, record_verified_task_merge,
+    },
 };
 
 use super::{

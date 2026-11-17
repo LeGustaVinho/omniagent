@@ -193,10 +193,17 @@ async fn simulates_conditional_subflow_and_retains_the_saved_revision_without_pr
     let preview = serde_json::to_value(preview)?;
     assert_eq!(preview["members"][0]["simulatable"], true, "{preview}");
     let authored = &preview["members"][0]["graphDefinitions"]["delivery"];
-    assert!(authored["inputs"].as_array().is_some_and(|ports|
-        ports.iter().any(|port| port["name"] == "plan" && port["value"]["artifact"] == "plan")));
-    assert!(authored["outputs"].as_array().is_some_and(|ports|
-        ports.iter().any(|port| port["name"] == "test-result" && port["value"]["artifact"] == "command_result")));
+    assert!(authored["inputs"].as_array().is_some_and(|ports| {
+        ports
+            .iter()
+            .any(|port| port["name"] == "plan" && port["value"]["artifact"] == "plan")
+    }));
+    assert!(
+        authored["outputs"].as_array().is_some_and(|ports| ports
+            .iter()
+            .any(|port| port["name"] == "test-result"
+                && port["value"]["artifact"] == "command_result"))
+    );
     assert!(
         preview["members"][0]["changes"]
             .as_array()

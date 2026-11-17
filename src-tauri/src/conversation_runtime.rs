@@ -149,7 +149,8 @@ pub(crate) async fn selected_scope(
     effort: Option<String>,
     mode: SessionMode,
 ) -> Result<SessionScope> {
-    let (scope, _) = selected_scope_with_model_option(store, checkout_id, selection, effort, mode).await?;
+    let (scope, _) =
+        selected_scope_with_model_option(store, checkout_id, selection, effort, mode).await?;
     Ok(scope)
 }
 
@@ -357,7 +358,10 @@ pub async fn conversation_output_fixture_audio(
     conversation_id: String,
     run_id: String,
 ) -> Result<Option<String>, String> {
-    store.side_output_fixture_audio(project_id, conversation_id, run_id).await.map_err(ui_error)
+    store
+        .side_output_fixture_audio(project_id, conversation_id, run_id)
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]
@@ -695,7 +699,10 @@ pub async fn conversation_approvals(
     conversation_id: String,
     run_id: String,
 ) -> Result<Vec<omniagent::conversations::ConversationApprovalEvidence>, String> {
-    store.conversation_approvals(conversation_id, run_id).await.map_err(ui_error)
+    store
+        .conversation_approvals(conversation_id, run_id)
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]
@@ -722,8 +729,7 @@ pub async fn conversation_events(
                 ProviderEventData::ContextRead { .. }
                     | ProviderEventData::AssistantFinal { .. }
                     | ProviderEventData::ReasoningUsage { .. }
-            )
-                || row.source == omniagent::dispatch::EventSource::Provider
+            ) || row.source == omniagent::dispatch::EventSource::Provider
         })
         .map(|row| row.event)
         .filter(|event| {
@@ -847,8 +853,13 @@ pub async fn conversation_generated_image_evidence(
     run_id: String,
     event_sequence: String,
 ) -> Result<Option<String>, String> {
-    let sequence = event_sequence.parse::<i64>().map_err(|_| "Invalid event sequence".to_owned())?;
-    store.dispatch_generated_image(project_id, conversation_id, run_id, sequence).await.map_err(ui_error)
+    let sequence = event_sequence
+        .parse::<i64>()
+        .map_err(|_| "Invalid event sequence".to_owned())?;
+    store
+        .dispatch_generated_image(project_id, conversation_id, run_id, sequence)
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]
@@ -859,8 +870,13 @@ pub async fn qualify_conversation_generated_image(
     run_id: String,
     event_sequence: String,
 ) -> Result<omniagent::providers::capabilities::Verification, String> {
-    let sequence = event_sequence.parse::<i64>().map_err(|_| "Invalid event sequence".to_owned())?;
-    store.qualify_conversation_generated_image(project_id, conversation_id, run_id, sequence).await.map_err(ui_error)
+    let sequence = event_sequence
+        .parse::<i64>()
+        .map_err(|_| "Invalid event sequence".to_owned())?;
+    store
+        .qualify_conversation_generated_image(project_id, conversation_id, run_id, sequence)
+        .await
+        .map_err(ui_error)
 }
 
 #[derive(Serialize)]

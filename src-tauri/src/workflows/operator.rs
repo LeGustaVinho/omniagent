@@ -224,12 +224,18 @@ impl Store {
             .workflow_attempt(project.clone(), run.clone())
             .await?
             .context("the planning attempt is outside this project")?;
-        ensure!(attempt.pin.workflow_run_id == workflow, "the planning attempt belongs to a different workflow");
+        ensure!(
+            attempt.pin.workflow_run_id == workflow,
+            "the planning attempt belongs to a different workflow"
+        );
         let node = self
             .pinned_workflow_node(project, workflow, attempt.pin.node_instance_id)
             .await?
             .context("the pinned planning stage is unavailable")?;
-        ensure!(node.definition.kind == BuiltinNode::Plan, "the pinned stage cannot publish plan proposals");
+        ensure!(
+            node.definition.kind == BuiltinNode::Plan,
+            "the pinned stage cannot publish plan proposals"
+        );
         self.execute(move |db| {
             let mut statement = db.prepare(
                 "SELECT seq, payload FROM agent_events WHERE run_id = ?1 AND source IN ('provider', 'application') ORDER BY seq",
@@ -261,8 +267,10 @@ impl Store {
             .workflow_execution_inputs(project, run, node, unit_id, inputs)
             .await?;
         let mode = match definition.definition.executor {
-            Executor::PlanAgent => super::stage_plan::StagePlanConfiguration::for_stage(&definition)?
-                .map_or(SessionMode::Plan, |plan| plan.mode()),
+            Executor::PlanAgent => {
+                super::stage_plan::StagePlanConfiguration::for_stage(&definition)?
+                    .map_or(SessionMode::Plan, |plan| plan.mode())
+            }
             Executor::ReadOnlyAgent => SessionMode::ReadOnly,
             Executor::WriteAgent => SessionMode::ApprovedWrite,
             _ => anyhow::bail!("this node does not execute a CLI role"),
@@ -310,9 +318,13 @@ impl Store {
             plan_revision: plan
                 .map(|artifact| artifact.id.clone())
                 .or_else(|| unit.as_ref().map(|unit| unit.plan_revision.clone())),
-            task_id: unit.map(|unit| unit.task_id).or_else(|| match artifacts.get("git").map(|artifact| &artifact.value) {
-                Some(ArtifactValue::GitInspection(git)) => Some(git.candidate.target.task_id.clone()),
-                _ => None,
+            task_id: unit.map(|unit| unit.task_id).or_else(|| {
+                match artifacts.get("git").map(|artifact| &artifact.value) {
+                    Some(ArtifactValue::GitInspection(git)) => {
+                        Some(git.candidate.target.task_id.clone())
+                    }
+                    _ => None,
+                }
             }),
         })
     }

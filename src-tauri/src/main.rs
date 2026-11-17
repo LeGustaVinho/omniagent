@@ -1,39 +1,39 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod conversation_runtime;
-mod composer_customization_ipc;
-mod conversation_goal_runtime;
-mod conversation_continuation_runtime;
-mod conversation_fork_runtime;
-mod conversation_attachment_ipc;
-mod composer_suggestion_ipc;
-mod conversation_compaction_ipc;
-mod history_deletion_ipc;
-mod conversation_steering_ipc;
 mod agile_runtime;
 mod backup_ipc;
+mod composer_customization_ipc;
+mod composer_suggestion_ipc;
+mod conversation_attachment_ipc;
+mod conversation_compaction_ipc;
+mod conversation_continuation_runtime;
+mod conversation_fork_runtime;
+mod conversation_goal_runtime;
+mod conversation_runtime;
+mod conversation_steering_ipc;
 mod delivery_merge_ipc;
 mod desktop;
-mod git_review_runtime;
-mod ide_source_runtime;
-mod project_search_runtime;
-mod manual_terminal;
 #[cfg(debug_assertions)]
 mod desktop_provider_fixture;
 mod fixture;
 mod fixture_runtime;
+mod git_review_runtime;
 mod goal_verification_ipc;
+mod history_deletion_ipc;
+mod ide_source_runtime;
 mod ipc;
+mod manual_terminal;
 mod markdown_analysis_ipc;
 mod model_defaults_runtime;
-mod note_runtime;
 mod note_index_runtime;
+mod note_runtime;
+mod project_description_runtime;
+mod project_search_runtime;
 mod queue_runtime;
 mod side_question_ipc;
-mod task_delivery_ipc;
 mod task_assignment_ipc;
+mod task_delivery_ipc;
 mod task_participants_ipc;
-mod project_description_runtime;
 mod workflow_ipc;
 
 use std::{path::PathBuf, sync::Arc};
@@ -225,7 +225,8 @@ fn main() {
         .on_window_event(desktop::hide_main_on_close)
         .on_webview_event(conversation_attachment_ipc::retain_attachment_drop)
         .setup(|app| {
-            let installation = omniagent::restore::open_installation(&app.path().app_local_data_dir()?)?;
+            let installation =
+                omniagent::restore::open_installation(&app.path().app_local_data_dir()?)?;
             let store = Store::open(installation.layout.database_path())?;
             tauri::async_runtime::block_on(store.recover_agent_attempts_after_restart())?;
             if let Err(error) =

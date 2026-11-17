@@ -13,7 +13,8 @@ use crate::{
     store::Store,
     tasks::{TaskRunScope, bind_checklist_job_mode, bind_task_run_scope},
     workflows::{
-        WorkflowJobInput, bind_job_input, stage_goal::load_stage_goal, stage_job_input_with_repair, stage_plan,
+        WorkflowJobInput, bind_job_input, stage_goal::load_stage_goal, stage_job_input_with_repair,
+        stage_plan,
     },
 };
 
@@ -233,9 +234,14 @@ pub(super) fn release_blocker(db: &Connection, job: &Job) -> Result<Option<Relea
     if release.checkout_id != job.checkout_id || Some(&release.task_id) != job.task_id.as_ref() {
         return Ok(Some(ReleaseBlocker::WrongScope));
     }
-    if release.revoked || crate::workflows::workflow_release_authorized(
-        db, &job.project_id, &origin.pipeline_run_id, &release.id,
-    )? == Some(false) {
+    if release.revoked
+        || crate::workflows::workflow_release_authorized(
+            db,
+            &job.project_id,
+            &origin.pipeline_run_id,
+            &release.id,
+        )? == Some(false)
+    {
         return Ok(Some(ReleaseBlocker::Revoked));
     }
     Ok(None)
@@ -355,7 +361,12 @@ impl Store {
                 params![pipeline_run, project, expected, revision],
             )?;
             ensure!(changed == 1, "The pipeline's plan revision changed");
-            crate::workflows::validate_selected_plan_revision(&tx, &project, &pipeline_run, &revision)?;
+            crate::workflows::validate_selected_plan_revision(
+                &tx,
+                &project,
+                &pipeline_run,
+                &revision,
+            )?;
             if expected.as_ref() != Some(&revision) {
                 tx.execute(
                     "UPDATE job_pipeline_releases SET revoked = 1 WHERE pipeline_run_id = ?1",

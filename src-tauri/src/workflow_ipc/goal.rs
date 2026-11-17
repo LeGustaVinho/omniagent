@@ -22,7 +22,9 @@ pub async fn preview_workflow_goal_requalification(
 ) -> Result<WorkflowGoalRequalification, String> {
     async {
         let submission = delivery_agent_submission(&store, input, false).await?;
-        store.preview_workflow_goal_requalification(submission).await
+        store
+            .preview_workflow_goal_requalification(submission)
+            .await
     }
     .await
     .map_err(report)
@@ -36,7 +38,9 @@ pub async fn submit_workflow_goal_requalification(
 ) -> Result<Job, String> {
     async {
         let submission = delivery_agent_submission(&store, input, false).await?;
-        store.submit_workflow_goal_requalification(submission, review_token).await
+        store
+            .submit_workflow_goal_requalification(submission, review_token)
+            .await
     }
     .await
     .map_err(report)
@@ -82,8 +86,13 @@ pub async fn preview_workflow_stage_goal(
             _ => anyhow::bail!("Select an agent stage to preview Goal Mode"),
         };
         let effort = match &node.configuration {
-            NodeConfiguration::AgentRole { requirements, .. } if requirements.bound_role.is_some() => {
-                let version = requirements.bound_role.clone().context("The pinned role is missing")?;
+            NodeConfiguration::AgentRole { requirements, .. }
+                if requirements.bound_role.is_some() =>
+            {
+                let version = requirements
+                    .bound_role
+                    .clone()
+                    .context("The pinned role is missing")?;
                 let artifact = store
                     .published_workflow_package_artifact(project_id.clone(), version)
                     .await?

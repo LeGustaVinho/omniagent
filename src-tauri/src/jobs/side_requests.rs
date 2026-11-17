@@ -20,8 +20,8 @@ use crate::{
         },
         profiles::verify_account_binding,
         side::{
-            self, OutputFixture, SideInput, SideOutcome, SidePin, SideResponse, SideRoute, SideSource,
-            SideUnavailable,
+            self, OutputFixture, SideInput, SideOutcome, SidePin, SideResponse, SideRoute,
+            SideSource, SideUnavailable,
         },
         suggestions::{SuggestionOutcome, native_suggestion, valid_suggestion},
     },
@@ -199,7 +199,16 @@ impl Store {
         purpose: SidePurpose,
         question: String,
     ) -> Result<SideSubmission> {
-        self.enqueue_side_request_with_fixture(conversation, expected_context, expected_source_run, scope, purpose, question, None).await
+        self.enqueue_side_request_with_fixture(
+            conversation,
+            expected_context,
+            expected_source_run,
+            scope,
+            purpose,
+            question,
+            None,
+        )
+        .await
     }
 
     pub async fn enqueue_side_request_with_fixture(
@@ -212,8 +221,11 @@ impl Store {
         question: String,
         output_fixture: Option<OutputFixture>,
     ) -> Result<SideSubmission> {
-        ensure!(output_fixture.is_none() || (purpose == SidePurpose::Validation && expected_source_run.is_some()),
-            "An output fixture requires an explicit validation of a recorded source run");
+        ensure!(
+            output_fixture.is_none()
+                || (purpose == SidePurpose::Validation && expected_source_run.is_some()),
+            "An output fixture requires an explicit validation of a recorded source run"
+        );
         let question = match purpose {
             SidePurpose::Question => question.trim().to_owned(),
             SidePurpose::Suggestion => "Suggest one useful follow-up prompt the user might send. Return only a JSON object with a single string field named prompt.".into(),
@@ -613,11 +625,18 @@ pub(super) fn load(db: &Connection, job: &str) -> Result<Option<SidePayload>> {
 }
 
 pub(crate) fn redact_retained_side_context(db: &Connection, job: &str) -> Result<()> {
-    let stored: Vec<u8> = db.query_row("SELECT payload FROM job_side_requests WHERE job_id = ?1", [job], |row| row.get(0))?;
+    let stored: Vec<u8> = db.query_row(
+        "SELECT payload FROM job_side_requests WHERE job_id = ?1",
+        [job],
+        |row| row.get(0),
+    )?;
     let mut payload: SidePayload = decode(&stored)?;
     payload.context.clear();
     payload.pin.provider_source = None;
-    db.execute("INSERT INTO history_deleted_side_payloads VALUES (?1)", [job])?;
+    db.execute(
+        "INSERT INTO history_deleted_side_payloads VALUES (?1)",
+        [job],
+    )?;
     db.execute(
         "UPDATE job_side_requests SET payload = ?2 WHERE job_id = ?1",
         params![job, protection::protect(&serde_json::to_vec(&payload)?)?],
@@ -627,7 +646,10 @@ pub(crate) fn redact_retained_side_context(db: &Connection, job: &str) -> Result
         [job],
     )?;
     db.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [job])?;
-    db.execute("UPDATE jobs SET queue_state = 'cancelled' WHERE id = ?1", [job])?;
+    db.execute(
+        "UPDATE jobs SET queue_state = 'cancelled' WHERE id = ?1",
+        [job],
+    )?;
     Ok(())
 }
 
@@ -644,9 +666,17 @@ pub(super) fn suggestion_still_current(
     }
     let (conversation, run, discarded): (String, String, bool) = db.query_row(
         "SELECT conversation_id, source_run_id, discarded FROM job_side_requests WHERE job_id = ?1",
-        [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    Ok(!discarded && native_suggestion(db, &conversation, &payload.pin.context_id, &run, &payload.scope)? == Some(SuggestionOutcome::Unavailable))
+    Ok(!discarded
+        && native_suggestion(
+            db,
+            &conversation,
+            &payload.pin.context_id,
+            &run,
+            &payload.scope,
+        )? == Some(SuggestionOutcome::Unavailable))
 }
 
 pub(crate) fn recover(db: &Connection) -> Result<()> {
@@ -887,8 +917,7 @@ fn normalize_suggestion(outcome: &mut SideOutcome) {
     }
     if let SideOutcome::Answered { text, .. } = outcome {
         match serde_json::from_str::<Suggestion>(text) {
-            Ok(suggestion) if valid_suggestion(suggestion.prompt.trim()) =>
-            {
+            Ok(suggestion) if valid_suggestion(suggestion.prompt.trim()) => {
                 *text = suggestion.prompt.trim().into();
             }
             _ => *outcome = SideOutcome::NoText,

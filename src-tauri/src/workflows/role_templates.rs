@@ -32,7 +32,10 @@ pub struct ConversationTemplate {
     pub tool_scope: SessionMode,
     pub completion_contract: String,
     pub review_policy: TemplateReviewPolicy,
-    #[serde(default, skip_serializing_if = "super::stage_requirements::StageRequirements::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "super::stage_requirements::StageRequirements::is_empty"
+    )]
     pub requirements: super::stage_requirements::StageRequirements,
 }
 
@@ -106,7 +109,11 @@ impl Store {
             while let Some(row) = rows.next()? {
                 let id: String = row.get(0)?;
                 let revision: String = row.get(1)?;
-                heads.push(head(db, &project, load_revision(db, &project, &id, &revision)?)?);
+                heads.push(head(
+                    db,
+                    &project,
+                    load_revision(db, &project, &id, &revision)?,
+                )?);
             }
             heads.sort_by(|left, right| {
                 left.name
@@ -265,7 +272,10 @@ pub(crate) fn save_conversation_template_in_tx(
     force_revision: bool,
 ) -> Result<SaveConversationTemplate> {
     validate_conversation_template(&mut template)?;
-    ensure!(template.requirements.is_valid(), "The role requirements are invalid or exceed the limits");
+    ensure!(
+        template.requirements.is_valid(),
+        "The role requirements are invalid or exceed the limits"
+    );
     let payload = protection::protect(&serde_json::to_vec(&template)?)?;
     let revision = Uuid::new_v4().to_string();
     let (id, ordinal, base_revision) = if let Some(base) = base {
@@ -326,8 +336,13 @@ pub(crate) fn save_conversation_template_in_tx(
     Ok(SaveConversationTemplate::Saved { detail })
 }
 
-fn head(db: &Connection, project: &str, revision: ConversationTemplateRevision) -> Result<ConversationTemplateHead> {
-    let display_label = super::settings_proposals::template_label_for_display(db, project, &revision.template_id)?;
+fn head(
+    db: &Connection,
+    project: &str,
+    revision: ConversationTemplateRevision,
+) -> Result<ConversationTemplateHead> {
+    let display_label =
+        super::settings_proposals::template_label_for_display(db, project, &revision.template_id)?;
     Ok(ConversationTemplateHead {
         template_id: revision.template_id,
         version: revision.version,

@@ -130,7 +130,8 @@ fn parse_scoped_plan_units(
     let ArtifactValue::Plan {
         run_id,
         event_sequence,
-    } = value else {
+    } = value
+    else {
         anyhow::bail!("plan has the wrong artifact kind");
     };
     let units = parse_plan_units(revision, &load_plan_text(db, &run_id, event_sequence)?)?;
@@ -218,12 +219,15 @@ pub(super) fn record_delivery_units(
             [&unit.id], |row| Ok(decode_unit(row)),
         ).optional()?.transpose()?;
         if let Some(existing) = existing {
-            ensure!(existing.workflow_run_id == decision.workflow_run_id
-                && existing.plan_revision == decision.plan_revision
-                && existing.project_id == decision.task.project_id
-                && existing.task_id == decision.task.task_id
-                && existing.checkout_id == checkout && existing.unit == unit,
-                "the preparation differs from the worktree and units originally scoped to this plan");
+            ensure!(
+                existing.workflow_run_id == decision.workflow_run_id
+                    && existing.plan_revision == decision.plan_revision
+                    && existing.project_id == decision.task.project_id
+                    && existing.task_id == decision.task.task_id
+                    && existing.checkout_id == checkout
+                    && existing.unit == unit,
+                "the preparation differs from the worktree and units originally scoped to this plan"
+            );
             continue;
         }
         db.execute(

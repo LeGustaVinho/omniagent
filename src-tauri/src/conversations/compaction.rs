@@ -20,8 +20,8 @@ use super::{
 
 mod native;
 
-pub(crate) use native::{NativeCompactionPlan, native_session_compacted};
 pub(super) use native::recover as recover_native_compactions;
+pub(crate) use native::{NativeCompactionPlan, native_session_compacted};
 
 const RECENT_TURNS: usize = 2;
 const SUMMARY_MAX_BYTES: usize = 16 * 1024;

@@ -243,17 +243,15 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
     graph.nodes.push(node(
         "unguarded",
         BuiltinNode::McpTool,
-        NodeConfiguration::McpTool(
-            crate::workflows::mcp_tools::McpToolConfiguration {
-                server_id: uuid::Uuid::new_v4().to_string(),
-                server_revision: "1".repeat(64),
-                tool_name: "send".into(),
-                contract_revision: "2".repeat(64),
-                arguments: Default::default(),
-                argument_mappings: Default::default(),
-                destination_pointer: None,
-            },
-        ),
+        NodeConfiguration::McpTool(crate::workflows::mcp_tools::McpToolConfiguration {
+            server_id: uuid::Uuid::new_v4().to_string(),
+            server_revision: "1".repeat(64),
+            tool_name: "send".into(),
+            contract_revision: "2".repeat(64),
+            arguments: Default::default(),
+            argument_mappings: Default::default(),
+            destination_pointer: None,
+        }),
     ));
     graph.wires.push(Wire {
         from: port("start", "always"),
@@ -280,7 +278,12 @@ async fn repeat_uses_the_previous_output_stops_at_its_bound_and_replays_after_re
     launch.request_id = "legacy-body-new-launch".into();
     let error = store.launch_workflow_manual(launch).await.unwrap_err();
     assert!(format!("{error:#}").contains("Review and publish revised Repeat body repeat"));
-    assert!(store.inspect_workflow_execution(project, previous_run).await?.is_some());
+    assert!(
+        store
+            .inspect_workflow_execution(project, previous_run)
+            .await?
+            .is_some()
+    );
     Ok(())
 }
 

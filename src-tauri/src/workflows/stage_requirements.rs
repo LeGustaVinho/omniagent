@@ -227,7 +227,10 @@ impl StageRequirementConfiguration {
 
     pub(crate) fn is_valid(&self) -> bool {
         self.stage.is_valid()
-            && self.goal.as_ref().is_none_or(|goal| goal.validate().is_ok())
+            && self
+                .goal
+                .as_ref()
+                .is_none_or(|goal| goal.validate().is_ok())
             && self.plan.as_ref().is_none_or(|plan| plan.is_valid())
             && self.bound_role.as_ref().is_none_or(roles::valid_bound_role)
             && self.role_template.as_ref().is_none_or(|role| {
@@ -249,7 +252,10 @@ fn effective_requirements(
     project: &str,
     configured: &StageRequirementConfiguration,
 ) -> Result<StageRequirements> {
-    let requirements_only = configured.role_template.as_ref().map(roles::role_version)
+    let requirements_only = configured
+        .role_template
+        .as_ref()
+        .map(roles::role_version)
         .filter(|version| configured.bound_role.as_ref() != Some(version));
     let mut effective = StageRequirements::default();
     for version in configured.bound_role.iter().chain(requirements_only.iter()) {

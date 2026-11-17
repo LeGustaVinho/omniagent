@@ -196,7 +196,8 @@ impl Store {
         revision: String,
         review_token: String,
     ) -> Result<()> {
-        self.resume_goal_with_review(project, revision, Some(review_token)).await
+        self.resume_goal_with_review(project, revision, Some(review_token))
+            .await
     }
 
     async fn resume_goal_with_review(
@@ -212,7 +213,9 @@ impl Store {
                 move |db| {
                     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                     if let Some(token) = checked.as_deref() {
-                        super::goal_transition::validate_goal_resume_review(&tx, &project, &revision, token)?;
+                        super::goal_transition::validate_goal_resume_review(
+                            &tx, &project, &revision, token,
+                        )?;
                     }
                     let (job, stopped_run) = paused_job(&tx, &project, &revision)?;
                     let mut recovery = None;
@@ -244,8 +247,14 @@ impl Store {
             .await?;
         if let Some((job, run, action)) = recovery {
             self.queue_job_recovery_with_goal(
-                project, job, run, action, Some(revision), review_token,
-            ).await?;
+                project,
+                job,
+                run,
+                action,
+                Some(revision),
+                review_token,
+            )
+            .await?;
         }
         self.job_signal.send_replace(());
         Ok(())
@@ -468,7 +477,11 @@ pub(super) fn writer_pause_checkpoint(
     )?)
 }
 
-pub(super) fn paused_job(db: &Connection, project: &str, revision: &str) -> Result<(Job, Option<String>)> {
+pub(super) fn paused_job(
+    db: &Connection,
+    project: &str,
+    revision: &str,
+) -> Result<(Job, Option<String>)> {
     let (id, stopped): (String, Option<String>) = db
         .query_row(
             "SELECT c.job_id, controls.stop_run_id FROM goal_revision_controls controls
@@ -892,7 +905,10 @@ pub(super) fn retire_requalified_goal(db: &Connection, revision: &str) -> Result
         [revision],
         |row| row.get(0),
     )?;
-    ensure!(confirmed && !owned_children_unsettled(db, revision)?, "The workflow goal continuation has already changed");
+    ensure!(
+        confirmed && !owned_children_unsettled(db, revision)?,
+        "The workflow goal continuation has already changed"
+    );
     stop_owned_children(db, revision)?;
     release_goal(db, revision)
 }

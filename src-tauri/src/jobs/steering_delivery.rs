@@ -209,7 +209,11 @@ impl Store {
         }).await
     }
 
-    pub async fn queued_steering_revision(&self, conversation: String, instruction: String) -> Result<Option<String>> {
+    pub async fn queued_steering_revision(
+        &self,
+        conversation: String,
+        instruction: String,
+    ) -> Result<Option<String>> {
         self.execute(move |db| {
             Ok(db.query_row(
                 "SELECT i.revision_id FROM queued_conversation_instructions i JOIN jobs j ON j.id = i.job_id
@@ -221,7 +225,10 @@ impl Store {
         }).await
     }
 
-    pub async fn conversation_instruction_deliveries(&self, conversation: String) -> Result<Vec<InstructionDeliveryEvidence>> {
+    pub async fn conversation_instruction_deliveries(
+        &self,
+        conversation: String,
+    ) -> Result<Vec<InstructionDeliveryEvidence>> {
         self.execute(move |db| {
             load_conversation(db, &conversation)?;
             let mut statement = db.prepare(

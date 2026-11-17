@@ -1,8 +1,8 @@
 use omniagent::{
     store::Store,
     workflows::{
-        ApprovalRuleSettings, WorkflowApprovalPreview, WorkflowApprovalStage, WorkflowApprovalSubmission,
-        WorkflowArtifact, WorkflowHostRequest, WorkflowHostSubmission,
+        ApprovalRuleSettings, WorkflowApprovalPreview, WorkflowApprovalStage,
+        WorkflowApprovalSubmission, WorkflowArtifact, WorkflowHostRequest, WorkflowHostSubmission,
     },
 };
 use tauri::State;
@@ -16,7 +16,10 @@ pub async fn workflow_approval_stage(
     run_id: String,
     node_id: String,
 ) -> Result<WorkflowApprovalStage, String> {
-    store.workflow_approval_stage(project_id, run_id, node_id).await.map_err(report)
+    store
+        .workflow_approval_stage(project_id, run_id, node_id)
+        .await
+        .map_err(report)
 }
 
 #[tauri::command]

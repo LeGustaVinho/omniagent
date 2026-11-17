@@ -1,5 +1,4 @@
 pub mod agent_tree;
-pub mod markdown_analysis;
 pub mod appearance;
 pub mod attachments;
 pub mod backup;
@@ -11,6 +10,7 @@ pub mod dispatch;
 pub mod evidence;
 pub mod installation;
 pub mod jobs;
+pub mod markdown_analysis;
 pub mod markdown_properties;
 pub mod markdown_recovery;
 pub mod mcp_bridge;

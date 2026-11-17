@@ -211,7 +211,12 @@ fn inherited_checkout(
             source_run_id,
             source_turn_id,
             context_id,
-        } => (Some(source_run_id), context_id, session_id, Some(source_turn_id)),
+        } => (
+            Some(source_run_id),
+            context_id,
+            session_id,
+            Some(source_turn_id),
+        ),
         NativeHistory::ProviderRecovery {
             session_id,
             source_run_id,
@@ -930,9 +935,13 @@ mod tests {
         );
         let recorded = &historical.observations;
         assert!(historical.inventory.filesystem_skills.contains(discovered));
-        assert!(recorded.iter().all(|entry| !entry.targets.contains(&InventoryTarget::Skill {
-            id: discovered.id.clone(),
-        })));
+        assert!(
+            recorded
+                .iter()
+                .all(|entry| !entry.targets.contains(&InventoryTarget::Skill {
+                    id: discovered.id.clone(),
+                }))
+        );
         let local_skill_id = SkillEntry::identity(Provider::Codex, &local_skill)?;
         let expected_links = [
             vec![],

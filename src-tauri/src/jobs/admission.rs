@@ -243,8 +243,13 @@ pub(crate) fn queue_conversation_continuation(
         attachments,
     )?;
     if !reference_ids.is_empty() {
-        let revision = instructions::load_revision(db, &job.id)?.context("Queued conversation lost its revision")?;
-        crate::conversations::reference_delivery::bind_references(db, &revision.revision_id, reference_ids)?;
+        let revision = instructions::load_revision(db, &job.id)?
+            .context("Queued conversation lost its revision")?;
+        crate::conversations::reference_delivery::bind_references(
+            db,
+            &revision.revision_id,
+            reference_ids,
+        )?;
     }
     Ok(job)
 }
@@ -1448,7 +1453,8 @@ fn evaluate(
     }
     if job.mode == SessionMode::ApprovedWrite {
         if let Some(prior_scope) = super::goal_requalification::initial_checkpoint(db, job)?
-            && prior_scope.same_worktree && !goals::confirmed_stage_worktree(db, job, &prior_scope.run)?
+            && prior_scope.same_worktree
+            && !goals::confirmed_stage_worktree(db, job, &prior_scope.run)?
         {
             blockers.push(Policy {
                 reason: "The requalified goal's worktree checkpoint is unavailable",

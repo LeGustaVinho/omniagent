@@ -272,8 +272,10 @@ pub(crate) fn validate_attempt_policy(db: &Connection, run: &str) -> Result<bool
 }
 
 pub(crate) fn validate_attempt_dispatch(db: &Connection, run: &str) -> Result<bool> {
-    ensure!(crate::workflows::comparison::selection::dispatch_sources_available(db, run)?,
-        "A selected comparison response was deleted before dispatch");
+    ensure!(
+        crate::workflows::comparison::selection::dispatch_sources_available(db, run)?,
+        "A selected comparison response was deleted before dispatch"
+    );
     crate::workflows::validate_attempt_control(db, run)?;
     if let Some(reason) = super::goals::goal_dispatch_blocker(db, run)? {
         save_rejection(

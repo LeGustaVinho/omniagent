@@ -367,7 +367,10 @@ mod tests {
         )?;
         assert_eq!(evidence, (vec![1, 2], vec![3, 4]));
         assert!(!db.prepare("PRAGMA foreign_key_check")?.exists([])?);
-        assert_eq!(db.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i32>(0))?, 1);
+        assert_eq!(
+            db.pragma_query_value(None, "foreign_keys", |row| row.get::<_, i32>(0))?,
+            1
+        );
         db.execute(
             "INSERT INTO workflow_artifacts VALUES ('items', 'run', 'node', 'items', NULL, 'json_list', x'05')",
             [],

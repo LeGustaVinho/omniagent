@@ -103,7 +103,11 @@ fn draft_references(
         .collect()
 }
 
-pub(super) fn draft_reference_bytes(db: &Connection, conversation: &str, project: &str) -> Result<u64> {
+pub(super) fn draft_reference_bytes(
+    db: &Connection,
+    conversation: &str,
+    project: &str,
+) -> Result<u64> {
     let references = draft_references(db, conversation, project)?;
     if references.is_empty() {
         return Ok(0);

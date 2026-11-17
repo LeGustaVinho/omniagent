@@ -45,8 +45,12 @@ use crate::{
     store::Store,
     tasks::{ChecklistProgressError, ChecklistProgressReceipt, ChecklistProgressRequest},
     workflows::{
-        authoring::package::mcp::{ApplyOperations, AuthoringOutcome, ReadCatalog, SubmitForReview},
-        settings_proposals::{SettingsPatch, SettingsPatchCatalog, SettingsPatchCatalogQuery, SettingsProposal},
+        authoring::package::mcp::{
+            ApplyOperations, AuthoringOutcome, ReadCatalog, SubmitForReview,
+        },
+        settings_proposals::{
+            SettingsPatch, SettingsPatchCatalog, SettingsPatchCatalogQuery, SettingsProposal,
+        },
     },
 };
 
@@ -156,7 +160,9 @@ enum Response {
     AuthoringOutcome(AuthoringOutcome),
     EditableSettings(Box<SettingsPatchCatalog>),
     SettingsProposal(Box<SettingsProposal>),
-    SettingsRejected { reason: String },
+    SettingsRejected {
+        reason: String,
+    },
     JobSubmitted {
         job_id: String,
     },

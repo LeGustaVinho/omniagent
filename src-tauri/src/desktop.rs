@@ -205,5 +205,8 @@ pub async fn repository_note_catalog(
     store: State<'_, Store>,
     checkout_id: String,
 ) -> Result<Vec<omniagent::repository::RepositoryNoteCatalogEntry>, String> {
-    store.repository_note_catalog(checkout_id).await.map_err(markdown_error)
+    store
+        .repository_note_catalog(checkout_id)
+        .await
+        .map_err(markdown_error)
 }

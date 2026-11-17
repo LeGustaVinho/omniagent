@@ -5,12 +5,12 @@ use omniagent::{
     attachments::{AttachmentDelivery, AttachmentSource},
     conversations::{AttemptPlan, Conversation, SessionScope},
     jobs::{
-        AdmissionBlocker, AdmissionEnvironment, AttemptSubagentRoute, InstructionDelivery, Job, JobContext,
-        JobNoticeKind, JobOrigin, JobPermission, JobRequest, JobRequestConflict, JobRequirements,
-        JobRole, JobRule, JobWorkspace, PipelineDispatch, PipelineNodeKind, ProjectSubagentPolicy,
-        QueueHistoryPolicy, QueueSettings, QueueState, RecoveryAction, SubagentAuditField,
-        SubagentAuditManagedReason, SubagentAuditPolicy, SubagentAuditPolicySource, SubagentAuditSource,
-        SubagentCounts, SubagentLimitMode,
+        AdmissionBlocker, AdmissionEnvironment, AttemptSubagentRoute, InstructionDelivery, Job,
+        JobContext, JobNoticeKind, JobOrigin, JobPermission, JobRequest, JobRequestConflict,
+        JobRequirements, JobRole, JobRule, JobWorkspace, PipelineDispatch, PipelineNodeKind,
+        ProjectSubagentPolicy, QueueHistoryPolicy, QueueSettings, QueueState, RecoveryAction,
+        SubagentAuditField, SubagentAuditManagedReason, SubagentAuditPolicy,
+        SubagentAuditPolicySource, SubagentAuditSource, SubagentCounts, SubagentLimitMode,
     },
     providers::{Capability, Provider, SessionIntent, SessionMode},
     repository,
@@ -555,20 +555,43 @@ async fn project_job_rules_match_the_role_operation_and_workspace() -> Result<()
         plan.run.id
     );
     assert!(store.claim_next_job(environment(false)).await?.is_none());
-    let admitted = store.run_orchestration(
-        project.clone(), plan.run.id.clone(), Some(plan.conversation_id.clone()),
-    ).await?.context("missing admitted rule evidence")?;
+    let admitted = store
+        .run_orchestration(
+            project.clone(),
+            plan.run.id.clone(),
+            Some(plan.conversation_id.clone()),
+        )
+        .await?
+        .context("missing admitted rule evidence")?;
     let admitted = serde_json::to_value(admitted)?;
     assert_eq!(admitted["policy"]["evidence"]["permission"], "allow");
-    assert_eq!(admitted["policy"]["evidence"]["source"]["workspace"]["type"], "task");
+    assert_eq!(
+        admitted["policy"]["evidence"]["source"]["workspace"]["type"],
+        "task"
+    );
     let mut replacement = changed.clone();
     replacement[0].permission = JobPermission::Deny;
-    store.set_project_job_rules(project.clone(), changed, replacement).await?;
-    let historical = store.run_orchestration(
-        project.clone(), plan.run.id.clone(), Some(plan.conversation_id),
-    ).await?.context("the saved rule disappeared after a policy change")?;
-    assert_eq!(serde_json::to_value(historical)?["policy"], admitted["policy"]);
-    assert!(store.run_orchestration(project, plan.run.id, Some("unrelated".into())).await?.is_none());
+    store
+        .set_project_job_rules(project.clone(), changed, replacement)
+        .await?;
+    let historical = store
+        .run_orchestration(
+            project.clone(),
+            plan.run.id.clone(),
+            Some(plan.conversation_id),
+        )
+        .await?
+        .context("the saved rule disappeared after a policy change")?;
+    assert_eq!(
+        serde_json::to_value(historical)?["policy"],
+        admitted["policy"]
+    );
+    assert!(
+        store
+            .run_orchestration(project, plan.run.id, Some("unrelated".into()))
+            .await?
+            .is_none()
+    );
     Ok(())
 }
 
@@ -1460,7 +1483,10 @@ async fn subagent_audit_overrides_are_independent_and_a_pipeline_stage_can_requi
         .await?
         .context("missing admission audit")?;
     assert_eq!(audit.effective_policy, SubagentAuditPolicy::Available);
-    assert_eq!(audit.policy_source, Some(SubagentAuditPolicySource::ConversationOverride));
+    assert_eq!(
+        audit.policy_source,
+        Some(SubagentAuditPolicySource::ConversationOverride)
+    );
     assert_eq!(audit.route, AttemptSubagentRoute::Available);
     assert!(audit.required_fields.is_empty());
     store.mark_agent_running(baseline.run.id.clone()).await?;
@@ -1568,11 +1594,17 @@ async fn subagent_audit_overrides_are_independent_and_a_pipeline_stage_can_requi
         .await?
         .context("missing workflow audit")?;
     assert_eq!(audit.effective_policy, SubagentAuditPolicy::Complete);
-    assert_eq!(audit.policy_source, Some(SubagentAuditPolicySource::Workflow));
+    assert_eq!(
+        audit.policy_source,
+        Some(SubagentAuditPolicySource::Workflow)
+    );
     assert_eq!(audit.required_fields.len(), 4);
-    assert_eq!(audit.route, AttemptSubagentRoute::Managed {
-        reason: Some(SubagentAuditManagedReason::NativeEvidenceUnavailable),
-    });
+    assert_eq!(
+        audit.route,
+        AttemptSubagentRoute::Managed {
+            reason: Some(SubagentAuditManagedReason::NativeEvidenceUnavailable),
+        }
+    );
     let quota = store.conversation_subagent_quota(chat.clone()).await?;
     assert_eq!(quota.native_sessions.len(), 1);
     assert_eq!(quota.native_sessions[0].allowance, 0);
@@ -1592,8 +1624,16 @@ async fn subagent_audit_overrides_are_independent_and_a_pipeline_stage_can_requi
         .await?
         .context("missing child audit")?;
     assert_eq!(audit.policy_conversation_id, chat);
-    assert_eq!(audit.policy_source, Some(SubagentAuditPolicySource::OriginatingAttempt));
-    assert!(reopened.attempt_subagent_audit(chat.clone(), child.run.id.clone()).await?.is_none());
+    assert_eq!(
+        audit.policy_source,
+        Some(SubagentAuditPolicySource::OriginatingAttempt)
+    );
+    assert!(
+        reopened
+            .attempt_subagent_audit(chat.clone(), child.run.id.clone())
+            .await?
+            .is_none()
+    );
     store.mark_agent_running(child.run.id.clone()).await?;
     store
         .finish_agent_attempt(
@@ -1638,7 +1678,10 @@ async fn subagent_audit_overrides_are_independent_and_a_pipeline_stage_can_requi
         .attempt_subagent_audit(chat, parent.run.id)
         .await?
         .context("historical audit disappeared after editing the conversation policy")?;
-    assert_eq!(historical.policy_source, Some(SubagentAuditPolicySource::Workflow));
+    assert_eq!(
+        historical.policy_source,
+        Some(SubagentAuditPolicySource::Workflow)
+    );
     Ok(())
 }
 

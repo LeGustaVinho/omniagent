@@ -554,6 +554,6 @@ pub(super) fn assess_route(
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod requalification_tests;
+#[cfg(test)]
+mod tests;

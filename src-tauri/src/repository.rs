@@ -24,12 +24,12 @@ pub mod git_review;
 mod isolated_git;
 mod markdown;
 mod markdown_catalog;
-pub mod project_search;
-pub mod source_documents;
 pub mod markdown_index;
 pub mod markdown_index_watch;
 pub mod markdown_links;
 pub mod markdown_renames;
+pub mod project_search;
+pub mod source_documents;
 pub mod verification;
 pub mod verified_git;
 pub mod verified_merge;
@@ -39,15 +39,17 @@ pub use candidates::{AttemptWorktreeEvidence, CandidateRevision, GitChanges, Liv
 pub(crate) use candidates::{
     WorktreeCheckpointMismatch, save_reconciled_native_candidate, save_worktree_candidate,
 };
-pub(crate) use markdown::{bind_job_markdown, workflow_markdown_revision};
 pub use markdown::{RepositoryMarkdown, RepositoryMarkdownRevision};
+pub(crate) use markdown::{bind_job_markdown, workflow_markdown_revision};
 pub use markdown_catalog::RepositoryNoteCatalogEntry;
+pub(crate) use worktrees::conversation::{
+    ConversationWorktreePreview, inspect_fork_checkout, materialize_fork_checkout,
+};
 pub use worktrees::strategy::{BranchStrategy, TaskBranchStrategy};
 pub use worktrees::{GitStartingState, ManagedWorktree, WorktreeStart, provision_task_worktree};
-pub(crate) use worktrees::conversation::{ConversationWorktreePreview, inspect_fork_checkout, materialize_fork_checkout};
 pub(crate) use worktrees::{
-    capture_worktree_start, observe_interrupted_writer, validate_task_worktree_checkout, verify_managed_recovery_candidate,
-    verify_managed_recovery_checkout,
+    capture_worktree_start, observe_interrupted_writer, validate_task_worktree_checkout,
+    verify_managed_recovery_candidate, verify_managed_recovery_checkout,
 };
 pub use writers::with_managed_worktree_writer;
 

@@ -54,27 +54,50 @@ async fn exercise(pass_second: bool) -> Result<()> {
     let (plans, planner_input) =
         workflow_plan_candidates_fixture(&store, &repo, &run, [single, multiple]).await?;
     assert!(planner_input.iter().any(|message| {
-        message.text.contains("units array must contain exactly one logical unit")
+        message
+            .text
+            .contains("units array must contain exactly one logical unit")
     }));
     let rejected = store
         .set_job_pipeline_plan(project.clone(), run.id.clone(), None, plans[1].id.clone())
         .await
         .expect_err("repair must reject a recorded multi-unit proposal");
-    assert!(rejected.to_string().contains("requires exactly one logical unit"), "{rejected:#}");
-    assert!(store
-        .workflow_run(project.clone(), run.id.clone())
-        .await?
-        .context("missing repair run")?
-        .plan_revision
-        .is_none());
+    assert!(
+        rejected
+            .to_string()
+            .contains("requires exactly one logical unit"),
+        "{rejected:#}"
+    );
+    assert!(
+        store
+            .workflow_run(project.clone(), run.id.clone())
+            .await?
+            .context("missing repair run")?
+            .plan_revision
+            .is_none()
+    );
     let linked = link_reviewed_plan_candidates_fixture(
-        &store, &repo, None, &run, plans, "Fix the failed file check",
-    ).await?;
+        &store,
+        &repo,
+        None,
+        &run,
+        plans,
+        "Fix the failed file check",
+    )
+    .await?;
     let fixture = approve_reviewed_plan_fixture(&store, dir.path(), repo, run, linked).await?;
     assert_eq!(fixture.units.len(), 1);
-    assert!(store.set_job_pipeline_plan(
-        project.clone(), fixture.run.id.clone(), Some(fixture.plan.id.clone()), fixture.alternate_plan.id.clone(),
-    ).await.is_err());
+    assert!(
+        store
+            .set_job_pipeline_plan(
+                project.clone(),
+                fixture.run.id.clone(),
+                Some(fixture.plan.id.clone()),
+                fixture.alternate_plan.id.clone(),
+            )
+            .await
+            .is_err()
+    );
     let unit = &fixture.units[0];
     let task = &unit.task_id;
     let worktree = store

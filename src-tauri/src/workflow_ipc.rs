@@ -6,10 +6,10 @@ use omniagent::{
     store::Store,
     workflows::{
         ArtifactValue, BuiltinNode, NodeInputs, WorkflowAgentSubmission, WorkflowArtifact,
-        WorkflowDefinition, WorkflowDeliveryUnit, WorkflowHostRequest, WorkflowHostSubmission, WorkflowOperatorJob,
-        WorkflowLaunchReceipt, WorkflowLaunchSource,
-        WorkflowPlanHistory, WorkflowPlanProposal, WorkflowPlanRevisionRequest, WorkflowRun,
-        WorkflowUnitOutcome, WorkflowUnitRequest, WorkflowUnitSubmission,
+        WorkflowDefinition, WorkflowDeliveryUnit, WorkflowHostRequest, WorkflowHostSubmission,
+        WorkflowLaunchReceipt, WorkflowLaunchSource, WorkflowOperatorJob, WorkflowPlanHistory,
+        WorkflowPlanProposal, WorkflowPlanRevisionRequest, WorkflowRun, WorkflowUnitOutcome,
+        WorkflowUnitRequest, WorkflowUnitSubmission,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -73,9 +73,16 @@ pub async fn start_repository_delivery(
     checkout_id: String,
     revision_id: String,
 ) -> Result<WorkflowRun, String> {
-    store.launch_builtin_repository_delivery(
-        project_id, WorkflowLaunchSource { checkout_id, revision_id },
-    ).await.map_err(report)
+    store
+        .launch_builtin_repository_delivery(
+            project_id,
+            WorkflowLaunchSource {
+                checkout_id,
+                revision_id,
+            },
+        )
+        .await
+        .map_err(report)
 }
 
 #[tauri::command]
@@ -109,7 +116,9 @@ pub async fn inspect_repository_delivery(
         let host_outputs = store
             .current_workflow_host_outputs(project_id.clone(), run_id.clone())
             .await?;
-        let launch = store.workflow_launch(project_id.clone(), run_id.clone()).await?;
+        let launch = store
+            .workflow_launch(project_id.clone(), run_id.clone())
+            .await?;
         let jobs = store.workflow_operator_jobs(project_id, run_id).await?;
         Ok(Some(RepositoryDelivery {
             run,
@@ -218,8 +227,12 @@ pub async fn submit_repository_delivery_agent(
     async {
         let comparison = input.comparison.clone();
         let submission = delivery_agent_submission(&store, input, false).await?;
-        store.submit_workflow_agent_with_comparison(submission, comparison).await
-    }.await.map_err(report)
+        store
+            .submit_workflow_agent_with_comparison(submission, comparison)
+            .await
+    }
+    .await
+    .map_err(report)
 }
 
 async fn delivery_agent_submission(
@@ -241,11 +254,21 @@ async fn delivery_agent_submission(
         ""
     } else {
         match target.kind {
-            BuiltinNode::Plan => "Propose an implementation plan for the selected repository document. Ask for missing decisions using the planning interface.",
-            BuiltinNode::ReviewPlan => "Review the pinned plan and explain unresolved issues. Keep the checkout read-only.",
-            BuiltinNode::Implement => "Implement the pinned logical unit on the approved branch. Keep unrelated changes out of the unit. Leave the changes in the worktree for review, checks and commit approval.",
-            BuiltinNode::ReviewCandidate => "Review the selected candidate tree for correctness and evaluate the pinned unit criteria.",
-            BuiltinNode::ReviewDiffCandidate => "Review only the frozen candidate diff against its saved base. Report findings and show which changes need correction. Keep the materialized checkout read-only.",
+            BuiltinNode::Plan => {
+                "Propose an implementation plan for the selected repository document. Ask for missing decisions using the planning interface."
+            }
+            BuiltinNode::ReviewPlan => {
+                "Review the pinned plan and explain unresolved issues. Keep the checkout read-only."
+            }
+            BuiltinNode::Implement => {
+                "Implement the pinned logical unit on the approved branch. Keep unrelated changes out of the unit. Leave the changes in the worktree for review, checks and commit approval."
+            }
+            BuiltinNode::ReviewCandidate => {
+                "Review the selected candidate tree for correctness and evaluate the pinned unit criteria."
+            }
+            BuiltinNode::ReviewDiffCandidate => {
+                "Review only the frozen candidate diff against its saved base. Report findings and show which changes need correction. Keep the materialized checkout read-only."
+            }
             _ => anyhow::bail!("select a pinned CLI agent stage"),
         }
     };
@@ -396,7 +419,9 @@ pub async fn publish_repository_delivery_evidence(
                         .parse()?,
                 },
             ),
-            BuiltinNode::ReviewPlan | BuiltinNode::ReviewCandidate | BuiltinNode::ReviewDiffCandidate => {
+            BuiltinNode::ReviewPlan
+            | BuiltinNode::ReviewCandidate
+            | BuiltinNode::ReviewDiffCandidate => {
                 ("review", ArtifactValue::Review { run_id: attempt_id })
             }
             _ => anyhow::bail!("this node does not publish planning or review evidence"),

@@ -46,7 +46,10 @@ impl Store {
         mut revision: WorkflowPlanRevisionRequest,
     ) -> Result<Job> {
         ensure!(
-            matches!(submission.scope.mode, SessionMode::Plan | SessionMode::ReadOnly),
+            matches!(
+                submission.scope.mode,
+                SessionMode::Plan | SessionMode::ReadOnly
+            ),
             "A revision requires the workflow's read-only planning stage"
         );
         revision.feedback = revision.feedback.trim().to_owned();
@@ -76,7 +79,8 @@ impl Store {
             .await?
             .context("The selected planning attempt is unavailable")?;
         ensure!(
-            source.status == RunStatus::Succeeded && source.pin.workflow_run_id == *workflow
+            source.status == RunStatus::Succeeded
+                && source.pin.workflow_run_id == *workflow
                 && source.pin.node_instance_id == submission.dispatch.node_instance_id,
             "A revision requires a completed planning attempt in this workflow"
         );
@@ -118,10 +122,15 @@ impl Store {
         let artifacts = self
             .workflow_run_artifacts(project.clone(), workflow.clone())
             .await?;
-        let active_outputs = self.current_workflow_host_outputs(project.clone(), workflow.clone()).await?;
+        let active_outputs = self
+            .current_workflow_host_outputs(project.clone(), workflow.clone())
+            .await?;
         let attempt_decision = artifacts.iter().find_map(|artifact| match &artifact.value {
-            ArtifactValue::Release(reference) if attempt.pin.release_id.as_ref() == Some(&reference.release.id) =>
-                Some(&reference.decision_artifact_id),
+            ArtifactValue::Release(reference)
+                if attempt.pin.release_id.as_ref() == Some(&reference.release.id) =>
+            {
+                Some(&reference.decision_artifact_id)
+            }
             _ => None,
         });
         let mut versions = Vec::new();
@@ -142,8 +151,14 @@ impl Store {
             let mut approvals = artifacts.iter().filter(|item| {
                 matches!(&item.value, ArtifactValue::Approval(decision) if decision.plan_revision == artifact.id)
             });
-            let approval = approvals.clone().find(|item| Some(&item.id) == attempt_decision)
-                .or_else(|| approvals.clone().find(|item| active_outputs.values().any(|id| id == &item.id)))
+            let approval = approvals
+                .clone()
+                .find(|item| Some(&item.id) == attempt_decision)
+                .or_else(|| {
+                    approvals
+                        .clone()
+                        .find(|item| active_outputs.values().any(|id| id == &item.id))
+                })
                 .or_else(|| approvals.next());
             let release = approval.and_then(|approval| {
                 artifacts.iter().find_map(|item| match &item.value {

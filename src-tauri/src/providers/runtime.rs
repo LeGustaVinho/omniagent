@@ -51,8 +51,8 @@ use super::{
     suggestions::{SuggestionOutcome, SuggestionSource, adapter_route_unavailable},
 };
 
-mod native_goals;
 pub(crate) mod native_compaction;
+mod native_goals;
 mod requirements;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -562,7 +562,13 @@ impl TurnExecution {
             .app
             .block_on(self.store.goal_execution_for_run(self.plan.run.id.clone()))?;
         if self.admission.is_some() && self.goal.is_none() {
-            self.native_suggestions = self.app.block_on(self.store.scheduled_suggestion_enabled(self.plan.run.id.clone())).unwrap_or(false);
+            self.native_suggestions = self
+                .app
+                .block_on(
+                    self.store
+                        .scheduled_suggestion_enabled(self.plan.run.id.clone()),
+                )
+                .unwrap_or(false);
         }
         if self
             .goal
@@ -599,7 +605,10 @@ impl TurnExecution {
             self.reject_dispatch(DispatchRejection::ProfileUnavailable)?;
             return Err(error);
         }
-        self.comparison = self.app.block_on(self.store.model_comparison_pin_for_run(self.plan.run.id.clone()))?;
+        self.comparison = self.app.block_on(
+            self.store
+                .model_comparison_pin_for_run(self.plan.run.id.clone()),
+        )?;
         let is_comparison = self.comparison.is_some();
         let registered = if let Some(pin) = &self.comparison {
             pin.verify_attempt(&self.plan).and_then(|()| pin.checkout())
@@ -649,7 +658,8 @@ impl TurnExecution {
         if self.plan.native_fork.is_some() {
             session.allow_native_fork_fallback();
         }
-        if self.native_suggestions && !is_comparison && !adapter_route_unavailable(&self.plan.scope) {
+        if self.native_suggestions && !is_comparison && !adapter_route_unavailable(&self.plan.scope)
+        {
             session.enable_native_suggestions();
         }
         session.set_checkout_root(&checkout.root);
@@ -684,7 +694,8 @@ impl TurnExecution {
             Ok(None) => {
                 self.record_bridge_registration(Registration::Unavailable {
                     reason: if is_isolated_read {
-                        "The OmniAgent MCP helper is disabled for the isolated read-only checkout".into()
+                        "The OmniAgent MCP helper is disabled for the isolated read-only checkout"
+                            .into()
                     } else {
                         "The selected runner has no MCP helper".into()
                     },
@@ -1298,9 +1309,11 @@ impl TurnExecution {
                 }
             };
             let update = session.receive(frame)?;
-            if update.events.iter().any(|event| {
-                matches!(event.data, ProviderEventData::NativeForkUnavailable { .. })
-            }) {
+            if update
+                .events
+                .iter()
+                .any(|event| matches!(event.data, ProviderEventData::NativeForkUnavailable { .. }))
+            {
                 ensure!(
                     !ready && !sent && self.plan.native_fork.take().is_some(),
                     "Unexpected native fork fallback after startup"
@@ -1336,10 +1349,17 @@ impl TurnExecution {
             let suggestion_boundary = if self.native_suggestions {
                 update.events.iter().find_map(|event| {
                     (event.location.parent_item_id.is_none()
-                        && matches!(event.data, ProviderEventData::TurnFinished { outcome: TurnOutcome::Completed }))
+                        && matches!(
+                            event.data,
+                            ProviderEventData::TurnFinished {
+                                outcome: TurnOutcome::Completed
+                            }
+                        ))
                     .then(|| event.location.clone())
                 })
-            } else { None };
+            } else {
+                None
+            };
             let turn_status = self.record_update(process, update, EventSource::Provider)?;
             if let Some(accepted) = native_seed_receipt {
                 ensure!(
@@ -1393,9 +1413,11 @@ impl TurnExecution {
                     self.store
                         .preserve_questions_after_turn(self.plan.run.id.clone(), false),
                 )?;
-                if status == RunStatus::Succeeded && !awaiting_question
+                if status == RunStatus::Succeeded
+                    && !awaiting_question
                     && let Some(boundary) = suggestion_boundary
-                    && self.suggestion_still_wanted() {
+                    && self.suggestion_still_wanted()
+                {
                     let _ = self.settle_composer_suggestion(process, session, commands, boundary);
                 }
                 return Ok(status);
@@ -1562,7 +1584,9 @@ impl TurnExecution {
             let suffix = format!("\n\n{}", seed.managed_instructions);
             let goal = projected
                 .iter_mut()
-                .rfind(|message| message.text == seed.managed_instructions || message.text.ends_with(&suffix))
+                .rfind(|message| {
+                    message.text == seed.managed_instructions || message.text.ends_with(&suffix)
+                })
                 .context("The admitted native goal context lost its objective")?;
             goal.text = if let Some(stage) = goal.text.strip_suffix(&suffix) {
                 format!("{stage}\n\n{}", seed.objective)
@@ -1573,12 +1597,23 @@ impl TurnExecution {
         } else {
             format_input(&projected_input)?
         };
-        let conversation_references = self.app.block_on(self.store.conversation_dispatch_references(
-            self.plan.run.id.clone(), self.plan.input.iter().map(|message| message.revision_id.clone()).collect(),
-        ))?;
+        let conversation_references = self.app.block_on(
+            self.store.conversation_dispatch_references(
+                self.plan.run.id.clone(),
+                self.plan
+                    .input
+                    .iter()
+                    .map(|message| message.revision_id.clone())
+                    .collect(),
+            ),
+        )?;
         if !conversation_references.is_empty() {
-            input.text.push_str("\n\nQuoted conversation references supplied by OmniAgent (JSON data):\n");
-            input.text.push_str(&serde_json::to_string(&conversation_references)?);
+            input.text.push_str(
+                "\n\nQuoted conversation references supplied by OmniAgent (JSON data):\n",
+            );
+            input
+                .text
+                .push_str(&serde_json::to_string(&conversation_references)?);
         }
         let objective = projected_input
             .iter()
@@ -1656,9 +1691,18 @@ impl TurnExecution {
         if let Some(blocked) = assessment.take_if(|report| !report.blockers.is_empty()) {
             return self.record_attachment_assessment(blocked).map(|()| true);
         }
-        let (mut selected_skills, mut skill_files): (Vec<_>, Vec<_>) = self.plan.input.last()
+        let (mut selected_skills, mut skill_files): (Vec<_>, Vec<_>) = self
+            .plan
+            .input
+            .last()
             .filter(|message| message.role == MessageRole::User)
-            .map(|message| resolve_selected_skills(&self.plan.scope, &message.text, self.reported_skills.as_ref()))
+            .map(|message| {
+                resolve_selected_skills(
+                    &self.plan.scope,
+                    &message.text,
+                    self.reported_skills.as_ref(),
+                )
+            })
             .transpose()?
             .unwrap_or_default()
             .into_iter()
@@ -1669,8 +1713,14 @@ impl TurnExecution {
                 skill_files.push(file);
             }
         }
-        ensure!(selected_skills.len() <= 8, "The turn has more than eight selected skills");
-        ensure!(self.plan.native_goal_seed.is_none() || selected_skills.is_empty(), "The native goal route cannot carry selected skills");
+        ensure!(
+            selected_skills.len() <= 8,
+            "The turn has more than eight selected skills"
+        );
+        ensure!(
+            self.plan.native_goal_seed.is_none() || selected_skills.is_empty(),
+            "The native goal route cannot carry selected skills"
+        );
         self.composer_skill_sources = skill_files;
         let update = if self.plan.native_goal_seed.is_some() {
             session.seed_native_goal_context(input)?
@@ -1707,8 +1757,15 @@ impl TurnExecution {
             })
         } else {
             Some(SkillRequest {
-                name: selected_skills.iter().map(|skill| skill.name.as_str()).collect::<Vec<_>>().join(", "),
-                matching_ids: selected_skills.iter().map(|skill| skill.id.clone()).collect(),
+                name: selected_skills
+                    .iter()
+                    .map(|skill| skill.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                matching_ids: selected_skills
+                    .iter()
+                    .map(|skill| skill.id.clone())
+                    .collect(),
                 selections: selected_skills,
             })
         };
@@ -2008,7 +2065,14 @@ impl TurnExecution {
     }
 
     fn suggestion_still_wanted(&self) -> bool {
-        self.admission.is_none() || self.app.block_on(self.store.scheduled_suggestion_still_wanted(self.plan.conversation_id.clone())).unwrap_or(false)
+        self.admission.is_none()
+            || self
+                .app
+                .block_on(
+                    self.store
+                        .scheduled_suggestion_still_wanted(self.plan.conversation_id.clone()),
+                )
+                .unwrap_or(false)
     }
 
     fn settle_composer_suggestion(
@@ -2019,12 +2083,19 @@ impl TurnExecution {
         boundary: ProviderLocation,
     ) -> Result<()> {
         if adapter_route_unavailable(&self.plan.scope) {
-            if let (Some(provider_session_id), Some(message)) = (boundary.session_id, self.plan.input.last()) {
+            if let (Some(provider_session_id), Some(message)) =
+                (boundary.session_id, self.plan.input.last())
+            {
                 let source = SuggestionSource {
-                    provider_session_id, provider_turn_id: boundary.turn_id,
-                    provider_result_id: boundary.item_id, message_id: message.message_id.clone(),
+                    provider_session_id,
+                    provider_turn_id: boundary.turn_id,
+                    provider_result_id: boundary.item_id,
+                    message_id: message.message_id.clone(),
                 };
-                self.record(source.settlement(SuggestionOutcome::Unavailable), EventSource::Application)?;
+                self.record(
+                    source.settlement(SuggestionOutcome::Unavailable),
+                    EventSource::Application,
+                )?;
             }
             return Ok(());
         }
@@ -2071,7 +2142,9 @@ impl TurnExecution {
                 _ => return self.finish_suggestion(session, SuggestionOutcome::Failed),
             };
             match update {
-                Ok(update) if self.suggestion_still_wanted() => self.record_suggestion_events(update.events)?,
+                Ok(update) if self.suggestion_still_wanted() => {
+                    self.record_suggestion_events(update.events)?
+                }
                 Ok(_) => return self.finish_suggestion(session, SuggestionOutcome::Cancelled),
                 Err(_) => return self.finish_suggestion(session, SuggestionOutcome::Failed),
             }

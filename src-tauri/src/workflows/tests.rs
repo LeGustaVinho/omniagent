@@ -38,7 +38,11 @@ fn graph(role: &str) -> WorkflowGraph {
             (
                 "plan",
                 Plan,
-                NodeConfiguration::AgentRole { role: role.into(), model: None, requirements: Default::default() },
+                NodeConfiguration::AgentRole {
+                    role: role.into(),
+                    model: None,
+                    requirements: Default::default(),
+                },
             ),
             (
                 "review",
@@ -591,20 +595,47 @@ async fn scheduler_attempts_keep_workflow_node_and_plan_pins_and_validate_eviden
     assert_eq!(attempt.pin.workflow, saved);
     assert_eq!(attempt.pin.plan_revision.as_ref(), Some(&plan.id));
     assert_eq!(attempt.pin.node_instance_id, "review");
-    let recorded = store.inspect_workflow_execution(project.clone(), workflow.id.clone()).await?.context("missing run graph")?;
+    let recorded = store
+        .inspect_workflow_execution(project.clone(), workflow.id.clone())
+        .await?
+        .context("missing run graph")?;
     assert_eq!(recorded.definition.version, saved);
     assert_ne!(recorded.definition.version, new);
-    assert_eq!(recorded.definition.nodes.iter().find(|entry| entry.instance.id == "plan"), Some(&node));
-    let start_output = recorded.outputs.iter().find(|entry| entry.artifact.id == start.id).context("start output missing")?;
+    assert_eq!(
+        recorded
+            .definition
+            .nodes
+            .iter()
+            .find(|entry| entry.instance.id == "plan"),
+        Some(&node)
+    );
+    let start_output = recorded
+        .outputs
+        .iter()
+        .find(|entry| entry.artifact.id == start.id)
+        .context("start output missing")?;
     assert!(start_output.input_receipts[0].inputs.is_empty());
-    let work_output = recorded.outputs.iter().find(|entry| entry.artifact.id == work.id).context("linked work missing")?;
+    let work_output = recorded
+        .outputs
+        .iter()
+        .find(|entry| entry.artifact.id == work.id)
+        .context("linked work missing")?;
     assert_eq!(work_output.input_receipts[0].inputs, work_inputs);
     assert_eq!(work_output.input_receipts[0].execution_key, plan.id);
-    let review_job = recorded.jobs.iter().find(|entry| entry.job.id == review.id).context("review job missing")?;
+    let review_job = recorded
+        .jobs
+        .iter()
+        .find(|entry| entry.job.id == review.id)
+        .context("review job missing")?;
     assert_eq!(review_job.inputs.as_ref().unwrap()["plan"], plan.id);
     assert_eq!(review_job.attempts[0].run_id, attempt.run_id);
     assert_eq!(review_job.attempts[0].status, RunStatus::Succeeded);
-    assert!(store.inspect_workflow_execution(foreign.project_id, workflow.id.clone()).await?.is_none());
+    assert!(
+        store
+            .inspect_workflow_execution(foreign.project_id, workflow.id.clone())
+            .await?
+            .is_none()
+    );
     assert_eq!(
         store
             .resolve_workflow_artifact(project, workflow.id, work.id.clone(), ArtifactKind::Task)
@@ -690,7 +721,15 @@ pub(super) async fn link_reviewed_delivery_fixture(
     } else {
         "Do each change separately.\n\n```omniagent-plan\n{\"units\":[{\"purpose\":\"First change\",\"completionCriteria\":[\"First file updated\"]},{\"purpose\":\"Second change\",\"completionCriteria\":[\"Second file updated\"]}]}\n```"
     };
-    link_reviewed_plan_fixture(store, repo, task_id, run, planned_text, "Two sequential changes").await
+    link_reviewed_plan_fixture(
+        store,
+        repo,
+        task_id,
+        run,
+        planned_text,
+        "Two sequential changes",
+    )
+    .await
 }
 
 pub(super) async fn link_reviewed_plan_fixture(
@@ -712,7 +751,10 @@ pub(super) async fn workflow_plan_candidates_fixture(
     repo: &ProjectCheckout,
     run: &WorkflowRun,
     [planned_text, alternative]: [&str; 2],
-) -> Result<([WorkflowArtifact; 2], Vec<crate::conversations::MessageRevision>)> {
+) -> Result<(
+    [WorkflowArtifact; 2],
+    Vec<crate::conversations::MessageRevision>,
+)> {
     let project = repo.project_id.clone();
     let root = Path::new(&repo.checkout_root);
     let host = |node: &str, inputs, request| WorkflowHostSubmission {
@@ -722,18 +764,23 @@ pub(super) async fn workflow_plan_candidates_fixture(
         inputs,
         request,
     };
-    let document = match store.workflow_launch(project.clone(), run.id.clone()).await? {
+    let document = match store
+        .workflow_launch(project.clone(), run.id.clone())
+        .await?
+    {
         Some(launch) => launch.source,
-        None => store.capture_repository_markdown(repo.checkout_id.clone(), root.join("brief.md"))
-            .await?.revision,
+        None => {
+            store
+                .capture_repository_markdown(repo.checkout_id.clone(), root.join("brief.md"))
+                .await?
+                .revision
+        }
     };
     let start = store
         .execute_workflow_host(host(
             "start",
             NodeInputs::new(),
-            WorkflowHostRequest::Start {
-                document,
-            },
+            WorkflowHostRequest::Start { document },
         ))
         .await?;
     let context = store
@@ -768,12 +815,19 @@ pub(super) async fn workflow_plan_candidates_fixture(
             },
         )
         .await?;
-    store.record_agent_observation(planned.run.id.clone(), EventSource::Provider, ProviderEvent {
-        location: ProviderLocation::default(), data: ProviderEventData::PlanProposed {
-            text: alternative.into(),
-            source: PlanSource::CodexPlanItem,
-        },
-    }).await?;
+    store
+        .record_agent_observation(
+            planned.run.id.clone(),
+            EventSource::Provider,
+            ProviderEvent {
+                location: ProviderLocation::default(),
+                data: ProviderEventData::PlanProposed {
+                    text: alternative.into(),
+                    source: PlanSource::CodexPlanItem,
+                },
+            },
+        )
+        .await?;
     store
         .finish_agent_attempt(
             planned.run.id.clone(),

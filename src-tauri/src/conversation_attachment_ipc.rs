@@ -182,17 +182,23 @@ pub async fn review_conversation_attachment_draft(
     target_checkout_id: Option<String>,
 ) -> Result<AttachmentDraftReview, String> {
     async {
-        let checkout = store.conversation_continuation_checkout_id(conversation_id.clone(),target_checkout_id.clone()).await?;
-        let scope = crate::conversation_runtime::selected_scope(
-            &store,
-            checkout,
-            selection,
-            effort,
-            mode,
-        )
-        .await?;
+        let checkout = store
+            .conversation_continuation_checkout_id(
+                conversation_id.clone(),
+                target_checkout_id.clone(),
+            )
+            .await?;
+        let scope =
+            crate::conversation_runtime::selected_scope(&store, checkout, selection, effort, mode)
+                .await?;
         store
-            .review_conversation_attachment_draft_at_checkout(conversation_id, expected_revision, scope, text, target_checkout_id)
+            .review_conversation_attachment_draft_at_checkout(
+                conversation_id,
+                expected_revision,
+                scope,
+                text,
+                target_checkout_id,
+            )
             .await
     }
     .await

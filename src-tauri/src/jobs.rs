@@ -44,8 +44,11 @@ pub use admission::{
     AdmissionBlocker, AdmissionEnvironment, JobInspection, ProjectQueue, QueueSettings,
 };
 pub(crate) use command::recover_commands;
+pub(crate) use command::{
+    CommandExchange, PinnedCommandScript, PreparedCommand, queue_pipeline_command,
+    queue_pipeline_mcp,
+};
 pub use command::{CommandJobOutput, PipelineCommand};
-pub(crate) use command::{CommandExchange, PinnedCommandScript, PreparedCommand, queue_pipeline_command, queue_pipeline_mcp};
 pub use downstream::{DownstreamInput, DownstreamWait, DownstreamWaitState};
 pub(crate) use downstream::{observe_child_run, recover_waiting_parent, settle_parent_wait};
 pub(crate) use failures::record_job_failure;
@@ -53,18 +56,18 @@ pub use failures::{
     FailureCause, FailureObservation, FailurePhase, JobFailure, ObservedProcessExit,
 };
 pub use goal_control::{GoalControlState, GoalStopAction};
-pub use goal_inspection::{ConversationGoalOverview, InspectedGoal};
-pub use goal_requalification::{GoalRequalificationScope, WorkflowGoalRequalification};
-pub(crate) use goal_transition::{conversation_goal_transition, native_goal_fork_is_safe};
-pub use goal_transition::{GoalTransitionReview, GoalTransitionScope};
-pub use goal_verification::{
-    GoalCriterionEvidence, GoalCriterionStatus, GoalCriterionVerification, GoalEvidenceChoice,
-    GoalVerification, GoalVerificationStatus,
-};
-pub(crate) use goal_verification::load_goal_verification;
 pub(crate) use goal_control::{
     pause_revoked_goal, recover_managed_goal_stops, settle_goal_stop,
     settle_owned_goal_cancellations,
+};
+pub use goal_inspection::{ConversationGoalOverview, InspectedGoal};
+pub use goal_requalification::{GoalRequalificationScope, WorkflowGoalRequalification};
+pub use goal_transition::{GoalTransitionReview, GoalTransitionScope};
+pub(crate) use goal_transition::{conversation_goal_transition, native_goal_fork_is_safe};
+pub(crate) use goal_verification::load_goal_verification;
+pub use goal_verification::{
+    GoalCriterionEvidence, GoalCriterionStatus, GoalCriterionVerification, GoalEvidenceChoice,
+    GoalVerification, GoalVerificationStatus,
 };
 pub use goals::{
     GoalCheckpoint, GoalContinuationOwner, GoalDefinition, GoalRevision, GoalTurnAction,
@@ -72,8 +75,8 @@ pub use goals::{
 };
 pub(crate) use goals::{
     GoalExecution, accept_goal_checkpoint, delegated_goal_authority_revoked, is_native_goal_run,
-    record_native_goal, record_native_goal_turn, recover_native_goal_executors, require_workflow_goal_release,
-    settle_native_goal_executor,
+    record_native_goal, record_native_goal_turn, recover_native_goal_executors,
+    require_workflow_goal_release, settle_native_goal_executor,
 };
 pub use history::{QueueHistoryPolicy, QueueHistorySettings};
 pub(crate) use history::{apply_queue_history_policy, detached_question_context};
@@ -84,10 +87,11 @@ pub use instructions::{InstructionDelivery, PendingInstruction};
 pub(crate) use native_goal_evidence::{
     late_native_goal_evidence, record_native_goal_control, recover_native_goal_output,
 };
-pub(crate) use native_goal_qualification::{NativeGoalSeed, candidate as native_goal_candidate, effective_qualification_matches};
+pub(crate) use native_goal_qualification::{
+    NativeGoalSeed, candidate as native_goal_candidate, effective_qualification_matches,
+};
 pub use notices::{JobNotice, JobNoticeKind, JobNotices};
 pub use orchestration::RunOrchestration;
-pub use question_answers::ConversationQuestionTimelineEntry;
 pub use pipeline::{
     PipelineAgentInput, PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease,
     ReleaseBlocker,
@@ -98,6 +102,7 @@ pub use policy::{
     DispatchRejection, JobPermission, JobRequirements, JobRole, JobRule, JobWorkspace,
     RequiredCustomization,
 };
+pub use question_answers::ConversationQuestionTimelineEntry;
 pub(crate) use question_waits::{
     QuestionTimer, archive_saved_question, close_live_question, now_ms, open_native_question,
     recover_question_stop_reservations, refresh_live_question_status, restart_question_waits,
@@ -110,8 +115,8 @@ pub use recovery::{InterruptedWriterReview, WriterReconciliationReceipt};
 pub(crate) use recovery::{requeue_rejected_native_goal, requeue_unlaunched_job};
 pub use scheduler::JobScheduler;
 pub(crate) use scheduler::LaunchGate;
-pub(crate) use side_requests::recover as recover_side_requests;
 pub(crate) use side_requests::read_suggestion_mode;
+pub(crate) use side_requests::recover as recover_side_requests;
 pub use side_requests::{ComposerSuggestionMode, SavedSideRequest, SidePurpose, SideSubmission};
 pub(crate) use steering_delivery::{
     SteeringPreparationRejected, accepted_revisions as accepted_steering_revisions,
@@ -503,7 +508,10 @@ pub(crate) fn insert_selected_operator_job(
     scope: SessionScope,
     mut request: JobRequest,
 ) -> Result<Job> {
-    let checkout = request.checkout_id.as_deref().context("job checkout was not selected")?;
+    let checkout = request
+        .checkout_id
+        .as_deref()
+        .context("job checkout was not selected")?;
     validate_operator_scope(db, &project, checkout, &scope)?;
     if scope.mode == SessionMode::ApprovedWrite {
         request.task_id = db.query_row(

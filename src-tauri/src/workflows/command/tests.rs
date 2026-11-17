@@ -4,11 +4,14 @@ use serde_json::json;
 
 use super::*;
 use crate::{
-    jobs::{AdmissionEnvironment, DispatchRejection, JobAttempt, JobKind, JobScheduler, RecoveryAction},
+    jobs::{
+        AdmissionEnvironment, DispatchRejection, JobAttempt, JobKind, JobScheduler, RecoveryAction,
+    },
     repository::AttemptWorktreeEvidence,
     runs::RunStatus,
     workflows::{
-        ArtifactKind, DeliveryRoles, Endpoint, ManualWorkflowLaunch, NodeInstance, Wire, WorkflowLaunchSource, builtin_delivery_graph,
+        ArtifactKind, DeliveryRoles, Endpoint, ManualWorkflowLaunch, NodeInstance, Wire,
+        WorkflowLaunchSource, builtin_delivery_graph,
         tests::{approve_delivery_fixture_in_run, approved_delivery_repository},
     },
 };
@@ -25,7 +28,9 @@ async fn terminal_after(store: &Store, job: &Job, previous: Option<&str>) -> Res
                 .await?
                 .context("Command job disappeared")?
                 .latest_attempt
-                .filter(|attempt| attempt.status.is_terminal() && Some(attempt.run_id.as_str()) != previous)
+                .filter(|attempt| {
+                    attempt.status.is_terminal() && Some(attempt.run_id.as_str()) != previous
+                })
             {
                 return Ok(attempt);
             }
@@ -135,10 +140,16 @@ switch ($Mode) {
                 r#"[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $data = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd()); [Console]::Write('text: ' + $data.message)"#.into(),
             ])
         } else {
-            (&registered, vec![match mode {
-                "changed-child" | "cancel-child" => "changed",
-                _ => mode,
-            }.into()])
+            (
+                &registered,
+                vec![
+                    match mode {
+                        "changed-child" | "cancel-child" => "changed",
+                        _ => mode,
+                    }
+                    .into(),
+                ],
+            )
         };
         graph.nodes.push(NodeInstance {
             id: mode.into(),
@@ -179,24 +190,42 @@ switch ($Mode) {
         ("diagnose-result", "invalid", "failed"),
     ] {
         graph.nodes.push(NodeInstance {
-            id: id.into(), kind: super::super::BuiltinNode::Parallel, configuration: NodeConfiguration::None,
+            id: id.into(),
+            kind: super::super::BuiltinNode::Parallel,
+            configuration: NodeConfiguration::None,
         });
         graph.wires.push(Wire {
-            from: Endpoint { node: from.into(), port: port.into() },
-            to: Endpoint { node: id.into(), port: "ready".into() },
+            from: Endpoint {
+                node: from.into(),
+                port: port.into(),
+            },
+            to: Endpoint {
+                node: id.into(),
+                port: "ready".into(),
+            },
         });
     }
     let version = store
         .save_workflow_revision(repo.project_id.clone(), "command-test".into(), graph)
         .await?;
-    let document = store.capture_repository_markdown(
-        repo.checkout_id.clone(), Path::new(&repo.checkout_root).join("brief.md"),
-    ).await?;
-    let run = store.launch_workflow_manual(ManualWorkflowLaunch {
-        project_id: repo.project_id.clone(), workflow: version,
-        source: WorkflowLaunchSource { checkout_id: repo.checkout_id.clone(), revision_id: document.revision.id },
-        request_id: Uuid::new_v4().to_string(), work_id: None,
-    }).await?;
+    let document = store
+        .capture_repository_markdown(
+            repo.checkout_id.clone(),
+            Path::new(&repo.checkout_root).join("brief.md"),
+        )
+        .await?;
+    let run = store
+        .launch_workflow_manual(ManualWorkflowLaunch {
+            project_id: repo.project_id.clone(),
+            workflow: version,
+            source: WorkflowLaunchSource {
+                checkout_id: repo.checkout_id.clone(),
+                revision_id: document.revision.id,
+            },
+            request_id: Uuid::new_v4().to_string(),
+            work_id: None,
+        })
+        .await?;
     assert!(
         store
             .submit_workflow_command(WorkflowCommandSubmission {
@@ -312,12 +341,29 @@ switch ($Mode) {
         .inspect_workflow_execution(fixture.project.clone(), fixture.run.id.clone())
         .await?
         .context("Missing workflow inspection after Command failure")?;
-    let routed = inspected.control.iter().find(|record| record.node_id == "invalid")
+    let routed = inspected
+        .control
+        .iter()
+        .find(|record| record.node_id == "invalid")
         .context("The Command failure did not select its wired outcome")?;
     assert_eq!(routed.selected_ports, ["failed"]);
-    assert_eq!(routed.source_run_id.as_deref(), Some(invalid.run_id.as_str()));
-    assert!(inspected.control.iter().any(|record| record.node_id == "diagnose-result" && record.selected_ports == ["branches"]));
-    assert!(inspected.control.iter().any(|record| record.node_id == "valid-result" && record.selected_ports.is_empty()));
+    assert_eq!(
+        routed.source_run_id.as_deref(),
+        Some(invalid.run_id.as_str())
+    );
+    assert!(
+        inspected
+            .control
+            .iter()
+            .any(|record| record.node_id == "diagnose-result"
+                && record.selected_ports == ["branches"])
+    );
+    assert!(
+        inspected
+            .control
+            .iter()
+            .any(|record| record.node_id == "valid-result" && record.selected_ports.is_empty())
+    );
     let invalid_node = inspected
         .jobs
         .iter()
@@ -330,23 +376,53 @@ switch ($Mode) {
         invalid_node.inputs.as_ref().unwrap().get("worktree"),
         Some(&fixture.worktree.id)
     );
-    assert!(inspected.outputs.iter().any(|entry| entry.artifact == evidence && entry.current));
-    assert!(inspected.outputs.iter().all(|entry| entry.artifact.node_instance_id != "invalid"));
+    assert!(
+        inspected
+            .outputs
+            .iter()
+            .any(|entry| entry.artifact == evidence && entry.current)
+    );
+    assert!(
+        inspected
+            .outputs
+            .iter()
+            .all(|entry| entry.artifact.node_instance_id != "invalid")
+    );
     let failure = store
         .job_failure(fixture.project.clone(), invalid.run_id.clone())
         .await?
         .context("Missing failure evidence for the inspected Command attempt")?;
-    assert_eq!(failure.observation.cause, Some(crate::jobs::FailureCause::InvalidResult));
+    assert_eq!(
+        failure.observation.cause,
+        Some(crate::jobs::FailureCause::InvalidResult)
+    );
     assert!(failure.logs_available);
     let job_inspection = |job: &Job| {
         store.inspect_workflow_execution_job(
-            fixture.project.clone(), fixture.run.id.clone(), job.id.clone(),
-            AdmissionEnvironment { runner: DirectWindowsRunner.identity().into(), bridge_available: true },
+            fixture.project.clone(),
+            fixture.run.id.clone(),
+            job.id.clone(),
+            AdmissionEnvironment {
+                runner: DirectWindowsRunner.identity().into(),
+                bridge_available: true,
+            },
         )
     };
-    let invalid_recovery = job_inspection(&invalid_job).await?.context("Missing invalid Command inspection")?;
+    let invalid_recovery = job_inspection(&invalid_job)
+        .await?
+        .context("Missing invalid Command inspection")?;
     assert!(invalid_recovery.recovery_actions.is_empty());
-    assert!(store.queue_job_recovery(fixture.project.clone(), invalid_job.id, invalid.run_id, RecoveryAction::Retry).await.is_err());
+    assert!(
+        store
+            .queue_job_recovery(
+                fixture.project.clone(),
+                invalid_job.id,
+                invalid.run_id,
+                RecoveryAction::Retry
+            )
+            .await
+            .is_err()
+    );
     let failed_exit = terminal(&store, &submit("nonzero").await?).await?;
     assert_eq!(failed_exit.status, RunStatus::Failed);
     let failure = store
@@ -379,50 +455,111 @@ switch ($Mode) {
             .await?
             .is_none()
     );
-    let rejected = store.job_failure(fixture.project.clone(), changed.run_id.clone()).await?
+    let rejected = store
+        .job_failure(fixture.project.clone(), changed.run_id.clone())
+        .await?
         .context("Missing failure evidence for the changed Command script")?;
-    assert_eq!(rejected.dispatch_rejection, Some(DispatchRejection::ProfileUnavailable));
-    let inspected = job_inspection(&changed_job).await?.context("Missing changed Command inspection")?;
-    assert_eq!(inspected.job.latest_attempt.context("Missing failed attempt")?.run_id, changed.run_id);
+    assert_eq!(
+        rejected.dispatch_rejection,
+        Some(DispatchRejection::ProfileUnavailable)
+    );
+    let inspected = job_inspection(&changed_job)
+        .await?
+        .context("Missing changed Command inspection")?;
+    assert_eq!(
+        inspected
+            .job
+            .latest_attempt
+            .context("Missing failed attempt")?
+            .run_id,
+        changed.run_id
+    );
     assert_eq!(inspected.recovery_actions, [RecoveryAction::Retry]);
-    assert!(submit("changed-child").await.unwrap_err().to_string().contains("control input ready is waiting"));
+    assert!(
+        submit("changed-child")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("control input ready is waiting")
+    );
     std::fs::write(script, original)?;
-    store.queue_job_recovery(fixture.project.clone(), changed_job.id.clone(), changed.run_id.clone(), RecoveryAction::Retry).await?;
+    store
+        .queue_job_recovery(
+            fixture.project.clone(),
+            changed_job.id.clone(),
+            changed.run_id.clone(),
+            RecoveryAction::Retry,
+        )
+        .await?;
     let retried = terminal_after(&store, &changed_job, Some(&changed.run_id)).await?;
     assert_eq!(retried.status, RunStatus::Succeeded);
-    let snapshot = store.inspect_workflow_execution(fixture.project.clone(), fixture.run.id.clone()).await?
+    let snapshot = store
+        .inspect_workflow_execution(fixture.project.clone(), fixture.run.id.clone())
+        .await?
         .context("Missing workflow inspection after Command recovery")?;
-    let recorded = snapshot.jobs.iter().find(|entry| entry.job.id == changed_job.id).context("Missing retried job")?;
+    let recorded = snapshot
+        .jobs
+        .iter()
+        .find(|entry| entry.job.id == changed_job.id)
+        .context("Missing retried job")?;
     assert_eq!(recorded.attempts.len(), 2);
     assert_eq!(recorded.attempts[1].run_id, retried.run_id);
-    assert_eq!(recorded.attempts[1].previous_run_id.as_deref(), Some(changed.run_id.as_str()));
+    assert_eq!(
+        recorded.attempts[1].previous_run_id.as_deref(),
+        Some(changed.run_id.as_str())
+    );
     let child = terminal(&store, &submit("changed-child").await?).await?;
     assert_eq!(child.status, RunStatus::Succeeded);
 
     let cancel_job = submit("cancel").await?;
     let running = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let current = store.job(fixture.project.clone(), cancel_job.id.clone()).await?
+            let current = store
+                .job(fixture.project.clone(), cancel_job.id.clone())
+                .await?
                 .context("Cancellable command disappeared")?;
             if let Some(attempt) = current.latest_attempt {
-                ensure!(!attempt.status.is_terminal(), "Command ended before interruption");
+                ensure!(
+                    !attempt.status.is_terminal(),
+                    "Command ended before interruption"
+                );
                 if attempt.status == RunStatus::Running {
                     break Ok::<_, anyhow::Error>(attempt);
                 }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    }).await??;
-    store.request_project_job_interrupt(fixture.project.clone(), cancel_job.id.clone(), running.run_id.clone()).await?;
+    })
+    .await??;
+    store
+        .request_project_job_interrupt(
+            fixture.project.clone(),
+            cancel_job.id.clone(),
+            running.run_id.clone(),
+        )
+        .await?;
     let cancelled = terminal(&store, &cancel_job).await?;
     assert_eq!(cancelled.run_id, running.run_id);
     assert_eq!(cancelled.status, RunStatus::Cancelled);
-    let stopped = store.command_job_output(fixture.project.clone(), cancelled.run_id.clone()).await?
+    let stopped = store
+        .command_job_output(fixture.project.clone(), cancelled.run_id.clone())
+        .await?
         .context("Missing cancellation outcome")?;
     assert!(stopped.process.is_some_and(|process| process.cancelled));
     assert!(!root.join("late-command-effect").exists());
-    assert!(store.workflow_command_result(fixture.project.clone(), cancelled.run_id).await?.is_none());
-    assert!(submit("cancel-child").await.unwrap_err().to_string().contains("control input ready is waiting"));
+    assert!(
+        store
+            .workflow_command_result(fixture.project.clone(), cancelled.run_id)
+            .await?
+            .is_none()
+    );
+    assert!(
+        submit("cancel-child")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("control input ready is waiting")
+    );
 
     scheduler.shutdown().await?;
     drop(store);

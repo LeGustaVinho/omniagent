@@ -11,6 +11,8 @@ use crate::{
 
 use super::{new_id, open, seal};
 
+#[cfg(test)]
+mod authoring_acceptance;
 pub(crate) mod mcp;
 #[cfg(test)]
 mod mcp_binding_acceptance;
@@ -20,8 +22,6 @@ mod publish;
 mod request;
 pub(crate) mod roles;
 mod simulation;
-#[cfg(test)]
-mod authoring_acceptance;
 #[cfg(test)]
 mod subflow_tests;
 #[cfg(test)]
@@ -366,8 +366,8 @@ mod protected_review;
 #[cfg(test)]
 mod usage_acceptance;
 
-pub mod exchange;
 pub mod derive_reusable;
+pub mod exchange;
 
 #[cfg(test)]
 mod from_chat_acceptance;

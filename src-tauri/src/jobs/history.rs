@@ -229,7 +229,6 @@ fn pinned_release_blocker(db: &Connection, job: &Job) -> Result<Option<ReleaseBl
             [&job.id], |row| row.get::<_, bool>(0),
         )?;
     if (!unplanned_goal && current.is_none()) || current != origin.plan_revision {
-
         return Ok(Some(ReleaseBlocker::StalePlan));
     }
     release_blocker(db, job)

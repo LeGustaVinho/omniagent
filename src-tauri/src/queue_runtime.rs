@@ -1,8 +1,8 @@
 use omniagent::{
     diagnostics,
     jobs::{
-        CommandJobOutput, DownstreamWait, Job, JobFailure, JobRequest, JobRule, QueueSettings,
-        QueueState, RecoveryAction, InterruptedWriterReview, WriterReconciliationReceipt,
+        CommandJobOutput, DownstreamWait, InterruptedWriterReview, Job, JobFailure, JobRequest,
+        JobRule, QueueSettings, QueueState, RecoveryAction, WriterReconciliationReceipt,
     },
     runs::RunRecord,
     store::Store,
@@ -173,7 +173,10 @@ pub async fn interrupted_writer_review(
     job_id: String,
     run_id: String,
 ) -> Result<Option<InterruptedWriterReview>, String> {
-    store.interrupted_writer_review(project_id, job_id, run_id).await.map_err(ui_error)
+    store
+        .interrupted_writer_review(project_id, job_id, run_id)
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]
@@ -185,6 +188,14 @@ pub async fn reconcile_interrupted_writer(
     expected_revision: String,
     external_effects_reconciled: bool,
 ) -> Result<WriterReconciliationReceipt, String> {
-    store.reconcile_interrupted_writer(project_id, job_id, run_id, expected_revision, external_effects_reconciled)
-        .await.map_err(ui_error)
+    store
+        .reconcile_interrupted_writer(
+            project_id,
+            job_id,
+            run_id,
+            expected_revision,
+            external_effects_reconciled,
+        )
+        .await
+        .map_err(ui_error)
 }

@@ -240,12 +240,20 @@ impl Store {
                 ArtifactValue::Candidate(candidate) => Some(candidate),
                 _ => None,
             };
-            super::stage_goal::require_stage_goal_result(&tx, &project, &run, &node, &attempt_id, candidate)?;
+            super::stage_goal::require_stage_goal_result(
+                &tx,
+                &project,
+                &run,
+                &node,
+                &attempt_id,
+                candidate,
+            )?;
             let artifact = insert_scoped_artifact(&tx, &project, run, node, port, unit, value)?;
             super::control::refresh(&tx, &project, &artifact.workflow_run_id)?;
             tx.commit()?;
             Ok(artifact)
-        }).await
+        })
+        .await
     }
 
     pub async fn resolve_workflow_artifact(
@@ -301,7 +309,11 @@ impl Store {
                     run,
                     node,
                     run_id,
-                    &[BuiltinNode::ReviewPlan, BuiltinNode::ReviewCandidate, BuiltinNode::ReviewDiffCandidate],
+                    &[
+                        BuiltinNode::ReviewPlan,
+                        BuiltinNode::ReviewCandidate,
+                        BuiltinNode::ReviewDiffCandidate,
+                    ],
                 )
                 .await?;
             }
@@ -436,15 +448,25 @@ impl Store {
             }
             ArtifactValue::GitInspection(inspection) => {
                 let candidate = &inspection.candidate;
-                let saved = self.selected_candidate(
-                    project.into(), candidate.target.task_id.clone(), candidate.id.clone(),
-                ).await?;
-                ensure!(saved.as_ref() == Some(candidate), "The frozen Git inspection is unavailable in this project");
+                let saved = self
+                    .selected_candidate(
+                        project.into(),
+                        candidate.target.task_id.clone(),
+                        candidate.id.clone(),
+                    )
+                    .await?;
+                ensure!(
+                    saved.as_ref() == Some(candidate),
+                    "The frozen Git inspection is unavailable in this project"
+                );
             }
             ArtifactValue::DiffReport(_) => {
                 ensure!(
-                    self.pinned_workflow_node(project.into(), run.into(), node.into()).await?
-                        .is_some_and(|pinned| pinned.definition.kind == BuiltinNode::PublishDiffReport),
+                    self.pinned_workflow_node(project.into(), run.into(), node.into())
+                        .await?
+                        .is_some_and(
+                            |pinned| pinned.definition.kind == BuiltinNode::PublishDiffReport
+                        ),
                     "Only the pinned diff report stage can publish this result"
                 );
             }
@@ -464,16 +486,29 @@ impl Store {
                 );
             }
             ArtifactValue::CommandResult(result) => {
-                let saved = self.workflow_command_result(project.into(), result.run_id.clone()).await?
+                let saved = self
+                    .workflow_command_result(project.into(), result.run_id.clone())
+                    .await?
                     .context("Command result is unavailable in the owning project")?;
-                ensure!(saved.workflow_run_id == run && saved.node_instance_id == node && &saved.value == value,
-                    "Command result differs from its verified scope");
+                ensure!(
+                    saved.workflow_run_id == run
+                        && saved.node_instance_id == node
+                        && &saved.value == value,
+                    "Command result differs from its verified scope"
+                );
             }
             ArtifactValue::McpToolResult(result) => {
-                let saved = self.workflow_mcp_attempt_evidence(project.into(), result.run_id.clone()).await?
-                    .and_then(|evidence| evidence.artifact).context("MCP tool result is unavailable in the owning project")?;
-                ensure!(saved.workflow_run_id == run && saved.node_instance_id == node && &saved.value == value,
-                    "MCP tool result differs from its verified scope");
+                let saved = self
+                    .workflow_mcp_attempt_evidence(project.into(), result.run_id.clone())
+                    .await?
+                    .and_then(|evidence| evidence.artifact)
+                    .context("MCP tool result is unavailable in the owning project")?;
+                ensure!(
+                    saved.workflow_run_id == run
+                        && saved.node_instance_id == node
+                        && &saved.value == value,
+                    "MCP tool result differs from its verified scope"
+                );
             }
             ArtifactValue::JsonList(list) => list.validate()?,
             ArtifactValue::JsonItem(_) | ArtifactValue::IterationResults(_) => {
@@ -551,7 +586,9 @@ pub(super) fn load_plan_text(db: &Connection, run_id: &str, sequence: i64) -> Re
         .context("plan proposal event is unavailable on the issuing attempt")?;
     let event: ProviderEvent = serde_json::from_slice(&protection::unprotect(&payload)?)?;
     match event.data {
-        ProviderEventData::PlanProposed { text, .. } if event.location.parent_item_id.is_none() => Ok(text),
+        ProviderEventData::PlanProposed { text, .. } if event.location.parent_item_id.is_none() => {
+            Ok(text)
+        }
         _ => anyhow::bail!("the evidence is outside the owning attempt's plan proposals"),
     }
 }

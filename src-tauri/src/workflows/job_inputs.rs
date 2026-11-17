@@ -58,8 +58,14 @@ pub(crate) fn stage_job_input_with_repair(
     if let Some(plan) = &binding.plan_revision {
         require_current_plan(db, project, &binding.pipeline_run_id, plan)?;
     }
-    super::control::require_stage(db, project, &binding.pipeline_run_id, &binding.node_instance_id,
-        input.unit_id.as_deref(), &input.artifacts)?;
+    super::control::require_stage(
+        db,
+        project,
+        &binding.pipeline_run_id,
+        &binding.node_instance_id,
+        input.unit_id.as_deref(),
+        &input.artifacts,
+    )?;
     if let Some(revision) = &input.plan_revision_request {
         ensure!(
             pinned.definition.kind == BuiltinNode::Plan,
@@ -148,9 +154,20 @@ pub(super) fn load_attempt_input(db: &Connection, run: &str) -> Result<Option<Wo
         .transpose()
 }
 
-pub(crate) fn load_workflow_job_input(db: &Connection, job: &str) -> Result<Option<WorkflowJobInput>> {
-    let payload: Option<Vec<u8>> = db.query_row("SELECT payload FROM workflow_job_inputs WHERE job_id = ?1", [job], |row| row.get(0)).optional()?;
-    payload.map(|payload| Ok(serde_json::from_slice(&protection::unprotect(&payload)?)?)).transpose()
+pub(crate) fn load_workflow_job_input(
+    db: &Connection,
+    job: &str,
+) -> Result<Option<WorkflowJobInput>> {
+    let payload: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT payload FROM workflow_job_inputs WHERE job_id = ?1",
+            [job],
+            |row| row.get(0),
+        )
+        .optional()?;
+    payload
+        .map(|payload| Ok(serde_json::from_slice(&protection::unprotect(&payload)?)?))
+        .transpose()
 }
 
 impl Store {

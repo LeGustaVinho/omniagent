@@ -57,7 +57,12 @@ pub async fn submit_conversation_continuation(
     target_checkout_id: Option<String>,
 ) -> Result<ContinuationInspection, String> {
     async {
-        let checkout_id = store.conversation_continuation_checkout_id(conversation_id.clone(), target_checkout_id.clone()).await?;
+        let checkout_id = store
+            .conversation_continuation_checkout_id(
+                conversation_id.clone(),
+                target_checkout_id.clone(),
+            )
+            .await?;
         let scope = crate::conversation_runtime::selected_scope(
             &store,
             checkout_id,
@@ -83,8 +88,14 @@ pub async fn submit_conversation_continuation(
 }
 
 #[tauri::command]
-pub async fn conversation_continuation_checkouts(store: State<'_, Store>, conversation_id: String) -> Result<Vec<ProjectCheckout>, String> {
-    store.conversation_continuation_checkouts(conversation_id).await.map_err(ui_error)
+pub async fn conversation_continuation_checkouts(
+    store: State<'_, Store>,
+    conversation_id: String,
+) -> Result<Vec<ProjectCheckout>, String> {
+    store
+        .conversation_continuation_checkouts(conversation_id)
+        .await
+        .map_err(ui_error)
 }
 
 #[tauri::command]
@@ -157,7 +168,9 @@ pub async fn confirm_conversation_continuation(
     text: String,
 ) -> Result<ContinuedConversation, String> {
     async {
-        let checkout_id = store.conversation_continuation_review_checkout(conversation_id.clone(), preview_id.clone()).await?;
+        let checkout_id = store
+            .conversation_continuation_review_checkout(conversation_id.clone(), preview_id.clone())
+            .await?;
         let scope = crate::conversation_runtime::selected_scope(
             &store,
             checkout_id,

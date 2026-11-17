@@ -143,9 +143,11 @@ impl CandidateVerification {
     }
 
     pub(crate) fn passes_repair_checks(&self) -> bool {
-        self.allows_acceptance() && self.gates.iter().any(|gate|
-            required_command(&gate.gate, gate.executable_revision.as_deref())
-                && matches!(gate.outcome, Some(CandidateGateOutcome::Passed { .. })))
+        self.allows_acceptance()
+            && self.gates.iter().any(|gate| {
+                required_command(&gate.gate, gate.executable_revision.as_deref())
+                    && matches!(gate.outcome, Some(CandidateGateOutcome::Passed { .. }))
+            })
     }
 }
 
@@ -377,13 +379,19 @@ impl Store {
         id: String,
         required: Vec<String>,
     ) -> Result<CandidateVerification> {
-        self.verify_candidate_snapshot(project, task, id, required, None, false).await
+        self.verify_candidate_snapshot(project, task, id, required, None, false)
+            .await
     }
 
     pub(crate) async fn verify_repair_candidate(
-        &self, project: String, task: String, id: String, required: Vec<String>,
+        &self,
+        project: String,
+        task: String,
+        id: String,
+        required: Vec<String>,
     ) -> Result<CandidateVerification> {
-        self.verify_candidate_snapshot(project, task, id, required, None, true).await
+        self.verify_candidate_snapshot(project, task, id, required, None, true)
+            .await
     }
 
     pub(crate) async fn verify_frozen_selected_candidate(
@@ -392,8 +400,19 @@ impl Store {
         candidate: SelectedCandidate,
         required: Vec<String>,
     ) -> Result<CandidateVerification> {
-        ensure!(candidate.target.project_id == project, "The frozen Git candidate is outside this project");
-        self.verify_candidate_snapshot(project, candidate.target.task_id.clone(), candidate.id.clone(), required, Some(candidate), false).await
+        ensure!(
+            candidate.target.project_id == project,
+            "The frozen Git candidate is outside this project"
+        );
+        self.verify_candidate_snapshot(
+            project,
+            candidate.target.task_id.clone(),
+            candidate.id.clone(),
+            required,
+            Some(candidate),
+            false,
+        )
+        .await
     }
 
     async fn verify_candidate_snapshot(
@@ -537,16 +556,26 @@ impl Store {
 }
 
 fn required_command(gate: &CandidateGate, executable_revision: Option<&str>) -> bool {
-    gate.required && executable_revision.is_some() && matches!(gate.action, CandidateGateAction::Command { .. })
+    gate.required
+        && executable_revision.is_some()
+        && matches!(gate.action, CandidateGateAction::Command { .. })
 }
 
 fn ensure_repair_checks(gates: &[PinnedGate]) -> Result<()> {
-    ensure!(gates.iter().any(|gate| required_command(&gate.gate, gate.executable_revision.as_deref())),
-        "Fix failed checks needs a configured executable check marked as required");
+    ensure!(
+        gates
+            .iter()
+            .any(|gate| required_command(&gate.gate, gate.executable_revision.as_deref())),
+        "Fix failed checks needs a configured executable check marked as required"
+    );
     Ok(())
 }
 
-pub(crate) fn require_repair_check_policy(db: &Connection, project: &str, names: Vec<String>) -> Result<()> {
+pub(crate) fn require_repair_check_policy(
+    db: &Connection,
+    project: &str,
+    names: Vec<String>,
+) -> Result<()> {
     ensure_repair_checks(&policy_with_requirements(db, project, names)?.1)
 }
 
@@ -588,10 +617,16 @@ pub(crate) fn load_selected_candidate(
     task: &str,
     id: &str,
 ) -> Result<SelectedCandidate> {
-    let payload: Vec<u8> = db.query_row("SELECT payload FROM selected_candidate_revisions
+    let payload: Vec<u8> = db
+        .query_row(
+            "SELECT payload FROM selected_candidate_revisions
         WHERE project_id = ?1 AND task_id = ?2 AND id = ?3
           AND NOT EXISTS (SELECT 1 FROM history_deleted_candidate_diffs WHERE candidate_id = ?3)",
-        params![project, task, id], |row| row.get(0)).optional()?.context("selected candidate is unavailable in the requested work scope")?;
+            params![project, task, id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .context("selected candidate is unavailable in the requested work scope")?;
     decode(&payload)
 }
 

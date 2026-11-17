@@ -282,12 +282,15 @@ async fn proposals_apply_only_scoped_grants_and_review_mixed_fields_atomically()
         "mixed-current",
         vec![timeout(1, 25), label(1, "Reviewed alias")],
     );
-    let pending =
-        invoke_test_mcp_tool(&bridge, "propose_settings_patch", serde_json::to_value(mixed)?).await?;
-    let pending: SettingsProposal = serde_json::from_value(
-        pending["result"]["structuredContent"].clone(),
+    let pending = invoke_test_mcp_tool(
+        &bridge,
+        "propose_settings_patch",
+        serde_json::to_value(mixed)?,
     )
-    .with_context(|| format!("The scoped MCP proposal did not reach review: {pending}"))?;
+    .await?;
+    let pending: SettingsProposal =
+        serde_json::from_value(pending["result"]["structuredContent"].clone())
+            .with_context(|| format!("The scoped MCP proposal did not reach review: {pending}"))?;
     assert_eq!(pending.decision, SettingsProposalDecision::Pending);
     assert_eq!(pending.actor.run_id, plan.run.id);
     assert_eq!(pending.actor.dispatch_id, dispatch);

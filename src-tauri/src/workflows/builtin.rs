@@ -166,8 +166,14 @@ impl Store {
             });
             for (from, to) in [("verified", "ready"), ("git", "git")] {
                 graph.wires.push(Wire {
-                    from: Endpoint { node: "commit".into(), port: from.into() },
-                    to: Endpoint { node: MAINTENANCE_ACTIVATION_ID.into(), port: to.into() },
+                    from: Endpoint {
+                        node: "commit".into(),
+                        port: from.into(),
+                    },
+                    to: Endpoint {
+                        node: MAINTENANCE_ACTIVATION_ID.into(),
+                        port: to.into(),
+                    },
                 });
             }
         }
@@ -179,13 +185,11 @@ impl Store {
         project: String,
         roles: DeliveryRoles,
     ) -> Result<WorkflowRun> {
-        let graph = self.builtin_delivery_for_project(project.clone(), roles).await?;
+        let graph = self
+            .builtin_delivery_for_project(project.clone(), roles)
+            .await?;
         let version = self
-            .save_workflow_revision(
-                project.clone(),
-                BUILTIN_DELIVERY_ID.into(),
-                graph,
-            )
+            .save_workflow_revision(project.clone(), BUILTIN_DELIVERY_ID.into(), graph)
             .await?;
         self.start_workflow_run(project, version).await
     }

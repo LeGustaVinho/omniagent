@@ -221,7 +221,8 @@ async fn the_attached_destination_accepts_only_the_exact_external_update_after_f
     };
     let draft = test.destination.join("local-draft.txt");
     fs::write(&draft, "destination draft")?;
-    let blocked = test.store
+    let blocked = test
+        .store
         .verify_delivery_merge(test.request(Some(acceptance_id.clone())))
         .await
         .unwrap_err();

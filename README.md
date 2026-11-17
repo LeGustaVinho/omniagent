@@ -32,13 +32,16 @@ git diff --exit-code -- src/bindings
 
 ### Windows desktop smoke test
 
-Install [tauri-driver 2.1](https://v2.tauri.app/develop/tests/webdriver/) and
-Microsoft Edge WebDriver for the installed WebView2 version. Put both drivers on
-`PATH`, or provide their absolute paths in `OMNIAGENT_TAURI_DRIVER` and
-`OMNIAGENT_EDGE_DRIVER`.
+Prepare [tauri-driver 2.1](https://v2.tauri.app/develop/tests/webdriver/) and a
+[compatible Edge WebDriver](https://learn.microsoft.com/microsoft-edge/webview2/how-to/webdriver)
+with the same script used by Windows CI. Set `OMNIAGENT_TAURI_DRIVER` and
+`OMNIAGENT_EDGE_DRIVER` before running the script to use drivers you already have.
 
 ```powershell
-pnpm tauri build --debug --no-bundle --config tests/desktop/tauri.conf.json
+$drivers = ./tests/desktop/prepare-windows-drivers.ps1 -Destination (Join-Path $env:TEMP 'omniagent-webdriver')
+$env:OMNIAGENT_TAURI_DRIVER = $drivers.TauriDriver
+$env:OMNIAGENT_EDGE_DRIVER = $drivers.EdgeDriver
+pnpm tauri build --debug --no-bundle --config tests/desktop/tauri.conf.json --ci
 pnpm test:desktop
 ```
 

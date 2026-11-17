@@ -256,12 +256,29 @@ impl Store {
                 else {
                     anyhow::bail!("check executor has no pinned checks");
                 };
-                let checks = if self.workflow_candidate_check_is_repair(
-                    project_id.clone(), run_id.clone(), node_id.clone(),
-                ).await? {
-                    self.verify_repair_candidate(project_id.clone(), task_id.clone(), candidate.id.clone(), names).await?
+                let checks = if self
+                    .workflow_candidate_check_is_repair(
+                        project_id.clone(),
+                        run_id.clone(),
+                        node_id.clone(),
+                    )
+                    .await?
+                {
+                    self.verify_repair_candidate(
+                        project_id.clone(),
+                        task_id.clone(),
+                        candidate.id.clone(),
+                        names,
+                    )
+                    .await?
                 } else {
-                    self.verify_selected_candidate_with_requirements(project_id.clone(), task_id.clone(), candidate.id.clone(), names).await?
+                    self.verify_selected_candidate_with_requirements(
+                        project_id.clone(),
+                        task_id.clone(),
+                        candidate.id.clone(),
+                        names,
+                    )
+                    .await?
                 };
                 (
                     "checks",
@@ -412,8 +429,16 @@ impl Store {
             _ => anyhow::bail!("the host request does not match the pinned unit executor"),
         };
         let artifact = self
-            .record_workflow_unit_artifact(&unit, node_id, port, value,
-                inputs.into_iter().map(|(port, artifact)| (port, artifact.id)).collect())
+            .record_workflow_unit_artifact(
+                &unit,
+                node_id,
+                port,
+                value,
+                inputs
+                    .into_iter()
+                    .map(|(port, artifact)| (port, artifact.id))
+                    .collect(),
+            )
             .await?;
         if committing {
             let follow_up = match self
@@ -464,7 +489,12 @@ impl Store {
                 Some(unit.unit.id),
                 value,
             )?;
-            super::inspection::record_workflow_input_ids(&tx, &artifact, &unit.plan_revision, &inputs)?;
+            super::inspection::record_workflow_input_ids(
+                &tx,
+                &artifact,
+                &unit.plan_revision,
+                &inputs,
+            )?;
             tx.commit()?;
             Ok(artifact)
         })

@@ -162,7 +162,11 @@ impl Store {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let origin = pipeline_work_origin(&tx, &project, &pipeline_run)?;
             crate::workflows::require_launch_checklist_item(
-                &tx, &project, &pipeline_run, &task, Some(&item),
+                &tx,
+                &project,
+                &pipeline_run,
+                &task,
+                Some(&item),
             )?;
             let current =
                 item_at_expected_revision(&tx, &project, &task, &item, expected_revision)?;

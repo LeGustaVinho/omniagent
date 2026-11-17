@@ -7,19 +7,19 @@ use sha2::{Digest, Sha256};
 mod approval;
 mod artifacts;
 pub mod authoring;
-pub mod comparison;
 mod builtin;
 mod command;
-pub mod mcp_tools;
+pub mod comparison;
 mod control;
 mod execution;
-pub mod inspection;
-mod iteration;
 #[cfg(test)]
 mod git_integration;
+pub mod inspection;
+mod iteration;
 mod job_inputs;
 mod launch;
 pub mod maintenance;
+pub mod mcp_tools;
 mod merge_execution;
 mod operator;
 mod plan_revision;
@@ -27,26 +27,26 @@ mod plan_revision;
 mod planning_integration;
 mod registry;
 mod repetition;
-mod subflow;
 pub mod role_templates;
-pub mod templates;
-pub mod triggers;
 mod runtime;
 pub mod settings_proposals;
 pub mod stage_goal;
-pub mod stage_plan;
-pub mod stage_requirements;
 #[cfg(test)]
 mod stage_models;
+pub mod stage_plan;
+pub mod stage_requirements;
+mod subflow;
+pub mod templates;
 #[cfg(test)]
 mod tests;
+pub mod triggers;
 mod unit_execution;
 mod units;
 
 pub use approval::{
-    ApprovalDecision, ApprovalDecisionSource, ApprovalFacts, ApprovalRuleEvidence, ApprovalRuleOutcome,
-    ApprovalRuleSettings, UnmetApproval, WorkflowApprovalPreview, WorkflowApprovalStage,
-    WorkflowApprovalSubmission,
+    ApprovalDecision, ApprovalDecisionSource, ApprovalFacts, ApprovalRuleEvidence,
+    ApprovalRuleOutcome, ApprovalRuleSettings, UnmetApproval, WorkflowApprovalPreview,
+    WorkflowApprovalStage, WorkflowApprovalSubmission,
 };
 pub(crate) use approval::{
     active_delivery_workflow, detach_active_delivery_workflow, workflow_release_authorized,
@@ -56,22 +56,28 @@ pub use artifacts::{
     WorkflowAcceptanceReference, WorkflowArtifact, WorkflowMergeReference,
 };
 pub use builtin::{DeliveryRoles, builtin_delivery_graph};
-pub use control::{ConditionPredicate, ControlStageReceipt};
-pub(crate) use control::{refresh_from_attempt, validate_attempt_control};
+pub(crate) use command::publish_command_result;
 pub use command::{
     CommandConfiguration, CommandData, CommandOutputFormat, CommandRegistration,
     CommandRegistrationRequest, CommandTarget, WorkflowCommandResult, WorkflowCommandSubmission,
 };
-pub(crate) use command::publish_command_result;
+pub use control::{ConditionPredicate, ControlStageReceipt};
+pub(crate) use control::{refresh_from_attempt, validate_attempt_control};
 pub use execution::{NodeInputs, WorkflowHostRequest, WorkflowHostSubmission};
-pub use iteration::{BuildListConfiguration, ForEachBeginConfiguration, ForEachCollectConfiguration, ForEachConfiguration, ForEachGateConfiguration, WorkflowIterationResults, WorkflowJsonItem, WorkflowJsonList};
-pub(crate) use job_inputs::{WorkflowJobInput, bind_job_input, load_workflow_job_input, stage_job_input};
+pub use iteration::{
+    BuildListConfiguration, ForEachBeginConfiguration, ForEachCollectConfiguration,
+    ForEachConfiguration, ForEachGateConfiguration, WorkflowIterationResults, WorkflowJsonItem,
+    WorkflowJsonList,
+};
 pub(crate) use job_inputs::stage_job_input_with_repair;
+pub(crate) use job_inputs::{
+    WorkflowJobInput, bind_job_input, load_workflow_job_input, stage_job_input,
+};
 pub use launch::{
     ManualWorkflowLaunch, WorkflowLaunchOrigin, WorkflowLaunchReceipt, WorkflowLaunchSource,
 };
-pub(crate) use launch::{pinned_workflow_checklist_for_job, require_launch_checklist_item};
 pub(crate) use launch::{launch_workflow_in_tx, validate_workflow_launch_source};
+pub(crate) use launch::{pinned_workflow_checklist_for_job, require_launch_checklist_item};
 pub(crate) use operator::waiting_for_delivery_commit;
 pub use operator::{WorkflowAgentTarget, WorkflowOperatorJob, WorkflowPlanProposal};
 pub use plan_revision::{WorkflowPlanHistory, WorkflowPlanRevisionRequest};
@@ -81,14 +87,14 @@ pub use registry::{
 };
 pub use repetition::{RepeatFeedback, RepeatUntilConfiguration};
 pub use runtime::{NodeAttempt, NodePin, WorkflowAgentSubmission, WorkflowRun};
-pub use subflow::WorkflowSubflow;
 pub(crate) use runtime::{load_definition as load_workflow_definition, load_node_attempt};
+pub use subflow::WorkflowSubflow;
 pub(crate) use unit_execution::validate_unit_acceptance;
 pub use unit_execution::{WorkflowUnitOutcome, WorkflowUnitRequest, WorkflowUnitSubmission};
 pub use units::{WorkflowDeliveryUnit, WorkflowPlanUnit};
 pub(crate) use units::{
-    bind_delivery_commit, load_delivery_unit, load_delivery_units, validate_unit_capture,
-    validate_selected_plan_revision,
+    bind_delivery_commit, load_delivery_unit, load_delivery_units, validate_selected_plan_revision,
+    validate_unit_capture,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,10 +170,20 @@ fn compile_resolved<'definition>(
     graph: WorkflowGraph,
     definition_for: impl Fn(&NodeInstance) -> Option<&'definition NodeDefinition>,
 ) -> Result<WorkflowDefinition> {
-    ensure!(graph.nodes.iter().all(|node| !matches!(node.kind, BuiltinNode::Subflow | BuiltinNode::RepeatUntil | BuiltinNode::ForEach)),
-        "Select a pinned subflow in an authoring package for reusable calls, repeats and iteration");
-    ensure!(graph.nodes.iter().all(|node| !node.kind.generated_iteration()),
-        "For each generates its internal stages during publication");
+    ensure!(
+        graph.nodes.iter().all(|node| !matches!(
+            node.kind,
+            BuiltinNode::Subflow | BuiltinNode::RepeatUntil | BuiltinNode::ForEach
+        )),
+        "Select a pinned subflow in an authoring package for reusable calls, repeats and iteration"
+    );
+    ensure!(
+        graph
+            .nodes
+            .iter()
+            .all(|node| !node.kind.generated_iteration()),
+        "For each generates its internal stages during publication"
+    );
     compile_resolved_graph(id, graph, definition_for, true)
 }
 
@@ -246,17 +262,27 @@ fn compile_resolved_graph<'definition>(
             .iter()
             .find(|port| port.name == wire.to.port)
             .context("wire target port is unavailable")?;
-        ensure!(input.value.accepts(output.value), "incompatible workflow ports");
-        if wire.to.port == "value" && matches!(
-            nodes[to].instance.configuration,
-            NodeConfiguration::Condition { predicate: ConditionPredicate::CandidateChecksPassed }
-        ) {
+        ensure!(
+            input.value.accepts(output.value),
+            "incompatible workflow ports"
+        );
+        if wire.to.port == "value"
+            && matches!(
+                nodes[to].instance.configuration,
+                NodeConfiguration::Condition {
+                    predicate: ConditionPredicate::CandidateChecksPassed
+                }
+            )
+        {
             ensure!(
                 output.value == PortType::Data(ArtifactKind::Checks),
                 "A candidate checks condition needs a checks output"
             );
         }
-        ensure!(connections.insert((&wire.from, &wire.to)), "workflow wire already exists");
+        ensure!(
+            connections.insert((&wire.from, &wire.to)),
+            "workflow wire already exists"
+        );
         let accepts_multiple = match nodes[to].instance.kind {
             BuiltinNode::Join => input.name == "branches",
             BuiltinNode::ForEachCollect => matches!(input.name.as_str(), "finished" | "result"),
@@ -273,15 +299,20 @@ fn compile_resolved_graph<'definition>(
         for port in &node.definition.inputs {
             let connected = incoming.contains(&(node.instance.id.as_str(), port.name.as_str()));
             let conditionally_required = match (&node.instance.configuration, port.name.as_str()) {
-                (NodeConfiguration::McpTool(configuration), "arguments") => Some(!configuration.argument_mappings.is_empty()),
-                (NodeConfiguration::BuildList(configuration), "value") => Some(configuration.requires_evidence()),
+                (NodeConfiguration::McpTool(configuration), "arguments") => {
+                    Some(!configuration.argument_mappings.is_empty())
+                }
+                (NodeConfiguration::BuildList(configuration), "value") => {
+                    Some(configuration.requires_evidence())
+                }
                 _ => None,
             };
             if let Some(required) = conditionally_required {
                 ensure!(
                     connected == required,
                     "Node {} requires input {} exactly when configured to use upstream evidence",
-                    node.instance.id, port.name
+                    node.instance.id,
+                    port.name
                 );
                 continue;
             }
@@ -322,7 +353,14 @@ fn compile_resolved_graph<'definition>(
         subflows: Vec::new(),
     };
     let unit_nodes = control::unit_nodes(&definition);
-    ensure!(definition.nodes.iter().all(|node| !(node.instance.kind.generated_iteration() || node.instance.kind == BuiltinNode::BuildList)
-        || !unit_nodes.contains(node.instance.id.as_str())), "List execution currently requires a workflow outside a logical delivery unit");
+    ensure!(
+        definition
+            .nodes
+            .iter()
+            .all(|node| !(node.instance.kind.generated_iteration()
+                || node.instance.kind == BuiltinNode::BuildList)
+                || !unit_nodes.contains(node.instance.id.as_str())),
+        "List execution currently requires a workflow outside a logical delivery unit"
+    );
     Ok(definition)
 }

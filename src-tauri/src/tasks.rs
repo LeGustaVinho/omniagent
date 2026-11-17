@@ -19,7 +19,9 @@ pub use activity::{
 pub use agile_events::{
     AgileEventData, AgileEventOrigin, AgilePipelineLink, AgilePipelineOrigin, ProjectWorkEvent,
 };
-pub(crate) use agile_events::{WorkStateChanges, bind_workflow_trigger_origin, pipeline_work_origin};
+pub(crate) use agile_events::{
+    WorkStateChanges, bind_workflow_trigger_origin, pipeline_work_origin,
+};
 pub(crate) use checklists::bind_checklist_job_mode;
 pub(crate) use checklists::progress::ChecklistProgressRequest;
 pub use checklists::progress::{
@@ -63,7 +65,11 @@ pub struct ProjectEpic {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum TaskPlacement {
     Task { epic_id: Option<String> },
     Subtask { parent_task_id: String },

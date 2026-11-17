@@ -8,7 +8,9 @@ use uuid::Uuid;
 use crate::{
     attachments::AttachmentDispatch,
     context_records::assembly::RoleDispatchContext,
-    conversations::{MessageRevision, SessionScope, SubmittedConversationReference, reference_delivery},
+    conversations::{
+        MessageRevision, SessionScope, SubmittedConversationReference, reference_delivery,
+    },
     protection,
     providers::{
         ProviderEvent,
@@ -27,7 +29,9 @@ use crate::{
 mod attachment_evidence;
 mod attachment_retention;
 mod generated_image_evidence;
-pub(crate) use generated_image_evidence::{is_current_native_image_qualification, latest_native_image_qualification};
+pub(crate) use generated_image_evidence::{
+    is_current_native_image_qualification, latest_native_image_qualification,
+};
 mod history_deletion;
 mod instruction_evidence;
 mod inventory;
@@ -38,22 +42,24 @@ pub(crate) use attachment_retention::revoked_history_run;
 pub use attachment_retention::{
     AttachmentHistoryRemoval, AttachmentHistoryTarget, AttachmentRemovalPreview,
 };
-pub use history_deletion::{HistoryDeletionDiff, HistoryDeletionMode, HistoryDeletionPreview, HistoryDeletionTarget};
 pub(crate) use history_deletion::omit_deleted_dispatch_messages;
+pub use history_deletion::{
+    HistoryDeletionDiff, HistoryDeletionMode, HistoryDeletionPreview, HistoryDeletionTarget,
+};
 pub use instruction_evidence::{
     InstructionDispatch, InstructionDispatchMode, InstructionDispatchStatus, InstructionReceipt,
     InstructionReview,
 };
 pub use inventory::DispatchInventory;
 pub(crate) use inventory::belongs_to_dispatch;
-pub(crate) use lineage::{
-    enqueue_summary, load_conversation_artifact, read_background_dispatch_result, reconcile_summary, record_conversation_excerpt,
-    record_message_copy,
-};
 pub use lineage::{
     ArtifactSource, ByteRange, ConversationArtifactRevision, ConversationSelection,
     DispatchIdentity, DispatchLineage, DispatchSourceRevision, DispatchUse, ExcerptSource,
     MessageRevisionOrigin, QueuedSummary, SelectedMessageSpan, SummaryRun,
+};
+pub(crate) use lineage::{
+    enqueue_summary, load_conversation_artifact, read_background_dispatch_result,
+    reconcile_summary, record_conversation_excerpt, record_message_copy,
 };
 pub use profile::DispatchProfileEvidence;
 
@@ -102,10 +108,11 @@ pub struct ContextSnapshot {
 
 impl ContextSnapshot {
     fn working_directory(&self) -> &Path {
-        self.instructions.as_ref().map_or(
-            self.scope.checkout.as_path(),
-            |inventory| &inventory.working_directory,
-        )
+        self.instructions
+            .as_ref()
+            .map_or(self.scope.checkout.as_path(), |inventory| {
+                &inventory.working_directory
+            })
     }
 }
 

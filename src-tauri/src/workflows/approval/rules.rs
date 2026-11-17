@@ -10,7 +10,8 @@ use super::{
     require_current_plan, validate_linked_task,
 };
 use crate::workflows::{
-    ArtifactKind, ArtifactValue, BuiltinNode, NodeInputs, PinnedNode, WorkflowArtifact, WorkflowRun,
+    ArtifactKind, ArtifactValue, BuiltinNode, NodeInputs, PinnedNode, WorkflowArtifact,
+    WorkflowRun,
     artifacts::{load_artifact, load_plan_text},
     runtime::load_workflow_run,
     units::parse_plan_units,
@@ -80,10 +81,18 @@ pub struct WorkflowApprovalPreview {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum WorkflowApprovalStage {
-    Waiting { reason: String },
-    Skipped { reason: String },
+    Waiting {
+        reason: String,
+    },
+    Skipped {
+        reason: String,
+    },
     Ready {
         plan_id: String,
         task_artifact_id: String,
@@ -119,7 +128,11 @@ impl ApprovalContext {
         let ArtifactValue::Task(task_ref) = &task.value else {
             anyhow::bail!("approval requires linked work");
         };
-        let ArtifactValue::Plan { run_id: attempt, event_sequence } = &plan.value else {
+        let ArtifactValue::Plan {
+            run_id: attempt,
+            event_sequence,
+        } = &plan.value
+        else {
             anyhow::bail!("approval requires a plan");
         };
         ensure!(
@@ -141,7 +154,10 @@ impl ApprovalContext {
         Ok(Self {
             facts,
             workflow_id: run.version.id.clone(),
-            inputs: NodeInputs::from([("plan".into(), plan.id.clone()), ("task".into(), task.id.clone())]),
+            inputs: NodeInputs::from([
+                ("plan".into(), plan.id.clone()),
+                ("task".into(), task.id.clone()),
+            ]),
             decision: ApprovalDecision {
                 workflow_run_id: run.id.clone(),
                 node_instance_id: node_id.into(),
@@ -172,11 +188,14 @@ impl Store {
             let stage = match approval_selection(&tx, &run, &node_id)? {
                 ApprovalSelection::Waiting { reason } => WorkflowApprovalStage::Waiting { reason },
                 ApprovalSelection::Skipped { reason } => WorkflowApprovalStage::Skipped { reason },
-                ApprovalSelection::Ready { plan, task } => approval_stage_ready(&tx, &run, &node_id, &plan, &task)?,
+                ApprovalSelection::Ready { plan, task } => {
+                    approval_stage_ready(&tx, &run, &node_id, &plan, &task)?
+                }
             };
             tx.commit()?;
             Ok(stage)
-        }).await
+        })
+        .await
     }
 
     async fn approval_context(
@@ -200,7 +219,8 @@ impl Store {
             let run = load_workflow_run(db, &project_id, &run_id)?
                 .context("the approval workflow is unavailable")?;
             ApprovalContext::from_inputs(db, &run, &node_id, &resolved["plan"], &resolved["task"])
-        }).await
+        })
+        .await
     }
 
     pub async fn workflow_approval_preview(
@@ -330,7 +350,9 @@ impl Store {
                     rule_evidence,
                 )?;
                 super::super::control::refresh(
-                    &tx, &context.decision.task.project_id, &context.decision.workflow_run_id,
+                    &tx,
+                    &context.decision.task.project_id,
+                    &context.decision.workflow_run_id,
                 )?;
                 tx.commit()?;
                 Ok(artifact)
@@ -339,7 +361,6 @@ impl Store {
         self.job_signal.send_replace(());
         Ok(completed)
     }
-
 }
 
 fn approval_stage_ready(
@@ -353,9 +374,11 @@ fn approval_stage_ready(
         .and_then(|context| inspect(db, &context));
     let preview = match preview {
         Ok(preview) => preview,
-        Err(error) => return Ok(WorkflowApprovalStage::Waiting {
-            reason: crate::diagnostics::preview(&error.to_string()),
-        }),
+        Err(error) => {
+            return Ok(WorkflowApprovalStage::Waiting {
+                reason: crate::diagnostics::preview(&error.to_string()),
+            });
+        }
     };
     let source = if let Some(id) = &preview.decision_artifact_id {
         let artifact = load_artifact(db, &run.project_id, &run.id, id, ArtifactKind::Approval)?
@@ -378,10 +401,19 @@ fn approval_stage_ready(
 fn inspect(db: &Connection, context: &ApprovalContext) -> Result<WorkflowApprovalPreview> {
     let decision = &context.decision;
     super::super::control::require_stage(
-        db, &decision.task.project_id, &decision.workflow_run_id,
-        &decision.node_instance_id, None, &context.inputs,
+        db,
+        &decision.task.project_id,
+        &decision.workflow_run_id,
+        &decision.node_instance_id,
+        None,
+        &context.inputs,
     )?;
-    let rule = load_rule(db, &decision.task.project_id, &context.workflow_id, &decision.node_instance_id)?;
+    let rule = load_rule(
+        db,
+        &decision.task.project_id,
+        &context.workflow_id,
+        &decision.node_instance_id,
+    )?;
     inspect_selected(db, context, rule)
 }
 
@@ -458,12 +490,20 @@ pub(in crate::workflows) fn activate_selected_approval(
     let preview = inspect_selected(db, &context, rule)?;
     if preview.decision_artifact_id.is_some()
         || preview.outcome != ApprovalRuleOutcome::ConditionsMet
-        || super::super::authoring::ensure_package_runnable(db, &run.project_id, &run.version).is_err()
-        || crate::tasks::validate_repository_delivery_open(db, &run.project_id, &context.facts.task_id).is_err()
+        || super::super::authoring::ensure_package_runnable(db, &run.project_id, &run.version)
+            .is_err()
+        || crate::tasks::validate_repository_delivery_open(
+            db,
+            &run.project_id,
+            &context.facts.task_id,
+        )
+        .is_err()
     {
         return Ok(false);
     }
-    Ok(apply_if_automatic(db, &context, preview)?.decision_artifact_id.is_some())
+    Ok(apply_if_automatic(db, &context, preview)?
+        .decision_artifact_id
+        .is_some())
 }
 
 fn outcome(settings: &ApprovalRuleSettings, facts: &ApprovalFacts) -> ApprovalRuleOutcome {
@@ -522,7 +562,9 @@ fn apply_and_refresh(
     let preview = apply_if_automatic(db, context, preview)?;
     if pending && preview.decision_artifact_id.is_some() {
         super::super::control::refresh(
-            db, &context.decision.task.project_id, &context.decision.workflow_run_id,
+            db,
+            &context.decision.task.project_id,
+            &context.decision.workflow_run_id,
         )?;
     }
     Ok(preview)

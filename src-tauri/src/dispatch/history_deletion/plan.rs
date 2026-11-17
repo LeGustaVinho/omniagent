@@ -198,9 +198,11 @@ fn expand_comparison_runs(db: &Connection, plan: &mut DeletionPlan) -> Result<()
                 AND source.revision_id IN (SELECT value FROM json_each(?1))
          )",
         [serde_json::to_string(&plan.revisions)?])?;
-    plan.synthetic_input_runs.extend(ids(db,
+    plan.synthetic_input_runs.extend(ids(
+        db,
         "SELECT run_id FROM job_attempts WHERE job_id IN (SELECT value FROM json_each(?1))",
-        [serde_json::to_string(&jobs)?])?);
+        [serde_json::to_string(&jobs)?],
+    )?);
     plan.jobs.extend(jobs);
     Ok(())
 }

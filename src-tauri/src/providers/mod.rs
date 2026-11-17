@@ -663,7 +663,10 @@ pub trait CliSession: Send {
         input: TurnInput,
         skills: &[composer_customizations::SelectedComposerSkill],
     ) -> anyhow::Result<AdapterUpdate> {
-        anyhow::ensure!(skills.is_empty(), "This adapter has no qualified composer skill input");
+        anyhow::ensure!(
+            skills.is_empty(),
+            "This adapter has no qualified composer skill input"
+        );
         self.send(input)
     }
     fn send(&mut self, input: TurnInput) -> anyhow::Result<AdapterUpdate>;
@@ -819,6 +822,7 @@ pub mod antigravity;
 pub mod capabilities;
 pub mod claude;
 pub mod codex;
+pub mod composer_customizations;
 pub mod configuration;
 pub mod generated_image;
 pub mod goal;
@@ -832,6 +836,5 @@ pub mod runtime;
 pub(crate) mod sandbox;
 pub mod side;
 pub mod skills;
-pub mod composer_customizations;
 pub mod steering;
 pub mod suggestions;

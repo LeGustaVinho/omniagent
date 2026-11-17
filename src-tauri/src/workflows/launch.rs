@@ -138,7 +138,9 @@ impl Store {
         project: String,
         source: WorkflowLaunchSource,
     ) -> Result<WorkflowRun> {
-        let graph = self.builtin_delivery_for_project(project.clone(), DeliveryRoles::default()).await?;
+        let graph = self
+            .builtin_delivery_for_project(project.clone(), DeliveryRoles::default())
+            .await?;
         let revision = self
             .save_workflow_revision(
                 project.clone(),

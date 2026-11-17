@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use omniagent::workflows::authoring::package::{
     PackageArtifactVersion, PublishedPackageArtifact, WorkflowPackage, WorkflowPackageCatalogEntry,
-    WorkflowPackageDraft, WorkflowPackagePreview, WorkflowPackagePublishOutcome, WorkflowPackageSummary,
-    WorkflowSimulation, WorkflowSimulationScenario,
+    WorkflowPackageDraft, WorkflowPackagePreview, WorkflowPackagePublishOutcome,
+    WorkflowPackageSummary, WorkflowSimulation, WorkflowSimulationScenario,
     derive_reusable::{ReusableDerivation, ReusableSource, SubflowBoundary, WorkflowReusableNode},
     exchange::{ExchangeBinding, WorkflowExchange, WorkflowExchangePreview},
 };
@@ -31,7 +31,10 @@ pub async fn describe_workflow_reusable_boundary(
     source: ReusableSource,
     node_ids: Option<Vec<String>>,
 ) -> Result<SubflowBoundary, String> {
-    store.describe_workflow_reusable_boundary(project_id, source, node_ids).await.map_err(report)
+    store
+        .describe_workflow_reusable_boundary(project_id, source, node_ids)
+        .await
+        .map_err(report)
 }
 
 #[tauri::command]
@@ -41,7 +44,10 @@ pub async fn derive_workflow_reusable(
     source: ReusableSource,
     request: ReusableDerivation,
 ) -> Result<WorkflowPackageDraft, String> {
-    store.derive_workflow_reusable(project_id, source, request).await.map_err(report)
+    store
+        .derive_workflow_reusable(project_id, source, request)
+        .await
+        .map_err(report)
 }
 
 #[tauri::command]
@@ -50,7 +56,10 @@ pub async fn describe_workflow_reusable_node(
     project_id: String,
     version: PackageArtifactVersion,
 ) -> Result<WorkflowReusableNode, String> {
-    store.describe_workflow_reusable_node(project_id, version).await.map_err(report)
+    store
+        .describe_workflow_reusable_node(project_id, version)
+        .await
+        .map_err(report)
 }
 
 #[tauri::command]
@@ -141,17 +150,30 @@ pub async fn inspect_workflow_package(
 
 #[tauri::command]
 pub async fn preview_workflow_package_revision(
-    store: State<'_, Store>, project_id: String, draft_id: String, revision: String,
+    store: State<'_, Store>,
+    project_id: String,
+    draft_id: String,
+    revision: String,
 ) -> Result<WorkflowPackagePreview, String> {
-    store.preview_workflow_package_revision(project_id, draft_id, revision).await.map_err(report)
+    store
+        .preview_workflow_package_revision(project_id, draft_id, revision)
+        .await
+        .map_err(report)
 }
 
 #[tauri::command]
 pub async fn simulate_workflow_package_revision(
-    store: State<'_, Store>, project_id: String, draft_id: String, revision: String, member_key: String,
+    store: State<'_, Store>,
+    project_id: String,
+    draft_id: String,
+    revision: String,
+    member_key: String,
     scenario: WorkflowSimulationScenario,
 ) -> Result<WorkflowSimulation, String> {
-    store.simulate_workflow_package_revision(project_id, draft_id, revision, member_key, scenario).await.map_err(report)
+    store
+        .simulate_workflow_package_revision(project_id, draft_id, revision, member_key, scenario)
+        .await
+        .map_err(report)
 }
 
 #[tauri::command]
@@ -265,11 +287,24 @@ pub async fn start_workflow_editor_authoring(
     brief: String,
 ) -> Result<WorkflowPackageDraft, String> {
     async {
-        anyhow::ensure!(matches!(selection.provider, Provider::Codex | Provider::Claude),
-            "Choose a Codex or Claude authoring profile");
-        let scope = selected_scope(&store, checkout_id.clone(), selection, effort, SessionMode::ReadOnly).await?;
-        store.start_workflow_editor_authoring(project_id, checkout_id, scope, base, brief).await
-    }.await.map_err(report)
+        anyhow::ensure!(
+            matches!(selection.provider, Provider::Codex | Provider::Claude),
+            "Choose a Codex or Claude authoring profile"
+        );
+        let scope = selected_scope(
+            &store,
+            checkout_id.clone(),
+            selection,
+            effort,
+            SessionMode::ReadOnly,
+        )
+        .await?;
+        store
+            .start_workflow_editor_authoring(project_id, checkout_id, scope, base, brief)
+            .await
+    }
+    .await
+    .map_err(report)
 }
 
 #[tauri::command]

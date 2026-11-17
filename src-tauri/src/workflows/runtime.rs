@@ -14,8 +14,8 @@ use crate::{
 
 use super::{
     ArtifactKind, ArtifactValue, Executor, NodeConfiguration, NodeInputs, PinnedNode, PortType,
-    WorkflowDefinition, WorkflowGraph, WorkflowJobInput, WorkflowRevision, compile,
-    authoring::package::roles,
+    WorkflowDefinition, WorkflowGraph, WorkflowJobInput, WorkflowRevision,
+    authoring::package::roles, compile,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,10 +68,20 @@ pub(super) fn insert_workflow_run(
 ) -> Result<WorkflowRun> {
     super::authoring::ensure_package_runnable(db, project, &workflow.version)?;
     roles::validate_role_pins(db, project, workflow)?;
-    ensure!(workflow.nodes.iter().all(|node| !matches!(node.instance.kind, super::BuiltinNode::Subflow | super::BuiltinNode::RepeatUntil | super::BuiltinNode::ForEach)),
-        "An unbound workflow invocation cannot launch");
+    ensure!(
+        workflow.nodes.iter().all(|node| !matches!(
+            node.instance.kind,
+            super::BuiltinNode::Subflow
+                | super::BuiltinNode::RepeatUntil
+                | super::BuiltinNode::ForEach
+        )),
+        "An unbound workflow invocation cannot launch"
+    );
     let id = Uuid::new_v4().to_string();
-    db.execute("INSERT INTO job_pipeline_runs(id, project_id) VALUES (?1, ?2)", params![id, project])?;
+    db.execute(
+        "INSERT INTO job_pipeline_runs(id, project_id) VALUES (?1, ?2)",
+        params![id, project],
+    )?;
     db.execute(
         "INSERT INTO workflow_run_pins VALUES (?1, ?2, ?3, ?4)",
         params![id, project, workflow.version.id, workflow.version.revision],
@@ -83,7 +93,13 @@ pub(super) fn insert_workflow_run(
         };
         db.execute(
             "INSERT INTO workflow_subflow_pins VALUES (?1, ?2, ?3, 'subflow', ?4, ?5)",
-            params![id, subflow.path, scope, subflow.version.id, subflow.version.revision],
+            params![
+                id,
+                subflow.path,
+                scope,
+                subflow.version.id,
+                subflow.version.revision
+            ],
         )?;
     }
     for node in &workflow.nodes {
@@ -96,29 +112,55 @@ pub(super) fn insert_workflow_run(
             "INSERT INTO job_pipeline_nodes (pipeline_run_id, instance_id, kind) VALUES (?1, ?2, ?3)",
             params![id, node.instance.id, scheduler_kind],
         )?;
-        let requires_plan = node.definition.inputs.iter().any(|port| port.value == PortType::Data(ArtifactKind::Plan));
+        let requires_plan = node
+            .definition
+            .inputs
+            .iter()
+            .any(|port| port.value == PortType::Data(ArtifactKind::Plan));
         db.execute(
             "INSERT INTO workflow_node_pins VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, node.instance.id, node.revision, node.definition.revision,
-                node.definition.executor.scheduler_profile(), requires_plan],
+            params![
+                id,
+                node.instance.id,
+                node.revision,
+                node.definition.revision,
+                node.definition.executor.scheduler_profile(),
+                requires_plan
+            ],
         )?;
     }
-    Ok(WorkflowRun { id, project_id: project.into(), version: workflow.version.clone(), plan_revision: None })
+    Ok(WorkflowRun {
+        id,
+        project_id: project.into(),
+        version: workflow.version.clone(),
+        plan_revision: None,
+    })
 }
 
-pub(super) fn load_workflow_run(db: &Connection, project: &str, run: &str) -> Result<Option<WorkflowRun>> {
-    Ok(db.query_row(
-        "SELECT p.workflow_id, p.workflow_revision, j.plan_revision
+pub(super) fn load_workflow_run(
+    db: &Connection,
+    project: &str,
+    run: &str,
+) -> Result<Option<WorkflowRun>> {
+    Ok(db
+        .query_row(
+            "SELECT p.workflow_id, p.workflow_revision, j.plan_revision
          FROM workflow_run_pins p JOIN job_pipeline_runs j ON j.id = p.pipeline_run_id
          WHERE p.project_id = ?1 AND p.pipeline_run_id = ?2",
-        params![project, run],
-        |row| Ok(WorkflowRun {
-            id: run.into(),
-            project_id: project.into(),
-            version: WorkflowRevision { id: row.get(0)?, revision: row.get(1)? },
-            plan_revision: row.get(2)?,
-        }),
-    ).optional()?)
+            params![project, run],
+            |row| {
+                Ok(WorkflowRun {
+                    id: run.into(),
+                    project_id: project.into(),
+                    version: WorkflowRevision {
+                        id: row.get(0)?,
+                        revision: row.get(1)?,
+                    },
+                    plan_revision: row.get(2)?,
+                })
+            },
+        )
+        .optional()?)
 }
 
 impl Store {
@@ -134,7 +176,9 @@ impl Store {
             for node in &workflow.nodes {
                 if let NodeConfiguration::McpTool(configuration) = &node.instance.configuration {
                     super::mcp_tools::validate_mcp_binding(db, &project, configuration)
-                        .with_context(|| format!("MCP tool binding for node {}", node.instance.id))?;
+                        .with_context(|| {
+                            format!("MCP tool binding for node {}", node.instance.id)
+                        })?;
                 }
             }
             db.execute(
@@ -173,11 +217,13 @@ impl Store {
             let run = insert_workflow_run(&tx, &project, &workflow)?;
             tx.commit()?;
             Ok(run)
-        }).await
+        })
+        .await
     }
 
     pub async fn workflow_run(&self, project: String, run: String) -> Result<Option<WorkflowRun>> {
-        self.execute(move |db| load_workflow_run(db, &project, &run)).await
+        self.execute(move |db| load_workflow_run(db, &project, &run))
+            .await
     }
 
     pub async fn submit_workflow_agent(&self, submission: WorkflowAgentSubmission) -> Result<Job> {
@@ -190,7 +236,8 @@ impl Store {
         submission: WorkflowAgentSubmission,
         comparison: Option<super::comparison::ComparisonSelection>,
     ) -> Result<Job> {
-        self.submit_workflow_agent_inner(submission, None, false, comparison, None).await
+        self.submit_workflow_agent_inner(submission, None, false, comparison, None)
+            .await
     }
 
     pub(super) async fn submit_workflow_agent_with_revision(
@@ -198,12 +245,20 @@ impl Store {
         submission: WorkflowAgentSubmission,
         plan_revision_request: Option<super::WorkflowPlanRevisionRequest>,
     ) -> Result<Job> {
-        self.submit_workflow_agent_inner(submission, plan_revision_request, false, None, None).await
+        self.submit_workflow_agent_inner(submission, plan_revision_request, false, None, None)
+            .await
     }
 
-    pub(crate) async fn submit_workflow_checklist_agent(&self, submission: WorkflowAgentSubmission) -> Result<Job> {
-        ensure!(submission.input.target.is_some(), "checklist execution requires a task run target");
-        self.submit_workflow_agent_inner(submission, None, true, None, None).await
+    pub(crate) async fn submit_workflow_checklist_agent(
+        &self,
+        submission: WorkflowAgentSubmission,
+    ) -> Result<Job> {
+        ensure!(
+            submission.input.target.is_some(),
+            "checklist execution requires a task run target"
+        );
+        self.submit_workflow_agent_inner(submission, None, true, None, None)
+            .await
     }
 
     pub async fn submit_workflow_goal_requalification(
@@ -211,7 +266,8 @@ impl Store {
         submission: WorkflowAgentSubmission,
         review_token: String,
     ) -> Result<Job> {
-        self.submit_workflow_agent_inner(submission, None, false, None, Some(review_token)).await
+        self.submit_workflow_agent_inner(submission, None, false, None, Some(review_token))
+            .await
     }
 
     async fn submit_workflow_agent_inner(
@@ -241,21 +297,26 @@ impl Store {
             )
             .await?;
         let planning_route = input.pinned.as_ref().map(|(_, route)| *route);
-        ensure!(comparison.is_none() || (node.definition.kind == super::BuiltinNode::ReviewPlan && scope.mode == SessionMode::ReadOnly),
-            "Comparison responses require a read-only plan review stage");
-        let qualified = if let Some(plan) = super::stage_plan::StagePlanConfiguration::for_stage(&node)? {
-            scope.mode == plan.mode()
-        } else {
-            match (node.definition.executor, scope.mode) {
-                (Executor::PlanAgent, SessionMode::Plan) => true,
-                (Executor::PlanAgent, SessionMode::ReadOnly) => {
-                    planning_route == Some(QuestionRoute::StructuredTurn)
+        ensure!(
+            comparison.is_none()
+                || (node.definition.kind == super::BuiltinNode::ReviewPlan
+                    && scope.mode == SessionMode::ReadOnly),
+            "Comparison responses require a read-only plan review stage"
+        );
+        let qualified =
+            if let Some(plan) = super::stage_plan::StagePlanConfiguration::for_stage(&node)? {
+                scope.mode == plan.mode()
+            } else {
+                match (node.definition.executor, scope.mode) {
+                    (Executor::PlanAgent, SessionMode::Plan) => true,
+                    (Executor::PlanAgent, SessionMode::ReadOnly) => {
+                        planning_route == Some(QuestionRoute::StructuredTurn)
+                    }
+                    (Executor::ReadOnlyAgent, SessionMode::ReadOnly) => true,
+                    (Executor::WriteAgent, SessionMode::ApprovedWrite) => true,
+                    _ => false,
                 }
-                (Executor::ReadOnlyAgent, SessionMode::ReadOnly) => true,
-                (Executor::WriteAgent, SessionMode::ApprovedWrite) => true,
-                _ => false,
-            }
-        };
+            };
         ensure!(
             qualified,
             "the CLI profile does not match the pinned agent executor"
@@ -329,7 +390,10 @@ impl Store {
             request.instructions.push_str("\n\n");
             request.instructions.push_str(
                 &self
-                    .workflow_plan_unit_instructions(project_id.clone(), dispatch.pipeline_run_id.clone())
+                    .workflow_plan_unit_instructions(
+                        project_id.clone(),
+                        dispatch.pipeline_run_id.clone(),
+                    )
                     .await?,
             );
         } else {
@@ -361,23 +425,37 @@ impl Store {
                 "this node has no release input"
             );
         }
-        let NodeConfiguration::AgentRole { role, model, requirements } = &node.instance.configuration else {
+        let NodeConfiguration::AgentRole {
+            role,
+            model,
+            requirements,
+        } = &node.instance.configuration
+        else {
             anyhow::bail!("the pinned node has no agent role");
         };
         if !requirements.is_empty() {
-            super::stage_requirements::validate_stage_requirements(self, project_id.clone(), requirements.clone()).await?;
+            super::stage_requirements::validate_stage_requirements(
+                self,
+                project_id.clone(),
+                requirements.clone(),
+            )
+            .await?;
         }
         if let Some(version) = &requirements.bound_role {
             let (project, version) = (project_id.clone(), version.clone());
-            let template = self.execute(move |db| roles::load_role(db, &project, &version)).await?
+            let template = self
+                .execute(move |db| roles::load_role(db, &project, &version))
+                .await?
                 .context("The pinned workflow role is unavailable")?;
             roles::qualify_bound_role(&template, model.as_ref(), &scope)?;
             request.instructions = roles::role_instructions(&template, &request.instructions);
         }
         ensure!(
-            model.as_ref().is_none_or(|selection| selection.provider == scope.provider
-                && selection.profile_id == scope.profile_id
-                && scope.model.as_deref() == Some(selection.model_id.as_str())),
+            model
+                .as_ref()
+                .is_none_or(|selection| selection.provider == scope.provider
+                    && selection.profile_id == scope.profile_id
+                    && scope.model.as_deref() == Some(selection.model_id.as_str())),
             "the scheduled CLI profile and model must match the pinned stage override"
         );
         ensure!(
@@ -482,7 +560,8 @@ impl Store {
         project: String,
         attempt: String,
     ) -> Result<Option<NodeAttempt>> {
-        self.execute(move |db| load_node_attempt(db, &project, &attempt)).await
+        self.execute(move |db| load_node_attempt(db, &project, &attempt))
+            .await
     }
 }
 

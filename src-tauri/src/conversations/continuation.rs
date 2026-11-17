@@ -1,8 +1,9 @@
 use super::{
     Conversation, MessageRevision, MessageRole, SessionScope, activate_context,
     automatic_continuity, check_idle_base, consume_matching_draft, context_entries,
-    insert_conversation, insert_message, load_conversation, new_id,
-    previous_attempt, reference_delivery, draft_files::{consume_attachment_draft, verify_attachment_draft},
+    draft_files::{consume_attachment_draft, verify_attachment_draft},
+    insert_conversation, insert_message, load_conversation, new_id, previous_attempt,
+    reference_delivery,
 };
 use crate::{
     attachments::{AttachmentDelivery, AttachmentSource, CapturedPayload, captured_for_revision},
@@ -226,9 +227,16 @@ impl Store {
             validate_scope(&scope, &root)?;
             let inspected =
                 match continuation_route(&tx, &conversation, &expected_context_id, &scope)? {
-                    ContinuationRoute::Review(reason) => {
-                        seal_review(&tx, &project, &conversation, scope, reason, Vec::new(), None, None)?
-                    }
+                    ContinuationRoute::Review(reason) => seal_review(
+                        &tx,
+                        &project,
+                        &conversation,
+                        scope,
+                        reason,
+                        Vec::new(),
+                        None,
+                        None,
+                    )?,
                     _ => ContinuationInspection::Automatic,
                 };
             tx.commit()?;
@@ -244,7 +252,14 @@ impl Store {
         scope: SessionScope,
         text: String,
     ) -> Result<ContinuationInspection> {
-        self.submit_conversation_with_references(conversation_id, expected_context_id, scope, text, Vec::new()).await
+        self.submit_conversation_with_references(
+            conversation_id,
+            expected_context_id,
+            scope,
+            text,
+            Vec::new(),
+        )
+        .await
     }
 
     pub async fn submit_conversation_with_references(
@@ -255,7 +270,15 @@ impl Store {
         text: String,
         reference_ids: Vec<String>,
     ) -> Result<ContinuationInspection> {
-        self.submit_conversation_with_files(conversation_id, expected_context_id, scope, text, reference_ids, None).await
+        self.submit_conversation_with_files(
+            conversation_id,
+            expected_context_id,
+            scope,
+            text,
+            reference_ids,
+            None,
+        )
+        .await
     }
 
     pub async fn submit_conversation_with_files(
@@ -267,8 +290,16 @@ impl Store {
         reference_ids: Vec<String>,
         attachment_preview_id: Option<String>,
     ) -> Result<ContinuationInspection> {
-        self.submit_conversation_with_files_at_checkout(conversation_id, expected_context_id, scope, text,
-            reference_ids, attachment_preview_id, None).await
+        self.submit_conversation_with_files_at_checkout(
+            conversation_id,
+            expected_context_id,
+            scope,
+            text,
+            reference_ids,
+            attachment_preview_id,
+            None,
+        )
+        .await
     }
 
     pub async fn submit_conversation_with_files_at_checkout(
@@ -281,9 +312,14 @@ impl Store {
         attachment_preview_id: Option<String>,
         requested_checkout_id: Option<String>,
     ) -> Result<ContinuationInspection> {
-        let attachments = self.prepare_attachment_draft_submission(
-            conversation_id.clone(), &scope, &text, attachment_preview_id.clone(),
-        ).await?;
+        let attachments = self
+            .prepare_attachment_draft_submission(
+                conversation_id.clone(),
+                &scope,
+                &text,
+                attachment_preview_id.clone(),
+            )
+            .await?;
         let outcome = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -356,13 +392,25 @@ impl Store {
         scope: SessionScope,
         text: String,
     ) -> Result<ContinuedConversation> {
-        let attachment_preview_id = self.execute({
-            let conversation_id = conversation_id.clone(); let preview_id = preview_id.clone();
-            move |db| Ok(load_continuation_review(db, &conversation_id, &preview_id)?.1.attachment_preview_id)
-        }).await?;
-        let attachments = self.prepare_attachment_draft_submission(
-            conversation_id.clone(), &scope, &text, attachment_preview_id,
-        ).await?;
+        let attachment_preview_id = self
+            .execute({
+                let conversation_id = conversation_id.clone();
+                let preview_id = preview_id.clone();
+                move |db| {
+                    Ok(load_continuation_review(db, &conversation_id, &preview_id)?
+                        .1
+                        .attachment_preview_id)
+                }
+            })
+            .await?;
+        let attachments = self
+            .prepare_attachment_draft_submission(
+                conversation_id.clone(),
+                &scope,
+                &text,
+                attachment_preview_id,
+            )
+            .await?;
         let continued = self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let (context_id, preview) = load_continuation_review(&tx, &conversation_id, &preview_id)?;
@@ -420,20 +468,37 @@ impl Store {
         Ok(continued)
     }
 
-    pub async fn conversation_continuation_review_checkout(&self, conversation_id: String, preview_id: String) -> Result<String> {
+    pub async fn conversation_continuation_review_checkout(
+        &self,
+        conversation_id: String,
+        preview_id: String,
+    ) -> Result<String> {
         self.execute(move |db| {
             let source = load_conversation(db, &conversation_id)?;
             let (_, review) = load_continuation_review(db, &conversation_id, &preview_id)?;
-            Ok(super::fork_checkout::resolve_continuation_checkout(db, &source, review.target_checkout_id.as_deref())?.checkout_id)
-        }).await
+            Ok(super::fork_checkout::resolve_continuation_checkout(
+                db,
+                &source,
+                review.target_checkout_id.as_deref(),
+            )?
+            .checkout_id)
+        })
+        .await
     }
 }
 
-fn require_destination_seed_references(db: &Connection, entries: &[String], root: &Path) -> Result<()> {
+fn require_destination_seed_references(
+    db: &Connection,
+    entries: &[String],
+    root: &Path,
+) -> Result<()> {
     for revision in entries {
         for attachment in captured_for_revision(db, revision)? {
-            if let (AttachmentSource::Checkout { relative_path }, CapturedPayload::Reference { .. }) =
-                (&attachment.metadata.source, &attachment.payload) {
+            if let (
+                AttachmentSource::Checkout { relative_path },
+                CapturedPayload::Reference { .. },
+            ) = (&attachment.metadata.source, &attachment.payload)
+            {
                 attachment.validate_reference(root).with_context(|| format!(
                     "The saved reference {} cannot be used in the destination checkout. Choose a fresh conversation to continue with this draft.",
                     relative_path.display()))?;
@@ -443,12 +508,19 @@ fn require_destination_seed_references(db: &Connection, entries: &[String], root
     Ok(())
 }
 
-fn load_continuation_review(db: &Connection, conversation_id: &str, preview_id: &str) -> Result<(String, SealedReview)> {
+fn load_continuation_review(
+    db: &Connection,
+    conversation_id: &str,
+    preview_id: &str,
+) -> Result<(String, SealedReview)> {
     let (context_id, payload): (String, Vec<u8>) = db.query_row(
         "SELECT context_id, payload FROM conversation_continuation_previews WHERE id = ?1 AND conversation_id = ?2",
         params![preview_id, conversation_id], |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional()?.context("This continuation preview is no longer available. Review the conversation again.")?;
-    Ok((context_id, serde_json::from_slice(&protection::unprotect(&payload)?)?))
+    Ok((
+        context_id,
+        serde_json::from_slice(&protection::unprotect(&payload)?)?,
+    ))
 }
 
 fn continuation_route(
@@ -474,7 +546,9 @@ fn continuation_route(
         {
             return Ok(ContinuationRoute::NativeFork(source_session));
         }
-        return Ok(ContinuationRoute::Review(ContinuationReason::SessionUnavailable));
+        return Ok(ContinuationRoute::Review(
+            ContinuationReason::SessionUnavailable,
+        ));
     };
     let serialized = serde_json::to_string(scope)?;
     if prior.scope != serialized {
@@ -636,7 +710,9 @@ impl PinnedContinuation {
         let Some(prior) = previous_attempt(db, &conversation.id)? else {
             // The fork's copied seed is already pinned by history_is_current.
             // Admission may replay it when its source session is unavailable.
-            return Ok(super::native_fork::source_session(db, &conversation.id)?.as_ref() == Some(session));
+            return Ok(
+                super::native_fork::source_session(db, &conversation.id)?.as_ref() == Some(session),
+            );
         };
         if &prior.session_id != session || !prior.matches_allocation(allocation) {
             return Ok(false);
@@ -814,8 +890,8 @@ pub(super) fn fork_history_at_checkout(
     checkout_id: String,
     title: String,
 ) -> Result<Conversation> {
-    let source_session: Option<String> = if source.checkout_id == checkout_id { db
-        .query_row(
+    let source_session: Option<String> = if source.checkout_id == checkout_id {
+        db.query_row(
             "SELECT a.agent_session_id FROM agent_attempts a
          JOIN agent_sessions s ON s.id = a.agent_session_id
          JOIN conversation_contexts c ON c.id = a.result_context_id
@@ -825,7 +901,10 @@ pub(super) fn fork_history_at_checkout(
             params![source.id, serde_json::to_string(entries)?],
             |row| row.get(0),
         )
-        .optional()? } else { None };
+        .optional()?
+    } else {
+        None
+    };
     let source_session = match source_session {
         Some(session) if native_goal_fork_is_safe(db, &session)? => Some(session),
         _ => None,
@@ -858,7 +937,13 @@ pub(super) fn fork_history_at_checkout(
     }
     if !copied.is_empty() {
         fork.context_id = activate_context(db, &fork.id, &copied)?;
-        super::compaction::inherit_fork(db, &source.context_id, &fork.context_id, entries, &copied)?;
+        super::compaction::inherit_fork(
+            db,
+            &source.context_id,
+            &fork.context_id,
+            entries,
+            &copied,
+        )?;
     }
     db.execute(
         "INSERT INTO conversation_forks (conversation_id, source_conversation_id,

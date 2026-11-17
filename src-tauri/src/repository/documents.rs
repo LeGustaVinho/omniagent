@@ -25,8 +25,8 @@ use format::{EditorFormat, encode};
 pub use movement::RepositoryDocumentMove;
 pub(super) use movement::proposed_move_paths;
 pub(super) use replacement::lock_directories;
-pub(super) use replacement::{file_identity, open_directory_for_rename, open_for_rename, rename};
 use replacement::{FileSave, replace};
+pub(super) use replacement::{file_identity, open_directory_for_rename, open_for_rename, rename};
 
 #[derive(Clone, Copy)]
 pub(crate) enum DocumentKind {

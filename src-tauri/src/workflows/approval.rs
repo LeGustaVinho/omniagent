@@ -99,7 +99,8 @@ impl Store {
         attempt: &str,
     ) -> Result<String> {
         let (project, attempt) = (project.to_owned(), attempt.to_owned());
-        self.execute(move |db| load_plan_checkout(db, &project, &attempt)).await
+        self.execute(move |db| load_plan_checkout(db, &project, &attempt))
+            .await
     }
 }
 
@@ -152,7 +153,9 @@ pub(crate) fn workflow_release_authorized(
     let Some(workflow) = super::runtime::load_workflow_run(db, project, run)? else {
         return Ok(Some(false));
     };
-    if super::authoring::package::ensure_package_repeat_guards(db, project, &workflow.version).is_err() {
+    if super::authoring::package::ensure_package_repeat_guards(db, project, &workflow.version)
+        .is_err()
+    {
         return Ok(Some(false));
     }
     let saved = load_artifact(db, project, run, &decision, ArtifactKind::Approval)?;

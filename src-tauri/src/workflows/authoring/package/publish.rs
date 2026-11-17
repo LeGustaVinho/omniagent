@@ -292,7 +292,12 @@ fn publish_member(
             member.name
         );
         check_transitive_references(
-            db, project, &artifact, &mut BTreeSet::new(), ReferenceCheck::Publication, None,
+            db,
+            project,
+            &artifact,
+            &mut BTreeSet::new(),
+            ReferenceCheck::Publication,
+            None,
         )?;
         blockers.extend(dependency_blockers(&member.body, &slot, &artifact));
         references.insert(
@@ -443,7 +448,10 @@ fn publish_member(
                 if member.destination == PackageDestination::Library {
                     require_portable_mcp(tool, "$preset", &references, &dependencies)?;
                 }
-                if let Some(declaration) = dependencies.get("$preset").filter(|artifact| matches!(artifact.body, PackageArtifactBody::McpTool { .. })) {
+                if let Some(declaration) = dependencies
+                    .get("$preset")
+                    .filter(|artifact| matches!(artifact.body, PackageArtifactBody::McpTool { .. }))
+                {
                     check_mcp_declaration(db, project, tool, declaration, true, &mut blockers)?;
                 } else if tool.is_package_placeholder() {
                     blockers.push("Bind the local MCP tool for this preset.".into());
@@ -826,18 +834,26 @@ impl<'a> GraphCompiler<'a> {
                         .get("$preset")
                         .context("The pinned preset definition is unavailable")?;
                     node.configuration = derive_reusable::resolve_preset_configuration(
-                        &node.configuration, configuration, editable_fields, definition,
-                    ).with_context(|| format!("The preset configuration for {slot} is invalid"))?;
+                        &node.configuration,
+                        configuration,
+                        editable_fields,
+                        definition,
+                    )
+                    .with_context(|| format!("The preset configuration for {slot} is invalid"))?;
                     if let Some(ResolvedPackageReference::Published { version }) =
                         artifact.references.get("$preset")
                     {
                         let dependency = (self.loader)(version)?
                             .context("The preset's exact dependency is unavailable")?;
                         match &dependency.body {
-                            PackageArtifactBody::Role { .. } => roles::bind(&mut node.configuration, &dependency)?,
+                            PackageArtifactBody::Role { .. } => {
+                                roles::bind(&mut node.configuration, &dependency)?
+                            }
                             PackageArtifactBody::Command { .. } => {
                                 if let Some(configuration) = configured_command(&dependency.body) {
-                                    if let NodeConfiguration::Command(command) = &mut node.configuration {
+                                    if let NodeConfiguration::Command(command) =
+                                        &mut node.configuration
+                                    {
                                         let output = command.output;
                                         *command = configuration;
                                         command.output = output;
@@ -848,8 +864,14 @@ impl<'a> GraphCompiler<'a> {
                             }
                             PackageArtifactBody::McpTool { .. } => {
                                 if let NodeConfiguration::McpTool(config) = &node.configuration {
-                                    check_mcp_declaration(self.db, self.project, config, &dependency,
-                                        self.validate_bindings, blockers)?;
+                                    check_mcp_declaration(
+                                        self.db,
+                                        self.project,
+                                        config,
+                                        &dependency,
+                                        self.validate_bindings,
+                                        blockers,
+                                    )?;
                                     declared_mcp.insert(slot.as_str());
                                 }
                             }
@@ -893,7 +915,10 @@ impl<'a> GraphCompiler<'a> {
                         anyhow::bail!("For each node {slot} needs a bounded item contract");
                     };
                     let body = self.child(artifact, blockers)?;
-                    calls.insert(slot.clone(), crate::workflows::iteration::expand_for_each(body, configuration)?);
+                    calls.insert(
+                        slot.clone(),
+                        crate::workflows::iteration::expand_for_each(body, configuration)?,
+                    );
                 }
                 PackageArtifactBody::McpTool { .. } => {
                     let NodeConfiguration::McpTool(config) = &node.configuration else {
@@ -926,9 +951,18 @@ impl<'a> GraphCompiler<'a> {
             }
         }
         for node in &graph.nodes {
-            ensure!(!node.kind.generated_iteration(), "For each generates its internal stages during publication");
-            ensure!(!matches!(node.configuration, NodeConfiguration::PresetOverrides { .. }),
-                "Select the exact preset revision for {}", node.id);
+            ensure!(
+                !node.kind.generated_iteration(),
+                "For each generates its internal stages during publication"
+            );
+            ensure!(
+                !matches!(
+                    node.configuration,
+                    NodeConfiguration::PresetOverrides { .. }
+                ),
+                "Select the exact preset revision for {}",
+                node.id
+            );
             let pin = effective_pins
                 .get_mut(&node.id)
                 .context("A workflow node lost its reviewed definition")?;
@@ -946,8 +980,10 @@ impl<'a> GraphCompiler<'a> {
                 "The pinned definition for {} is unavailable",
                 node.id
             );
-            if matches!(node.kind, BuiltinNode::Subflow | BuiltinNode::RepeatUntil | BuiltinNode::ForEach)
-                && !calls.contains_key(&node.id)
+            if matches!(
+                node.kind,
+                BuiltinNode::Subflow | BuiltinNode::RepeatUntil | BuiltinNode::ForEach
+            ) && !calls.contains_key(&node.id)
             {
                 blockers.push(format!("Select a pinned subflow for {}.", node.id));
             }
@@ -1291,7 +1327,9 @@ fn check_transitive_references(
                 }
                 check_transitive_references(db, project, &dependency, seen, check, local_mcp)?;
             }
-            ResolvedPackageReference::Parameter { name, .. } if check == ReferenceCheck::Runnable => {
+            ResolvedPackageReference::Parameter { name, .. }
+                if check == ReferenceCheck::Runnable =>
+            {
                 anyhow::bail!("Choose the binding for {name}.")
             }
             _ => (),
@@ -1308,10 +1346,14 @@ fn require_guarded_repeat(
     dependency: &PublishedPackageArtifact,
 ) -> Result<()> {
     let graph = match consumer {
-        PackageArtifactBody::Pipeline { graph } | PackageArtifactBody::Subflow { graph, .. } => graph,
+        PackageArtifactBody::Pipeline { graph } | PackageArtifactBody::Subflow { graph, .. } => {
+            graph
+        }
         _ => return Ok(()),
     };
-    let Some(NodeConfiguration::RepeatUntil(configuration)) = graph.nodes.iter()
+    let Some(NodeConfiguration::RepeatUntil(configuration)) = graph
+        .nodes
+        .iter()
         .find(|node| node.id == slot && node.kind == BuiltinNode::RepeatUntil)
         .map(|node| &node.configuration)
     else {
@@ -1321,11 +1363,17 @@ fn require_guarded_repeat(
     let mut compiler = GraphCompiler::new(db, project, &load);
     compiler.validate_bindings = false;
     let body = compiler.child(dependency, &mut Vec::new())?;
-    let ready = body.inputs.get(&configuration.ready_input)
+    let ready = body
+        .inputs
+        .get(&configuration.ready_input)
         .context("The pinned Repeat ready input is unavailable")?;
-    let completed = body.outputs.get(&configuration.completion_output)
+    let completed = body
+        .outputs
+        .get(&configuration.completion_output)
         .context("The pinned Repeat completion output is unavailable")?;
-    let result = body.outputs.get(&configuration.evidence_output)
+    let result = body
+        .outputs
+        .get(&configuration.evidence_output)
         .context("The pinned Repeat evidence output is unavailable")?;
     crate::workflows::iteration::validate_loop_body(&body, ready, None, completed, result)
         .with_context(|| format!("Review and publish revised Repeat body {slot} before execution"))

@@ -14,11 +14,10 @@ use crate::{
 use super::{
     ApprovalDecision, ArtifactValue, Executor, NodeConfiguration, PinnedNode, PortType,
     TaskReference, WorkflowApprovalSubmission, WorkflowArtifact, WorkflowPlanUnit,
-    approval::{
-        issue_prepared_release, require_active_decision, require_current_plan,
-    },
+    approval::{issue_prepared_release, require_active_decision, require_current_plan},
     artifacts::insert_artifact,
-    digest, registry::supports_pinned_execution,
+    digest,
+    registry::supports_pinned_execution,
 };
 
 pub type NodeInputs = BTreeMap<String, String>;
@@ -81,14 +80,20 @@ impl Store {
             request,
         } = submission;
         if matches!(request, WorkflowHostRequest::ApproveImplementation) {
-            return self.approve_workflow_implementation(WorkflowApprovalSubmission {
-                project_id, run_id, node_id, inputs,
-            }).await;
+            return self
+                .approve_workflow_implementation(WorkflowApprovalSubmission {
+                    project_id,
+                    run_id,
+                    node_id,
+                    inputs,
+                })
+                .await;
         }
         let (node, inputs) = self
             .workflow_execution_inputs(&project_id, &run_id, &node_id, None, &inputs)
             .await?;
-        let preparation_decision = if matches!(request, WorkflowHostRequest::PrepareWorktree { .. }) {
+        let preparation_decision = if matches!(request, WorkflowHostRequest::PrepareWorktree { .. })
+        {
             inputs.get("decision").map(|approval| approval.id.clone())
         } else {
             None
@@ -113,7 +118,9 @@ impl Store {
                     request_revision.clone(),
                 );
                 let decision = preparation_decision.clone();
-                move |db| load_host_completion(db, &run, &node, &key, &revision, decision.as_deref())
+                move |db| {
+                    load_host_completion(db, &run, &node, &key, &revision, decision.as_deref())
+                }
             })
             .await?;
         if let Some(saved) = saved {
@@ -133,18 +140,34 @@ impl Store {
                 let ArtifactValue::Markdown(document) = &inputs["document"].value else {
                     anyhow::bail!("Read Git needs the selected document's registered checkout");
                 };
-                let inspection = super::templates::diff::capture(self, &project_id, &document.checkout_id, selection).await?;
+                let inspection = super::templates::diff::capture(
+                    self,
+                    &project_id,
+                    &document.checkout_id,
+                    selection,
+                )
+                .await?;
                 HostAction::Publish("git", ArtifactValue::GitInspection(inspection))
             }
             (Executor::CheckSelectedGit, WorkflowHostRequest::VerifyReviewDiff) => {
-                let NodeConfiguration::RequiredChecks { names } = node.instance.configuration else {
+                let NodeConfiguration::RequiredChecks { names } = node.instance.configuration
+                else {
                     anyhow::bail!("The diff checks configuration is unavailable");
                 };
-                let checks = super::templates::diff::verify(self, &project_id, &inputs["git"], names).await?;
+                let checks =
+                    super::templates::diff::verify(self, &project_id, &inputs["git"], names)
+                        .await?;
                 HostAction::Publish("checks", ArtifactValue::Checks(checks))
             }
             (Executor::ReportSelectedGit, WorkflowHostRequest::PublishDiffReport) => {
-                let report = super::templates::diff::report(self, &project_id, &inputs["git"], &inputs["review"], &inputs["checks"]).await?;
+                let report = super::templates::diff::report(
+                    self,
+                    &project_id,
+                    &inputs["git"],
+                    &inputs["review"],
+                    &inputs["checks"],
+                )
+                .await?;
                 HostAction::Publish("report", ArtifactValue::DiffReport(report))
             }
             (
@@ -312,11 +335,23 @@ impl Store {
         );
         let control_checked = if super::control::uses_control(&definition) {
             self.refresh_control(project.into(), run.into()).await?;
-            let (node, unit, supplied) = (node.to_owned(), unit_id.map(str::to_owned), artifacts.clone());
+            let (node, unit, supplied) = (
+                node.to_owned(),
+                unit_id.map(str::to_owned),
+                artifacts.clone(),
+            );
             let (definition, workflow) = (definition.clone(), workflow.clone());
-            self.execute(move |db| super::control::require_dependencies(
-                db, &definition, &workflow, &node, unit.as_deref(), &supplied,
-            )).await?
+            self.execute(move |db| {
+                super::control::require_dependencies(
+                    db,
+                    &definition,
+                    &workflow,
+                    &node,
+                    unit.as_deref(),
+                    &supplied,
+                )
+            })
+            .await?
         } else {
             false
         };
@@ -327,7 +362,10 @@ impl Store {
                 .iter()
                 .find(|wire| wire.to.node == node && wire.to.port == port.name);
             let mcp_arguments = port.name == "arguments"
-                && matches!(&pinned.instance.configuration, NodeConfiguration::McpTool(_));
+                && matches!(
+                    &pinned.instance.configuration,
+                    NodeConfiguration::McpTool(_)
+                );
             if source.is_none() && mcp_arguments {
                 continue;
             }
@@ -343,8 +381,13 @@ impl Store {
                 None
             };
             let value = if mcp_arguments {
-                producer.definition.outputs.iter().find(|port| port.name == source.from.port)
-                    .map(|port| port.value).filter(|value| matches!(value, PortType::Data(_)))
+                producer
+                    .definition
+                    .outputs
+                    .iter()
+                    .find(|port| port.name == source.from.port)
+                    .map(|port| port.value)
+                    .filter(|value| matches!(value, PortType::Data(_)))
                     .context("MCP arguments must come from a typed workflow artifact")?
             } else {
                 port.value
@@ -397,7 +440,9 @@ impl Store {
                     );
                     resolved.insert(port.name.clone(), artifact);
                 }
-                PortType::Evidence => anyhow::bail!("Conditions execute through the pinned control scheduler"),
+                PortType::Evidence => {
+                    anyhow::bail!("Conditions execute through the pinned control scheduler")
+                }
             }
         }
         ensure!(
@@ -436,7 +481,13 @@ pub(super) fn record_host_completion(
 ) -> Result<()> {
     db.execute(
         "INSERT INTO workflow_host_completions VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![artifact.workflow_run_id, artifact.node_instance_id, execution_key, request_revision, artifact.id],
+        params![
+            artifact.workflow_run_id,
+            artifact.node_instance_id,
+            execution_key,
+            request_revision,
+            artifact.id
+        ],
     )?;
     Ok(())
 }
@@ -461,7 +512,9 @@ fn load_host_completion(
     let Some((saved, payload)) = saved else {
         return Ok(None);
     };
-    if saved != revision && let Some(decision) = preparation_decision {
+    if saved != revision
+        && let Some(decision) = preparation_decision
+    {
         let was_prepared: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM workflow_release_bindings WHERE decision_artifact_id = ?1)",
             [decision], |row| row.get(0),

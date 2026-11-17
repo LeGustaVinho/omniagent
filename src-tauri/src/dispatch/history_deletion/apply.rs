@@ -77,7 +77,10 @@ pub(super) fn apply(db: &Connection, plan: &DeletionPlan) -> Result<()> {
             params![job, seal(&request)?],
         )?;
         db.execute("DELETE FROM job_recoveries WHERE job_id = ?1", [job])?;
-        db.execute("UPDATE model_comparison_syntheses SET prompt = X'' WHERE job_id = ?1", [job])?;
+        db.execute(
+            "UPDATE model_comparison_syntheses SET prompt = X'' WHERE job_id = ?1",
+            [job],
+        )?;
     }
     db.execute(
         "UPDATE conversation_summary_requests SET payload = X'' WHERE id IN (SELECT value FROM json_each(?1))",

@@ -19,12 +19,14 @@ use super::{ContextSnapshot, NativeHistory};
 
 mod conversation_artifacts;
 pub(super) use conversation_artifacts::pending_summary_sources;
-pub(crate) use conversation_artifacts::{load_conversation_artifact, record_conversation_excerpt};
-pub(crate) use conversation_artifacts::{enqueue_summary, read_background_dispatch_result, reconcile_summary};
 pub use conversation_artifacts::{
     ArtifactSource, ByteRange, ConversationArtifactRevision, ConversationSelection, ExcerptSource,
     QueuedSummary, SelectedMessageSpan, SummaryRun,
 };
+pub(crate) use conversation_artifacts::{
+    enqueue_summary, read_background_dispatch_result, reconcile_summary,
+};
+pub(crate) use conversation_artifacts::{load_conversation_artifact, record_conversation_excerpt};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -422,18 +424,31 @@ fn collect(
         });
     }
     if let Some(overlay) = crate::conversations::compaction::load_overlay(db, &snapshot.context_id)?
-        && snapshot.submitted_messages.first().is_some_and(|entry| entry == &overlay.seed())
-        && let ConversationArtifactRevision::Summary { id, source_context_id, covered, .. } = overlay.artifact
+        && snapshot
+            .submitted_messages
+            .first()
+            .is_some_and(|entry| entry == &overlay.seed())
+        && let ConversationArtifactRevision::Summary {
+            id,
+            source_context_id,
+            covered,
+            ..
+        } = overlay.artifact
     {
         messages.extend(covered.iter().map(|part| part.origin.revision_id.clone()));
         sources.push(DispatchSourceRevision::CompactedConversation {
-            artifact_revision_id: id, source_context_id, covered,
+            artifact_revision_id: id,
+            source_context_id,
+            covered,
         });
     }
     for submitted in &snapshot.conversation_references {
         let reference = &submitted.reference;
-        messages.extend(crate::conversations::reference_delivery::source_revisions(&reference.artifact)
-            .into_iter().map(str::to_owned));
+        messages.extend(
+            crate::conversations::reference_delivery::source_revisions(&reference.artifact)
+                .into_iter()
+                .map(str::to_owned),
+        );
         sources.push(DispatchSourceRevision::ConversationReference {
             message_revision_id: submitted.message_revision_id.clone(),
             project_id: reference.project_id.clone(),

@@ -198,7 +198,15 @@ fn effective_quota(db: &Connection, conversation: &str) -> Result<EffectiveQuota
          LEFT JOIN conversation_subagent_quotas q ON q.conversation_id = c.id
          LEFT JOIN workflow_planning_conversations p ON p.conversation_id = c.id WHERE c.id = ?1",
         [conversation],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
     )?;
     Ok(EffectiveQuota {
         project: project_policy(db, &project)?,
@@ -599,16 +607,15 @@ fn authorize(
     } else {
         strict.then(|| native_requested.min(limit.saturating_sub(used + managed_slots)))
     };
-    let (audit, managed_reason) = if native_allowance == Some(0)
-        && matches!(audit, SubagentAuditRoute::Native { .. })
-    {
-        (
-            SubagentAuditRoute::Managed,
-            Some(SubagentAuditManagedReason::ZeroNativeAllowance),
-        )
-    } else {
-        (audit, managed_reason)
-    };
+    let (audit, managed_reason) =
+        if native_allowance == Some(0) && matches!(audit, SubagentAuditRoute::Native { .. }) {
+            (
+                SubagentAuditRoute::Managed,
+                Some(SubagentAuditManagedReason::ZeroNativeAllowance),
+            )
+        } else {
+            (audit, managed_reason)
+        };
     Ok(Ok(SubagentAllocation {
         conversation_id: conversation.map(str::to_owned),
         native_allowance,

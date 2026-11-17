@@ -102,17 +102,29 @@ pub(super) fn ensure_merge_destination_available(
     project: &str,
     root: &Path,
 ) -> Result<()> {
-    let root = root.to_str().context("the destination checkout path is not UTF-8")?;
-    let checkout: Option<String> = db.query_row(
-        "SELECT id FROM checkouts WHERE project_id = ?1 AND root = ?2",
-        params![project, root],
-        |row| row.get(0),
-    ).optional()?;
-    let Some(checkout) = checkout else { return Ok(()); };
+    let root = root
+        .to_str()
+        .context("the destination checkout path is not UTF-8")?;
+    let checkout: Option<String> = db
+        .query_row(
+            "SELECT id FROM checkouts WHERE project_id = ?1 AND root = ?2",
+            params![project, root],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(checkout) = checkout else {
+        return Ok(());
+    };
     match writer_conflict(db, &checkout, "")? {
-        Some(WriterConflict::Run { id, .. }) => bail!("destination worktree is reserved by run {id}"),
-        Some(WriterConflict::App(id)) => bail!("destination worktree is reserved by app operation {id}"),
-        Some(WriterConflict::Pending { scope, .. }) => bail!("destination worktree has pending changes for scope {scope}"),
+        Some(WriterConflict::Run { id, .. }) => {
+            bail!("destination worktree is reserved by run {id}")
+        }
+        Some(WriterConflict::App(id)) => {
+            bail!("destination worktree is reserved by app operation {id}")
+        }
+        Some(WriterConflict::Pending { scope, .. }) => {
+            bail!("destination worktree has pending changes for scope {scope}")
+        }
         None => Ok(()),
     }
 }
