@@ -57,6 +57,19 @@ const output = (nodeInstanceId: string, id: string, port: string, kind: string, 
   current: true, inputReceipts: [], artifact: { id, nodeInstanceId, port, value: { kind, evidence }, unitId, workflowRunId: runId },
 });
 
+it("refreshes a conversation run between job completion and the End result", () => {
+  const agent = node("conversation_agent", "Conversation agent");
+  const completed = job(agent.instance.id, [{ runId: "native-attempt", ordinal: 1, previousRunId: null,
+    conversationId: "chat", status: "succeeded" }]);
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, projectId, version, planRevision: null },
+    definition: { version, name: "Direct conversation", nodes: [agent], wires: [] },
+    units: [], unitNodeIds: [], jobs: [completed], outputs: [], control: [], conversationTurnActive: true,
+  };
+  expect(needsExecutionRefresh(snapshot)).toBe(true);
+  expect(needsExecutionRefresh({ ...snapshot, conversationTurnActive: false })).toBe(false);
+});
+
 it("shows a Function as one live graph node with its published result and internal graph", async () => {
   const start = node("start", "Start", [], [control("start")]);
   const inner = node("summarize::execute", "AI Node Agent", [control("ready")],

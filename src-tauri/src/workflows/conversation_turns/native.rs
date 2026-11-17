@@ -12,9 +12,15 @@ use crate::{
 
 use super::{
     BuiltinNode, ConversationPipelineInputs, ConversationPipelineTurnRequest, NodeConfiguration,
-    SavedRequest, WorkflowDefinition, WorkflowRevision, origin, turn_entry,
+    SavedRequest, WorkflowDefinition, WorkflowRevision, open_request, origin, turn_entry,
 };
-use crate::workflows::{WorkflowRun, generic_agent, launch::launch_entry_in_tx};
+use crate::workflows::{
+    ArtifactValue, WorkflowRun,
+    artifacts::insert_artifact,
+    digest, generic_agent,
+    inspection::record_workflow_input_ids,
+    launch::{launch_entry_in_tx, load_workflow_launch},
+};
 
 pub(in crate::workflows) const WORKFLOW_ID: &str = "omniagent:direct-conversation";
 const AGENT_ID: &str = "conversation-agent";
@@ -200,6 +206,99 @@ pub(crate) fn launch_direct_turn(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running')",
         params![conversation, job.id, protection::protect(&serde_json::to_vec(&saved)?)?, message_revision, context.context_id, run.id],
     )?;
+    Ok(())
+}
+
+pub(crate) fn revise_direct_turn_input(
+    db: &Connection,
+    project: &str,
+    conversation: &str,
+    job: &str,
+    revision: &str,
+) -> Result<()> {
+    let pending = db
+        .query_row(
+            "SELECT t.sequence, t.payload, t.workflow_run_id FROM conversation_pipeline_turns t
+         JOIN workflow_run_pins p ON p.pipeline_run_id = t.workflow_run_id
+         WHERE t.conversation_id = ?1 AND t.request_id = ?2 AND t.state = 'running'
+           AND p.project_id = ?3 AND p.workflow_id = ?4 AND t.message_revision_id IS NOT ?5",
+            params![conversation, job, project, WORKFLOW_ID, revision],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((sequence, payload, run)) = pending else {
+        return Ok(());
+    };
+    let mut saved = open_request(&payload)?;
+    let mut launch = load_workflow_launch(db, project, &run)?
+        .context("The direct turn lost its pinned launch")?;
+    saved
+        .inputs
+        .values
+        .insert("messageRevisionId".into(), revision.into());
+    launch.inputs = saved.inputs.values.clone();
+    let launch_payload = serde_json::to_vec(&launch)?;
+    let original: String = db.query_row(
+        "SELECT artifact_id FROM workflow_host_completions
+         WHERE pipeline_run_id = ?1 AND node_instance_id = 'start' AND execution_key = ''",
+        [&run],
+        |row| row.get(0),
+    )?;
+    let artifact = insert_artifact(
+        db,
+        project,
+        run.clone(),
+        "start".into(),
+        "inputs".into(),
+        ArtifactValue::JsonObject(launch.inputs),
+    )?;
+    if artifact.id != original {
+        record_workflow_input_ids(db, &artifact, "", &Default::default())?;
+        db.execute(
+            "UPDATE workflow_host_completions SET artifact_id = ?2, request_revision = ?3
+             WHERE pipeline_run_id = ?1 AND node_instance_id = 'start' AND execution_key = ''",
+            params![run, artifact.id, digest(&launch_payload)],
+        )?;
+        // The queued instruction is still editable, so no attempt has consumed the draft binding.
+        db.execute("DELETE FROM workflow_artifacts WHERE id = ?1", [original])?;
+    }
+    db.execute(
+        "UPDATE workflow_launches SET payload = ?2 WHERE pipeline_run_id = ?1",
+        params![run, protection::protect(&launch_payload)?],
+    )?;
+    db.execute(
+        "UPDATE conversation_pipeline_turns SET message_revision_id = ?2, payload = ?3 WHERE sequence = ?1",
+        params![sequence, revision, protection::protect(&serde_json::to_vec(&saved)?)?],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn reopen_direct_turn(db: &Connection, job: &Job) -> Result<()> {
+    let Some(context) = &job.context else {
+        return Ok(());
+    };
+    let reopened = db.query_row(
+        "UPDATE conversation_pipeline_turns AS t SET state = 'running', error = NULL, result_revision_id = NULL
+         WHERE t.conversation_id = ?1 AND t.request_id = ?2 AND t.state = 'failed'
+           AND EXISTS (SELECT 1 FROM workflow_run_pins p WHERE p.pipeline_run_id = t.workflow_run_id
+                       AND p.project_id = ?3 AND p.workflow_id = ?4)
+         RETURNING workflow_run_id",
+        params![context.conversation_id, job.id, job.project_id, WORKFLOW_ID],
+        |row| row.get::<_, String>(0),
+    ).optional()?;
+    if let Some(run) = reopened {
+        db.execute(
+            "DELETE FROM workflow_control_receipts WHERE pipeline_run_id = ?1
+             AND node_instance_id IN (?2, 'end')",
+            params![run, AGENT_ID],
+        )?;
+    }
     Ok(())
 }
 

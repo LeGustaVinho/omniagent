@@ -605,6 +605,8 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
     onSuccess: (recoveryJob) => {
       queryClient.setQueryData<JobInspection>(jobKey, { job: recoveryJob, blockers: [], recoveryActions: [] });
       void queryClient.invalidateQueries({ queryKey: jobKey });
+      void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "pipeline-turns"] });
+      void queryClient.invalidateQueries({ queryKey: ["repository-delivery", recoveryJob.projectId, "execution"] });
     },
   });
 

@@ -368,6 +368,9 @@ impl Store {
             crate::conversations::reference_delivery::copy_references(&tx, &expected, &revision)?;
             tx.execute("UPDATE queued_conversation_instructions SET revision_id = ?2 WHERE job_id = ?1",
                 params![id, revision])?;
+            crate::workflows::conversation_turns::revise_direct_turn_input(
+                &tx, &instruction.project, &conversation, &id, &revision,
+            )?;
             let job = load_job(&tx, &instruction.project, &id)?.context("Instruction lost its job")?;
             if super::policy::effective_policy(&tx, &job)?.permission == super::JobPermission::Review {
                 tx.execute("DELETE FROM job_approvals WHERE job_id = ?1", [&id])?;

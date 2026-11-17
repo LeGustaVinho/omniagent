@@ -78,6 +78,7 @@ export type WorkflowExecutionSnapshot = {
   jobs: ExecutionJob[];
   outputs: ExecutionOutput[];
   control: ExecutionControl[];
+  conversationTurnActive?: boolean;
   pendingDecisions?: WorkflowPendingDecision[];
   timedWaits?: { nodeId: string; unitId: string | null; deadlineAt: number }[];
   forkBranches?: { forkId: string; branch: string; unitId: string | null; state: Exclude<WorkflowExecutionState, "waiting" | "interrupted">; settledOrder: number | null }[];
@@ -191,7 +192,8 @@ const recordedWaits = [
 
 export function needsExecutionRefresh(snapshot: WorkflowExecutionSnapshot | null | undefined) {
   if (!snapshot) return false;
-  return Boolean(snapshot.timedWaits?.length) || snapshot.forkBranches?.some(({ state }) => state === "queued" || state === "running") ||
+  return snapshot.conversationTurnActive === true || Boolean(snapshot.timedWaits?.length) ||
+    snapshot.forkBranches?.some(({ state }) => state === "queued" || state === "running") ||
     Boolean(snapshot.pendingDecisions?.length) || recordedWaits.some(([field]) => snapshot[field]?.length) ||
     snapshot.backlogExecutions?.some(({ state }) => state === "pending") ||
     snapshot.comparisonStages?.some(({ state }) => state === "queued" || state === "running") ||

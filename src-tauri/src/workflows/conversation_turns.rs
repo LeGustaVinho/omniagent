@@ -39,7 +39,10 @@ mod tests;
 pub(crate) use dispatch::prepare_next_conversation_stage;
 use dispatch::{RunningTurn, TurnState};
 pub(super) use native::{NativeOutcome, WORKFLOW_ID as DIRECT_WORKFLOW_ID, native_outcome};
-pub(crate) use native::{is_conversation_template, launch_direct_turn, pin_direct_conversation};
+pub(crate) use native::{
+    is_conversation_template, launch_direct_turn, pin_direct_conversation, reopen_direct_turn,
+    revise_direct_turn_input,
+};
 pub(super) use native::validate_conversation_template;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -545,14 +548,22 @@ impl SavedRequest {
 
 fn load_turn(db: &Connection, sequence: i64) -> Result<Turn> {
     let (payload, state, message_revision_id, history_context_id, run_id, result_revision_id, error) = db.query_row(
-        "SELECT payload, state, message_revision_id, history_context_id, workflow_run_id, result_revision_id, error
-         FROM conversation_pipeline_turns WHERE sequence = ?1",
-        [sequence],
-        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        "SELECT t.payload, t.state, coalesce(i.revision_id, t.message_revision_id), t.history_context_id,
+                t.workflow_run_id, t.result_revision_id, t.error
+         FROM conversation_pipeline_turns t
+         LEFT JOIN workflow_run_pins p ON p.pipeline_run_id = t.workflow_run_id AND p.workflow_id = ?2
+         LEFT JOIN queued_conversation_instructions i ON p.pipeline_run_id IS NOT NULL AND i.job_id = t.request_id
+         WHERE t.sequence = ?1",
+        params![sequence, DIRECT_WORKFLOW_ID],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get(1)?, row.get::<_, Option<String>>(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
     )?;
+    let mut request = open_request(&payload)?;
+    if request.native_job.is_some() && let Some(revision) = &message_revision_id {
+        request.inputs.values.insert("messageRevisionId".into(), revision.clone().into());
+    }
     Ok(Turn {
         sequence,
-        request: open_request(&payload)?,
+        request,
         state,
         message_revision_id,
         history_context_id,

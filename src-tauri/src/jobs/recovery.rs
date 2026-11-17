@@ -685,6 +685,7 @@ impl Store {
                             &job_id,
                         )?;
                     }
+                    crate::workflows::conversation_turns::reopen_direct_turn(&tx, &job)?;
                     tx.commit()?;
                     return Ok(job);
                 }
@@ -714,6 +715,7 @@ impl Store {
                         checkpoint.context_id()
                     ],
                 )?;
+                crate::workflows::conversation_turns::reopen_direct_turn(&tx, &job)?;
                 if let Some(writer_checkpoint) = writer_checkpoint {
                     tx.execute(
                         "INSERT INTO goal_writer_recoveries(job_id, checkpoint_run_id) VALUES (?1, ?2)",

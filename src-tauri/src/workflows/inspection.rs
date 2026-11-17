@@ -42,6 +42,8 @@ pub struct WorkflowExecutionInspection {
     pub jobs: Vec<WorkflowExecutionJob>,
     pub outputs: Vec<WorkflowExecutionOutput>,
     pub control: Vec<ControlStageReceipt>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub conversation_turn_active: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fork_branches: Vec<super::orchestration::ForkBranchStatus>,
     pub pending_decisions: Vec<WorkflowPendingDecision>,
@@ -185,6 +187,12 @@ impl Store {
             let jobs = load_jobs(&tx, &run)?;
             let outputs = load_outputs(&tx, &run, &jobs, &units)?;
             let control = recorded_control(&tx, &run)?;
+            let conversation_turn_active = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM conversation_pipeline_turns t
+                   WHERE t.workflow_run_id = ?1 AND (t.state = 'running' OR EXISTS (
+                       SELECT 1 FROM conversation_pipeline_turn_drains d WHERE d.sequence = t.sequence)))",
+                [&run.id], |row| row.get(0),
+            )?;
             let fork_branches = super::orchestration::branch_statuses(&tx, &run)?;
             let pending_decisions = pending_decisions(&tx, &run, &definition)?;
             let timed_waits = super::timed::active_waits(&tx, &run)?;
@@ -208,6 +216,7 @@ impl Store {
                 jobs,
                 outputs,
                 control,
+                conversation_turn_active,
                 fork_branches,
                 pending_decisions,
                 timed_waits,

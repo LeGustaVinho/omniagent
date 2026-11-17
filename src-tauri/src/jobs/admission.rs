@@ -557,6 +557,9 @@ impl Store {
                             .context("The recovery checkpoint is no longer current")
                     })
                     .transpose()?;
+                if checkpoint.is_some() {
+                    crate::workflows::conversation_turns::reopen_direct_turn(&tx, &job)?;
+                }
                 let automatic_writer_checkpoint = if job.mode == SessionMode::ApprovedWrite
                     && let Some(goal) = &inputs.goal
                     && crate::workflows::load_workflow_job_input(&tx, &job.id)?.is_some()
@@ -584,6 +587,13 @@ impl Store {
                 } else {
                     None
                 };
+                if let Some(claim) = adopted.as_ref().or(standalone.as_ref())
+                    && let Some(context) = &job.context
+                {
+                    crate::workflows::conversation_turns::revise_direct_turn_input(
+                        &tx, &job.project_id, &context.conversation_id, &claim.job_id, &claim.revision_id,
+                    )?;
+                }
                 let mut plan = build_attempt(
                     &tx, &job, inputs, checkpoint.as_ref(), allocation,
                     adopted.as_ref().map(|claim| claim.revision_id.clone()),

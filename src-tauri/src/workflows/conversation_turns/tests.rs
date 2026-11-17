@@ -175,10 +175,10 @@ async fn an_end_reply_settles_the_chat_while_another_branch_waits() -> Result<()
 }
 
 #[tokio::test]
-async fn direct_turn_pins_native_job_and_reuses_one_transcript_reply() -> Result<()> {
+async fn direct_turn_keeps_the_revised_instruction_and_recovers_to_end() -> Result<()> {
     use crate::{
         conversations::SessionScope,
-        jobs::{AdmissionEnvironment, JobContext},
+        jobs::{AdmissionEnvironment, JobContext, RecoveryAction},
         providers::Provider,
         runs::RunStatus,
     };
@@ -225,13 +225,66 @@ async fn direct_turn_pins_native_job_and_reuses_one_transcript_reply() -> Result
         .run_id
         .clone()
         .context("Expected a pinned direct run")?;
+    store
+        .revise_pending_instruction(
+            chat.id.clone(),
+            job.id.clone(),
+            initial[0]
+                .message_revision_id
+                .clone()
+                .context("Expected an instruction")?,
+            "Revised native question".into(),
+            None,
+        )
+        .await?;
+    let revised = store.conversation_pipeline_turns(chat.id.clone()).await?;
+    assert_eq!(revised[0].text, "Revised native question");
+    assert_ne!(
+        revised[0].message_revision_id,
+        initial[0].message_revision_id
+    );
+    let environment = AdmissionEnvironment {
+        runner: scope.runner,
+        bridge_available: false,
+    };
+    let first = store
+        .claim_next_job(environment.clone())
+        .await?
+        .context("Expected the initial native attempt")?;
+    store.mark_agent_running(first.run.id.clone()).await?;
+    store
+        .finish_agent_attempt(first.run.id.clone(), RunStatus::Failed, None)
+        .await?;
+    assert!(store.advance_conversation_pipeline_turns().await?);
+    assert_eq!(
+        store.conversation_pipeline_turns(chat.id.clone()).await?[0].state,
+        "failed"
+    );
+    store
+        .queue_job_recovery(
+            repo.project_id.clone(),
+            job.id.clone(),
+            first.run.id.clone(),
+            RecoveryAction::Retry,
+        )
+        .await?;
+    let resumed = store.conversation_pipeline_turns(chat.id.clone()).await?;
+    assert_eq!(resumed[0].state, "running");
+    assert_eq!(resumed[0].run_id.as_deref(), Some(pinned_run.as_str()));
+    let recovering = store
+        .inspect_workflow_execution(repo.project_id.clone(), pinned_run.clone())
+        .await?
+        .context("Expected the reopened direct run")?;
+    assert!(recovering.conversation_turn_active);
+    assert!(!recovering.control.iter().any(|node| node.node_id == "end"));
     let attempt = store
-        .claim_next_job(AdmissionEnvironment {
-            runner: scope.runner,
-            bridge_available: false,
-        })
+        .claim_next_job(environment)
         .await?
         .context("Expected the native job to be admitted")?;
+    assert_eq!(
+        attempt.previous_run_id.as_deref(),
+        Some(first.run.id.as_str())
+    );
     store.mark_agent_running(attempt.run.id.clone()).await?;
     store
         .finish_agent_attempt(
@@ -240,6 +293,11 @@ async fn direct_turn_pins_native_job_and_reuses_one_transcript_reply() -> Result
             Some("Native reply".into()),
         )
         .await?;
+    let finishing = store
+        .inspect_workflow_execution(repo.project_id.clone(), pinned_run.clone())
+        .await?
+        .context("Expected the completing direct run")?;
+    assert!(finishing.conversation_turn_active);
     assert!(store.advance_conversation_pipeline_turns().await?);
     let turns = store.conversation_pipeline_turns(chat.id.clone()).await?;
     assert_eq!(turns.len(), 1);
@@ -251,22 +309,29 @@ async fn direct_turn_pins_native_job_and_reuses_one_transcript_reply() -> Result
             .iter()
             .map(|message| message.text.as_str())
             .collect::<Vec<_>>(),
-        ["Native question", "Native reply"]
+        ["Revised native question", "Native reply"]
     );
     assert_eq!(
         turns[0].result_revision_id.as_deref(),
         Some(messages[1].revision_id.as_str())
     );
+    assert_eq!(
+        turns[0].message_revision_id.as_deref(),
+        Some(messages[0].revision_id.as_str())
+    );
     let inspection = store
         .inspect_workflow_execution(repo.project_id, pinned_run)
         .await?
         .context("Expected the direct execution graph")?;
-    assert!(inspection.control.iter().any(|node| node.node_id == "end"));
+    assert!(!inspection.conversation_turn_active);
+    assert!(inspection.control.iter().any(|node| node.node_id == "end"
+        && node.state == super::super::control::ControlStageState::Completed));
     let native = inspection
         .jobs
         .iter()
         .find(|entry| entry.job.id == job.id)
         .context("Expected the native job in the graph")?;
+    assert_eq!(native.attempts.len(), 2);
     let source = inspection
         .outputs
         .iter()
@@ -274,6 +339,10 @@ async fn direct_turn_pins_native_job_and_reuses_one_transcript_reply() -> Result
             output.artifact.node_instance_id == "start" && output.artifact.port == "inputs"
         })
         .context("Expected the Start input artifact")?;
+    assert!(
+        matches!(&source.artifact.value, super::super::ArtifactValue::JsonObject(value)
+        if value["messageRevisionId"] == messages[0].revision_id)
+    );
     assert_eq!(
         native
             .inputs
