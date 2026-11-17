@@ -15,9 +15,9 @@ use crate::{
 
 use super::*;
 
-mod github_fixture;
+pub(super) mod github_fixture;
 
-const DESTINATION: &str = "fixture-integration";
+pub(super) const DESTINATION: &str = "fixture-integration";
 const QUALITY_CHECK: &str = "fixture-regression";
 
 fn wire(source: (&str, &str), target: (&str, &str)) -> Wire {
@@ -800,7 +800,7 @@ async fn run_github_action(store: &Store, client: &github_fixture::LocalGithub) 
         .await
 }
 
-async fn advance_github_poll(
+pub(super) async fn advance_github_poll(
     store: &Store,
     run: &str,
     node: &str,

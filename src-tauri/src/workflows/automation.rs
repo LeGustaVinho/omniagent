@@ -138,6 +138,74 @@ impl Store {
 }
 
 impl PendingWorkflowAgent {
+    #[cfg(test)]
+    pub(crate) fn fixture_identity(&self) -> (&str, &str) {
+        (&self.run, &self.node)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn fixture_submission(
+        &self,
+        store: &Store,
+    ) -> Result<WorkflowAgentSubmission> {
+        let target = store
+            .workflow_operator_agent_target(
+                &self.project,
+                &self.run,
+                &self.node,
+                self.request.unit.as_deref(),
+                &self.request.inputs,
+            )
+            .await?;
+        let pinned = store
+            .pinned_workflow_node(self.project.clone(), self.run.clone(), self.node.clone())
+            .await?
+            .context("The fixture lost its published agent stage")?;
+        let NodeConfiguration::AgentRole {
+            model,
+            requirements,
+            ..
+        } = pinned.instance.configuration
+        else {
+            anyhow::bail!("The fixture stage is not a published agent role");
+        };
+        let role = if let Some(version) = requirements.bound_role {
+            let project = self.project.clone();
+            Some(
+                store
+                    .execute(move |db| {
+                        super::authoring::package::roles::load_role(db, &project, &version)?
+                            .context("The fixture lost its published conversation role")
+                    })
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let selection = model.or_else(|| role.as_ref().map(|role| role.model.clone()));
+        let scope = SessionScope {
+            provider: selection
+                .as_ref()
+                .map_or(crate::providers::Provider::Codex, |model| model.provider),
+            profile_id: selection.as_ref().map_or_else(
+                || "fixture-profile".into(),
+                |model| model.profile_id.clone(),
+            ),
+            account_binding: None,
+            checkout: crate::repository::checkout_root(store, target.checkout_id.clone()).await?,
+            executable: std::env::current_exe()?,
+            cli_version: "0.169.0".into(),
+            runner: "fixture-runner".into(),
+            permission_revision: DESKTOP_PERMISSION_REVISION.into(),
+            mode: target.mode,
+            model: selection
+                .map(|model| model.model_id)
+                .or_else(|| Some("fixture-model".into())),
+            effort: role.and_then(|role| role.effort),
+        };
+        Ok(self.submission(target, scope))
+    }
+
     pub(crate) async fn prepare(
         &self,
         store: &Store,
