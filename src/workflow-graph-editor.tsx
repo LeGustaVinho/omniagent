@@ -15,9 +15,9 @@ import { AgentRoleFields } from "@/workflow-stage-model";
 import type { StageGoalRoleRevision } from "@/workflow-stage-goal";
 import {
   changedPorts, configurationProblem, connectionProblem, defaultConfiguration, incompatibility,
-  initialNodePositions, isStartNode, outputPort, portType, wireKey,
+  initialNodePositions, isPresetEligible, isStartNode, outputPort, portType, wireKey,
   type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowGraph, type WorkflowGraphNode,
-  type WorkflowEndpoint, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPort, type WorkflowWire,
+  type WorkflowEndpoint, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPort, type WorkflowReuseSelection, type WorkflowWire,
 } from "@/workflow-graph-model";
 import "./workflow-graph-editor.css";
 
@@ -125,7 +125,8 @@ type CanvasMenu = { target: CanvasTarget; point: { x: number; y: number }; origi
 const historyLimit = 32;
 
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
-  allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode, historyScope }: {
+  allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode, historyScope,
+  onDerive, deriveDisabled }: {
   projectId: string;
   checkoutId?: string;
   state: WorkflowEditorState;
@@ -140,10 +141,13 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   goalRoleForNode?: (nodeId: string) => { version?: StageGoalRoleRevision; pending?: boolean } | undefined;
   subflowDefinitionForNode?: (nodeId: string) => WorkflowDefinition | undefined;
   historyScope?: string;
+  onDerive?: (selection: WorkflowReuseSelection) => void;
+  deriveDisabled?: boolean;
 }) {
   const { graph, layout } = state;
   const [theme, setTheme] = useState(readTheme);
   const [selected, select] = useState(graph.nodes[0]?.id ?? "");
+  const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
   const issuedIds = useRef(new Set(graph.nodes.map(({ id }) => id)));
   const [catalogOpen, showCatalog] = useState(false);
   const [catalogPosition, setCatalogPosition] = useState<{ x: number; y: number }>();
@@ -218,6 +222,15 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   }
 
   function changeNodes(changes: NodeChange<CanvasNode>[], removedWireIds: string[] = []) {
+    const selectionChanges = changes.filter((change) => change.type === "select" || change.type === "remove");
+    if (selectionChanges.length) setSelectedNodes((previous) => {
+      const next = new Set(previous);
+      for (const change of selectionChanges) {
+        if (change.type === "select" && change.selected) next.add(change.id);
+        else next.delete(change.id);
+      }
+      return [...next];
+    });
     const nextLayout = { ...layout };
     const nextDefinitions = { ...state.updateDefinitions };
     const removed = new Set<string>();
@@ -336,10 +349,19 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     if (target.kind === "node") {
       const clicked = graph.nodes.find(({ id }) => id === target.id);
       if (!clicked) return;
+      const subflowNodes = selectedNodes.includes(clicked.id)
+        ? graph.nodes.filter(({ id, kind }) => selectedNodes.includes(id) && !isStartNode(kind)).map(({ id }) => id)
+        : isStartNode(clicked.kind) ? [] : [clicked.id];
       return { label: clicked.id, groups: [[
         { label: "Inspect node", run: () => { select(clicked.id); setConnectionError(null); } },
         { label: "Copy node ID", run: () => copy(clicked.id) },
         { label: "Copy node configuration", run: () => copy(JSON.stringify(clicked.configuration, null, 2)) },
+      ], [
+        ...(onDerive && isPresetEligible(clicked) && !editablePresetFields?.[clicked.id] ? [{ label: "Save node as preset…", disabled: deriveDisabled,
+          run: () => onDerive({ type: "preset", nodeId: clicked.id }) }] : []),
+        ...(onDerive && subflowNodes.length ? [{ label: subflowNodes.length > 1
+          ? `Extract ${subflowNodes.length} selected nodes as subflow…` : "Extract node as subflow…", disabled: deriveDisabled,
+          run: () => onDerive({ type: "subflow", nodeIds: subflowNodes }) }] : []),
       ], disabled ? [] : [
         ...(layout[clicked.id] ? [{ label: "Reset node position", run: () => {
           const nextLayout = { ...layout };
@@ -366,7 +388,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
 
   const canvasNodes: CanvasNode[] = graph.nodes.map((item) => {
     const defined = definitions[item.id];
-    return { id: item.id, type: "workflow", position: previewPositions[item.id] ?? layout[item.id] ?? positions[item.id]!, selected: item.id === selected,
+    return { id: item.id, type: "workflow", position: previewPositions[item.id] ?? layout[item.id] ?? positions[item.id]!, selected: selectedNodes.includes(item.id),
       ariaLabel: `${defined?.title ?? "Node"} ${item.id}`, data: { definition: defined, readOnly: disabled,
         problem: !defined || Boolean(configurationProblem(item.configuration, defined)),
         portActions: { nodeId: item.id, activeOutput: pending?.from, activate: (side, name) => activatePort(item.id, side, name) },
@@ -425,6 +447,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       }}>
         <PipelineGraphCanvas<CanvasNode, Edge> interactive={!disabled} nodes={canvasNodes} edges={edges} nodeTypes={nodeTypes} colorMode={theme}
           fitView fitViewOptions={{ padding: 0.15, maxZoom: 1 }} minZoom={0.08} maxZoom={2}
+          selectionKeyCode="Shift" multiSelectionKeyCode={["Control", "Meta"]}
           nodesDraggable={!disabled} nodesConnectable={!disabled} edgesReconnectable={!disabled}
           deleteKeyCode={disabled ? null : ["Backspace", "Delete"]}
           onNodesChange={changeNodes}

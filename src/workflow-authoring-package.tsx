@@ -334,6 +334,7 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
     {save.error && <p role="alert">{String(save.error)}</p>}
     <WorkflowPackageGraphEditing projectId={projectId} checkoutId={checkoutId} draftId={draft.id} savedRevision={draft.revision}
       graphs={packageGraphs(text)} draftPresets={draftPresets} layouts={draft.layouts} canvasByMember={canvasByMember}
+      deriveDisabled={busy || dirty || revisionConflict} onDerived={update}
       changeCanvas={(key, canvas) => setCanvases((previous) => {
         const next = { ...previous };
         if (JSON.stringify(canvas.layout) === JSON.stringify(draft.layouts?.[key] ?? {})

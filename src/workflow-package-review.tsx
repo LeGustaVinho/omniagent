@@ -8,9 +8,10 @@ import { WorkflowStartValueField, initialWorkflowStartFields, initialWorkflowSta
   type WorkflowStartSchema } from "@/workflow-launch-fields";
 import { StructuredValueField } from "@/workflow-structured-fields";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
+import type { PackageDraft } from "@/workflow-authoring-package";
 import { graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions,
-  type WorkflowEndpoint, type WorkflowGraph, type WorkflowLayout, type WorkflowPortType } from "@/workflow-graph-model";
-import { PublishedSubflow, ReusableCatalog, reusableEditableFields, reusableNodeQuery,
+  type WorkflowEndpoint, type WorkflowGraph, type WorkflowLayout, type WorkflowPortType, type WorkflowReuseSelection } from "@/workflow-graph-model";
+import { PublishedSubflow, ReusableCatalog, reusableEditableFields, reusableNodeQuery, WorkflowReusableDerivationDialog,
   type ReusableBody, type ReusableDescription, type ReusableReference } from "@/workflow-reusable";
 
 type Version = { id: string; revision: string; destination: string; kind: string };
@@ -54,15 +55,18 @@ type GraphMember = {
 };
 
 export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, savedRevision, graphs, draftPresets = {}, disabled, edit,
-  layouts = {}, canvasByMember, changeCanvas }: {
+  layouts = {}, canvasByMember, changeCanvas, deriveDisabled, onDerived }: {
   projectId: string; checkoutId: string; draftId: string; savedRevision: string; graphs: GraphMember[]; disabled: boolean;
   draftPresets?: Record<string, ReusableBody>;
   layouts?: Record<string, WorkflowLayout>;
   canvasByMember: Record<string, WorkflowCanvasEdit>;
   changeCanvas: (key: string, canvas: WorkflowCanvasEdit) => void;
   edit: (key: string, graph: WorkflowGraph, references?: Record<string, ReusableReference>) => void;
+  deriveDisabled: boolean;
+  onDerived: (draft: PackageDraft) => void;
 }) {
   const [selection, select] = useState("");
+  const [derivation, setDerivation] = useState<WorkflowReuseSelection>();
   const graph = graphs.find(({ key }) => key === selection) ?? graphs[0];
   const show = Boolean(graph);
   const preview = usePackagePreview(projectId, draftId, savedRevision, show);
@@ -82,14 +86,19 @@ export function WorkflowPackageGraphEditing({ projectId, checkoutId, draftId, sa
         canvas={canvasByMember[graph.key] ?? { layout: layouts[graph.key] ?? {}, updateDefinitions: {} }}
         setCanvas={(canvas) => changeCanvas(graph.key, canvas)}
         pinned={pinned} catalog={registry.data} disabled={disabled} graphs={graphs} memberKey={graph.key} edit={(next, references) => edit(graph.key, next, references)}
+        onDerive={setDerivation} deriveDisabled={deriveDisabled}
         openDraftSubflow={(key) => {
           const child = graphs.find((member) => member.key === key && member.kind === "subflow");
           return child ? <Button type="button" variant="outline" onClick={() => select(child.key)}>Open draft subflow</Button> : null;
         }} />}
+      {derivation && <WorkflowReusableDerivationDialog projectId={projectId} graph={graph.graph}
+        source={{ type: "package_revision", draftId, revision: savedRevision, memberKey: graph.key }} selection={derivation}
+        disabled={deriveDisabled} onClose={() => setDerivation(undefined)} onSaved={onDerived} />}
   </section>;
 }
 
-function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPresets, pinned, catalog, disabled, edit, openDraftSubflow, canvas, setCanvas, graphs, memberKey }: {
+function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPresets, pinned, catalog, disabled, edit, openDraftSubflow,
+  canvas, setCanvas, graphs, memberKey, onDerive, deriveDisabled }: {
   projectId: string; checkoutId: string; graph: WorkflowGraph; pinned: WorkflowDefinitions; catalog: WorkflowDefinition[]; disabled: boolean;
   references: Record<string, ReusableReference>; draftPresets: Record<string, ReusableBody>;
   edit: (graph: WorkflowGraph, references?: Record<string, ReusableReference>) => void;
@@ -98,6 +107,8 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
   setCanvas: (canvas: WorkflowCanvasEdit) => void;
   graphs: GraphMember[];
   memberKey: string;
+  onDerive: (selection: WorkflowReuseSelection) => void;
+  deriveDisabled: boolean;
 }) {
   const client = useQueryClient();
   const published = graph.nodes.flatMap(({ id }) => {
@@ -213,7 +224,7 @@ function PackageMemberGraph({ projectId, checkoutId, graph, references, draftPre
     <ReusableCatalog projectId={projectId} disabled={disabled} onAdd={add} />
     {error && <p role="alert">{String(error)}</p>}
     <WorkflowGraphEditor projectId={projectId} checkoutId={checkoutId} state={state} setState={update} definitions={definitions} catalog={catalog}
-      problems={graphProblems(presented, definitions)} disabled={disabled}
+      problems={graphProblems(presented, definitions)} disabled={disabled} onDerive={onDerive} deriveDisabled={deriveDisabled}
       allowDefinitionUpdates={(id) => !references[id] || graph.nodes.find((node) => node.id === id)?.configuration.kind === "agent_role"}
       editablePresetFields={Object.fromEntries([...presets.entries()].map(([id, preset]) => [id, preset.fields]))}
       goalRoleForNode={(id) => {

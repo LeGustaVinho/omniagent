@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { exampleCheckout } from "@/workbench-contract";
 import { WorkflowPackageEditor } from "@/workflow-authoring-package";
@@ -12,9 +12,19 @@ import { WorkflowReusableDerivation } from "@/workflow-reusable";
 import type { WorkflowDefinition, WorkflowGraph, WorkflowWire } from "@/workflow-graph-model";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-vi.mock("@xyflow/react", async (original) => ({
-  ...await original<typeof import("@xyflow/react")>(), ReactFlow: () => null, Background: () => null, Controls: () => null,
-}));
+vi.mock("@xyflow/react", async (original) => {
+  type CanvasNode = { id: string; selected: boolean };
+  return {
+    ...await original<typeof import("@xyflow/react")>(), Background: () => null, Controls: () => null,
+    ReactFlow: ({ nodes, onNodesChange, onNodeContextMenu }: {
+      nodes: CanvasNode[];
+      onNodesChange?: (changes: { type: "select"; id: string; selected: boolean }[]) => void;
+      onNodeContextMenu?: (event: MouseEvent, node: CanvasNode) => void;
+    }) => <div>{nodes.map((node) => <button key={node.id} type="button" aria-label={`Select graph node ${node.id}`}
+      aria-pressed={node.selected} onClick={() => onNodesChange?.([{ type: "select", id: node.id, selected: !node.selected }])}
+      onContextMenu={(event) => onNodeContextMenu?.(event, node)} />)}</div>,
+  };
+});
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 const projectId = exampleCheckout.projectId;
@@ -80,6 +90,51 @@ it("derives a preset and a typed subflow selection from the immutable package re
   expect(invoke).toHaveBeenCalledWith("derive_workflow_reusable", { projectId, source, request: {
     name: "Reusable verification", key: "reusable-verification", destination: "library",
     selection: { type: "subflow", nodeIds: ["verify"], inputs: { ready: [edge] }, outputs: { verified: output } },
+  } });
+});
+
+it("opens the saved preset and typed subflow review from the clicked canvas node and selection", async () => {
+  const connected = { ...graph, nodes: [...graph.nodes, { ...graph.nodes[1]!, id: "verify-again" }] };
+  const sourceDraft = { ...draft, package: { ...draft.package, members: [{ ...draft.package.members[0]!,
+    body: { kind: "pipeline", graph: connected } }] } };
+  const output = { node: "verify-again", port: "checks" };
+  const source = { type: "package_revision", draftId: draft.id, revision: draft.revision, memberKey: "pipeline" };
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "inspect_workflow_package") return sourceDraft;
+    if (command === "conversation_models") return [];
+    if (command === "workflow_graph_registry") return [start, verify];
+    if (command === "preview_workflow_package_revision") return { revisions: [], members: [{ key: "pipeline", graphDefinitions: {} }] };
+    if (command === "describe_workflow_reusable_boundary") return {
+      inputs: [{ wire: edge, value: control }], outputs: [{ endpoint: output, value: checks, consumedOutsideSelection: true }],
+    };
+    if (command === "derive_workflow_reusable") return { ...sourceDraft, revision: "derived" };
+    throw Error(command);
+  });
+  mount(<WorkflowPackageEditor draftId={draft.id} checkout={exampleCheckout} simulation={null}
+    startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} openWorkspace={vi.fn()} />);
+  const user = userEvent.setup();
+  const first = await screen.findByRole("button", { name: "Select graph node verify" });
+  const second = screen.getByRole("button", { name: "Select graph node verify-again" });
+  await user.click(first);
+  fireEvent.contextMenu(second);
+  await user.click(await screen.findByRole("menuitem", { name: "Save node as preset…" }));
+  const preset = within(await screen.findByRole("dialog", { name: "Save node as preset" }));
+  expect(preset.getByRole<HTMLSelectElement>("combobox", { name: "Configured node" }).value).toBe("verify-again");
+  await user.click(preset.getByRole("button", { name: "Close" }));
+
+  await user.click(second);
+  fireEvent.contextMenu(first);
+  await user.click(await screen.findByRole("menuitem", { name: "Extract 2 selected nodes as subflow…" }));
+  const subflow = within(await screen.findByRole("dialog", { name: "Extract subflow" }));
+  expect(subflow.getByRole<HTMLInputElement>("checkbox", { name: "verify" }).checked).toBe(true);
+  expect(subflow.getByRole<HTMLInputElement>("checkbox", { name: "verify-again" }).checked).toBe(true);
+  await subflow.findByLabelText("Public input name for start.start");
+  await user.type(subflow.getByLabelText("Name", { exact: true }), "Verification");
+  await user.click(subflow.getByRole("button", { name: "Save as subflow" }));
+  expect(invoke).toHaveBeenCalledWith("describe_workflow_reusable_boundary", { projectId, source, nodeIds: ["verify", "verify-again"] });
+  expect(invoke).toHaveBeenCalledWith("derive_workflow_reusable", { projectId, source, request: {
+    name: "Verification", key: "verification", destination: "project",
+    selection: { type: "subflow", nodeIds: ["verify", "verify-again"], inputs: { start: [edge] }, outputs: { checks: output } },
   } });
 });
 
