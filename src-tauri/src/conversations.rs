@@ -2247,6 +2247,7 @@ mod tests {
 
     mod attachment_composer_acceptance;
     mod comparison;
+    mod stage_plugin_roles;
     mod stage_requirements_workflow;
 
     use super::*;
