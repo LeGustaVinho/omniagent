@@ -12,8 +12,14 @@ const imageTypes = new Set(["image/avif", "image/bmp", "image/gif", "image/jpeg"
 const audioTypes = new Set(["audio/aac", "audio/flac", "audio/mp4", "audio/mpeg", "audio/ogg", "audio/opus", "audio/wav", "audio/x-wav"]);
 const videoTypes = new Set(["video/mp4", "video/ogg", "video/quicktime", "video/webm", "video/x-m4v"]);
 
+export const isNoteMediaPath = (path: string) => fileExtension.test(path);
+
+export function isNoteMediaType(mimeType: string) {
+  return mimeType === "application/pdf" || imageTypes.has(mimeType) || audioTypes.has(mimeType) || videoTypes.has(mimeType);
+}
+
 export function noteAttachmentCandidates(target: string, from: string, wiki: boolean) {
-  if (!fileExtension.test(target) || target.includes(":") || /^[\\/]{2}/.test(target)) return [];
+  if (!isNoteMediaPath(target) || target.includes(":") || /^[\\/]{2}/.test(target)) return [];
   const path = target.replaceAll("\\", "/");
   const parent = from.slice(0, from.lastIndexOf("/") + 1);
   const reference = path.startsWith("/") ? path.slice(1) : parent + path;

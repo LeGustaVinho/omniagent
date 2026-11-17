@@ -11,6 +11,7 @@ import {
 } from "@/ide-file-workspace";
 import { folderSearchTarget, readNoteSearchTarget } from "@/ide-file-search";
 import { readNoteWindowTarget } from "@/file-editor-popout";
+import { useCheckoutFilePreview } from "@/checkout-file-preview";
 import { containingFolder, fileContextActions, fileHistoryTarget, readNoteRenameTarget, readOpenNotesTarget, terminalFolderTarget, useCheckoutTextReader, workingDiffTarget } from "@/file-context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
@@ -413,8 +414,10 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   const readOpenNote = useCallback((path: string) => dock.api?.panels.some((panel) => panel.params?.path === path)
     ? getNote(path)?.content : undefined, [dock.api, getNote]);
   useCheckoutTextReader(checkout.checkoutId, !simulated, readOpenNote);
-  const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem,
-    currentText: (path) => simulated ? examples[path]?.content : readOpenNote(path),
+  const currentText = (path: string) => simulated ? examples[path]?.content : readOpenNote(path);
+  const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem, currentText });
+  const filePreview = useCheckoutFilePreview({ checkoutId: checkout.checkoutId, simulated, currentText,
+    open: (path) => open(path, undefined, undefined, "source"),
   });
   const revealNote = (path: string) => { setSidebar(true); setDisplay("tree"); setReveal({ path }); };
   const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated, bufferAt: (path) => notes[path],
@@ -773,7 +776,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
               ...conversationActions.actions(item, selection), ...fileOperations.actions(item, selection),
             ] : [
               ...treeActions.actions(item),
-              ...(item.kind === "file" ? noteMenu(item.path) : []),
+              ...(item.kind === "file" ? [[filePreview.action(item.path)], ...noteMenu(item.path)] : []),
               ...(item.kind !== "file" ? [[{ label: "Find in folder", run: () => openWorkspace("ide", folderSearchTarget(item.path)) }]] : []),
               ...(!simulated ? [[{ label: "Open terminal here", run: () => openWorkspace("ide", terminalFolderTarget(item.kind === "file" ? containingFolder(item.path) : item.path)) }]] : []),
               ...menu.location(item),
@@ -991,6 +994,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
         </li>)}</ul>
       </FileDialog>}
       {treeActions.dialog}
+      {filePreview.dialog}
       {conversationActions.dialog}
       {dialog?.kind === "extract" && <ExtractNoteDialog ownerPanel={dialog.ownerPanel} path={dialog.path} selection={dialog.selection} folders={treeActions.folders}
         onClose={closeDialog} onExtract={(options) => repository.extractSelection(dialog.path, dialog.selection, options)}

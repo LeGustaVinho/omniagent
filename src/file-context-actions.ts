@@ -130,6 +130,14 @@ function otherEditorText(checkoutId: string, path: string) {
 
 type CheckoutFileText = { status: "text"; text: string } | { status: "unsupported_encoding" };
 
+export function checkoutFileLiveText(checkoutId: string, path: string, simulated: boolean, currentText?: CurrentText) {
+  return currentText?.(path) ?? (simulated ? undefined : otherEditorText(checkoutId, path));
+}
+
+export function readCheckoutFileText(checkoutId: string, path: string) {
+  return invoke<CheckoutFileText>("read_checkout_file_text", { checkoutId, path });
+}
+
 export function fileContextActions({ checkout, simulated, status, report, currentText }: {
   checkout: ProjectCheckout;
   simulated: boolean;
@@ -159,7 +167,7 @@ export function fileContextActions({ checkout, simulated, status, report, curren
   };
   function copyTextContents(path: string) {
     const request = ++textCaptureRequest;
-    const text = currentText?.(path) ?? (simulated ? undefined : otherEditorText(checkout.checkoutId, path));
+    const text = checkoutFileLiveText(checkout.checkoutId, path, simulated, currentText);
     const confirmation = "Copied text contents of " + fileName(path);
     if (text !== undefined) {
       copy(text, confirmation);
@@ -170,7 +178,7 @@ export function fileContextActions({ checkout, simulated, status, report, curren
       return;
     }
     report("");
-    void invoke<CheckoutFileText>("read_checkout_file_text", { checkoutId: checkout.checkoutId, path }).then((file) => {
+    void readCheckoutFileText(checkout.checkoutId, path).then((file) => {
       if (request !== textCaptureRequest) return;
       if (file.status === "text") copy(file.text, confirmation);
       else report(path + " contains binary data or uses an unsupported text encoding.");
