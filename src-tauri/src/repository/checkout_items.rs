@@ -25,6 +25,8 @@ use super::{
     with_managed_worktree_writer,
 };
 
+pub mod mutations;
+
 fn item_path(root: &Path, relative: &str) -> Result<PathBuf> {
     if relative.is_empty() {
         return Ok(root.into());
@@ -164,27 +166,42 @@ pub async fn create_checkout_item(
     name: String,
     directory: bool,
 ) -> Result<String, String> {
-    let create = async {
-        let root = validated_root(&store, checkout_id.clone()).await?;
-        let managed = store
-            .execute({
-                let checkout_id = checkout_id.clone();
-                move |db| {
-                    Ok(db.query_row(
-                "SELECT project_id, task_id FROM managed_task_worktrees WHERE checkout_id = ?1",
-                [checkout_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            ).optional()?)
-                }
-            })
-            .await?;
-        let write = move || create_item(&root, &relative_directory, &name, directory);
-        if let Some((project, task)) = managed {
-            with_managed_worktree_writer(&store, project, checkout_id, task, move |_| write()).await
-        } else {
-            tokio::task::spawn_blocking(write).await?
-        }
-    };
-    create.await.map_err(|error| format!("{error:#}"))
+    write_in_checkout(&store, checkout_id, move |root| {
+        create_item(root, &relative_directory, &name, directory)
+    })
+    .await
+    .map_err(|error| format!("{error:#}"))
+}
+
+async fn write_in_checkout<T: Send + 'static>(
+    store: &Store,
+    checkout_id: String,
+    write: impl FnOnce(&Path) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let root = validated_root(store, checkout_id.clone()).await?;
+    let managed = store
+        .execute({
+            let checkout_id = checkout_id.clone();
+            move |db| {
+                Ok(db.query_row(
+            "SELECT project_id, task_id FROM managed_task_worktrees WHERE checkout_id = ?1",
+            [checkout_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional()?)
+            }
+        })
+        .await?;
+    if let Some((project, task)) = managed {
+        with_managed_worktree_writer(store, project, checkout_id, task, move |worktree| {
+            ensure!(
+                worktree.root == root,
+                "The managed worktree moved. Reopen it before changing files."
+            );
+            write(&root)
+        })
+        .await
+    } else {
+        tokio::task::spawn_blocking(move || write(&root)).await?
+    }
 }
 
 fn create_item(
@@ -195,6 +212,7 @@ fn create_item(
 ) -> Result<String> {
     validate_name(name)?;
     let parent = checkout_directory(root, relative_directory)?;
+    let _parents = super::documents::lock_directories(&parent)?;
     let path = parent.join(name);
     let relative = relative_name(root, &path)?;
     if directory {

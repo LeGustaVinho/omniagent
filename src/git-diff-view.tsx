@@ -154,8 +154,8 @@ function UnifiedPatch({ file }: { file: GitTextComparison }) {
   </div>;
 }
 
-function MonacoComparison({ file, layout, ready }: {
-  file: GitTextComparison; layout: DiffLayout; ready: (instance: editor.IStandaloneDiffEditor | null) => void;
+export function MonacoComparison({ file, layout, ready }: {
+  file: GitTextComparison; layout: DiffLayout; ready?: (instance: editor.IStandaloneDiffEditor | null) => void;
 }) {
   const anchor = useRef<HTMLDivElement>(null);
   const instance = useRef<editor.IStandaloneDiffEditor | null>(null);
@@ -205,12 +205,12 @@ function MonacoComparison({ file, layout, ready }: {
       theme();
       themeObserver = new MutationObserver(theme);
       themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-app-theme", "data-app-motion", "style", "class"] });
-      ready(opened);
+      ready?.(opened);
     }).catch(() => { if (active) setError(true); });
 
     return () => {
       active = false;
-      ready(null);
+      ready?.(null);
       themeObserver?.disconnect();
       instance.current?.dispose();
       instance.current = null;

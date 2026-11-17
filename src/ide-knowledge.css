@@ -107,6 +107,8 @@
 .file-tree summary::-webkit-details-marker { display: none; }
 .file-tree :is(summary, .file-tree-row):hover { background: var(--muted); }
 .file-tree-row[aria-current=page] { background: var(--muted); box-shadow: inset 2px 0 var(--primary); }
+.file-tree-row[aria-pressed=true] { background: color-mix(in srgb, var(--primary) 17%, var(--background)); }
+.file-selection-count { padding: .25rem .45rem; color: var(--muted-foreground); font-size: .75rem; }
 .file-tree-row svg, .file-tree summary svg { flex-shrink: 0; color: var(--file-muted); }
 .file-tree-row span { overflow: hidden; text-overflow: ellipsis; }
 .file-field { display: flex; align-items: center; gap: 7px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; min-width: 0; }
@@ -155,6 +157,8 @@
 .file-status[role=alert] { color: var(--negative, #e98989); }
 
 .file-dialog-overlay { position: fixed; inset: 0; background: rgb(0 0 0 / .6); z-index: 70; }
+.file-dialog.file-comparison-dialog { width: min(1080px, 92vw); }
+.file-comparison-body { display: flex; flex-direction: column; gap: .6rem; height: min(55vh, 520px); min-height: 0; }
 .file-dialog {
   position: fixed;
   top: 50%;

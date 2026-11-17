@@ -25,6 +25,7 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const refreshTree = () => Promise.all([refresh(), folders.refetch({ throwOnError: true })]);
 
   function actions(item: FileTreeTarget): MenuGroups {
     if (simulated || item.kind === "file") return [];
@@ -35,7 +36,7 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
       setRequest({ path: item.path, kind });
     } })), item.kind === "root" ? [{ label: "Refresh tree", run: () => {
       report("");
-      void Promise.all([refresh(), folders.refetch({ throwOnError: true })]).catch((failure: unknown) => report(String(failure)));
+      void refreshTree().catch((failure: unknown) => report(String(failure)));
     } }] : []];
   }
 
@@ -50,7 +51,7 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
         checkoutId, relativeDirectory: path, name: filename, directory: kind === "folder",
       });
       setRequest(undefined);
-      await Promise.all([refresh(), folders.refetch({ throwOnError: true })]).catch((failure: unknown) => report(String(failure)));
+      await refreshTree().catch((failure: unknown) => report(String(failure)));
       onCreated(created, kind);
     } catch (failure) {
       setError(String(failure));
@@ -72,5 +73,5 @@ export function useCheckoutTreeActions({ checkoutId, simulated, knowledge, refre
     </form>
   </FileDialog>;
 
-  return { folders: folders.data, actions, dialog };
+  return { folders: folders.data, refreshTree, actions, dialog };
 }

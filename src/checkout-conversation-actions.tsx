@@ -11,7 +11,7 @@ const newConversation = "new";
 
 export function useCheckoutConversationActions(checkoutId: string, simulated: boolean, openConversation: (id: string) => void) {
   const client = useQueryClient();
-  const [target, setTarget] = useState<FileTreeTarget>();
+  const [targets, setTargets] = useState<readonly FileTreeTarget[]>();
   const [destination, setDestination] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
@@ -21,43 +21,46 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
   const conversations = useQuery({
     queryKey: conversationKey,
     queryFn: () => invoke<Conversation[]>("list_conversations", { checkoutId }),
-    enabled: !simulated && !!target,
+    enabled: !simulated && !!targets,
     retry: false,
   });
+  const folders = (targets ?? []).filter(({ kind }) => kind === "folder").map(({ path }) => path);
   const files = useQuery({
     queryKey: ["checkout-context-file-list", checkoutId],
     queryFn: () => invoke<string[]>("list_repository_source_files", { checkoutId }),
-    enabled: !simulated && target?.kind === "folder",
+    enabled: !simulated && folders.length > 0,
     retry: false,
   });
-  const matches = target?.kind === "folder"
-    ? (files.data ?? []).filter((path) => path.startsWith(`${target.path}/`) && path.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))
+  const matches = folders.length > 0
+    ? (files.data ?? []).filter((path) => folders.some((folder) => path.startsWith(`${folder}/`)) && path.toLocaleLowerCase().includes(filter.toLocaleLowerCase()))
     : [];
 
-  function start(item: FileTreeTarget, create: boolean) {
-    setSelected(item.kind === "file" ? [item.path] : []);
+  function start(items: readonly FileTreeTarget[], create: boolean) {
+    setSelected(items.filter(({ kind }) => kind === "file").map(({ path }) => path));
     setDestination(create ? newConversation : "");
     setFilter("");
     setError("");
-    setTarget(item);
+    setTargets(items);
   }
 
-  function actions(item: FileTreeTarget): MenuGroups {
+  function actions(item: FileTreeTarget, selection?: readonly FileTreeTarget[]): MenuGroups {
     if (simulated || item.kind === "root") return [];
+    const items = selection ?? [item];
     return [[
-      { label: item.kind === "file" ? "Add to conversation…" : "Add files to conversation…", run: () => start(item, false) },
-      { label: "New conversation with context…", run: () => start(item, true) },
+      { label: !selection && item.kind === "file" ? "Add to conversation…" : "Add files to conversation…", run: () => start(items, false) },
+      { label: "New conversation with context…", run: () => start(items, true) },
     ]];
   }
 
   async function attach() {
-    if (busy || !target || !selected.length || !destination) return;
+    if (busy || !targets || !selected.length || !destination) return;
     setBusy(true);
     setError("");
     try {
       let conversationId = destination;
       if (destination === newConversation) {
-        const created = await invoke<Conversation>("create_conversation", { checkoutId, title: fileName(target.path) });
+        const title = targets.length === 1 ? fileName(targets[0]!.path) : "Selected checkout files";
+        const created = await invoke<Conversation>("create_conversation", { checkoutId, title });
         conversationId = created.id;
         setDestination(created.id);
         client.setQueryData<Conversation[]>(conversationKey, (current) => [created, ...(current ?? [])]);
@@ -65,7 +68,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
       }
       await invoke("add_checkout_files_to_conversation", { checkoutId, conversationId, paths: selected });
       void client.invalidateQueries({ queryKey: ["conversation", conversationId, "attachments"] });
-      setTarget(undefined);
+      setTargets(undefined);
       openConversation(conversationId);
     } catch (failure) {
       setError(String(failure));
@@ -74,7 +77,8 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
     }
   }
 
-  const dialog = target && <FileDialog title="Add checkout context" description={target.path} onClose={() => { if (!busy) setTarget(undefined); }}>
+  const dialog = targets && <FileDialog title="Add checkout context" description={targets.length === 1 ? targets[0]!.path : `${targets.length} selected items`}
+    onClose={() => { if (!busy) setTargets(undefined); }}>
     <form className="grid gap-2" onSubmit={(event) => { event.preventDefault(); void attach(); }}>
       <label>Conversation <select className="delivery-filter" value={destination} disabled={busy}
         onChange={(event) => setDestination(event.currentTarget.value)}>
@@ -84,7 +88,7 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
       </select></label>
       {conversations.isFetching && <p role="status">Loading conversations…</p>}
       {conversations.error && <p role="alert">{String(conversations.error)}</p>}
-      {target.kind === "folder" && <>
+      {folders.length > 0 && <>
         <label className="file-field"><input type="search" aria-label="Filter files" value={filter}
           onChange={(event) => setFilter(event.currentTarget.value)} /></label>
         {files.isPending && <p role="status">Loading files…</p>}
@@ -102,9 +106,13 @@ export function useCheckoutConversationActions(checkoutId: string, simulated: bo
         {matches.length > 100 && <p>Showing 100 of {matches.length} files. Filter to narrow the list.</p>}
         <p role="status">{selected.length} selected</p>
       </>}
+      {targets.length > 1 && selected.length > 0 && <details>
+        <summary>Selected files</summary>
+        <ul className="max-h-36 overflow-auto">{selected.map((path) => <li key={path}>{path}</li>)}</ul>
+      </details>}
       {error && <p className="file-help" role="alert">{error}</p>}
       <div className="file-dialog-footer">
-        <button type="button" className="fw-btn" disabled={busy} onClick={() => setTarget(undefined)}>Cancel</button>
+        <button type="button" className="fw-btn" disabled={busy} onClick={() => setTargets(undefined)}>Cancel</button>
         <button type="submit" className="fw-btn fw-primary" disabled={busy || !destination || !selected.length}>
           {busy ? "Adding…" : "Add to draft"}
         </button>

@@ -37,6 +37,7 @@ toml = "1"
 ts-rs = "12"
 uuid = { version = "1", features = ["v4"] }
 windows-version = "0.1"
+windows = { version = "0.62.2", features = ["Win32_System_Com", "Win32_UI_Shell"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",

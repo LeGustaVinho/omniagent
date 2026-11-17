@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render as renderElement, screen, waitFor, with
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import IdeWorkspace from "@/ide-workspace";
+import type { ItemEdit } from "@/checkout-item-operations";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -44,10 +45,10 @@ const propsFor = (checkoutId: string): WorkspaceProps => ({
   checkout: { checkoutId, projectId: "project", repositoryRoot: "C:\\repo", checkoutRoot: `C:\\${checkoutId}` },
   simulation: null, openActivity: vi.fn(), openChanges: vi.fn(), openWorkspace: vi.fn(), startSimulation: vi.fn(),
 });
-const documentAt = (checkoutId: string, rev: string, text: string) => ({
+const documentAt = (checkoutId: string, rev: string, text: string, path = file) => ({
   status: "document",
   document: {
-    revision: { id: rev, checkoutId, relativePath: file, sha256: rev, baseCommit: null },
+    revision: { id: rev, checkoutId, relativePath: path, sha256: rev, baseCommit: null },
     markdown: text,
     fileIdentity: rev,
   },
@@ -76,12 +77,13 @@ function fixture() {
       checkoutId: string; path?: string; layout?: string; revisionId?: string; baseRevision?: string;
       expectedRevision?: string; expectedDraftRevision?: string | null; markdown?: string; channel?: { onmessage: Notice };
       relativeDirectory?: string; name?: string; directory?: boolean;
+      operation?: "copy" | "move" | "recycle"; edits?: ItemEdit[];
     };
     const id = args.checkoutId;
     switch (command) {
       case "workbench_layout": return layouts.get(id) ?? null;
       case "save_workbench_layout": layouts.set(id, args.layout!); return;
-      case "list_repository_source_files": return [file, "docs/Guide.md"];
+      case "list_repository_source_files": return [disk.get(id)?.document.revision.relativePath, "docs/Guide.md"].filter(Boolean);
       case "list_checkout_folders": return folders.get(id) ?? [];
       case "create_checkout_item": {
         const path = [args.relativeDirectory, args.name].filter(Boolean).join("/");
@@ -90,6 +92,17 @@ function fixture() {
         return path;
       }
       case "open_checkout_item_in_shell": return;
+      case "mutate_checkout_items": {
+        if (args.operation === "move") {
+          for (const { source, destination } of args.edits ?? []) {
+            const current = disk.get(id)?.document;
+            if (current?.revision.relativePath === source && destination) {
+              disk.set(id, documentAt(id, current.revision.id, current.markdown, destination));
+            }
+          }
+        }
+        return { completed: args.edits ?? [], error: null };
+      }
       case "list_conversations": return [{ id: "review-chat", checkoutId: id, title: "Code review", contextId: "ctx" }];
       case "add_checkout_files_to_conversation": return { revision: "attached", files: [] };
       case "list_repository_source_drafts": return drafts.has(id) ? [file] : [];
@@ -146,6 +159,65 @@ it("uses the clicked row for the Explorer, even with another source file active"
   });
   expect(views()).toHaveLength(1);
   expect(screen.getByRole("button", { name: "review.rs" }).getAttribute("aria-current")).toBe("page");
+});
+
+it("renames the underlying file and keeps split editor tabs on the renamed path", async () => {
+  const service = fixture();
+  render(<IdeWorkspace {...propsFor(main)} />);
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  const row = screen.getByRole("button", { name: "review.rs" });
+  fireEvent.click(row);
+  await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.click(screen.getByRole("button", { name: "Split editor" }));
+  expect(views()).toHaveLength(2);
+  const tab = closeButtons()[0]!.closest(".file-tab-label")!;
+  fireEvent.contextMenu(tab);
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Pin tab" }));
+  expect(await screen.findByLabelText("Pinned")).toBeTruthy();
+
+  fireEvent.contextMenu(row);
+  fireEvent.click(await screen.findByRole("menuitem", { name: "Rename…" }));
+  const dialog = await screen.findByRole("dialog", { name: "Rename" });
+  fireEvent.change(within(dialog).getByRole("textbox", { name: "New name" }), { target: { value: "renamed.rs" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Rename" }));
+
+  const editors = await screen.findAllByRole<HTMLTextAreaElement>("textbox", { name: "Source editor for src/renamed.rs" });
+  expect(editors.map(({ value }) => value)).toEqual(["fn original() {}", "fn original() {}"]);
+  expect(screen.queryByRole("textbox", { name: editorLabel })).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("mutate_checkout_items", {
+    checkoutId: main, operation: "move", edits: [{ source: file, directory: false, destination: "src/renamed.rs" }],
+  });
+  await waitFor(() => {
+    expect(service.layouts.get(main)).toContain('"path":"src/renamed.rs"');
+    expect(service.layouts.get(main)).toContain('"pinned":true');
+  });
+});
+
+it("uses the selected rows for bulk recycling after confirmation", async () => {
+  fixture();
+  render(<IdeWorkspace {...propsFor(alternate)} />);
+  fireEvent.click(await screen.findByRole("button", { name: "src" }));
+  fireEvent.click(screen.getByRole("button", { name: "docs" }));
+  const source = screen.getByRole("button", { name: "review.rs" });
+  const note = screen.getByRole("button", { name: "Guide.md" });
+  fireEvent.click(source);
+  await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.click(note, { ctrlKey: true });
+  expect(source.getAttribute("aria-pressed")).toBe("true");
+  expect(note.getAttribute("aria-pressed")).toBe("true");
+  fireEvent.contextMenu(note);
+  const menu = await screen.findByRole("menu", { name: "2 selected items" });
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Move to Recycle Bin…" }));
+  const dialog = await screen.findByRole("dialog", { name: "Move to Recycle Bin" });
+  expect(invoke).not.toHaveBeenCalledWith("mutate_checkout_items", expect.anything());
+  fireEvent.click(within(dialog).getByRole("button", { name: "Move to Recycle Bin" }));
+  await screen.findByText("Recycled 2 items");
+  expect(invoke).toHaveBeenCalledWith("mutate_checkout_items", {
+    checkoutId: alternate, operation: "recycle", edits: [
+      { source: "docs/Guide.md", directory: false, destination: null },
+      { source: file, directory: false, destination: null },
+    ],
+  });
 });
 
 it("opens a folder terminal from the keyboard menu and keeps the root session mounted", async () => {

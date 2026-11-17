@@ -5,6 +5,9 @@ import { fileName } from "@/ide-knowledge-data";
 import type { FileTreeTarget } from "@/ide-file-workspace";
 
 const terminalPrefix = "omni-terminal-folder:";
+const noteRenamePrefix = "omni-rename-note:";
+const openNotesPrefix = "omni-open-notes:";
+let noteNavigationRequest = 0;
 const workingDiffPrefix = "omni-working-diff:";
 
 export function workingDiffTarget(path: string) {
@@ -13,6 +16,28 @@ export function workingDiffTarget(path: string) {
 
 export function readWorkingDiffTarget(target?: string) {
   if (target?.startsWith(workingDiffPrefix)) return target.slice(workingDiffPrefix.length);
+}
+
+export function noteRenameTarget(path: string) {
+  return noteRenamePrefix + encodeURIComponent(path) + "#" + ++noteNavigationRequest;
+}
+
+export function readNoteRenameTarget(target?: string) {
+  if (!target?.startsWith(noteRenamePrefix)) return;
+  try { return decodeURIComponent(target.slice(noteRenamePrefix.length).split("#", 1)[0]!); }
+  catch { return undefined; }
+}
+
+export function openNotesTarget(paths: readonly string[]) {
+  return openNotesPrefix + JSON.stringify([++noteNavigationRequest, paths]);
+}
+
+export function readOpenNotesTarget(target?: string): string[] | undefined {
+  if (!target?.startsWith(openNotesPrefix)) return;
+  try {
+    const payload: unknown = JSON.parse(target.slice(openNotesPrefix.length));
+    if (Array.isArray(payload) && Array.isArray(payload[1])) return payload[1].filter((path): path is string => typeof path === "string" && /\.(?:md|markdown)$/i.test(path));
+  } catch { return undefined; }
 }
 
 export function terminalFolderTarget(path: string) {

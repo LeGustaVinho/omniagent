@@ -4,7 +4,7 @@ import {
   type IDockviewPanelHeaderProps, type IDockviewPanelProps, type SerializedDockview,
 } from "dockview-react";
 import { FileCode2, FileText, Folder, FolderOpen, FolderTree, PanelLeftClose, Pin, X } from "lucide-react";
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { Dialog } from "radix-ui";
 import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { fileName } from "@/ide-knowledge-data";
@@ -17,6 +17,7 @@ export type FileView = "editor" | "reading";
 interface FilePanelParams {
   path: string;
   view: FileView;
+  pinned?: boolean;
 }
 
 export type FilePanelApi = IDockviewPanelProps["api"];
@@ -38,24 +39,20 @@ function FileDockPanel({ params }: IDockviewPanelProps<FilePanelParams>) {
 function FileDockTab({ params, api }: IDockviewPanelHeaderProps<FilePanelParams>) {
   const context = useContext(FileDockContext);
   const title = fileName(params.path) + (params.view === "reading" ? " · Reading" : "");
-  const [pinned, setPinned] = useState(api.isPinned);
-  useEffect(() => {
-    const change = api.onDidChangePinned(({ isPinned }) => setPinned(isPinned));
-    return () => change.dispose();
-  }, [api]);
+  const pinned = params.pinned ?? false;
   const cleanTabs = api.group.panels.filter((panel) => {
     const item = panel.params as FilePanelParams | undefined;
-    return panel.id !== api.id && !panel.api.isPinned && item && !context?.dirty(item.path);
+    return panel.id !== api.id && item && !item.pinned && !context?.dirty(item.path);
   });
   return (
     <ContextActions label={title} className="file-tab-label" title={params.path} groups={[
       ...(context?.tabActions(params.path, params.view, api) ?? []),
       [
-        { label: pinned ? "Unpin tab" : "Pin tab", run: () => api.setPinned(!api.isPinned) },
+        { label: pinned ? "Unpin tab" : "Pin tab", run: () => api.updateParameters({ ...params, pinned: !pinned }) },
         { label: "Close other saved tabs in group", disabled: !cleanTabs.length, run: () => {
           for (const panel of cleanTabs) {
             const item = panel.params as FilePanelParams;
-            if (!panel.api.isPinned && !context?.dirty(item.path)) context?.requestClose(item.path, panel.api);
+            if (!item.pinned && !context?.dirty(item.path)) context?.requestClose(item.path, panel.api);
           }
         } },
       ],
@@ -90,19 +87,23 @@ export function FileDock({ context, onReady }: { context: FileDockContextValue; 
       <DockviewReact className="file-dock" theme={light ? themeLight : themeDark}
         components={filePanelComponents} onReady={onReady}
         watermarkComponent={FileDockEmpty} defaultTabComponent={FileDockTab}
-        getTabContextMenuItems={() => []} pinnedTabs={{ enabled: true }} disableFloatingGroups />
+        getTabContextMenuItems={() => []} disableFloatingGroups />
     </FileDockContext.Provider>
   );
 }
 
 export function focusFile(dock: DockviewApi, path: string, view: FileView = "editor") {
   const id = `${view}:${path}`;
-  const existing = dock.getPanel(id);
+  const existing = dock.panels.find((panel) => panel.params?.path === path && panel.params?.view === view);
   if (existing) {
     existing.api.setActive();
   } else {
-    dock.addPanel({ id, component: "file", params: { path, view }, title: fileName(path) });
+    dock.addPanel({ id: unusedPanelId(dock, id), component: "file", params: { path, view }, title: fileName(path) });
   }
+}
+
+function unusedPanelId(dock: DockviewApi, preferred: string) {
+  return dock.getPanel(preferred) ? `${preferred}:${crypto.randomUUID()}` : preferred;
 }
 
 export function splitFile(dock: DockviewApi, path: string, view: FileView = "editor", direction: "right" | "below" = "right", reference?: string) {
@@ -110,11 +111,11 @@ export function splitFile(dock: DockviewApi, path: string, view: FileView = "edi
   if (!active) { focusFile(dock, path, view); return; }
   const id = view === "reading" ? `reading:${path}` : direction === "below" ? `split-below:${path}` : `split:${path}`;
   const existing = dock.getPanel(id);
-  if (existing) {
+  if (existing?.params?.path === path && existing.params?.view === view) {
     existing.api.setActive();
     return;
   }
-  dock.addPanel({ id, component: "file", params: { path, view }, title: fileName(path),
+  dock.addPanel({ id: unusedPanelId(dock, id), component: "file", params: { path, view }, title: fileName(path),
     position: { referencePanel: active.id, direction } });
 }
 
@@ -199,7 +200,25 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     if (api && ready) splitFile(api, file, view, direction, reference);
   }, [api, ready]);
 
-  return { api, error, onReady, open, path: file?.path, view: file?.view, ready, split };
+  const reconcilePaths = (destination: (path: string) => string | null | undefined) => {
+    const reopened = new Set<string>();
+    if (!api) return reopened;
+    for (const panel of [...api.panels]) {
+      const params = panel.params as FilePanelParams | undefined;
+      if (!params) continue;
+      const path = destination(params.path);
+      if (path === null) panel.api.close();
+      else if (path !== undefined && path !== params.path) {
+        panel.api.updateParameters({ ...params, path });
+        panel.api.setTitle(fileName(path));
+        reopened.add(path);
+      }
+    }
+    setFile(api.activePanel?.params as FilePanelParams | undefined);
+    return reopened;
+  };
+
+  return { api, error, onReady, open, path: file?.path, view: file?.view, ready, split, reconcilePaths };
 }
 
 interface FolderNodeData {
@@ -229,10 +248,11 @@ export type FileTreeTarget = { kind: "file" | "folder" | "root"; path: string };
 
 interface TreeRows {
   active?: string;
-  onOpen: (path: string) => void;
-  actions: (target: FileTreeTarget) => MenuGroups;
+  choose: (target: FileTreeTarget, event: MouseEvent<HTMLButtonElement>) => void;
+  actions: (target: FileTreeTarget, selection?: readonly FileTreeTarget[]) => MenuGroups;
   expanded: ReadonlySet<string>;
-  toggle: (path: string) => void;
+  selected: ReadonlySet<string>;
+  selection: (path: string) => readonly FileTreeTarget[] | undefined;
   setSubtree: (path: string, collapse: boolean) => void;
 }
 
@@ -250,12 +270,15 @@ function FolderBranch({ tree, parent, rows }: { tree: FolderNodeData; parent: st
         const path = parent ? `${parent}/${name}` : name;
         const expanded = rows.expanded.has(path);
         const Icon = expanded ? FolderOpen : Folder;
+        const target: FileTreeTarget = { kind: "folder", path };
+        const selected = rows.selection(path);
         return <li key={name}>
-          <ContextActions label={path} groups={[...rows.actions({ kind: "folder", path }), [
+          <ContextActions label={selected ? `${selected.length} selected items` : path} groups={[...rows.actions(target, selected), ...(!selected ? [[
             { label: "Expand folder tree", run: () => rows.setSubtree(path, false) },
             { label: "Collapse folder tree", run: () => rows.setSubtree(path, true) },
-          ]]}>
-            <button type="button" className="file-tree-row" aria-expanded={expanded} title={path} onClick={() => rows.toggle(path)}>
+          ]] : [])]}>
+            <button type="button" className="file-tree-row" aria-expanded={expanded} aria-pressed={rows.selected.has(path) || undefined} title={path}
+              onClick={(event) => rows.choose(target, event)}>
               <Icon size={15} /><span>{name}</span>
             </button>
           </ContextActions>
@@ -263,12 +286,14 @@ function FolderBranch({ tree, parent, rows }: { tree: FolderNodeData; parent: st
         </li>;
       })}
       {tree.files.map((path) => {
-        const Icon = path.endsWith(".md") ? FileText : FileCode2;
+        const Icon = /\.(?:md|markdown)$/i.test(path) ? FileText : FileCode2;
+        const target: FileTreeTarget = { kind: "file", path };
+        const selected = rows.selection(path);
         return (
           <li key={path}>
-            <ContextActions label={path} groups={rows.actions({ kind: "file", path })}>
+            <ContextActions label={selected ? `${selected.length} selected items` : path} groups={rows.actions(target, selected)}>
               <button type="button" className="file-tree-row" aria-current={rows.active === path ? "page" : undefined}
-                title={path} onClick={() => rows.onOpen(path)}>
+                title={path} aria-pressed={rows.selected.has(path) || undefined} onClick={(event) => rows.choose(target, event)}>
                 <Icon size={15} /> <span>{fileName(path)}</span>
               </button>
             </ContextActions>
@@ -296,8 +321,8 @@ export function FileTree({ paths, folders = [], active, onOpen, actions, reveal,
 }
 
 function PersistentFolderTree({ tree, active, onOpen, actions, reveal, storageKey }: {
-  tree: FolderNodeData; reveal?: { path: string }; storageKey: string;
-} & Pick<TreeRows, "active" | "onOpen" | "actions">) {
+  tree: FolderNodeData; reveal?: { path: string }; storageKey: string; onOpen: (path: string) => void;
+} & Pick<TreeRows, "active" | "actions">) {
   const [expanded, setExpanded] = useState(() => {
     try {
       const saved: unknown = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
@@ -306,6 +331,42 @@ function PersistentFolderTree({ tree, active, onOpen, actions, reveal, storageKe
     return new Set<string>();
   });
   const container = useRef<HTMLDivElement>(null);
+  const [selected, setSelected] = useState(new Set<string>());
+  const selectionAnchor = useRef<string>(undefined);
+  function visibleItems(node: FolderNodeData, parent = ""): FileTreeTarget[] {
+    return [...[...node.folders].flatMap(([name, folder]): FileTreeTarget[] => {
+      const path = parent ? `${parent}/${name}` : name;
+      return [{ kind: "folder", path }, ...(expanded.has(path) ? visibleItems(folder, path) : [])];
+    }), ...node.files.map((path): FileTreeTarget => ({ kind: "file", path }))];
+  }
+  const selection = selected.size > 1 ? visibleItems(tree).filter(({ path }) => selected.has(path)) : [];
+  function choose(target: FileTreeTarget, event: MouseEvent<HTMLButtonElement>) {
+    const { path, kind } = target;
+    if (event.shiftKey && selectionAnchor.current) {
+      const visible = visibleItems(tree);
+      const first = visible.findIndex((item) => item.path === selectionAnchor.current);
+      const last = visible.findIndex((item) => item.path === path);
+      if (first >= 0 && last >= 0) {
+        const range = visible.slice(Math.min(first, last), Math.max(first, last) + 1).map((item) => item.path);
+        setSelected(new Set([...((event.ctrlKey || event.metaKey) ? selected : []), ...range]));
+        return;
+      }
+    }
+    if (event.ctrlKey || event.metaKey || event.shiftKey) {
+      const next = new Set(selected.size ? selected : selectionAnchor.current ? [selectionAnchor.current] : []);
+      if (!next.delete(path)) next.add(path);
+      setSelected(next);
+    } else {
+      setSelected(new Set());
+      if (kind === "file") onOpen(path);
+      else if (kind === "folder") setExpanded((previous) => {
+        const next = new Set(previous);
+        if (!next.delete(path)) next.add(path);
+        return next;
+      });
+    }
+    selectionAnchor.current = path;
+  }
   useEffect(() => {
     try { localStorage.setItem(storageKey, JSON.stringify([...expanded])); }
     catch { /* Keep the in-memory state when storage is unavailable. */ }
@@ -337,11 +398,9 @@ function PersistentFolderTree({ tree, active, onOpen, actions, reveal, storageKe
         <FolderTree size={15} /><span>Checkout root</span>
       </button>
     </ContextActions>
-    <FolderBranch tree={tree} parent="" rows={{ active, onOpen, actions, expanded, setSubtree, toggle: (path) => setExpanded((previous) => {
-      const next = new Set(previous);
-      if (!next.delete(path)) next.add(path);
-      return next;
-    }) }} />
+    {selection.length > 1 && <p className="file-selection-count" role="status">{selection.length} selected</p>}
+    <FolderBranch tree={tree} parent="" rows={{ active, actions, expanded, setSubtree, selected, choose,
+      selection: (path) => selection.length > 1 && selected.has(path) ? selection : undefined }} />
   </div>;
 }
 
@@ -371,18 +430,19 @@ export function FileSidebar({ name, children }: { name: string; children: ReactN
   return <ResizablePanel as="aside" className="file-workspace-sidebar" aria-label={name} edge="right" resizeKey={name} resizeLabel={name}>{children}</ResizablePanel>;
 }
 
-export function FileDialog({ title, description, onClose, children }: {
+export function FileDialog({ title, description, onClose, children, className = "" }: {
   title: string;
   description: string;
   onClose: () => void;
   children: ReactNode;
+  className?: string;
 }) {
   const activator = useRef(document.activeElement);
   return (
     <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="file-dialog-overlay" />
-        <Dialog.Content className="file-dialog" onCloseAutoFocus={(event) => {
+        <Dialog.Content className={`file-dialog ${className}`} onCloseAutoFocus={(event) => {
           const element = activator.current;
           if (element instanceof HTMLElement && element.isConnected) {
             event.preventDefault();
