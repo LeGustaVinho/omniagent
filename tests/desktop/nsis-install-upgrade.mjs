@@ -14,7 +14,7 @@ import { remote } from "webdriverio";
 // A separately named installed product preserves the production and desktop fixture profiles.
 assert.equal(process.platform, "win32");
 assert.equal(process.arch, "x64");
-const supportedScenarios = ["--workbench", "--backup-restore", "--protected-inspector"];
+const supportedScenarios = ["--workbench", "--backup-restore", "--protected-inspector", "--comparison"];
 assert.ok(process.argv[2], `Usage: node tests/desktop/nsis-install-upgrade.mjs <case.json> ${supportedScenarios.map((flag) => `[${flag}]`).join(" ")}`);
 const caseFile = resolve(process.argv[2]);
 const scenarios = new Set(process.argv.slice(3));
@@ -236,6 +236,10 @@ try {
   if (scenarios.has("--protected-inspector")) {
     const { runInstalledProtectedInspector } = await import("./installed-protected-inspector.mjs");
     receipt.protectedInspector = await runInstalledProtectedInspector(installed);
+  }
+  if (scenarios.has("--comparison")) {
+    const { runInstalledComparison } = await import("./installed-comparison.mjs");
+    receipt.comparison = await runInstalledComparison(installed);
   }
 } finally {
   if (registry("HKCU", uninstallKey, "DisplayName") === product) {

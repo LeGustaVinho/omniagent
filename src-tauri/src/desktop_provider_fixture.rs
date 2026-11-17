@@ -14,6 +14,9 @@ use serde_json::{Value, json};
 pub const APP_IDENTIFIER: &str = "io.github.legustavinho.omniagent.desktop-tests";
 const PROFILE_ENV: &str = "OMNIAGENT_DESKTOP_TEST_RUN_ID";
 const MODEL: &str = "desktop-fixture";
+const RATED_MODEL: &str = "gpt-6-luna";
+const BLOCKED_COMPARISON_MODEL: &str = "desktop-comparison-blocked";
+const COMPARISON_PROMPT: &str = "Read the pinned installed comparison fixture";
 const SESSION: &str = "desktop-fixture-session";
 const TURN: &str = "desktop-fixture-turn";
 const RELEASE: &str = "release-desktop-jobs";
@@ -65,15 +68,30 @@ pub fn run_from_args() -> Option<i32> {
 fn run() -> Result<()> {
     let root = env::current_dir()?;
     let mut stdout = io::stdout().lock();
+    let mut model = MODEL;
     for line in io::stdin().lock().lines() {
         let request: Value = serde_json::from_str(&line?)?;
         let result = match request["method"].as_str() {
             Some("initialize") => json!({"userAgent":"omniagent-desktop-fixture"}),
             Some("initialized") => continue,
-            Some("thread/start") => json!({
-                "thread":{"id":SESSION}, "cwd":root, "model":MODEL, "sandbox":{"type":"readOnly"}
-            }),
-            Some("model/list") => json!({"data":[{"id":MODEL,"displayName":"Desktop fixture"}]}),
+            Some("thread/start") => {
+                model = match request["params"]["model"].as_str() {
+                    Some(RATED_MODEL) => RATED_MODEL,
+                    Some(BLOCKED_COMPARISON_MODEL) => BLOCKED_COMPARISON_MODEL,
+                    _ => MODEL,
+                };
+                let sandbox = if model == BLOCKED_COMPARISON_MODEL {
+                    "workspaceWrite"
+                } else {
+                    "readOnly"
+                };
+                json!({"thread":{"id":SESSION}, "cwd":root, "model":model, "sandbox":{"type":sandbox}})
+            }
+            Some("model/list") => json!({"data":[
+                {"id":MODEL,"displayName":"Desktop fixture"},
+                {"id":RATED_MODEL,"displayName":"GPT-6 Luna"},
+                {"id":BLOCKED_COMPARISON_MODEL,"displayName":"Comparison fixture without read-only sandbox"},
+            ]}),
             Some("config/read") => {
                 json!({"config":{"sandbox_mode":"read-only","approval_policy":"never"}})
             }
@@ -122,6 +140,21 @@ fn run() -> Result<()> {
                             &["Yes", "No"],
                         )?;
                     }
+                } else if text == COMPARISON_PROMPT {
+                    ensure!(
+                        model != BLOCKED_COMPARISON_MODEL,
+                        "A blocked comparison received a turn"
+                    );
+                    wait_for_file(&root.join(".git/release-installed-comparison"))?;
+                    let input = fs::read_to_string(root.join("comparison-input.txt"))?;
+                    finished(
+                        &mut stdout,
+                        "completed",
+                        Some(&format!(
+                            "Saved comparison response for {model}: {}",
+                            input.trim()
+                        )),
+                    )?;
                 } else if text.starts_with(COMPOSER_PROMPT) {
                     verify_composer_input(&root, &request, text)?;
                     finished(

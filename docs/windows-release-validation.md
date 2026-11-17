@@ -164,6 +164,10 @@ On the same Windows 10 host, nine Rust checks and ten Testing Library checks pas
 
 Queue inspection and admission agreed on the blocked jobs across dependencies, bridge availability, approval decisions, writer reservations and execution capacity. The queue UI rendered the returned blocker reasons and exact linked attempt, and the reconciliation UI required confirmation scoped to the affected writer. [Queue admission](../src-tauri/tests/job_queue.rs) · [Queue UI](../src/queue-live.test.tsx) · [Writer reconciliation](../src/queue-writer-reconciliation.test.tsx)
 
+## Installed model comparison
+
+The Windows 10 x64 `0.1.1` NSIS trial at `5b843e0` ran comparison `51da8e70-66cf-4583-a06e-6fdbe3828637` against a separate scripted Codex App Server executable. Two candidates had live dispatches at the same time and both original responses reopened from their recorded runs after restart. The third failed before its prompt was sent, and the UI showed the read-only sandbox incompatibility alongside the partial result. The successful attempts read from a disposable Git snapshot pinned to commit `2b4d5d87d1cb456e0a9c5564440384dae9944b5e`. A test write to the snapshot's `.git` directory left the original dirty checkout untouched. Repeat with `--comparison` and the separate debug fixture CLI. [Comparison acceptance scenario](../tests/desktop/installed-comparison.mjs) · [Scripted provider](../src-tauri/src/desktop_provider_fixture.rs)
+
 ## Protected dispatch inspector and export checks
 
 The Windows 10 x64 NSIS `0.1.1` trial at `5b843e0` used a separate scripted Codex App Server executable. The SQLite blobs for dispatch `4d0182be-1b5a-4020-ae1a-339c45788721` excluded the plaintext fixture prompt. The local inspector revealed the exact sent frames on request. After restart and changes to the local instruction and skill files, it displayed the original revisions and frames. The foreign conversation could access neither the exact input nor its inventory, and opening the inspector created no new attempt. Repeat the scenario with `--protected-inspector`. [Installed inspector scenario](../tests/desktop/installed-protected-inspector.mjs)
