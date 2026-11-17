@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { RunRecord } from "@/bindings/RunRecord";
@@ -88,11 +88,12 @@ it("opens recorded run pages through the same Activity tabs as Simulate and load
 
 it("copies captured command output and failure evidence for the exact inspected run", async () => {
   const projectId = exampleCheckout.projectId;
-  const run: RunRecord = { id: "command-attempt", projectId, checkoutId: exampleCheckout.checkoutId, turnId: "command-turn", status: "failed" };
+  const run: RunRecord = { id: "command-attempt", projectId, checkoutId: "attempt-worktree", turnId: "command-turn", status: "failed" };
   const process = { code: 17, cancelled: false };
   const stdout = "  First line\r\nSecond line — ç\r\n";
   const stderr = "Checks failed\n";
   const openActivity = vi.fn();
+  const openWorkspace = vi.fn();
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     if (command === "command_job_run") return run;
     if (command === "command_job_output") return (args as { runId: string }).runId === run.id
@@ -101,13 +102,15 @@ it("copies captured command output and failure evidence for the exact inspected 
       { runId: run.id, checkoutId: run.checkoutId, status: "failed", ordinal: 2, createdAt: 9 },
       { runId: "prior-command", checkoutId: run.checkoutId, status: "succeeded", ordinal: 1, createdAt: 5 },
     ];
+    if (command === "list_conversations") return [{ id: "diagnostic-chat", title: "Investigate checks" }];
+    if (command === "append_checkout_context_to_conversation") return;
     if (command === "job_failure") return { outcome: "failed", checkoutId: run.checkoutId, checkoutRoot: "D:\\worktree",
       observation: { phase: "execution", cause: "process_exit", process }, providerOutcome: null, logsAvailable: false, savedDiffAvailable: false };
     throw new Error(`Unexpected ${command}`);
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<QueryClientProvider client={client}><RunInspector checkout={exampleCheckout} runId={run.id}
-    simulation={null} onClose={vi.fn()} startSimulation={vi.fn()} openWorkspace={vi.fn()} openChanges={vi.fn()} openActivity={openActivity} /></QueryClientProvider>);
+    simulation={null} onClose={vi.fn()} startSimulation={vi.fn()} openWorkspace={openWorkspace} openChanges={vi.fn()} openActivity={openActivity} /></QueryClientProvider>);
   const user = userEvent.setup();
   const activity = within(await screen.findByRole("region", { name: "Command activity" }));
   expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "command_job_output")).toBe(false);
@@ -148,6 +151,26 @@ it("copies captured command output and failure evidence for the exact inspected 
   expect(recordName).toBe("run-command-attempt-output-partial.json");
   expect(JSON.parse(await readDownload(recordBlob))).toEqual({
     projectId, checkoutId: run.checkoutId, runId: run.id, process, stdout, stderr, truncated: true,
+  });
+
+  const printedError = activity.getByText("Checks failed");
+  const selection = document.getSelection()!;
+  const range = document.createRange();
+  range.setStart(printedError.firstChild!, 7);
+  range.setEnd(printedError.firstChild!, 13);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  fireEvent.contextMenu(printedError);
+  await user.click(await screen.findByRole("menuitem", { name: "Investigate selected output…" }));
+  selection.removeAllRanges();
+  const draft = within(await screen.findByRole("dialog", { name: "Add checkout context" }));
+  expect(draft.getByLabelText("Selected text").textContent).toBe("failed");
+  expect(draft.getByText("Standard error · Line 1 · Run command-attempt · Worktree attempt-worktree · Exit code 17 · Incomplete recorded output")).toBeTruthy();
+  await user.selectOptions(draft.getByLabelText("Conversation"), "diagnostic-chat");
+  await user.click(draft.getByRole("button", { name: "Add to draft" }));
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("conversations", "diagnostic-chat"));
+  expect(invoke).toHaveBeenCalledWith("append_checkout_context_to_conversation", {
+    checkoutId: exampleCheckout.checkoutId, conversationId: "diagnostic-chat", context: expect.stringContaining("\nfailed\n```"),
   });
 
   fireEvent.contextMenu(activity.getByText("Exit code 17"));
