@@ -383,11 +383,13 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     },
   });
   const openSearchMatch = (path: string, line: number, column?: number) => openFile(path, line, false, column);
-  const searchInFolder = (path: string) => {
+  const searchWithScope = (scope?: FileSearchScope) => {
     setSidebar(true);
-    setSearchScope(path ? { kind: "folder", path } : undefined);
+    setSearchScope(scope);
     setNavigator("search");
   };
+  const searchInFolder = (path: string) => searchWithScope(path ? { kind: "folder", path } : undefined);
+  const searchInFile = (path: string) => ({ label: "Search in this file", run: () => searchWithScope({ kind: "file", path }) });
   const searchEditorText = (text: string) => {
     searchInFolder("");
     if (simulated) setQuery(text);
@@ -396,7 +398,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const searchScopeActions = (path: string) => {
     const folder = containingFolder(path);
     return [
-      ...(searchScope?.kind === "file" && searchScope.path === path ? [] : [{ label: "Search in this file", run: () => setSearchScope({ kind: "file", path }) }]),
+      ...(searchScope?.kind === "file" && searchScope.path === path ? [] : [searchInFile(path)]),
       ...(folder ? searchScope?.kind === "folder" && searchScope.path === folder ? [] : [{ label: "Search in containing folder", run: () => searchInFolder(folder) }]
         : searchScope ? [{ label: "Search entire worktree", run: () => searchInFolder("") }] : []),
     ];
@@ -487,6 +489,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                   { label: "Open to the side", run: () => openFile(target.path, undefined, true) },
                   ...(!markdownPath(target.path) ? dock.openGroupActions(target.path, (groupId) => openFile(target.path, undefined, { groupId })) : []),
                   { label: "Open in new window", run: () => openFile(target.path, undefined, false, undefined, true) },
+                  searchInFile(target.path),
                   ...(!simulated && markdownPath(target.path) ? [{ label: "Rename note…", run: () => renameNote(target.path) }] : []),
                   ...(!simulated ? [{ label: "Open working diff", run: () => openWorkspace("git", workingDiffTarget(target.path)) }] : []),
                   ...(!simulated ? [{ label: "Save a copy…", run: () => treeActions.saveCopy(target.path, dirty(target.path) ? currentText(target.path) : undefined) }] : []),
@@ -528,7 +531,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                 <div className="ide-file-view">
                   <FileCaption path={path} revision={entry.revision} onReveal={revealFile} actions={(item) => [
                     [{ label: "Reveal in Explorer tree", run: () => revealFile(item.path) },
-                      ...(item.kind === "folder" ? [{ label: "Find in folder", run: () => searchInFolder(item.path) }] : []),
+                      item.kind === "folder" ? { label: "Find in folder", run: () => searchInFolder(item.path) } : searchInFile(item.path),
                       ...(!simulated ? [{ label: "Open terminal here", run: () => openTerminal(item.kind === "file" ? containingFolder(item.path) : item.path) }] : [])],
                     ...menu.location(item),
                   ]} />
@@ -557,6 +560,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
               { label: "Split right", run: () => dock.split(path, view, "right", api.id) },
               { label: "Split down", run: () => dock.split(path, view, "below", api.id) },
               { label: "Reveal in Explorer tree", run: () => revealFile(path) },
+              searchInFile(path),
               ...(!simulated ? [{ label: "Open working diff", run: () => openWorkspace("git", workingDiffTarget(path)) }] : []),
             ], ...menu.location({ kind: "file", path }), comparison.actions(path, api), ...conversationActions.actions({ kind: "file", path }), ...fileOperations.actions({ kind: "file", path }), [
               { label: "Close tab", run: () => requestClose(path, api) },

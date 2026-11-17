@@ -111,6 +111,71 @@ it("submits literal search to the selected checkout, marks partial results, and 
   expect(await form.findByRole("button", { name: /plan#blue.md · 4/ })).toBeTruthy();
 });
 
+it("scopes content search to a closed Explorer file, an inactive tab and a file breadcrumb", async () => {
+  const checkoutId = "linked-worktree";
+  const first = "src/ação file.ts";
+  const second = "src/active.ts";
+  const props: WorkspaceProps = {
+    checkout: { projectId: "project", checkoutId, repositoryRoot: "C:\\repo", checkoutRoot: "C:\\linked" },
+    openWorkspace: vi.fn(), openActivity: vi.fn(), openChanges: vi.fn(), startSimulation: vi.fn(), simulation: null,
+  };
+  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    switch (command) {
+      case "workbench_layout": case "read_repository_source_draft": return null;
+      case "list_repository_source_files": return [first, second];
+      case "list_repository_source_drafts": case "list_checkout_folders": return [];
+      case "save_workbench_layout": case "unwatch_repository_source": return undefined;
+      case "watch_repository_source": return "watch";
+      case "ripgrep_status": return available;
+      case "search_repository_files": return { status: "results", truncated: false, matches: [] };
+      case "open_repository_source_file": {
+        const { path } = args as { path: string };
+        return { status: "document", document: { revision: {
+          id: path, checkoutId, relativePath: path, sha256: "sha", baseCommit: null,
+        }, markdown: "source", fileIdentity: path } };
+      }
+      default: throw new Error(command);
+    }
+  });
+  render(<QueryClientProvider client={client()}><IdeWorkspace {...props} target={second} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await screen.findByLabelText(`Source editor for ${second}`);
+  await user.click(await screen.findByRole("button", { name: "src" }));
+
+  async function searchFileFrom(anchor: HTMLElement, path: string) {
+    fireEvent.contextMenu(anchor);
+    await user.click(await screen.findByRole("menuitem", { name: "Search in this file" }));
+    const form = within(screen.getByRole("form", { name: "Project file search" }));
+    expect(form.getByText(`Search in ${path}`)).toBeTruthy();
+    const input = form.getByRole<HTMLInputElement>("searchbox", { name: "Search file contents" });
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    return input;
+  }
+
+  const explorerSearch = await searchFileFrom(screen.getByRole("button", { name: "ação file.ts" }), first);
+  await user.type(explorerSearch, "closed.*literal{Enter}");
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("search_repository_files", { checkoutId, query: "closed.*literal", relativeFile: first }));
+  expect(screen.queryByRole("button", { name: "Close ação file.ts" })).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "Files" }));
+  await user.click(screen.getByRole("button", { name: "ação file.ts" }));
+  await screen.findByLabelText(`Source editor for ${first}`);
+  const activeTab = screen.getByRole("button", { name: "Close active.ts" }).closest<HTMLElement>(".file-tab-label")!;
+  await user.click(within(activeTab).getByText("active.ts"));
+  await screen.findByLabelText(`Source editor for ${second}`);
+  const inactiveTab = screen.getByRole("button", { name: "Close ação file.ts" }).closest<HTMLElement>(".file-tab-label")!;
+  const tabSearch = await searchFileFrom(inactiveTab, first);
+  await user.type(tabSearch, "tab needle{Enter}");
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("search_repository_files", { checkoutId, query: "tab needle", relativeFile: first }));
+  expect(screen.getByLabelText(`Source editor for ${second}`)).toBeTruthy();
+
+  const breadcrumb = screen.getByRole("button", { name: "Reveal file active.ts" });
+  const breadcrumbSearch = await searchFileFrom(breadcrumb, second);
+  expect(breadcrumbSearch.value).toBe("tab needle");
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("search_repository_files", { checkoutId, query: "tab needle", relativeFile: second }));
+});
+
 it("shows a missing executable and immediately shares a validated System Settings path with search", async () => {
   const override = "C:\\Program Files\\ripgrep\\rg.exe";
   vi.mocked(invoke).mockImplementation(async (command, args) => {

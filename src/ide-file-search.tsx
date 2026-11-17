@@ -110,10 +110,21 @@ function FileSearchResults({ results, onOpen, actions, fileActions }: {
     <FileSearchGroup key={path} path={path} matches={matches} onOpen={onOpen} actions={actions} fileActions={fileActions} />)}</ul>;
 }
 
-function FileSearchField({ label, query, onChange }: { label: string; query: string; onChange: (query: string) => void }) {
+function FileSearchField({ label, query, onChange, scope }: { label: string; query: string; onChange: (query: string) => void; scope?: FileSearchScope }) {
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!scope) return;
+    // Let the closing context menu restore focus before moving it to search.
+    let focusTimer: number | undefined;
+    const frame = requestAnimationFrame(() => { focusTimer = window.setTimeout(() => input.current?.focus()); });
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(focusTimer);
+    };
+  }, [scope]);
   return <label className="file-field">
     <Search size={15} aria-hidden="true" />
-    <input type="search" autoFocus value={query} onChange={(event) => onChange(event.currentTarget.value)}
+    <input ref={input} type="search" autoFocus value={query} onChange={(event) => onChange(event.currentTarget.value)}
       placeholder={label} aria-label={label} />
   </label>;
 }
@@ -139,7 +150,7 @@ export function ExampleFileSearch({ query, setQuery, results, onOpen, actions, f
 }) {
   return <div className="file-search">
     <ScopeLabel scope={scope} onClear={onClear} />
-    <FileSearchField label="Search files and content" query={query} onChange={setQuery} />
+    <FileSearchField label="Search files and content" query={query} onChange={setQuery} scope={scope} />
     {(literalContent ? query : query.trim()) && <p className="file-help" role="status">{results.length ? `${results.length} matches` : "No files match your search"}</p>}
     <FileSearchResults results={results} onOpen={onOpen} actions={actions} fileActions={fileActions} />
   </div>;
@@ -178,7 +189,7 @@ export function ProjectFileSearch({ checkoutId, onOpen, scope, onClear, editorSe
     setSubmitted({ checkoutId, query, sequence: `form:${++formSequence.current}`, editorSearch: selection });
   }}>
     <ScopeLabel scope={scope} onClear={onClear} />
-    <FileSearchField label="Search file contents" query={query} onChange={setQuery} />
+    <FileSearchField label="Search file contents" query={query} onChange={setQuery} scope={scope} />
     <button type="submit" className="fw-btn fw-outlined" disabled={!query || !ripgrep.data?.executable || results.isFetching}>Search</button>
     {ripgrep.isPending && <p className="file-help" role="status">Checking ripgrep…</p>}
     {ripgrep.error && <p className="file-help" role="alert">{String(ripgrep.error)}</p>}
