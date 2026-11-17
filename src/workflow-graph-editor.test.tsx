@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { useState, type ComponentType } from "react";
+import { useState, type ComponentType, type MouseEvent } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import PipelinesWorkspace from "@/pipelines-workspace";
 import { WorkflowGraphEditor, type WorkflowEditorState } from "@/workflow-graph-editor";
-import { connectionProblem, defaultConfiguration, graphProblems, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
+import { connectionProblem, defaultConfiguration, graphProblems, wireKey, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
 import { exampleCheckout } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -16,6 +16,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@xyflow/react", async (importOriginal) => {
   type Position = { x: number; y: number };
   type Card = { id: string; position: Position; data: { definition: WorkflowDefinition } };
+  type Wire = { id: string };
   const update = () => undefined;
   return {
     ...await importOriginal<typeof import("@xyflow/react")>(),
@@ -23,13 +24,21 @@ vi.mock("@xyflow/react", async (importOriginal) => {
     Controls: () => null,
     Handle: ({ id, type }: { id: string; type: string }) => <span data-port-handle={`${type}:${id}`} />,
     useUpdateNodeInternals: () => update,
-    ReactFlow: ({ nodes, nodeTypes, onNodesChange }: {
+    ReactFlow: ({ nodes, edges, nodeTypes, onNodesChange, onNodeContextMenu, onEdgeContextMenu, onPaneContextMenu }: {
       nodes: Card[]; nodeTypes: { workflow: ComponentType<Card> };
+      edges: Wire[];
       onNodesChange: (changes: { type: "position"; id: string; position: Position }[]) => void;
-    }) => <div>{nodes.map(({ id, ...card }) => <div key={id} data-testid={`node-${id}`} data-position={JSON.stringify(card.position)}>
-      <nodeTypes.workflow id={id} {...card} />
-      <button type="button" onClick={() => onNodesChange([{ type: "position", id, position: { x: 91, y: -8 } }])}>Move {id}</button>
-    </div>)}</div>,
+      onNodeContextMenu?: (event: MouseEvent, node: Card) => void;
+      onEdgeContextMenu?: (event: MouseEvent, wire: Wire) => void;
+      onPaneContextMenu?: (event: MouseEvent) => void;
+    }) => <div data-testid="test-pipeline-pane" onContextMenu={onPaneContextMenu}>
+      {nodes.map(({ id, ...card }) => <div key={id} className="react-flow__node" data-id={id} data-testid={`node-${id}`}
+        data-position={JSON.stringify(card.position)} onContextMenu={(event) => onNodeContextMenu?.(event, { id, ...card })}>
+        <nodeTypes.workflow id={id} {...card} />
+        <button type="button" onClick={() => onNodesChange([{ type: "position", id, position: { x: 91, y: -8 } }])}>Move {id}</button>
+      </div>)}
+      {edges?.map((edge) => <div key={edge.id} data-testid={`edge-${edge.id}`} onContextMenu={(event) => onEdgeContextMenu?.(event, edge)} />)}
+    </div>,
   };
 });
 
@@ -45,6 +54,36 @@ const context: WorkflowDefinition = { kind: "load_context", title: "Load context
 const plan: WorkflowDefinition = { kind: "plan", title: "Plan", revision: 1, configuration: "agent_role", executor: "plan_agent", effect: "invoke_model",
   inputs: [control("ready"), data("context", "markdown")], outputs: [control("planned"), data("plan", "plan")] };
 const wire = (from: string, output: string, to: string, input: string) => ({ from: { node: from, port: output }, to: { node: to, port: input } });
+
+it("opens actions for the clicked node, connection, and canvas independently", async () => {
+  const connection = wire("start", "start", "context", "ready");
+  const definitions = { start, context };
+  function TestBuilder() {
+    const [state, setState] = useState<WorkflowEditorState>({ graph: {
+      name: "Test graph", wires: [connection], nodes: [
+        { id: "start", kind: "start", configuration: { kind: "none" } },
+        { id: "context", kind: "load_context", configuration: { kind: "none" } },
+      ],
+    }, layout: {}, updateDefinitions: {} });
+    return <WorkflowGraphEditor projectId="test" state={state} setState={setState} definitions={definitions}
+      catalog={[start, context]} problems={[]} disabled={false} />;
+  }
+  render(<TestBuilder />);
+  const user = userEvent.setup();
+  fireEvent.contextMenu(screen.getByTestId("node-context"));
+  await user.click(within(await screen.findByRole("menu", { name: "context" })).getByRole("menuitem", { name: "Inspect node" }));
+  expect((screen.getByRole("combobox", { name: "Inspect node" }) as HTMLSelectElement).value).toBe("context");
+
+  const edge = `edge-${wireKey(connection)}`;
+  fireEvent.contextMenu(screen.getByTestId(edge));
+  await user.click(await screen.findByRole("menuitem", { name: "Remove connection" }));
+  expect(screen.queryByTestId(edge)).toBeNull();
+  expect(screen.getByTestId("node-context")).toBeTruthy();
+
+  fireEvent.contextMenu(screen.getByTestId("test-pipeline-pane"));
+  await user.click(within(await screen.findByRole("menu", { name: "Pipeline canvas" })).getByRole("menuitem", { name: "Undo graph edit" }));
+  expect(screen.getByTestId(edge)).toBeTruthy();
+});
 
 it("opens the real Library and searches the same definitions used by the Builder", async () => {
   const ipc = vi.mocked(invoke);

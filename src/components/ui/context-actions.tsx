@@ -84,3 +84,23 @@ export function ContextActions({ label, groups, children, className = "", title,
     </ContextMenu.Portal>
   </ContextMenu.Root>;
 }
+
+export function PositionedContextActions({ label, groups, point, onClose, restoreFocus }: {
+  label: string;
+  groups: MenuGroups;
+  point: { x: number; y: number };
+  onClose: () => void;
+  restoreFocus: () => void;
+}) {
+  return <DropdownMenu.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <DropdownMenu.Trigger asChild>
+      <button className="context-actions-anchor" type="button" aria-hidden tabIndex={-1} style={{ left: point.x, top: point.y }} />
+    </DropdownMenu.Trigger>
+    <DropdownMenu.Portal>
+      <DropdownMenu.Content aria-label={label} aria-labelledby={undefined} className="context-actions-menu" align="start" collisionPadding={8}
+        onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(); }}>
+        <ActionItems groups={groups} variant="dropdown" />
+      </DropdownMenu.Content>
+    </DropdownMenu.Portal>
+  </DropdownMenu.Root>;
+}

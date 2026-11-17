@@ -60,7 +60,7 @@ it("reopens a registered checkout from startup without registering it again", as
   const user = userEvent.setup();
   renderApp();
   await user.click(await screen.findByRole("button", { name: "Registered repositories" }));
-  await user.click(await screen.findByRole("button", { name: /Example/ }));
+  await user.click(await screen.findByRole("button", { name: /^Example/ }));
   expect(await screen.findByText("Repository workspace")).toBeTruthy();
   expect(invoke.mock.calls).toEqual([
     ["active_checkout"], ["registered_checkouts"], ["select_active_checkout", { checkoutId: "checkout" }],
