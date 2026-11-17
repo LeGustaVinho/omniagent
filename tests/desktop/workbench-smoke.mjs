@@ -2273,12 +2273,25 @@ test("detaches the selected dirty editor into a native window and returns it wit
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Move tab to new window"]');
     await browser.waitUntil(async () => (await browser.getWindowHandles()).some((handle) => handle !== main));
     const labels = () => invoke(browser, "plugin:window|get_all_windows");
-    const waitForMainOnly = () => browser.waitUntil(async () =>
-      (await browser.getWindowHandles()).length === 1 && (await labels()).every((label) => !label.startsWith("editor-")),
-    { timeoutMsg: "The detached editor's native or browser window stayed open." });
+    const waitForMainOnly = () => browser.waitUntil(async () => {
+      const handles = await browser.getWindowHandles();
+      return handles.length === 1 && handles[0] === main && (await labels()).every((label) => !label.startsWith("editor-"));
+    }, { timeoutMsg: "The detached editor's native or browser window stayed open." });
+    const switchToEditorWindow = (path) => browser.waitUntil(async () => {
+      await browser.switchToWindow(main);
+      const handles = await browser.getWindowHandles();
+      if (handles.length !== 2 || !handles.includes(main)) return false;
+      const detached = handles.find((handle) => handle !== main);
+      try {
+        await browser.switchToWindow(detached);
+        return await browser.$(`.file-tab-label[title=${JSON.stringify(path)}]`).isDisplayed();
+      } catch (error) {
+        if (!/no such window|web view not found/i.test(String(error))) throw error;
+        return false;
+      }
+    }, { timeoutMsg: `The detached window for ${path} did not become ready.` });
     assert.ok((await labels()).some((label) => label.startsWith("editor-")));
-    const popup = (await browser.getWindowHandles()).find((handle) => handle !== main);
-    await browser.switchToWindow(popup);
+    await switchToEditorWindow(file);
     const popupTab = browser.$(`.file-tab-label[title="${file}"]`);
     await popupTab.waitForDisplayed();
     const detachedEditor = browser.$(".code-editor .view-line:first-child");
@@ -2303,9 +2316,7 @@ test("detaches the selected dirty editor into a native window and returns it wit
 
     await ide.$(".file-dock-group-menu").click({ button: "right" });
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Move group to new window"]');
-    await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 2);
-    const group = (await browser.getWindowHandles()).find((handle) => handle !== main);
-    await browser.switchToWindow(group);
+    await switchToEditorWindow(file);
     await browser.$(`.file-tab-label[title="${file}"]`).waitForDisplayed();
     await browser.$(`.file-tab-label[title="${other}"]`).waitForDisplayed();
     await browser.$(".file-dock-group-menu").click({ button: "right" });
@@ -2315,9 +2326,7 @@ test("detaches the selected dirty editor into a native window and returns it wit
 
     await ide.$(`button[title="${note}"]`).click({ button: "right" });
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Open in new window"]');
-    await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 2);
-    const noteWindow = (await browser.getWindowHandles()).find((handle) => handle !== main);
-    await browser.switchToWindow(noteWindow);
+    await switchToEditorWindow(note);
     const noteTab = browser.$(`.file-tab-label[title="${note}"]`);
     await noteTab.waitForDisplayed();
     const noteEditor = browser.$(`[aria-label="Markdown editor for ${note}"] .cm-line:first-child`);
