@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, ChevronUp, CircleCheck, Columns2, ExternalLink, FileCode2, FileImage, GitCompare, Rows3, X } from "lucide-react";
-import type { editor, IRange } from "monaco-editor";
+import type { editor, IPosition, IRange } from "monaco-editor";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
 import { FileDialog } from "@/ide-file-workspace";
@@ -33,6 +33,7 @@ export type GitComparedFile = {
 type DiffLayout = "auto" | "split" | "unified";
 type DiffSide = GitReviewSide;
 type ExcerptHandler = (selection: EditorExcerpt, revision: string, instruction?: string) => void;
+type VersionPreview = { title: string; revision: string; path: string; content: GitComparedSide; line?: number };
 
 type GitDiffRow = {
   path: string;
@@ -95,7 +96,7 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   const [patchPath, setPatchPath] = useState<string>();
   const [requestedLine, setRequestedLine] = useState<number>();
   const [copyError, setCopyError] = useState("");
-  const [sidePreview, setSidePreview] = useState<{ title: string; revision: string; path: string; content: GitComparedSide }>();
+  const [sidePreview, setSidePreview] = useState<VersionPreview>();
   const comparedFileAction = useContextActionFeedback();
   const [instance, setInstance] = useState<editor.IStandaloneDiffEditor | null>(null);
   const [batchPaths, setBatchPaths] = useState<ReadonlySet<string>>(() => new Set());
@@ -105,8 +106,8 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   const reviewedCount = comparison?.hunks?.filter((hunk) => hunk.reviewed).length ?? 0;
   const hasPatch = Boolean(hasHunks || allowSavedPatch && comparison?.patch);
   const patchLineNumbers = useMemo(() => comparison ? {
-    original: !/\r(?!\n)/.test(comparison.original),
-    modified: !/\r(?!\n)/.test(comparison.modified),
+    original: gitPatchLineCount(comparison.original),
+    modified: gitPatchLineCount(comparison.modified),
   } : undefined, [comparison]);
   const [reviewLocation, setReviewLocation] = useState<GitReviewAnnotations["location"]>();
   const showingPatch = hasPatch && Boolean(selected && patchPath === selected.path);
@@ -154,7 +155,7 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
       const revision = side === "original" ? ranges.base : ranges.revised;
       return { label: `Open ${title.toLowerCase()}`, run: () => void comparedFileAction.run(async () => {
         const snapshot = await load();
-        setSidePreview({ title, revision, path: snapshot.path, content: snapshot[side] });
+        setSidePreview({ title, revision, path: side === "original" ? file.previousPath ?? snapshot.path : snapshot.path, content: snapshot[side] });
       }) };
     };
     return [openSide("original"), openSide("modified"), {
@@ -164,6 +165,10 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
         await navigator.clipboard.writeText(patch.content);
       }, "Copied Git patch to the clipboard."),
     }];
+  }
+  function openPatchLine(side: DiffSide, line: number) {
+    if (!comparison) return;
+    setSidePreview(versionPreviewAtLine(comparison, side, line, side === "original" ? ranges.base : ranges.revised));
   }
   const counts = files.reduce<{ additions: number; deletions: number } | undefined>((sum, file) => {
     if (file.additions === undefined || file.deletions === undefined) return sum;
@@ -263,7 +268,8 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
                           </button>
                           {hunk.reviewed && <span className="flex items-center gap-1 pr-2 text-xs text-[var(--success)]"><CircleCheck size={13} aria-hidden />Reviewed</span>}
                         </div>
-                        <HunkPatchLines hunk={hunk} review={reviewAnnotations} lineNumbers={patchLineNumbers} markReviewed={markReviewed} />
+                        <HunkPatchLines hunk={hunk} review={reviewAnnotations} lineNumbers={patchLineNumbers} markReviewed={markReviewed}
+                          openLine={openPatchLine} />
                       </div>
                     </ContextActions>
                   </section>;
@@ -275,12 +281,42 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
         </div>}
         {footer && <footer className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-3 py-2">{footer}</footer>}
       </div>}
-    {sidePreview && <FileDialog title={sidePreview.title} description={sidePreview.path} className="file-comparison-dialog" onClose={() => setSidePreview(undefined)}>
-      <p className="font-mono text-xs text-muted-foreground">{sidePreview.revision}</p>
-      {sidePreview.content.status === "text" ? <pre tabIndex={0} aria-label="Version contents" className="min-h-0 overflow-auto rounded border border-border p-3 font-mono text-xs leading-5">{sidePreview.content.content}</pre>
-        : <p className="file-help">{sidePreview.content.status === "missing" ? "This file does not exist in this version." : sidePreview.content.reason}</p>}
-    </FileDialog>}
+    {sidePreview && <GitVersionPreview preview={sidePreview} close={() => setSidePreview(undefined)} />}
   </GitDiffFrame>;
+}
+
+function versionPreviewAtLine(file: GitTextComparison, side: DiffSide, line: number, revision: string): VersionPreview {
+  return { title: side === "original" ? "Base version" : "Revised version", revision, line,
+    path: side === "original" ? file.originalPath ?? file.path : file.path, content: { status: "text", content: file[side] } };
+}
+
+function GitVersionPreview({ preview, close }: { preview: VersionPreview; close: () => void }) {
+  const { content, line, path, revision, title } = preview;
+  const highlighted = useRef<HTMLElement>(null);
+  const text = content.status === "text" ? content.content : undefined;
+  const range = useMemo(() => {
+    if (line === undefined || text === undefined) return;
+    let start = 0;
+    let current = 1;
+    for (const separator of text.matchAll(/\r\n|\r|\n/g)) {
+      if (line === current) return { start, end: separator.index };
+      start = separator.index + separator[0].length;
+      current += 1;
+    }
+    if (line === current) return { start, end: text.length };
+  }, [line, text]);
+  useEffect(() => {
+    if (!range) return;
+    const frame = requestAnimationFrame(() => highlighted.current?.scrollIntoView?.({ block: "center" }));
+    return () => cancelAnimationFrame(frame);
+  }, [range]);
+  return <FileDialog title={title} description={line === undefined ? path : `${path}:${line}`} className="file-comparison-dialog" onClose={close}>
+    <p className="font-mono text-xs text-muted-foreground">{revision}</p>
+    {content.status === "text" ? <pre tabIndex={0} aria-label="Version contents" className="min-h-0 overflow-auto rounded border border-border p-3 font-mono text-xs leading-5">
+      {range ? <>{content.content.slice(0, range.start)}<mark ref={highlighted} aria-label={`Selected line ${line}`}
+        className="bg-accent text-accent-foreground">{content.content.slice(range.start, range.end)}</mark>{content.content.slice(range.end)}</> : content.content}
+    </pre> : <p className="file-help">{content.status === "missing" ? "This file does not exist in this version." : content.reason}</p>}
+  </FileDialog>;
 }
 
 function PatchLines({ value }: { value: string }) {
@@ -289,12 +325,18 @@ function PatchLines({ value }: { value: string }) {
   </pre>;
 }
 
-function HunkPatchLines({ hunk, review, lineNumbers, markReviewed }: {
-  hunk: GitHunk; review?: GitReviewAnnotations; lineNumbers?: Record<DiffSide, boolean>; markReviewed?: MenuAction;
+function gitPatchLineCount(text: string) {
+  if (!text || /\r(?!\n)/.test(text)) return 0;
+  return (text.match(/\n/g)?.length ?? 0) + Number(!text.endsWith("\n"));
+}
+
+function HunkPatchLines({ hunk, review, lineNumbers, markReviewed, openLine }: {
+  hunk: GitHunk; review?: GitReviewAnnotations; lineNumbers?: Record<DiffSide, number>; markReviewed?: MenuAction;
+  openLine: (side: DiffSide, line: number) => void;
 }) {
   const value = hunk.patch.slice(hunk.patch.indexOf("\n@@ ") + 1);
   const scope = review?.scope;
-  if (!scope || !lineNumbers) return <PatchLines value={value} />;
+  if (!lineNumbers) return <PatchLines value={value} />;
   let original = hunk.originalLine;
   let modified = hunk.modifiedLine;
   return <div className="overflow-auto p-3 font-mono text-xs leading-5">
@@ -302,15 +344,19 @@ function HunkPatchLines({ hunk, review, lineNumbers, markReviewed }: {
       const prefix = line[0];
       const originalLine = prefix === " " || prefix === "-" ? original++ : 0;
       const modifiedLine = prefix === " " || prefix === "+" ? modified++ : 0;
-      const actions = ([["original", originalLine, "base"], ["modified", modifiedLine, "revised"]] as const)
-        .filter(([side, number]) => lineNumbers[side] && number > 0 && number <= scope[side].lineCount)
+      const lines = ([["original", originalLine, "base"], ["modified", modifiedLine, "revised"]] as const)
+        .filter(([side, number]) => lineNumbers[side] > 0 && number > 0);
+      const locations = lines.filter(([side, number]) => number <= lineNumbers[side]).map(([side, number, label]) => ({
+        label: `Open ${label} version at line ${number}`, run: () => openLine(side, number),
+      }));
+      const comments = scope && lines.filter(([side, number]) => number <= scope[side].lineCount)
         .map(([side, number, label]) => ({
           label: `Add review comment on ${label} line…`,
           run: () => review.add({ side, startLine: number, endLine: number }),
         }));
       const className = prefix === "+" ? "bg-green-500/15" : prefix === "-" ? "bg-red-500/15" : "";
       const label = [originalLine && `Base line ${originalLine}`, modifiedLine && `Revised line ${modifiedLine}`].filter(Boolean).join(" · ");
-      return <ContextActions key={index} label={label} groups={[actions, markReviewed && actions.length ? [markReviewed] : []]} className={`diff-patch-line ${className}`}>
+      return <ContextActions key={index} label={label} groups={[locations, comments ?? [], markReviewed && (locations.length || comments?.length) ? [markReviewed] : []]} className={`diff-patch-line ${className}`}>
         <span className={`block min-w-0 flex-1 whitespace-pre ${className}`}>{line || " "}</span>
       </ContextActions>;
     })}
@@ -336,6 +382,7 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
   const instance = useRef<editor.IStandaloneDiffEditor | null>(null);
   const [opened, setOpened] = useState<editor.IStandaloneDiffEditor | null>(null);
   const [error, setError] = useState(false);
+  const [versionPreview, setVersionPreview] = useState<VersionPreview>();
   const layoutSetting = useRef(layout);
   layoutSetting.current = layout;
   const { copy, feedback } = useContextActionFeedback();
@@ -386,19 +433,26 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
         const sideEditor = side === "original" ? opened.getOriginalEditor() : opened.getModifiedEditor();
         const path = side === "original" ? file.originalPath ?? file.path : file.path;
         let clickedRange: IRange | undefined;
-        if (commentScope?.[side].lineCount) {
-          sideEditor.onMouseDown(({ target, event }) => {
-            clickedRange = undefined;
-            if (target.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || event.rightButton) return;
-            const current = actions.current.review;
-            const comment = current?.comments.find((entry) => entry.side === side && entry.startLine === target.position?.lineNumber);
-            if (comment) current?.show(comment.id);
-          });
-          sideEditor.onKeyDown(() => { clickedRange = undefined; });
-          sideEditor.onContextMenu(({ target }) => {
-            const position = target.position;
-            clickedRange = position ? sideEditor.getSelections()?.find((range) => range.containsPosition(position)) : undefined;
-          });
+        let clickedPosition: IPosition | undefined;
+        function clearContextLocation() { clickedPosition = undefined; clickedRange = undefined; }
+        sideEditor.onMouseDown(({ target, event }) => {
+          clearContextLocation();
+          if (!commentScope?.[side].lineCount || target.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || event.rightButton) return;
+          const current = actions.current.review;
+          const comment = current?.comments.find((entry) => entry.side === side && entry.startLine === target.position?.lineNumber);
+          if (comment) current?.show(comment.id);
+        });
+        sideEditor.onKeyDown(clearContextLocation);
+        sideEditor.onContextMenu(({ target }) => {
+          const position = target.position;
+          clickedPosition = position ?? undefined;
+          clickedRange = position && commentScope?.[side].lineCount
+            ? sideEditor.getSelections()?.find((range) => range.containsPosition(position)) : undefined;
+        });
+        function contextLine() {
+          const line = (clickedPosition ?? sideEditor.getPosition())?.lineNumber;
+          clearContextLocation();
+          return line;
         }
         function selection(range: IRange | null = sideEditor.getSelection()): EditorExcerpt | undefined {
           const model = sideEditor.getModel();
@@ -425,12 +479,21 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
           } });
         if (side === "modified" && actions.current.openLine) sideEditor.addAction({ id: "omniagent.open-working-diff-line",
           label: "Go to line in working file", contextMenuGroupId: "9_omniagent-diff",
-          run: () => { const line = sideEditor.getPosition()?.lineNumber; if (line) actions.current.openLine?.(line); } });
+          run: () => { const line = contextLine(); if (line) actions.current.openLine?.(line); } });
+        if (file[side].length) sideEditor.addAction({ id: `omniagent.open-${side}-diff-version-line`,
+          label: side === "original" ? "Open base version at line" : "Open revised version at line", contextMenuGroupId: "9_omniagent-diff",
+          run: () => {
+            const line = contextLine();
+            if (line) setVersionPreview(versionPreviewAtLine(file, side, line, actions.current.revisions?.[side]
+              ?? (side === "original" ? "Base" : "Revised")));
+          } });
         if (commentScope?.[side].lineCount) sideEditor.addAction({
           id: `omniagent.review-comment-${side}-diff`, label: "Add review comment…", contextMenuGroupId: "9_omniagent-diff",
           run: () => {
-            const range = selection(clickedRange);
-            clickedRange = undefined;
+            const location = clickedPosition;
+            const range = selection(clickedRange ?? (location ? { startLineNumber: location.lineNumber, endLineNumber: location.lineNumber,
+              startColumn: location.column, endColumn: location.column } : undefined));
+            clearContextLocation();
             const current = actions.current.review;
             if (range && current?.scope?.snapshot === commentScope.snapshot) current.add({ side, startLine: range.startLine, endLine: range.endLine });
           },
@@ -489,9 +552,12 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
     target.focus();
   }, [opened, review?.location]);
 
-  return error ? <><div className="p-2"><InlineIssue>Diff editor unavailable. Showing the text comparison.</InlineIssue></div><UnifiedPatch file={file} /></>
-    : <div className="flex h-full min-h-45 w-full min-w-0 flex-col overflow-hidden">
-      {feedback && <p className="px-3 py-1 text-xs" role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
-      <div className="min-h-0 flex-1" ref={anchor} aria-label={`Diff editor for ${file.path}`} />
-    </div>;
+  return <>
+    {error ? <><div className="p-2"><InlineIssue>Diff editor unavailable. Showing the text comparison.</InlineIssue></div><UnifiedPatch file={file} /></>
+      : <div className="flex h-full min-h-45 w-full min-w-0 flex-col overflow-hidden">
+        {feedback && <p className="px-3 py-1 text-xs" role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
+        <div className="min-h-0 flex-1" ref={anchor} aria-label={`Diff editor for ${file.path}`} />
+      </div>}
+    {versionPreview && <GitVersionPreview preview={versionPreview} close={() => setVersionPreview(undefined)} />}
+  </>;
 }
