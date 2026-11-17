@@ -2189,7 +2189,16 @@ test("discards only the reviewed Git hunk and preserves the staged file", { time
     const gitView = browser.$('[aria-label="Git workspace"]');
     await click(gitView, "button=Review hunks");
     const firstHunkActions = '[aria-label="Git hunks"] section[aria-label^="@@ -1,"] > .diff-hunk-menu > .context-actions-more';
-    await click(gitView, firstHunkActions);
+    const openFirstHunkActions = async () => {
+      await browser.waitUntil(() => browser.execute((selector) => {
+        const trigger = document.querySelector(selector);
+        if (!(trigger instanceof HTMLButtonElement)) return false;
+        trigger.focus();
+        return document.activeElement === trigger;
+      }, firstHunkActions), { timeoutMsg: "The first Git hunk did not render its action button." });
+      await browser.keys(Key.Enter);
+    };
+    await openFirstHunkActions();
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Mark hunk as reviewed"]');
     const reviewed = '//*[@aria-label="Git hunks"]//span[normalize-space(.)="Reviewed"]';
     await browser.$(reviewed).waitForDisplayed();
@@ -2199,7 +2208,7 @@ test("discards only the reviewed Git hunk and preserves the staged file", { time
     await click(browser, '.work-rail button[aria-label="Git"]');
     await click(gitView, "button=Review hunks");
     await browser.$(reviewed).waitForDisplayed();
-    await click(gitView, firstHunkActions);
+    await openFirstHunkActions();
     await click(browser, '//*[@role="menuitem"][normalize-space(.)="Discard hunk…"]');
     const preview = browser.$('[role="dialog"].file-comparison-dialog');
     await preview.$('[aria-label="Discard preview"]').waitForDisplayed();
