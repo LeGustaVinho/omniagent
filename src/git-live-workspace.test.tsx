@@ -48,6 +48,46 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
+it("stages and unstages the exact checked files with a single reviewed index mutation", async () => {
+  const selected = ["notes/one.md", "src/two.rs"];
+  const other = "untouched.txt";
+  let staged = false;
+  const revision = () => staged ? { ...originalRevision, index: "updated-index" } : originalRevision;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, worktrees, branches, root: checkout.checkoutRoot, managed: false, revision: revision(),
+      changes: [...selected, other].map((path) => ({ path, working: "M", staged: staged && selected.includes(path) ? "M" : null })),
+    };
+    if (command === "git_checkout_diff") return {
+      path: (payload as { path: string }).path, revision: revision(),
+      original: { status: "text", content: "base\n" }, modified: { status: "text", content: "modified\n" },
+    };
+    if (command === "set_git_paths_staged") { staged = (payload as { staged: boolean }).staged; return; }
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  openGit();
+  let files = within(await screen.findByRole("region", { name: "Changed files" }));
+  for (const path of selected) await user.click(files.getByRole("checkbox", { name: `Select ${path} for batch actions` }));
+  expect(files.getByRole("status").textContent).toContain("2 files selected");
+  fireEvent.contextMenu(files.getByRole("button", { name: /^untouched\.txt/ }));
+  expect(await screen.findByRole("menuitem", { name: "Stage file" })).toBeTruthy();
+  await user.keyboard("{Escape}");
+  fireEvent.keyDown(files.getByRole("button", { name: /^notes\/one\.md/ }), { key: "F10", shiftKey: true });
+  await user.click(await screen.findByRole("menuitem", { name: "Stage 2 selected files" }));
+  expect(invoke).toHaveBeenCalledWith("set_git_paths_staged", {
+    checkoutId: checkout.checkoutId, paths: selected, staged: true, expected: originalRevision,
+  });
+  await user.selectOptions(screen.getByLabelText("Diff source"), "staged");
+  files = within(await screen.findByRole("region", { name: "Changed files" }));
+  for (const path of selected) await user.click(await files.findByRole("checkbox", { name: `Select ${path} for batch actions` }));
+  fireEvent.contextMenu(files.getByRole("button", { name: /^src\/two\.rs/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Unstage 2 selected files" }));
+  expect(invoke).toHaveBeenCalledWith("set_git_paths_staged", {
+    checkoutId: checkout.checkoutId, paths: selected, staged: false, expected: { ...originalRevision, index: "updated-index" },
+  });
+});
+
 it("compares two tracked refs in the shared text diff without reading the worktree", async () => {
   const revisions = { base: "current-main", head: "current-feature", mergeBase: "common-ancestor" };
   const range = { baseReference: "refs/heads/main", headReference: "refs/heads/feature" };

@@ -28,6 +28,60 @@ fn commit_fixture(root: &Path, message: &str) -> Result<String> {
 }
 
 #[tokio::test]
+async fn stages_and_unstages_the_exact_file_selection_in_one_index_update() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("batch checkout");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let added = "file [literal].txt";
+    let deleted = "delete.txt";
+    let unrelated = "unrelated.txt";
+    for path in [added, deleted, unrelated] {
+        fs::write(root.join(path), "base\n")?;
+    }
+    commit_fixture(&root, "Base")?;
+    fs::write(root.join(added), "working edit\n")?;
+    fs::remove_file(root.join(deleted))?;
+    fs::write(root.join(unrelated), "staged elsewhere\n")?;
+    git(&root, &["add", "--", unrelated])?;
+    let first_index = fs::read(root.join(".git/index"))?;
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let original = store.git_checkout_review(checkout.clone()).await?.revision;
+    let selected = vec![added.into(), deleted.into()];
+    assert!(
+        store
+            .set_git_paths_staged(checkout.clone(), vec![added.into(), "missing".into()], true, original.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read(root.join(".git/index"))?, first_index);
+    store
+        .set_git_paths_staged(checkout.clone(), selected.clone(), true, original.clone())
+        .await?;
+    assert_eq!(git(&root, &["show", &format!(":{added}")])?, "working edit");
+    assert!(git(&root, &["show", &format!(":{deleted}")]).is_err());
+    assert_eq!(git(&root, &["show", &format!(":{unrelated}")])?, "staged elsewhere");
+    assert!(
+        store
+            .set_git_paths_staged(checkout.clone(), selected.clone(), false, original)
+            .await
+            .is_err()
+    );
+    let fresh = store.git_checkout_review(checkout.clone()).await?.revision;
+    store
+        .set_git_paths_staged(checkout, selected, false, fresh)
+        .await?;
+    assert_eq!(git(&root, &["show", &format!(":{added}")])?, "base");
+    assert_eq!(git(&root, &["show", &format!(":{deleted}")])?, "base");
+    assert_eq!(git(&root, &["show", &format!(":{unrelated}")])?, "staged elsewhere");
+    assert_eq!(fs::read_to_string(root.join(added))?, "working edit\n");
+    assert!(!root.join(deleted).exists());
+    Ok(())
+}
+
+#[tokio::test]
 async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_result() -> Result<()> {
     use crate::store::DraftKey;
 

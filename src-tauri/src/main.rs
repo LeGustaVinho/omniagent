@@ -524,6 +524,7 @@ fn main() {
             git_review_runtime::set_git_hunk_reviewed,
             git_review_runtime::create_git_worktree,
             git_review_runtime::set_git_path_staged,
+            git_review_runtime::set_git_paths_staged,
             git_review_runtime::set_git_hunk_staged,
             git_review_runtime::commit_git_index,
             git_review_runtime::git_saved_attempts,

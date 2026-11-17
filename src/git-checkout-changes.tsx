@@ -133,6 +133,18 @@ export function GitCheckoutChanges({ review, indexActions, initialSource = "work
                 `Review this Git hunk (${description}).\nHEAD: ${head}\nIndex fingerprint: ${index}`);
             } }] : []),
           ]]}
+          fileBatchActions={indexActions ? (rows) => {
+            const paths = rows.map(({ path }) => path);
+            const statuses = paths.map((path) => review.changes.find((entry) => entry.path === path));
+            const hasWorking = statuses.every((entry) => entry && !isUnmerged(entry) && entry.working);
+            const hasStaged = statuses.every((entry) => entry && !isUnmerged(entry) && entry.staged);
+            return [[
+              ...(hasWorking ? [{ label: `Stage ${paths.length} selected files`, disabled: changeStage.isPending,
+                run: () => changeStage.mutate({ paths, staged: true }) }] : []),
+              ...(hasStaged ? [{ label: `Unstage ${paths.length} selected files`, disabled: changeStage.isPending,
+                run: () => changeStage.mutate({ paths, staged: false }) }] : []),
+            ]];
+          } : undefined}
           fileActions={(file) => {
             if (file.kind === "Unmerged") return [[{ label: "Review conflict…", run: () => setConflict(file.path) }]];
             const entry = review.changes.find((change) => change.path === file.path);
@@ -241,9 +253,11 @@ function GitBranchComparison({ review, onClose, startContextText }: { review: Ch
 function useChangeStage(review: CheckoutReview) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (request: { path: string; staged: boolean } | { path: string; source: Source; hunkId: string; expected: ReviewRevision }) =>
+    mutationFn: (request: { path: string; staged: boolean } | { paths: string[]; staged: boolean }
+      | { path: string; source: Source; hunkId: string; expected: ReviewRevision }) =>
       "hunkId" in request ? invoke("set_git_hunk_staged", { checkoutId: review.checkoutId, ...request })
-        : invoke("set_git_path_staged", { checkoutId: review.checkoutId, ...request, expected: review.revision }),
+        : invoke("paths" in request ? "set_git_paths_staged" : "set_git_path_staged",
+          { checkoutId: review.checkoutId, ...request, expected: review.revision }),
     onSettled: () => Promise.all([
       client.invalidateQueries({ queryKey: ["git-review", review.checkoutId] }),
       client.invalidateQueries({ queryKey: ["git-live-diff", review.checkoutId] }),

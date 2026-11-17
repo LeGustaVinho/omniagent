@@ -293,6 +293,20 @@ pub async fn set_git_path_staged(
 }
 
 #[tauri::command]
+pub async fn set_git_paths_staged(
+    store: State<'_, Store>,
+    checkout_id: String,
+    paths: Vec<String>,
+    staged: bool,
+    expected: GitReviewRevision,
+) -> Result<(), String> {
+    store
+        .set_git_paths_staged(checkout_id, paths, staged, expected)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn set_git_hunk_reviewed(
     store: State<'_, Store>,
     checkout_id: String,

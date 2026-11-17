@@ -56,7 +56,7 @@ function ChangeCounts({ additions, deletions }: { additions: number; deletions: 
 }
 
 export function GitDiffReview({ source, title, ranges, files, selectedPath, select, comparison, preview, empty, notice,
-  allowSavedPatch, openFile, openLine, addExcerpt, fileActions, hunkActions, hunkReview, reviewAnnotations, reviewPanel, footer, onClose }: {
+  allowSavedPatch, openFile, openLine, addExcerpt, fileActions, fileBatchActions, hunkActions, hunkReview, reviewAnnotations, reviewPanel, footer, onClose }: {
   source: string;
   title: string;
   ranges: { base: string; revised: string };
@@ -72,6 +72,7 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   openLine?: (line: number) => void;
   addExcerpt?: ExcerptHandler;
   fileActions?: (file: GitDiffRow) => MenuGroups;
+  fileBatchActions?: (files: readonly GitDiffRow[]) => MenuGroups;
   hunkActions?: (hunk: GitHunk) => MenuGroups;
   hunkReview?: { pending: boolean; change: (hunkId: string, reviewed: boolean) => void };
   reviewAnnotations?: GitReviewAnnotations;
@@ -84,6 +85,8 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
   const [requestedLine, setRequestedLine] = useState<number>();
   const [copyError, setCopyError] = useState("");
   const [instance, setInstance] = useState<editor.IStandaloneDiffEditor | null>(null);
+  const [batchPaths, setBatchPaths] = useState<ReadonlySet<string>>(() => new Set());
+  const selectedFiles = files.filter(({ path }) => batchPaths.has(path));
   const selected = files.find((file) => file.path === selectedPath);
   const hasHunks = Boolean(comparison?.hunks?.length);
   const reviewedCount = comparison?.hunks?.filter((hunk) => hunk.reviewed).length ?? 0;
@@ -111,6 +114,21 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
       setRequestedLine(undefined);
     }
   }, [instance, requestedLine]);
+  useEffect(() => {
+    setBatchPaths((current) => {
+      if (current.size === 0) return current;
+      const remaining = files.filter(({ path }) => current.has(path));
+      return remaining.length === current.size ? current : new Set(remaining.map(({ path }) => path));
+    });
+  }, [files]);
+
+  function toggleFile(path: string) {
+    setBatchPaths((current) => {
+      const next = new Set(current);
+      if (!next.delete(path)) next.add(path);
+      return next;
+    });
+  }
   function copy(value: string) {
     setCopyError("");
     void Promise.resolve().then(() => navigator.clipboard.writeText(value)).catch(() => setCopyError("Could not copy to the clipboard."));
@@ -146,7 +164,14 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
         <ResizablePanel as="section" className="diff-files" aria-label="Changed files"
           edge="bottom" resizeKey="git-changed-files" resizeLabel="changed files">
           <div className="diff-files-scroll">
-          {files.map((file) => <ContextActions key={file.path} label={file.path} groups={[[
+          {fileBatchActions && selectedFiles.length > 0 && <p className="px-3 py-1 text-xs" role="status">
+            {selectedFiles.length} {selectedFiles.length === 1 ? "file" : "files"} selected
+          </p>}
+          {files.map((file) => <ContextActions key={file.path} label={file.path}
+            groups={fileBatchActions && batchPaths.has(file.path) && selectedFiles.length > 1 ? [[
+              { label: "Copy selected relative paths", run: () => copy(selectedFiles.map(({ path }) => path).join("\n")) },
+              { label: "Clear file selection", run: () => setBatchPaths(new Set()) },
+            ], ...fileBatchActions(selectedFiles)] : [[
             { label: selected?.path === file.path ? "Collapse diff" : "Open diff", run: () => {
               select(selected?.path === file.path ? "" : file.path);
               setPatchPath(undefined);
@@ -156,8 +181,13 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
               { label: "Copy patch", run: () => copy(comparison.patch!) },
             ] : []),
           ], ...(fileActions?.(file) ?? [])]}>
+            {fileBatchActions && <input type="checkbox" className="ml-3 shrink-0" aria-label={`Select ${file.path} for batch actions`}
+              checked={batchPaths.has(file.path)} onChange={() => toggleFile(file.path)} />}
             <button type="button" className="diff-file-row" aria-expanded={selected?.path === file.path}
-            onClick={() => { select(selected?.path === file.path ? "" : file.path); setPatchPath(undefined); }}>
+            onClick={(event) => {
+              if (fileBatchActions && (event.ctrlKey || event.metaKey)) toggleFile(file.path);
+              else { select(selected?.path === file.path ? "" : file.path); setPatchPath(undefined); }
+            }}>
             {selected?.path === file.path ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} className="text-muted-foreground" aria-hidden />}
             {file.kind === "Binary" ? <FileImage size={14} className="text-muted-foreground" aria-hidden /> : <FileCode2 size={14} className="text-muted-foreground" aria-hidden />}
             <span className="min-w-0 flex-1 truncate font-mono" title={file.path}>{file.previousPath && `${file.previousPath} → `}{file.path}</span>
