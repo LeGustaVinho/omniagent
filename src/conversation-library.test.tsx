@@ -237,6 +237,61 @@ it("shows newest activity first, filters by project and title, and reconnects to
   expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
 });
 
+it("opens a new conversation beside the active panel only within the selected worktree", async () => {
+  const { layouts } = repository();
+  const { user, onOpenOtherCheckout } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await user.click(await library().findByRole("button", { name: original }));
+  const referenceTab = await screen.findByRole("tab", { name: original });
+  const openBeside = async (title: string) => {
+    fireEvent.contextMenu(await library().findByRole("button", { name: title }));
+    await user.click(await screen.findByRole("menuitem", { name: "Open conversation to the side" }));
+  };
+  await openBeside("Live handoff");
+  const liveTab = await screen.findByRole("tab", { name: "Live handoff" });
+  expect(liveTab.closest(".dv-groupview")).not.toBe(referenceTab.closest(".dv-groupview"));
+  await waitFor(() => expect(layouts.get(`${selected.checkoutId}:conversations`)).toContain(liveId));
+  expect(invoke).toHaveBeenCalledWith("checkout_conversation", { checkoutId: selected.checkoutId, conversationId: liveId });
+
+  await user.click(library().getByRole("button", { name: original }));
+  await openBeside("Live handoff");
+  await waitFor(() => expect(library().getByRole("button", { name: "Live handoff" }).getAttribute("aria-current")).toBe("page"));
+  expect(screen.getAllByRole("tab", { name: "Live handoff" })).toEqual([liveTab]);
+  expect(liveTab.closest(".dv-groupview")).not.toBe(referenceTab.closest(".dv-groupview"));
+
+  await user.selectOptions(library().getByRole("combobox", { name: "Project" }), "");
+  fireEvent.contextMenu(await library().findByRole("button", { name: "Audit details" }));
+  const menu = within(await screen.findByRole("menu"));
+  expect(menu.queryByRole("menuitem", { name: "Open conversation to the side" })).toBeNull();
+  await user.click(menu.getByRole("menuitem", { name: "Open conversation" }));
+  expect(onOpenOtherCheckout).toHaveBeenCalledExactlyOnceWith(other, externalId);
+});
+
+it("moves an already open conversation to the side with the same mounted composer and draft", async () => {
+  repository();
+  const { user } = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await user.click(await library().findByRole("button", { name: original }));
+  const input = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Message draft" });
+  const edited = `${draft}\nRetain this unsent edit across a split.`;
+  fireEvent.change(input, { target: { value: edited } });
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_conversation_draft", { conversationId: archiveId, text: edited }));
+  await user.click(library().getByRole("button", { name: "Live handoff" }));
+  const companion = await screen.findByRole("tab", { name: "Live handoff" });
+  const originalTab = () => screen.getByRole("tab", { name: original });
+  expect(originalTab().closest(".dv-groupview")).toBe(companion.closest(".dv-groupview"));
+
+  const row = library().getByRole("button", { name: original });
+  row.focus();
+  await user.keyboard("{Shift>}{F10}{/Shift}");
+  await user.click(await screen.findByRole("menuitem", { name: "Open conversation to the side" }));
+  await waitFor(() => expect(originalTab().closest(".dv-groupview")).not.toBe(companion.closest(".dv-groupview")));
+  await waitFor(() => expect(screen.getAllByRole("textbox", { name: "Message draft" })).toContain(input));
+  expect(input.value).toBe(edited);
+  expect(screen.getAllByRole("tab", { name: original })).toHaveLength(1);
+  expect(invoke).not.toHaveBeenCalledWith("start_conversation_turn", expect.anything());
+});
+
 it("persists library and tab renames, restores older history and draft, and shares the saved title with the reference picker", async () => {
   const { layouts } = repository();
   const first = mount();
