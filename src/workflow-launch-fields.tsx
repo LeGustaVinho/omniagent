@@ -7,6 +7,8 @@ import type { Hierarchy } from "@/project-agile-model";
 import { RepositoryMarkdownPicker } from "@/repository-markdown-picker";
 import type { WorkflowStartField } from "@/workflow-graph-model";
 import { StructuredListField, StructuredObjectField } from "@/workflow-structured-fields";
+import { WorkflowSchemaInput } from "@/workflow-schema-editor";
+import { schemaValueProblem, type JsonSchema } from "@/workflow-schema-model";
 
 export type { WorkflowStartField } from "@/workflow-graph-model";
 type ValueType = WorkflowStartField["valueType"];
@@ -18,6 +20,7 @@ export type WorkflowStartSchema = {
   requiresBacklogPlan?: boolean;
   requiresEvent: boolean;
   promptOrMarkdown?: boolean;
+  jsonSchema?: JsonSchema;
 };
 
 export type TypedLaunchFields = {
@@ -45,12 +48,14 @@ export function initialWorkflowStartFields({ fields }: WorkflowStartSchema) {
     .map(({ name, valueType }) => [name, initialWorkflowStartValue(valueType)]));
 }
 
-export function WorkflowStartValueField({ field: { name, valueType, required }, value, disabled, onChange }: {
+export function WorkflowStartValueField({ field: { name, valueType, required }, schema, value, disabled, onChange }: {
   field: WorkflowStartField;
+  schema?: JsonSchema;
   value: unknown;
   disabled: boolean;
   onChange: (value: unknown) => void;
 }) {
+  if (schema) return <WorkflowSchemaInput label={name} schema={schema} value={value} disabled={disabled} onChange={onChange} />;
   switch (valueType) {
     case "object": return <StructuredObjectField label={name} value={value} disabled={disabled} onChange={onChange} />;
     case "array": return <StructuredListField label={name} value={value} disabled={disabled} onChange={onChange} />;
@@ -107,9 +112,10 @@ export function TypedWorkflowLaunchForm({ projectId, initialCheckoutId, pinnedDo
   const work = (hierarchy.data?.work ?? []).find(({ task }) => task.id === requestedWork);
   const workAvailable = requestedWork ? Boolean(work) : !schema.requiresWork;
   const supplied = schema.fields.every(({ name, required }) => (!required && !includedFields.includes(name)) || Object.hasOwn(values, name));
+  const invalidValues = schema.jsonSchema && schemaValueProblem(schema.jsonSchema, values, "Workflow inputs");
   const needsDocument = pinned || schema.requiresDocument ||
     (schema.promptOrMarkdown ? requestSource === "markdown" : includeDocument);
-  const ready = Boolean(checkout && workAvailable && supplied && !pending
+  const ready = Boolean(checkout && workAvailable && supplied && !invalidValues && !pending
     && (!schema.promptOrMarkdown || needsDocument || prompt.trim()));
   const error = checkouts.error ?? hierarchy.error;
 
@@ -160,11 +166,12 @@ export function TypedWorkflowLaunchForm({ projectId, initialCheckoutId, pinnedDo
             checked={included} onChange={(event) => toggleField(field, event.currentTarget.checked)} />
             Provide {field.name}
           </label>}
-          {included && <WorkflowStartValueField field={field} value={values[field.name]} disabled={pending}
+          {included && <WorkflowStartValueField field={field} schema={schema.jsonSchema?.properties?.[field.name]} value={values[field.name]} disabled={pending}
             onChange={(value) => setValue(field.name, value)} />}
         </div>;
       })}
     </fieldset>}
+    {supplied && invalidValues && <p role="alert">{invalidValues}</p>}
     {schema.promptOrMarkdown && !pinned && <label>Request source
       <select value={requestSource} disabled={pending}
         onChange={(event) => setRequestSource(event.currentTarget.value === "markdown" ? "markdown" : "prompt")}>

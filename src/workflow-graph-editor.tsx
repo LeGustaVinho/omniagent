@@ -7,6 +7,7 @@ import { ControlTooltip } from "@/components/ui/control-tooltip";
 import { PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineToolbar } from "@/pipeline-layout";
 import { WorkflowAgileFields } from "@/workflow-agile-editor";
+import { WorkflowControlFields } from "@/workflow-control-editor";
 import { CommandNodeConfiguration } from "@/workflow-command";
 import { DecisionNodeFields, type WorkflowDecisionConfiguration } from "@/workflow-decision-editor";
 import { WorkflowMcpNodeConfiguration } from "@/workflow-mcp-tools";
@@ -16,7 +17,7 @@ import { AgentRoleFields } from "@/workflow-stage-model";
 import type { StageGoalRoleRevision } from "@/workflow-stage-goal";
 import type { ReusableReference } from "@/workflow-reusable";
 import {
-  changedPorts, configurationProblem, connectionProblem, defaultConfiguration, incompatibility,
+  changedPorts, configurationProblem, configuredBranches, connectionProblem, defaultConfiguration, incompatibility,
   initialNodePositions, isPresetEligible, isStartNode, outputPort, portType, readableGraphViewport, wireKey,
   type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowGraph, type WorkflowGraphNode,
   type WorkflowEndpoint, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPort, type WorkflowReuseSelection, type WorkflowWire,
@@ -24,7 +25,8 @@ import {
 import "./workflow-graph-editor.css";
 
 type WorkflowNodeBinding = {
-  reference: ReusableReference;
+  reference?: ReusableReference;
+  slots?: Record<string, ReusableReference>;
   preset?: {
     base: WorkflowNodeConfiguration;
     fields: string[];
@@ -48,6 +50,14 @@ export function editorDefinitions(state: WorkflowEditorState, pinned: WorkflowDe
     if (!definition) return [];
     const bound = subflowDefinition?.(node.id);
     if (bound) definition = scopedSubflowPorts(node, definition, bound);
+    if (node.kind === "fork" || node.kind === "join_results") {
+      const branches = configuredBranches(node.configuration);
+      const control = (name: string): WorkflowPort => ({ name, value: { kind: "control" } });
+      const data = (name: string): WorkflowPort => ({ name, value: { kind: "data", artifact: "json_object" } });
+      definition = node.kind === "fork" ? {
+        ...definition, outputs: branches.flatMap((name) => [control(`branch:${name}`), data(`context:${name}`)]),
+      } : { ...definition, inputs: branches.flatMap((name) => [control(`branch:${name}`), data(`result:${name}`)]) };
+    }
     if (node.configuration.kind === "subflow_entry" && Array.isArray(node.configuration.outputs)) {
       definition = { ...definition, configuration: "subflow_entry", outputs: node.configuration.outputs };
     }
@@ -72,7 +82,16 @@ export function editorDefinitions(state: WorkflowEditorState, pinned: WorkflowDe
 }
 
 function scopedSubflowPorts(node: WorkflowGraphNode, definition: WorkflowDefinition, bound: WorkflowDefinition): WorkflowDefinition {
-  if (node.kind === "subflow") return { ...definition, inputs: bound.inputs, outputs: bound.outputs };
+  if (node.kind === "subflow") return { ...definition, title: bound.title, inputs: bound.inputs, outputs: bound.outputs,
+    inputSchemas: bound.inputSchemas, outputSchemas: bound.outputSchemas };
+  if (node.kind === "loop") {
+    const input = bound.inputSchemas?.[String(node.configuration.contextInput)]?.properties?.input;
+    const item = bound.outputSchemas?.[String(node.configuration.resultOutput)];
+    return { ...definition, inputSchemas: input ? { input } : undefined, outputSchemas: item ? {
+      results: { type: "object", properties: { iterations: { type: "array", items: item }, reason: { type: "string" } },
+        required: ["iterations", "reason"], additionalProperties: false },
+    } : undefined };
+  }
   if (node.kind === "repeat_until") {
     const exports = Array.isArray(node.configuration.exports) ? node.configuration.exports : [];
     return { ...definition, inputs: bound.inputs, outputs: [
@@ -184,12 +203,13 @@ function pasteOffset(points: number[], anchor?: number) {
 }
 
 const bindingFingerprint = (bindings: WorkflowEditorState["nodeBindings"]) =>
-  JSON.stringify(Object.entries(bindings ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([id, binding]) => [id, binding.reference]));
+  JSON.stringify(Object.entries(bindings ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([id, binding]) =>
+    [id, binding.reference, binding.slots]));
 
 export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, definitions, catalog, problems, disabled,
   allowDefinitionUpdates = true, inspectReference, editablePresetFields, goalRoleForNode, subflowDefinitionForNode,
   backlogBound, onDerive, deriveDisabled, fullHeight = false, toolbarStart, initialViewport, onViewportChange,
-  promptRoles, inspectPrompt }: {
+  promptRoles, inspectPrompt, insertTools, cloneBinding }: {
   projectId: string;
   checkoutId?: string;
   state: WorkflowEditorState;
@@ -212,8 +232,11 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   onViewportChange?: (viewport: Viewport) => void;
   promptRoles?: Record<string, string>;
   inspectPrompt?: (id: string) => ReactNode;
+  insertTools?: (insert: (kind: string, binding?: WorkflowNodeBinding, configuration?: WorkflowNodeConfiguration) => void) => ReactNode;
+  cloneBinding?: (binding: WorkflowNodeBinding) => WorkflowNodeBinding;
 }) {
   const { graph, layout } = state;
+  const hasEnd = graph.nodes.some(({ kind }) => kind === "end");
   const [theme, setTheme] = useState(readTheme);
   const [selected, select] = useState(graph.nodes[0]?.id ?? "");
   const [selectedNodes, setSelectedNodes] = useState<string[]>([]);
@@ -341,7 +364,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     };
   }
 
-  function insert(selection: GraphSelection, anchor?: { x: number; y: number }) {
+  function insert(selection: GraphSelection, anchor?: { x: number; y: number }, clone = true) {
     if (disabled || !selection.nodes.length) return;
     const ids = new Map(selection.nodes.map(({ node }) => [node.id, allocateId(node.id)]));
     const nextLayout = { ...layout };
@@ -352,16 +375,36 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     const copies = selection.nodes.map(({ node, position, binding, definition }) => {
       const id = ids.get(node.id)!;
       nextLayout[id] = { x: position.x + dx, y: position.y + dy };
-      if (binding) nodeBindings[id] = binding;
+      if (binding) nodeBindings[id] = clone ? cloneBinding?.(binding) ?? binding : binding;
       if (definition) definitionCopies[id] = definition;
-      return { ...node, id };
+      if (node.configuration.kind !== "join_results" || typeof node.configuration.fork !== "string") return { ...node, id };
+      const fork = ids.get(node.configuration.fork) ?? null;
+      return { ...node, id, configuration: { ...node.configuration, fork,
+        cancelRemaining: fork !== null && node.configuration.cancelRemaining === true } };
     });
     const wires = selection.wires.map(({ from, to }) => ({ from: { ...from, node: ids.get(from.node)! }, to: { ...to, node: ids.get(to.node)! } }));
     apply({ ...state, layout: nextLayout, ...(Object.keys(definitionCopies).length && { definitionCopies }),
-      ...(state.nodeBindings && { nodeBindings }),
+      ...(Object.keys(nodeBindings).length || state.nodeBindings ? { nodeBindings } : {}),
       graph: { ...graph, nodes: [...graph.nodes, ...copies], wires: [...graph.wires, ...wires] } });
     setSelectedNodes(copies.map(({ id }) => id));
     select(copies[0]!.id);
+  }
+
+  function insertNew(kind: string, binding?: WorkflowNodeBinding, configuration?: WorkflowNodeConfiguration) {
+    const definition = catalog.find((entry) => entry.kind === kind);
+    if (!definition) return;
+    const bounds = canvas.current?.getBoundingClientRect();
+    const point = bounds && flow ? flow.screenToFlowPosition({
+      x: bounds.left + bounds.width / 2,
+      y: bounds.top + bounds.height / 2,
+    }) : { x: 270, y: 120 };
+    insert({ nodes: [{ node: { id: kind.replaceAll("_", "-"), kind,
+      configuration: configuration ?? defaultConfiguration(definition.configuration) }, position: { x: 0, y: 0 }, binding }], wires: [] }, point, false);
+    revealInspector((request) => request + 1);
+  }
+
+  function isBoundary(kind: string) {
+    return hasEnd && (isStartNode(kind) || kind === "end");
   }
 
   function changeNodes(changes: NodeChange<CanvasNode>[], removedWireIds: string[] = []) {
@@ -385,6 +428,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
       if (change.type === "select" && change.selected) select(change.id);
       if (disabled) continue;
       if (change.type === "remove") {
+        if (graph.nodes.some(({ id, kind }) => id === change.id && isBoundary(kind))) continue;
         removed.add(change.id);
         delete nextLayout[change.id];
         delete nextDefinitions[change.id];
@@ -417,7 +461,11 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     apply({ ...state, layout: nextLayout, updateDefinitions: nextDefinitions,
       ...(state.definitionCopies && { definitionCopies }), ...(state.nodeBindings && { nodeBindings }),
       graph: removed.size || removedWires.size ? { ...graph,
-      nodes: graph.nodes.filter(({ id }) => !removed.has(id)),
+      nodes: graph.nodes.filter(({ id }) => !removed.has(id)).map((node) => {
+        const { configuration } = node;
+        return configuration.kind === "join_results" && typeof configuration.fork === "string" && removed.has(configuration.fork)
+          ? { ...node, configuration: { ...configuration, fork: null, cancelRemaining: false } } : node;
+      }),
       wires: graph.wires.filter((wire) => !removed.has(wire.from.node) && !removed.has(wire.to.node) && !removedWires.has(wireKey(wire))),
     } : graph });
   }
@@ -501,13 +549,14 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
     const first = scoped[0]!;
     const multiple = scoped.length > 1;
     const selection = `${scoped.length} selected nodes`;
-    const subflowNodes = scoped.filter(({ kind }) => !isStartNode(kind)).map(({ id }) => id);
-    const duplicable = scoped.every(({ id, kind }) => !isStartNode(kind) && definitions[id] !== undefined);
+    const subflowNodes = scoped.filter(({ kind }) => !isStartNode(kind) && !isBoundary(kind)).map(({ id }) => id);
+    const duplicable = scoped.every(({ id, kind }) => !isStartNode(kind) && !isBoundary(kind) && definitions[id] !== undefined);
     return [[
       ...(multiple ? [{ label: "Fit selection to view", disabled: !flow,
         run: () => { void flow?.fitView({ nodes: scoped.map(({ id }) => ({ id })), padding: 0.15, maxZoom: 1 }); } }] : []),
       ...(onDerive && subflowNodes.length ? [{ label: subflowNodes.length > 1
-        ? `Extract ${subflowNodes.length} selected nodes as subflow…` : "Extract node as subflow…", disabled: deriveDisabled,
+        ? `Extract ${subflowNodes.length} selected nodes as ${hasEnd ? "Function" : "subflow"}…`
+        : `Extract node as ${hasEnd ? "Function" : "subflow"}…`, disabled: deriveDisabled,
         run: () => onDerive({ type: "subflow", nodeIds: subflowNodes }) }] : []),
     ], disabled ? [] : [
       ...(duplicable ? [
@@ -519,8 +568,8 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         delete nextLayout[first.id];
         apply({ ...state, layout: nextLayout });
       } }] : []),
-      { label: multiple ? `Remove ${selection}` : "Remove node", destructive: true,
-        run: () => changeNodes(scoped.map(({ id }) => ({ type: "remove", id }))) },
+      ...(!scoped.some(({ kind }) => isBoundary(kind)) ? [{ label: multiple ? `Remove ${selection}` : "Remove node", destructive: true,
+        run: () => changeNodes(scoped.map(({ id }) => ({ type: "remove", id }))) }] : []),
     ]];
   }
 
@@ -549,7 +598,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
         { label: "Copy node ID", run: () => copy(clicked.id) },
         { label: "Copy node configuration", run: () => copy(JSON.stringify(clicked.configuration, null, 2)) },
       ], [
-        ...(onDerive && isPresetEligible(clicked) && !editablePresetFields?.[clicked.id] ? [{ label: "Save node as preset…", disabled: deriveDisabled,
+        ...(!hasEnd && onDerive && isPresetEligible(clicked) && !editablePresetFields?.[clicked.id] ? [{ label: "Save node as preset…", disabled: deriveDisabled,
           run: () => onDerive({ type: "preset", nodeId: clicked.id }) }] : []),
       ], ...scopedNodeActions(scoped)] };
     }
@@ -590,6 +639,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   }}>
     <PipelineToolbar>
       {toolbarStart}
+      {insertTools?.(insertNew)}
       <label className="pipeline-inline-field workflow-graph-name"><span>Pipeline name</span><input aria-label="Pipeline name" value={graph.name} disabled={disabled} onChange={(event) => {
         const name = event.currentTarget.value;
         patchGraph((previous) => ({ ...previous, name }));
@@ -694,7 +744,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
             <summary><SlidersHorizontal size={15} aria-hidden /> Settings <ChevronRight size={14} aria-hidden /></summary>
             <div className="pipeline-stack">
               {inspectReference?.(node.id)}
-              <NodeFields projectId={projectId} checkoutId={checkoutId} node={node} definition={definition}
+              <NodeFields projectId={projectId} checkoutId={checkoutId} node={node} definition={definition} nodes={graph.nodes}
                 presetFields={editablePresetFields?.[node.id]} goalRole={goalRoleForNode?.(node.id)}
                 subflow={subflowDefinitionForNode?.(node.id)}
                 backlogBound={backlogBound?.(node.id)}
@@ -714,7 +764,7 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
             </div>
           </details>}
         </>}
-        {node && !disabled && <Button type="button" variant="ghost" className="workflow-remove-node" onClick={() => changeNodes([{ id: node.id, type: "remove" }])}>
+        {node && !disabled && !isBoundary(node.kind) && <Button type="button" variant="ghost" className="workflow-remove-node" onClick={() => changeNodes([{ id: node.id, type: "remove" }])}>
           <Trash2 size={14} /> Remove node
         </Button>}
       </>} />
@@ -723,18 +773,25 @@ export function WorkflowGraphEditor({ projectId, checkoutId, state, setState, de
   </section>;
 }
 
-function NodeFields({ projectId, checkoutId, node, definition, disabled, presetFields, goalRole, subflow, backlogBound, onChange }: {
+function NodeFields({ projectId, checkoutId, node, definition, disabled, presetFields, goalRole, subflow, backlogBound, onChange, nodes }: {
   projectId: string; checkoutId?: string; node: WorkflowGraphNode; definition: WorkflowDefinition; disabled: boolean; onChange: (configuration: WorkflowNodeConfiguration) => void;
   presetFields?: string[];
   goalRole?: { version?: StageGoalRoleRevision; pending?: boolean };
   subflow?: WorkflowDefinition;
   backlogBound?: boolean;
+  nodes: WorkflowGraphNode[];
 }) {
   const { configuration } = node;
   const allow = (field: string) => !presetFields || presetFields.includes(field);
   const locked = disabled || presetFields?.length === 0;
   switch (definition.configuration) {
     case "none": return null;
+    case "end": return null;
+    case "fork":
+    case "join_results":
+    case "wait":
+    case "human":
+    case "loop": return <WorkflowControlFields configuration={configuration} disabled={locked} nodes={nodes} subflow={subflow} onChange={onChange} />;
     case "agent_role": return <AgentRoleFields projectId={projectId} checkoutId={checkoutId}
       mode={definition.kind === "plan" ? "plan" : definition.effect === "write_repository" ? "approved_write" : "read_only"}
       nodeId={node.id} nodeKind={node.kind} goalRole={goalRole}
@@ -763,7 +820,7 @@ function NodeFields({ projectId, checkoutId, node, definition, disabled, presetF
     case "set_fields": return <SetFieldsFields configuration={configuration} disabled={locked} onChange={onChange} />;
     case "filter_map_list": return <FilterMapListFields configuration={configuration} disabled={locked} onChange={onChange} />;
     case "build_text": return <BuildTextFields configuration={configuration} disabled={locked} onChange={onChange} />;
-    case "validate_output": return <StructuredObjectField label="Output JSON Schema" value={configuration.schema} disabled={locked}
+    case "validate_output": return definition.outputSchemas?.object ? null : <StructuredObjectField label="Output JSON Schema" value={configuration.schema} disabled={locked}
       onChange={(schema) => onChange({ ...configuration, schema })} />;
     case "quality_gate": return <>
       <p className="pipeline-meta">Use field paths into the evidence array, in wire order.</p>
@@ -771,7 +828,13 @@ function NodeFields({ projectId, checkoutId, node, definition, disabled, presetF
         onChange={(rules) => onChange({ ...configuration, rules })} />
     </>;
     case "compare_models": return <CompareModelsFields configuration={configuration} disabled={locked} onChange={onChange} />;
-    case "typed_start": return <StartInputFields configuration={configuration} disabled={locked} onChange={onChange} />;
+    case "typed_start": return definition.outputSchemas?.inputs ? <div className="pipeline-stack">
+      <label className="pipeline-checkline">
+        <input type="checkbox" checked={configuration.conversation === true} disabled={locked} onChange={(event) =>
+          onChange({ ...configuration, conversation: event.currentTarget.checked })} /> Conversation entry
+      </label>
+      {configuration.conversation === true && <small className="pipeline-meta">The chat supplies message and history fields declared in this Schema.</small>}
+    </div> : <StartInputFields configuration={configuration} disabled={locked} onChange={onChange} />;
     case "find_work":
     case "update_progress":
     case "manage_work":

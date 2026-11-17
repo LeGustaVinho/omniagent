@@ -14,6 +14,7 @@ import { PipelineAuthoringEditor, ProjectPipelineDrafts } from "@/workflow-autho
 import { WorkflowMaintenanceCandidates, WorkflowMaintenancePlugins } from "@/workflow-maintenance";
 import { WorkflowSettingsProposals } from "@/workflow-settings-proposals";
 import { WorkflowExecutionWorkspace } from "@/workflow-execution";
+import { WorkflowLibrary } from "@/workflow-library";
 import { workflowRunTarget, type WorkflowExecutionFocus } from "@/workflow-execution-model";
 import type { ComparisonHandoff } from "@/workflow-comparison-handoff";
 import { WorkflowExecutionStateBadge } from "@/workflow-execution-state";
@@ -237,7 +238,7 @@ function ProjectPipelinesWorkspace(props: WorkspaceProps) {
           : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
           : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} runFocus={runFocus}
             comparisonHandoff={handoff?.runId === runId ? handoff : undefined} />
-          : view === "library" ? <PipelineLibrary />
+          : view === "library" ? <WorkflowLibrary projectId={props.checkout.projectId} openWorkspace={props.openWorkspace} />
           : view === "maintenance" ? <ProjectPipelineMaintenance {...props} />
           : draftId ? <PipelineAuthoringEditor key={draftId} {...props} draftId={draftId} />
             : <ProjectPipelineDrafts {...props} />}

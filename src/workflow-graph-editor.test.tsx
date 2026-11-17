@@ -7,6 +7,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import PipelinesWorkspace from "@/pipelines-workspace";
+import { PipelineAuthoringEditor } from "@/workflow-authoring";
 import { editorDefinitions, WorkflowGraphEditor, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { configurationProblem, connectionProblem, defaultConfiguration, graphProblems, wireKey, type WorkflowCanvasEdit, type WorkflowDefinition, type WorkflowGraph, type WorkflowPort } from "@/workflow-graph-model";
 import { exampleCheckout } from "@/workbench-contract";
@@ -130,19 +131,77 @@ it("requires the reusable review's prompt and subject from the same evidence col
     definitions)).toEqual([]);
 });
 
-it("keeps the Library empty without loading the Builder node registry or packages", () => {
+it("loads published Library artifacts without loading the Builder node registry", async () => {
   const ipc = vi.mocked(invoke);
   ipc.mockClear();
+  ipc.mockResolvedValue([]);
   render(<QueryClientProvider client={new QueryClient()}>
     <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target="library" openWorkspace={vi.fn()}
       startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
   </QueryClientProvider>);
   const library = within(screen.getByRole("region", { name: "Workflow library" }));
-  expect(library.getByText("No items in the library.")).toBeTruthy();
+  expect(await library.findByText("No published schemas.")).toBeTruthy();
   expect(library.queryByRole("searchbox")).toBeNull();
   expect(library.queryByText("Import or export workflow packages")).toBeNull();
-  expect(ipc).not.toHaveBeenCalledWith("workflow_node_definitions");
-  expect(ipc).not.toHaveBeenCalledWith("workflow_package_catalog", expect.anything());
+  expect(ipc).not.toHaveBeenCalledWith("workflow_node_definitions", expect.anything());
+  expect(ipc).toHaveBeenCalledWith("workflow_package_catalog", { projectId: exampleCheckout.projectId });
+});
+
+it("adds an AI Node and saves its Prompt artifact with both Schema references", async () => {
+  const typedStart = { ...start, kind: "typed_start", configuration: "typed_start" };
+  const end = { ...start, kind: "end", title: "End", configuration: "end", inputs: [control("ready")], outputs: [control("completed")] };
+  const subflow = { ...start, kind: "subflow", title: "Function", inputs: [], outputs: [] };
+  const role = { destination: "project", kind: "role", id: "summarizer", revision: "role-one" };
+  const spec = (key: string, name: string) => ({ key, name, body: { kind: "schema", fields: [] } });
+  const current = {
+    id: "draft", revision: "saved", conversationId: null, publication: null, request: null,
+    package: { name: "Summarize", members: [
+      { key: "workflow", name: "Summarize", body: { kind: "pipeline", graph: {
+        name: "Summarize",
+        nodes: [{ id: "start", kind: "typed_start", configuration: defaultConfiguration("typed_start") },
+          { id: "end", kind: "end", configuration: defaultConfiguration("end") }],
+        wires: [wire("start", "start", "end", "ready")],
+      } } }, spec("incoming", "Incoming"), spec("outgoing", "Outgoing"),
+    ] },
+  };
+  const ipc = vi.mocked(invoke);
+  ipc.mockImplementation(async (command, payload) => {
+    switch (command) {
+      case "inspect_workflow_package": return current;
+      case "preview_workflow_package_revision": return { revision: current.revision, revisions: [current.revision], members: [] };
+      case "workflow_node_definitions": return [typedStart, end, subflow];
+      case "workflow_package_catalog": return [{ version: role, name: "Summarizer", blockers: [] }];
+      case "read_published_workflow_package_artifact": return { body: { kind: "role", template: {
+        name: "Summarizer", role: "agent", model: { provider: "codex", profileId: "default", modelId: "model" }, effort: null,
+        instructions: "", completionContract: "", toolScope: "read_only", reviewPolicy: "independent",
+      } } };
+      case "save_workflow_package": return { ...current, revision: "configured", package: (payload as { package: unknown }).package };
+      default: throw new Error(command);
+    }
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <PipelineAuthoringEditor checkout={exampleCheckout} draftId="package:draft" simulation={null} openWorkspace={vi.fn()}
+      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Add node" }));
+  await user.click(within(screen.getByRole("dialog", { name: "Add node" })).getByRole("button", { name: "AI Node Agent" }));
+  const settings = within(await screen.findByLabelText("AI Node Agent settings"));
+  await user.selectOptions(settings.getByRole("combobox", { name: "Role" }), settings.getByRole("option", { name: /^Summarizer/ }));
+  const input = settings.getByRole("combobox", { name: "Input Schema" });
+  const output = settings.getByRole("combobox", { name: "Output Schema" });
+  await user.selectOptions(input, within(input).getByRole("option", { name: /^Incoming/ }));
+  await user.selectOptions(output, within(output).getByRole("option", { name: /^Outgoing/ }));
+  await user.type(settings.getByRole("textbox", { name: "Prompt" }), "Summarize the message.");
+  await user.click(screen.getByRole("button", { name: "Save draft revision" }));
+  expect(ipc).toHaveBeenCalledWith("save_workflow_package", expect.objectContaining({ package: expect.objectContaining({
+    members: expect.arrayContaining([expect.objectContaining({
+      key: "agent",
+      body: { kind: "prompt", prompt: expect.objectContaining({ text: "Summarize the message.", schemaContract: true }) },
+      references: { role: { source: "published", version: role }, input_schema: { source: "draft", key: "incoming" },
+        output_schema: { source: "draft", key: "outgoing" } },
+    })]),
+  }) }));
 });
 
 it("duplicates the selected graph with its internal wires, exact old pin and undo history", async () => {

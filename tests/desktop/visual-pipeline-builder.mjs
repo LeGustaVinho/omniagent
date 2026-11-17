@@ -340,7 +340,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const views = browser.$('[aria-label="Pipelines views"]');
   await click(views.$("button=Library"));
   const library = browser.$('[aria-label="Workflow library"]');
-  await library.$("p=No items in the library.").waitForDisplayed({ timeout });
+  await library.$("button=New Schema").waitForDisplayed({ timeout });
   assert.equal(await library.$("[data-pipeline-node]").isExisting(), false);
   assert.equal(await library.$("summary=Import or export workflow packages").isExisting(), false);
   await click(views.$("button=Maintenance"));
@@ -380,11 +380,19 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   const draft = staged.find(({ name }) => name === title);
   assert.ok(draft, "The named builder action did not create a project draft");
   const draftScope = { projectId, draftId: draft.id };
-  assert.equal(await editor.$("button=Add node").isExisting(), false);
+  await click(editor.$("button=Add node"));
+  const insertNode = browser.$('[role="dialog"]');
+  await insertNode.$("button=AI Node Agent").waitForDisplayed({ timeout });
+  await insertNode.$("button=Parallel / Fork").waitForDisplayed({ timeout });
+  await browser.keys("Escape");
   assert.equal(await editor.$('[aria-label="Add a reusable node"]').isExisting(), false);
   const seeded = await invoke(browser, "inspect_workflow_package", draftScope);
-  assert.deepEqual(seeded.package.members[0].body.graph.nodes.map(({ kind }) => kind), ["typed_start"]);
-  seeded.package.members[0].body.graph.nodes.push(
+  const seedGraph = seeded.package.members[0].body.graph;
+  assert.deepEqual(seedGraph.nodes.map(({ kind }) => kind), ["typed_start", "end"]);
+  assert.deepEqual(seedGraph.wires, [{ from: { node: "start", port: "start" }, to: { node: "end", port: "ready" } }]);
+  seedGraph.nodes = seedGraph.nodes.filter(({ kind }) => kind !== "end");
+  seedGraph.wires = [];
+  seedGraph.nodes.push(
     { id: load, kind: "load_context", configuration: { kind: "none" } },
     { id: condition, kind: "condition", configuration: { kind: "condition", predicate: { op: "exists", pointer: "" } } },
   );
@@ -550,18 +558,52 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   });
   await launchFromTask({ browser, invoke, capture, checkout, title: `Task for ${title}`, version, sourceRevision });
 
+  const chatTitle = `Conversation template for ${title}`;
+  const chatDraft = await invoke(browser, "create_workflow_package", {
+    projectId, package: { name: chatTitle, members: [
+      { key: "chat-input", name: "Conversation message", body: { kind: "schema", fields: [
+        { name: "message", type: "string", required: true },
+      ] } },
+      { key: "chat-output", name: "Conversation reply", body: { kind: "schema", fields: [
+        { name: "reply", type: "string", required: true },
+      ] } },
+      { key: "pipeline", name: chatTitle, references: {
+        "start:schema": { source: "draft", key: "chat-input" },
+        "checked:schema": { source: "draft", key: "chat-output" },
+        "end:schema": { source: "draft", key: "chat-output" },
+      }, body: { kind: "pipeline", graph: { name: chatTitle, nodes: [
+        { id: "start", kind: "typed_start", configuration: { kind: "typed_start", conversation: true, fields: [] } },
+        { id: "context", kind: "load_context", configuration: { kind: "none" } },
+        { id: "answer", kind: "set_fields", configuration: { kind: "set_fields", mode: "build", operations: [
+          { op: "set", path: "/reply", value: { source: "literal", value: "Loaded the chosen Markdown revision." } },
+        ] } },
+        { id: "checked", kind: "validate_output", configuration: { kind: "validate_output", schema: { type: "object" } } },
+        { id: "end", kind: "end", configuration: { kind: "end" } },
+      ], wires: [
+        makeWire("start", "start", "context", "ready"), makeWire("start", "document", "context", "document"),
+        makeWire("context", "loaded", "answer", "ready"), makeWire("answer", "completed", "checked", "ready"),
+        makeWire("answer", "object", "checked", "source"), makeWire("checked", "completed", "end", "ready"),
+        makeWire("checked", "object", "end", "result"),
+      ] } } },
+    ] },
+  });
+  const publishedChat = await invoke(browser, "publish_reviewed_workflow_package", {
+    projectId, draftId: chatDraft.id, reviewedRevision: chatDraft.revision,
+  });
+  const chatArtifact = publishedChat.publication.members.find(({ key }) => key === "pipeline").artifact.version;
+  const chatVersion = { id: chatArtifact.id, revision: chatArtifact.revision };
   await click(browser.$('button[aria-label="Conversations"]'));
   await click(browser.$('button[aria-label="New conversation"]'));
   const picker = browser.$('.conversation-pipeline-dialog[role="dialog"]');
-  await click(picker.$(`.//label[.//strong[normalize-space(.)='${title}']]`));
+  await click(picker.$(`.//label[.//strong[normalize-space(.)='${chatTitle}']]`));
   await click(picker.$("button=Create conversation"));
   let conversation;
   await browser.waitUntil(async () => {
     conversation = (await invoke(browser, "list_conversations", { checkoutId }))
-      .find(({ pipeline }) => pipeline?.kind === "published" && pipeline.workflow.id === id);
+      .find(({ pipeline }) => pipeline?.kind === "published" && pipeline.workflow.id === chatVersion.id);
     return Boolean(conversation);
   }, { timeout, timeoutMsg: "The selected published conversation was not persisted" });
-  assert.deepEqual(conversation.pipeline.workflow, version);
+  assert.deepEqual(conversation.pipeline.workflow, chatVersion);
   const chat = browser.$(`section[aria-label=${JSON.stringify(conversation.title)}]`);
   const composer = chat.$('textarea[id^="draft-"]');
   const turns = () => invoke(browser, "conversation_pipeline_turns", { conversationId: conversation.id });
@@ -579,7 +621,7 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
   assert.notEqual(attempts[0].runId, attempts[1].runId);
   for (const { runId } of attempts) {
     const attempt = await invoke(browser, "inspect_workflow_execution", { projectId, runId });
-    assert.deepEqual(attempt.run.version, version);
+    assert.deepEqual(attempt.run.version, chatVersion);
   }
   await capture?.(browser, "real-conversation-pipeline-turns");
 
@@ -597,6 +639,14 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
     await invoke(browser, "save_conversation_draft", { ...directScope, text: previous });
     await invoke(browser, "start_conversation_turn", { ...directScope, selection: model.option.selection, mode: "read_only", text: previous });
     await browser.waitUntil(async () => (await invoke(browser, "latest_conversation_run", directScope))?.status === "succeeded", { timeout });
+    let directTurn;
+    await browser.waitUntil(async () => {
+      [directTurn] = await invoke(browser, "conversation_pipeline_turns", directScope);
+      return directTurn?.state === "succeeded";
+    }, { timeout, timeoutMsg: "The direct conversation did not reach End" });
+    const directRun = await invoke(browser, "inspect_workflow_execution", { projectId, runId: directTurn.runId });
+    assert.deepEqual(directRun.definition.nodes.map(({ instance }) => instance.kind), ["typed_start", "conversation_agent", "end"]);
+    assert.ok(directRun.control.some(({ nodeId, state }) => nodeId === "end" && state === "completed"));
     await browser.refresh();
     await click(browser.$('button[aria-label="Conversations"]'));
     await click(browser.$(`section[aria-label="Conversation library"] button[aria-label=${JSON.stringify(title)}]`));
@@ -612,13 +662,13 @@ export async function verifyVisualPipelineBuilder({ browser, application, checko
     await textIsVisible(browser, continuationDialog, "Choose how to continue");
     await click(continuationDialog.$('.//label[contains(normalize-space(.), "Start a fresh conversation")]'));
     assert.equal(await continuationDialog.$("button=Continue and send").isEnabled(), false);
-    await click(continuationDialog.$(`.//label[.//code[@title='${version.revision}']]`));
+    await click(continuationDialog.$(`.//label[.//code[@title='${chatVersion.revision}']]`));
     await capture?.(browser, "real-continuation-pipeline-picker");
     await click(continuationDialog.$("button=Open draft"));
     const fresh = browser.$('section[aria-label="New conversation"] textarea[id^="draft-"]');
     await browser.waitUntil(async () => await fresh.isDisplayed() && (await fresh.getValue()) === draft, { timeout });
     const target = (await invoke(browser, "list_conversations", { checkoutId })).find((item) => item.title === "New conversation");
-    assert.deepEqual(target?.pipeline.workflow, version);
+    assert.deepEqual(target?.pipeline.workflow, chatVersion);
     assert.equal(await invoke(browser, "conversation_draft", directScope), "");
     assert.deepEqual(await invoke(browser, "conversation_pipeline_turns", { conversationId: target.id }), []);
 

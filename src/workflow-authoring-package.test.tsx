@@ -241,7 +241,8 @@ it("starts a named pipeline directly in the visual Builder", async () => {
       key: "pipeline", name: "Visual review", destination: "project",
       body: { kind: "pipeline", graph: { name: "Visual review", nodes: [
         { id: "start", kind: "typed_start", configuration: { kind: "typed_start", fields: [] } },
-      ], wires: [] } },
+        { id: "end", kind: "end", configuration: { kind: "end" } },
+      ], wires: [{ from: { node: "start", port: "start" }, to: { node: "end", port: "ready" } }] } },
     }] },
   });
   await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "authoring:package:visual-draft"));

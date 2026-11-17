@@ -329,7 +329,7 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
   const text = draft.data ?? "";
   const pipelineIsDirect = pipeline.kind === "direct";
   const pipelineTurns = useConversationPipelineTurns(conversationId, visible && pipelineKnown && !pipelineIsDirect,
-    (submitted) => saveDraft(conversationId, submitted));
+    (submitted) => saveDraft(conversationId, submitted), visible && pipelineKnown && pipelineIsDirect);
   const rememberedModel = pipelineTurns.defaultModel;
   const effort = chosenEffort ?? (explicitSelection ? "" : rememberedModel?.effort ?? "");
   const [pipelineSetup, setPipelineSetup] = useState<"edit" | "send">();
@@ -516,6 +516,7 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
       if ("review" in outcome) { setContinuation(outcome); return; }
       clearSubmittedDraft(submitted);
       void instructions.refresh();
+      void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "pipeline-turns"] });
       if (toRun) steer.mutate({ instructionId: outcome.instructionId, runId: toRun });
       if (library) await Promise.all([queryClient.invalidateQueries({ queryKey: referenceDraftKey }), attachments.refresh()]);
     },
@@ -533,6 +534,7 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
       clearSubmittedDraft(intent.text);
       setContinuation(undefined);
       void instructions.refresh();
+      void queryClient.invalidateQueries({ queryKey: ["conversation", conversation.id, "pipeline-turns"] });
       void queryClient.invalidateQueries({ queryKey: conversationLibraryKey });
       void queryClient.invalidateQueries({ queryKey: ["conversations", conversation.checkoutId] });
       if (library && intent.review.targetCheckout) {
@@ -560,6 +562,7 @@ function ConversationContent({ conversationId, title, checkoutId, confirmedCheck
         setDraftStatus("");
       }
       setGoalSettings(undefined);
+      void queryClient.invalidateQueries({ queryKey: ["conversation", conversationId, "pipeline-turns"] });
       await Promise.all([refreshGoal(), queryClient.invalidateQueries({ queryKey: jobKey }), instructions.refresh()]);
     },
   });

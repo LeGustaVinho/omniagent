@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowRight, Check, CircleAlert, FilePlus2, Package as PackageIcon, Plus, Save, Search, SlidersHorizontal, Sparkles, Upload, Workflow, X } from "lucide-react";
+import { ArrowRight, Braces, Check, CircleAlert, FilePlus2, Package as PackageIcon, Plus, Save, Search, SlidersHorizontal, Sparkles, Upload, Workflow, X } from "lucide-react";
 import type { Viewport } from "@xyflow/react";
 import { Dialog } from "radix-ui";
 import { Button } from "@/components/ui/button";
@@ -9,13 +9,13 @@ import { ModelPicker } from "@/components/model-picker";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { availableModelSelection, LIVE_MODEL_PROVIDERS, useLiveModelOptions } from "@/live-models";
 import type { WorkspaceProps } from "@/workbench-contract";
-import { PackagePublicationPreview, WorkflowPackageGraphEditing, WorkflowPackageReview, usePackagePreview } from "@/workflow-package-review";
+import { PackagePublicationPreview, WorkflowPackageGraphEditing, WorkflowPackageReview, usePackagePreview, type SchemaMember } from "@/workflow-package-review";
 import { WorkflowEditorAssistance } from "@/workflow-editor-assistance";
 import { WorkflowBuilderDialog } from "@/workflow-builder-dialog";
 import { WorkflowLaunchPicker } from "@/workflow-launch";
 import { WorkflowReusableDerivation, type ReusableBody, type ReusableReference } from "@/workflow-reusable";
 import type { WorkflowCanvasEdit, WorkflowGraph, WorkflowLayout, WorkflowNodeConfiguration } from "@/workflow-graph-model";
-import { promptEndpointForRename, type PromptMember, type PromptPortRename } from "@/workflow-prompt-model";
+import { defaultTypedPrompt, promptEndpointForRename, type PromptMember, type PromptPortRename } from "@/workflow-prompt-model";
 import "./pipeline-builder-landing.css";
 
 type Version = { kind: string; id: string; revision: string; destination: "project" | "library" };
@@ -46,6 +46,21 @@ const packageKey = (projectId: string, draftId: string) => [...packagesKey(proje
 const pending = (draft?: PackageDraft) => !!draft?.request
   && ["queued", "starting", "running", "waiting_for_input", "paused"].includes(draft.request.state);
 export const packageDraftTarget = (draftId: string) => `authoring:package:${draftId}`;
+
+export function schemaMember(key: string, name: string): SchemaMember {
+  return { key, name, body: { kind: "schema", fields: [] } };
+}
+
+function schemaMembers(members: Member[]): SchemaMember[] {
+  return members.flatMap(({ key, name, body }) => body.kind === "schema" && Array.isArray(body.fields)
+    ? [{ key, name, body: { kind: "schema", fields: body.fields } }] : []);
+}
+
+function uniqueMemberKey(stem: string, members: Member[], archived: Map<string, Member>) {
+  let key = stem;
+  for (let suffix = 2; members.some((member) => member.key === key) || archived.has(key); suffix += 1) key = `${stem}-${suffix}`;
+  return key;
+}
 
 function packageGraphs(text: string) {
   try {
@@ -126,7 +141,10 @@ export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, author
         name,
         members: [{
           key: "pipeline", name, destination: "project",
-          body: { kind: "pipeline", graph: { name, nodes: [{ id: "start", kind: "typed_start", configuration: { kind: "typed_start", fields: [] } }], wires: [] } },
+          body: { kind: "pipeline", graph: { name, nodes: [
+            { id: "start", kind: "typed_start", configuration: { kind: "typed_start", fields: [] } },
+            { id: "end", kind: "end", configuration: { kind: "end" } },
+          ], wires: [{ from: { node: "start", port: "start" }, to: { node: "end", port: "ready" } }] } },
         }],
       };
       return invoke<PackageDraft>("create_workflow_package", { projectId, conversationId: null, package: packageDocument });
@@ -145,7 +163,7 @@ export function PipelineBuilderLanding({ checkout, openWorkspace, drafts, author
       <div className="pipeline-builder-starts">
         <article className="pipeline-builder-start" data-primary="true">
           <span className="pipeline-builder-icon"><FilePlus2 size={18} aria-hidden /></span>
-          <div><h3>From scratch</h3><p>Open the canvas with a start node and add the steps you need.</p></div>
+          <div><h3>From scratch</h3><p>Build a workflow between Start and End.</p></div>
           <Dialog.Root open={creatingPipeline} onOpenChange={(open) => {
             if (create.isPending) return;
             if (open) { setPipelineName(""); create.reset(); }
@@ -276,6 +294,8 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
   currentText.current = text;
   const [confirmation, setConfirmation] = useState(false);
   const [packageOpen, setPackageOpen] = useState(false);
+  const [addingSchema, setAddingSchema] = useState(false);
+  const [schemaName, setSchemaName] = useState("");
   const [authoringOpen, setAuthoringOpen] = useState(false);
   const [reusableMember, setReusableMember] = useState("");
   const [feedback, setFeedback] = useState("");
@@ -311,7 +331,11 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
     }),
     onSuccess: (result) => {
       setConfirmation(false);
-      if (result.status === "published") update({ ...draft, publication: result.publication });
+      if (result.status === "published") {
+        update({ ...draft, publication: result.publication });
+        void client.invalidateQueries({ queryKey: ["workflow-package-catalog", projectId] });
+        void client.invalidateQueries({ queryKey: ["conversation-pipeline-options", checkoutId] });
+      }
     },
   });
   const dirty = text !== JSON.stringify(draft.package, null, 2) || Object.keys(canvasByMember).length > 0;
@@ -329,6 +353,7 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
     }
   })();
   const promptMembers = packagePromptMembers(draftMembers);
+  const schemas = schemaMembers(draftMembers);
   const savedGraphs = packageGraphs(JSON.stringify(draft.package));
   const savedReuseGraph = savedGraphs.find(({ key }) => key === (reusableMember || graphMember)) ?? savedGraphs[0];
   const draftPresets = Object.fromEntries(draft.package.members.filter(({ body }) => body.kind === "preset")
@@ -375,6 +400,36 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
       } } };
     });
     setText(JSON.stringify({ ...current, members }, null, 2));
+  }
+  function editSchema(schema: SchemaMember) {
+    const current = JSON.parse(currentText.current) as Package;
+    const members = current.members.map((member) => member.key === schema.key ? { ...member, ...schema } : member);
+    setText(JSON.stringify({ ...current, members }, null, 2));
+  }
+  function addSchema() {
+    const name = schemaName.trim();
+    if (!name) return;
+    const current = JSON.parse(currentText.current) as Package;
+    const key = uniqueMemberKey("schema", current.members, promptArchive.current);
+    setText(JSON.stringify({ ...current, members: [...current.members, schemaMember(key, name)] }, null, 2));
+    selectGraphMember(key);
+    setAddingSchema(false);
+    setSchemaName("");
+    setPackageOpen(false);
+  }
+  function newPrompt(source?: PromptMember): ReusableReference {
+    const current = JSON.parse(currentText.current) as Package;
+    const key = uniqueMemberKey("agent", current.members, promptArchive.current);
+    promptArchive.current.set(key, { name: "AI Node Agent", body: { kind: "prompt", prompt: defaultTypedPrompt() },
+      ...source, key, destination: "project" });
+    return { source: "draft", key };
+  }
+  function savePrefab(name: string, prompt: PromptMember["body"]["prompt"], references: Record<string, ReusableReference>) {
+    const current = JSON.parse(currentText.current) as Package;
+    const key = uniqueMemberKey("prefab", current.members, promptArchive.current);
+    const prefab: Member = { key, name, destination: "project", body: { kind: "prompt", prompt: { ...prompt, nodePrefab: true } }, references };
+    setText(JSON.stringify({ ...current, members: [...current.members, prefab] }, null, 2));
+    selectGraphMember(key);
   }
   function applyStageModel() {
     if (!stageModel) return;
@@ -463,10 +518,11 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
     {save.error && <p role="alert" className="workflow-builder-warning">{String(save.error)}</p>}
     <WorkflowPackageGraphEditing projectId={projectId} checkoutId={checkoutId} draftId={draft.id} savedRevision={draft.revision}
       graphs={graphs} draftPresets={draftPresets} layouts={draft.layouts} canvasByMember={canvasByMember}
-      promptMembers={promptMembers}
+      promptMembers={promptMembers} draftSchemas={schemas}
       draftRoles={draftMembers.flatMap((member) => member?.body?.kind === "role" && typeof member?.key === "string" && typeof member?.name === "string"
-        ? [{ name: member.name + " · This draft", reference: { source: "draft" as const, key: member.key } }] : [])}
-      editPrompt={editPrompt}
+        ? [{ name: member.name + " · This draft", reference: { source: "draft" as const, key: member.key },
+          template: member.body.template }] : [])}
+      editPrompt={editPrompt} editSchema={editSchema} newPrompt={newPrompt} savePrefab={savePrefab}
       selection={graphMember} select={selectGraphMember} viewports={viewports}
       deriveDisabled={busy || dirty || revisionConflict} onDerived={update}
       changeCanvas={(key, canvas) => setCanvases((previous) => {
@@ -494,8 +550,17 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
         wide open={packageOpen} onOpenChange={setPackageOpen}
         trigger={<Button variant="ghost"><PackageIcon size={15} aria-hidden /> Draft artifacts</Button>}>
         <div className="workflow-package-source pipeline-actions"><code>{draft.revision}</code>{sourceActions}</div>
-        <PackageMembers members={draft.package.members} graphs={[...savedGraphs, ...packagePromptMembers(draft.package.members)].map(({ key }) => key)}
+        <PackageMembers members={draft.package.members} graphs={[...savedGraphs, ...packagePromptMembers(draft.package.members), ...schemaMembers(draft.package.members)].map(({ key }) => key)}
           onOpen={(key) => { selectGraphMember(key); setPackageOpen(false); }} />
+        {addingSchema ? <form className="pipeline-stack pipeline-form" onSubmit={(event) => { event.preventDefault(); addSchema(); }}>
+          <label>Schema name<input value={schemaName} autoComplete="off" required onChange={(event) => setSchemaName(event.currentTarget.value)} /></label>
+          <div className="pipeline-actions">
+            <Button type="submit" disabled={busy || !schemaName.trim()}>Create Schema</Button>
+            <Button type="button" variant="ghost" onClick={() => setAddingSchema(false)}>Cancel</Button>
+          </div>
+        </form> : <Button type="button" variant="outline" className="w-fit" disabled={busy} onClick={() => setAddingSchema(true)}>
+          <Braces size={15} aria-hidden /> New Schema
+        </Button>}
         {savedReuseGraph && <section className="workflow-package-reuse pipeline-form pipeline-stack" aria-label={`Reuse ${savedReuseGraph.name}`}>
           {savedGraphs.length > 1 && <label>Saved graph<select value={savedReuseGraph.key} onChange={(event) => setReusableMember(event.currentTarget.value)}>
             {savedGraphs.map(({ key, name }) => <option key={key} value={key}>{name}</option>)}
@@ -567,7 +632,8 @@ function PackageMembers({ members, graphs, onOpen }: { members: Member[]; graphs
         <span className="workflow-package-member-icon"><PackageIcon size={15} aria-hidden /></span>
         <div><strong>{member.name}</strong><small>{member.body.kind.replaceAll("_", " ")} · {member.destination ?? "project"}</small>
           {member.base && <code title={member.base.revision}>Base {member.base.revision}</code>}</div>
-        {graphs.includes(member.key) && <Button variant="ghost" onClick={() => onOpen(member.key)} aria-label={member.body.kind === "prompt" ? "Open Prompt " + member.name : "Open graph " + member.name}>
+        {graphs.includes(member.key) && <Button variant="ghost" onClick={() => onOpen(member.key)} aria-label={member.body.kind === "prompt" ? "Open Prompt " + member.name
+          : member.body.kind === "schema" ? "Open Schema " + member.name : "Open graph " + member.name}>
           <ArrowRight size={15} aria-hidden />
         </Button>}
       </li>)}</ul>}

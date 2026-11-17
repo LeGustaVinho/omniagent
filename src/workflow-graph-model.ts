@@ -1,3 +1,5 @@
+import { schemaMismatch, type JsonSchema } from "@/workflow-schema-model";
+
 export type WorkflowEndpoint = { node: string; port: string };
 export type WorkflowWire = { from: WorkflowEndpoint; to: WorkflowEndpoint };
 export type WorkflowNodeConfiguration = { kind: string; [field: string]: unknown };
@@ -15,6 +17,8 @@ export type WorkflowDefinition = {
   effect: string;
   inputs: WorkflowPort[];
   outputs: WorkflowPort[];
+  inputSchemas?: Record<string, JsonSchema>;
+  outputSchemas?: Record<string, JsonSchema>;
 };
 
 export type WorkflowDefinitions = Record<string, WorkflowDefinition>;
@@ -72,6 +76,13 @@ export function isPresetEligible({ kind, configuration }: WorkflowGraphNode) {
 
 export function defaultConfiguration(kind: string): WorkflowNodeConfiguration {
   switch (kind) {
+    case "fork": return { kind, branches: ["first", "second"], concurrency: null };
+    case "join_results": return { kind, branches: ["first", "second"], strategy: "all", quorum: null,
+      countFailures: false, cancelRemaining: false, fork: null };
+    case "wait": return { kind, until: { kind: "delay", seconds: 60 } };
+    case "human": return { kind, interaction: "approval", message: "Does this stage have your approval?", fields: [] };
+    case "loop": return { kind, maxIterations: 3, breakWhen: null, exitWhen: null, limit: "complete",
+      readyInput: "ready", contextInput: "context", completionOutput: "completed", resultOutput: "result" };
     case "agent_role": return { kind, role: "" };
     case "required_checks": return { kind, names: [] };
     case "candidate_checks": return { kind: "required_checks", names: [] };
@@ -132,8 +143,18 @@ export function incompatibility(definitions: WorkflowDefinitions, { from, to }: 
   const input = inputPort(definitions, to);
   if (!output) return `Output ${from.node}.${from.port} is unavailable.`;
   if (!input) return `Input ${to.node}.${to.port} is unavailable.`;
-  return sameType(output.value, input.value) || (output.value.kind === "data" && input.value.kind === "evidence") ? null
-    : `${from.node}.${from.port} (${portType(output.value)}) cannot connect to ${to.node}.${to.port} (${portType(input.value)}).`;
+  if (!sameType(output.value, input.value) && !(output.value.kind === "data" && input.value.kind === "evidence")) {
+    return `${from.node}.${from.port} (${portType(output.value)}) cannot connect to ${to.node}.${to.port} (${portType(input.value)}).`;
+  }
+  const target = definitions[to.node]?.inputSchemas?.[to.port];
+  if (!target) return null;
+  const source = definitions[from.node]?.outputSchemas?.[from.port];
+  const issue = source ? schemaMismatch(source, target) : "The source needs a declared output Schema.";
+  return issue ? `${from.node}.${from.port} → ${to.node}.${to.port} · ${issue}` : null;
+}
+
+export function configuredBranches(configuration: WorkflowNodeConfiguration): string[] {
+  return Array.isArray(configuration.branches) ? configuration.branches.filter((name): name is string => typeof name === "string") : [];
 }
 
 function wireProblem(graph: WorkflowGraph, definitions: WorkflowDefinitions, wire: WorkflowWire) {
@@ -202,10 +223,38 @@ function setOperations(configuration: WorkflowNodeConfiguration): SetFieldOperat
 
 export function configurationProblem(configuration: WorkflowNodeConfiguration, definition: WorkflowDefinition, backlogBound = false) {
   if (definition.configuration === "candidate_acceptance" && configuration.kind === "none") return null;
+  if (definition.kind === "subflow" && configuration.kind === "prompt_overrides") return null;
   const candidateChecks = definition.configuration === "candidate_checks"
     && (configuration.kind === "required_checks" || configuration.kind === "staged_checks");
   if (configuration.kind !== definition.configuration && !candidateChecks) return "Review the parameters for this node version.";
   switch (configuration.kind) {
+    case "fork":
+    case "join_results": {
+      const branches = configuredBranches(configuration);
+      if (branches.length < 2 || new Set(branches).size !== branches.length ||
+        !branches.every((name) => /^[a-zA-Z0-9_-]+$/.test(name))) return "Use at least two unique branch names.";
+      const bounded = configuration.kind === "fork" ? configuration.concurrency : configuration.strategy === "quorum" ? configuration.quorum : null;
+      return (bounded == null && configuration.strategy !== "quorum") ||
+        (typeof bounded === "number" && Number.isInteger(bounded) && bounded >= 1 && bounded <= branches.length)
+        ? null : "Choose a branch count within the configured branches.";
+    }
+    case "wait": {
+      const until = configuration.until as { kind?: string; seconds?: number; at?: string } | undefined;
+      return until?.kind === "delay" && Number.isInteger(until.seconds) && (until.seconds ?? 0) > 0 ||
+        until?.kind === "scheduled" && !!until.at && Number.isFinite(Date.parse(until.at))
+        ? null : "Set a positive delay or scheduled time.";
+    }
+    case "human":
+      return typeof configuration.message === "string" && configuration.message.trim()
+        && (!["input", "feedback"].includes(String(configuration.interaction)) || Array.isArray(configuration.fields) && configuration.fields.length)
+        ? null : "Enter a message and configure the requested fields.";
+    case "loop":
+      if (!validIterationLimit(configuration.maxIterations)) return "Enter an iteration limit between 1 and 32.";
+      if (configuration.breakWhen != null) {
+        const problem = predicateProblem(configuration.breakWhen, false);
+        if (problem) return problem;
+      }
+      return configuration.exitWhen == null ? null : predicateProblem(configuration.exitWhen, false);
     case "agent_role": return typeof configuration.role === "string" && configuration.role.trim() ? null : "Agent role is required.";
     case "required_checks":
     case "staged_checks": {
@@ -357,6 +406,14 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
   const problems: string[] = [];
   if (!graph.name.trim()) problems.push("Enter a pipeline name.");
   if (graph.nodes.filter(({ kind }) => isStartNode(kind)).length !== 1) problems.push("The pipeline needs one Start node.");
+  const ends = graph.nodes.filter(({ kind }) => kind === "end");
+  if (ends.length > 1) problems.push("Choose one End node.");
+  if (graph.nodes.some(({ kind, configuration }) => kind === "typed_start" && configuration.conversation === true)) {
+    const result = ends[0] && definitions[ends[0].id]?.outputSchemas?.result;
+    if (result?.properties?.reply?.type !== "string" || !result.required?.includes("reply")) {
+      problems.push("A conversation pipeline needs an End result Schema with required reply text.");
+    }
+  }
   for (const node of graph.nodes) {
     const definition = definitions[node.id];
     if (!definition) {
@@ -402,6 +459,10 @@ export function graphProblems(graph: WorkflowGraph, definitions: WorkflowDefinit
         const required = node.configuration.reviewMode === "selected";
         if (wired !== required) problems.push(`${node.id}.selected_reviews requires a connection when using the selected reviews.`);
       } else if (((node.kind === "approval" || node.kind === "summarize_result") && port.name === "evidence") ||
+        (node.kind === "end" && port.name === "result" && !definition.inputSchemas?.result) ||
+        (node.kind === "wait" && port.name === "input") ||
+        (node.kind === "human" && port.name === "input" && node.configuration.interaction !== "review") ||
+        (node.kind === "join_results" && port.name.startsWith("result:")) ||
         (node.kind === "build_text" && port.name === "values") ||
         (node.kind === "agent" && port.name === "comparison") ||
         (["implement", "review_plan", "review_candidate", "review_diff_candidate"].includes(node.kind) && port.name === "brief") ||

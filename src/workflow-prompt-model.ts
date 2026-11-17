@@ -1,5 +1,6 @@
 import type { WorkflowDefinition, WorkflowEndpoint, WorkflowGraph, WorkflowNodeConfiguration, WorkflowPort } from "@/workflow-graph-model";
 import type { ReusableReference } from "@/workflow-reusable";
+import type { JsonSchema } from "@/workflow-schema-model";
 
 export const PROMPT_EXECUTORS = {
   agent: "General instructions",
@@ -22,6 +23,9 @@ export type PromptContract = {
   delegates: { alias: string; required: boolean }[];
   outputSchema?: Record<string, unknown>;
   configuration?: WorkflowNodeConfiguration;
+  schemaContract?: boolean;
+  nodePrefab?: boolean;
+  roleOverrides?: Record<string, unknown>;
 };
 export type PromptMember = {
   key: string;
@@ -50,14 +54,28 @@ export const defaultPromptContract = (): PromptContract => ({
   text: "", executor: "agent", inputs: {}, outputs: {}, routes: ["concluido"], delegates: [],
 });
 
+export const defaultTypedPrompt = (): PromptContract => ({
+  ...defaultPromptContract(), routes: [], schemaContract: true,
+});
+
 export function hasPromptDecision(prompt: PromptContract) {
   return prompt.executor === "agent" && (prompt.routes.length !== 1 || prompt.routes[0] !== "concluido"
     || !!prompt.delegates.length || Object.values(prompt.outputs).some(({ source }) => !source) || !!prompt.outputSchema);
 }
 
-export function promptNodeDefinition(name: string, prompt: PromptContract, base: WorkflowDefinition): WorkflowDefinition {
+export function promptNodeDefinition(name: string, prompt: PromptContract, base: WorkflowDefinition,
+  schemas?: { input?: JsonSchema; output?: JsonSchema }, write = false): WorkflowDefinition {
   const control = (name: string): WorkflowPort => ({ name, value: { kind: "control" } });
   const data = (name: string, artifact: string): WorkflowPort => ({ name, value: { kind: "data", artifact } });
+  if (prompt.schemaContract) return {
+    ...base, title: name,
+    inputs: [control("ready"), data("input", "json_object"), ...(write ? [
+      data("release", "release"), data("worktree", "worktree"), data("plan", "plan"),
+    ] : [])],
+    outputs: [control("completed"), control("failed"), data("result", "json_object")],
+    inputSchemas: schemas?.input ? { input: schemas.input } : undefined,
+    outputSchemas: schemas?.output ? { result: schemas.output } : undefined,
+  };
   const outcome = hasPromptDecision(prompt) ? [
     data("decision", "json_object"), data("outcome", "json_object"),
     ...(prompt.delegates.length ? [data("evidence", "evidence_set")] : []),

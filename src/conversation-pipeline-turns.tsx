@@ -7,6 +7,7 @@ import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { PipelineComposerAgent } from "@/pipeline-composer-customizations";
 import { Button } from "@/components/ui/button";
 import { initialWorkflowStartFields, initialWorkflowStartValue, WorkflowStartValueField, type WorkflowStartSchema } from "@/workflow-launch-fields";
+import { schemaValueProblem } from "@/workflow-schema-model";
 
 type StartField = WorkflowStartSchema["fields"][number] & { conversationSource?: "message" | "history" };
 type MarkdownRevision = { id: string; relativePath: string; sha256: string };
@@ -59,13 +60,24 @@ type TurnRequest = {
 const emptyInputs: ConversationPipelineInputs = { values: {} };
 const live = (turn: PipelineTurn) => turn.state === "queued" || turn.state === "running";
 
+function inputProblem(schema: ConversationPipelineSchema, values: Record<string, unknown>) {
+  for (const field of schema.fields) {
+    const contract = schema.jsonSchema?.properties?.[field.name];
+    if (contract && !field.conversationSource && Object.hasOwn(values, field.name)) {
+      const error = schemaValueProblem(contract, values[field.name], field.name);
+      if (error) return error;
+    }
+  }
+}
+
 function supplied(schema: ConversationPipelineSchema, inputs: ConversationPipelineInputs | undefined) {
   const data = inputs ?? emptyInputs;
   const event = schema.events?.find(({ id, workId }) => id === data.agileEventId && workId === data.workId);
   return (!schema.requiresDocument || Boolean(data.documentRevisionId))
     && (!schema.requiresWork || Boolean(data.workId))
     && (!schema.requiresEvent || Boolean(event))
-    && schema.fields.every((field) => field.conversationSource || !field.required || Object.hasOwn(data.values, field.name));
+    && schema.fields.every((field) => field.conversationSource || !field.required || Object.hasOwn(data.values, field.name))
+    && !inputProblem(schema, data.values);
 }
 
 async function fingerprint(json: string) {
@@ -82,7 +94,7 @@ function rememberedRequest(storageKey: string, hash: string) {
   } catch { return null; }
 }
 
-export function useConversationPipelineTurns(conversationId: string, enabled: boolean, saveSubmittedDraft: (text: string) => Promise<void>) {
+export function useConversationPipelineTurns(conversationId: string, enabled: boolean, saveSubmittedDraft: (text: string) => Promise<void>, observeDirect = false) {
   const client = useQueryClient();
   const key = ["conversation", conversationId, "pipeline-turns"] as const;
   const [configured, setConfigured] = useState<ConversationPipelineInputs>();
@@ -105,7 +117,7 @@ export function useConversationPipelineTurns(conversationId: string, enabled: bo
       }
       return rows;
     },
-    enabled,
+    enabled: enabled || observeDirect,
     retry: false,
     refetchInterval: (query) => query.state.data?.some(live) ? 1_100 : false,
   });
@@ -139,7 +151,7 @@ export function useConversationPipelineTurns(conversationId: string, enabled: bo
       void client.invalidateQueries({ queryKey: ["conversation", conversationId, "messages"], exact: true });
     },
   });
-  const accepted = turns.data?.filter(({ state }) => state !== "failed");
+  const accepted = enabled ? turns.data?.filter(({ state }) => state !== "failed") : undefined;
   const inputs = configured ?? accepted?.at(-1)?.inputs;
   const defaultModel = accepted?.findLast(({ selection }) => Boolean(selection));
   return { schema, turns, request, inputs, setConfigured, defaultModel,
@@ -233,6 +245,7 @@ export function ConversationPipelineInputsDialog({ schema, previous, projectId, 
   const inputs = { documentRevisionId: documentRevisionId || null, workId: workId || null, agileEventId: agileEventId || null,
     values: Object.fromEntries(fields.filter(({ name }) => Object.hasOwn(values, name)).map(({ name }) => [name, values[name]])) };
   const ready = Boolean(supplied(schema, inputs) && documentValid && workValid && !pending && !pick.isPending);
+  const inputError = inputProblem(schema, inputs.values);
   const error = revisions.error ?? pick.error ?? hierarchy.error;
 
   function setValue(name: string, value: unknown) {
@@ -301,11 +314,12 @@ export function ConversationPipelineInputsDialog({ schema, previous, projectId, 
                 return <div key={field.name}>
                   {!field.required && <label className="pipeline-checkline"><input type="checkbox" checked={included}
                     onChange={(event) => setValue(field.name, event.currentTarget.checked ? initialWorkflowStartValue(field.valueType) : undefined)} /> Provide {field.name}</label>}
-                  {included && <WorkflowStartValueField field={field} value={values[field.name]} disabled={pending}
+                  {included && <WorkflowStartValueField field={field} schema={schema.jsonSchema?.properties?.[field.name]} value={values[field.name]} disabled={pending}
                     onChange={(value) => setValue(field.name, value)} />}
                 </div>;
               })}
             </fieldset>}
+            {inputError && <p role="alert" className="conv-alert">{inputError}</p>}
             {error && <p role="alert" className="conv-alert">{String(error)}</p>}
           </form>
         </div>

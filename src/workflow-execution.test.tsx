@@ -11,7 +11,7 @@ import PipelinesWorkspace from "@/pipelines-workspace";
 import { WorkflowExecutionAgent } from "@/workflow-execution-agent";
 import { WorkflowDiffStage } from "@/workflow-execution-diff";
 import { WorkflowNodeEvidence } from "@/workflow-execution-evidence";
-import { needsExecutionRefresh, presentation, wiredExecutionInputs, type ExecutionJob, type ExecutionOutput,
+import { executionCanvasGraph, needsExecutionRefresh, presentation, wiredExecutionInputs, type ExecutionJob, type ExecutionOutput,
   type ExecutionPinnedNode, type WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 import { exampleCheckout } from "@/workbench-contract";
 
@@ -55,6 +55,55 @@ function job(nodeId: string, attempts: ExecutionJob["attempts"], kind: Job["kind
 }
 const output = (nodeInstanceId: string, id: string, port: string, kind: string, evidence: unknown, unitId: string | null = null): ExecutionOutput => ({
   current: true, inputReceipts: [], artifact: { id, nodeInstanceId, port, value: { kind, evidence }, unitId, workflowRunId: runId },
+});
+
+it("shows a Function as one live graph node with its published result and internal graph", async () => {
+  const start = node("start", "Start", [], [control("start")]);
+  const inner = node("summarize::execute", "AI Node Agent", [control("ready")],
+    [control("completed"), port("result", "json_object")]);
+  const end = node("end", "End", [control("ready"), port("result", "json_object")]);
+  const snapshot: WorkflowExecutionSnapshot = {
+    run: { id: runId, projectId, version, planRevision: null },
+    definition: {
+      version, name: "Conversation workflow", nodes: [start, inner, end], wires: [
+        { from: { node: "start", port: "start" }, to: { node: inner.instance.id, port: "ready" } },
+        { from: { node: inner.instance.id, port: "completed" }, to: { node: "end", port: "ready" } },
+        { from: { node: inner.instance.id, port: "result" }, to: { node: "end", port: "result" } },
+      ],
+      subflows: [{
+        path: "summarize", name: "Summarize request",
+        version: { id: "summary", revision: "published-summary", kind: "subflow", destination: "project" },
+        nodes: [inner.instance.id],
+        inputs: { begin: [{ node: inner.instance.id, port: "ready" }] },
+        outputs: {
+          completed: { node: inner.instance.id, port: "completed" },
+          reply: { node: inner.instance.id, port: "result" },
+        },
+      }],
+    },
+    units: [], unitNodeIds: [], jobs: [],
+    control: [{ nodeId: inner.instance.id, state: "completed", selectedPorts: ["completed"] }],
+    outputs: [output(inner.instance.id, "summary-artifact", "result", "json_object", { reply: "A structured summary" })],
+  };
+  expect(executionCanvasGraph(snapshot.definition).wires).toEqual([
+    { from: { node: "start", port: "start" }, to: { node: "summarize", port: "begin" } },
+    { from: { node: "summarize", port: "completed" }, to: { node: "end", port: "ready" } },
+    { from: { node: "summarize", port: "reply" }, to: { node: "end", port: "result" } },
+  ]);
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "list_repository_deliveries") return [snapshot.run];
+    if (command === "inspect_workflow_execution") return snapshot;
+    throw new Error(command);
+  });
+  render(<QueryClientProvider client={new QueryClient()}><PipelinesWorkspace checkout={exampleCheckout}
+    target={`run:${runId}`} simulation={null} startSimulation={vi.fn()} openWorkspace={vi.fn()}
+    openActivity={vi.fn()} openChanges={vi.fn()} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Summarize request · Completed" }));
+  expect(screen.queryByRole("button", { name: "AI Node Agent · Completed" })).toBeNull();
+  expect(within(screen.getByRole("region", { name: "Result on reply" })).getByText(/A structured summary/)).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Open internal graph" }));
+  expect(screen.getByRole("button", { name: "AI Node Agent · Completed" })).toBeTruthy();
 });
 
 it("opens a legacy run link in Runs and navigates between the parent backlog and task run", async () => {

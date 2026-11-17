@@ -21,8 +21,10 @@ import { WorkflowExecutionComparison } from "@/workflow-execution-comparison";
 import { comparisonReviewStages, type ComparisonHandoff } from "@/workflow-comparison-handoff";
 import { WorkflowExecutionStateBadge, workflowExecutionStateLabel } from "@/workflow-execution-state";
 import {
-  comparisonForNode, controlForNode, needsExecutionRefresh, presentation, workflowRunTarget, type ExecutionPinnedNode, type ExecutionRolePin,
-  type ExecutionUnit, type WorkflowExecutionFocus, type WorkflowExecutionSnapshot, type WorkflowExecutionState, type WorkflowRun,
+  comparisonForNode, controlForNode, executionCanvasGraph, executionOutputForWire, needsExecutionRefresh,
+  presentation, subflowForStage, workflowRunTarget, type ExecutionPinnedNode, type ExecutionRolePin,
+  type ExecutionSubflow, type ExecutionUnit, type WorkflowExecutionFocus, type WorkflowExecutionSnapshot,
+  type WorkflowExecutionState, type WorkflowRun,
 } from "@/workflow-execution-model";
 
 type ExecutionNode = Node<{ pinned: ExecutionPinnedNode; status: WorkflowExecutionState }, "execution">;
@@ -54,6 +56,24 @@ function PinnedRole({ pin }: { pin: ExecutionRolePin }) {
 
 const unitKey = ({ planRevision, unit }: ExecutionUnit) => `${planRevision}:${unit.id}`;
 
+type NodeDetail = ReturnType<typeof presentation>;
+
+function subflowPresentation(snapshot: WorkflowExecutionSnapshot, group: ExecutionSubflow,
+  details: readonly NodeDetail[], unit?: ExecutionUnit): NodeDetail {
+  const selected = (port: string) => {
+    const endpoint = group.outputs[port];
+    return endpoint && controlForNode(snapshot, endpoint.node, unit)?.selectedPorts.includes(endpoint.port);
+  };
+  const failed = details.find(({ status }) => status === "failed" || status === "interrupted");
+  if (selected("failed") || selected("falhou")) return { status: "failed", reason: failed?.reason };
+  if (selected("completed")) return { status: "completed" };
+  for (const status of ["running", "queued", "waiting", "failed", "interrupted", "cancelled"] as const) {
+    const member = details.find((detail) => detail.status === status);
+    if (member) return { status, reason: member.reason };
+  }
+  return { status: details.some(({ status }) => status === "completed") ? "completed" : "skipped" };
+}
+
 function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHandoff, runFocus }: {
   snapshot: WorkflowExecutionSnapshot;
   navigation: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace" | "openQueueJob">;
@@ -73,11 +93,15 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
   const [selected, setSelected] = useState(focusedNode?.instance.id ?? review?.nodeId ?? definition.nodes[0]?.instance.id ?? "");
   const [inspectorRequest, revealInspector] = useState(focusedNode ? 1 : 0);
   function viewStage(id: string) {
+    if (!graph.nodes.some(({ instance }) => instance.id === id)) {
+      setSubflowPath(subflowForStage(definition, id)?.path ?? "");
+    }
     setSelected(id);
     revealInspector((request) => request + 1);
   }
   const [selectedUnit, setSelectedUnit] = useState<string>();
-  const [subflowPath, setSubflowPath] = useState("");
+  const [subflowPath, setSubflowPath] = useState(() =>
+    subflowForStage(definition, focusedNode?.instance.id ?? review?.nodeId ?? "")?.path ?? "");
   const [theme, setTheme] = useState(readTheme);
   const [menu, setMenu] = useState<{ target: ExecutionTarget; point: { x: number; y: number }; origin?: HTMLElement | SVGElement }>();
   const { copy, feedback } = useContextActionFeedback();
@@ -90,12 +114,13 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
     ?? snapshot.units.find(({ unit }) => unit.id === focusedOutput?.unitId)
     ?? snapshot.units.find(({ planRevision }) => planRevision === run.planRevision);
   const subflow = definition.subflows?.find(({ path }) => path === subflowPath);
-  const graph = useMemo(() => ({
-    name: subflow?.name ?? definition.name,
-    nodes: definition.nodes.filter(({ instance }) => !subflow || subflow.nodes.includes(instance.id)).map(({ instance }) => instance),
-    wires: definition.wires.filter(({ from, to }) => !subflow || subflow.nodes.includes(from.node) && subflow.nodes.includes(to.node)),
-  }), [definition, subflow]);
-  const stages = definition.nodes.filter(({ instance }) => graph.nodes.some(({ id }) => id === instance.id))
+  const graph = useMemo(() => executionCanvasGraph(definition, subflow), [definition, subflow]);
+  function openSubflow(path: string) {
+    const scope = definition.subflows?.find((entry) => entry.path === path);
+    setSubflowPath(path);
+    setSelected(executionCanvasGraph(definition, scope).nodes[0]?.instance.id ?? "");
+  }
+  const concreteStages = definition.nodes
     .map((node) => {
       const unitScoped = snapshot.unitNodeIds.includes(node.instance.id);
       const pending = snapshot.pendingDecisions?.find((decision) => decision.nodeId === node.instance.id &&
@@ -104,23 +129,38 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
       const comparison = comparisonForNode(snapshot, node, unit);
       const detail: ReturnType<typeof presentation> = pending ? {
         status: "waiting",
-        reason: pending.request.kind === "approval" ? "Waiting for operator approval." : "Waiting for operator input.",
+        reason: pending.request.kind === "approval" || pending.request.kind === "human" && pending.request.interaction === "approval"
+          ? "Waiting for operator approval." : "Waiting for operator input.",
       } : comparison && comparison.stage.state !== "settled" ? {
         status: comparison.stage.state,
       } : presentation(snapshot, node, unit);
       return { node, detail, pending, comparison };
     });
-  const positions = useMemo(() => initialNodePositions(graph), [graph]);
+  const staged = new Map(concreteStages.map((entry) => [entry.node.instance.id, entry]));
+  const stages = graph.nodes.map((node) => {
+    const group = graph.subflows.get(node.instance.id);
+    if (!group) return { ...staged.get(node.instance.id)!, group: undefined };
+    const descendants = group.nodes.flatMap((id) => {
+      const stage = staged.get(id);
+      return stage ? [stage.detail] : [];
+    });
+    return { node, detail: subflowPresentation(snapshot, group, descendants, unit), group, pending: undefined, comparison: undefined };
+  });
+  const positions = useMemo(() => initialNodePositions({
+    nodes: graph.nodes.map(({ instance }) => instance),
+    wires: graph.wires,
+  }), [graph]);
   const active = stages.find(({ node }) => node.instance.id === selected);
   const approval = active?.node.instance.kind === "approve_implementation";
-  const waiting = stages.find(({ pending }) => pending) ?? stages.find(({ detail }) => detail.status === "waiting");
-  const failed = stages.find(({ detail }) => detail.status === "failed" || detail.status === "interrupted");
+  const scopedStages = subflow ? concreteStages.filter(({ node }) => subflow.nodes.includes(node.instance.id)) : concreteStages;
+  const waiting = scopedStages.find(({ pending }) => pending) ?? scopedStages.find(({ detail }) => detail.status === "waiting");
+  const failed = scopedStages.find(({ detail }) => detail.status === "failed" || detail.status === "interrupted");
   const nodes: ExecutionNode[] = stages.map(({ node, detail }) => ({
     id: node.instance.id, position: snapshot.layout?.[node.instance.id] ?? positions[node.instance.id]!, type: "execution", selected: node.instance.id === selected,
     ariaLabel: `${node.definition.title} · ${workflowExecutionStateLabel[detail.status]}`, data: { pinned: node, status: detail.status },
   }));
   const edges: Edge[] = graph.wires.map((wire) => {
-    const output = definition.nodes.find(({ instance }) => instance.id === wire.from.node)?.definition.outputs.find(({ name }) => name === wire.from.port);
+    const output = graph.nodes.find(({ instance }) => instance.id === wire.from.node)?.definition.outputs.find(({ name }) => name === wire.from.port);
     const control = output?.value.kind === "control";
     const color = control ? "var(--muted-foreground)" : "var(--primary)";
     return { id: wireKey(wire), type: "smoothstep", source: wire.from.node, sourceHandle: wire.from.port,
@@ -147,6 +187,14 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
     }
     const stage = stages.find(({ node }) => node.instance.id === target.id);
     if (!stage) return;
+    if (stage.group) {
+      const path = stage.group.path;
+      return { label: stage.node.definition.title, groups: [[
+        { label: "Inspect execution", run: () => viewStage(path) },
+        { label: "Open internal graph", run: () => openSubflow(path) },
+        { label: "Copy pinned revision", run: () => copy(stage.node.revision) },
+      ]] };
+    }
     const queueLink = navigation.openQueueJob;
     const isScoped = snapshot.unitNodeIds.includes(target.id);
     const jobs = snapshot.jobs.filter(({ nodeId, unitId, job }) => nodeId === target.id && (isScoped
@@ -171,11 +219,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
       <div className="workflow-run-selectors">
         {runPicker}
         {!!definition.subflows?.length && <label className="workflow-execution-field">Pinned subflow
-          <select value={subflowPath} onChange={(event) => {
-            const path = event.currentTarget.value;
-            setSubflowPath(path);
-            setSelected(definition.subflows?.find((entry) => entry.path === path)?.nodes[0] ?? definition.nodes[0]?.instance.id ?? "");
-          }}>
+          <select value={subflowPath} onChange={(event) => openSubflow(event.currentTarget.value)}>
             <option value="">Entire workflow</option>
             {definition.subflows.map(({ name, path }) => <option key={path} value={path}>{name} · {path}</option>)}
           </select>
@@ -253,12 +297,35 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
         </PipelineInspectorHeader>
         {active && <div className="pipeline-stack">
           <WorkflowExecutionStateBadge status={active.detail.status} />
+          {active.group ? <section className="workflow-record-card pipeline-stack" aria-label="Subflow execution">
+            {active.detail.reason && <p>{active.detail.reason}</p>}
+            <Button type="button" variant="outline" className="w-fit" onClick={() => openSubflow(active.group!.path)}>
+              Open internal graph <ArrowUpRight size={14} aria-hidden />
+            </Button>
+            {active.detail.status === "completed" && Object.entries(active.group.outputs).map(([port, endpoint]) => {
+              const artifact = executionOutputForWire(snapshot, endpoint, unit)?.artifact;
+              if (!artifact) return null;
+              return <section key={port} aria-label={`Result on ${port}`}>
+                <h3>{port}</h3>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap text-xs">
+                  {typeof artifact.value.evidence === "string" ? artifact.value.evidence : JSON.stringify(artifact.value.evidence, null, 2)}
+                </pre>
+                <Button type="button" variant="ghost" onClick={() => viewStage(endpoint.node)}>Inspect result source</Button>
+              </section>;
+            })}
+          </section> : <>
           <WorkflowPromptRunPanel snapshot={snapshot} nodeId={active.node.instance.id} unit={unit} navigation={navigation} />
           {snapshot.rolePins?.filter((pin) => pin.nodeId === active.node.instance.id && pin.nodeRevision === active.node.revision)
             .map((pin) => <PinnedRole key={`${pin.version.destination}:${pin.version.id}:${pin.version.revision}`} pin={pin} />)}
           {approval && <WorkflowApprovalInspector key={`approval:${active.node.instance.id}`}
             scope={{ projectId: run.projectId, runId: run.id }} nodeId={active.node.instance.id} planRevision={run.planRevision} />}
           {!approval && active.detail.reason && <p>{active.detail.reason}</p>}
+          {active.node.instance.kind === "fork" && <ul aria-label="Fork branches" className="pipeline-stack">
+            {snapshot.forkBranches?.filter(({ forkId, unitId }) => forkId === active.node.instance.id &&
+              (unitId === null || unitId === unit?.unit.id)).map(({ branch, state }) => <li className="pipeline-actions" key={branch}>
+              <span>{branch}</span><WorkflowExecutionStateBadge status={state} />
+            </li>)}
+          </ul>}
           {active.pending && <WorkflowStageDecisionForm key={active.pending.requestId}
             projectId={run.projectId} runId={run.id} pending={active.pending}
             evidence={Object.keys(active.pending.inputs).length > 0 && <RecordedInputs inputs={active.pending.inputs}
@@ -292,6 +359,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHa
           <WorkflowNodeEvidence key={`${active.node.instance.id}:${unit ? unitKey(unit) : ""}`} node={active.node} snapshot={snapshot}
             unitId={unit?.unit.id} focusedArtifactId={focusedOutput?.id}
             control={controlForNode(snapshot, active.node.instance.id, unit)} navigation={navigation} />
+          </>}
         </div>}
       </>} />
     {menu && context && <PositionedContextActions {...context} point={menu.point} onClose={() => setMenu(undefined)}

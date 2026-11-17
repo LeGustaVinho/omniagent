@@ -65,7 +65,7 @@ export function StartInputFields({ configuration, disabled, onChange }: Fields) 
   </fieldset>;
 }
 
-function PredicateFields({ value, label, disabled, onChange, allowChecks = true }: {
+export function PredicateFields({ value, label, disabled, onChange, allowChecks = true }: {
   value: unknown; label: string; disabled: boolean; onChange: (value: WorkflowPredicate) => void; allowChecks?: boolean;
 }) {
   const { op, pointer, value: expected } = structuredObject(value);

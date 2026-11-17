@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import type { PackageDraft } from "@/workflow-authoring-package";
 import { WorkflowGraphEditor } from "@/workflow-graph-editor";
 import type { PromptContract, PromptExpansion } from "@/workflow-prompt-model";
+import type { RoleSnapshot } from "@/workflow-typed-prompt";
+import type { SchemaField } from "@/workflow-schema-model";
 import {
   isPresetEligible, isStartNode, portType, type WorkflowDefinition, type WorkflowDefinitions, type WorkflowEndpoint,
   type WorkflowGraph, type WorkflowLayout, type WorkflowNodeConfiguration, type WorkflowPortType, type WorkflowReuseSelection, type WorkflowWire,
@@ -16,7 +18,8 @@ export type ReusableVersion = { id: string; revision: string; kind: string; dest
 export type ReusableReference = { source: "published"; version: ReusableVersion } | { source: "draft"; key: string }
   | { source: "parameter"; name: string; kind: string };
 export type ReusableBody = { kind: string; graph?: WorkflowGraph; configuration?: WorkflowNodeConfiguration; editableFields?: string[];
-  inputs?: Record<string, WorkflowEndpoint>; outputs?: Record<string, WorkflowEndpoint>; prompt?: PromptContract };
+  inputs?: Record<string, WorkflowEndpoint>; outputs?: Record<string, WorkflowEndpoint>; prompt?: PromptContract;
+  fields?: SchemaField[]; template?: RoleSnapshot };
 type MatchSource = { type: "package_revision"; draftId: string; revision: string; memberKey: string }
   | { type: "published"; version: ReusableVersion };
 type Boundary = {
@@ -77,7 +80,8 @@ export function WorkflowReusableDerivationDialog({ selection, onClose, onSaved, 
     <Dialog.Portal>
       <Dialog.Overlay className="conv-dialog-scrim" />
       <Dialog.Content className="conv-dialog">
-        <Dialog.Title>{selection.type === "preset" ? "Save node as preset" : "Extract subflow"}</Dialog.Title>
+        <Dialog.Title>{selection.type === "preset" ? "Save node as preset"
+          : props.graph.nodes.some(({ kind }) => kind === "end") ? "Extract Function" : "Extract subflow"}</Dialog.Title>
         <Dialog.Description>Review the selection from the saved graph revision.</Dialog.Description>
         <ReusableDerivationForm {...props} active initial={selection} onSaving={setSaving}
           onSaved={(draft) => { onClose(); onSaved(draft); }} />
@@ -90,7 +94,8 @@ export function WorkflowReusableDerivationDialog({ selection, onClose, onSaved, 
 function ReusableDerivationForm({ projectId, source, graph, disabled, onSaved, active, initial, onSaving }: DerivationProps & {
   active: boolean; initial?: WorkflowReuseSelection; onSaving?: (saving: boolean) => void;
 }) {
-  const [mode, setMode] = useState<Selection["type"]>(initial?.type ?? "preset");
+  const functionGraph = graph.nodes.some(({ kind }) => kind === "end");
+  const [mode, setMode] = useState<Selection["type"]>(initial?.type ?? (functionGraph ? "subflow" : "preset"));
   const [name, setName] = useState("");
   const [key, setKey] = useState("");
   const [destination, setDestination] = useState<ReusableVersion["destination"]>("project");
@@ -98,7 +103,7 @@ function ReusableDerivationForm({ projectId, source, graph, disabled, onSaved, a
     nodeId: initial?.type === "preset" ? initial.nodeId : "", editableFields: [],
   });
   const [subset, setSubset] = useState<string[] | null>(initial?.type === "subflow" ? initial.nodeIds : null);
-  const nodes = graph.nodes.filter(({ kind }) => !isStartNode(kind));
+  const nodes = graph.nodes.filter(({ kind }) => !isStartNode(kind) && kind !== "end");
   const selectedNode = nodes.find((node) => node.id === preset.nodeId && isPresetEligible(node));
   const boundary = useQuery({
     queryKey: ["workflow-reusable-boundary", projectId, source, subset],
@@ -118,9 +123,9 @@ function ReusableDerivationForm({ projectId, source, graph, disabled, onSaved, a
   const ready = !locked && Boolean(name.trim() && (key.trim() || slug(name)));
   return active && <fieldset className="pipeline-stack" disabled={locked}>
     {disabled && <p>Save the current revision before deriving a reusable node.</p>}
-    <label>Reusable type<select value={mode} onChange={(event) => setMode(event.currentTarget.value as Selection["type"])}>
+    {!functionGraph && <label>Reusable type<select value={mode} onChange={(event) => setMode(event.currentTarget.value as Selection["type"])}>
       <option value="preset">Configured node preset</option><option value="subflow">Subflow</option>
-    </select></label>
+    </select></label>}
     <label>Name<input value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
     <label>Artifact key<input value={key} placeholder={slug(name)} onChange={(event) => setKey(event.currentTarget.value)} /></label>
     <label>Destination<select value={destination} onChange={(event) => setDestination(event.currentTarget.value as ReusableVersion["destination"])}>
@@ -145,7 +150,7 @@ function ReusableDerivationForm({ projectId, source, graph, disabled, onSaved, a
       <Button type="button" variant="outline" disabled={!ready || !selectedNode}
         onClick={() => save.mutate({ type: "preset", ...preset })}>Save as preset</Button>
     </> : <>
-      <label>Subflow source<select value={subset === null ? "whole" : "subset"}
+      <label>{functionGraph ? "Function source" : "Subflow source"}<select value={subset === null ? "whole" : "subset"}
         onChange={(event) => setSubset(event.currentTarget.value === "whole" ? null : [])}>
         <option value="whole">Entire saved graph</option><option value="subset">Selected nodes</option>
       </select></label>
@@ -225,7 +230,9 @@ function BoundaryMappings({ boundary, graph, disabled, save }: {
     </fieldset>
     {!valid && <p>Choose at least one input and output with distinct names in each list.</p>}
     <Button type="button" variant="outline" disabled={disabled || !valid}
-      onClick={() => save(Object.fromEntries(mappedInputs), Object.fromEntries(mappedOutputs))}>Save as subflow</Button>
+      onClick={() => save(Object.fromEntries(mappedInputs), Object.fromEntries(mappedOutputs))}>
+      {graph.nodes.some(({ kind }) => kind === "end") ? "Save as Function" : "Save as subflow"}
+    </Button>
   </div>;
 }
 

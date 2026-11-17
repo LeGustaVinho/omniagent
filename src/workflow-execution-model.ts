@@ -2,7 +2,7 @@ import type { Job } from "@/bindings/Job";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import type { RunStatus } from "@/bindings/RunStatus";
 import type { SessionMode } from "@/bindings/SessionMode";
-import type { WorkflowDefinition, WorkflowGraphNode, WorkflowLayout, WorkflowWire } from "@/workflow-graph-model";
+import { wireKey, type WorkflowDefinition, type WorkflowGraphNode, type WorkflowLayout, type WorkflowPort, type WorkflowWire } from "@/workflow-graph-model";
 import type { WorkflowPendingDecision } from "@/workflow-stage-decisions";
 import type { ExecutionComparisonStage, RecordedComparison } from "@/workflow-execution-comparison";
 
@@ -44,6 +44,7 @@ export type ExecutionSubflow = {
   name: string;
   version: WorkflowVersion & { destination: "project" | "library"; kind: "subflow" };
   nodes: string[];
+  inputs?: Record<string, WorkflowWire["to"][]>;
   outputs: Record<string, WorkflowWire["from"]>;
 };
 export type ExecutionRolePin = {
@@ -78,6 +79,8 @@ export type WorkflowExecutionSnapshot = {
   outputs: ExecutionOutput[];
   control: ExecutionControl[];
   pendingDecisions?: WorkflowPendingDecision[];
+  timedWaits?: { nodeId: string; unitId: string | null; deadlineAt: number }[];
+  forkBranches?: { forkId: string; branch: string; unitId: string | null; state: Exclude<WorkflowExecutionState, "waiting" | "interrupted">; settledOrder: number | null }[];
   comparisonStages?: ExecutionComparisonStage[];
   automaticAgentWaits?: UnitExecutionWait[];
   automaticPreparationWaits?: ExecutionWait[];
@@ -95,6 +98,89 @@ type BacklogExecution = ExecutionWait & {
   tasks: { key: string; taskId: string; workflowRunId: string }[];
 };
 
+export function subflowForStage(definition: WorkflowExecutionSnapshot["definition"], nodeId: string) {
+  if (!definition.nodes.some(({ instance }) => instance.kind === "end" && !instance.id.includes("::"))) return undefined;
+  return definition.subflows?.filter(({ nodes }) => nodes.includes(nodeId))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+}
+
+export function executionCanvasGraph(definition: WorkflowExecutionSnapshot["definition"], scope?: ExecutionSubflow) {
+  const scoped = scope ? new Set(scope.nodes) : undefined;
+  const original = new Map(definition.nodes.map((node) => [node.instance.id, node]));
+  const prefix = scope ? scope.path + "::" : "";
+  const fold = definition.nodes.some(({ instance }) => instance.kind === "end" && !instance.id.includes("::"));
+  const subflows = new Map((fold ? definition.subflows ?? [] : []).filter(({ path }) =>
+    path.startsWith(prefix) && !path.slice(prefix.length).includes("::"))
+    .map((subflow) => [subflow.path, subflow]));
+  const owners = new Map<string, ExecutionSubflow>();
+  const inputs = new Map<string, Map<string, WorkflowPort>>();
+  const outputs = new Map<string, Map<string, WorkflowPort>>();
+  const endpointKey = ({ node, port }: WorkflowWire["from"]) => JSON.stringify([node, port]);
+  const inputNames = new Map<string, string>();
+  const outputNames = new Map<string, string>();
+  for (const subflow of subflows.values()) {
+    for (const node of subflow.nodes) owners.set(node, subflow);
+    const declaredInputs = new Map<string, WorkflowPort>();
+    for (const [name, endpoints] of Object.entries(subflow.inputs ?? {})) {
+      for (const endpoint of endpoints) {
+        inputNames.set(endpointKey(endpoint), name);
+        const port = original.get(endpoint.node)?.definition.inputs.find(({ name }) => name === endpoint.port);
+        if (port) declaredInputs.set(name, { ...port, name });
+      }
+    }
+    inputs.set(subflow.path, declaredInputs);
+    const declaredOutputs = new Map<string, WorkflowPort>();
+    for (const [name, endpoint] of Object.entries(subflow.outputs)) {
+      if (!outputNames.has(endpointKey(endpoint))) outputNames.set(endpointKey(endpoint), name);
+      const port = original.get(endpoint.node)?.definition.outputs.find(({ name }) => name === endpoint.port);
+      if (port) declaredOutputs.set(name, { ...port, name });
+    }
+    outputs.set(subflow.path, declaredOutputs);
+  }
+  const wires = new Map<string, WorkflowWire>();
+  for (const wire of definition.wires) {
+    if (scoped && (!scoped.has(wire.from.node) || !scoped.has(wire.to.node))) continue;
+    const source = owners.get(wire.from.node);
+    const target = owners.get(wire.to.node);
+    if (source && source === target) continue;
+    let { from, to } = wire;
+    if (source) {
+      const name = outputNames.get(endpointKey(from)) ?? `${from.node.slice(source.path.length + 2)}.${from.port}`;
+      const port = original.get(from.node)?.definition.outputs.find(({ name }) => name === from.port);
+      if (port) outputs.get(source.path)?.set(name, { ...port, name });
+      from = { node: source.path, port: name };
+    }
+    if (target) {
+      const name = inputNames.get(endpointKey(to)) ?? `${to.node.slice(target.path.length + 2)}.${to.port}`;
+      const port = original.get(to.node)?.definition.inputs.find(({ name }) => name === to.port);
+      if (port) inputs.get(target.path)?.set(name, { ...port, name });
+      to = { node: target.path, port: name };
+    }
+    const projected = { from, to };
+    wires.set(wireKey(projected), projected);
+  }
+  const emitted = new Set<string>();
+  const nodes = definition.nodes.flatMap((node): ExecutionPinnedNode[] => {
+    const id = node.instance.id;
+    if (scoped && !scoped.has(id)) return [];
+    const subflow = owners.get(id);
+    if (!subflow) return [node];
+    if (emitted.has(subflow.path)) return [];
+    emitted.add(subflow.path);
+    return [{
+      instance: { id: subflow.path, kind: "subflow", configuration: { kind: "none" } },
+      revision: subflow.version.revision,
+      definition: {
+        title: subflow.name, kind: "subflow", configuration: "none", revision: 1,
+        executor: "expand_subflow", effect: "none",
+        inputs: [...inputs.get(subflow.path)!.values()],
+        outputs: [...outputs.get(subflow.path)!.values()],
+      },
+    }];
+  });
+  return { name: scope?.name ?? definition.name, nodes, wires: [...wires.values()], subflows };
+}
+
 const recordedWaits = [
   ["automaticAgentWaits", "Waiting for agent dispatch"],
   ["automaticPreparationWaits", "Waiting for worktree preparation"],
@@ -105,7 +191,8 @@ const recordedWaits = [
 
 export function needsExecutionRefresh(snapshot: WorkflowExecutionSnapshot | null | undefined) {
   if (!snapshot) return false;
-  return recordedWaits.some(([field]) => snapshot[field]?.length) ||
+  return Boolean(snapshot.timedWaits?.length) || snapshot.forkBranches?.some(({ state }) => state === "queued" || state === "running") ||
+    Boolean(snapshot.pendingDecisions?.length) || recordedWaits.some(([field]) => snapshot[field]?.length) ||
     snapshot.backlogExecutions?.some(({ state }) => state === "pending") ||
     snapshot.comparisonStages?.some(({ state }) => state === "queued" || state === "running") ||
     snapshot.jobs.some(({ job }) => job.queuedRecovery || job.downstreamWait ||
@@ -213,6 +300,8 @@ export function presentation(snapshot: WorkflowExecutionSnapshot, node: Executio
   }
   const control = controlForNode(snapshot, nodeId, unit);
   if (control) return { status: control.state };
+  const timed = snapshot.timedWaits?.find((entry) => entry.nodeId === nodeId && entry.unitId === (unitScoped ? unit?.unit.id : null));
+  if (timed) return { status: "waiting", reason: "Resumes " + new Date(timed.deadlineAt).toLocaleString() + "." };
   const backlog = snapshot.backlogExecutions?.findLast((entry) => entry.nodeId === nodeId);
   if (backlog?.state === "failed") return { status: "failed", reason: backlog.reason ?? "A backlog delivery failed." };
   if (backlog?.state === "pending") return { status: "waiting", reason: backlog.reason ?? "Waiting for eligible tasks and verified merges." };

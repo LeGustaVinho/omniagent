@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 type ChoiceOption = { id: string; label: string };
 type FieldInput = { kind: "text" } | { kind: "boolean" } | { kind: "number"; integer: boolean }
   | { kind: "choice"; multiple: boolean; options: ChoiceOption[] };
-type InputField = { id: string; label: string; required: boolean; input: FieldInput };
+export type InputField = { id: string; label: string; required: boolean; input: FieldInput };
 export type WorkflowDecisionConfiguration = { kind: "request_input"; message: string; fields: InputField[] }
   | { kind: "approval"; message: string };
 
@@ -55,18 +55,23 @@ export function DecisionNodeFields({ configuration, onChange, disabled }: {
   onChange: (value: WorkflowDecisionConfiguration) => void;
   disabled?: boolean;
 }) {
-  function updateField(index: number, patch: Partial<InputField>) {
-    if (configuration.kind !== "request_input") return;
-    onChange({ ...configuration, fields: configuration.fields.map((field, position) => position === index ? { ...field, ...patch } : field) });
-  }
   const approval = configuration.kind === "approval";
   return <fieldset className="pipeline-stack" disabled={disabled}>
     <label>{approval ? "Approval message" : "Question message"}<textarea rows={3} value={configuration.message}
       onChange={(event) => onChange({ ...configuration, message: event.currentTarget.value })} /></label>
-    {!approval && <>
-      <fieldset className="pipeline-stack">
+    {!approval && <DecisionAnswerFields fields={configuration.fields} onChange={(fields) => onChange({ ...configuration, fields })} />}
+  </fieldset>;
+}
+
+export function DecisionAnswerFields({ fields, minimum = 1, onChange }: {
+  fields: InputField[]; minimum?: number; onChange: (fields: InputField[]) => void;
+}) {
+  function updateField(index: number, patch: Partial<InputField>) {
+    onChange(fields.map((field, position) => position === index ? { ...field, ...patch } : field));
+  }
+  return <fieldset className="pipeline-stack">
         <legend>Answer fields</legend>
-        {configuration.fields.map((field, index) => {
+        {fields.map((field, index) => {
           const { input } = field;
           const update = (input: FieldInput) => updateField(index, { input });
           return <fieldset key={index} className="pipeline-stack">
@@ -81,16 +86,12 @@ export function DecisionNodeFields({ configuration, onChange, disabled }: {
             {input.kind === "number" && <label className="pipeline-checkline"><input type="checkbox" checked={input.integer}
               onChange={(event) => update({ ...input, integer: event.currentTarget.checked })} /> Whole numbers only</label>}
             {input.kind === "choice" && <ChoiceFields input={input} update={update} />}
-            <Button type="button" variant="ghost" className="justify-self-start" disabled={configuration.fields.length <= 1}
-              aria-label={`Remove field ${index + 1}`} onClick={() => onChange({ ...configuration,
-                fields: configuration.fields.filter((_, position) => position !== index),
-              })}><Trash2 size={15} /></Button>
+            <Button type="button" variant="ghost" className="justify-self-start" disabled={fields.length <= minimum}
+              aria-label={`Remove field ${index + 1}`} onClick={() => onChange(fields.filter((_, position) => position !== index))}><Trash2 size={15} /></Button>
           </fieldset>;
         })}
-        <Button type="button" variant="outline" className="justify-self-start" onClick={() => onChange({ ...configuration,
-          fields: [...configuration.fields, { id: nextId(configuration.fields, "field"), label: `Answer ${configuration.fields.length + 1}`, required: true, input: { kind: "text" } }],
-        })}><Plus size={15} /> Add field</Button>
-      </fieldset>
-    </>}
-  </fieldset>;
+        <Button type="button" variant="outline" className="justify-self-start" onClick={() => onChange([
+          ...fields, { id: nextId(fields, "field"), label: `Answer ${fields.length + 1}`, required: true, input: { kind: "text" } },
+        ])}><Plus size={15} /> Add field</Button>
+      </fieldset>;
 }
