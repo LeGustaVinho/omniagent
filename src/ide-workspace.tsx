@@ -13,6 +13,7 @@ import { ContextActions, type MenuGroups } from "@/components/ui/context-actions
 import { useCheckoutFilePreview } from "@/checkout-file-preview";
 import { containingFolder, fileContextActions, fileHistoryTarget, noteRenameTarget, openNotesTarget, readSourceLineTarget, readTerminalFolderTarget, useCheckoutTextReader, workingDiffTarget } from "@/file-context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
+import type { TreeReveal } from "@/checkout-file-tree";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { changedItemPath, itemIncludesPath, useCheckoutItemOperations } from "@/checkout-item-operations";
 import { useCheckoutFileComparison } from "@/checkout-file-comparison";
@@ -65,7 +66,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const [sidebar, setSidebar] = useFileSidebar();
   const [navigator, setNavigator] = useState<"files" | "search">(requestedFolder === undefined ? "files" : "search");
   const [searchScope, setSearchScope] = useState<FileSearchScope | undefined>(() => requestedFolder ? { kind: "folder", path: requestedFolder } : undefined);
-  const [reveal, setReveal] = useState<{ path: string }>();
+  const [reveal, setReveal] = useState<TreeReveal>();
   const [query, setQuery] = useState("");
   const [editorSearch, setEditorSearch] = useState<EditorSearchRequest>();
   const [examples, setExamples] = useState(() => newBuffers(simulated, simulation?.scenario === "recovery"));
@@ -358,6 +359,13 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       else openFile(path);
     },
   });
+  const revealTerminalFolder = (path: string) => {
+    const missing = Boolean(path && !treeActions.folders?.includes(path));
+    setSidebar(true);
+    setNavigator("files");
+    setReveal({ path, expand: true, includeIgnored: missing });
+    if (missing) void treeActions.refreshTree().catch((error: unknown) => setProblem(String(error)));
+  };
   const conversationActions = useCheckoutConversationActions(checkout.checkoutId, simulated, (id) => openWorkspace("conversations", id));
   const renameNote = (path: string) => openWorkspace("knowledge", noteRenameTarget(path));
   const fileOperations = useCheckoutItemOperations({ checkoutId: checkout.checkoutId, simulated,
@@ -591,6 +599,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                       <WorktreeTerminal checkoutId={checkout.checkoutId} active={active} visible={visible} sessionActions={sessionActions}
                         {...(reviewedInput === undefined ? {} : { reviewedInput })}
                         onFocus={() => terminals.select(id)} onOpenFile={(path, line, column) => openFile(path, line, false, column)}
+                        onRevealFolder={revealTerminalFolder}
                         clearRevision={clearRevision} onContextText={(text) => conversationActions.startContextText({
                           title: "PowerShell output", reference: `PowerShell · ${title}`, text,
                         })} {...(directory ? { relativeDirectory: directory } : {})} {...(autoStart ? { autoStart: true } : {})} />

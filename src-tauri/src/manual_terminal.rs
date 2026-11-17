@@ -544,23 +544,26 @@ pub async fn write_manual_terminal(
 }
 
 #[tauri::command]
-pub async fn resolve_manual_terminal_file(
+pub async fn resolve_manual_terminal_path(
     store: State<'_, Store>,
     checkout_id: String,
     relative_directory: Option<String>,
     observed_directory: Option<String>,
     path: String,
-) -> Result<String, String> {
-    omniagent::repository::terminal_file_links::resolve_terminal_file(
+    expected_kind: Option<omniagent::repository::terminal_file_links::TerminalPathKind>,
+) -> Result<omniagent::repository::terminal_file_links::TerminalPath, String> {
+    omniagent::repository::terminal_file_links::resolve_terminal_path(
         &store,
         checkout_id,
         relative_directory,
         observed_directory,
         path,
+        expected_kind,
     )
     .await
     .map_err(|_| {
-        "This terminal reference does not resolve to a file in the current checkout.".into()
+        "This terminal reference does not resolve to a matching path in the current checkout."
+            .into()
     })
 }
 

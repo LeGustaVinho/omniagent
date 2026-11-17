@@ -616,7 +616,7 @@ type FileTreeProps = {
   onOpen: (path: string) => void;
   onOpenNoteFavorite?: (target: CheckoutNoteFavorite) => void;
   actions: TreeRows["actions"];
-  reveal?: { path: string };
+  reveal?: TreeReveal;
   checkoutId: string;
   workspace: "ide" | "knowledge";
   simulated: boolean;
@@ -655,10 +655,11 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteF
   const [collapsedFavoriteGroups, setCollapsedFavoriteGroups] = useState(new Set<string>());
   const newFavoriteGroup = { label: "New favorite group…", run: () => editFavoriteGroup({}) };
   const favoriteKeys = new Set(favorites.map(checkoutFavoriteKey));
-  const automaticReveal = preferences.autoReveal && active ? { path: active } : undefined;
+  const automaticReveal: TreeReveal | undefined = preferences.autoReveal && active ? { path: active } : undefined;
   const revealPath = manualReveal?.path ?? automaticReveal?.path;
   const visibleReveals = [manualReveal ?? visibilityOverride, automaticReveal].filter((reveal) => reveal !== undefined);
-  const ignored = useIgnoredTree(checkoutId, !simulated && preferences.ignored, expanded, preferences.dotfiles, visibleReveals);
+  const scopedIgnored = preferences.ignored ? undefined : visibleReveals.find((reveal) => reveal.includeIgnored)?.path;
+  const ignored = useIgnoredTree(checkoutId, !simulated && (preferences.ignored || Boolean(scopedIgnored)), expanded, preferences.dotfiles, visibleReveals, scopedIgnored);
   const markdown = (path: string) => /\.(?:md|markdown)$/i.test(path);
   const allFiles = [...paths, ...ignored.files.filter((path) => workspace === "ide" || markdown(path))];
   const allFolders = [...folders, ...ignored.folders];
@@ -724,11 +725,11 @@ function PersistentFolderTree({ paths, folders = [], active, onOpen, onOpenNoteF
     if (!preferences.autoReveal || !active) lastAutoReveal.current = undefined;
   }, [active, preferences.autoReveal]);
   useEffect(() => {
-    if (!revealPath) return;
+    if (revealPath === undefined) return;
     if (!manualReveal && lastAutoReveal.current === revealPath) return;
     const frame = requestAnimationFrame(() => {
-      const button = [...(container.current?.querySelectorAll<HTMLButtonElement>("[data-tree-item]") ?? [])]
-        .find((item) => item.title === revealPath);
+      const button = revealPath === "" ? rootButton.current
+        : [...(container.current?.querySelectorAll<HTMLButtonElement>("[data-tree-item]") ?? [])].find((item) => item.title === revealPath);
       if (!button) return;
       if (manualReveal) {
         button.focus();

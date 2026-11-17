@@ -30,7 +30,7 @@ export function treeParents(path: string) {
   return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"));
 }
 
-export type TreeReveal = { path: string; expand?: boolean };
+export type TreeReveal = { path: string; expand?: boolean; includeIgnored?: boolean };
 
 function revealIncludes(path: string, reveal?: TreeReveal) {
   if (!reveal) return false;
@@ -96,18 +96,19 @@ function ignoredFolderQuery(checkoutId: string, folder: string | null) {
   });
 }
 
-export function useIgnoredTree(checkoutId: string, enabled: boolean, expanded: ReadonlySet<string>, dotfiles: boolean, reveals: readonly TreeReveal[]) {
+export function useIgnoredTree(checkoutId: string, enabled: boolean, expanded: ReadonlySet<string>, dotfiles: boolean, reveals: readonly TreeReveal[], scope?: string) {
   const root = useQuery({ ...ignoredFolderQuery(checkoutId, null), enabled });
   const rootFolders = root.data?.folders ?? [];
+  const inScope = (path: string) => !scope || path === scope || path.startsWith(`${scope}/`) || scope.startsWith(`${path}/`);
   const underIgnoredRoot = (path: string) => rootFolders.some((root) => path === root || path.startsWith(`${root}/`));
-  const openIgnoredFolders = enabled ? [...expanded].filter((path) => underIgnoredRoot(path)
+  const openIgnoredFolders = enabled ? [...expanded].filter((path) => inScope(path) && underIgnoredRoot(path)
     && showTreePath(path, dotfiles, reveals) && treeParents(path).every((parent) => expanded.has(parent))) : [];
   const children = useQueries({ queries: openIgnoredFolders.map((path) => ignoredFolderQuery(checkoutId, path)) });
   if (!enabled) return { files: [], folders: [], pending: false, error: null, load: new Map<string, { pending: boolean; error: Error | null }>() };
   const load = new Map(openIgnoredFolders.map((path, index) => [path, { pending: children[index]!.isPending, error: children[index]!.error }]));
   return {
-    files: [...(root.data?.files ?? []), ...children.flatMap(({ data }) => data?.files ?? [])],
-    folders: [...rootFolders, ...children.flatMap(({ data }) => data?.folders ?? [])],
+    files: [...(root.data?.files ?? []), ...children.flatMap(({ data }) => data?.files ?? [])].filter(inScope),
+    folders: [...rootFolders, ...children.flatMap(({ data }) => data?.folders ?? [])].filter(inScope),
     pending: root.isPending, error: root.error, load,
   };
 }

@@ -506,7 +506,7 @@ fn main() {
             project_search_runtime::search_repository_files,
             manual_terminal::start_manual_terminal,
             manual_terminal::write_manual_terminal,
-            manual_terminal::resolve_manual_terminal_file,
+            manual_terminal::resolve_manual_terminal_path,
             manual_terminal::resize_manual_terminal,
             manual_terminal::close_manual_terminal,
             git_review_runtime::git_checkout_review,

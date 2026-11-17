@@ -403,7 +403,7 @@ it("opens wrapped local file references with their location and offers a menu on
     { text: "https://example.com/a.ts", isWrapped: false },
     { text: "C:\\check out\\a.ts:14:2", isWrapped: false },
   ];
-  vi.mocked(invoke).mockImplementation(async (command) => command === "start_manual_terminal" ? session : "docs/revisão #1.ts");
+  vi.mocked(invoke).mockImplementation(async (command) => command === "start_manual_terminal" ? session : { path: "docs/revisão #1.ts", kind: "file" });
   const onOpenFile = vi.fn();
   const user = userEvent.setup();
   const { container } = render(<ManualTerminal checkoutId="linked" relativeDirectory="docs" active autoStart onOpenFile={onOpenFile} />);
@@ -416,7 +416,7 @@ it("opens wrapped local file references with their location and offers a menu on
   links![0]!.activate(new MouseEvent("mouseup"), original);
   expect(onOpenFile).not.toHaveBeenCalled();
   await act(async () => { links![0]!.activate(new MouseEvent("mouseup", { ctrlKey: true }), original); });
-  expect(invoke).toHaveBeenCalledWith("resolve_manual_terminal_file", { checkoutId: "linked", relativeDirectory: "docs", path: ".\\revisão #1.ts" });
+  expect(invoke).toHaveBeenCalledWith("resolve_manual_terminal_path", { checkoutId: "linked", relativeDirectory: "docs", path: ".\\revisão #1.ts", expectedKind: "file" });
   expect(onOpenFile).toHaveBeenCalledExactlyOnceWith("docs/revisão #1.ts", 12, 5);
   terminal.linkProvider?.provideLinks(3, (provided) => { links = provided; });
   expect(links).toBeUndefined();
@@ -435,11 +435,11 @@ it("opens wrapped local file references with their location and offers a menu on
 });
 
 it("keeps an unverified reference and a late resolution from navigating", async () => {
-  const pending = deferred<string>();
+  const pending = deferred<{ path: string; kind: "file" }>();
   fixture.lines = [{ text: "src/file.ts:1", isWrapped: false }];
   vi.mocked(invoke).mockImplementation(async (command) => {
     if (command === "start_manual_terminal") return { checkoutId: "checkout", terminalId: "terminal" };
-    if (command === "resolve_manual_terminal_file") throw new Error("No file in this checkout.");
+    if (command === "resolve_manual_terminal_path") throw new Error("No file in this checkout.");
     return undefined;
   });
   const onOpenFile = vi.fn();
@@ -456,15 +456,53 @@ it("keeps an unverified reference and a late resolution from navigating", async 
   act(activate);
   rerender(view(false));
   rerender(view(true));
-  await act(async () => { pending.resolve("src/file.ts"); });
+  await act(async () => { pending.resolve({ path: "src/file.ts", kind: "file" }); });
   expect(onOpenFile).not.toHaveBeenCalled();
+});
+
+it("reveals checked folders from printed terminal paths and uses the directory at the clicked row", async () => {
+  const child = ".\\logs\\";
+  const absolute = String.raw`C:\check out\logs folder`;
+  fixture.lines = [
+    { text: child, isWrapped: false },
+    { text: absolute, isWrapped: false },
+    { text: "Error: 'not a path'", isWrapped: false },
+  ];
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "start_manual_terminal") return { checkoutId: "linked", terminalId: "terminal-token" };
+    if (command === "resolve_manual_terminal_path") return { path: (args as { path: string }).path === child ? "old/logs" : "logs folder", kind: "folder" };
+  });
+  const onOpenFile = vi.fn();
+  const onRevealFolder = vi.fn();
+  const user = userEvent.setup();
+  const { container } = render(<ManualTerminal checkoutId="linked" active autoStart onOpenFile={onOpenFile} onRevealFolder={onRevealFolder} />);
+  await screen.findByRole("button", { name: "Close PowerShell" });
+  const terminal = fixture.terminals[0]!;
+  terminal.onOsc?.(`P;OmniAgentCwd=terminal-token;${btoa(String.raw`C:\check out\old`)}`);
+  fixture.cursorRow = 1;
+  terminal.onOsc?.(`P;OmniAgentCwd=terminal-token;${btoa(String.raw`C:\check out\new`)}`);
+
+  const grid = container.querySelector(".xterm-screen")!;
+  vi.spyOn(grid, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 960, 250));
+  fireEvent.contextMenu(grid, { clientX: 12, clientY: 5 });
+  await user.click(await screen.findByRole("menuitem", { name: "Reveal folder in Explorer tree" }));
+  expect(invoke).toHaveBeenCalledWith("resolve_manual_terminal_path", {
+    checkoutId: "linked", path: child, expectedKind: "folder", observedDirectory: String.raw`C:\check out\old`,
+  });
+  expect(onRevealFolder).toHaveBeenCalledExactlyOnceWith("old/logs");
+
+  terminal.linkProvider?.provideLinks(2, (links) => expect(links?.map(({ text }) => text)).toEqual([absolute]));
+  await act(async () => terminal.linkProvider?.provideLinks(2, (links) => links?.[0]?.activate(new MouseEvent("mouseup", { ctrlKey: true }), absolute)));
+  expect(onRevealFolder).toHaveBeenNthCalledWith(2, "logs folder");
+  expect(onOpenFile).not.toHaveBeenCalled();
+  terminal.linkProvider?.provideLinks(3, (links) => expect(links).toBeUndefined());
 });
 
 it("keeps each relative file reference bound to its authenticated PowerShell prompt directory", async () => {
   fixture.lines = [{ text: "src/main.ts:1", isWrapped: false }, { text: "src/main.ts:2", isWrapped: false }];
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     if (command === "start_manual_terminal") return { checkoutId: "checkout", terminalId: "session-token" };
-    if (command === "resolve_manual_terminal_file") return (args as { observedDirectory: string }).observedDirectory + "/src/main.ts";
+    if (command === "resolve_manual_terminal_path") return { path: (args as { observedDirectory: string }).observedDirectory + "/src/main.ts", kind: "file" };
     return undefined;
   });
   const onOpenFile = vi.fn();

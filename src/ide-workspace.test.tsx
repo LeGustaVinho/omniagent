@@ -32,14 +32,16 @@ vi.mock("@/git-diff-view", () => ({
     <div aria-label="Compared local versions"><pre>{file.original}</pre><pre>{file.modified}</pre></div>,
 }));
 const terminalProps = vi.hoisted(() => vi.fn());
+const terminalReveal = vi.hoisted(() => vi.fn<(reveal: (path: string) => void) => void>());
 vi.mock("@/ide-terminal", () => ({
   ExampleTerminal: () => null,
   ManualTerminal: ({ onContextText: _onContextText, onOpenFile: _onOpenFile, onFocus: _onFocus,
-    sessionActions: _sessionActions, visible: _visible, ...props }: {
+    onRevealFolder, sessionActions: _sessionActions, visible: _visible, ...props }: {
     checkoutId: string; active: boolean; clearRevision?: number; onContextText?: unknown; onOpenFile?: unknown;
-    onFocus?: unknown; sessionActions?: unknown; visible?: boolean;
+    onFocus?: unknown; onRevealFolder: (path: string) => void; sessionActions?: unknown; visible?: boolean;
   }) => {
     terminalProps(props);
+    terminalReveal(onRevealFolder);
     return null;
   },
 }));
@@ -546,6 +548,34 @@ it("opens a folder terminal from the keyboard menu and keeps the root session mo
   }));
   expect(terminalProps).toHaveBeenCalledWith({ checkoutId: main, active: false, clearRevision: 0 });
   expect((screen.getByRole("combobox", { name: "Terminal session" }) as HTMLSelectElement).value).toBe("src");
+});
+
+it("reveals and expands the exact terminal folder while keeping unrelated ignored paths hidden", async () => {
+  fixture();
+  const native = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation((command, args) => {
+    if (command !== "list_checkout_ignored_items") return native(command, args);
+    switch ((args as { folder: string | null }).folder) {
+      case "cache": return Promise.resolve({ folders: ["cache/logs", "cache/another"], files: [] });
+      case "cache/logs": return Promise.resolve({ folders: [], files: ["cache/logs/run.log"] });
+      default: return Promise.resolve({ folders: ["cache", "ignored elsewhere"], files: [] });
+    }
+  });
+  const { container } = render(<IdeWorkspace {...propsFor(alternate)} />);
+  await waitFor(() => expect(terminalReveal).toHaveBeenCalled());
+  fireEvent.click(await screen.findByRole("button", { name: "Search" }));
+  act(() => terminalReveal.mock.lastCall?.[0]("cache/logs"));
+  const folder = await screen.findByRole("button", { name: "logs" });
+  await waitFor(() => expect(document.activeElement).toBe(folder));
+  expect(folder.getAttribute("aria-expanded")).toBe("true");
+  expect(await screen.findByRole("button", { name: "run.log" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "another" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "ignored elsewhere" })).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("list_checkout_ignored_items", { checkoutId: alternate, folder: "cache/logs" });
+
+  act(() => terminalReveal.mock.lastCall?.[0](""));
+  await waitFor(() => expect(document.activeElement).toBe(container.querySelector(".file-tree-root > button")));
+  expect(screen.queryByRole("button", { name: "logs" })).toBeNull();
 });
 
 it("creates an empty folder under the clicked parent and refreshes the tree", async () => {
