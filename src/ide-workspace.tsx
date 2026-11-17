@@ -20,6 +20,7 @@ import { exampleNotes, exampleSources, fileName, findFileText, normalizeReposito
 import type { CodeModel, CodeProblem, EditorLocation, EditorSettings } from "@/ide-code-editor";
 import { EditorStatus } from "@/ide-editor-status";
 import { SourceFormatDialog } from "@/source-format-dialog";
+import { SourceDraftDialog } from "@/source-draft-dialog";
 import type { SourceFormatChange } from "@/source-file-format";
 import { IdeProblems, problemReference, type FileProblem } from "@/ide-problems";
 import { useTerminalSessions } from "@/ide-terminal-sessions";
@@ -35,6 +36,7 @@ const WorktreeTerminal = lazy(() => import("@/ide-terminal").then(({ ManualTermi
 type IdeDialog =
   | { kind: "close"; path: string; api: FilePanelApi }
   | { kind: "format"; path: string; change: SourceFormatChange }
+  | { kind: "draft"; path: string; base: string; editorText: string }
   | { kind: "conflict"; path: string; ownerPanel?: FilePanelApi };
 
 const markdownPath = (path: string) => /\.(?:md|markdown)$/i.test(path);
@@ -608,6 +610,12 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
         {active && buffer && <footer className="ide-statusbar">
           <EditorStatus path={active} saved={!dirty(active)} settings={editorSettings[active]} format={buffer.format} copy={menu.copy}
             canConvert={!dirty(active) && !source.files[active]?.sourceProblem && !source.files[active]?.draftRevision}
+            onReviewExternal={buffer.external === undefined ? undefined : () => setDialog({ kind: "conflict", path: active })}
+            onReviewDraft={!simulated && source.files[active] && (source.files[active]?.draftRevision || source.draftPaths.includes(active))
+              ? () => {
+                const entry = source.getFile(active);
+                if (entry) setDialog({ kind: "draft", path: active, base: entry.base.id, editorText: entry.content });
+              } : undefined}
             onChangeFormat={!simulated && buffer.format ? (change) => setDialog({ kind: "format", path: active, change }) : undefined} />
           {buffer.external !== undefined && <button type="button" className="fw-btn" onClick={() => setDialog({ kind: "conflict", path: active })}>Review external change</button>}
           {simulated && buffer.external === undefined && <button type="button" className="fw-btn" onClick={simulateConflict}>Simulate external change</button>}
@@ -645,6 +653,9 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
           <button type="button" className="fw-btn fw-primary" disabled={confirmingClose} onClick={() => void confirmClose(dialog, true)}>Save and close</button>
         </div>
       </FileDialog>}
+      {dialog?.kind === "draft" && <SourceDraftDialog checkoutId={checkout.checkoutId} path={dialog.path} base={dialog.base} editorText={dialog.editorText}
+        read={() => source.readProtectedDraft(dialog.path)} restore={(draft) => source.restoreProtectedDraft(dialog.path, draft, dialog.editorText)}
+        copy={(text) => menu.copy(text, "Copied protected draft")} close={() => setDialog(undefined)} />}
       {dialog?.kind === "conflict" && <FileDialog title="File changed externally" description={`Review both versions of ${dialog.path} before continuing.`}
         ownerPanel={dialog.ownerPanel} onClose={() => setDialog(undefined)}>
         <div className="file-dialog-comparison">

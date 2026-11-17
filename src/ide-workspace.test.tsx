@@ -170,6 +170,38 @@ function fixture(extraSources: Record<string, string> = {}) {
   };
 }
 
+it("reviews and restores the protected draft from the file status only at the reviewed revision", async () => {
+  const { disk, drafts } = fixture();
+  const base = disk.get(main)!.document.revision;
+  drafts.set(main, { base, revision: "draft-before", markdown: "fn old_draft() {}" });
+  const user = userEvent.setup();
+  render(<IdeWorkspace {...propsFor(main)} target={file} />);
+  const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
+  expect(editor.value).toBe("fn old_draft() {}");
+
+  const openDraft = async () => {
+    fireEvent.contextMenu(await screen.findByText("Unsaved changes", { exact: true }));
+    await user.click(await screen.findByRole("menuitem", { name: "Review protected draft…" }));
+    return within(await screen.findByRole("dialog", { name: "Review protected draft" }));
+  };
+  drafts.set(main, { base, revision: "draft-reviewed", markdown: "fn reviewed_draft() {}" });
+  let dialog = await openDraft();
+  await dialog.findByText("fn reviewed_draft() {}", { exact: true });
+  drafts.set(main, { base, revision: "draft-after", markdown: "fn changed_draft() {}" });
+  await user.click(dialog.getByRole("button", { name: "Restore draft to editor" }));
+  expect((await dialog.findByRole("alert")).textContent).toContain("The protected draft changed");
+  expect(editor.value).toBe("fn old_draft() {}");
+  await user.click(dialog.getByRole("button", { name: "Close" }));
+
+  dialog = await openDraft();
+  await dialog.findByText("fn changed_draft() {}", { exact: true });
+  await user.click(dialog.getByRole("button", { name: "Restore draft to editor" }));
+  await waitFor(() => expect(editor.value).toBe("fn changed_draft() {}"));
+  expect(drafts.get(main)?.revision).toBe("draft-after");
+  expect(disk.get(main)?.document.markdown).toBe("fn original() {}");
+  expect(invoke).not.toHaveBeenCalledWith("save_repository_source_file", expect.anything());
+});
+
 it("previews an exact checkout file format and saves only after confirming the reviewed bytes", async () => {
   const { disk } = fixture();
   const source = "fn original() {}\n";
