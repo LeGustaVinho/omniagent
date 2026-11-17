@@ -242,7 +242,8 @@ function AuthoringRevisionEditor({ projectId, checkoutId, draft, revision }: { p
   }
   const save = useMutation({
     mutationFn: () => invoke<Draft>("save_workflow_authoring_draft", { ...bound, graph: editor.graph,
-      canvas: { layout: editor.layout, updateDefinitions: editor.updateDefinitions } }),
+      canvas: { layout: editor.layout, updateDefinitions: editor.updateDefinitions,
+        ...(editor.definitionCopies && { definitionCopies: editor.definitionCopies }) } }),
     onSuccess: updated,
   });
   const request = useMutation({

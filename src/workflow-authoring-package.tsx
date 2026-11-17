@@ -338,7 +338,7 @@ function PackageRevision({ draft, projectId, checkoutId, update, holdEdits, revi
       changeCanvas={(key, canvas) => setCanvases((previous) => {
         const next = { ...previous };
         if (JSON.stringify(canvas.layout) === JSON.stringify(draft.layouts?.[key] ?? {})
-          && Object.keys(canvas.updateDefinitions).length === 0) delete next[key];
+          && Object.keys(canvas.updateDefinitions).length === 0 && !canvas.definitionCopies) delete next[key];
         else next[key] = canvas;
         return next;
       })}

@@ -99,6 +99,7 @@ async fn duplicates_a_published_workflow_as_an_independent_draft_with_its_pins_a
                 WorkflowCanvasEdit {
                     layout: layout.clone(),
                     update_definitions: BTreeMap::new(),
+                    definition_copies: BTreeMap::new(),
                 },
             )]),
         )

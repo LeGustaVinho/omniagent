@@ -177,6 +177,14 @@ it("adds pinned reusable nodes, saves an editable override, and opens a child wi
   const names = within(parent).getByLabelText(/Required checks/);
   expect((names as HTMLTextAreaElement).value).toBe("Build");
   fireEvent.change(names, { target: { value: "Lint" } });
+  const pinnedNode = "reusable-verify-candidate";
+  fireEvent.contextMenu(screen.getByRole("button", { name: `Select graph node ${pinnedNode}` }));
+  await user.click(await screen.findByRole("menuitem", { name: "Duplicate node" }));
+  expect(screen.getByRole("button", { name: `Select graph node ${pinnedNode}-2` })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Undo graph edit" }));
+  expect(screen.queryByRole("button", { name: `Select graph node ${pinnedNode}-2` })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Redo graph edit" }));
+  expect(screen.getByRole("button", { name: `Select graph node ${pinnedNode}-2` })).toBeTruthy();
   await user.selectOptions(pick, screen.getByRole("option", { name: /Review subflow ·/ }));
   await user.click(screen.getByRole("button", { name: "Add pinned node" }));
   await user.selectOptions(inspect, await within(inspect).findByRole("option", { name: /Review subflow · reusable/ }));
@@ -193,9 +201,12 @@ it("adds pinned reusable nodes, saves an editable override, and opens a child wi
     package: { ...draft.package, members: [{ ...draft.package.members[0], body: { kind: "pipeline", graph: {
       ...graph, nodes: [...graph.nodes, { id: "reusable-verify-candidate", kind: "verify_candidate",
         configuration: { kind: "preset_overrides", fields: { names: ["Lint"] } } },
+      { id: "reusable-verify-candidate-2", kind: "verify_candidate",
+        configuration: { kind: "preset_overrides", fields: { names: ["Lint"] } } },
       { id: "reusable-subflow", kind: "subflow", configuration: { kind: "none" } }],
     } }, references: {
       "reusable-verify-candidate": { source: "published", version: presetVersion },
+      "reusable-verify-candidate-2": { source: "published", version: presetVersion },
       "reusable-subflow": { source: "published", version: subflowVersion },
     } }] },
   }));

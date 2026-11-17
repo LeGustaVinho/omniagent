@@ -19,7 +19,11 @@ export type WorkflowDefinition = {
 
 export type WorkflowDefinitions = Record<string, WorkflowDefinition>;
 export type WorkflowLayout = Record<string, { x: number; y: number }>;
-export type WorkflowCanvasEdit = { layout: WorkflowLayout; updateDefinitions: Record<string, number> };
+export type WorkflowCanvasEdit = {
+  layout: WorkflowLayout;
+  updateDefinitions: Record<string, number>;
+  definitionCopies?: Record<string, { sourceId: string; revision: number }>;
+};
 export type WorkflowReuseSelection = { type: "preset"; nodeId: string } | { type: "subflow"; nodeIds: string[] };
 
 export type WorkflowScalar = string | number | boolean | null;
