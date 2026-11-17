@@ -28,8 +28,8 @@ vi.mock("@/ide-code-editor", () => ({
     </>,
 }));
 vi.mock("@/git-diff-view", () => ({
-  MonacoComparison: ({ file }: { file: { original: string; modified: string } }) =>
-    <div aria-label="Compared local versions"><pre>{file.original}</pre><pre>{file.modified}</pre></div>,
+  MonacoComparison: ({ file }: { file: { path: string; originalPath?: string; original: string; modified: string } }) =>
+    <div aria-label="Compared local versions" data-path={file.path} data-original-path={file.originalPath}><pre>{file.original}</pre><pre>{file.modified}</pre></div>,
 }));
 const terminalProps = vi.hoisted(() => vi.fn());
 const terminalReveal = vi.hoisted(() => vi.fn<(reveal: (path: string) => void) => void>());
@@ -720,13 +720,14 @@ it("copies the exact clicked file from a live buffer or a read-only capture in t
 });
 
 
-it("compares the clicked draft with the selected branch history and historical file path", async () => {
+it("compares the clicked draft and its disk file separately with exact branch tips and historical paths", async () => {
   fixture();
   const selectedRef = { name: "feature", reference: "refs/heads/feature", sha: "c".repeat(40) };
   const oldPath = "src/former.rs";
   const old = { sha: "b".repeat(40), parent: null, author: "Fixture", committedAt: "2026-11-17T11:25:00Z",
     subject: "Historical version", path: oldPath, previousPath: null, status: "M" };
   const newest = { ...old, sha: "a".repeat(40), subject: "Latest version", path: file, previousPath: oldPath, status: "R" };
+  let diskText = "fn saved_disk() {}";
   const native = vi.mocked(invoke).getMockImplementation()!;
   vi.mocked(invoke).mockImplementation((command, args) => {
     if (command === "git_checkout_review") return Promise.resolve({ checkoutId: alternate, root: "C:/checkout",
@@ -736,7 +737,11 @@ it("compares the clicked draft with the selected branch history and historical f
       return Promise.resolve({ head: feature ? selectedRef.sha : newest.sha, entries: feature ? [newest, old] : [newest], hasMore: false });
     }
     if (command === "git_compare_file_versions") {
-      const { revised } = args as { revised: { path: string } };
+      const { base, revised } = args as { base: { path: string } | null; revised: { kind: string; path: string } };
+      if (revised.kind === "worktree") return Promise.resolve({
+        original: { status: "text", content: base?.path === oldPath ? "fn historical() {}" : "fn branch_tip() {}" },
+        modified: { status: "text", content: diskText },
+      });
       return Promise.resolve({ original: { status: "missing" }, modified: { status: "text", content: revised.path === oldPath ? "fn historical() {}" : "fn latest() {}" } });
     }
     return native(command, args);
@@ -759,6 +764,31 @@ it("compares the clicked draft with the selected branch history and historical f
   expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", {
     checkoutId: alternate, path: file, base: null, revised: { kind: "commit", sha: old.sha, path: oldPath },
   });
+
+  await user.click(dialog.getByRole("button", { name: "Close dialog" }));
+  fireEvent.contextMenu(tab);
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Compare Git versions" }), { key: "ArrowRight" });
+  await user.click(await screen.findByRole("menuitem", { name: "Compare file on disk with branch or commit…" }));
+  const saved = within(await screen.findByRole("dialog", { name: "Compare file on disk with Git revision" }));
+  await user.selectOptions(await saved.findByLabelText("History branch"), selectedRef.reference);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId: alternate, path: file, base: { kind: "commit", sha: selectedRef.sha, path: file }, revised: { kind: "worktree" },
+  }));
+  await user.click(await saved.findByRole("button", { name: /^Historical version/ }));
+  expect(await saved.findByText("fn historical() {}")).toBeTruthy();
+  expect(saved.getByText(diskText)).toBeTruthy();
+  expect(saved.queryByText("fn unsaved_draft() {}")).toBeNull();
+  expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId: alternate, path: file, base: { kind: "commit", sha: old.sha, path: oldPath }, revised: { kind: "worktree" },
+  });
+  const diff = saved.getByLabelText("Compared local versions");
+  expect(diff.getAttribute("data-original-path")).toBe(oldPath);
+  expect(diff.getAttribute("data-path")).toBe(file);
+  diskText = "fn updated_on_disk() {}";
+  await user.click(saved.getByRole("button", { name: "Refresh disk version" }));
+  expect(await saved.findByText(diskText)).toBeTruthy();
+  await user.click(saved.getByRole("button", { name: "Close dialog" }));
+  expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: editorLabel }).value).toBe("fn unsaved_draft() {}");
   expect(invoke).not.toHaveBeenCalledWith("save_repository_source_file", expect.anything());
 });
 

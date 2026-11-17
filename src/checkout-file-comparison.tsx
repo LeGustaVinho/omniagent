@@ -3,13 +3,14 @@ import { lazy, Suspense, useRef, useState } from "react";
 import { CheckoutDocumentHistory } from "@/checkout-document-history";
 import type { MenuAction } from "@/components/ui/context-actions";
 import type { GitTextComparison } from "@/git-diff-view";
+import type { RevisionComparisonTarget } from "@/git-file-history";
 import { compareGitFileVersions, gitFileText, type GitFileVersion } from "@/git-file-versions";
 import { FileDialog, type FilePanelApi, type FileTreeTarget } from "@/ide-file-workspace";
 
 type TextState = { content: string; saved: string; external?: string };
 type Comparison = { labels: [string, string]; ownerPanel?: FilePanelApi; file?: GitTextComparison; error?: string };
 const MonacoComparison = lazy(() => import("@/git-diff-view").then(({ MonacoComparison }) => ({ default: MonacoComparison })));
-const EditorRevisionComparison = lazy(() => import("@/git-file-history").then(({ EditorRevisionComparison }) => ({ default: EditorRevisionComparison })));
+const FileRevisionComparison = lazy(() => import("@/git-file-history").then(({ FileRevisionComparison }) => ({ default: FileRevisionComparison })));
 
 export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, openHistory, restoreLocalText, canRestore }: {
   checkoutId: string;
@@ -22,7 +23,7 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, ope
   const [selected, setSelected] = useState<string>();
   const [comparison, setComparison] = useState<Comparison>();
   const [history, showHistory] = useState<{ path: string; ownerPanel?: FilePanelApi }>();
-  const [editorRevision, selectEditorRevision] = useState<{ path: string; text: string; ownerPanel?: FilePanelApi }>();
+  const [revision, selectRevision] = useState<{ path: string; target: RevisionComparisonTarget; ownerPanel?: FilePanelApi }>();
   const [layout, setLayout] = useState<"split" | "unified">("split");
   const request = useRef(0);
 
@@ -79,10 +80,11 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, ope
         { label: "HEAD with staged index", run: () => compareDisk(path, { kind: "head" }, { kind: "index" }, ["HEAD", "Git index"], ownerPanel) },
         { label: "HEAD with file on disk", run: () => compareDisk(path, { kind: "head" }, { kind: "worktree" }, ["HEAD", `${path} · Disk`], ownerPanel) },
         { label: "Staged index with file on disk", run: () => compareDisk(path, { kind: "index" }, { kind: "worktree" }, ["Git index", `${path} · Disk`], ownerPanel) },
+        { label: "Compare file on disk with branch or commit…", run: () => selectRevision({ path, target: { kind: "disk" }, ownerPanel }) },
         ...(local ? [
           { label: "HEAD with editor", run: () => compareDraft(path, "head", local.content, ownerPanel) },
           { label: "Staged index with editor", run: () => compareDraft(path, "index", local.content, ownerPanel) },
-          { label: "Compare editor with branch or commit…", run: () => selectEditorRevision({ path, text: local.content, ownerPanel }) },
+          { label: "Compare editor with branch or commit…", run: () => selectRevision({ path, target: { kind: "editor", text: local.content }, ownerPanel }) },
         ] : []),
       ] }] : []),
       ...(!simulated && openHistory ? [{ label: "Show file history", run: () => openHistory(path) }] : []),
@@ -112,10 +114,10 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, ope
     </div>
   </FileDialog>;
 
-  return { actions, selectionActions, dialog: editorRevision ? <FileDialog title="Compare editor with Git revision"
-    description={editorRevision.path} ownerPanel={editorRevision.ownerPanel} className="file-comparison-dialog" onClose={() => selectEditorRevision(undefined)}>
+  return { actions, selectionActions, dialog: revision ? <FileDialog title={revision.target.kind === "disk" ? "Compare file on disk with Git revision" : "Compare editor with Git revision"}
+    description={revision.path} ownerPanel={revision.ownerPanel} className="file-comparison-dialog" onClose={() => selectRevision(undefined)}>
     <Suspense fallback={<p role="status">Loading Git comparison…</p>}>
-      <EditorRevisionComparison key={editorRevision.path} checkoutId={checkoutId} path={editorRevision.path} text={editorRevision.text} />
+      <FileRevisionComparison key={`${revision.target.kind}:${revision.path}`} checkoutId={checkoutId} path={revision.path} target={revision.target} />
     </Suspense>
   </FileDialog>
     : history ? <CheckoutDocumentHistory key={history.path} checkoutId={checkoutId} path={history.path}

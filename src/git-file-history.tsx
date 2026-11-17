@@ -15,6 +15,7 @@ type Entry = { sha: string; parent: string | null; author: string; committedAt: 
   path: string; previousPath: string | null; status: string };
 type FileHistory = { head: string | null; entries: Entry[]; hasMore: boolean };
 type Page = { pinnedHead: string | null; offset: number };
+type BranchSelection = { reference: string; label?: string; pinnedHead?: string };
 type View = "parent" | "disk" | "index" | "head" | "contents" | "selected" | "editor";
 const viewLabels: Record<View, string> = {
   parent: "Compare with parent", disk: "Compare with file on disk", index: "Compare with staged index",
@@ -25,13 +26,23 @@ const labels: Record<string, string> = { A: "Added", C: "Copied", D: "Deleted", 
 const version = (entry: Entry) => ({ kind: "commit" as const, sha: entry.sha, path: entry.path });
 const short = (sha: string) => sha.slice(0, 12);
 
-export function EditorRevisionComparison({ checkoutId, path, text }: {
-  checkoutId: string; path: string; text: string;
+export type RevisionComparisonTarget = { kind: "disk" } | { kind: "editor"; text: string };
+
+export function FileRevisionComparison({ checkoutId, path, target }: {
+  checkoutId: string; path: string; target: RevisionComparisonTarget;
 }) {
   const review = useGitCheckoutReview(checkoutId);
   if (review.error) return <p role="alert">{String(review.error)}</p>;
   if (!review.data) return <p role="status">Loading Git references…</p>;
-  return <GitFileHistoryView review={review.data} path={path} editorSnapshot={text} />;
+  return <GitFileHistoryView review={review.data} path={path} target={target} />;
+}
+
+function compareWithDisk(commit: ReturnType<typeof version>) {
+  return { base: commit, revised: { kind: "worktree" as const }, ranges: [`${short(commit.sha)} · ${commit.path}`, "File on disk"] };
+}
+
+function compareWithEditor(commit: ReturnType<typeof version>) {
+  return { base: null, revised: commit, ranges: [`${short(commit.sha)} · ${commit.path}`, "Editor snapshot"] };
 }
 
 function comparisonFor(entry: Entry, view: View, reference?: Entry) {
@@ -43,33 +54,35 @@ function comparisonFor(entry: Entry, view: View, reference?: Entry) {
       ranges: [entry.status !== "A" && entry.parent ? `${short(entry.parent)} · ${entry.previousPath ?? entry.path}` : "Before the file was added",
         `${short(entry.sha)} · ${entry.path}`],
     };
-    case "disk": return { base: selected, revised: { kind: "worktree" as const }, ranges: [short(entry.sha), "File on disk"] };
+    case "disk": return compareWithDisk(selected);
     case "index": return { base: selected, revised: { kind: "index" as const }, ranges: [short(entry.sha), "Staged index"] };
     case "head": return { base: selected, revised: { kind: "head" as const }, ranges: [short(entry.sha), "Current HEAD"] };
     case "contents": return { base: null, revised: selected, ranges: ["", `${short(entry.sha)} · ${entry.path}`] };
-    case "editor": return { base: null, revised: selected, ranges: [`${short(entry.sha)} · ${entry.path}`, "Editor snapshot"] };
+    case "editor": return compareWithEditor(selected);
     case "selected": return reference && { base: version(reference), revised: selected,
       ranges: [`${short(reference.sha)} · ${reference.path}`, `${short(entry.sha)} · ${entry.path}`] };
   }
 }
 
-export function GitFileHistoryView({ review, path, editorSnapshot, openFile, openConversation, clear }: {
-  review: CheckoutReview; path: string; editorSnapshot?: string;
+export function GitFileHistoryView({ review, path, target, openFile, openConversation, clear }: {
+  review: CheckoutReview; path: string; target?: RevisionComparisonTarget;
   openFile?: () => void; openConversation?: (id: string) => void; clear?: () => void;
 }) {
   const { checkoutId } = review;
-  const [branch, setBranch] = useState("");
-  const [compareTip, setCompareTip] = useState(editorSnapshot !== undefined);
+  const [branch, setBranch] = useState<BranchSelection>(() => ({ reference: "",
+    pinnedHead: target?.kind === "disk" ? review.revision.head ?? undefined : undefined,
+  }));
+  const [compareTip, setCompareTip] = useState(target !== undefined);
   const [picked, select] = useState<{ sha: string; view: View }>();
   const [reference, setReference] = useState<Entry>();
   const [layout, setLayout] = useState<"auto" | "split" | "unified">("auto");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
-  const head = branch ? review.branches.find((item) => item.reference === branch)?.sha : review.revision.head;
+  const head = branch.pinnedHead ?? (branch.reference ? review.branches.find((item) => item.reference === branch.reference)?.sha : review.revision.head);
   const history = useInfiniteQuery({
-    queryKey: ["git-file-history", checkoutId, path, branch, head],
-    initialPageParam: { pinnedHead: null, offset: 0 } as Page,
-    queryFn: ({ pageParam }) => invoke<FileHistory>("git_checkout_file_history", { checkoutId, path, branch: branch || null, ...pageParam }),
+    queryKey: ["git-file-history", checkoutId, path, branch.reference, head, branch.pinnedHead],
+    initialPageParam: { pinnedHead: branch.pinnedHead ?? null, offset: 0 } as Page,
+    queryFn: ({ pageParam }) => invoke<FileHistory>("git_checkout_file_history", { checkoutId, path, branch: branch.reference || null, ...pageParam }),
     getNextPageParam: (last, pages): Page | undefined => last.hasMore && last.head
       ? { pinnedHead: last.head, offset: pages.reduce((count, page) => count + page.entries.length, 0) } : undefined,
     retry: false,
@@ -77,12 +90,15 @@ export function GitFileHistoryView({ review, path, editorSnapshot, openFile, ope
   });
   const entries = history.data?.pages.flatMap((page) => page.entries) ?? [];
   const entry = entries.find(({ sha }) => sha === picked?.sha) ?? entries[0];
-  const defaultView = editorSnapshot === undefined ? "parent" : "editor";
+  const defaultView = target?.kind ?? "parent";
   const tip = history.data?.pages[0]?.head;
-  const view = compareTip ? "editor" : picked?.sha === entry?.sha ? picked?.view ?? defaultView : defaultView;
+  const view = !compareTip && picked?.sha === entry?.sha ? picked?.view ?? defaultView : defaultView;
   const comparison = useMemo(() => {
-    if (compareTip) return tip ? { base: null, revised: { kind: "commit" as const, sha: tip, path },
-      ranges: [`${short(tip)} · ${path}`, "Editor snapshot"] } : undefined;
+    if (compareTip) {
+      if (!tip) return undefined;
+      const commit = { kind: "commit" as const, sha: tip, path };
+      return view === "disk" ? compareWithDisk(commit) : compareWithEditor(commit);
+    }
     return entry ? comparisonFor(entry, view, reference) : undefined;
   }, [compareTip, tip, path, entry, view, reference]);
   function selectRevision(sha: string, view: View) {
@@ -101,16 +117,17 @@ export function GitFileHistoryView({ review, path, editorSnapshot, openFile, ope
     if (original.status === "unavailable" || modified.status === "unavailable") return {
       error: [original, modified].flatMap((side) => side.status === "unavailable" ? [side.reason] : []).join(" "),
     };
-    if (view === "editor" && editorSnapshot !== undefined) return { file: {
+    if (view === "editor" && target?.kind === "editor") return { file: {
       path, originalPath: comparison.revised.kind === "commit" ? comparison.revised.path : path,
       language: /\.(md|markdown)$/i.test(path) ? "markdown" : "plaintext",
-      original: gitFileText(modified), modified: editorSnapshot,
+      original: gitFileText(modified), modified: target.text,
     }, empty: false, missingAtRevision: modified.status === "missing" };
-    if (!entry) return undefined;
     const originalPath = comparison?.base?.kind === "commit" ? comparison.base.path : path;
-    return { file: { path: entry.path, originalPath, language: /\.(md|markdown)$/i.test(entry.path) ? "markdown" : "plaintext",
-      original: gitFileText(original), modified: gitFileText(modified) }, empty: original.status === "missing" && modified.status === "missing" };
-  }, [load.data, entry, comparison, path, view, editorSnapshot]);
+    const modifiedPath = comparison.revised.kind === "commit" ? comparison.revised.path : path;
+    return { file: { path: modifiedPath, originalPath, language: /\.(md|markdown)$/i.test(modifiedPath) ? "markdown" : "plaintext",
+      original: gitFileText(original), modified: gitFileText(modified) }, empty: original.status === "missing" && modified.status === "missing",
+      missingAtRevision: view === "disk" && original.status === "missing" && modified.status === "text" };
+  }, [load.data, comparison, path, view, target]);
   const conversation = useCheckoutConversationActions(checkoutId, !openConversation, (id) => openConversation?.(id));
   const comments = useGitReviewComments({
     checkoutId, surface: "versions", matchPath: path, comparisonPath: path, language: sides?.file?.language,
@@ -134,15 +151,21 @@ export function GitFileHistoryView({ review, path, editorSnapshot, openFile, ope
     <div className="delivery-toolbar delivery-filters">
       <h3 className="min-w-0 wrap-anywhere font-mono text-sm" title={path}>{path}</h3>
       <label className="delivery-field">History branch
-        <select className="delivery-filter" value={branch} onChange={(event) => {
-          setBranch(event.currentTarget.value); select(undefined); setReference(undefined); setCompareTip(editorSnapshot !== undefined);
+        <select className="delivery-filter" value={branch.reference} onChange={(event) => {
+          const reference = event.currentTarget.value;
+          const selected = review.branches.find((item) => item.reference === reference);
+          setBranch({ reference, label: selected?.name, pinnedHead: target?.kind === "disk"
+            ? (reference ? selected?.sha : review.revision.head ?? undefined) : undefined });
+          select(undefined); setReference(undefined); setCompareTip(target !== undefined);
         }}>
           <option value="">Current checkout HEAD</option>
           {review.branches.map(({ name, reference }) => <option key={reference} value={reference}>{name}</option>)}
+          {branch.label && !review.branches.some(({ reference }) => reference === branch.reference) &&
+            <option value={branch.reference}>{branch.label}</option>}
         </select>
       </label>
-      {editorSnapshot !== undefined && <Button type="button" variant="outline" disabled={compareTip || !tip}
-        onClick={() => setCompareTip(true)}>{branch ? "Compare branch tip" : "Compare checkout HEAD"}</Button>}
+      {target && <Button type="button" variant="outline" disabled={compareTip || !tip}
+        onClick={() => setCompareTip(true)}>{branch.reference ? "Compare branch tip" : "Compare checkout HEAD"}</Button>}
       {openFile && <Button type="button" variant="outline" onClick={openFile}>Open working file</Button>}
       {clear && <Button type="button" variant="ghost" onClick={clear}>All commits</Button>}
     </div>
@@ -156,7 +179,7 @@ export function GitFileHistoryView({ review, path, editorSnapshot, openFile, ope
           <td><ContextActions label={`${row.subject || "Commit"} ${short(row.sha)}`} groups={[[
             ...(Object.entries(viewLabels) as [View, string][]).filter(([mode]) =>
               (mode !== "contents" || row.status !== "D") && (mode !== "selected" || reference && reference.sha !== row.sha)
-              && (mode !== "editor" || editorSnapshot !== undefined))
+              && (mode !== "editor" || target?.kind === "editor"))
               .map(([mode, label]) => ({ label, run: () => selectRevision(row.sha, mode) })),
             { label: reference?.sha === row.sha ? "Clear comparison base" : "Select revision as comparison base",
               run: () => setReference(reference?.sha === row.sha ? undefined : row) },
@@ -202,7 +225,7 @@ export function GitFileHistoryView({ review, path, editorSnapshot, openFile, ope
       </div>
       {sides?.missingAtRevision && <p role="status" className="px-3 text-sm">This path did not exist at the selected revision.</p>}
       <div className="min-h-0 flex-1 overflow-auto" aria-live="polite">
-        {load.isPending ? <p role="status" className="p-3 text-sm">Loading file versions…</p>
+        {load.isPending || (view === "disk" && load.isFetching) ? <p role="status" className="p-3 text-sm">Loading file versions…</p>
           : load.error || sides?.error ? <div className="p-3"><InlineIssue>{load.error ? String(load.error) : sides?.error}</InlineIssue></div>
             : sides?.empty ? <p className="p-3 text-sm">This file is absent from both revisions.</p>
               : sides?.file && (view === "contents" ? <pre className="p-3 font-mono text-xs">{sides.file.modified}</pre>

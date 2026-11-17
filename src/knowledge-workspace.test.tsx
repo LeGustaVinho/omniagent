@@ -15,6 +15,10 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
   Channel: class { onmessage = () => {}; },
 }));
+vi.mock("@/git-diff-view", () => ({
+  MonacoComparison: ({ file }: { file: { original: string; modified: string } }) =>
+    <div aria-label="Compared note versions"><pre>{file.original}</pre><pre>{file.modified}</pre></div>,
+}));
 
 const rangeLayout = {
   getClientRects: () => [],
@@ -456,6 +460,59 @@ it("previews a closed note and opens only that note when explicitly requested", 
   const opened = await editor(checklist);
   expect(opened.state.doc.toString()).toBe(checklistSource);
   expect(active.state.doc.toString()).toBe(releaseSource);
+});
+
+
+it("compares a closed note on disk with the selected branch tip even when it has no history there", async () => {
+  mockRepository();
+  const base = { name: "other", reference: "refs/heads/other", sha: "c".repeat(40) };
+  const initial = "a".repeat(40);
+  let review = { checkoutId, root: props.checkout.checkoutRoot, managed: false,
+    revision: { branch: "refs/heads/main", head: initial, index: "index" }, changes: [], branches: [base], worktrees: [] };
+  let diskText = checklistSource;
+  const backend = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_checkout_review") return review;
+    if (command === "git_checkout_file_history") return { head: (args as { pinnedHead: string }).pinnedHead,
+      entries: [], hasMore: false };
+    if (command === "git_compare_file_versions") {
+      const { base: revision } = args as { base: { sha: string } };
+      return { original: revision.sha === base.sha ? { status: "missing" } : { status: "text", content: "# Saved at initial HEAD" },
+        modified: { status: "text", content: diskText } };
+    }
+    return backend(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await editor(release);
+  const tree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  const folder = tree.getByRole("button", { name: "notes" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
+  fireEvent.contextMenu(await tree.findByRole("button", { name: "Checklist.md" }));
+  fireEvent.keyDown(await screen.findByRole("menuitem", { name: "Compare Git versions" }), { key: "ArrowRight" });
+  await user.click(await screen.findByRole("menuitem", { name: "Compare file on disk with branch or commit…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Compare file on disk with Git revision" }));
+  await user.selectOptions(await dialog.findByLabelText("History branch"), base.reference);
+  expect(await dialog.findByText("This path did not exist at the selected revision.")).toBeTruthy();
+  expect(dialog.getByLabelText("Compared note versions").textContent).toBe(checklistSource);
+  expect(invoke).toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId, path: checklist, base: { kind: "commit", sha: base.sha, path: checklist }, revised: { kind: "worktree" },
+  });
+  expect(invoke).toHaveBeenCalledWith("git_checkout_file_history", {
+    checkoutId, path: checklist, branch: base.reference, pinnedHead: base.sha, offset: 0,
+  });
+
+  const moved = { ...base, sha: "d".repeat(40) };
+  review = { ...review, branches: [moved] };
+  await act(async () => { client.setQueryData(["git-review", checkoutId], review); });
+  diskText += "Refreshed on disk.\n";
+  await user.click(dialog.getByRole("button", { name: "Refresh disk version" }));
+  await waitFor(() => expect(dialog.getByLabelText("Compared note versions").textContent).toBe(diskText));
+  expect(invoke).not.toHaveBeenCalledWith("git_compare_file_versions", {
+    checkoutId, path: checklist, base: { kind: "commit", sha: moved.sha, path: checklist }, revised: { kind: "worktree" },
+  });
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_document", { checkoutId, path: checklist });
 });
 
 
