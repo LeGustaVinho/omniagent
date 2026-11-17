@@ -1,10 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { JobInspection } from "@/bindings/JobInspection";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { deliveryMergeReceiptQuery } from "@/delivery-merge-model";
+import { downloadArtifact } from "@/download-artifact";
 import { JobFailurePanel } from "@/job-failure";
 import { commitQuery } from "@/project-agile-model";
 import { queueBlockerReason } from "@/queue-model";
@@ -13,7 +15,7 @@ import type { WorkspaceProps } from "@/workbench-contract";
 import { AttemptStageRequirements } from "@/workflow-stage-requirements";
 import { WorkflowMcpToolRun } from "@/workflow-mcp-tools";
 import { WorkflowMaintenanceDelivery } from "@/workflow-maintenance";
-import type { ExecutionArtifact, ExecutionControl, ExecutionJob, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
+import type { ExecutionArtifact, ExecutionControl, ExecutionJob, ExecutionOutput, ExecutionPinnedNode, WorkflowExecutionSnapshot } from "@/workflow-execution-model";
 
 type Navigation = Pick<WorkspaceProps, "checkout" | "openWorkspace" | "openActivity" | "openQueueJob">;
 type Task = { projectId: string; taskId: string };
@@ -23,6 +25,44 @@ type Approval = { task: Task; source: string; planRevision: string; ruleEvidence
 type ArtifactScope = { projectId: string; runId: string };
 
 const text = (kind: string) => kind.replaceAll("_", " ");
+
+function pinnedNodeRevision(snapshot: WorkflowExecutionSnapshot, nodeId: string) {
+  return snapshot.definition.nodes.find(({ instance }) => instance.id === nodeId)?.revision;
+}
+
+function recordedArtifact(snapshot: WorkflowExecutionSnapshot, output?: ExecutionOutput) {
+  return {
+    projectId: snapshot.run.projectId,
+    workflowRunId: snapshot.run.id,
+    workflowVersion: snapshot.run.version,
+    artifact: output?.artifact ?? null,
+    ...(output && {
+      producerRevision: pinnedNodeRevision(snapshot, output.artifact.nodeInstanceId),
+      current: output.current,
+    }),
+  };
+}
+
+function EvidenceActions({ direction, port, id, record, children }: {
+  direction: "input" | "output";
+  port: string;
+  id: string;
+  record: () => object;
+  children: ReactNode;
+}) {
+  const { feedback, copy, run } = useContextActionFeedback();
+  return <>
+    <ContextActions label={`${port} ${direction} evidence ${id}`} groups={[[
+      { label: `Copy ${direction} evidence JSON`, run: () => copy(JSON.stringify(record(), null, 2)) },
+      { label: `Download ${direction} evidence (.json)`, run: () => void run(async () => {
+        const filename = id.replace(/[^a-z0-9_-]/gi, "_").slice(0, 80);
+        downloadArtifact(`workflow-${direction}-${filename}.json`,
+          new Blob([JSON.stringify(record(), null, 2)], { type: "application/json" }));
+      }) },
+    ]]}><div className="min-w-0 flex-1">{children}</div></ContextActions>
+    {feedback && <p className="text-xs" role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
+  </>;
+}
 
 function LinkedWork({ task, projectId, navigation }: { task?: Task; projectId: string; navigation: Navigation }) {
   return task?.projectId === projectId ? <Button type="button" variant="outline" onClick={() => navigation.openWorkspace("tasks", task.taskId)}>Open Agile work</Button> : null;
@@ -124,21 +164,45 @@ function ArtifactLinks({ artifact, scope, navigation }: { artifact: ExecutionArt
 }
 
 type InputEvidence = [port: string, artifactId: string];
+type InputConsumer = {
+  nodeInstanceId: string;
+  nodeRevision?: string;
+  unitId?: string | null;
+  planRevision?: string | null;
+  jobId?: string;
+  triggeringRunId?: string | null;
+  decisionRequestId?: string;
+  inputReceipt?: { executionKey: string; revision: string };
+};
 
-export function RecordedInputs({ inputs, snapshot, scope, navigation }: { inputs: Record<string, string> | InputEvidence[] | null; snapshot: WorkflowExecutionSnapshot; scope: ArtifactScope; navigation: Navigation }) {
+export function RecordedInputs({ inputs, snapshot, scope, navigation, consumer }: {
+  inputs: Record<string, string> | InputEvidence[] | null;
+  snapshot: WorkflowExecutionSnapshot;
+  scope: ArtifactScope;
+  navigation: Navigation;
+  consumer: InputConsumer;
+}) {
   if (inputs === null) return <p>Exact data inputs were not recorded for this execution.</p>;
   const entries = Array.isArray(inputs) ? inputs : Object.entries(inputs);
   if (entries.length === 0) return <p>No data inputs were supplied.</p>;
   return <ul className="pipeline-stack" aria-label="Recorded data inputs">
     {entries.map(([port, id]) => {
-      const output = snapshot.outputs.find(({ artifact }) => artifact.id === id)?.artifact;
-      return <li key={`${port}:${id}`} className="break-words"><strong>{port}</strong>
-        {output && <> · {output.nodeInstanceId}.{output.port} · {text(output.value.kind)}</>}
-        <p><code className="break-all">{id}</code></p>
-        {output && <details><summary>Open input evidence</summary>
-          <ArtifactLinks artifact={output} scope={scope} navigation={navigation} />
-          <pre className="workflow-evidence-json">{JSON.stringify(output.value.evidence, null, 2)}</pre>
-        </details>}
+      const output = snapshot.outputs.find(({ artifact }) => artifact.id === id);
+      const artifact = output?.artifact;
+      return <li key={`${port}:${id}`} className="break-words">
+        <EvidenceActions direction="input" port={port} id={id} record={() => ({
+          ...recordedArtifact(snapshot, output),
+          direction: "input",
+          input: { port, artifactId: id, ...consumer },
+        })}>
+          <strong>{port}</strong>
+          {artifact && <> · {artifact.nodeInstanceId}.{artifact.port} · {text(artifact.value.kind)}</>}
+          <p><code className="break-all">{id}</code></p>
+          {artifact && <details><summary>Open input evidence</summary>
+            <ArtifactLinks artifact={artifact} scope={scope} navigation={navigation} />
+            <pre className="workflow-evidence-json">{JSON.stringify(artifact.value.evidence, null, 2)}</pre>
+          </details>}
+        </EvidenceActions>
       </li>;
     })}
   </ul>;
@@ -166,7 +230,9 @@ function WorkflowJobEvidence({ entry, snapshot, scope, navigation }: { entry: Ex
       {navigation.openQueueJob && <Button type="button" variant="outline" onClick={() => navigation.openQueueJob?.(job.id)}>Open queue job</Button>}
       {job.taskId && <LinkedWork task={{ projectId: scope.projectId, taskId: job.taskId }} projectId={scope.projectId} navigation={navigation} />}
     </div>
-    <details><summary>Job inputs</summary><RecordedInputs inputs={inputs} snapshot={snapshot} scope={scope} navigation={navigation} /></details>
+    <details><summary>Job inputs</summary><RecordedInputs inputs={inputs} snapshot={snapshot} scope={scope} navigation={navigation}
+      consumer={{ nodeInstanceId: entry.nodeId, nodeRevision: pinnedNodeRevision(snapshot, entry.nodeId), unitId: entry.unitId,
+        jobId: job.id, planRevision: job.pipeline?.planRevision }} /></details>
     <ol aria-label="Attempt history" className="pipeline-stack">{attempts.map((attempt) => <li key={attempt.runId} className="workflow-record-card">
       <p>Attempt {attempt.ordinal} · <strong className="capitalize">{text(attempt.status)}</strong></p>
       <p><code>{attempt.runId}</code></p>
@@ -199,7 +265,9 @@ function ControlEvidence({ control, snapshot, jobs, navigation }: {
       {toPort} · {from.node}.{from.port} · {selected ? "Selected" : "Skipped input"}
     </li>)}</ul>}
     {inputs.length > 0 && <RecordedInputs inputs={inputs} snapshot={snapshot}
-      scope={{ projectId: snapshot.run.projectId, runId: snapshot.run.id }} navigation={navigation} />}
+      scope={{ projectId: snapshot.run.projectId, runId: snapshot.run.id }} navigation={navigation}
+      consumer={{ nodeInstanceId: control.nodeId, nodeRevision: pinnedNodeRevision(snapshot, control.nodeId),
+        unitId: control.unitId, planRevision: control.planRevision, triggeringRunId: control.sourceRunId }} />}
     {runId && <p>Triggering attempt <code>{runId}</code></p>}
     {attempt && <>
       <Button type="button" variant="outline" onClick={() => navigation.openActivity(attempt.runId, attempt.conversationId ?? undefined)}>Open triggering attempt</Button>
@@ -254,17 +322,28 @@ export function WorkflowNodeEvidence({ node, snapshot, unitId, control, navigati
     </section>}
     {!!outputs.length && <section aria-label="Recorded outputs" className="pipeline-stack">
       <h3>Recorded outputs</h3>
-      {outputs.map(({ artifact, current, inputReceipts }) => <section key={artifact.id} className="workflow-record-card" aria-label={`${artifact.port} output`}>
-        <p><strong>{artifact.port}</strong> · {text(artifact.value.kind)}{!current && <> · Earlier execution</>}</p>
-        <p><code>{artifact.id}</code></p>
-        <ArtifactLinks artifact={artifact} scope={scope} navigation={navigation} />
-        <details><summary>Open output evidence</summary><pre className="workflow-evidence-json">{JSON.stringify(artifact.value.evidence, null, 2)}</pre></details>
-        {!jobs.length && inputReceipts.length === 0 && <RecordedInputs inputs={null} snapshot={snapshot} scope={scope} navigation={navigation} />}
-        {inputReceipts.map((receipt) => <details key={`${receipt.executionKey}:${receipt.revision}`}>
-          <summary>Input evidence{receipt.executionKey && ` · Plan ${receipt.executionKey.slice(0, 12)}`}</summary>
-          <RecordedInputs inputs={receipt.inputs} snapshot={snapshot} scope={scope} navigation={navigation} />
-        </details>)}
-      </section>)}
+      {outputs.map((output) => {
+        const { artifact, current, inputReceipts } = output;
+        const consumer = { nodeInstanceId: artifact.nodeInstanceId, nodeRevision: node.revision, unitId: artifact.unitId };
+        return <section key={artifact.id} className="workflow-record-card" aria-label={`${artifact.port} output`}>
+          <EvidenceActions direction="output" port={artifact.port} id={artifact.id} record={() => ({
+            ...recordedArtifact(snapshot, output),
+            direction: "output",
+            inputReceipts,
+          })}>
+            <p><strong>{artifact.port}</strong> · {text(artifact.value.kind)}{!current && <> · Earlier execution</>}</p>
+            <p><code>{artifact.id}</code></p>
+            <ArtifactLinks artifact={artifact} scope={scope} navigation={navigation} />
+            <details><summary>Open output evidence</summary><pre className="workflow-evidence-json">{JSON.stringify(artifact.value.evidence, null, 2)}</pre></details>
+          </EvidenceActions>
+          {!jobs.length && inputReceipts.length === 0 && <p>Exact data inputs were not recorded for this execution.</p>}
+          {inputReceipts.map(({ executionKey, revision, inputs }) => <details key={`${executionKey}:${revision}`}>
+            <summary>Input evidence{executionKey && ` · Plan ${executionKey.slice(0, 12)}`}</summary>
+            <RecordedInputs inputs={inputs} snapshot={snapshot} scope={scope} navigation={navigation}
+              consumer={{ ...consumer, inputReceipt: { executionKey, revision } }} />
+          </details>)}
+        </section>;
+      })}
     </section>}
     {!control && !pastControl.length && !jobs.length && !outputs.length && <p>No execution evidence has been recorded for this node.</p>}
   </div>;
