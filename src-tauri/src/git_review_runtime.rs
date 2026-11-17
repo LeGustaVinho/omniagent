@@ -117,6 +117,31 @@ pub async fn git_compare_file_versions(
 }
 
 #[tauri::command]
+pub async fn git_discard_batch_preview(
+    store: State<'_, Store>,
+    checkout_id: String,
+    paths: Vec<String>,
+) -> Result<omniagent::repository::git_review::GitDiscardBatchPreview, String> {
+    store
+        .git_discard_batch_preview(checkout_id, paths)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_discard_batch_changes(
+    store: State<'_, Store>,
+    checkout_id: String,
+    paths: Vec<String>,
+    snapshot: String,
+) -> Result<(), String> {
+    store
+        .git_discard_batch_changes(checkout_id, paths, snapshot)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn git_file_permalink(
     store: State<'_, Store>,
     checkout_id: String,
@@ -288,6 +313,20 @@ pub async fn set_git_path_staged(
 ) -> Result<(), String> {
     store
         .set_git_path_staged(checkout_id, path, staged, expected)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn set_git_paths_staged(
+    store: State<'_, Store>,
+    checkout_id: String,
+    paths: Vec<String>,
+    staged: bool,
+    expected: GitReviewRevision,
+) -> Result<(), String> {
+    store
+        .set_git_paths_staged(checkout_id, paths, staged, expected)
         .await
         .map_err(review_error)
 }

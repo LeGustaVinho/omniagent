@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io,
     os::windows::fs::OpenOptionsExt,
@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_DELETE_ON_CLOSE;
@@ -34,13 +34,14 @@ mod history;
 mod hunk_review;
 mod hunks;
 mod permalink;
+mod reviewed_files;
 mod saved_patch;
 pub use blame::GitLineBlame;
 pub use comments::{GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface};
 pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
 pub use conflicts::{GitConflictProposal, GitConflictReview};
 pub use content::{GitDiffSource, GitFileSide, GitReviewDiff};
-pub use discard::GitDiscardPreview;
+pub use discard::{GitDiscardBatchPreview, GitDiscardPreview};
 pub use history::{GitFileHistory, GitFileVersion, GitFileVersionComparison};
 pub use hunk_review::GitHunkReviewRequest;
 pub use hunks::GitReviewHunk;
@@ -288,17 +289,30 @@ impl Store {
         staged: bool,
         expected: GitReviewRevision,
     ) -> Result<()> {
+        self.set_git_paths_staged(checkout, vec![path], staged, expected)
+            .await
+    }
+
+    pub async fn set_git_paths_staged(
+        &self,
+        checkout: String,
+        paths: Vec<String>,
+        staged: bool,
+        expected: GitReviewRevision,
+    ) -> Result<()> {
+        ensure!(!paths.is_empty(), "select at least one changed file");
+        let mut unique = BTreeSet::new();
+        for path in &paths {
+            validate_path(path)?;
+            ensure!(unique.insert(path.to_lowercase()), "the selected paths overlap");
+        }
         let scope = self.git_review_scope(checkout).await?;
-        validate_path(&path)?;
-        let managed = self.execute({
-            let checkout = scope.id.clone();
-            move |db| Ok(db.query_row("SELECT project_id, task_id FROM managed_task_worktrees WHERE checkout_id = ?1", [checkout],
-                |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?))).optional()?)
-        }).await?;
+        let owner = scope.owner.clone();
+        let project = scope.project.clone();
         let checkout = scope.id.clone();
-        let write = move || stage_path(&scope, &path, staged, &expected);
-        match managed {
-            Some((project, task)) => {
+        let write = move || stage_paths(&scope, &paths, staged, &expected);
+        match owner {
+            Some(task) => {
                 with_managed_worktree_writer(self, project, checkout, task, move |_| write()).await
             }
             None => tokio::task::spawn_blocking(write).await?,
@@ -429,9 +443,9 @@ impl LiveReview {
     }
 }
 
-fn stage_path(
+fn stage_paths(
     scope: &ReviewScope,
-    path: &str,
+    paths: &[String],
     staged: bool,
     expected: &GitReviewRevision,
 ) -> Result<()> {
@@ -445,35 +459,37 @@ fn stage_path(
     let index = index_parent.join("index");
     let _lock = lock_git_file(&index.with_extension("lock")).context("lock the worktree index")?;
     review.verify()?;
-    let status = review
+    let statuses: BTreeMap<_, _> = review
         .status()?
         .into_iter()
-        .find(|entry| entry.path == path)
-        .context("the reviewed path no longer has a change")?;
-    ensure!(
-        !status.unmerged(),
-        "review the conflict before changing this path's index"
-    );
-    if staged {
+        .map(|entry| (entry.path.clone(), entry))
+        .collect();
+    for path in paths {
+        let status = statuses
+            .get(path)
+            .with_context(|| format!("the reviewed path {path} no longer has a change"))?;
         ensure!(
-            status.working.is_some(),
-            "the path has no working change to stage"
+            !status.unmerged(),
+            "review the conflict in {path} before changing its index"
         );
-        if let Some(_locks) = content::lock_staging_file(&scope.root, path)? {
-            stage_existing_file(&review, path)?;
+        if staged {
+            ensure!(status.working.is_some(), "{path} has no working change to stage");
         } else {
-            review.view.read(&[
-                "-c",
-                "core.splitIndex=false",
-                "update-index",
-                "--force-remove",
-                "--",
-                path,
-            ])?;
+            ensure!(status.staged.is_some(), "{path} has no staged change");
         }
+    }
+    let locked = if staged {
+        paths
+            .iter()
+            .map(|path| content::lock_staging_file(&scope.root, path))
+            .collect::<Result<Vec<_>>>()?
     } else {
-        ensure!(status.staged.is_some(), "the path has no staged change");
-        if review.revision.head.is_some() {
+        Vec::new()
+    };
+    for (slot, path) in paths.iter().enumerate() {
+        if locked.get(slot).is_some_and(Option::is_some) {
+            stage_existing_file(&review, path)?;
+        } else if !staged && review.revision.head.is_some() {
             review.view.read(&[
                 "-c",
                 "core.splitIndex=false",
@@ -511,6 +527,14 @@ fn stage_existing_file(review: &LiveReview, path: &str) -> Result<()> {
 }
 
 fn install_index(review: &LiveReview, index: &Path) -> Result<()> {
+    install_index_if(review, index, || Ok(()))
+}
+
+fn install_index_if(
+    review: &LiveReview,
+    index: &Path,
+    verify: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let mut replacement =
         tempfile::NamedTempFile::new_in(index.parent().context("the index has no parent")?)?;
     std::io::copy(
@@ -520,6 +544,7 @@ fn install_index(review: &LiveReview, index: &Path) -> Result<()> {
     replacement.as_file().sync_all()?;
     review.verify()?;
     let replacement = replacement.into_temp_path();
+    verify()?;
     fs::rename(&replacement, index).context("install the reviewed worktree index")?;
     Ok(())
 }

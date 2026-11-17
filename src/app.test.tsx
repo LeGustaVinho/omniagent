@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { App } from "@/app";
+import type { WorkspaceDestination } from "@/workbench-contract";
 import { useWorkspace } from "@/workspace-state";
 
 const invoke = vi.hoisted(() => vi.fn());
@@ -12,8 +13,10 @@ const listen = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke, isTauri }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
 vi.mock("@/settings-appearance", () => ({ useAppAppearance: () => undefined }));
-vi.mock("@/workbench", () => ({ default: ({ fileTarget }: { fileTarget?: { path: string; line: number | null } }) =>
-  <><p>Repository workspace</p>{fileTarget && <p>{fileTarget.path}:{fileTarget.line}</p>}</> }));
+vi.mock("@/workbench", () => ({ default: ({ fileTarget, destination }: {
+  fileTarget?: { path: string; line: number | null }; destination?: WorkspaceDestination;
+}) => <><p>Repository workspace</p>{fileTarget && <p>{fileTarget.path}:{fileTarget.line}</p>}
+    {destination && <p>Starting workspace {destination.workspace}</p>}</> }));
 
 function renderApp() {
   const query = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -70,6 +73,23 @@ it("reopens a registered checkout from startup without registering it again", as
   expect(await screen.findByText("Repository workspace")).toBeTruthy();
   expect(invoke.mock.calls).toEqual([
     ["active_checkout"], ["registered_checkouts"], ["select_active_checkout", { checkoutId: "checkout" }],
+  ]);
+});
+
+it("opens the requested workspace in the exact checkout picked from startup", async () => {
+  const root = "D:/Projects/Example";
+  const checkout = { projectId: "project", repositoryRoot: root, checkoutId: "checkout", checkoutRoot: root };
+  const linked = { ...checkout, checkoutId: "linked", checkoutRoot: "D:/Worktrees/Example linked" };
+  invoke.mockResolvedValueOnce(null).mockResolvedValueOnce([checkout, linked]).mockResolvedValueOnce(undefined);
+  const user = userEvent.setup();
+  renderApp();
+  await user.click(await screen.findByRole("button", { name: "Registered repositories" }));
+  fireEvent.contextMenu(await screen.findByText(linked.checkoutRoot));
+  await user.click(await screen.findByRole("menuitem", { name: "Open in Knowledge" }));
+  expect(await screen.findByText("Starting workspace knowledge")).toBeTruthy();
+  expect(useWorkspace.getState().checkout).toEqual(linked);
+  expect(invoke.mock.calls).toEqual([
+    ["active_checkout"], ["registered_checkouts"], ["select_active_checkout", { checkoutId: linked.checkoutId }],
   ]);
 });
 

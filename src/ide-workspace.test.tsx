@@ -530,6 +530,66 @@ it("adds the clicked file to the chosen conversation draft and opens the draft",
   });
 });
 
+it("previews the clicked Explorer item without opening a tab and reuses the existing media renderer", async () => {
+  fixture({ "docs/Closed.txt": "closed", "docs/Diagram.png": "", "docs/Archive.bin": "" });
+  const backend = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "read_checkout_file_text") {
+      expect((args as { checkoutId: string }).checkoutId).toBe(alternate);
+      const path = (args as { path: string }).path;
+      if (path === "docs/Closed.txt") return { status: "text", text: "Closed file preview\r\n😀" };
+      if (path === "docs/Archive.bin") return { status: "unsupported_encoding" };
+      throw new Error("Unexpected text capture path " + path);
+    }
+    if (command === "read_repository_attachment") {
+      expect(args).toEqual({ checkoutId: alternate, path: "docs/Diagram.png" });
+      return { relativePath: "docs/Diagram.png", mimeType: "image/png", contentBase64: "iVBORw0KGgo=" };
+    }
+    return backend(command, args);
+  });
+  const user = userEvent.setup();
+  render(<IdeWorkspace {...propsFor(alternate)} target={file} />);
+  const editor = await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.change(editor, { target: { value: "fn live_preview() {}" } });
+  const preview = async (name: string) => {
+    fireEvent.contextMenu(await screen.findByRole("button", { name }));
+    await user.click(await screen.findByRole("menuitem", { name: "Preview…" }));
+    return within(await screen.findByRole("dialog", { name: "Preview file" }));
+  };
+
+  const sourceFolder = await screen.findByRole("button", { name: "src" });
+  if (sourceFolder.getAttribute("aria-expanded") !== "true") await user.click(sourceFolder);
+  const live = await preview("review.rs");
+  expect(live.getByLabelText("Text preview").textContent).toBe("fn live_preview() {}");
+  expect(invoke).not.toHaveBeenCalledWith("read_checkout_file_text", expect.anything());
+  await user.click(live.getByRole("button", { name: "Close dialog" }));
+  const docs = await screen.findByRole("button", { name: "docs" });
+  if (docs.getAttribute("aria-expanded") !== "true") await user.click(docs);
+  const closed = await preview("Closed.txt");
+  expect((await closed.findByLabelText("Text preview")).textContent).toBe("Closed file preview\r\n😀");
+  expect(invoke).toHaveBeenCalledWith("read_checkout_file_text", { checkoutId: alternate, path: "docs/Closed.txt" });
+  await user.click(closed.getByRole("button", { name: "Close dialog" }));
+  const image = await preview("Diagram.png");
+  const media = await image.findByRole("img", { name: "Diagram.png" });
+  expect(media.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo=");
+  expect(invoke).not.toHaveBeenCalledWith("open_checkout_item_in_shell", expect.anything());
+  await user.click(image.getByRole("button", { name: "Open in default application" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("open_checkout_item_in_shell", {
+    checkoutId: alternate, relativePath: "docs/Diagram.png", action: "open",
+  }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Preview file" })).toBeNull());
+
+  const unsupported = await preview("Archive.bin");
+  expect(await unsupported.findByText("A preview is unavailable for this file format.")).toBeTruthy();
+  await user.click(unsupported.getByRole("button", { name: "Close dialog" }));
+  expect(screen.getByRole("textbox", { name: editorLabel })).toBe(editor);
+  expect(screen.queryByRole("textbox", { name: "Source editor for docs/Closed.txt" })).toBeNull();
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "open_repository_source_file").every(([, args]) =>
+    (args as { path: string }).path === file)).toBe(true);
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_repository_source_file")).toBe(false);
+});
+
+
 it("copies the exact clicked file from a live buffer or a read-only capture in the selected checkout", async () => {
   fixture({ "docs/Closed.txt": "closed", "docs/Image.bin": "binary" });
   const backend = vi.mocked(invoke).getMockImplementation()!;

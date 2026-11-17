@@ -296,6 +296,37 @@ it("refuses extraction if the source buffer changes while reviewing the selectio
 });
 
 
+it("previews a closed note and opens only that note when explicitly requested", async () => {
+  mockRepository();
+  const backend = vi.mocked(invoke).getMockImplementation()!;
+  const body = checklistSource + "A".repeat(256 * 1024);
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "read_checkout_file_text") {
+      expect(args).toEqual({ checkoutId, path: checklist });
+      return { status: "text", text: body };
+    }
+    return backend(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const active = await editor(release);
+  const tree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  const folder = tree.getByRole("button", { name: "notes" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
+  fireEvent.contextMenu(await tree.findByRole("button", { name: "Checklist.md" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Preview…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Preview file" }));
+  expect((await dialog.findByLabelText("Text preview")).textContent).toBe(body.slice(0, 256 * 1024));
+  expect(dialog.getByText("Showing the start of this file. Open it in the editor for the full text.")).toBeTruthy();
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_document", { checkoutId, path: checklist });
+  await user.click(dialog.getByRole("button", { name: "Open in editor" }));
+  const opened = await editor(checklist);
+  expect(opened.state.doc.toString()).toBe(checklistSource);
+  expect(active.state.doc.toString()).toBe(releaseSource);
+});
+
+
 it("copies closed and dirty notes from their context menus without changing the selected note", async () => {
   mockRepository();
   const backend = vi.mocked(invoke).getMockImplementation()!;

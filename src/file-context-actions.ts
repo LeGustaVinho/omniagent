@@ -10,6 +10,10 @@ import { noteSearchTarget } from "@/ide-file-search";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const terminalPrefix = "omni-terminal-folder:";
+const terminalRequestPrefix = "omni-terminal-request:";
+const newWorktreePrefix = "omni-new-worktree:";
+const gitCheckoutPrefix = "omni-git-checkout:";
+let workspaceShortcut = 0;
 const noteRenamePrefix = "omni-rename-note:";
 const openNotesPrefix = "omni-open-notes:";
 let noteNavigationRequest = 0;
@@ -78,12 +82,22 @@ export function readOpenNotesTarget(target?: string): string[] | undefined {
 }
 
 export function terminalFolderTarget(path: string) {
-  return terminalPrefix + path;
+  return terminalRequestPrefix + JSON.stringify([path, ++workspaceShortcut]);
 }
 
 export function readTerminalFolderTarget(target?: string) {
   if (target?.startsWith(terminalPrefix)) return target.slice(terminalPrefix.length);
+  if (!target?.startsWith(terminalRequestPrefix)) return;
+  try {
+    const [path] = JSON.parse(target.slice(terminalRequestPrefix.length)) as [unknown];
+    if (typeof path === "string") return path;
+  } catch { return; }
 }
+
+export const newWorktreeTarget = () => newWorktreePrefix + ++workspaceShortcut;
+export const isNewWorktreeTarget = (target?: string) => Boolean(target?.startsWith(newWorktreePrefix));
+export const gitCheckoutTarget = () => gitCheckoutPrefix + ++workspaceShortcut;
+export const isGitCheckoutTarget = (target?: string) => Boolean(target?.startsWith(gitCheckoutPrefix));
 
 export function containingFolder(path: string) {
   const slash = path.lastIndexOf("/");
@@ -116,6 +130,14 @@ function otherEditorText(checkoutId: string, path: string) {
 
 type CheckoutFileText = { status: "text"; text: string } | { status: "unsupported_encoding" };
 
+export function checkoutFileLiveText(checkoutId: string, path: string, simulated: boolean, currentText?: CurrentText) {
+  return currentText?.(path) ?? (simulated ? undefined : otherEditorText(checkoutId, path));
+}
+
+export function readCheckoutFileText(checkoutId: string, path: string) {
+  return invoke<CheckoutFileText>("read_checkout_file_text", { checkoutId, path });
+}
+
 export function fileContextActions({ checkout, simulated, status, report, currentText }: {
   checkout: ProjectCheckout;
   simulated: boolean;
@@ -145,7 +167,7 @@ export function fileContextActions({ checkout, simulated, status, report, curren
   };
   function copyTextContents(path: string) {
     const request = ++textCaptureRequest;
-    const text = currentText?.(path) ?? (simulated ? undefined : otherEditorText(checkout.checkoutId, path));
+    const text = checkoutFileLiveText(checkout.checkoutId, path, simulated, currentText);
     const confirmation = "Copied text contents of " + fileName(path);
     if (text !== undefined) {
       copy(text, confirmation);
@@ -156,7 +178,7 @@ export function fileContextActions({ checkout, simulated, status, report, curren
       return;
     }
     report("");
-    void invoke<CheckoutFileText>("read_checkout_file_text", { checkoutId: checkout.checkoutId, path }).then((file) => {
+    void readCheckoutFileText(checkout.checkoutId, path).then((file) => {
       if (request !== textCaptureRequest) return;
       if (file.status === "text") copy(file.text, confirmation);
       else report(path + " contains binary data or uses an unsupported text encoding.");

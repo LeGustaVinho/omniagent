@@ -1,5 +1,5 @@
 use std::{
-    fs::File,
+    fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -10,11 +10,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::runtime::Handle;
 
-use crate::store::Store;
+use crate::{providers::configuration::plain_metadata, store::Store};
 
-use super::super::documents::replace_reviewed_checkout_bytes;
+use super::super::{
+    checkout_items::{checkout_directory, mutations::recycle_checked, validate_name},
+    documents::{file_identity, open_for_rename, rename, replace_reviewed_checkout_bytes},
+};
 use super::{
-    GitFileSide, GitReviewRevision, LiveReview, ReviewScope, content, install_index,
+    GitFileSide, GitReviewRevision, LiveReview, ReviewScope, content, install_index_if,
     lock_directories, lock_git_file, stage_existing_file, validate_oid, validate_path,
     with_managed_worktree_writer,
 };
@@ -35,10 +38,18 @@ pub struct GitConflictReview {
     base: Option<ConflictStage>,
     local: Option<ConflictStage>,
     incoming: Option<ConflictStage>,
+    deleted_side: Option<ConflictSide>,
     pub working: GitFileSide,
     pub snapshot: Option<String>,
     pub resolution_blocked: Option<String>,
     pub proposal_blocked: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictSide {
+    Local,
+    Incoming,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +61,7 @@ pub struct GitConflictReview {
 pub enum GitConflictProposal {
     Local { object_id: String },
     Incoming { object_id: String },
+    Deletion { side: ConflictSide },
     Combined { content: String },
 }
 
@@ -59,7 +71,7 @@ impl Store {
         checkout: String,
         path: String,
     ) -> Result<GitConflictReview> {
-        validate_path(&path)?;
+        validate_conflict_path(&path)?;
         let scope = self.git_review_scope(checkout.clone()).await?;
         let mut result = tokio::task::spawn_blocking(move || {
             let review = LiveReview::open(&scope)?;
@@ -91,7 +103,7 @@ impl Store {
         expected: String,
         proposal: GitConflictProposal,
     ) -> Result<()> {
-        validate_path(&path)?;
+        validate_conflict_path(&path)?;
         validate_snapshot(&expected)?;
         let scope = self.git_review_scope(checkout).await?;
         let store = self.clone();
@@ -107,19 +119,28 @@ impl Store {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 ensure_no_protected_draft(&tx, &scope.id, &path)?;
                 let destination = scope.root.join(&path);
-                match observed.working {
-                    GitFileSide::Text { content } => replace_reviewed_checkout_bytes(
-                        &scope.root,
-                        &destination,
-                        &format!("{:x}", Sha256::digest(content.as_bytes())),
-                        edited.as_bytes(),
-                        content::MAX_DIFF_SIDE_BYTES,
-                        || review.verify(),
-                    ),
-                    GitFileSide::Missing => {
+                match (observed.working, edited) {
+                    (GitFileSide::Text { content }, Some(edited)) => {
+                        replace_reviewed_checkout_bytes(
+                            &scope.root,
+                            &destination,
+                            &format!("{:x}", Sha256::digest(content.as_bytes())),
+                            edited.as_bytes(),
+                            content::MAX_DIFF_SIDE_BYTES,
+                            || review.verify(),
+                        )
+                    }
+                    (GitFileSide::Missing, Some(edited)) => {
                         create_working_result(&review, &destination, edited.as_bytes())
                     }
-                    GitFileSide::Unavailable { reason } => anyhow::bail!("{reason}"),
+                    (GitFileSide::Text { content }, None) => {
+                        recycle_working_result(&scope, &review, &path, &content)
+                    }
+                    (GitFileSide::Missing, None) => {
+                        require_missing_result(&destination)?;
+                        review.verify()
+                    }
+                    (GitFileSide::Unavailable { reason }, _) => anyhow::bail!("{reason}"),
                 }
             }))
         })
@@ -132,7 +153,7 @@ impl Store {
         path: String,
         expected: String,
     ) -> Result<()> {
-        validate_path(&path)?;
+        validate_conflict_path(&path)?;
         validate_snapshot(&expected)?;
         let scope = self.git_review_scope(checkout).await?;
         let store = self.clone();
@@ -143,6 +164,82 @@ impl Store {
         })
         .await
     }
+}
+
+fn validate_conflict_path(path: &str) -> Result<()> {
+    validate_path(path)?;
+    path.split('/').try_for_each(validate_name)
+}
+
+fn recycle_working_result(
+    scope: &ReviewScope,
+    review: &LiveReview,
+    path: &str,
+    expected: &str,
+) -> Result<()> {
+    let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let parent = checkout_directory(&scope.root, folder)?;
+    let _parents = lock_directories(&parent)?;
+    let destination = parent.join(name);
+    let file = open_for_rename(&destination)?;
+    let identity = file_identity(&file)?;
+    ensure!(
+        matches!(content::read_locked_worktree(&file)?, GitFileSide::Text { content } if content == expected),
+        "the working file changed before removal; review the conflict again"
+    );
+    let recovery = tempfile::Builder::new()
+        .prefix(".omniagent-conflict-recovery-")
+        .tempdir_in(&parent)?;
+    let recovery_guards = lock_directories(recovery.path())?;
+    let displaced = recovery.path().join(name);
+    review.verify()?;
+    rename(&file, &displaced).context("move the reviewed file into recovery")?;
+    let recovery = recovery.keep();
+    drop(file);
+
+    let recycled = recycle_checked(&displaced, || {
+        review.verify()?;
+        let recovery_file = open_for_rename(&displaced)?;
+        ensure!(
+            file_identity(&recovery_file)? == identity
+                && matches!(content::read_locked_worktree(&recovery_file)?, GitFileSide::Text { content } if content == expected),
+            "the recovery file changed"
+        );
+        Ok(())
+    });
+    if let Err(error) = recycled {
+        let restored = (|| -> Result<()> {
+            let file = open_for_rename(&displaced)?;
+            ensure!(
+                file_identity(&file)? == identity,
+                "the recovery file changed"
+            );
+            rename(&file, &destination)?;
+            Ok(())
+        })();
+        drop(recovery_guards);
+        let _ = fs::remove_dir(&recovery);
+        if restored.is_ok() {
+            return Err(
+                error.context("The Recycle Bin operation failed and the working file was restored")
+            );
+        }
+        anyhow::bail!(
+            "Check the recovery path {} or the Recycle Bin. The reviewed file could not be restored automatically: {error:#}",
+            displaced.display()
+        );
+    }
+    drop(recovery_guards);
+    let _ = fs::remove_dir(&recovery);
+    require_missing_result(&destination).context("The reviewed file was moved to the Recycle Bin")
+}
+
+fn require_missing_result(path: &Path) -> Result<()> {
+    ensure!(
+        plain_metadata(path)?.is_none(),
+        "a working file appeared; review the conflict again"
+    );
+    Ok(())
 }
 
 fn create_working_result(review: &LiveReview, destination: &Path, edited: &[u8]) -> Result<()> {
@@ -175,17 +272,31 @@ async fn with_conflict_writer(
     }
 }
 
-fn proposal_content(observed: &GitConflictReview, proposal: GitConflictProposal) -> Result<String> {
+fn proposal_content(
+    observed: &GitConflictReview,
+    proposal: GitConflictProposal,
+) -> Result<Option<String>> {
     match proposal {
-        GitConflictProposal::Local { object_id } => chosen_side(&observed.local, &object_id),
-        GitConflictProposal::Incoming { object_id } => chosen_side(&observed.incoming, &object_id),
+        GitConflictProposal::Local { object_id } => {
+            chosen_side(&observed.local, &object_id).map(Some)
+        }
+        GitConflictProposal::Incoming { object_id } => {
+            chosen_side(&observed.incoming, &object_id).map(Some)
+        }
+        GitConflictProposal::Deletion { side } => {
+            ensure!(
+                observed.deleted_side == Some(side),
+                "the selected conflict side has no recorded deletion"
+            );
+            Ok(None)
+        }
         GitConflictProposal::Combined { content } => {
             ensure!(
                 content.len() as u64 <= content::MAX_DIFF_SIDE_BYTES
                     && !content.contains(['\r', '\0']),
                 "the combined result must use UTF-8 text with LF line endings and fit in the text preview limit"
             );
-            Ok(content)
+            Ok(Some(content))
         }
     }
 }
@@ -227,6 +338,16 @@ fn read_conflict(
     working: GitFileSide,
 ) -> Result<GitConflictReview> {
     let [base, local, incoming] = read_stages(review, path)?;
+    let regular = |stage: &ConflictStage| matches!(stage.mode.as_str(), "100644" | "100755");
+    let deleted_side = match (&base, &local, &incoming) {
+        (Some(base), None, Some(incoming)) if regular(base) && regular(incoming) => {
+            Some(ConflictSide::Local)
+        }
+        (Some(base), Some(local), None) if regular(base) && regular(local) => {
+            Some(ConflictSide::Incoming)
+        }
+        _ => None,
+    };
     let (fingerprint, resolution_blocked, proposal_blocked) = match &working {
         GitFileSide::Text { content } => {
             let fingerprint = format!("{:x}", Sha256::digest(content.as_bytes()));
@@ -238,7 +359,9 @@ fn read_conflict(
         }
         GitFileSide::Missing => (
             Some("missing".into()),
-            Some("Create the working result and review it before staging.".into()),
+            deleted_side
+                .is_none()
+                .then(|| "Create the working result and review it before staging.".into()),
             None,
         ),
         GitFileSide::Unavailable { reason } => (None, Some(reason.clone()), Some(reason.clone())),
@@ -267,6 +390,7 @@ fn read_conflict(
         base,
         local,
         incoming,
+        deleted_side,
         working,
         snapshot,
         resolution_blocked,
@@ -352,8 +476,7 @@ struct PreparedResolution {
     path: String,
     review: LiveReview,
     index: LockedReviewIndex,
-    _parents: Vec<File>,
-    _file: File,
+    working: Option<(Vec<File>, File)>,
 }
 
 struct LockedReviewIndex {
@@ -381,14 +504,12 @@ fn prepare_resolution(
 ) -> Result<PreparedResolution> {
     let review = LiveReview::open(&scope)?;
     let index = lock_review_index(&review)?;
-    let (_parents, _file) = content::lock_staging_file(&scope.root, &path)?
-        .context("the working result is missing; review the conflict again")?;
-    let observed = read_conflict(
-        &scope,
-        &review,
-        &path,
-        content::read_locked_worktree(&_file)?,
-    )?;
+    let working = content::lock_staging_file(&scope.root, &path)?;
+    let reviewed_file = match &working {
+        Some((_, file)) => content::read_locked_worktree(file)?,
+        None => GitFileSide::Missing,
+    };
+    let observed = read_conflict(&scope, &review, &path, reviewed_file)?;
     require_snapshot(&observed, expected)?;
     if let Some(reason) = observed.resolution_blocked {
         anyhow::bail!("{reason}");
@@ -398,8 +519,7 @@ fn prepare_resolution(
         path,
         review,
         index,
-        _parents,
-        _file,
+        working,
     })
 }
 
@@ -409,14 +529,28 @@ impl PreparedResolution {
         // protected draft. The transaction keeps another Store from racing that check.
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_no_protected_draft(&tx, &self.scope.id, &self.path)?;
-        stage_existing_file(&self.review, &self.path)?;
+        let listing = if self.working.is_some() {
+            stage_existing_file(&self.review, &self.path)?;
+            "--unmerged"
+        } else {
+            require_missing_result(&self.scope.root.join(&self.path))?;
+            self.review.view.read(&[
+                "-c",
+                "core.splitIndex=false",
+                "update-index",
+                "--force-remove",
+                "--",
+                &self.path,
+            ])?;
+            "--stage"
+        };
         ensure!(
             self.review
                 .view
                 .read(&[
                     "--literal-pathspecs",
                     "ls-files",
-                    "--unmerged",
+                    listing,
                     "-z",
                     "--",
                     &self.path
@@ -424,7 +558,12 @@ impl PreparedResolution {
                 .is_empty(),
             "Git could not stage the file as a resolution"
         );
-        install_index(&self.review, &self.index.path)
+        install_index_if(&self.review, &self.index.path, || {
+            if self.working.is_none() {
+                require_missing_result(&self.scope.root.join(&self.path))?;
+            }
+            Ok(())
+        })
     }
 }
 

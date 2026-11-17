@@ -10,6 +10,7 @@ import {
 import { ExampleFileSearch, matchReference, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget, type FileSearchScope } from "@/ide-file-search";
 import { noteWindowTarget } from "@/file-editor-popout";
 import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
+import { useCheckoutFilePreview } from "@/checkout-file-preview";
 import { containingFolder, fileContextActions, fileHistoryTarget, noteRenameTarget, openNotesTarget, readSourceLineTarget, readTerminalFolderTarget, useCheckoutTextReader, workingDiffTarget } from "@/file-context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
@@ -334,9 +335,9 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const readOpenFile = useCallback((path: string) => dock.api?.panels.some((panel) => panel.params?.path === path)
     ? source.getFile(path)?.content : undefined, [dock.api, source.getFile]);
   useCheckoutTextReader(checkout.checkoutId, !simulated, readOpenFile);
-  const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem,
-    currentText: (path) => simulated ? examples[path]?.content ?? exampleNotes.find((note) => note.path === path)?.content : readOpenFile(path),
-  });
+  const currentText = (path: string) => simulated ? examples[path]?.content ?? exampleNotes.find((note) => note.path === path)?.content : readOpenFile(path);
+  const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem, currentText });
+  const filePreview = useCheckoutFilePreview({ checkoutId: checkout.checkoutId, simulated, currentText, open: openFile });
   const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated, bufferAt: (path) => {
     const note = simulated && exampleNotes.find((entry) => entry.path === path);
     return files[path] ?? (note ? { content: note.content, saved: note.content } : undefined);
@@ -482,6 +483,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                 ...(target.kind !== "file" ? [[{ label: "Find in folder", run: () => searchInFolder(target.path) }]] : []),
                 ...(target.kind === "file" ? [[
                   { label: "Open", run: () => openFile(target.path) },
+                  filePreview.action(target.path),
                   ...(!markdownPath(target.path) ? [{ label: "Open to the side", run: () => openFile(target.path, undefined, true) }] : []),
                   { label: "Open in new window", run: () => openFile(target.path, undefined, false, undefined, true) },
                   ...(!simulated && markdownPath(target.path) ? [{ label: "Rename note…", run: () => renameNote(target.path) }] : []),
@@ -622,6 +624,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       </div>
 
       {treeActions.dialog}
+      {filePreview.dialog}
       {conversationActions.dialog}
       {fileOperations.dialog}
       {comparison.dialog}

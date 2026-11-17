@@ -2,6 +2,7 @@ import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import type { RequestId } from "@/conversation-inputs";
 
 export type WorkspaceId = "conversations" | "ide" | "tasks" | "pipelines" | "knowledge" | "git" | "diagnostics";
+export type WorkspaceDestination = { workspace: WorkspaceId; target?: string };
 export type ScenarioId = "delivery" | "recovery" | "pipelines" | "windows";
 export type DeliveryStep = "note" | "question" | "plan" | "queued" | "running" | "review" | "verified" | "accepted" | "merged" | "interrupted" | "failed";
 export type DeliveryAction = "start" | "answer" | "approve" | "dispatch" | "finish" | "verify" | "accept" | "merge" | "interrupt" | "resume" | "fail" | "retry" | "invalidate";

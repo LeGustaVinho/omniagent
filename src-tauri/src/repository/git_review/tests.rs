@@ -28,7 +28,62 @@ fn commit_fixture(root: &Path, message: &str) -> Result<String> {
 }
 
 #[tokio::test]
+async fn stages_and_unstages_the_exact_file_selection_in_one_index_update() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("batch checkout");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    let added = "file [literal].txt";
+    let deleted = "delete.txt";
+    let unrelated = "unrelated.txt";
+    for path in [added, deleted, unrelated] {
+        fs::write(root.join(path), "base\n")?;
+    }
+    commit_fixture(&root, "Base")?;
+    fs::write(root.join(added), "working edit\n")?;
+    fs::remove_file(root.join(deleted))?;
+    fs::write(root.join(unrelated), "staged elsewhere\n")?;
+    git(&root, &["add", "--", unrelated])?;
+    let first_index = fs::read(root.join(".git/index"))?;
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let original = store.git_checkout_review(checkout.clone()).await?.revision;
+    let selected = vec![added.into(), deleted.into()];
+    assert!(
+        store
+            .set_git_paths_staged(checkout.clone(), vec![added.into(), "missing".into()], true, original.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read(root.join(".git/index"))?, first_index);
+    store
+        .set_git_paths_staged(checkout.clone(), selected.clone(), true, original.clone())
+        .await?;
+    assert_eq!(git(&root, &["show", &format!(":{added}")])?, "working edit");
+    assert!(git(&root, &["show", &format!(":{deleted}")]).is_err());
+    assert_eq!(git(&root, &["show", &format!(":{unrelated}")])?, "staged elsewhere");
+    assert!(
+        store
+            .set_git_paths_staged(checkout.clone(), selected.clone(), false, original)
+            .await
+            .is_err()
+    );
+    let fresh = store.git_checkout_review(checkout.clone()).await?.revision;
+    store
+        .set_git_paths_staged(checkout, selected, false, fresh)
+        .await?;
+    assert_eq!(git(&root, &["show", &format!(":{added}")])?, "base");
+    assert_eq!(git(&root, &["show", &format!(":{deleted}")])?, "base");
+    assert_eq!(git(&root, &["show", &format!(":{unrelated}")])?, "staged elsewhere");
+    assert_eq!(fs::read_to_string(root.join(added))?, "working edit\n");
+    assert!(!root.join(deleted).exists());
+    Ok(())
+}
+
+#[tokio::test]
 async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_result() -> Result<()> {
+    use super::conflicts::ConflictSide;
     use crate::store::DraftKey;
 
     let temporary = tempfile::tempdir()?;
@@ -91,6 +146,7 @@ async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_resu
             .await?,
     )?;
     assert_eq!(missing["incoming"], serde_json::Value::Null);
+    assert_eq!(missing["deletedSide"], "incoming");
     assert_eq!(missing["local"]["file"]["content"], "updated locally\n");
     let object_id = |view: &serde_json::Value, side: &str| -> Result<String> {
         Ok(view[side]["objectId"]
@@ -337,7 +393,7 @@ async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_resu
         .await?;
     assert!(
         store
-            .git_conflict_review(checkout, path.into())
+            .git_conflict_review(checkout.clone(), path.into())
             .await
             .is_err()
     );
@@ -354,6 +410,101 @@ async fn reviews_real_conflict_stages_and_only_stages_the_confirmed_working_resu
         deleted_before
     );
     assert_eq!(fs::read_to_string(root.join(path))?, merged);
+
+    let deletion = || GitConflictProposal::Deletion {
+        side: ConflictSide::Incoming,
+    };
+    let deletion_snapshot = store
+        .git_conflict_review(checkout.clone(), deleted.into())
+        .await?
+        .snapshot
+        .context("existing working file snapshot")?;
+    assert!(
+        store
+            .git_apply_conflict_resolution(
+                checkout.clone(),
+                deleted.into(),
+                deletion_snapshot.clone(),
+                GitConflictProposal::Deletion { side: ConflictSide::Local },
+            )
+            .await
+            .is_err()
+    );
+    let deletion_draft = || DraftKey::CheckoutFile {
+        checkout_id: checkout.clone(),
+        relative_path: deleted.into(),
+    };
+    store
+        .save_draft(deletion_draft(), b"protected draft".to_vec())
+        .await?;
+    assert!(
+        store
+            .git_apply_conflict_resolution(
+                checkout.clone(),
+                deleted.into(),
+                deletion_snapshot.clone(),
+                deletion(),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read_to_string(root.join(deleted))?, "updated locally\n");
+    store.delete_draft(deletion_draft()).await?;
+    fs::write(root.join(deleted), "external change before deletion\n")?;
+    assert!(
+        store
+            .git_apply_conflict_resolution(checkout.clone(), deleted.into(), deletion_snapshot, deletion())
+            .await
+            .is_err()
+    );
+    let deletion_snapshot = store
+        .git_conflict_review(checkout.clone(), deleted.into())
+        .await?
+        .snapshot
+        .context("reviewed external revision")?;
+    store
+        .git_apply_conflict_resolution(checkout.clone(), deleted.into(), deletion_snapshot, deletion())
+        .await?;
+    assert!(!root.join(deleted).exists());
+    assert_eq!(
+        git(&root, &["ls-files", "--unmerged", "--", deleted])?,
+        deleted_before
+    );
+    let absent = store.git_conflict_review(checkout.clone(), deleted.into()).await?;
+    assert_eq!(absent.working, GitFileSide::Missing);
+    assert!(absent.resolution_blocked.is_none());
+    let confirmed_absence = absent.snapshot.context("reviewed absence")?;
+    fs::write(root.join(deleted), "recreated after removal\n")?;
+    assert!(
+        store
+            .git_mark_conflict_resolved(checkout.clone(), deleted.into(), confirmed_absence.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(deleted))?,
+        "recreated after removal\n"
+    );
+    fs::remove_file(root.join(deleted))?;
+    store
+        .save_draft(deletion_draft(), b"protected after removal".to_vec())
+        .await?;
+    assert!(
+        store
+            .git_mark_conflict_resolved(checkout.clone(), deleted.into(), confirmed_absence.clone())
+            .await
+            .is_err()
+    );
+    store.delete_draft(deletion_draft()).await?;
+    store
+        .git_mark_conflict_resolved(checkout, deleted.into(), confirmed_absence)
+        .await?;
+    assert_eq!(git(&root, &["ls-files", "--stage", "--", deleted])?, "");
+    assert_eq!(
+        git(&root, &["diff", "--cached", "--name-status", "--", deleted])?,
+        format!("D\t{deleted}")
+    );
+    assert_eq!(git(&root, &["show", ":unrelated.txt"])?, "separately staged change");
     Ok(())
 }
 

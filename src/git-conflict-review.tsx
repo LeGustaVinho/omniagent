@@ -8,12 +8,14 @@ import { FileDialog } from "@/ide-file-workspace";
 import { InlineIssue } from "@/tasks-git-ui";
 
 type ConflictStage = { objectId: string; mode: string; file: GitFileSide };
+type ConflictSide = "local" | "incoming";
 type ConflictReview = {
   path: string;
   revision: { branch: string | null; head: string | null; index: string | null };
   base: ConflictStage | null;
   local: ConflictStage | null;
   incoming: ConflictStage | null;
+  deletedSide: ConflictSide | null;
   working: GitFileSide;
   snapshot: string | null;
   resolutionBlocked: string | null;
@@ -27,7 +29,7 @@ const versionLabels: Record<Version, string> = {
   incoming: "Incoming · stage 3",
   working: "Working result",
 };
-type ProposalChoice = { kind: "local" | "incoming"; objectId: string } | { kind: "combined" };
+type ProposalChoice = { kind: ConflictSide; objectId: string } | { kind: "combined" } | { kind: "deletion"; side: ConflictSide };
 type Proposal = { expected: string; choice: ProposalChoice; text: string };
 const maxProposalBytes = 2 * 1024 * 1024;
 
@@ -68,7 +70,7 @@ export function GitConflictReview({ checkoutId, checkoutRoot, path, openFile, cl
     mutationFn: ({ expected, choice, text }: Proposal) => invoke<void>("git_apply_conflict_resolution", {
       checkoutId, path, expected, proposal: choice.kind === "combined" ? { kind: "combined", content: text } : choice,
     }),
-    onSuccess: async () => {
+    onSuccess: async (_result, saved) => {
       setProposal(undefined);
       confirmProposal(false);
       setConfirmed(undefined);
@@ -78,7 +80,9 @@ export function GitConflictReview({ checkoutId, checkoutRoot, path, openFile, cl
         client.invalidateQueries({ queryKey: ["git-review", checkoutId] }),
         client.invalidateQueries({ queryKey: ["git-live-diff", checkoutId] }),
       ]);
-      setNotice("Working result saved. Review it to stage the resolution.");
+      setNotice(saved.choice.kind === "deletion"
+        ? "Working file moved to the Recycle Bin. Review its absence before staging the deletion. To recover the contents, restore the file by name and move it back to the checkout."
+        : "Working result saved. Review it to stage the resolution.");
     },
   });
   const current = review.data;
@@ -90,8 +94,13 @@ export function GitConflictReview({ checkoutId, checkoutRoot, path, openFile, cl
   const stageSnapshot = current && !current.resolutionBlocked && fresh && !proposal
     ? current.snapshot : null;
   const proposalSnapshot = current && !current.proposalBlocked && fresh ? current.snapshot : null;
-  const chooseLabel = version === "local" ? "Use local version…" : "Use incoming version…";
-  const canChoose = !proposal && proposalSnapshot && (version === "local" || version === "incoming") && stage?.file.status === "text";
+  const side = version === "local" || version === "incoming" ? version : undefined;
+  const choosesDeletion = Boolean(side && current?.deletedSide === side);
+  const chooseLabel = `Use ${side ?? "selected"} ${choosesDeletion ? "deletion" : "version"}…`;
+  const canChoose = !proposal && proposalSnapshot && side && (stage?.file.status === "text"
+    || choosesDeletion && current?.working.status === "text");
+  const removesFile = proposal?.choice.kind === "deletion";
+  const stagesDeletion = current?.working.status === "missing" && Boolean(current.deletedSide);
   const proposalStale = proposal && current?.snapshot !== proposal.expected;
   const proposedBytes = proposal ? new TextEncoder().encode(proposal.text).byteLength : 0;
   const tooLarge = proposedBytes > maxProposalBytes;
@@ -119,8 +128,11 @@ export function GitConflictReview({ checkoutId, checkoutRoot, path, openFile, cl
     setProposal({ expected: proposalSnapshot, choice, text });
   }
   function chooseVersion() {
-    if (canChoose && stage?.file.status === "text" && (version === "local" || version === "incoming")) {
-      startProposal({ kind: version, objectId: stage.objectId }, stage.file.content);
+    if (!canChoose || !side) return;
+    if (choosesDeletion && current?.working.status === "text") {
+      startProposal({ kind: "deletion", side }, current.working.content);
+    } else if (stage?.file.status === "text") {
+      startProposal({ kind: side, objectId: stage.objectId }, stage.file.content);
     }
   }
   function combine() {
@@ -158,14 +170,20 @@ export function GitConflictReview({ checkoutId, checkoutRoot, path, openFile, cl
             {file?.status === "text" ? <pre aria-label={`${versionLabels[version]} text`} tabIndex={0}
               className={`${proposal ? "max-h-36" : "max-h-64"} overflow-auto whitespace-pre-wrap wrap-anywhere font-mono text-xs`}>{file.content || "Empty file"}</pre>
               : file?.status === "unavailable" ? <p>{file.reason}</p>
-              : <p>File absent in this version.</p>}
+              : <p>{choosesDeletion ? "This side deleted the file." : "File absent in this version."}</p>}
           </div>
         </ContextActions>
       </section>
       {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
       {(current.proposalBlocked ?? current.resolutionBlocked) && <p role="status">{current.proposalBlocked ?? current.resolutionBlocked}</p>}
       {proposal && <section aria-label="Proposed resolution" className="grid gap-2 border-t border-border pt-3">
-        {proposal.choice.kind === "combined" ? <label className="file-field">Proposed working result
+        {removesFile ? <>
+          <p>The working result will be absent. These exact working contents will be moved to the Recycle Bin.</p>
+          <pre aria-label="File contents to remove" tabIndex={0}
+            className="max-h-52 overflow-auto whitespace-pre-wrap wrap-anywhere rounded border border-border px-2 py-1.5 font-mono text-xs">
+            {proposal.text || "Empty file"}
+          </pre>
+        </> : proposal.choice.kind === "combined" ? <label className="file-field">Proposed working result
           <textarea rows={8} className="resize-y font-mono text-xs" value={proposal.text} disabled={busy}
             onChange={(event) => {
               setProposal({ ...proposal, text: event.currentTarget.value });
@@ -175,15 +193,20 @@ export function GitConflictReview({ checkoutId, checkoutRoot, path, openFile, cl
           className="max-h-52 overflow-auto whitespace-pre-wrap wrap-anywhere rounded border border-border px-2 py-1.5 font-mono text-xs">
           {proposal.text || "Empty file"}
         </pre>}
-        <p className="text-xs text-muted-foreground">{proposal.choice.kind === "combined"
+        <p className="text-xs text-muted-foreground">{proposal.choice.kind === "deletion"
+          ? `Recorded deletion from ${versionLabels[proposal.choice.side]}.`
+          : proposal.choice.kind === "combined"
           ? "Combined text uses UTF-8 with LF line endings."
           : `Exact text from ${versionLabels[proposal.choice.kind]}.`} {proposedBytes.toLocaleString()} bytes.</p>
         {tooLarge && <p role="alert">The proposed result exceeds the 2 MiB text limit.</p>}
-        {proposalStale && <p role="alert">The conflict changed. Copy your proposal before cancelling and review the current versions.</p>}
+        {proposalStale && <p role="alert">{removesFile
+          ? "The conflict changed. Review the current versions before removing the working file."
+          : "The conflict changed. Copy your proposal before cancelling and review the current versions."}</p>}
         <label className="flex items-start gap-2 text-xs">
           <input type="checkbox" checked={proposalConfirmed} disabled={Boolean(proposalStale) || busy || tooLarge || !proposalSnapshot}
             onChange={(event) => confirmProposal(event.currentTarget.checked)} />
-          {createsFile ? "I reviewed the proposed contents and want to create the working result."
+          {removesFile ? "I reviewed the working contents and want to move this file to the Recycle Bin."
+            : createsFile ? "I reviewed the proposed contents and want to create the working result."
             : "I reviewed the proposed contents and want to replace the working result."}
         </label>
       </section>}
@@ -191,7 +214,8 @@ export function GitConflictReview({ checkoutId, checkoutRoot, path, openFile, cl
         <input type="checkbox" checked={confirmedSnapshot === current.snapshot} onChange={(event) => {
           setConfirmed(event.currentTarget.checked ? current.snapshot ?? undefined : undefined);
         }} />
-        I reviewed this working result and want to stage it as the resolution.
+        {stagesDeletion ? "I reviewed the absent working file and want to stage its deletion."
+          : "I reviewed this working result and want to stage it as the resolution."}
       </label>}
     </>}
     <div className="file-dialog-footer flex-wrap">
@@ -202,12 +226,12 @@ export function GitConflictReview({ checkoutId, checkoutRoot, path, openFile, cl
       {proposal && <>
         <Button type="button" variant="ghost" disabled={busy} onClick={cancelProposal}>Cancel proposal</Button>
         <Button type="button" disabled={!canApply} onClick={() => { if (canApply) apply.mutate(proposal); }}>
-          {apply.isPending ? "Saving…" : createsFile ? "Create working result" : "Replace working result"}
+          {apply.isPending ? "Saving…" : removesFile ? "Remove working file" : createsFile ? "Create working result" : "Replace working result"}
         </Button>
       </>}
       {current && !proposal && <Button type="button" disabled={!stageSnapshot || version !== "working" || confirmedSnapshot !== stageSnapshot}
         onClick={() => { if (stageSnapshot && version === "working" && confirmedSnapshot === stageSnapshot) resolve.mutate(stageSnapshot); }}>
-        {resolve.isPending ? "Staging…" : "Stage reviewed result"}
+        {resolve.isPending ? "Staging…" : stagesDeletion ? "Stage reviewed deletion" : "Stage reviewed result"}
       </Button>}
       <Button type="button" variant="ghost" disabled={busy} onClick={close}>Close</Button>
     </div>

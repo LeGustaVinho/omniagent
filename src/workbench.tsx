@@ -22,7 +22,8 @@ import { GoTo, type Destination } from "@/workbench-navigation";
 import { useWorkspaceSize, WorkbenchPanel, WorkspaceDrawersSuspended, WorkspaceVisibility } from "@/workbench-panel";
 import {
   exampleCheckout, nextDeliveryStep, scenarios,
-  type DeliveryAction, type DeliveryStep, type QuestionFocus, type QueueJobFocus, type ScenarioId, type SimulationSession, type WorkspaceId, type WorkspaceProps,
+  type DeliveryAction, type DeliveryStep, type QuestionFocus, type QueueJobFocus, type ScenarioId, type SimulationSession,
+  type WorkspaceDestination, type WorkspaceId, type WorkspaceProps,
 } from "@/workbench-contract";
 
 const ConversationsPreview = lazy(() => import("@/conversations-preview"));
@@ -122,16 +123,18 @@ function RailButton({ label, text = label, icon: Icon, current, pressed, onClick
   </ControlTooltip>;
 }
 
-export default function Workbench({ checkout, openRepository, onSelectCheckout, initialConversationId, fileTarget }: {
+export default function Workbench({ checkout, openRepository, onSelectCheckout, initialConversationId, destination, fileTarget }: {
   checkout: ProjectCheckout;
   openRepository: ReactNode;
-  onSelectCheckout: (checkout: ProjectCheckout, conversationId?: string) => Promise<void>;
+  onSelectCheckout: (checkout: ProjectCheckout, conversationId?: string, destination?: WorkspaceDestination) => Promise<void>;
   initialConversationId?: string;
+  destination?: WorkspaceDestination;
   fileTarget?: FileLinkTarget;
 }) {
   const lastAreaKey = "omniagent-workspace-area:" + checkout.checkoutId;
   const [realNavigation, setRealNavigation] = useState(() => {
     const prior = readNavigation(lastAreaKey);
+    if (destination) return show(destination.workspace, destination.target, prior);
     return initialConversationId ? show("conversations", initialConversationId, prior) : prior;
   });
   const [preview, setPreview] = useState<SimulationState | null>(null);
@@ -405,7 +408,11 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
             <Button ref={sidebarTrigger} variant="ghost" className="ui-icon-button" aria-label="Toggle conversation navigation" aria-expanded={sidebar}
               onClick={() => changeSidebar(!sidebar)}><PanelLeft size={16} aria-hidden="true" /></Button>
           </ControlTooltip>}
-          {preview ? <span className="truncate font-medium">Example repository</span> : <CheckoutSelector checkout={checkout} onSelect={onSelectCheckout} />}
+          {preview ? <span className="truncate font-medium">Example repository</span> : <CheckoutSelector checkout={checkout}
+            onSelect={async (selected, shortcut) => {
+              if (shortcut && selected.checkoutId === checkout.checkoutId) real.openWorkspace(shortcut.workspace, shortcut.target);
+              else await onSelectCheckout(selected, undefined, shortcut);
+            }} />}
           <span className="work-crumb-divider" aria-hidden="true">/</span><span className="work-current-area">{currentArea}</span>
         </div>
         {!narrowRail && navigationSearch}
