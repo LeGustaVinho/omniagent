@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
+import { useFileEditorDocument } from "@/file-editor-popout";
 import type { EditorExcerpt } from "@/editor-context";
 import type { NoteTarget } from "@/knowledge-document";
 
@@ -30,6 +31,7 @@ export function isContextKey(event: KeyboardEvent) {
 }
 
 export function useNoteContextMenu() {
+  const owner = useFileEditorDocument();
   const [menu, setMenu] = useState<{ label: string; groups: MenuGroups; point: { x: number; y: number }; focus: () => void }>();
   const open = useCallback((label: string, groups: MenuGroups | undefined, point: { x: number; y: number }, focus: () => void) => {
     if (!groups?.some((group) => group.length)) return false;
@@ -37,5 +39,5 @@ export function useNoteContextMenu() {
     return true;
   }, []);
   return { open, overlay: menu && <PositionedContextActions label={menu.label} groups={menu.groups} point={menu.point}
-    onClose={() => setMenu(undefined)} restoreFocus={menu.focus} /> };
+    onClose={() => setMenu(undefined)} restoreFocus={menu.focus} container={owner?.body} /> };
 }

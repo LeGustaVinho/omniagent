@@ -15,6 +15,7 @@ mod delivery_merge_ipc;
 mod desktop;
 #[cfg(debug_assertions)]
 mod desktop_provider_fixture;
+mod editor_windows;
 mod file_link_runtime;
 mod fixture;
 mod fixture_runtime;
@@ -293,10 +294,12 @@ fn main() {
             app.manage(ide_source_runtime::SourceWatches::default());
             app.manage(manual_terminal::ManualTerminals::default());
             app.manage(fixture_runtime::FixtureRuns::default());
+            editor_windows::build_main_window(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             runtime_status,
+            editor_windows::close_editor_window,
             file_link_runtime::take_pending_file_link,
             backup_ipc::create_application_backup,
             backup_ipc::preview_application_restore,

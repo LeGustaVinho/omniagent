@@ -8,6 +8,7 @@ import {
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
 import { ExampleFileSearch, matchReference, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget, type FileSearchScope } from "@/ide-file-search";
+import { noteWindowTarget } from "@/file-editor-popout";
 import { containingFolder, fileContextActions, fileHistoryTarget, noteRenameTarget, openNotesTarget, readSourceLineTarget, readTerminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
@@ -115,16 +116,17 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     }
   }, [files, models]);
 
-  const openFile = useCallback((path: string, line?: number, split = false, column?: number) => {
+  const openFile = useCallback((path: string, line?: number, split = false, column?: number, newWindow = false) => {
     const request = ++openRequest.current;
     if (markdownPath(path)) {
       const location = line !== undefined || split ? noteSearchTarget(path, line ?? 1, request, split) : path;
-      openWorkspace("knowledge", location);
+      openWorkspace("knowledge", newWindow ? noteWindowTarget(path, request) : location);
       return;
     }
     const focus = (file: string) => {
       if (line !== undefined) setJumps((before) => ({ ...before, [file]: { line, column, token: (before[file]?.token ?? 0) + 1 } }));
-      if (split) dock.split(file);
+      if (newWindow) dock.openInWindow(file);
+      else if (split) dock.split(file);
       else dock.open(file);
     };
     if (simulated) {
@@ -136,7 +138,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       watchSource(canonical);
       focus(canonical);
     });
-  }, [dock.open, dock.split, loadSource, openWorkspace, simulated, watchSource]);
+  }, [dock.open, dock.openInWindow, dock.split, loadSource, openWorkspace, simulated, watchSource]);
 
   useEffect(() => {
     if (simulated || !dock.ready || !dock.api) return;
@@ -446,6 +448,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                 ...(target.kind === "file" ? [[
                   { label: "Open", run: () => openFile(target.path) },
                   ...(!markdownPath(target.path) ? [{ label: "Open to the side", run: () => openFile(target.path, undefined, true) }] : []),
+                  { label: "Open in new window", run: () => openFile(target.path, undefined, false, undefined, true) },
                   ...(!simulated && markdownPath(target.path) ? [{ label: "Rename note…", run: () => renameNote(target.path) }] : []),
                   ...(!simulated ? [{ label: "Open working diff", run: () => openWorkspace("git", workingDiffTarget(target.path)) }] : []),
                   ...(!simulated && files[target.path] ? [{ label: "Save a copy…", run: () => treeActions.saveCopy(target.path, files[target.path]!.content) }] : []),
@@ -517,7 +520,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
               { label: "Split down", run: () => dock.split(path, view, "below", api.id) },
               { label: "Reveal in Explorer tree", run: () => revealFile(path) },
               ...(!simulated ? [{ label: "Open working diff", run: () => openWorkspace("git", workingDiffTarget(path)) }] : []),
-            ], ...menu.location({ kind: "file", path }), comparison.actions(path), ...conversationActions.actions({ kind: "file", path }), ...fileOperations.actions({ kind: "file", path }), [
+            ], ...menu.location({ kind: "file", path }), comparison.actions(path, api), ...conversationActions.actions({ kind: "file", path }), ...fileOperations.actions({ kind: "file", path }), [
               { label: "Close tab", run: () => requestClose(path, api) },
             ]],
           }} />
@@ -573,7 +576,8 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       {conversationActions.dialog}
       {fileOperations.dialog}
       {comparison.dialog}
-      {dialog?.kind === "close" && <FileDialog title="Save changes?" description={`${dialog.path} has unsaved changes.`} onClose={cancelClose}>
+      {dialog?.kind === "close" && <FileDialog title="Save changes?" description={`${dialog.path} has unsaved changes.`} onClose={cancelClose}
+        ownerPanel={dialog.api}>
         <div className="file-dialog-footer">
           <button type="button" className="fw-btn" disabled={confirmingClose} onClick={cancelClose}>Cancel</button>
           <button type="button" className="fw-btn fw-destructive" disabled={confirmingClose} onClick={() => void confirmClose(dialog, false)}>Discard changes</button>

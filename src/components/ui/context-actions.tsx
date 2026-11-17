@@ -23,7 +23,11 @@ export function useContextActionFeedback() {
   return { feedback, run, copy: (text: string) => void run(() => navigator.clipboard.writeText(text), "Copied to the clipboard.") };
 }
 
-function ActionItems({ groups, variant }: { groups: MenuGroups; variant: "context" | "dropdown" }) {
+function ActionItems({ groups, variant, container }: {
+  groups: MenuGroups;
+  variant: "context" | "dropdown";
+  container?: HTMLElement;
+}) {
   const { Item, Separator, Sub, SubTrigger, SubContent, Portal } = variant === "context" ? ContextMenu : DropdownMenu;
   function render(action: MenuAction) {
     if ("items" in action) {
@@ -31,7 +35,7 @@ function ActionItems({ groups, variant }: { groups: MenuGroups; variant: "contex
         <SubTrigger className="context-action" disabled={action.disabled}>
           {action.label}<ChevronRight aria-hidden />
         </SubTrigger>
-        <Portal><SubContent className="context-actions-menu" collisionPadding={8}>{action.items.map(render)}</SubContent></Portal>
+        <Portal container={container}><SubContent className="context-actions-menu" collisionPadding={8}>{action.items.map(render)}</SubContent></Portal>
       </Sub>;
     }
     return <Item key={action.label} className="context-action" disabled={action.disabled}
@@ -54,27 +58,34 @@ export function ContextActions({ label, groups, children, className = "", title,
   stopPointerDown?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [container, setContainer] = useState<HTMLElement>();
   const keyboardTarget = useRef<HTMLElement>(null);
+  const setMenuDocument = (target: HTMLElement) => setContainer(target.ownerDocument.body);
   if (!groups.some((group) => group.length)) return <>{children}</>;
-  return <ContextMenu.Root>
+  return <ContextMenu.Root modal={!container || container.ownerDocument === document}>
     <ContextMenu.Trigger asChild>
-      <div className={`context-actions-target ${className}`} title={title} onKeyDown={(event) => {
+      <div className={`context-actions-target ${className}`} title={title}
+        onContextMenuCapture={(event) => setMenuDocument(event.currentTarget)} onKeyDown={(event) => {
         if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
         event.preventDefault();
         event.stopPropagation();
         keyboardTarget.current = event.target as HTMLElement;
+        setMenuDocument(event.currentTarget);
         setOpen(true);
       }}>
         {children}
-        <DropdownMenu.Root open={open} onOpenChange={setOpen}>
+        <DropdownMenu.Root open={open} onOpenChange={setOpen} modal={!container || container.ownerDocument === document}>
           <DropdownMenu.Trigger asChild>
             <button type="button" className="context-actions-more" aria-label={`Actions for ${label}`} title={`Actions for ${label}`}
-              onClick={(event) => event.stopPropagation()}
-              onPointerDown={stopPointerDown ? (event) => event.stopPropagation() : undefined}>
+              onClick={(event) => event.stopPropagation()} onKeyDown={(event) => setMenuDocument(event.currentTarget)}
+              onPointerDown={(event) => {
+                setMenuDocument(event.currentTarget);
+                if (stopPointerDown) event.stopPropagation();
+              }}>
               <Ellipsis size={15} aria-hidden />
             </button>
           </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
+          <DropdownMenu.Portal container={container}>
             <DropdownMenu.Content aria-label={label} className="context-actions-menu" align="end" sideOffset={4} collisionPadding={8}
               onCloseAutoFocus={(event) => {
                 const target = keyboardTarget.current;
@@ -83,35 +94,36 @@ export function ContextActions({ label, groups, children, className = "", title,
                 event.preventDefault();
                 target.focus();
               }}>
-              <ActionItems groups={groups} variant="dropdown" />
+              <ActionItems groups={groups} variant="dropdown" container={container} />
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
       </div>
     </ContextMenu.Trigger>
-    <ContextMenu.Portal>
+    <ContextMenu.Portal container={container}>
       <ContextMenu.Content aria-label={label} className="context-actions-menu" collisionPadding={8}>
-        <ActionItems groups={groups} variant="context" />
+        <ActionItems groups={groups} variant="context" container={container} />
       </ContextMenu.Content>
     </ContextMenu.Portal>
   </ContextMenu.Root>;
 }
 
-export function PositionedContextActions({ label, groups, point, onClose, restoreFocus }: {
+export function PositionedContextActions({ label, groups, point, onClose, restoreFocus, container }: {
   label: string;
   groups: MenuGroups;
   point: { x: number; y: number };
   onClose: () => void;
   restoreFocus: () => void;
+  container?: HTMLElement;
 }) {
-  return <DropdownMenu.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+  return <DropdownMenu.Root open onOpenChange={(open) => { if (!open) onClose(); }} modal={!container || container.ownerDocument === document}>
     <DropdownMenu.Trigger asChild>
       <button className="context-actions-anchor" type="button" aria-hidden tabIndex={-1} style={{ left: point.x, top: point.y }} />
     </DropdownMenu.Trigger>
-    <DropdownMenu.Portal>
+    <DropdownMenu.Portal container={container}>
       <DropdownMenu.Content aria-label={label} aria-labelledby={undefined} className="context-actions-menu" align="start" collisionPadding={8}
         onCloseAutoFocus={(event) => { event.preventDefault(); restoreFocus(); }}>
-        <ActionItems groups={groups} variant="dropdown" />
+        <ActionItems groups={groups} variant="dropdown" container={container} />
       </DropdownMenu.Content>
     </DropdownMenu.Portal>
   </DropdownMenu.Root>;

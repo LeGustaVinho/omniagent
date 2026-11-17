@@ -4,11 +4,11 @@ import { CheckoutDocumentHistory } from "@/checkout-document-history";
 import type { MenuAction } from "@/components/ui/context-actions";
 import type { GitTextComparison } from "@/git-diff-view";
 import { compareGitFileVersions, gitFileText, type GitFileVersion } from "@/git-file-versions";
-import { FileDialog, type FileTreeTarget } from "@/ide-file-workspace";
+import { FileDialog, type FilePanelApi, type FileTreeTarget } from "@/ide-file-workspace";
 import { fileName } from "@/ide-knowledge-data";
 
 type TextState = { content: string; saved: string; external?: string };
-type Comparison = { labels: [string, string]; file?: GitTextComparison; error?: string };
+type Comparison = { labels: [string, string]; ownerPanel?: FilePanelApi; file?: GitTextComparison; error?: string };
 const MonacoComparison = lazy(() => import("@/git-diff-view").then(({ MonacoComparison }) => ({ default: MonacoComparison })));
 
 export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, copy, report, openHistory, restoreLocalText, canRestore }: {
@@ -23,7 +23,7 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, cop
 }) {
   const [selected, setSelected] = useState<string>();
   const [comparison, setComparison] = useState<Comparison>();
-  const [history, showHistory] = useState<{ path: string }>();
+  const [history, showHistory] = useState<{ path: string; ownerPanel?: FilePanelApi }>();
   const [layout, setLayout] = useState<"split" | "unified">("split");
   const request = useRef(0);
 
@@ -39,56 +39,56 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, cop
     return bufferAt(path)?.content ?? readDisk(path);
   }
 
-  async function compare(labels: [string, string], input: [Promise<string>, Promise<string>], path: string) {
+  async function compare(labels: [string, string], input: [Promise<string>, Promise<string>], path: string, ownerPanel?: FilePanelApi) {
     const id = ++request.current;
-    setComparison({ labels });
+    setComparison({ labels, ownerPanel });
     try {
       const [original, modified] = await Promise.all(input);
-      if (request.current === id) setComparison({ labels, file: { path, language: /\.(?:md|markdown)$/i.test(path) ? "markdown" : "plaintext", original, modified } });
+      if (request.current === id) setComparison({ labels, ownerPanel, file: { path, language: /\.(?:md|markdown)$/i.test(path) ? "markdown" : "plaintext", original, modified } });
     } catch (failure) {
-      if (request.current === id) setComparison({ labels, error: String(failure) });
+      if (request.current === id) setComparison({ labels, ownerPanel, error: String(failure) });
     }
   }
 
-  function comparePaths(left: string, right: string) {
-    void compare([left, right], [read(left), read(right)], right);
+  function comparePaths(left: string, right: string, ownerPanel?: FilePanelApi) {
+    void compare([left, right], [read(left), read(right)], right, ownerPanel);
   }
 
-  function compareDisk(path: string, base: GitFileVersion, revised: GitFileVersion, labels: [string, string]) {
+  function compareDisk(path: string, base: GitFileVersion, revised: GitFileVersion, labels: [string, string], ownerPanel?: FilePanelApi) {
     const comparison = compareGitFileVersions(checkoutId, path, base, revised);
-    void compare(labels, [comparison.then(({ original }) => gitFileText(original)), comparison.then(({ modified }) => gitFileText(modified))], path);
+    void compare(labels, [comparison.then(({ original }) => gitFileText(original)), comparison.then(({ modified }) => gitFileText(modified))], path, ownerPanel);
   }
 
-  function compareDraft(path: string, base: "head" | "index", content: string) {
+  function compareDraft(path: string, base: "head" | "index", content: string, ownerPanel?: FilePanelApi) {
     const version = compareGitFileVersions(checkoutId, path, null, { kind: base });
     void compare([base === "head" ? "HEAD" : "Git index", `${path} · Editor`],
-      [version.then(({ modified }) => gitFileText(modified)), Promise.resolve(content)], path);
+      [version.then(({ modified }) => gitFileText(modified)), Promise.resolve(content)], path, ownerPanel);
   }
 
-  function actions(path: string): MenuAction[] {
+  function actions(path: string, ownerPanel?: FilePanelApi): MenuAction[] {
     const local = bufferAt(path);
     const name = fileName(path);
     return [
       { label: "Copy text content", run: () => { void read(path).then((text) => copy(text, `Copied ${name}`), (failure: unknown) => report(String(failure))); } },
       { label: selected === path ? "Clear comparison selection" : "Select for comparison", run: () => setSelected(selected === path ? undefined : path) },
-      ...(selected && selected !== path ? [{ label: "Compare with selected file", run: () => comparePaths(selected, path) }] : []),
+      ...(selected && selected !== path ? [{ label: "Compare with selected file", run: () => comparePaths(selected, path, ownerPanel) }] : []),
       ...(local && local.content !== local.saved ? [{ label: "Compare with saved version", run: () => {
-        void compare([`${path} · Saved`, `${path} · Editor`], [Promise.resolve(local.saved), Promise.resolve(local.content)], path);
+        void compare([`${path} · Saved`, `${path} · Editor`], [Promise.resolve(local.saved), Promise.resolve(local.content)], path, ownerPanel);
       } }] : []),
       ...(local?.external !== undefined ? [{ label: "Compare editor with file on disk", run: () => {
-        void compare([`${path} · Disk`, `${path} · Editor`], [Promise.resolve(local.external!), Promise.resolve(local.content)], path);
+        void compare([`${path} · Disk`, `${path} · Editor`], [Promise.resolve(local.external!), Promise.resolve(local.content)], path, ownerPanel);
       } }] : []),
       ...(!simulated ? [{ label: "Compare Git versions", items: [
-        { label: "HEAD with staged index", run: () => compareDisk(path, { kind: "head" }, { kind: "index" }, ["HEAD", "Git index"]) },
-        { label: "HEAD with file on disk", run: () => compareDisk(path, { kind: "head" }, { kind: "worktree" }, ["HEAD", `${path} · Disk`]) },
-        { label: "Staged index with file on disk", run: () => compareDisk(path, { kind: "index" }, { kind: "worktree" }, ["Git index", `${path} · Disk`]) },
+        { label: "HEAD with staged index", run: () => compareDisk(path, { kind: "head" }, { kind: "index" }, ["HEAD", "Git index"], ownerPanel) },
+        { label: "HEAD with file on disk", run: () => compareDisk(path, { kind: "head" }, { kind: "worktree" }, ["HEAD", `${path} · Disk`], ownerPanel) },
+        { label: "Staged index with file on disk", run: () => compareDisk(path, { kind: "index" }, { kind: "worktree" }, ["Git index", `${path} · Disk`], ownerPanel) },
         ...(local ? [
-          { label: "HEAD with editor", run: () => compareDraft(path, "head", local.content) },
-          { label: "Staged index with editor", run: () => compareDraft(path, "index", local.content) },
+          { label: "HEAD with editor", run: () => compareDraft(path, "head", local.content, ownerPanel) },
+          { label: "Staged index with editor", run: () => compareDraft(path, "index", local.content, ownerPanel) },
         ] : []),
       ] }] : []),
       ...(!simulated && openHistory ? [{ label: "Show file history", run: () => openHistory(path) }] : []),
-      ...(!simulated ? [{ label: "Show local history", run: () => showHistory({ path }) }] : []),
+      ...(!simulated ? [{ label: "Show local history", run: () => showHistory({ path, ownerPanel }) }] : []),
     ];
   }
 
@@ -97,7 +97,7 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, cop
     return [{ label: "Compare selected files", run: () => comparePaths(items[0]!.path, items[1]!.path) }];
   }
 
-  const dialog = comparison && <FileDialog title="Compare files" description={comparison.labels.join(" ↔ ")} className="file-comparison-dialog"
+  const dialog = comparison && <FileDialog title="Compare files" description={comparison.labels.join(" ↔ ")} className="file-comparison-dialog" ownerPanel={comparison.ownerPanel}
     onClose={() => { request.current += 1; setComparison(undefined); }}>
     <div className="file-comparison-body">
       {comparison.error ? <p role="alert">{comparison.error}</p> : comparison.file ? <>
@@ -115,7 +115,7 @@ export function useCheckoutFileComparison({ checkoutId, simulated, bufferAt, cop
   </FileDialog>;
 
   return { actions, selectionActions, dialog: history ? <CheckoutDocumentHistory key={history.path} checkoutId={checkoutId} path={history.path}
-    editorText={bufferAt(history.path)?.content} readDisk={() => readDisk(history.path)}
+    editorText={bufferAt(history.path)?.content} readDisk={() => readDisk(history.path)} ownerPanel={history.ownerPanel}
     restore={restoreLocalText && canRestore?.(history.path) !== false ? (text) => restoreLocalText(history.path, text) : undefined}
     onClose={() => showHistory(undefined)} /> : dialog };
 }

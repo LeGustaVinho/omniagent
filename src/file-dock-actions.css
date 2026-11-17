@@ -1,3 +1,8 @@
+.file-editor-popup {
+  margin: 0;
+  height: 100vh;
+}
+
 .file-dock-group-menu {
   align-self: stretch;
   margin-inline-end: .2rem;

@@ -1,10 +1,11 @@
 import { useRef, useState } from "react";
 import { containingFolder } from "@/file-context-actions";
-import { FileDialog } from "@/ide-file-workspace";
+import { FileDialog, type FilePanelApi } from "@/ide-file-workspace";
 import type { NoteSelection } from "@/knowledge-context";
 import type { NoteExtractionDestination } from "@/repository-note-buffers";
 
-export function ExtractNoteDialog({ path, selection, folders = [], onClose, onExtract, onCreated }: {
+export function ExtractNoteDialog({ path, selection, folders = [], onClose, onExtract, onCreated, ownerPanel }: {
+  ownerPanel?: FilePanelApi;
   path: string;
   selection: NoteSelection;
   folders?: readonly string[];
@@ -38,7 +39,7 @@ export function ExtractNoteDialog({ path, selection, folders = [], onClose, onEx
     onCreated(created, replaceWithLink);
   }
 
-  return <FileDialog title="Extract selection to a new note" description={path}
+  return <FileDialog title="Extract selection to a new note" description={path} ownerPanel={ownerPanel}
     onClose={() => { if (!submitting.current) onClose(); }}>
     <form onSubmit={(event) => { event.preventDefault(); void extract(); }}>
       <label className="grid gap-1 py-2 text-xs">Destination folder

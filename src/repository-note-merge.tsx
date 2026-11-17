@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useRef, useState } from "react";
-import { FileDialog } from "@/ide-file-workspace";
+import { FileDialog, type FilePanelApi } from "@/ide-file-workspace";
 import type { MergeRevision, SavedNoteMerge } from "@/repository-note-buffers";
 
 type MergePreview = {
@@ -14,7 +14,8 @@ type MergePreview = {
   warnings: { path: string; line: number | null; message: string }[];
 };
 
-export function RepositoryNoteMerge({ checkoutId, source, suggestedDestination, destinations, onClose, onApply, onOpen, onSaved }: {
+export function RepositoryNoteMerge({ checkoutId, source, suggestedDestination, destinations, onClose, onApply, onOpen, onSaved, ownerPanel }: {
+  ownerPanel?: FilePanelApi;
   checkoutId: string;
   source: string;
   suggestedDestination?: string;
@@ -59,7 +60,7 @@ export function RepositoryNoteMerge({ checkoutId, source, suggestedDestination, 
   }
 
   return <FileDialog title={result ? "Merge result" : preview ? "Review note merge" : "Merge notes"}
-    description={preview ? preview.source + " → " + preview.destination : source} onClose={close}>
+    description={preview ? preview.source + " → " + preview.destination : source} onClose={close} ownerPanel={ownerPanel}>
     {result ? <>
       {result.saved.length > 0 && <ul className="note-rewrite-list" aria-label="Saved notes">
         {result.saved.map((path) => <li key={path}>{path} · Saved</li>)}

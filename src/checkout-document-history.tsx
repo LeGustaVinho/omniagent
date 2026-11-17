@@ -2,7 +2,7 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { lazy, Suspense, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { FileDialog } from "@/ide-file-workspace";
+import { FileDialog, type FilePanelApi } from "@/ide-file-workspace";
 
 type HistoryEntry = { position: number; revisionId: string; recordedAt: number; origin: "captured" | "before_save" | "saved" };
 type HistoryPage = { entries: HistoryEntry[]; nextBefore: number | null };
@@ -23,12 +23,13 @@ function revisionText(checkoutId: string, path: string, position: number | undef
   };
 }
 
-export function CheckoutDocumentHistory({ checkoutId, path, editorText, readDisk, restore, onClose }: {
+export function CheckoutDocumentHistory({ checkoutId, path, editorText, readDisk, restore, ownerPanel, onClose }: {
   checkoutId: string;
   path: string;
   editorText?: string;
   readDisk: () => Promise<string>;
   restore?: (text: string) => Promise<void>;
+  ownerPanel?: FilePanelApi;
   onClose: () => void;
 }) {
   const [selected, select] = useState<number>();
@@ -77,7 +78,7 @@ export function CheckoutDocumentHistory({ checkoutId, path, editorText, readDisk
     finally { setRestoring(false); }
   }
 
-  return <FileDialog title="Local file history" description={path} className="file-comparison-dialog" onClose={onClose}>
+  return <FileDialog title="Local file history" description={path} className="file-comparison-dialog" ownerPanel={ownerPanel} onClose={onClose}>
     <div className="file-comparison-body">
       {list.isPending && <p role="status">Loading local revisions…</p>}
       {list.error && <p role="alert">{String(list.error)}</p>}

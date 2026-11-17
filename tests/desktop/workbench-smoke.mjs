@@ -2048,6 +2048,111 @@ test("opens Git and local file history and recycles only the clicked checkout fi
   }
 });
 
+test("detaches the selected dirty editor into a native window and returns it with its draft", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Detached editor checkout");
+  const file = "draft.txt";
+  const other = "other.txt";
+  const note = "meeting.md";
+  const original = "Draft content\n";
+  const revised = "Draft contentx\n";
+  const editedInWindow = "Draft contentxy\n";
+  git(scratch, "init", "-q", "-b", "main", repo);
+  git(repo, "config", "core.autocrlf", "false");
+  await writeFile(join(repo, file), original);
+  await writeFile(join(repo, other), "Other file\n");
+  await writeFile(join(repo, note), "# Meeting notes\n");
+  git(repo, "add", ".");
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Seed detached editor checkout");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const main = await browser.getWindowHandle();
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    const source = { checkoutId: checkout.checkoutId, path: file };
+    await selectCheckout(browser, checkout);
+    await click(browser, '.work-rail button[aria-label="IDE"]');
+    const ide = browser.$('[aria-label="IDE workspace"]');
+    await click(ide, `button=${file}`);
+    const editor = ide.$(".code-editor .view-line:first-child");
+    await editor.waitForDisplayed();
+    await editor.click();
+    await browser.action("key").down(Key.End).up(Key.End).perform();
+    await browser.keys("x");
+    await browser.waitUntil(async () => (await invoke(browser, "read_repository_source_draft", source))?.markdown === revised);
+    await click(ide, `button=${other}`);
+    await ide.$(`.file-tab-label[title="${file}"]`).click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Move tab to new window"]');
+    await browser.waitUntil(async () => (await browser.getWindowHandles()).some((handle) => handle !== main));
+    const labels = () => invoke(browser, "plugin:window|get_all_windows");
+    assert.ok((await labels()).some((label) => label.startsWith("editor-")));
+    const popup = (await browser.getWindowHandles()).find((handle) => handle !== main);
+    await browser.switchToWindow(popup);
+    const popupTab = browser.$(`.file-tab-label[title="${file}"]`);
+    await popupTab.waitForDisplayed();
+    const detachedEditor = browser.$(".code-editor .view-line:first-child");
+    await detachedEditor.waitForDisplayed();
+    assert.match(await detachedEditor.getText(), /Draft contentx/);
+    assert.equal(await browser.$$(".file-tab-label").length, 1);
+    await detachedEditor.click();
+    await browser.action("key").down(Key.End).up(Key.End).perform();
+    await browser.keys("y");
+    await browser.waitUntil(async () => (await detachedEditor.getText()).includes("Draft contentxy"));
+    await click(popupTab, `button[aria-label="Close ${file}"]`);
+    const dirtyClose = browser.$('[role="dialog"].file-dialog');
+    await dirtyClose.waitForDisplayed();
+    await click(dirtyClose, "button=Cancel");
+    await popupTab.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Return editor window to main window"]');
+    await browser.switchToWindow(main);
+    await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 1);
+    await browser.waitUntil(async () => (await labels()).every((label) => !label.startsWith("editor-")),
+      { timeoutMsg: "The detached editor's native window stayed open." });
+    await ide.$(`.file-tab-label[title="${file}"]`).waitForDisplayed();
+    await browser.waitUntil(async () => (await invoke(browser, "read_repository_source_draft", source))?.markdown === editedInWindow);
+    assert.equal(await readFile(join(repo, file), "utf8"), original);
+
+    await ide.$(".file-dock-group-menu").click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Move group to new window"]');
+    await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 2);
+    const group = (await browser.getWindowHandles()).find((handle) => handle !== main);
+    await browser.switchToWindow(group);
+    await browser.$(`.file-tab-label[title="${file}"]`).waitForDisplayed();
+    await browser.$(`.file-tab-label[title="${other}"]`).waitForDisplayed();
+    await browser.$(".file-dock-group-menu").click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Return editor window to main window"]');
+    await browser.switchToWindow(main);
+    await browser.waitUntil(async () => (await labels()).every((label) => !label.startsWith("editor-")));
+
+    await ide.$(`button[title="${note}"]`).click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Open in new window"]');
+    await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 2);
+    const noteWindow = (await browser.getWindowHandles()).find((handle) => handle !== main);
+    await browser.switchToWindow(noteWindow);
+    const noteTab = browser.$(`.file-tab-label[title="${note}"]`);
+    await noteTab.waitForDisplayed();
+    const noteEditor = browser.$(`[aria-label="Markdown editor for ${note}"] .cm-line:first-child`);
+    await noteEditor.waitForDisplayed();
+    await noteEditor.click();
+    await browser.action("key").down(Key.End).up(Key.End).perform();
+    await browser.keys("!");
+    await browser.waitUntil(async () => (await noteEditor.getText()).includes("Meeting notes!"));
+    await noteTab.click({ button: "right" });
+    await click(browser, '//*[@role="menuitem"][normalize-space(.)="Return editor window to main window"]');
+    await browser.switchToWindow(main);
+    await browser.waitUntil(async () => (await labels()).every((label) => !label.startsWith("editor-")));
+    await browser.waitUntil(async () => (await invoke(browser, "read_repository_markdown_draft", {
+      checkoutId: checkout.checkoutId, path: note,
+    }))?.markdown === "# Meeting notes!\n");
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
 test("filters actual Windows hidden attributes independently from dotfiles in Explorer", { timeout: 90_000 }, async (t) => {
   const { application, scratch } = await copyTestApplication(t);
   const repo = join(scratch, "Windows hidden items checkout");

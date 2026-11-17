@@ -15,6 +15,7 @@ import type { ExampleFile } from "@/ide-knowledge-data";
 import { fileName } from "@/ide-knowledge-data";
 import { headings, markdownNoteLink, parseReadingFile, parseWiki, readingLocalAddress, type NoteTarget } from "@/knowledge-document";
 import { isContextKey, useNoteContextMenu, type NoteContextActions, type NoteContextHit } from "@/knowledge-context";
+import { useFileEditorDocument } from "@/file-editor-popout";
 import { noteAttachmentCandidates } from "@/repository-note-media";
 import { insertListItem, insertTable, toggleTaskCheckbox } from "@/knowledge-source-commands";
 
@@ -275,6 +276,7 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const instance = useRef<EditorView>(undefined);
+  const owner = useFileEditorDocument();
   const compartment = useRef(new Compartment()).current;
   const { open: openContextMenu, overlay } = useNoteContextMenu();
   const fresh = useRef({ source, onChange, onLink, mode, files, analyze, suggestLinks, contextActions });
@@ -296,6 +298,7 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
     };
     const view = new EditorView({
       parent: target,
+      root: target.ownerDocument,
       state: EditorState.create({
         doc: fresh.current.source,
         extensions: [
@@ -336,8 +339,8 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
           }),
           EditorView.domEventHandlers({
             contextmenu(event, editor) {
-              const target = event.target instanceof Element ? event.target : null;
-              const offset = target?.closest<HTMLElement>("[data-note-offset]")?.dataset.noteOffset;
+              const target = event.target as Element | null;
+              const offset = target?.closest?.<HTMLElement>("[data-note-offset]")?.dataset.noteOffset;
               const pos = offset === undefined ? editor.posAtCoords({ x: event.clientX, y: event.clientY }) : Number(offset);
               return pos !== null && show(editor, pos, { x: event.clientX, y: event.clientY });
             },
@@ -382,6 +385,10 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
     instance.current = view;
     return () => { instance.current = undefined; view.destroy(); };
   }, [compartment, openContextMenu, path]);
+
+  useEffect(() => {
+    if (owner && instance.current?.root !== owner) instance.current?.setRoot(owner);
+  }, [owner]);
 
   useEffect(() => {
     instance.current?.dispatch({ effects: compartment.reconfigure(mode === "live" ? (analyze ? canonicalLivePreview : livePreview) : []) });

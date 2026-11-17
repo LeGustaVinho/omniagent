@@ -10,6 +10,7 @@ import { Dialog } from "radix-ui";
 import { ContextActions, PositionedContextActions, type MenuGroups } from "@/components/ui/context-actions";
 import { fileName } from "@/ide-knowledge-data";
 import { setCheckoutFavorites, useCheckoutFavorites, type CheckoutFavorite } from "@/checkout-favorites";
+import { dockviewLayoutInMain, editorPopoutPath, FileEditorDocument, mirrorEditorAppearance } from "@/file-editor-popout";
 import { makeTree, readTreePreferences, saveTreePreference, showTreePath, treeParents, useIgnoredTree, useWindowsHiddenTree,
   type FolderNodeData, type TreeReveal } from "@/checkout-file-tree";
 import { ResizablePanel } from "@/panel-resize";
@@ -53,8 +54,28 @@ export interface FileDockContextValue {
 
 const FileDockContext = createContext<FileDockContextValue | null>(null);
 
+function panelDocument(api?: FilePanelApi) {
+  const owner = api?.getWindow();
+  return owner && !owner.closed ? owner.document ?? document : document;
+}
+
+function usePanelDocument(api?: FilePanelApi) {
+  const [owner, setOwner] = useState(() => panelDocument(api));
+  useEffect(() => {
+    const update = () => setOwner(panelDocument(api));
+    update();
+    const location = api?.onDidLocationChange(update);
+    return () => location?.dispose();
+  }, [api]);
+  return owner;
+}
+
 function FileDockPanel({ params, api }: IDockviewPanelProps<FilePanelParams>) {
-  return useContext(FileDockContext)?.renderFile(params.path, params.view, api.id) ?? null;
+  const context = useContext(FileDockContext);
+  const ownerDocument = usePanelDocument(api);
+  return <FileEditorDocument.Provider value={ownerDocument}>
+    {context?.renderFile(params.path, params.view, api.id)}
+  </FileEditorDocument.Provider>;
 }
 
 function FileDockTab({ params, api }: IDockviewPanelHeaderProps<FilePanelParams>) {
@@ -105,19 +126,21 @@ export function FileDock({ context, onReady }: { context: FileDockContextValue; 
       <DockviewReact className="file-dock" theme={light ? themeLight : themeDark}
         components={filePanelComponents} onReady={onReady}
         watermarkComponent={FileDockEmpty} defaultTabComponent={FileDockTab} rightHeaderActionsComponent={FileGroupControls}
-        getTabContextMenuItems={() => []} disableFloatingGroups />
+        getTabContextMenuItems={() => []} disableFloatingGroups popoutUrl={editorPopoutPath} />
     </FileDockContext.Provider>
   );
 }
 
-export function focusFile(dock: DockviewApi, path: string, view: FileView = "editor") {
+export function focusFile(dock: DockviewApi, path: string, view: FileView = "editor", home?: DockGroup) {
   const id = `${view}:${path}`;
   const existing = dock.panels.find((panel) => panel.params?.path === path && panel.params?.view === view);
   if (existing) {
     existing.api.setActive();
-  } else {
-    dock.addPanel({ id: unusedPanelId(dock, id), component: "file", params: { path, view }, title: fileName(path) });
+    if (existing.group.api.location.type === "popout") existing.api.getWindow().focus();
+    return existing;
   }
+  return dock.addPanel({ id: unusedPanelId(dock, id), component: "file", params: { path, view }, title: fileName(path),
+    position: home ? { referenceGroup: home } : undefined });
 }
 
 function unusedPanelId(dock: DockviewApi, preferred: string) {
@@ -162,6 +185,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
   const closeSequence = useRef(0);
   const pendingClose = useRef<CloseBatch>(null);
   const reopenPending = useRef(false);
+  const detaching = useRef(false);
   const liveDock = useRef<DockviewApi | null>(null);
   const initialPathRef = useRef(initialPath);
   const onReady = useCallback(({ api: view }: DockviewReadyEvent) => setApi(view), []);
@@ -175,7 +199,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     let loaded = false;
     let writes = Promise.resolve();
     const scope = { workspace, checkoutId };
-    const serialize = () => JSON.stringify(api.toJSON());
+    const serialize = () => JSON.stringify(dockviewLayoutInMain(api.toJSON()));
     const flush = () => {
       const layout = pending;
       pending = undefined;
@@ -194,13 +218,27 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     const updateFile = () => setFile(api.activePanel?.params as FilePanelParams | undefined);
     const activeChange = api.onDidActivePanelChange(() => { updateFile(); save(); });
     const layoutChange = api.onDidLayoutChange(save);
+    const cleanupPopouts = new Map<Window, () => void>();
+    const addPopout = api.onDidAddPopoutGroup(({ group, window: popup }) => {
+      popup.document.querySelector(".dv-dockview")?.classList.add("file-dock");
+      const stopAppearance = mirrorEditorAppearance(popup);
+      const title = () => { popup.document.title = (group.activePanel?.title ?? "Editor group") + " · OmniAgent"; };
+      title();
+      const activePanel = group.api.onDidActivePanelChange(title);
+      cleanupPopouts.set(popup, () => { activePanel.dispose(); stopAppearance(); });
+      save();
+    });
+    const closePopout = api.onWillClosePopoutWindow(({ window: popup }) => {
+      cleanupPopouts.get(popup)?.();
+      cleanupPopouts.delete(popup);
+    });
     window.addEventListener("pagehide", flush);
 
     const restore = async () => {
       try {
         const stored = simulated ? undefined : await invoke<string | null>("workbench_layout", scope);
         if (!active) return;
-        if (stored) api.fromJSON(JSON.parse(stored) as SerializedDockview);
+        if (stored) api.fromJSON(dockviewLayoutInMain(JSON.parse(stored) as SerializedDockview));
       } catch (failure) {
         if (active) setError(String(failure));
       } finally {
@@ -222,10 +260,41 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
       flush();
       layoutChange.dispose();
       activeChange.dispose();
+      addPopout.dispose();
+      closePopout.dispose();
+      for (const cleanup of cleanupPopouts.values()) cleanup();
     };
   }, [api, checkoutId, simulated, workspace]);
 
   const open = useCallback((file: string) => { if (api && ready) focusFile(api, file); }, [api, ready]);
+  const detach = useCallback(async (target: DockTab | DockGroup) => {
+    if (!api || !ready || detaching.current) return;
+    detaching.current = true;
+    setError("");
+    try {
+      const open = await api.addPopoutGroup(target);
+      if (!open && liveDock.current === api) {
+        setError("Could not open an editor window.");
+      }
+    } catch (failure) {
+      if (liveDock.current === api) setError(String(failure));
+    } finally {
+      detaching.current = false;
+    }
+  }, [api, ready]);
+  const openInWindow = useCallback((path: string, view: FileView = "editor") => {
+    if (!api || !ready) return;
+    const detached = api.panels.find((panel) => panel.params?.path === path && panel.params?.view === view
+      && panel.group.api.location.type === "popout");
+    if (detached) {
+      detached.api.setActive();
+      detached.api.getWindow().focus();
+      return;
+    }
+    const home = api.groups.find((group) => group.api.location.type === "grid");
+    const panel = focusFile(api, path, view, home);
+    void detach(panel);
+  }, [api, detach, ready]);
   const split = useCallback((file: string, view?: FileView, direction?: "right" | "below", reference?: string) => {
     if (api && ready) splitFile(api, file, view, direction, reference);
   }, [api, ready]);
@@ -316,6 +385,11 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
         { label: "Split active tab right", run: () => split(current.path, current.view, "right", focused.id) },
         { label: "Split active tab down", run: () => split(current.path, current.view, "below", focused.id) },
       ] : []),
+      ...(group.api.location.type === "popout" ? [
+        { label: "Return editor window to main window", run: () => group.api.getWindow().close() },
+      ] : [
+        { label: "Move group to new window", disabled: !group.panels.length, run: () => void detach(group) },
+      ]),
       ...(others.length ? [{ label: "Merge this group into", items: others.map((other) => ({
         label: groupName(other), run: () => mergeGroups(group, other),
       })) }, { label: "Merge all groups here", run: () => {
@@ -341,12 +415,20 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     const right = index === -1 ? [] : group.panels.slice(index + 1).filter((panel) => !panel.params?.pinned);
     const saved = otherTabs.filter((panel) => !commands.dirty(String(panel.params?.path)));
     const others = api?.groups.filter((other) => other.id !== group.id) ?? [];
+    const main = others.find((other) => other.api.location.type === "grid" && other.panels.length);
     return [[
       { label: "Move tab", items: [
         { label: "New group to the right", disabled: group.panels.length < 2, run: () => tab.moveTo({ group, position: "right" }) },
         { label: "New group below", disabled: group.panels.length < 2, run: () => tab.moveTo({ group, position: "bottom" }) },
         ...others.map((other) => ({ label: groupName(other), run: () => tab.moveTo({ group: other, position: "center" }) })),
       ] },
+      ...(group.api.location.type === "popout" ? [
+        ...(main && group.panels.length > 1 ? [{ label: "Move tab to main window", run: () => tab.moveTo({ group: main, position: "center" }) }] : []),
+        { label: "Return editor window to main window", run: () => group.api.getWindow().close() },
+      ] : [{ label: "Move tab to new window", run: () => {
+        const selected = api?.getPanel(tab.id);
+        if (selected) void detach(selected);
+      } }]),
     ], [
       { label: "Close other tabs in group", disabled: !otherTabs.length, run: () => closeTabs(otherTabs, commands) },
       { label: "Close tabs to the right", disabled: !right.length, run: () => closeTabs(right, commands) },
@@ -377,7 +459,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
     return reopened;
   };
 
-  return { api, error, onReady, open, path: file?.path, view: file?.view, ready, split, reconcilePaths,
+  return { api, error, onReady, open, openInWindow, path: file?.path, view: file?.view, ready, split, reconcilePaths,
     closeTab, cancelCloseBatch, resumeCloseBatch, groupActions, layoutActions };
 }
 
@@ -716,21 +798,23 @@ export function FileSidebar({ name, children }: { name: string; children: ReactN
   return <ResizablePanel as="aside" className="file-workspace-sidebar" aria-label={name} edge="right" resizeKey={name} resizeLabel={name}>{children}</ResizablePanel>;
 }
 
-export function FileDialog({ title, description, onClose, children, className = "" }: {
+export function FileDialog({ title, description, onClose, children, className = "", ownerPanel }: {
   title: string;
   description: string;
   onClose: () => void;
   children: ReactNode;
   className?: string;
+  ownerPanel?: FilePanelApi;
 }) {
-  const activator = useRef(document.activeElement);
+  const ownerDocument = usePanelDocument(ownerPanel);
+  const activator = useRef(ownerDocument.activeElement as HTMLElement | null);
   return (
     <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <Dialog.Portal>
+      <Dialog.Portal container={ownerDocument.body}>
         <Dialog.Overlay className="file-dialog-overlay" />
         <Dialog.Content className={`file-dialog ${className}`} onCloseAutoFocus={(event) => {
           const element = activator.current;
-          if (element instanceof HTMLElement && element.isConnected) {
+          if (element?.isConnected) {
             event.preventDefault();
             element.focus();
           }

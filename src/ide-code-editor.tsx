@@ -1,6 +1,7 @@
 import type { editor } from "monaco-editor";
 import { useEffect, useRef, useState } from "react";
 import { excerptReference, markdownExcerpt, type EditorExcerpt } from "@/editor-context";
+import { useFileEditorDocument } from "@/file-editor-popout";
 import type { GitPermalinkLines } from "@/git-file-versions";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
 
@@ -51,6 +52,8 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const instance = useRef<editor.IStandaloneCodeEditor>(undefined);
+  const owner = useFileEditorDocument();
+  const viewState = useRef<{ path: string; scope: string; jump?: number; state: editor.ICodeEditorViewState | null }>(undefined);
   const fresh = useRef({ content, update, problems, jump, onSettings, onCopy, onExcerpt, onPermalink, onOmniAgentLink });
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
@@ -188,7 +191,10 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
       observer = new MutationObserver(() => monaco.editor.setTheme(monacoTheme()));
       observer.observe(document.documentElement, { attributes: true });
       const location = fresh.current.jump;
-      if (location) {
+      const previous = viewState.current;
+      if (previous?.path === path && previous.scope === scope && previous.jump === location?.token && previous.state) {
+        codeEditor.restoreViewState(previous.state);
+      } else if (location) {
         codeEditor.setPosition({ lineNumber: location.line, column: location.column ?? 1 });
         codeEditor.revealLineInCenter(location.line);
       }
@@ -200,10 +206,11 @@ export function CodeEditor({ scope, path, content, models, update, problems, jum
       cancelled = true;
       observer?.disconnect();
       subscriptions.forEach((subscription) => subscription.dispose());
+      if (instance.current) viewState.current = { path, scope, jump: fresh.current.jump?.token, state: instance.current.saveViewState() };
       instance.current?.dispose();
       instance.current = undefined;
     };
-  }, [models, path, scope]);
+  }, [models, owner, path, scope]);
 
   useEffect(() => {
     const codeEditor = instance.current;
