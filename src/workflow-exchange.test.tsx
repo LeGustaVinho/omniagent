@@ -5,11 +5,18 @@ import type { ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
+import { downloadArtifact } from "@/download-artifact";
 import { WorkflowExchangeDownload, WorkflowExchangePanel } from "@/workflow-exchange";
 import type { ExchangeBinding } from "@/workflow-exchange-bindings";
+import { WorkflowTemplateHistory } from "@/workflow-template-history";
+import { exampleCheckout } from "@/workbench-contract";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@/download-artifact", async (original) => ({
+  ...await original<typeof import("@/download-artifact")>(),
+  downloadArtifact: vi.fn(),
+}));
 vi.mock("@/workflow-exchange-bindings", () => ({
   WorkflowExchangeBindings: ({ onChange }: { onChange: (key: string, binding: ExchangeBinding) => void }) =>
     <button type="button" onClick={() => onChange("binding-model", { type: "model_profile",
@@ -17,7 +24,7 @@ vi.mock("@/workflow-exchange-bindings", () => ({
     })}>Use destination profile</button>,
 }));
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); invoke.mockReset(); });
+afterEach(() => { cleanup(); invoke.mockReset(); vi.mocked(downloadArtifact).mockReset(); });
 
 const version = { id: "preset", revision: "historical", kind: "preset", destination: "library" } as const;
 const mount = (node: ReactNode) => render(<QueryClientProvider client={new QueryClient()}>{node}</QueryClientProvider>);
@@ -61,16 +68,56 @@ it("imports only the original document and destination bindings covered by its l
 });
 
 it("downloads an explicitly selected historical artifact revision", async () => {
-  const createObjectURL = vi.fn(() => "blob:approved-export");
-  vi.stubGlobal("URL", Object.assign(class extends URL {}, { createObjectURL, revokeObjectURL: vi.fn() }));
-  const filenames: string[] = [];
-  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
-    filenames.push(this.download);
-  });
   invoke.mockResolvedValue({ format: "omniagent.workflow-package", version: 1 });
   mount(<WorkflowExchangeDownload projectId="source-project" versions={[version]} />);
   await userEvent.click(screen.getByRole("button", { name: "Download package" }));
-  await waitFor(() => expect(filenames).toEqual(["omniagent-workflow-package.json"]));
-  expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+  await waitFor(() => expect(downloadArtifact).toHaveBeenCalledExactlyOnceWith("omniagent-workflow-package.json", expect.any(Blob)));
+  expect(vi.mocked(downloadArtifact).mock.calls[0]?.[1].type).toBe("application/json");
   expect(invoke).toHaveBeenCalledWith("export_workflow_exchange", { projectId: "source-project", selected: [version] });
+});
+
+it("exports the clicked library preset revision independently of the checked package assembly", async () => {
+  const other = { ...version, revision: "other-head", destination: "project" };
+  const evidence = { format: "omniagent.workflow-package", version: 1 };
+  invoke.mockImplementation(async (command) => {
+    if (command === "workflow_package_catalog") return [{ version, name: "Shared preset" }, { version: other, name: "Shared preset" }];
+    if (command === "export_workflow_exchange") return evidence;
+    throw new Error(command);
+  });
+  mount(<WorkflowExchangePanel projectId="source-project" openWorkspace={vi.fn()} />);
+  const user = userEvent.setup();
+  await user.click(screen.getByText("Import or export workflow packages"));
+  await user.click(screen.getByText("Export published revisions"));
+  const clicked = await screen.findByRole<HTMLInputElement>("checkbox", { name: /Shared preset.*library.*historical/ });
+  const checked = screen.getByRole<HTMLInputElement>("checkbox", { name: /Shared preset.*project.*other-head/ });
+  await user.click(checked);
+  fireEvent.contextMenu(clicked);
+  await user.click(await screen.findByRole("menuitem", { name: "Download package for this revision" }));
+  await waitFor(() => expect(downloadArtifact).toHaveBeenCalledTimes(1));
+  expect(invoke).toHaveBeenLastCalledWith("export_workflow_exchange", { projectId: "source-project", selected: [version] });
+  expect(checked.checked).toBe(true);
+  expect(clicked.checked).toBe(false);
+  await user.click(screen.getByRole("button", { name: "Download package" }));
+  await waitFor(() => expect(downloadArtifact).toHaveBeenCalledTimes(2));
+  expect(invoke).toHaveBeenLastCalledWith("export_workflow_exchange", { projectId: "source-project", selected: [other] });
+});
+
+it("exports the exact saved template revision and surfaces a rejected export", async () => {
+  const clicked = { id: "pipeline", revision: "clicked-old-version", kind: "pipeline", destination: "library" };
+  const other = { ...clicked, revision: "new-version", destination: "project" };
+  const projectId = exampleCheckout.projectId;
+  const openWorkspace = vi.fn();
+  invoke.mockImplementation(async (command) => {
+    if (command === "workflow_package_catalog") return [{ version: other, name: "Release" }, { version: clicked, name: "Release" }];
+    if (command === "export_workflow_exchange") throw new Error("A selected revision or dependency is not visible in this project");
+    throw new Error(command);
+  });
+  mount(<WorkflowTemplateHistory checkout={exampleCheckout} openWorkspace={openWorkspace} />);
+  const user = userEvent.setup();
+  fireEvent.contextMenu(await screen.findByRole("button", { name: /^Release.*clicked-old-/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Download package for this revision" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("is not visible in this project");
+  expect(invoke).toHaveBeenLastCalledWith("export_workflow_exchange", { projectId, selected: [clicked] });
+  expect(downloadArtifact).not.toHaveBeenCalled();
+  expect(openWorkspace).not.toHaveBeenCalled();
 });

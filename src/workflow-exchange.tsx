@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
+import { ContextActions } from "@/components/ui/context-actions";
+import { downloadArtifact } from "@/download-artifact";
 import { WorkflowExchangeBindings, type ExchangeBinding, type ExchangeBindingRequirement } from "@/workflow-exchange-bindings";
 import type { WorkflowAssistanceVersion as Version } from "@/workflow-editor-assistance";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -48,6 +50,7 @@ export function WorkflowExchangePanel({ projectId, openWorkspace }: {
 function ExportPackage({ projectId }: { projectId: string }) {
   const [open, setOpen] = useState(false);
   const [selection, setSelection] = useState<Set<string>>(new Set());
+  const save = useWorkflowExchangeDownload(projectId);
   const catalog = useQuery({
     queryKey: ["workflow-package-catalog", projectId],
     queryFn: () => invoke<CatalogArtifact[]>("workflow_package_catalog", { projectId }),
@@ -65,41 +68,47 @@ function ExportPackage({ projectId }: { projectId: string }) {
         {catalog.data?.map(({ version, name }) => {
           const key = versionKey(version);
           const checked = selection.has(key);
-          return <label className="flex items-baseline gap-2" key={key}>
-            <input type="checkbox" checked={checked} disabled={!checked && selection.size >= 32} onChange={() => setSelection((current) => {
-              const next = new Set(current);
-              if (next.has(key)) next.delete(key);
-              else next.add(key);
-              return next;
-            })} />
-            <span>{name} · {readable(version.kind)} · {version.destination} · <code>{version.revision.slice(0, 10)}</code></span>
-          </label>;
+          return <ContextActions key={key} label={`${name} · ${version.revision}`} groups={[[
+            { label: "Download package for this revision", disabled: save.isPending, run: () => save.mutate([version]) },
+          ]]}>
+            <label className="flex min-w-0 flex-1 items-baseline gap-2">
+              <input type="checkbox" checked={checked} disabled={!checked && selection.size >= 32} onChange={() => setSelection((current) => {
+                const next = new Set(current);
+                if (next.has(key)) next.delete(key);
+                else next.add(key);
+                return next;
+              })} />
+              <span>{name} · {readable(version.kind)} · {version.destination} · <code>{version.revision.slice(0, 10)}</code></span>
+            </label>
+          </ContextActions>;
         })}
       </fieldset>
-      <WorkflowExchangeDownload projectId={projectId} versions={selected} />
+      <WorkflowDownloadControls save={save} versions={selected} />
       {catalog.error && <p role="alert">{String(catalog.error)}</p>}
     </div>}
   </details>;
 }
 
-export function WorkflowExchangeDownload({ projectId, versions }: { projectId: string; versions: Version[] }) {
-  const save = useMutation({
-    mutationFn: (selected: Version[]) => invoke<unknown>("export_workflow_exchange", { projectId, selected }),
-    onSuccess: (document) => {
-      const url = URL.createObjectURL(new Blob([JSON.stringify(document)], { type: "application/json" }));
-      const link = window.document.createElement("a");
-      link.href = url;
-      link.download = "omniagent-workflow-package.json";
-      link.click();
-      const revoke = URL.revokeObjectURL.bind(URL);
-      setTimeout(() => revoke(url), 1_000);
+export function useWorkflowExchangeDownload(projectId: string) {
+  return useMutation({
+    mutationFn: async (selected: Version[]) => {
+      const document = await invoke<unknown>("export_workflow_exchange", { projectId, selected });
+      downloadArtifact("omniagent-workflow-package.json", new Blob([JSON.stringify(document)], { type: "application/json" }));
     },
   });
+}
+
+function WorkflowDownloadControls({ save, versions }: { save: ReturnType<typeof useWorkflowExchangeDownload>; versions: Version[] }) {
   return <>
     <Button type="button" variant="outline" disabled={!versions.length || save.isPending}
       onClick={() => save.mutate(versions)}>{save.isPending ? "Preparing export…" : "Download package"}</Button>
     {save.error && <p role="alert">{String(save.error)}</p>}
   </>;
+}
+
+export function WorkflowExchangeDownload({ projectId, versions }: { projectId: string; versions: Version[] }) {
+  const save = useWorkflowExchangeDownload(projectId);
+  return <WorkflowDownloadControls save={save} versions={versions} />;
 }
 
 function ImportPackage({ projectId, openWorkspace }: {
