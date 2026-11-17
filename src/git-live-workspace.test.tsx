@@ -413,6 +413,37 @@ it("previews a chosen side and an edited combination before writing a working re
   expect(invoke).not.toHaveBeenCalledWith("set_git_path_staged", expect.anything());
 });
 
+it("uses the clicked historical commit as the exact starting revision of a new worktree", async () => {
+  const newer = "a".repeat(40);
+  const earlier = "b".repeat(40);
+  const author = "Fixture";
+  const committedAt = "2026-11-17T11:00:00-03:00";
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: (payload as { checkoutId: string }).checkoutId, worktrees, branches, root: checkout.checkoutRoot,
+      managed: false, revision: { ...originalRevision, head: newer }, changes: [],
+    };
+    if (command === "git_checkout_history") return [
+      { sha: newer, author, committedAt, subject: "Latest revision" },
+      { sha: earlier, author, committedAt, subject: "Earlier revision" },
+    ];
+    if (command === "create_git_worktree") return { ...checkout, checkoutId: "new-worktree" };
+    throw new Error(command);
+  });
+  openGit({ target: "history" });
+  const user = userEvent.setup();
+  fireEvent.contextMenu(await screen.findByRole("button", { name: /^Earlier revision/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Create worktree from this commit…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "New worktree" }));
+  expect(dialog.getByRole<HTMLSelectElement>("combobox", { name: "Base revision" }).value).toBe(earlier);
+  await user.type(dialog.getByLabelText("Branch", { exact: true }), "from-old");
+  await user.click(dialog.getByRole("button", { name: "Create worktree" }));
+  expect(invoke).toHaveBeenCalledWith("create_git_worktree", {
+    projectId: checkout.projectId, checkoutId: checkout.checkoutId,
+    request: { branch: "from-old", existing: false, baseReference: earlier, expectedHead: earlier, path: null },
+  });
+});
+
 it("registers a manual worktree from the shared dialog and selects the returned checkout", async () => {
   const tree = { checkoutId: "manually-created", root: "D:/worktrees/new-local", branch: "new-local", head: "current-main", managed: false };
   let created = false;
