@@ -352,9 +352,9 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   }
   const revealFile = (path: string) => { setSidebar(true); setNavigator("files"); setReveal({ path }); };
   const treeActions = useCheckoutTreeActions({ checkoutId: checkout.checkoutId, simulated, refresh: source.refreshCatalog, report: setProblem,
-    onCreated: (path, kind) => {
-      setStatus(`Created ${path}`);
-      if (kind === "folder") setReveal({ path });
+    onCreated: (path, kind, copiedFromDisk) => {
+      setStatus(copiedFromDisk ? `Copied ${path}` : `Created ${path}`);
+      if (kind === "folder" || copiedFromDisk) setReveal({ path });
       else openFile(path);
     },
   });
@@ -481,7 +481,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                   { label: "Open in new window", run: () => openFile(target.path, undefined, false, undefined, true) },
                   ...(!simulated && markdownPath(target.path) ? [{ label: "Rename note…", run: () => renameNote(target.path) }] : []),
                   ...(!simulated ? [{ label: "Open working diff", run: () => openWorkspace("git", workingDiffTarget(target.path)) }] : []),
-                  ...(!simulated && files[target.path] ? [{ label: "Save a copy…", run: () => treeActions.saveCopy(target.path, files[target.path]!.content) }] : []),
+                  ...(!simulated ? [{ label: "Save a copy…", run: () => treeActions.saveCopy(target.path, dirty(target.path) ? currentText(target.path) : undefined) }] : []),
                 ]] : []),
                 ...(!simulated ? [[{ label: "Open terminal here", run: () => openTerminal(target.kind === "file" ? containingFolder(target.path) : target.path) }]] : []),
                 ...menu.location(target),
@@ -544,7 +544,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
             groupActions: (id) => dock.groupActions(id, dockCommands),
             tabActions: (path, view, api) => [[
               { label: "Save", disabled: !dirty(path), run: () => { void save(path); } },
-              ...(!simulated && files[path] ? [{ label: "Save a copy…", run: () => treeActions.saveCopy(path, files[path]!.content) }] : []),
+              ...(!simulated && files[path] ? [{ label: "Save a copy…", run: () => treeActions.saveCopy(path, dirty(path) ? currentText(path) : undefined) }] : []),
               ...(files[path]?.external !== undefined ? [{ label: "Review external change", run: () => setDialog({ kind: "conflict", path }) }] : []),
               { label: "Split right", run: () => dock.split(path, view, "right", api.id) },
               { label: "Split down", run: () => dock.split(path, view, "below", api.id) },

@@ -673,6 +673,27 @@ it("copies the exact clicked file from a live buffer or a read-only capture in t
 });
 
 
+it("saves a named copy of a closed file by copying its disk bytes", async () => {
+  const path = "docs/Closed.bin";
+  fixture({ [path]: "binary fixture" });
+  const user = userEvent.setup();
+  render(<IdeWorkspace {...propsFor(alternate)} />);
+  await user.click(await screen.findByRole("button", { name: "docs" }));
+  fireEvent.contextMenu(await screen.findByRole("button", { name: "Closed.bin" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Save a copy…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Save a copy" }));
+  expect(dialog.getByText("Copy docs/Closed.bin as stored on disk")).toBeTruthy();
+  await user.selectOptions(dialog.getByRole("combobox", { name: "Destination folder" }), "");
+  fireEvent.change(dialog.getByRole("textbox", { name: "Name" }), { target: { value: "Archive.bin" } });
+  await user.click(dialog.getByRole("button", { name: "Save copy" }));
+  expect(await screen.findByText("Copied Archive.bin")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("mutate_checkout_items", {
+    checkoutId: alternate, operation: "copy", edits: [{ source: path, destination: "Archive.bin", directory: false }],
+  });
+  expect(invoke).not.toHaveBeenCalledWith("open_repository_source_file", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("create_checkout_item", expect.anything());
+});
+
 it("saves the open editor buffer as a new file without saving the original", async () => {
   const service = fixture();
   render(<IdeWorkspace {...propsFor(alternate)} target={file} />);

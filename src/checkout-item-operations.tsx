@@ -12,7 +12,7 @@ type Item = { kind: "file" | "folder"; path: string };
 type Clipboard = { checkoutId: string; operation: "copy" | "move"; items: readonly Item[] };
 type Request = { kind: "duplicate" | "rename" | "copy" | "move" | "recycle" | "paste"; items: readonly Item[]; paste?: Clipboard };
 export type ItemEdit = { source: string; directory: boolean; destination: string | null };
-type ItemResult = { completed: ItemEdit[]; error: string | null };
+export type ItemResult = { completed: ItemEdit[]; error: string | null };
 type ItemChange = { origin: symbol; checkoutId: string; operation: Operation; completed: ItemEdit[] };
 
 const useFileClipboard = create<{ value?: Clipboard }>(() => ({}));

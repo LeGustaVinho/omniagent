@@ -449,9 +449,9 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
   }, [dock.ready, target]);
   const treeActions = useCheckoutTreeActions({ checkoutId: checkout.checkoutId, simulated, knowledge: true, report: setProblem,
     refresh: () => Promise.all([repository.refreshCatalog(), noteIndex.index.refetch({ throwOnError: true })]),
-    onCreated: (path, kind) => {
-      setStatus(`Created ${path}`);
-      if (kind === "folder") setReveal({ path });
+    onCreated: (path, kind, copiedFromDisk) => {
+      setStatus(copiedFromDisk ? `Copied ${path}` : `Created ${path}`);
+      if (kind === "folder" || copiedFromDisk) setReveal({ path });
       else open(path);
     },
   });
@@ -519,7 +519,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     ], [
       { label: "Rename note…", disabled: !simulated && isDirty(notes[path]), run: () => { void requestRename(path); } },
       ...mergeActions(path, { ownerPanel }),
-      ...(!simulated && notes[path] ? [{ label: "Save a copy…", run: () => treeActions.saveCopy(path, notes[path]!.content) }] : []),
+      ...(!simulated ? [{ label: "Save a copy…", run: () => treeActions.saveCopy(path, dirtyNote(path) ? currentText(path) : undefined) }] : []),
       { label: "Copy wikilink", run: () => menu.copy(`[[${path}]]`, "Copied wikilink") },
       { label: "Show backlinks and outgoing links", run: () => { setInspector("links"); open(path); } },
       ...(!simulated ? [{ label: "Open working diff", run: () => openWorkspace("git", workingDiffTarget(path)) }] : []),
