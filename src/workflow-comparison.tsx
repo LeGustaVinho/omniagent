@@ -42,7 +42,7 @@ export function WorkflowComparisons({ checkout, target, openActivity, openQueueJ
   const [models, setModels] = useState<ModelSelection[]>([]);
   const [activeId, setActiveId] = useState<string>();
   const [included, setIncluded] = useState<ComparisonSelection>();
-  const [destination, setDestination] = useState<string>();
+  const [destination, setDestination] = useState<{ groupId: string; runId?: string }>();
   const [synthesisDraft, setSynthesisDraft] = useState<{ groupId: string; open: boolean; runIds: string[] }>();
   const evidencePrefix = useId();
   const { copy, feedback } = useContextActionFeedback();
@@ -101,10 +101,16 @@ export function WorkflowComparisons({ checkout, target, openActivity, openQueueJ
     enabled: Boolean(groupId && result?.candidates.some(({ state, runId }) => runId && terminal.has(state))),
   });
   const selectedRuns = included && included.groupId === groupId ? included.runIds : [];
-  const sourceRuns = result?.candidates.flatMap((candidate) => {
+  const eligibleRuns = result?.candidates.flatMap((candidate) => {
     const runId = selectableComparisonRun(candidate, outcomes.data);
-    return runId && selectedRuns.includes(runId) ? [runId] : [];
+    return runId ? [runId] : [];
   }) ?? [];
+  const sourceRuns = eligibleRuns.filter((runId) => selectedRuns.includes(runId));
+  const currentDestination = destination?.groupId === groupId ? destination : undefined;
+  const destinationRuns = currentDestination?.runId
+    ? eligibleRuns.filter((runId) => runId === currentDestination.runId)
+    : sourceRuns;
+  const comparisonFinished = result && !active(result);
 
   return <section className="pipeline-stack min-h-0 overflow-auto p-4" aria-label="Model comparisons">
     <PipelineSectionHeading title="Compare models" icon={<Columns2 size={20} aria-hidden />} />
@@ -185,6 +191,8 @@ export function WorkflowComparisons({ checkout, target, openActivity, openQueueJ
               ...(candidate.runId ? [{ label: "Open execution evidence", run: () => openActivity(candidate.runId!, candidate.conversationId ?? undefined) }]
                 : openQueueJob ? [{ label: "Open queued job", run: () => openQueueJob(candidate.jobId) }] : []),
             ], [
+              ...(sourceRun && comparisonFinished ? [{ label: "Use this result in pipeline…",
+                run: () => setDestination({ groupId: result.id, runId: sourceRun }) }] : []),
               ...(runId ? [{ label: selectedInSynthesis ? "Remove from synthesis" : "Include in synthesis", run: () => {
                 setSynthesisDraft({ groupId: result.id, open: true,
                   runIds: selectedInSynthesis ? synthesisRuns.filter((id) => id !== runId) : [...synthesisRuns, runId] });
@@ -204,13 +212,13 @@ export function WorkflowComparisons({ checkout, target, openActivity, openQueueJ
           </PipelineComparisonCard>;
         })}
       </ol>
-      {onUseInPipeline && result.sourceCheckoutId && !active(result) &&
-        result.candidates.some((candidate) => selectableComparisonRun(candidate, outcomes.data)) && <div className="pipeline-actions">
-          <Button type="button" variant="outline" disabled={!sourceRuns.length} aria-expanded={destination === result.id}
-            onClick={() => setDestination(destination === result.id ? undefined : result.id)}>Use in pipeline</Button>
+      {onUseInPipeline && result.sourceCheckoutId && comparisonFinished && eligibleRuns.length > 0 && <div className="pipeline-actions">
+          <Button type="button" variant="outline" disabled={!sourceRuns.length && !currentDestination} aria-expanded={!!currentDestination}
+            onClick={() => setDestination(currentDestination ? undefined : { groupId: result.id })}>Use in pipeline</Button>
         </div>}
-      {onUseInPipeline && destination === result.id && <WorkflowComparisonDestination key={`destination:${result.id}`} projectId={projectId}
-        sourceCheckoutId={result.sourceCheckoutId} selection={{ groupId: result.id, runIds: sourceRuns }} onUse={onUseInPipeline} />}
+      {onUseInPipeline && result.sourceCheckoutId && comparisonFinished && currentDestination &&
+        <WorkflowComparisonDestination key={JSON.stringify([result.id, currentDestination.runId])} projectId={projectId}
+          sourceCheckoutId={result.sourceCheckoutId} selection={{ groupId: result.id, runIds: destinationRuns }} onUse={onUseInPipeline} />}
       <ComparisonSyntheses key={result.id} projectId={projectId} group={result} outcomes={outcomes.data} options={modelsQuery.options}
         openActivity={openActivity} openQueueJob={openQueueJob} open={synthesisOpen} runIds={synthesisRuns}
         onOpenChange={(open) => { if (open !== synthesisOpen) setSynthesisDraft({ groupId: result.id, open, runIds: synthesisRuns }); }}
