@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { invoke } from "@tauri-apps/api/core";
+import userEvent from "@testing-library/user-event";
+import { useCheckoutTextReader } from "@/file-context-actions";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render as renderElement, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
@@ -486,6 +488,55 @@ it("adds the clicked file to the chosen conversation draft and opens the draft",
     checkoutId: alternate, conversationId: "review-chat", paths: ["docs/Guide.md"],
   });
 });
+
+it("copies the exact clicked file from a live buffer or a read-only capture in the selected checkout", async () => {
+  fixture({ "docs/Closed.txt": "closed", "docs/Image.bin": "binary" });
+  const backend = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "read_checkout_file_text") {
+      const request = args as { checkoutId: string; path: string };
+      expect(request.checkoutId).toBe(alternate);
+      if (request.path === "docs/Closed.txt") return { status: "text", text: "Worktree text\r\n😀\r" };
+      if (request.path === "docs/Image.bin") return { status: "unsupported_encoding" };
+      throw new Error("Unexpected text capture path " + request.path);
+    }
+    return backend(command, args);
+  });
+  function OtherWorkspace() {
+    useCheckoutTextReader(main, true, () => "wrong worktree");
+    useCheckoutTextReader(alternate, true, (path) => path === "docs/Guide.md" ? "# Knowledge draft\n" : undefined);
+    return null;
+  }
+  const user = userEvent.setup();
+  const clipboard = vi.spyOn(navigator.clipboard, "writeText");
+  const props = propsFor(alternate);
+  render(<><IdeWorkspace {...props} target={file} /><OtherWorkspace /></>);
+  const editor = await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.change(editor, { target: { value: "fn local_draft() {}" } });
+  const copy = async (name: string) => {
+    fireEvent.contextMenu(await screen.findByRole("button", { name }));
+    await user.click(await screen.findByRole("menuitem", { name: "Copy text contents" }));
+  };
+  await copy("Reveal file review.rs");
+  expect(clipboard).toHaveBeenLastCalledWith("fn local_draft() {}");
+  expect(invoke).not.toHaveBeenCalledWith("read_checkout_file_text", expect.anything());
+  await user.click(await screen.findByRole("button", { name: "docs" }));
+  await copy("Guide.md");
+  expect(clipboard).toHaveBeenLastCalledWith("# Knowledge draft\n");
+  expect(invoke).not.toHaveBeenCalledWith("read_checkout_file_text", expect.anything());
+  await copy("Closed.txt");
+  await waitFor(() => expect(clipboard).toHaveBeenLastCalledWith("Worktree text\r\n😀\r"));
+  expect(invoke).toHaveBeenCalledWith("read_checkout_file_text", { checkoutId: alternate, path: "docs/Closed.txt" });
+  await copy("Image.bin");
+  expect(await screen.findByText("docs/Image.bin contains binary data or uses an unsupported text encoding.")).toBeTruthy();
+  expect(clipboard).toHaveBeenCalledTimes(3);
+  expect(props.openWorkspace).not.toHaveBeenCalled();
+  expect(screen.queryByRole("textbox", { name: "Source editor for docs/Closed.txt" })).toBeNull();
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "open_repository_source_file").every(([, args]) =>
+    (args as { path: string }).path === file)).toBe(true);
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "save_repository_source_file")).toBe(false);
+});
+
 
 it("saves the open editor buffer as a new file without saving the original", async () => {
   const service = fixture();

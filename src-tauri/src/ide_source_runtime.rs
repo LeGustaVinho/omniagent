@@ -8,8 +8,8 @@ use omniagent::{
     repository::{
         RepositoryMarkdown,
         documents::{
-            CheckoutDocumentHistoryPage, CheckoutDocumentHistoryText, RepositoryDocumentOpen,
-            RepositoryDocumentSave, SourceFormatChange, SourceFormatPreview,
+            CheckoutDocumentHistoryPage, CheckoutDocumentHistoryText, CheckoutFileText,
+            RepositoryDocumentOpen, RepositoryDocumentSave, SourceFormatChange, SourceFormatPreview,
         },
     },
     store::Store,
@@ -30,6 +30,18 @@ pub async fn list_repository_source_files(
 ) -> Result<Vec<String>, String> {
     store
         .list_repository_source_files(checkout_id)
+        .await
+        .map_err(report)
+}
+
+#[tauri::command]
+pub async fn read_checkout_file_text(
+    store: State<'_, Store>,
+    checkout_id: String,
+    path: String,
+) -> Result<CheckoutFileText, String> {
+    store
+        .read_checkout_file_text(checkout_id, path)
         .await
         .map_err(report)
 }

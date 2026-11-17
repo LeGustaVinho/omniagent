@@ -482,6 +482,7 @@ fn main() {
             omniagent::repository::checkout_items::mutations::mutate_checkout_items,
             omniagent::repository::checkout_items::mutations::import_checkout_items,
             ide_source_runtime::list_repository_source_files,
+            ide_source_runtime::read_checkout_file_text,
             ide_source_runtime::open_repository_source_file,
             ide_source_runtime::save_repository_source_file,
             ide_source_runtime::preview_repository_source_format,

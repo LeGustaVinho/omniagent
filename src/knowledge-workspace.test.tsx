@@ -296,6 +296,40 @@ it("refuses extraction if the source buffer changes while reviewing the selectio
 });
 
 
+it("copies closed and dirty notes from their context menus without changing the selected note", async () => {
+  mockRepository();
+  const backend = vi.mocked(invoke).getMockImplementation()!;
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "read_checkout_file_text") {
+      expect(args).toEqual({ checkoutId, path: checklist });
+      return { status: "text", text: checklistSource.replaceAll("\n", "\r\n") };
+    }
+    return backend(command, args);
+  });
+  const user = userEvent.setup();
+  const clipboard = vi.spyOn(navigator.clipboard, "writeText");
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
+  const view = await editor(release);
+  const draft = releaseSource + "\nLive draft.";
+  act(() => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: draft } }));
+  fireEvent.contextMenu(await screen.findByRole("button", { name: "Reveal file Release.md" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Copy text contents" }));
+  expect(clipboard).toHaveBeenLastCalledWith(draft);
+  expect(invoke).not.toHaveBeenCalledWith("read_checkout_file_text", expect.anything());
+
+  const navigation = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  const folder = navigation.getByRole("button", { name: "notes" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
+  fireEvent.contextMenu(await navigation.findByRole("button", { name: "Checklist.md" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Copy text contents" }));
+  await waitFor(() => expect(clipboard).toHaveBeenLastCalledWith(checklistSource.replaceAll("\n", "\r\n")));
+  expect(invoke).toHaveBeenCalledWith("read_checkout_file_text", { checkoutId, path: checklist });
+  expect(screen.queryByLabelText("Markdown editor for " + checklist)).toBeNull();
+  expect(view.state.doc.toString()).toBe(draft);
+});
+
+
 it("favorites distinct headings and a block, follows the edited source, and removes the exact favorite", async () => {
   const fixture = mockRepository();
   const content = "# Overview\n\n## Scope\n\nFirst scope.\n\n## Scope\n\nSecond scope.\n\nA decision to preserve. ^decision\n";

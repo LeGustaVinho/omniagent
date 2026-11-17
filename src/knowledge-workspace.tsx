@@ -11,7 +11,7 @@ import {
 } from "@/ide-file-workspace";
 import { folderSearchTarget, readNoteSearchTarget } from "@/ide-file-search";
 import { readNoteWindowTarget } from "@/file-editor-popout";
-import { containingFolder, fileContextActions, fileHistoryTarget, readNoteRenameTarget, readOpenNotesTarget, terminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
+import { containingFolder, fileContextActions, fileHistoryTarget, readNoteRenameTarget, readOpenNotesTarget, terminalFolderTarget, useCheckoutTextReader, workingDiffTarget } from "@/file-context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { changedItemPath, itemIncludesPath, useCheckoutItemOperations } from "@/checkout-item-operations";
@@ -410,7 +410,12 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     setDialog({ kind: "repositoryRename", path: canonical, revision: current.base.id });
   };
 
-  const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem });
+  const readOpenNote = useCallback((path: string) => dock.api?.panels.some((panel) => panel.params?.path === path)
+    ? getNote(path)?.content : undefined, [dock.api, getNote]);
+  useCheckoutTextReader(checkout.checkoutId, !simulated, readOpenNote);
+  const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem,
+    currentText: (path) => simulated ? examples[path]?.content : readOpenNote(path),
+  });
   const revealNote = (path: string) => { setSidebar(true); setDisplay("tree"); setReveal({ path }); };
   const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated, bufferAt: (path) => notes[path],
     copy: menu.copy, report: setProblem, openHistory: (path) => openWorkspace("git", fileHistoryTarget(path)),

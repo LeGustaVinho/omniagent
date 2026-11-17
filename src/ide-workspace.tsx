@@ -10,7 +10,7 @@ import {
 import { ExampleFileSearch, matchReference, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget, type FileSearchScope } from "@/ide-file-search";
 import { noteWindowTarget } from "@/file-editor-popout";
 import { ContextActions, type MenuGroups } from "@/components/ui/context-actions";
-import { containingFolder, fileContextActions, fileHistoryTarget, noteRenameTarget, openNotesTarget, readSourceLineTarget, readTerminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
+import { containingFolder, fileContextActions, fileHistoryTarget, noteRenameTarget, openNotesTarget, readSourceLineTarget, readTerminalFolderTarget, useCheckoutTextReader, workingDiffTarget } from "@/file-context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { changedItemPath, itemIncludesPath, useCheckoutItemOperations } from "@/checkout-item-operations";
@@ -316,7 +316,12 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     dock.cancelCloseBatch();
     setDialog(undefined);
   };
-  const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem });
+  const readOpenFile = useCallback((path: string) => dock.api?.panels.some((panel) => panel.params?.path === path)
+    ? source.getFile(path)?.content : undefined, [dock.api, source.getFile]);
+  useCheckoutTextReader(checkout.checkoutId, !simulated, readOpenFile);
+  const menu = fileContextActions({ checkout, simulated, status: setStatus, report: setProblem,
+    currentText: (path) => simulated ? examples[path]?.content ?? exampleNotes.find((note) => note.path === path)?.content : readOpenFile(path),
+  });
   const comparison = useCheckoutFileComparison({ checkoutId: checkout.checkoutId, simulated, bufferAt: (path) => {
     const note = simulated && exampleNotes.find((entry) => entry.path === path);
     return files[path] ?? (note ? { content: note.content, saved: note.content } : undefined);

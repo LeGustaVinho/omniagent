@@ -208,6 +208,13 @@ pub struct RepositoryDocumentRecovery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CheckoutFileText {
+    Text { text: String },
+    UnsupportedEncoding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryAttachment {
     pub canonical_path: PathBuf,
@@ -265,6 +272,35 @@ impl Store {
         )
         .await?;
         Ok(RepositoryDocumentOpen::Document { document })
+    }
+
+    pub async fn read_checkout_file_text(
+        &self,
+        checkout: String,
+        path: String,
+    ) -> Result<CheckoutFileText> {
+        let (root, max) = editor_checkout(self, &checkout).await?;
+        tokio::task::spawn_blocking(move || {
+            let path = super::checkout_items::checkout_regular_file(&root, &path)?;
+            let parent = path
+                .parent()
+                .context("The checkout file has no parent folder.")?;
+            let _directories = lock_directories(parent)?;
+            let file = read_file(&path, max)?.context("The checkout file no longer exists.")?;
+            if infer::get(&file.bytes).is_some_and(|kind| {
+                let mime = kind.mime_type();
+                !mime.starts_with("text/") && !matches!(mime, "application/rtf" | "application/xml" | "image/svg+xml")
+            }) {
+                return Ok(CheckoutFileText::UnsupportedEncoding);
+            }
+            let Ok(text) = RawDocument::from_bytes(DocumentKind::Source, &file.bytes) else {
+                return Ok(CheckoutFileText::UnsupportedEncoding);
+            };
+            Ok(CheckoutFileText::Text {
+                text: text.into_text(),
+            })
+        })
+        .await?
     }
 
     pub async fn read_repository_attachment(

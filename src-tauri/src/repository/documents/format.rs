@@ -54,6 +54,10 @@ impl RawDocument {
         Ok(Self { encoding, text })
     }
 
+    pub(super) fn into_text(self) -> String {
+        self.text
+    }
+
     pub fn raw_text(self) -> String {
         if self.encoding != TextEncoding::Utf8 {
             format!("{BOM}{}", self.text)
