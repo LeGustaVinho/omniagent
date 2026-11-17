@@ -537,6 +537,47 @@ it("opens the requested attempt's saved diff without loading live checkout conte
   expect(openActivity).toHaveBeenCalledWith("recorded-run");
 });
 
+it("requires a destination and a fresh reviewed comparison before applying saved evidence", async () => {
+  let previews = 0;
+  const destination = "D:\\fixture\\alternate";
+  const request = { projectId: checkout.projectId, runId: "patch-attempt", captureRevision: "saved-capture", checkoutId: "alternate", part: "committed" };
+  vi.mocked(invoke).mockImplementation(async (command, args) => {
+    if (command === "git_saved_attempts") return [{ runId: request.runId, checkoutId: checkout.checkoutId, label: "Saved attempt" }];
+    if (command === "attempt_worktree_evidence") return { kind: "saved", artifact: { revision: request.captureRevision,
+      start: { worktree: { branch: "attempt" }, starting: { head: "base" } }, candidate: { head: "candidate" }, committedPatchBase64: btoa("patch") } };
+    if (command === "registered_checkouts") return [checkout, { ...checkout, checkoutId: request.checkoutId, checkoutRoot: destination },
+      { ...checkout, projectId: "other-project", checkoutId: "other", checkoutRoot: "Unrelated worktree" }];
+    if (command === "preview_saved_git_patch") return { snapshot: `snapshot-${++previews}`, destination, revision: originalRevision,
+      files: [{ path: "example.txt", before: { status: "text", content: "Original contents" }, after: { status: "text", content: "Result contents" } }] };
+    if (command === "apply_saved_git_patch") {
+      if ((args as { snapshot: string }).snapshot === "snapshot-1") throw "The reviewed destination changed.";
+      return;
+    }
+    throw new Error(`Unexpected ${command}`);
+  });
+  const user = userEvent.setup();
+  openGit({ target: "attempt:patch-attempt" });
+  await user.click(await screen.findByRole("button", { name: "Apply saved patch…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Apply saved patch" }));
+  const target = await dialog.findByRole<HTMLSelectElement>("combobox", { name: "Destination worktree" });
+  const confirm = dialog.getByRole<HTMLButtonElement>("button", { name: "Apply reviewed patch" });
+  expect(target.value).toBe("");
+  expect(dialog.queryByRole("option", { name: "Unrelated worktree" })).toBeNull();
+  expect(confirm.disabled).toBe(true);
+  await user.selectOptions(target, request.checkoutId);
+  await user.click(dialog.getByRole("button", { name: "Review patch" }));
+  expect(await dialog.findByText("Result contents")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("preview_saved_git_patch", { request });
+  await user.click(confirm);
+  expect(await dialog.findByText("The reviewed destination changed.")).toBeTruthy();
+  expect(confirm.disabled).toBe(true);
+  await user.click(dialog.getByRole("button", { name: "Review patch" }));
+  await waitFor(() => expect(confirm.disabled).toBe(false));
+  await user.click(confirm);
+  expect(await screen.findByText(`Saved patch applied to ${destination}.`)).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("apply_saved_git_patch", { request, snapshot: "snapshot-2" });
+});
+
 it("deletes a workflow attempt's recorded diff using the owning chat and the preview revision", async () => {
   let deleted = false;
   const target = { kind: "attempt_diff", conversationId: "workflow-chat", runId: "recorded-run" };

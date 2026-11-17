@@ -3,9 +3,11 @@ import { useQuery } from "@tanstack/react-query";
 import type { editor as MonacoEditor } from "monaco-editor";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ContextActions } from "@/components/ui/context-actions";
 import { ConversationHistoryDeletion } from "@/conversation-history-deletion";
 import { GitDiffFrame } from "@/git-diff-view";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
+import { SavedPatchDialog, type SavedPatchPart } from "@/saved-patch-dialog";
 import { DeliveryDetailPanel, InlineIssue } from "@/tasks-git-ui";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -52,7 +54,7 @@ function RecordedAttempts({ projectId, target, openActivity, onClose }: SavedGit
       {(attempt || evidence.data) && <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs"
         onClick={() => attempt?.conversationId ? openActivity(runId, attempt.conversationId) : openActivity(runId)}>View attempt</Button>}
     </div>
-    {artifact ? <RecordedArtifact key={`${runId}:${artifact.revision}`} artifact={artifact} />
+    {artifact ? <RecordedArtifact key={`${runId}:${artifact.revision}`} artifact={artifact} projectId={projectId} runId={runId} />
       : <div className="delivery-empty">
         {(attempts.error || evidence.error) && <InlineIssue>{String(attempts.error ?? evidence.error)}</InlineIssue>}
         {((!runId && attempts.isPending) || (runId && evidence.isPending)) && <p role="status">Loading recorded Git evidence…</p>}
@@ -71,7 +73,7 @@ function RecordedAttempts({ projectId, target, openActivity, onClose }: SavedGit
   </GitDiffFrame>;
 }
 
-function RecordedArtifact({ artifact }: { artifact: ChangeArtifact }) {
+function RecordedArtifact({ artifact, projectId, runId }: { artifact: ChangeArtifact; projectId: string; runId: string }) {
   const changes = artifact.candidate.changes;
   const allParts: Part[] = [
     { id: "committed", label: "Commits during attempt", encoded: artifact.committedPatchBase64, language: "diff" },
@@ -81,8 +83,11 @@ function RecordedArtifact({ artifact }: { artifact: ChangeArtifact }) {
   ];
   const parts = allParts.filter((entry) => entry.encoded || entry.sha);
   const [choice, select] = useState("");
+  const [applying, setApplying] = useState<SavedPatchPart>();
+  const [applied, setApplied] = useState("");
   const part = parts.find((entry) => entry.id === choice) ?? parts[0];
   const text = decode(part?.encoded);
+  const patchPart = part?.id === "committed" || part?.id === "staged" || part?.id === "working" ? part.id : undefined;
   return <div className="delivery-body">
     <div className="delivery-main flex min-w-0 flex-col">
       {part ? <>
@@ -93,9 +98,14 @@ function RecordedArtifact({ artifact }: { artifact: ChangeArtifact }) {
             </select>
           </label>
           {part.sha && <p className="wrap-anywhere font-mono text-xs">SHA-256 {part.sha}</p>}
+          {patchPart && <ContextActions label={part.label} groups={[[{ label: "Apply saved patch…", run: () => setApplying(patchPart) }]]}>
+            <Button type="button" variant="outline" onClick={() => setApplying(patchPart)}>Apply saved patch…</Button>
+          </ContextActions>}
         </div>
+        {applied && <p role="status" className="px-3 py-2 text-sm">Saved patch applied to {applied}.</p>}
         {text === undefined ? <p className="p-3 text-sm">Recorded text is unavailable for this file.</p>
-          : <RecordedMonaco key={part.id} label={part.label} text={text} language={part.language} />}
+          : <RecordedMonaco key={part.id} label={part.label} text={text} language={part.language}
+            apply={patchPart ? () => setApplying(patchPart) : undefined} />}
       </> : <p className="p-3 text-sm">No patch was recorded for this attempt.</p>}
     </div>
     <DeliveryDetailPanel label="Recorded comparison identity" resizeKey="git-comparison-details">
@@ -113,6 +123,8 @@ function RecordedArtifact({ artifact }: { artifact: ChangeArtifact }) {
         </dl>
       </div>
     </DeliveryDetailPanel>
+    {applying && <SavedPatchDialog selection={{ projectId, runId, captureRevision: artifact.revision, part: applying }}
+      close={() => setApplying(undefined)} applied={setApplied} />}
   </div>;
 }
 
@@ -125,9 +137,12 @@ function decode(encoded?: string) {
   } catch { return undefined; }
 }
 
-function RecordedMonaco({ label, text, language }: { label: string; text: string; language: string }) {
+function RecordedMonaco({ label, text, language, apply }: { label: string; text: string; language: string; apply?: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const [error, setError] = useState(false);
+  const applyPatch = useRef(apply);
+  applyPatch.current = apply;
+  const canApply = Boolean(apply);
   useEffect(() => {
     let active = true;
     let model: MonacoEditor.ITextModel | undefined;
@@ -141,6 +156,8 @@ function RecordedMonaco({ label, text, language }: { label: string; text: string
         model, ariaLabel: label, readOnly: true, automaticLayout: true,
         minimap: { enabled: false }, scrollBeyondLastLine: false,
       });
+      if (canApply) editor.addAction({ id: "omniagent.apply-saved-patch", label: "Apply saved patch…",
+        contextMenuGroupId: "9_omniagent-saved-patch", run: () => applyPatch.current?.() });
       theme();
       observer = new MutationObserver(theme);
       observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-app-theme", "data-app-motion", "style", "class"] });
@@ -151,7 +168,7 @@ function RecordedMonaco({ label, text, language }: { label: string; text: string
       editor?.dispose();
       model?.dispose();
     };
-  }, [label, language, text]);
+  }, [canApply, label, language, text]);
   return error ? <pre className="min-h-40 flex-1 overflow-auto whitespace-pre-wrap wrap-anywhere p-3 text-xs" aria-label={label}>{text}</pre>
     : <div ref={host} className="min-h-45 flex-1" aria-label={label} />;
 }

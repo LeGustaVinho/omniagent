@@ -34,6 +34,7 @@ mod history;
 mod hunk_review;
 mod hunks;
 mod permalink;
+mod saved_patch;
 pub use blame::GitLineBlame;
 pub use comments::{GitReviewComment, GitReviewCommentRequest, GitReviewCommentSurface};
 pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
@@ -44,6 +45,7 @@ pub use history::{GitFileHistory, GitFileVersion, GitFileVersionComparison};
 pub use hunk_review::GitHunkReviewRequest;
 pub use hunks::GitReviewHunk;
 pub use permalink::GitPermalinkLines;
+pub use saved_patch::{SavedPatchPreview, SavedPatchRequest};
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

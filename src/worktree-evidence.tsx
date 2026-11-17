@@ -4,6 +4,7 @@ import { useContext, useState } from "react";
 import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { decodeArtifactBytes, downloadArtifact } from "@/download-artifact";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
+import { SavedPatchDialog, type SavedPatchSelection } from "@/saved-patch-dialog";
 
 type FileChange = { path: string; sha256: string; contentBase64?: string };
 type Snapshot = {
@@ -29,8 +30,10 @@ function decode(base64: string) {
   return new TextDecoder().decode(decodeArtifactBytes(base64));
 }
 
-function Patch({ title, data }: { title: string; data: string }) {
+function Patch({ title, data, selection }: { title: string; data: string; selection?: SavedPatchSelection }) {
   const [open, setOpen] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [applied, setApplied] = useState("");
   const { copy, feedback, run } = useContextActionFeedback();
   if (!data) return null;
   return (
@@ -42,10 +45,13 @@ function Patch({ title, data }: { title: string; data: string }) {
           { label: "Download saved patch", run: () => void run(async () => {
             downloadArtifact(`${title.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}.patch`, new Blob([decodeArtifactBytes(data)], { type: "application/octet-stream" }));
           }) },
+          ...(selection ? [{ label: "Apply saved patch…", run: () => setApplying(true) }] : []),
         ]]}>
           <pre tabIndex={0} className="max-h-72 min-w-0 flex-1 overflow-auto rounded bg-muted p-2 text-xs">{decode(data)}</pre>
         </ContextActions>
         {feedback && <p role={feedback.failed ? "alert" : "status"} className="text-xs">{feedback.text}</p>}
+        {applied && <p role="status" className="text-xs">Saved patch applied to {applied}.</p>}
+        {applying && selection && <SavedPatchDialog selection={selection} close={() => setApplying(false)} applied={setApplied} />}
       </>}
     </details>
   );
@@ -73,7 +79,7 @@ function SnapshotFile({ file }: { file: FileChange }) {
   </li>;
 }
 
-function SnapshotChanges({ snapshot }: { snapshot: Snapshot }) {
+function SnapshotChanges({ snapshot, source }: { snapshot: Snapshot; source?: Omit<SavedPatchSelection, "part"> }) {
   const changes = snapshot.changes;
   if (!changes) return <p>Detailed changes are unavailable.</p>;
   if (!changes.stagedPatchBase64 && !changes.unstagedPatchBase64 && !changes.untracked.length) {
@@ -81,8 +87,8 @@ function SnapshotChanges({ snapshot }: { snapshot: Snapshot }) {
   }
   return (
     <>
-      <Patch title="Staged changes" data={changes.stagedPatchBase64} />
-      <Patch title="Unstaged changes" data={changes.unstagedPatchBase64} />
+      <Patch title="Staged changes" data={changes.stagedPatchBase64} selection={source && { ...source, part: "staged" }} />
+      <Patch title="Unstaged changes" data={changes.unstagedPatchBase64} selection={source && { ...source, part: "working" }} />
       {changes.untracked.length > 0 && <ul aria-label="Untracked files">
         {changes.untracked.map((file) => <SnapshotFile key={file.path} file={file} />)}
       </ul>}
@@ -105,6 +111,7 @@ export function WorktreeEvidence({ projectId, runId, ownerTaskId }: {
   });
   const evidence = saved.data;
   const artifact = evidence?.kind === "saved" ? evidence.artifact : undefined;
+  const patchSource = artifact && { projectId, runId, captureRevision: artifact.revision };
   const owner = artifact?.start.worktree.ownerTaskId ?? ownerTaskId;
   const live = useQuery({
     queryKey: ["live-managed-worktree", projectId, owner],
@@ -129,8 +136,9 @@ export function WorktreeEvidence({ projectId, runId, ownerTaskId }: {
           ]]}><p>Candidate <code title={artifact.revision}>{artifact.revision.slice(0, 12)}</code></p></ContextActions>
           {feedback && <p role={feedback.failed ? "alert" : "status"} className="text-xs">{feedback.text}</p>}
           <p>Saved HEAD <code>{artifact.candidate.head}</code></p>
-          <Patch title="Changes committed during the attempt" data={artifact.committedPatchBase64} />
-          <SnapshotChanges snapshot={artifact.candidate} />
+          <Patch title="Changes committed during the attempt" data={artifact.committedPatchBase64}
+            selection={patchSource && { ...patchSource, part: "committed" }} />
+          <SnapshotChanges snapshot={artifact.candidate} source={patchSource} />
           <details>
             <summary>Starting Git state</summary>
             <p>Starting HEAD <code>{artifact.start.starting.head}</code></p>

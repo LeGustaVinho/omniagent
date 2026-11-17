@@ -342,3 +342,26 @@ pub async fn git_saved_attempts(
         .await
         .map_err(review_error)
 }
+
+#[tauri::command]
+pub async fn preview_saved_git_patch(
+    store: State<'_, Store>,
+    request: omniagent::repository::git_review::SavedPatchRequest,
+) -> Result<omniagent::repository::git_review::SavedPatchPreview, String> {
+    store
+        .preview_saved_patch(request)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn apply_saved_git_patch(
+    store: State<'_, Store>,
+    request: omniagent::repository::git_review::SavedPatchRequest,
+    snapshot: String,
+) -> Result<(), String> {
+    store
+        .apply_saved_patch(request, snapshot)
+        .await
+        .map_err(review_error)
+}

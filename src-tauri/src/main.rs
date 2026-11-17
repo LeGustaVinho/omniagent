@@ -526,6 +526,8 @@ fn main() {
             git_review_runtime::set_git_hunk_staged,
             git_review_runtime::commit_git_index,
             git_review_runtime::git_saved_attempts,
+            git_review_runtime::preview_saved_git_patch,
+            git_review_runtime::apply_saved_git_patch,
             note_index_runtime::rebuild_repository_note_index,
             note_index_runtime::reconcile_repository_note_index,
             note_index_runtime::watch_repository_note_index,
