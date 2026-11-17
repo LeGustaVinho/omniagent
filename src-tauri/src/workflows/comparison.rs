@@ -12,7 +12,7 @@ use crate::{
     protection,
     providers::SessionMode,
     repository::{
-        self, CheckoutLayout,
+        self, CheckoutLayout, RepositoryMarkdownRevision,
         comparison::{materialize_comparison, verify_comparison},
         verification::MaterializedCandidate,
     },
@@ -20,11 +20,13 @@ use crate::{
 };
 
 mod evidence;
+mod markdown;
 mod outcomes;
 pub(crate) mod selection;
 pub(crate) mod stage;
 mod synthesis;
 pub use evidence::ComparisonEnvironment;
+pub use markdown::ComparisonMarkdownSource;
 pub use outcomes::ComparisonOutcome;
 pub use selection::{ComparisonInput, ComparisonSelection};
 pub use stage::{
@@ -40,6 +42,8 @@ pub struct ModelComparison {
     pub commit: String,
     pub tree: String,
     pub prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_document: Option<RepositoryMarkdownRevision>,
     pub candidates: Vec<ComparisonCandidate>,
 }
 
@@ -81,6 +85,7 @@ struct PreparedComparison {
     tree: String,
     path: PathBuf,
     prompt: String,
+    source_document: Option<RepositoryMarkdownRevision>,
     profiles: Vec<(CandidateSelection, SessionScope)>,
 }
 
@@ -115,6 +120,9 @@ impl PreparedComparison {
                 protection::protect(self.prompt.as_bytes())?
             ],
         )?;
+        if let Some(source) = &self.source_document {
+            markdown::record_source(db, &id, &self.checkout, &self.commit, source)?;
+        }
         for (position, (selection, scope)) in
             std::mem::take(&mut self.profiles).into_iter().enumerate()
         {
@@ -129,6 +137,9 @@ impl PreparedComparison {
                     requires_bridge: false,
                 },
             )?;
+            if let Some(source) = &self.source_document {
+                repository::bind_job_markdown(db, &job.id, &source.id)?;
+            }
             db.execute(
                 "INSERT INTO model_comparison_candidates VALUES (?1, ?2, ?3, ?4)",
                 params![
@@ -147,6 +158,7 @@ pub(crate) struct ComparisonPin {
     pub(crate) group_id: String,
     pub(crate) commit: String,
     pub(crate) tree: String,
+    pub(crate) source_document: Option<RepositoryMarkdownRevision>,
     root: PathBuf,
     prompt: String,
     selection: ModelSelection,
@@ -198,9 +210,16 @@ impl Store {
         profiles: Vec<(SessionScope, Option<ModelOption>)>,
         storage: PathBuf,
     ) -> Result<ModelComparison> {
-        let mut prepared = self
+        let prepared = self
             .prepare_model_comparison(project, checkout, commit, prompt, profiles, storage)
             .await?;
+        self.enqueue_prepared_comparison(prepared).await
+    }
+
+    async fn enqueue_prepared_comparison(
+        &self,
+        mut prepared: PreparedComparison,
+    ) -> Result<ModelComparison> {
         let group = self
             .execute(move |db| {
                 let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -281,6 +300,7 @@ impl Store {
             tree,
             path,
             prompt,
+            source_document: None,
             profiles,
         })
     }
@@ -309,12 +329,15 @@ impl Store {
                  FROM executions e JOIN model_comparison_groups g ON g.id = e.group_id
                  JOIN job_attempts a ON a.job_id = e.job_id JOIN runs r ON r.id = a.run_id AND r.checkout_id = g.source_checkout_id
                  WHERE r.id = ?1", [run],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get::<_, String>(3)?, row.get::<_, Vec<u8>>(4)?, row.get::<_, String>(5)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, row.get::<_, String>(3)?, row.get::<_, Vec<u8>>(4)?, row.get::<_, String>(5)?)),
             ).optional()?;
-            saved.map(|(group_id, commit, tree, root, protected, selection)| Ok(ComparisonPin {
-                group_id, commit, tree, root: root.into(), prompt: String::from_utf8(protection::unprotect(&protected)?)?,
-                selection: serde_json::from_str(&selection)?,
-            })).transpose()
+            saved.map(|(group_id, commit, tree, root, protected, selection)| {
+                let source_document = markdown::load_source(db, &group_id)?;
+                Ok(ComparisonPin {
+                    group_id, commit, tree, source_document, root: root.into(),
+                    prompt: String::from_utf8(protection::unprotect(&protected)?)?, selection: serde_json::from_str(&selection)?,
+                })
+            }).transpose()
         }).await
     }
 }
@@ -413,6 +436,7 @@ fn load_group(db: &Connection, project: &str, id: &str) -> Result<ModelCompariso
         commit,
         tree,
         prompt: String::from_utf8(protection::unprotect(&prompt)?)?,
+        source_document: markdown::load_source(db, id)?,
         candidates,
     })
 }

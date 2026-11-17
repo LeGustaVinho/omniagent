@@ -82,6 +82,7 @@ const viewTargets: Record<string, View> = { comparison: "Compare", compare: "Com
 function productionRoute(target = ""): { view: ProductionView; draftId?: string; runId?: string } {
   if (target.startsWith("run:")) return { view: "runs", runId: target.slice("run:".length) };
   if (target.startsWith("authoring:")) return { view: "drafts", draftId: target.slice("authoring:".length) };
+  if (target.startsWith("compare-note:")) return { view: "compare" };
   const tab = productionTabs.find(({ id }) => id === target);
   return { view: tab?.id ?? (target === "" || target === "builder" ? "drafts" : "delivery") };
 }
@@ -234,7 +235,7 @@ function ProjectPipelinesWorkspace(props: WorkspaceProps) {
     <div className="pipeline-view">
       {view === "templates" ? <ConversationTemplateEditor checkout={props.checkout} openWorkspace={props.openWorkspace}
         savedWorkflows={<WorkflowTemplateHistory {...props} />} />
-        : view === "compare" ? <WorkflowComparisons {...props} onUseInPipeline={(destination) => {
+        : view === "compare" ? <WorkflowComparisons key={props.target ?? "compare"} {...props} onUseInPipeline={(destination) => {
           setHandoff(destination);
           props.openWorkspace("pipelines", workflowRunTarget(destination.runId));
         }} />

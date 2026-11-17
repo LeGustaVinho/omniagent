@@ -1,12 +1,13 @@
 use crate::conversation_runtime::selected_scope_with_model_option;
 use anyhow::Result;
 use omniagent::{
-    model_catalog::ModelSelection,
+    conversations::SessionScope,
+    model_catalog::{ModelOption, ModelSelection},
     providers::SessionMode,
     store::Store,
     workflows::comparison::{
-        ComparisonEnvironment, ComparisonInput, ComparisonOutcome, ComparisonSelection,
-        ComparisonSynthesis, ModelComparison,
+        ComparisonEnvironment, ComparisonInput, ComparisonMarkdownSource, ComparisonOutcome,
+        ComparisonSelection, ComparisonSynthesis, ModelComparison,
     },
 };
 use tauri::{AppHandle, Manager, State};
@@ -113,18 +114,7 @@ pub async fn start_model_comparison(
     selections: Vec<ModelSelection>,
 ) -> Result<ModelComparison, String> {
     async {
-        let mut scopes = Vec::with_capacity(selections.len());
-        for selected in selections {
-            let (scope, option) = selected_scope_with_model_option(
-                &store,
-                checkout_id.clone(),
-                selected,
-                None,
-                SessionMode::ReadOnly,
-            )
-            .await?;
-            scopes.push((scope, Some(option)));
-        }
+        let scopes = comparison_profiles(&store, &checkout_id, selections).await?;
         let storage = app
             .path()
             .app_local_data_dir()?
@@ -142,4 +132,61 @@ pub async fn start_model_comparison(
     }
     .await
     .map_err(report)
+}
+
+#[tauri::command]
+pub async fn start_model_comparison_from_markdown(
+    app: AppHandle,
+    store: State<'_, Store>,
+    project_id: String,
+    checkout_id: String,
+    revision_id: String,
+    relative_path: String,
+    sha256: String,
+    prompt: String,
+    selections: Vec<ModelSelection>,
+) -> Result<ModelComparison, String> {
+    async {
+        let scopes = comparison_profiles(&store, &checkout_id, selections).await?;
+        let storage = app
+            .path()
+            .app_local_data_dir()?
+            .join("comparison-checkouts");
+        store
+            .start_model_comparison_from_markdown(
+                project_id,
+                checkout_id,
+                ComparisonMarkdownSource {
+                    revision_id,
+                    relative_path,
+                    sha256,
+                },
+                prompt,
+                scopes,
+                storage,
+            )
+            .await
+    }
+    .await
+    .map_err(report)
+}
+
+async fn comparison_profiles(
+    store: &Store,
+    checkout_id: &str,
+    selections: Vec<ModelSelection>,
+) -> Result<Vec<(SessionScope, Option<ModelOption>)>> {
+    let mut profiles = Vec::with_capacity(selections.len());
+    for selection in selections {
+        let (scope, option) = selected_scope_with_model_option(
+            store,
+            checkout_id.to_owned(),
+            selection,
+            None,
+            SessionMode::ReadOnly,
+        )
+        .await?;
+        profiles.push((scope, Some(option)));
+    }
+    Ok(profiles)
 }

@@ -46,7 +46,7 @@ pub(crate) use candidates::{
     WorktreeCheckpointMismatch, save_reconciled_native_candidate, save_worktree_candidate,
 };
 pub use markdown::{RepositoryMarkdown, RepositoryMarkdownRevision};
-pub(crate) use markdown::{bind_job_markdown, workflow_markdown_revision};
+pub(crate) use markdown::{bind_job_markdown, load_markdown, workflow_markdown_revision};
 pub use markdown_catalog::RepositoryNoteCatalogEntry;
 pub(crate) use worktrees::conversation::{
     ConversationWorktreePreview, inspect_fork_checkout, materialize_fork_checkout,

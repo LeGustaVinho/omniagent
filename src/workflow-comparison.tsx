@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { skipToken, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useId, useState } from "react";
 import { Columns2 } from "lucide-react";
@@ -14,6 +14,8 @@ import { ComparisonCandidateOutcome, comparisonOutcome, type CandidateOutcome } 
 import { selectableComparisonRun, type ComparisonGroup as Comparison, type ComparisonSelection } from "@/workflow-comparison-selection";
 import { WorkflowComparisonDestination, type ComparisonHandoff } from "@/workflow-comparison-handoff";
 import { ComparisonSyntheses } from "@/workflow-comparison-synthesis";
+import { readWorkflowComparisonNoteTarget } from "@/workflow-comparison-note-target";
+import type { NoteRevision } from "@/repository-note-buffers";
 
 type Environment = {
   jobId: string;
@@ -27,11 +29,14 @@ const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 const active = (comparison: Comparison) => comparison.candidates.some(({ state }) => !terminal.has(state));
 const validCommit = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 
-export function WorkflowComparisons({ checkout, openActivity, openQueueJob, onUseInPipeline }: WorkspaceProps & {
+export function WorkflowComparisons({ checkout, target, openActivity, openQueueJob, onUseInPipeline }: WorkspaceProps & {
   onUseInPipeline?: (handoff: ComparisonHandoff) => void;
 }) {
   const client = useQueryClient();
   const { projectId, checkoutId } = checkout;
+  const fromNote = target?.startsWith("compare-note:") === true;
+  const note = readWorkflowComparisonNoteTarget(target);
+  const noteInCheckout = note?.checkoutId === checkoutId ? note : undefined;
   const [prompt, setPrompt] = useState("");
   const [commitOverride, setCommit] = useState<string>();
   const [models, setModels] = useState<ModelSelection[]>([]);
@@ -45,16 +50,32 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob, onUs
   const source = useQuery({
     queryKey: ["comparison-source-commit", projectId, checkoutId],
     queryFn: () => invoke<string | null>("comparison_source_commit", { projectId, checkoutId }),
+    enabled: !fromNote,
   });
+  const noteSource = useQuery({
+    queryKey: ["repository-markdown", checkoutId, noteInCheckout?.revisionId],
+    queryFn: noteInCheckout ? () => invoke<{ revision: NoteRevision; markdown: string } | null>("read_repository_markdown", {
+      checkoutId, revisionId: noteInCheckout.revisionId,
+    }) : skipToken,
+  });
+  const recorded = noteSource.data?.revision;
+  const savedNote = noteSource.isSuccess && noteInCheckout && recorded?.id === noteInCheckout.revisionId && recorded.checkoutId === checkoutId
+    && recorded.relativePath === noteInCheckout.relativePath && recorded.sha256 === noteInCheckout.sha256 ? noteSource.data : undefined;
   const groupsKey = ["model-comparisons", projectId];
   const groups = useQuery({
     queryKey: groupsKey,
     queryFn: () => invoke<Comparison[]>("model_comparisons", { projectId }),
     refetchInterval: (query) => query.state.data?.some(active) ? 1200 : false,
   });
-  const commit = commitOverride ?? source.data ?? "";
+  const commit = fromNote ? savedNote?.revision.baseCommit ?? "" : commitOverride ?? source.data ?? "";
   const run = useMutation({
-    mutationFn: () => invoke<Comparison>("start_model_comparison", { projectId, checkoutId, commit: commit.trim(), prompt: prompt.trim(), selections: models }),
+    mutationFn: () => {
+      const input = { projectId, checkoutId, prompt: prompt.trim(), selections: models };
+      if (!fromNote) return invoke<Comparison>("start_model_comparison", { ...input, commit: commit.trim() });
+      if (!savedNote) throw new Error("The chosen Markdown revision is unavailable.");
+      const { id: revisionId, relativePath, sha256 } = savedNote.revision;
+      return invoke<Comparison>("start_model_comparison_from_markdown", { ...input, revisionId, relativePath, sha256 });
+    },
     onSuccess: (group) => {
       client.setQueryData<Comparison[]>(groupsKey, (current) => [group, ...(current ?? [])]);
       setActiveId(group.id);
@@ -89,10 +110,29 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob, onUs
     <PipelineSectionHeading title="Compare models" icon={<Columns2 size={20} aria-hidden />} />
     <PipelineComparisonSetup onSubmit={(event) => { event.preventDefault(); if (canRun) run.mutate(); }} request={<>
       <label>Shared request<textarea rows={4} value={prompt} onChange={(event) => setPrompt(event.currentTarget.value)} /></label>
-      <label>Git commit<input spellCheck={false} value={commit} onChange={(event) => setCommit(event.currentTarget.value)} placeholder="Full commit SHA" /></label>
-      {source.error && <p role="alert">{String(source.error)}</p>}
-      {source.data === null && <p className="text-sm text-muted-foreground">Create a Git commit to use this checkout for comparison.</p>}
-      <p className="text-sm text-muted-foreground">Each candidate runs independently using the same request and a clean, read-only checkout at this commit.</p>
+      {fromNote ? <>
+        {!noteInCheckout && <p role="alert">This saved note target is unavailable in the current checkout.</p>}
+        {noteInCheckout && noteSource.isPending && <p role="status">Loading the saved note revision…</p>}
+        {noteSource.error && <p role="alert">{String(noteSource.error)}</p>}
+        {noteSource.isSuccess && !savedNote && <p role="alert">The chosen Markdown revision is unavailable.</p>}
+        {savedNote && <>
+          <dl className="pipeline-data break-all" aria-label="Saved note input">
+            <dt>Saved note</dt><dd>{savedNote.revision.relativePath}</dd>
+            <dt>Note revision</dt><dd><code>{savedNote.revision.id}</code></dd>
+            <dt>SHA-256</dt><dd><code>{savedNote.revision.sha256}</code></dd>
+            {commit && <><dt>Git commit</dt><dd><code>{commit}</code></dd></>}
+          </dl>
+          <details className="pipeline-evidence"><summary>Read saved Markdown</summary>
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words">{savedNote.markdown}</pre>
+          </details>
+          {!commit && <p role="alert">This saved revision has no Git commit for the comparison checkout.</p>}
+        </>}
+      </> : <>
+        <label>Git commit<input spellCheck={false} value={commit} onChange={(event) => setCommit(event.currentTarget.value)} placeholder="Full commit SHA" /></label>
+        {source.error && <p role="alert">{String(source.error)}</p>}
+        {source.data === null && <p className="text-sm text-muted-foreground">Create a Git commit to use this checkout for comparison.</p>}
+      </>}
+      <p className="text-sm text-muted-foreground">Each candidate runs independently in a clean, read-only checkout at this commit with the same request{fromNote ? " and saved note" : ""}.</p>
       {run.error && <p role="alert">{String(run.error)}</p>}
       <Button type="submit" disabled={!canRun}>{run.isPending ? "Preparing comparison…" : "Start comparison"}</Button>
     </>} candidates={<>
@@ -116,9 +156,10 @@ export function WorkflowComparisons({ checkout, openActivity, openQueueJob, onUs
         setDestination(undefined);
         setSynthesisDraft(undefined);
       }}>
-        {groups.data?.map((group) => <option value={group.id} key={group.id}>{group.prompt} · {group.commit.slice(0, 12)}</option>)}
+        {groups.data?.map((group) => <option value={group.id} key={group.id}>{group.sourceDocument?.relativePath ?? group.prompt} · {group.commit.slice(0, 12)}</option>)}
       </select></label>
       <p className="break-all text-sm">Pinned Git commit <code>{result.commit}</code></p>
+      {result.sourceDocument && <p className="break-all text-sm">Saved note <code>{result.sourceDocument.relativePath}</code> · Revision <code>{result.sourceDocument.id}</code> · SHA-256 <code>{result.sourceDocument.sha256}</code></p>}
       <h2 className="text-base font-medium">{comparisonOutcome(result.candidates.map(({ state }) => state))}</h2>
       {environment.error && <p role="alert">{String(environment.error)}</p>}
       {outcomes.error && <p role="alert">{String(outcomes.error)}</p>}

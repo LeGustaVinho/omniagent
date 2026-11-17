@@ -1655,6 +1655,19 @@ impl TurnExecution {
             self.store
                 .dispatch_repository_markdown(self.plan.run.id.clone()),
         )?;
+        if let Some(expected) = self
+            .comparison
+            .as_ref()
+            .and_then(|pin| pin.source_document.as_ref())
+        {
+            ensure!(
+                repository_markdown
+                    .as_ref()
+                    .map(|document| &document.revision)
+                    == Some(expected),
+                "The candidate no longer matches the saved Markdown revision pinned to the comparison"
+            );
+        }
         if let Some(source) = &repository_markdown {
             source.append_to_prompt(&mut input.text)?;
         }

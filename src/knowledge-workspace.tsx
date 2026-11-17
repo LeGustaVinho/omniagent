@@ -41,6 +41,7 @@ import { useRepositoryNoteIndex } from "@/repository-note-index";
 import { RepositoryNoteRename } from "@/repository-note-rename";
 import { LinkedRepositoryNotePlanning, RepositoryNotePlanning, useRepositoryNotePlans } from "@/repository-note-planning";
 import { WorkflowLaunchPicker } from "@/workflow-launch";
+import { workflowComparisonNoteTarget } from "@/workflow-comparison-note-target";
 import { asNoteLocation, linkPreviewValue, resolveRepositoryLink, suggestRepositoryLinks, useRepositoryLinkPreviews,
   type IndexedLinkLocation, type IndexedLinkResolution, type IndexedNoteDetails, type IndexedNoteRelationships } from "@/repository-note-links";
 import type { NoteGraphProjection } from "@/knowledge-graph";
@@ -501,17 +502,21 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     void loadNote(favorite.path).then((path) => { if (request === lastOpen.current) navigate(path); });
   };
 
-  const openSavedNoteAction = (path: string, kind: "plan" | "launch" | "linkedPlanning", ownerPanel?: FilePanelApi) => {
+  const openSavedNoteAction = (path: string, kind: "plan" | "launch" | "linkedPlanning" | "compare", ownerPanel?: FilePanelApi) => {
     const request = ++lastOpen.current;
     void loadNote(path).then((canonical) => {
       if (request !== lastOpen.current) return;
       const selected = canonical ? getNote(canonical) : undefined;
-      if (!selected || selected.sourceProblem || (kind !== "linkedPlanning" && isDirty(selected))) {
-        setProblem(kind === "linkedPlanning" ? "The saved note revision is unavailable."
+      const browseSaved = kind === "linkedPlanning" || kind === "compare";
+      if (!selected || selected.sourceProblem || (!browseSaved && isDirty(selected))) {
+        setProblem(browseSaved ? "The saved note revision is unavailable."
           : "Save the note and resolve external changes before using its revision.");
         return;
       }
-      if (kind === "linkedPlanning") setDialog({ kind, source: selected.base, ownerPanel });
+      if (kind === "compare") {
+        const { id, relativePath, sha256, checkoutId } = selected.base;
+        openWorkspace("pipelines", workflowComparisonNoteTarget({ checkoutId, revisionId: id, relativePath, sha256 }));
+      } else if (kind === "linkedPlanning") setDialog({ kind, source: selected.base, ownerPanel });
       else setDialog({ kind, source: selected.base });
     });
   };
@@ -548,6 +553,8 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
       ...(!simulated ? [
         { label: "Plan from note…", disabled: isDirty(notes[path]), run: () => openSavedNoteAction(path, "plan") },
         { label: "Run workflow from note…", disabled: isDirty(notes[path]), run: () => openSavedNoteAction(path, "launch") },
+        { label: "Compare models from note…", disabled: Boolean(repository.notes[path]?.sourceProblem),
+          run: () => openSavedNoteAction(path, "compare") },
         { label: "Open linked planning / delivery…", disabled: Boolean(repository.notes[path]?.sourceProblem),
           run: () => openSavedNoteAction(path, "linkedPlanning", ownerPanel) },
       ] : []),

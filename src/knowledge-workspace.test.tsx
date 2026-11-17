@@ -10,6 +10,7 @@ import KnowledgeWorkspace from "@/knowledge-workspace";
 import { getProperties, noteFrontmatter } from "@/knowledge-document";
 import type { NoteRevision } from "@/repository-note-buffers";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
+import { readWorkflowComparisonNoteTarget } from "@/workflow-comparison-note-target";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -462,7 +463,6 @@ it("previews a closed note and opens only that note when explicitly requested", 
   expect(active.state.doc.toString()).toBe(releaseSource);
 });
 
-
 it("compares a closed note on disk with the selected branch tip even when it has no history there", async () => {
   mockRepository();
   const base = { name: "other", reference: "refs/heads/other", sha: "c".repeat(40) };
@@ -832,6 +832,44 @@ it("shows the saved revision's empty planning links while the tab has a draft", 
   expect(await dialog.findByText("No planning runs are linked to this saved revision.")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("repository_note_planning", { projectId: props.checkout.projectId, checkoutId, revisionId: "release-1" });
   expect(view.state.doc.toString()).toBe(releaseSource + "Unpublished decision.");
+});
+
+it("hands off the saved revision for both a conflicted draft and a different clicked closed note", async () => {
+  const repository = mockRepository();
+  const openWorkspace = vi.fn();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} openWorkspace={openWorkspace} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const view = await editor(release);
+  await waitFor(() => expect(repository.isWatched(release)).toBe(true));
+  act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "Unsaved specification." } }));
+  await waitFor(() => expect(repository.drafts.get(release)?.markdown).toBe(releaseSource + "Unsaved specification."));
+  act(() => repository.externalChange(documentAt(release, "release-2", "# New content on disk")));
+  expect(await screen.findByRole("button", { name: "Review external change" })).toBeTruthy();
+  fireEvent.contextMenu(tab("Release.md").getByText("Release.md"));
+  expect((await screen.findByRole("menuitem", { name: "Plan from note…" })).getAttribute("aria-disabled")).toBe("true");
+  expect(screen.getByRole("menuitem", { name: "Run workflow from note…" }).getAttribute("aria-disabled")).toBe("true");
+  await user.click(screen.getByRole("menuitem", { name: "Compare models from note…" }));
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledTimes(1));
+  expect(readWorkflowComparisonNoteTarget(openWorkspace.mock.calls[0]?.[1])).toEqual({
+    checkoutId, revisionId: "release-1", relativePath: release, sha256: "release-1-sha256",
+  });
+
+  const tree = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  const folder = tree.getByRole("button", { name: "notes" });
+  if (folder.getAttribute("aria-expanded") !== "true") await user.click(folder);
+  fireEvent.contextMenu(await tree.findByRole("button", { name: "Checklist.md" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Compare models from note…" }));
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledTimes(2));
+  const [workspace, target] = openWorkspace.mock.calls[1]!;
+  expect(workspace).toBe("pipelines");
+  expect(readWorkflowComparisonNoteTarget(target)).toEqual({
+    checkoutId, revisionId: "checklist-1", relativePath: checklist, sha256: "checklist-1-sha256",
+  });
+  expect(screen.queryByLabelText("Markdown editor for " + checklist)).toBeNull();
+  expect(view.state.doc.toString()).toBe(releaseSource + "Unsaved specification.");
+  expect(invoke).not.toHaveBeenCalledWith("start_model_comparison", expect.anything());
+  expect(invoke).not.toHaveBeenCalledWith("start_model_comparison_from_markdown", expect.anything());
 });
 
 it.each(["Live Preview", "Reading"])("opens an unopened note from the full-text index in %s", async (mode) => {

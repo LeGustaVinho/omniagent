@@ -454,6 +454,7 @@ fn main() {
             workflow_ipc::comparison::comparison_source_commit,
             workflow_ipc::comparison::model_comparisons,
             workflow_ipc::comparison::start_model_comparison,
+            workflow_ipc::comparison::start_model_comparison_from_markdown,
             workflow_ipc::comparison::model_comparison_environments,
             workflow_ipc::comparison::model_comparison_outcomes,
             workflow_ipc::comparison::model_comparison_job_inputs,
