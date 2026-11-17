@@ -170,6 +170,12 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
     if (!comparison) return;
     setSidePreview(versionPreviewAtLine(comparison, side, line, side === "original" ? ranges.base : ranges.revised));
   }
+  function copyPatchLine(side: DiffSide, line: number) {
+    if (!comparison) return;
+    const revision = side === "original" ? ranges.base : ranges.revised;
+    const path = side === "original" ? comparison.originalPath ?? comparison.path : comparison.path;
+    void copy(`${path}:${line} · ${revision}`);
+  }
   const counts = files.reduce<{ additions: number; deletions: number } | undefined>((sum, file) => {
     if (file.additions === undefined || file.deletions === undefined) return sum;
     return { additions: (sum?.additions ?? 0) + file.additions, deletions: (sum?.deletions ?? 0) + file.deletions };
@@ -269,7 +275,7 @@ export function GitDiffReview({ source, title, ranges, files, selectedPath, sele
                           {hunk.reviewed && <span className="flex items-center gap-1 pr-2 text-xs text-[var(--success)]"><CircleCheck size={13} aria-hidden />Reviewed</span>}
                         </div>
                         <HunkPatchLines hunk={hunk} review={reviewAnnotations} lineNumbers={patchLineNumbers} markReviewed={markReviewed}
-                          openLine={openPatchLine} />
+                          openLine={openPatchLine} copyLine={copyPatchLine} />
                       </div>
                     </ContextActions>
                   </section>;
@@ -330,9 +336,10 @@ function gitPatchLineCount(text: string) {
   return (text.match(/\n/g)?.length ?? 0) + Number(!text.endsWith("\n"));
 }
 
-function HunkPatchLines({ hunk, review, lineNumbers, markReviewed, openLine }: {
+function HunkPatchLines({ hunk, review, lineNumbers, markReviewed, openLine, copyLine }: {
   hunk: GitHunk; review?: GitReviewAnnotations; lineNumbers?: Record<DiffSide, number>; markReviewed?: MenuAction;
   openLine: (side: DiffSide, line: number) => void;
+  copyLine: (side: DiffSide, line: number) => void;
 }) {
   const value = hunk.patch.slice(hunk.patch.indexOf("\n@@ ") + 1);
   const scope = review?.scope;
@@ -346,9 +353,10 @@ function HunkPatchLines({ hunk, review, lineNumbers, markReviewed, openLine }: {
       const modifiedLine = prefix === " " || prefix === "+" ? modified++ : 0;
       const lines = ([["original", originalLine, "base"], ["modified", modifiedLine, "revised"]] as const)
         .filter(([side, number]) => lineNumbers[side] > 0 && number > 0);
-      const locations = lines.filter(([side, number]) => number <= lineNumbers[side]).map(([side, number, label]) => ({
-        label: `Open ${label} version at line ${number}`, run: () => openLine(side, number),
-      }));
+      const locations = lines.filter(([side, number]) => number <= lineNumbers[side]).flatMap(([side, number, label]) => [
+        { label: `Open ${label} version at line ${number}`, run: () => openLine(side, number) },
+        { label: `Copy ${label} line ${number} reference`, run: () => copyLine(side, number) },
+      ]);
       const comments = scope && lines.filter(([side, number]) => number <= scope[side].lineCount)
         .map(([side, number, label]) => ({
           label: `Add review comment on ${label} line…`,
@@ -446,8 +454,7 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
         sideEditor.onContextMenu(({ target }) => {
           const position = target.position;
           clickedPosition = position ?? undefined;
-          clickedRange = position && commentScope?.[side].lineCount
-            ? sideEditor.getSelections()?.find((range) => range.containsPosition(position)) : undefined;
+          clickedRange = position ? sideEditor.getSelections()?.find((range) => range.containsPosition(position)) : undefined;
         });
         function contextLine() {
           const line = (clickedPosition ?? sideEditor.getPosition())?.lineNumber;
@@ -461,20 +468,27 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
           const endLine = endColumn === 1 && endLineNumber > startLine ? endLineNumber - 1 : endLineNumber;
           return { path, startLine, endLine, text: model.getValueInRange(range), language: file.language === "plaintext" ? undefined : file.language };
         }
+        function contextExcerpt(includeClickedLine: boolean) {
+          const location = clickedPosition;
+          const range = location ? clickedRange ?? (includeClickedLine ? { startLineNumber: location.lineNumber, endLineNumber: location.lineNumber,
+            startColumn: location.column, endColumn: location.column } : null) : undefined;
+          clearContextLocation();
+          return selection(range);
+        }
         sideEditor.addAction({ id: `omniagent.copy-${side}-diff-line`, label: "Copy file and line reference", contextMenuGroupId: "9_omniagent-diff",
           run: () => {
-            const range = selection();
+            const range = contextExcerpt(true);
             const revision = actions.current.revisions?.[side];
             if (range) actions.current.copy([excerptReference(range), revision].filter(Boolean).join(" · "));
           } });
         sideEditor.addAction({ id: `omniagent.copy-${side}-diff-markdown`, label: "Copy selection as Markdown", contextMenuGroupId: "9_omniagent-diff",
-          precondition: "editorHasSelection", run: () => { const range = selection(); if (range?.text) actions.current.copy(markdownExcerpt(range)); } });
+          precondition: "editorHasSelection", run: () => { const range = contextExcerpt(false); if (range?.text) actions.current.copy(markdownExcerpt(range)); } });
         if (actions.current.addExcerpt) for (const [id, label, instruction] of [
           ["quote", "Add diff selection to conversation…", undefined],
           ["review", "Review selected change…", "Review this excerpt in the context of the Git comparison."],
         ] as const) sideEditor.addAction({ id: `omniagent.${id}-${side}-diff-selection`, label, contextMenuGroupId: "9_omniagent-diff",
           precondition: "editorHasSelection", run: () => {
-            const range = selection();
+            const range = contextExcerpt(false);
             if (range?.text) actions.current.addExcerpt?.(range, actions.current.revisions?.[side] ?? (side === "original" ? "Base" : "Revised"), instruction);
           } });
         if (side === "modified" && actions.current.openLine) sideEditor.addAction({ id: "omniagent.open-working-diff-line",
@@ -490,10 +504,7 @@ export function MonacoComparison({ file, layout, ready, revisions, openLine, add
         if (commentScope?.[side].lineCount) sideEditor.addAction({
           id: `omniagent.review-comment-${side}-diff`, label: "Add review comment…", contextMenuGroupId: "9_omniagent-diff",
           run: () => {
-            const location = clickedPosition;
-            const range = selection(clickedRange ?? (location ? { startLineNumber: location.lineNumber, endLineNumber: location.lineNumber,
-              startColumn: location.column, endColumn: location.column } : undefined));
-            clearContextLocation();
+            const range = contextExcerpt(true);
             const current = actions.current.review;
             if (range && current?.scope?.snapshot === commentScope.snapshot) current.add({ side, startLine: range.startLine, endLine: range.endLine });
           },

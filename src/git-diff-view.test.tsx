@@ -33,6 +33,9 @@ it("opens the exact read-only base line of a removed hunk using its historical p
   expect(readOnly.getByLabelText("Version contents").textContent).toBe(comparison.original);
   expect(openWorking).not.toHaveBeenCalled();
   await user.click(readOnly.getByRole("button", { name: "Close dialog" }));
+  fireEvent.contextMenu(screen.getByText("-removed line"));
+  await user.click(await screen.findByRole("menuitem", { name: "Copy base line 2 reference" }));
+  expect(await navigator.clipboard.readText()).toBe("docs/before rename.txt:2 · Index abc");
 
   const added = screen.getByText("+added line");
   fireEvent.keyDown(added, { key: "F10", shiftKey: true });
@@ -50,6 +53,9 @@ it("uses the clicked Monaco position independently of the opposite side and curr
     const side = { addAction: ({ id, run }: { id: string; run: () => void }) => actions.set(id, run),
       onContextMenu: (handler: (event: MonacoMenuEvent) => void) => { context = handler; },
       onMouseDown: vi.fn(), onKeyDown: vi.fn(), getPosition: () => ({ lineNumber: 1, column: 1 }),
+      getSelection: () => ({ startLineNumber: 1, endLineNumber: 1, startColumn: 1, endColumn: 4 }),
+      getSelections: () => [{ containsPosition: (position: { lineNumber: number }) => position.lineNumber === 1 }],
+      getModel: () => ({ getValueInRange: () => "" }),
       createDecorationsCollection: () => ({ clear: vi.fn() }) };
     return { side, actions, click: (lineNumber: number) => context?.({ target: { position: { lineNumber, column: 3 } } }) };
   }
@@ -68,6 +74,8 @@ it("uses the clicked Monaco position independently of the opposite side and curr
   expect(readOnly.getByLabelText("Selected line 2").textContent).toBe("removed line");
   expect(readOnly.getByText("Previous commit")).toBeTruthy();
   await user.click(readOnly.getByRole("button", { name: "Close dialog" }));
+  await act(async () => { base.click(2); base.actions.get("omniagent.copy-original-diff-line")?.(); });
+  expect(await navigator.clipboard.readText()).toBe("docs/before rename.txt:2 · Previous commit");
   act(() => { revised.click(3); revised.actions.get("omniagent.open-working-diff-line")?.(); });
   expect(openWorking).toHaveBeenCalledExactlyOnceWith(3);
 });
