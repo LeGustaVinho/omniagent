@@ -11,13 +11,15 @@ import {
 import { Braces, CheckSquare, List, Redo2, Search, Table2, Undo2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef } from "react";
+import type { MenuGroups } from "@/components/ui/context-actions";
 import type { ExampleFile } from "@/ide-knowledge-data";
 import { fileName } from "@/ide-knowledge-data";
 import { headings, markdownNoteLink, parseReadingFile, parseWiki, readingLocalAddress, type NoteTarget } from "@/knowledge-document";
 import { isContextKey, useNoteContextMenu, type NoteContextActions, type NoteContextHit } from "@/knowledge-context";
 import { useFileEditorDocument } from "@/file-editor-popout";
 import { noteAttachmentCandidates } from "@/repository-note-media";
-import { insertListItem, insertTable, toggleTaskCheckbox } from "@/knowledge-source-commands";
+import { canFormatInlineMarkdown, canFormatMarkdown, insertCodeBlock, insertListItem, insertMarkdownLink, insertTable,
+  markdownHeadingLevel, setMarkdownHeading, surroundInlineMarkdown, toggleTaskCheckbox } from "@/knowledge-source-commands";
 
 export interface NoteJump {
   anchor?: string;
@@ -276,6 +278,33 @@ function noteContextAt(editor: EditorView, path: string, offset: number): NoteCo
   return hit;
 }
 
+function sourceFormattingMenu(editor: EditorView, offset: number, hit: NoteContextHit): MenuGroups {
+  const doc = editor.state.doc;
+  const range = hit.selection ?? { from: offset, to: offset };
+  if (!canFormatMarkdown(editor.state, range)) return [];
+  const command = (label: string, edit: Command, position = range) => ({ label, run: () => {
+    if (editor.state.doc !== doc || !editor.dom.isConnected) return;
+    editor.dispatch({ selection: EditorSelection.single(position.from, position.to) });
+    edit(editor);
+  } });
+  const level = markdownHeadingLevel(editor.state, offset);
+  const inline = !hit.link && !hit.attachment && !hit.tag && canFormatInlineMarkdown(editor.state, range);
+  return [[{ label: "Format Markdown", items: [
+    ...(inline ? [
+      command("Bold", surroundInlineMarkdown("**")), command("Italic", surroundInlineMarkdown("*")),
+      command("Strikethrough", surroundInlineMarkdown("~~")), command("Inline code", surroundInlineMarkdown("`")),
+      command("Insert Markdown link", insertMarkdownLink),
+    ] : []),
+    ...(level !== undefined ? [{ label: "Heading", items: [
+      ...(level ? [command("Paragraph", setMarkdownHeading(0), { from: offset, to: offset })] : []),
+      ...[1, 2, 3, 4, 5, 6].filter((number) => number !== level)
+        .map((number) => command(`Heading ${number}`, setMarkdownHeading(number), { from: offset, to: offset })),
+    ] }] : []),
+    command("Insert list item", insertListItem), command("Toggle task checkbox", toggleTaskCheckbox),
+    command("Insert table", insertTable), command("Insert code block", insertCodeBlock),
+  ] }]];
+}
+
 export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLink, analyze = false, suggestLinks, contextActions }: {
   mode: "source" | "live";
   path: string;
@@ -306,7 +335,8 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
     const show = (editor: EditorView, pos: number, point: { x: number; y: number }) => {
       if (!fresh.current.contextActions) return false;
       const hit = noteContextAt(editor, path, pos);
-      return openContextMenu(hit.link?.alias || hit.link?.target || hit.attachment?.label || hit.anchor || hit.tag || "Note source", fresh.current.contextActions(hit), point, () => {
+      const groups = [...fresh.current.contextActions(hit), ...sourceFormattingMenu(editor, pos, hit)];
+      return openContextMenu(hit.link?.alias || hit.link?.target || hit.attachment?.label || hit.anchor || hit.tag || "Note source", groups, point, () => {
         if (editor.dom.isConnected && !editor.dom.closest("[hidden]")) editor.focus();
       });
     };
@@ -453,19 +483,6 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
     view.focus();
   };
 
-  const insertCode = () => {
-    const view = instance.current;
-    if (!view) return;
-    const selection = view.state.selection.main;
-    const value = view.state.sliceDoc(selection.from, selection.to);
-    const fence = "\n```\n";
-    view.dispatch({
-      changes: { from: selection.from, to: selection.to, insert: fence + value + fence },
-      selection: EditorSelection.cursor(selection.from + fence.length + value.length),
-    });
-    view.focus();
-  };
-
   return (
     <div className="note-editor" data-mode={mode}>
       <div className="note-editor-tools" aria-label="Editing commands">
@@ -475,7 +492,7 @@ export function MarkdownEditor({ mode, path, source, files, jump, onChange, onLi
         <button type="button" className="fw-icon" title="Insert list item" aria-label="Insert list item" onClick={() => runEdit(insertListItem)}><List size={15} /></button>
         <button type="button" className="fw-icon" title="Toggle task checkbox" aria-label="Toggle task checkbox" onClick={() => runEdit(toggleTaskCheckbox)}><CheckSquare size={15} /></button>
         <button type="button" className="fw-icon" title="Insert table" aria-label="Insert table" onClick={() => runEdit(insertTable)}><Table2 size={15} /></button>
-        <button type="button" className="fw-icon" title="Insert code block" aria-label="Insert code block" onClick={insertCode}><Braces size={15} /></button>
+        <button type="button" className="fw-icon" title="Insert code block" aria-label="Insert code block" onClick={() => runEdit(insertCodeBlock)}><Braces size={15} /></button>
       </div>
       <div className="note-editor-mount" ref={mount} />
       {overlay}

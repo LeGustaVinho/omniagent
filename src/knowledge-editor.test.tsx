@@ -88,11 +88,12 @@ it("opens context on the exact concealed link and quotes the live selection with
   } }));
 });
 
-function openSource(source: string) {
+function openSource(source: string, mode: "source" | "live" = "source", contextual = false) {
   const onChange = vi.fn();
   function Controlled() {
     const [content, setContent] = useState(source);
-    return <MarkdownEditor {...props} mode="source" source={content} onChange={(updated) => { onChange(updated); setContent(updated); }} />;
+    return <MarkdownEditor {...props} mode={mode} source={content} contextActions={contextual ? () => [] : undefined}
+      onChange={(updated) => { onChange(updated); setContent(updated); }} />;
   }
   const { container } = render(<Controlled />);
   return { view: EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!, onChange };
@@ -100,6 +101,45 @@ function openSource(source: string) {
 
 const command = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
 const select = (view: EditorView, anchor: number, head = anchor) => act(() => view.dispatch({ selection: { anchor, head } }));
+
+const expandFormat = () => fireEvent.keyDown(screen.getByRole("menuitem", { name: "Format Markdown" }), { key: "ArrowRight" });
+
+it.each(["source", "live"] as const)("formats the selected text and inserts the Markdown link destination in %s mode", (mode) => {
+  const source = "# Release\n\nRead café 🚀 and check the plan.";
+  const { view } = openSource(source, mode, true);
+  vi.spyOn(view, "coordsAtPos").mockReturnValue(null);
+  const start = source.indexOf("café");
+  const end = start + "café 🚀".length;
+  select(view, start, end);
+  fireEvent.keyDown(view.contentDOM, { key: "F10", shiftKey: true });
+  expandFormat();
+  fireEvent.click(screen.getByRole("menuitem", { name: "Bold" }));
+  expect(view.state.doc.toString()).toBe(source.replace("café 🚀", "**café 🚀**"));
+  command("Undo");
+  expect(view.state.doc.toString()).toBe(source);
+
+  select(view, start, end);
+  fireEvent.keyDown(view.contentDOM, { key: "F10", shiftKey: true });
+  expandFormat();
+  fireEvent.click(screen.getByRole("menuitem", { name: "Insert Markdown link" }));
+  const next = source.replace("café 🚀", "[café 🚀]()");
+  expect(view.state.doc.toString()).toBe(next);
+  expect(view.state.selection.main.head).toBe(next.indexOf(")"));
+});
+
+it("changes the clicked Setext heading while the editor cursor is elsewhere", () => {
+  const source = "## Release ##\n\nRelease\n-------\n\nKeep the details intact.";
+  const { view } = openSource(source, "source", true);
+  select(view, 0, "## Release ##".length);
+  vi.spyOn(view, "posAtCoords").mockReturnValue(source.lastIndexOf("Release") + 1);
+  fireEvent.contextMenu(view.contentDOM);
+  expandFormat();
+  fireEvent.keyDown(screen.getByRole("menuitem", { name: "Heading" }), { key: "ArrowRight" });
+  fireEvent.click(screen.getByRole("menuitem", { name: "Heading 4" }));
+  expect(view.state.doc.toString()).toBe("## Release ##\n\n#### Release\n\nKeep the details intact.");
+  command("Undo");
+  expect(view.state.doc.toString()).toBe(source);
+});
 
 it("makes and toggles list tasks through separate undo steps while preserving neighboring plugin syntax", () => {
   const before = "---\nkanban-plugin: board # comment\n---\n\nScore:: 5\n\n";
