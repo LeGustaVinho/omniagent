@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode, type Ref } from "react";
 import type { Provider } from "@/bindings/Provider";
 import type { SessionMode } from "@/bindings/SessionMode";
 import { capabilitySubjectLabel, type CapabilitySubject } from "@/capability-subject";
@@ -61,12 +61,11 @@ function windowsVersion({ major, minor, build, revision, nativeArchitecture, ser
   return `${name} ${major}.${minor}.${build}.${revision}${arch ? ` · ${arch}` : ""}`;
 }
 
-function RecordedCapabilities({ capabilities }: { capabilities: RecordedCapability[] }) {
+function RecordedCapabilities({ capabilities, disclosure }: { capabilities: RecordedCapability[]; disclosure: Ref<HTMLDetailsElement> }) {
   const { copy, feedback } = useContextActionFeedback();
-  if (!capabilities.length) return <p>No capability assessment recorded.</p>;
-  return <details className="min-w-32">
+  return <details ref={disclosure} className="min-w-32">
     <summary>Recorded capabilities</summary>
-    <ul className="grid max-w-72 gap-2 py-2 whitespace-normal [overflow-wrap:anywhere]" aria-label="Recorded capabilities">
+    {capabilities.length ? <ul className="grid max-w-72 gap-2 py-2 whitespace-normal [overflow-wrap:anywhere]" aria-label="Recorded capabilities">
       {capabilities.map(({ subject, boundary, status, observed, evidence }) => {
         const capability = capabilitySubjectLabel(subject);
         const title = `${capability} · ${statuses[status]}`;
@@ -85,7 +84,7 @@ function RecordedCapabilities({ capabilities }: { capabilities: RecordedCapabili
           </div>
         </ContextActions></li>;
       })}
-    </ul>
+    </ul> : <p>No capability assessment recorded.</p>}
     {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
   </details>;
 }
@@ -99,13 +98,15 @@ function RecordedValidation({ target }: { target: SideValidationTarget }) {
   </details>;
 }
 
-function RecordedCli({ record }: { record: RecordedProfile }) {
+function RecordedCli({ record, showQualification }: { record: RecordedProfile; showQualification: () => void }) {
   const { copy, feedback } = useContextActionFeedback();
   const recordedAt = new Date(record.recordedAt * 1000);
   const { runId, cliVersion, provider, reportedModel, requestedModel, platform, runner, mode } = record;
   const title = `${providers[provider]} ${cliVersion}`;
   return <>
     <ContextActions label={`Recorded profile ${runId}`} groups={[[
+      { label: "Show qualification details", run: showQualification },
+    ], [
       { label: "Copy qualification run ID", run: () => copy(runId) },
       { label: "Copy recorded profile", run: () => copy([
         title, `Run ${runId}`, `Recorded ${recordedAt.toISOString()}`,
@@ -121,33 +122,46 @@ function RecordedCli({ record }: { record: RecordedProfile }) {
   </>;
 }
 
-function profileRow(record: RecordedProfile): MatrixRow {
+function RecordedProfileRow({ record }: { record: RecordedProfile }) {
   const model = record.reportedModel ?? record.requestedModel;
-  return {
-    id: record.runId,
-    cli: <RecordedCli record={record} />,
-    model: <>{model ?? "Provider default"}
+  const disclosure = useRef<HTMLDetailsElement>(null);
+
+  function showQualification() {
+    const details = disclosure.current;
+    if (!details) return;
+    details.open = true;
+    const view = details.ownerDocument.defaultView;
+    // Focus the disclosure after the menu finishes restoring focus.
+    view?.setTimeout(() => view.requestAnimationFrame(() => {
+      if (details.isConnected && details.open) details.querySelector("summary")?.focus();
+    }));
+  }
+
+  return <MatrixTableRow
+    cli={<RecordedCli record={record} showQualification={showQualification} />}
+    model={<>{model ?? "Provider default"}
       {!record.reportedModel && <div className="text-muted-foreground">Model report unavailable</div>}
       {record.reportedModel && record.requestedModel && record.reportedModel !== record.requestedModel &&
-        <div className="text-muted-foreground">Requested · {record.requestedModel}</div>}</>,
-    host: record.platform ? windowsVersion(record.platform.host) : "Unavailable",
-    runner: <>{record.runner === "windows-direct" ? "Direct Windows host" : record.runner}
+        <div className="text-muted-foreground">Requested · {record.requestedModel}</div>}</>}
+    host={record.platform ? windowsVersion(record.platform.host) : "Unavailable"}
+    runner={<>{record.runner === "windows-direct" ? "Direct Windows host" : record.runner}
       {record.platform?.guest && <div>{windowsVersion(record.platform.guest)}</div>}
-      <div className="text-muted-foreground">{modes[record.mode]}</div></>,
-    qualification: <>
-      <RecordedCapabilities capabilities={record.capabilities} />
+      <div className="text-muted-foreground">{modes[record.mode]}</div></>}
+    qualification={<>
+      <RecordedCapabilities capabilities={record.capabilities} disclosure={disclosure} />
       {record.validation && <RecordedValidation target={record.validation} />}
-    </>,
-  };
+    </>} />;
 }
 
-function MatrixTable({ rows }: { rows: MatrixRow[] }) {
+function MatrixTableRow({ cli, model, host, runner, qualification }: Omit<MatrixRow, "id">) {
+  return <tr className="align-top"><td>{cli}</td><td>{model}</td><td>{host}</td><td>{runner}</td><td>{qualification}</td></tr>;
+}
+
+function MatrixTable({ children }: { children: ReactNode }) {
   return <div className="settings-table-scroll" role="region" tabIndex={0} aria-label="Qualification table">
     <table aria-label="Qualification matrix">
       <thead><tr><th scope="col">CLI</th><th scope="col">Model</th><th scope="col">Host</th><th scope="col">Runner</th><th scope="col">Qualification</th></tr></thead>
-      <tbody>{rows.map((row) => <tr key={row.id} className="align-top">
-        <td>{row.cli}</td><td>{row.model}</td><td>{row.host}</td><td>{row.runner}</td><td>{row.qualification}</td>
-      </tr>)}</tbody>
+      <tbody>{children}</tbody>
     </table>
   </div>;
 }
@@ -166,7 +180,7 @@ function RecordedQualifications({ validationCheckoutId }: { validationCheckoutId
     {query.isPending && <p role="status">Loading recorded qualifications…</p>}
     {query.isError && <><p role="alert">Recorded qualifications could not be loaded.</p>
       <Button type="button" variant="outline" onClick={() => void query.refetch()}>Retry</Button></>}
-    {query.data?.records.length ? <MatrixTable rows={query.data.records.map(profileRow)} /> : query.isSuccess &&
+    {query.data?.records.length ? <MatrixTable>{query.data.records.map((record) => <RecordedProfileRow key={record.runId} record={record} />)}</MatrixTable> : query.isSuccess &&
       <p>No submitted dispatch profiles have been recorded.</p>}
     {(pages.length > 1 || next) && <nav className="settings-actions" aria-label="Qualification pages">
       <Button type="button" variant="outline" disabled={pages.length <= 1} onClick={() => setPages((current) => current.slice(0, -1))}>Newer</Button>
@@ -182,7 +196,7 @@ export function QualificationMatrix({ examples = false, validationCheckoutId = n
   const [expanded, setExpanded] = useState(false);
   return <details className="settings-matrix" onToggle={(event) => setExpanded(event.currentTarget.open)}>
     <summary>Qualification matrix</summary>
-    {examples ? <MatrixTable rows={exampleRows} /> : expanded &&
+    {examples ? <MatrixTable>{exampleRows.map(({ id, ...row }) => <MatrixTableRow key={id} {...row} />)}</MatrixTable> : expanded &&
       <RecordedQualifications key={validationCheckoutId} validationCheckoutId={validationCheckoutId} />}
   </details>;
 }

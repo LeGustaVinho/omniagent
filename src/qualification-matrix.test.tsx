@@ -2,7 +2,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { QualificationMatrix } from "@/qualification-matrix";
@@ -73,6 +73,45 @@ it("uses the eligible attempt's recorded scope only after explicit validation", 
     conversationId: target.conversationId, expectedSourceRunId: target.sourceRunId, expectedContextId: null,
     selection: target.selection, effort: target.effort, mode: target.mode, purpose: "validation", question: "",
   });
+});
+
+it("opens and focuses the exact profile's recorded details without triggering validation", async () => {
+  const profile = {
+    recordedAt: 1776000000, provider: "codex", cliVersion: "same-version", requestedModel: "recorded-model",
+    reportedModel: "recorded-model", platform: null, runner: "windows-direct", mode: "read_only", validation: null,
+  };
+  vi.mocked(invoke).mockResolvedValue({ records: [
+    { ...profile, runId: "other-profile", capabilities: [] },
+    { ...profile, runId: "selected-profile", capabilities: [{
+      subject: { kind: "protocol", capability: "side_request" }, boundary: "exact_checkout", status: "verified",
+      observed: "succeeded", evidence: null,
+    }], validation: { conversationId: "recorded-chat", sourceRunId: "selected-profile", mode: "read_only", effort: null,
+      selection: { provider: "codex", profileId: "recorded-profile", modelId: "recorded-model" } } },
+  ], nextCursor: null });
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={new QueryClient()}><QualificationMatrix validationCheckoutId="active-checkout" /></QueryClientProvider>);
+  await user.click(screen.getByText("Qualification matrix"));
+  const selectedActions = await screen.findByRole("button", { name: "Actions for Recorded profile selected-profile" });
+  const otherActions = screen.getByRole("button", { name: "Actions for Recorded profile other-profile" });
+  const selected = within(selectedActions.closest("tr")!);
+  const other = within(otherActions.closest("tr")!);
+  const selectedSummary = selected.getByText("Recorded capabilities");
+  const otherSummary = other.getByText("Recorded capabilities");
+  selectedActions.focus();
+  await user.keyboard("{Shift>}{F10}{/Shift}");
+  await user.click(await screen.findByRole("menuitem", { name: "Show qualification details" }));
+  await waitFor(() => expect(document.activeElement).toBe(selectedSummary));
+  expect(selectedSummary.parentElement).toHaveProperty("open", true);
+  expect(otherSummary.parentElement).toHaveProperty("open", false);
+  expect(selected.getByText("side request · Verified in provider run")).toBeTruthy();
+  expect(selected.queryByRole("region", { name: "Side request capability validation" })).toBeNull();
+
+  fireEvent.contextMenu(other.getByText("Codex"));
+  await user.click(await screen.findByRole("menuitem", { name: "Show qualification details" }));
+  await waitFor(() => expect(document.activeElement).toBe(otherSummary));
+  expect(otherSummary.parentElement).toHaveProperty("open", true);
+  expect(other.getByText("No capability assessment recorded.")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("desktop_capability_qualifications", { cursor: null, validationCheckoutId: "active-checkout" });
 });
 
 it("shows the same columns in Simulate without reading the real profile history", async () => {
