@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
+import type { ModelOption } from "@/bindings/ModelOption";
 import { PipelineAuthoringEditor } from "@/workflow-authoring";
 import { WorkflowPackageList } from "@/workflow-authoring-package";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
@@ -38,15 +39,17 @@ const published = {
   ],
 };
 
-function mount({ stale = false, publication = null, openWorkspace = vi.fn() }: {
+function mount({ stale = false, publication = null, openWorkspace = vi.fn(), members = initial.package.members, stageModels = [] }: {
   stale?: boolean; publication?: typeof published | null; openWorkspace?: WorkspaceProps["openWorkspace"];
+  members?: object[]; stageModels?: { option: Pick<ModelOption, "name" | "selectable" | "selection" | "rating"> }[];
 } = {}) {
-  let draft: { package: { name: string; members: object[] }; revision: string; publication: unknown } = { ...initial, publication };
+  let draft: { package: { name: string; members: object[] }; revision: string; publication: unknown } =
+    { ...initial, package: { ...initial.package, members }, publication };
   const note = { id: "saved-brief", relativePath: "brief.md", sha256: "a".repeat(64) };
   vi.mocked(invoke).mockImplementation(async (name, input) => {
     switch (name) {
       case "inspect_workflow_package": return draft;
-      case "conversation_models": return [];
+      case "conversation_models": return stageModels.filter(({ option }) => option.selection.provider === (input as { provider: string }).provider);
       case "workflow_package_catalog": return [artifact];
       case "preview_workflow_package_revision": return {
         revision: (input as { revision: string }).revision, revisions: [draft.revision, initial.revision],
@@ -176,6 +179,56 @@ it("runs the exact pipeline from its package receipt and opens its execution gra
     },
   });
   await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "run:published-run"));
+});
+
+it("pins the chosen pipeline model on unbound stages and locally edited presets through the draft", async () => {
+  const selected = { provider: "codex", profileId: "desktop", modelId: "fixture-model" } as const;
+  const explicit = { provider: "claude", profileId: "desktop", modelId: "existing-model" };
+  const stageModels = [{ option: { name: "Fixture model", selectable: true, selection: selected, rating: null } }];
+  const agent = { kind: "agent_role", role: "Reviewer", requirements: { reviewReuse: true } };
+  const preset = { key: "reviewer", name: "Reviewer", destination: "library", body: {
+    kind: "preset", nodeKind: "agent", editableFields: ["role"], configuration: agent,
+  } };
+  const pinnedRole = { id: "other-role", revision: "published-v1", destination: "library", kind: "role" };
+  const boundPreset = { ...preset, key: "bound-preset", references: { "$preset": { source: "published", version: pinnedRole } } };
+  const fixedPreset = { ...preset, key: "fixed-preset", body: { ...preset.body, configuration: { ...agent, model: explicit } } };
+  const direct = { id: "direct", kind: "agent", configuration: agent };
+  const fixed = { id: "fixed", kind: "agent", configuration: { ...agent, model: explicit } };
+  const bound = { id: "bound", kind: "agent", configuration: { ...agent, requirements: { boundRole: pinnedRole } } };
+  const referenced = { id: "referenced", kind: "agent", configuration: agent };
+  const nodes = [...pipeline.body.graph.nodes, direct, fixed, bound, referenced];
+  const root = { ...pipeline, body: { ...pipeline.body, graph: { ...pipeline.body.graph, nodes } },
+    references: { referenced: { source: "draft", key: preset.key } } };
+  const child = { key: "child", name: "Child", body: {
+    kind: "subflow", graph: { name: "Child", nodes: [direct], wires: [] },
+  } };
+  const members = [root, child, preset, boundPreset, fixedPreset];
+  const user = mount({ members, stageModels });
+  await user.click(await screen.findByText("Configure stage models"));
+  const bulk = await screen.findByRole<HTMLButtonElement>("button", { name: "Apply to 3 unconfigured stages" });
+  expect(bulk.disabled).toBe(true);
+  await user.click(await screen.findByRole("button", { name: "Pipeline stage model · Choose model" }));
+  await user.click(await screen.findByRole("menuitemradio", { name: "Fixture model" }));
+  expect(screen.getByRole("button", { name: "Package authoring model · Choose model" })).toBeTruthy();
+  await user.click(bulk);
+  expect(screen.queryByText("Configure stage models")).toBeNull();
+  expect(invoke).not.toHaveBeenCalledWith("save_workflow_package", expect.anything());
+  await user.click(screen.getByRole("button", { name: "Save package revision" }));
+
+  const configured = { ...agent, model: selected };
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_workflow_package", {
+    projectId: exampleCheckout.projectId, draftId: initial.id, expectedRevision: initial.revision,
+    package: { name: initial.package.name, members: [
+      { ...root, body: { ...root.body, graph: { ...root.body.graph,
+        nodes: [...pipeline.body.graph.nodes, { ...direct, configuration: configured }, fixed, bound, referenced],
+      } } },
+      { ...child, body: { ...child.body, graph: { ...child.body.graph, nodes: [{ ...direct, configuration: configured }] } } },
+      { ...preset, body: { ...preset.body, configuration: configured } },
+      boundPreset, fixedPreset,
+    ] },
+  }));
+  expect(agent).not.toHaveProperty("model");
+  expect(invoke).not.toHaveBeenCalledWith("publish_reviewed_workflow_package", expect.anything());
 });
 
 it("starts a named pipeline directly in the visual Builder", async () => {
