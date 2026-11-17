@@ -14,8 +14,8 @@ import type { WorkspaceProps } from "@/workbench-contract";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), Channel: class { onmessage = () => undefined; } }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: () => Promise.resolve("0.1.0") }));
 vi.mock("@/ide-code-editor", () => ({
-  CodeEditor: ({ path, jump }: { path: string; jump?: { line: number; token: number } }) => (
-    <div aria-label={`Source editor for ${path}`} data-line={jump?.line} data-jump={jump?.token} />
+  CodeEditor: ({ path, jump }: { path: string; jump?: { line: number; column?: number; token: number } }) => (
+    <div aria-label={`Source editor for ${path}`} data-line={jump?.line} data-column={jump?.column} data-jump={jump?.token} />
   ),
 }));
 vi.mock("@/ide-terminal", () => ({ ExampleTerminal: () => null, ManualTerminal: () => null }));
@@ -43,9 +43,11 @@ it("submits literal search to the selected checkout, marks partial results, and 
       case "save_workbench_layout": case "unwatch_repository_source": return undefined;
       case "watch_repository_source": return "watch";
       case "ripgrep_status": return available;
-      case "search_repository_files": return { status: "results", truncated: true, matches: [
-        { path, line: 42, excerpt: "  value a.*b  " }, { path: markdown, line: 4, excerpt: "Markdown result" },
-      ] };
+      case "search_repository_files": {
+        const source = { path, line: 42, columns: [9, 16], occurrences: 2, excerpt: "  value a.*b   a.*b ", lineText: "  value a.*b   a.*b " };
+        const scoped = Boolean(args && "relativeFile" in args);
+        return { status: "results", truncated: !scoped, matches: scoped ? [source] : [source, { path: markdown, line: 4, excerpt: "Markdown result" }] };
+      }
       case "open_repository_source_file":
         expect(args).toEqual({ checkoutId, path });
         return { status: "document", document: { revision: {
@@ -68,6 +70,7 @@ it("submits literal search to the selected checkout, marks partial results, and 
   await user.click(result);
   const editor = await screen.findByLabelText(`Source editor for ${path}`);
   expect(editor.getAttribute("data-line")).toBe("42");
+  expect(editor.getAttribute("data-column")).toBe("9");
   await user.click(result);
   await waitFor(() => expect(editor.getAttribute("data-jump")).toBe("2"));
   expect(screen.getAllByRole("button", { name: "Close ação file.ts" })).toHaveLength(1);
@@ -75,6 +78,29 @@ it("submits literal search to the selected checkout, marks partial results, and 
   const [workspace, target] = openWorkspace.mock.calls[0] ?? [];
   expect(workspace).toBe("knowledge");
   expect(readNoteSearchTarget(target)).toEqual({ path: markdown, line: 4 });
+  fireEvent.contextMenu(form.getByRole("button", { name: /plan#blue.md · 4/ }));
+  await user.click(screen.getByRole("menuitem", { name: "Open to the side" }));
+  expect(readNoteSearchTarget(openWorkspace.mock.lastCall?.[1])).toEqual({ path: markdown, line: 4, side: true });
+
+  const group = form.getByRole("button", { name: `${path}, 2 matches` });
+  fireEvent.contextMenu(group);
+  await user.click(screen.getByRole("menuitem", { name: "Copy visible occurrence references" }));
+  expect(await navigator.clipboard.readText()).toBe(`${path}:42:9\n${path}:42:16`);
+  fireEvent.contextMenu(result);
+  await user.click(screen.getByRole("menuitem", { name: "Copy matching line" }));
+  expect(await navigator.clipboard.readText()).toBe("  value a.*b   a.*b ");
+  fireEvent.contextMenu(group);
+  await user.click(screen.getByRole("menuitem", { name: "Open first match to the side" }));
+  await waitFor(() => expect(screen.getAllByRole("button", { name: "Close ação file.ts" })).toHaveLength(2));
+  expect(screen.getAllByLabelText(`Source editor for ${path}`).every((view) => view.getAttribute("data-column") === "9")).toBe(true);
+
+  fireEvent.contextMenu(group);
+  await user.click(screen.getByRole("menuitem", { name: "Search in this file" }));
+  expect(await form.findByText(`Search in ${path}`)).toBeTruthy();
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("search_repository_files", { checkoutId, query: "  a.*b  ", relativeFile: path }));
+  expect(form.queryByRole("button", { name: /plan#blue.md · 4/ })).toBeNull();
+  await user.click(form.getByRole("button", { name: "Search entire worktree" }));
+  expect(await form.findByRole("button", { name: /plan#blue.md · 4/ })).toBeTruthy();
 });
 
 it("shows a missing executable and immediately shares a validated System Settings path with search", async () => {
@@ -167,8 +193,8 @@ it("jumps to a Markdown match while preserving the canonical tab and repeated op
   });
   try {
     const queryClient = client();
-    const workspace = (line: number, sequence: number) => <QueryClientProvider client={queryClient}>
-      <KnowledgeWorkspace {...props} target={noteSearchTarget(path, line, sequence)} />
+    const workspace = (line: number, sequence: number, side = false) => <QueryClientProvider client={queryClient}>
+      <KnowledgeWorkspace {...props} target={noteSearchTarget(path, line, sequence, side)} />
     </QueryClientProvider>;
     const { rerender, unmount } = render(workspace(4, 1));
     const surface = await screen.findByLabelText(`Markdown editor for ${path}`);
@@ -183,6 +209,9 @@ it("jumps to a Markdown match while preserving the canonical tab and repeated op
     expect(screen.getAllByRole("button", { name: "Close plan#blue.md" })).toHaveLength(1);
     expect(readNoteSearchTarget(path)).toEqual({ path });
     expect(readNoteSearchTarget(noteSearchTarget(path, 0, 4))).toBeUndefined();
+    rerender(workspace(4, 4, true));
+    expect(await screen.findByLabelText(`Reading view for ${path}`)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close plan#blue.md · Reading" })).toBeTruthy();
     unmount();
   } finally {
     cleanup();

@@ -33,14 +33,17 @@ pub async fn search_repository_files(
     checkout_id: String,
     query: String,
     relative_directory: Option<String>,
+    relative_file: Option<String>,
 ) -> Result<ProjectSearch, String> {
-    match relative_directory {
-        Some(directory) => {
+    match (relative_directory, relative_file) {
+        (Some(_), Some(_)) => return Err("Choose either a search folder or a search file.".into()),
+        (None, Some(file)) => store.search_repository_file(checkout_id, query, file).await,
+        (Some(directory), None) => {
             store
                 .search_repository_files_in(checkout_id, query, directory)
                 .await
         }
-        None => store.search_repository_files(checkout_id, query).await,
+        (None, None) => store.search_repository_files(checkout_id, query).await,
     }
     .map_err(report)
 }

@@ -7,15 +7,16 @@ import {
   FileCaption, FileDialog, FileDock, FileSidebar, FileTree, FileUnavailable,
   keepOnlyCleanClose, SidebarToggle, useFileDock, useFileSidebar, type FilePanelApi,
 } from "@/ide-file-workspace";
-import { ExampleFileSearch, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget } from "@/ide-file-search";
+import { ExampleFileSearch, matchReference, noteSearchTarget, ProjectFileSearch, readFolderSearchTarget, type FileSearchScope } from "@/ide-file-search";
 import { containingFolder, fileContextActions, fileHistoryTarget, noteRenameTarget, openNotesTarget, readSourceLineTarget, readTerminalFolderTarget, workingDiffTarget } from "@/file-context-actions";
-import { ContextActions } from "@/components/ui/context-actions";
 import { useCheckoutTreeActions } from "@/checkout-tree-actions";
 import { useCheckoutConversationActions } from "@/checkout-conversation-actions";
 import { changedItemPath, itemIncludesPath, useCheckoutItemOperations } from "@/checkout-item-operations";
 import { useCheckoutFileComparison } from "@/checkout-file-comparison";
 import { exampleNotes, exampleSources, fileName, findFileText, normalizeRepositoryPath, type FileSearchResult } from "@/ide-knowledge-data";
-import type { CodeModel, CodeProblem } from "@/ide-code-editor";
+import type { CodeModel, CodeProblem, EditorLocation, EditorSettings } from "@/ide-code-editor";
+import { EditorStatus } from "@/ide-editor-status";
+import { IdeProblems, problemReference, type FileProblem } from "@/ide-problems";
 import { ResizablePanel } from "@/panel-resize";
 import { useRepositorySourceBuffers, type NoteBuffer } from "@/repository-note-buffers";
 import type { WorkspaceProps } from "@/workbench-contract";
@@ -53,13 +54,15 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const { load: loadSource, watch: watchSource, update: updateSource } = source;
   const [sidebar, setSidebar] = useFileSidebar();
   const [navigator, setNavigator] = useState<"files" | "search">(requestedFolder === undefined ? "files" : "search");
-  const [searchFolder, setSearchFolder] = useState(requestedFolder);
+  const [searchScope, setSearchScope] = useState<FileSearchScope | undefined>(() => requestedFolder ? { kind: "folder", path: requestedFolder } : undefined);
   const [reveal, setReveal] = useState<{ path: string }>();
   const [query, setQuery] = useState("");
   const [examples, setExamples] = useState(() => newBuffers(simulated, simulation?.scenario === "recovery"));
   const files: Record<string, NoteBuffer> = simulated ? examples : source.files;
   const [jumps, setJumps] = useState<Record<string, { line: number; column?: number; token: number }>>({});
   const [markers, setMarkers] = useState<Record<string, CodeProblem[]>>({});
+  const [editorSettings, setEditorSettings] = useState<Record<string, EditorSettings>>({});
+  const [quickFix, setQuickFix] = useState<(EditorLocation & { panelId: string })>();
   const [bottom, setBottom] = useState<"terminal" | "problems" | null>("terminal");
   const [terminalFolders, setTerminalFolders] = useState<string[]>([""]);
   const [terminalFolder, setTerminalFolder] = useState("");
@@ -88,7 +91,8 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     ...Object.entries(examples).map(([path, value]) => ({ path, content: value.content })),
     ...(simulated ? exampleNotes : []),
   ];
-  const results = findFileText(searchFolder ? filesForSearch.filter(({ path }) => path.startsWith(`${searchFolder}/`)) : filesForSearch, query, true);
+  const results = findFileText(filesForSearch.filter(({ path }) => !searchScope || (searchScope.kind === "file"
+    ? path === searchScope.path : path.startsWith(`${searchScope.path}/`))), query, true);
   const paths = simulated ? filesForSearch.map(({ path }) => path)
     : [...new Set([...source.catalog, ...source.draftPaths, ...Object.keys(source.files)])];
   const markerEntries = Object.entries(markers).flatMap(([path, items]) => items.map((item) => ({ path, ...item })));
@@ -114,7 +118,8 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
   const openFile = useCallback((path: string, line?: number, split = false, column?: number) => {
     const request = ++openRequest.current;
     if (markdownPath(path)) {
-      openWorkspace("knowledge", !simulated && line ? noteSearchTarget(path, line, request) : path);
+      const location = line !== undefined || split ? noteSearchTarget(path, line ?? 1, request, split) : path;
+      openWorkspace("knowledge", location);
       return;
     }
     const focus = (file: string) => {
@@ -162,7 +167,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     }
     if (requestedFolder !== undefined) {
       setSidebar(true);
-      setSearchFolder(requestedFolder);
+      setSearchScope(requestedFolder ? { kind: "folder", path: requestedFolder } : undefined);
       setNavigator("search");
       return;
     }
@@ -187,6 +192,13 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     });
   }, [simulated, updateSource]);
   const report = useCallback((path: string, issues: CodeProblem[]) => setMarkers((before) => ({ ...before, [path]: issues })), []);
+  const reportEditorSettings = useCallback((path: string, settings: EditorSettings) => setEditorSettings((before) => ({ ...before, [path]: settings })), []);
+  const finishQuickFix = useCallback(() => setQuickFix(undefined), []);
+  const showQuickFix = ({ path, line, column }: FileProblem) => {
+    if (dock.api?.activePanel?.params?.path !== path) dock.open(path);
+    const panel = dock.api?.activePanel;
+    if (panel?.params?.path === path) setQuickFix({ panelId: panel.id, line, column });
+  };
 
   const save = async (path: string) => {
     const entry = simulated ? files[path] : source.getFile(path);
@@ -244,6 +256,11 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
     record?.model.dispose();
     models.delete(path);
     setMarkers((before) => {
+      const next = { ...before };
+      delete next[path];
+      return next;
+    });
+    setEditorSettings((before) => {
       const next = { ...before };
       delete next[path];
       return next;
@@ -333,16 +350,57 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
       for (const path of next) void loadSource(path).then((canonical) => { if (canonical) watchSource(canonical); });
     },
   });
-  const searchActions = ({ path, line, excerpt }: FileSearchResult) => [[
-    { label: "Open at match", run: () => openFile(path, line) },
-    ...(!markdownPath(path) ? [{ label: "Open to the side", run: () => openFile(path, line, true) }] : []),
-    { label: "Reveal in Explorer tree", run: () => revealFile(path) },
-  ], [
-    { label: "Copy line reference", run: () => menu.copy(`${path}:${line}`, "Copied line reference") },
-    { label: "Copy matched text", run: () => menu.copy(excerpt, "Copied matched text") },
-  ], simulated || !excerpt ? [] : [
-    { label: "Add match to conversation…", run: () => conversationActions.startExcerpt({ path, text: excerpt, startLine: line, endLine: line }) },
-  ]];
+  const openSearchMatch = (path: string, line: number, column?: number) => openFile(path, line, false, column);
+  const searchInFolder = (path: string) => {
+    setSidebar(true);
+    setSearchScope(path ? { kind: "folder", path } : undefined);
+    setNavigator("search");
+  };
+  const searchScopeActions = (path: string) => {
+    const folder = containingFolder(path);
+    return [
+      ...(searchScope?.kind === "file" && searchScope.path === path ? [] : [{ label: "Search in this file", run: () => setSearchScope({ kind: "file", path }) }]),
+      ...(folder ? searchScope?.kind === "folder" && searchScope.path === folder ? [] : [{ label: "Search in containing folder", run: () => searchInFolder(folder) }]
+        : searchScope ? [{ label: "Search entire worktree", run: () => searchInFolder("") }] : []),
+    ];
+  };
+  const searchActions = (match: FileSearchResult) => {
+    const { path, line, excerpt, columns = [], lineText } = match;
+    const reference = matchReference(match);
+    const isSource = !markdownPath(path);
+    return [[
+      { label: "Open at match", run: () => openSearchMatch(path, line, columns[0]) },
+      { label: "Open to the side", run: () => openFile(path, line, true, columns[0]) },
+      ...(isSource && columns.length > 1 ? [{ label: "Open at occurrence", items: columns.map((column) => ({
+        label: `Column ${column}`, run: () => openSearchMatch(path, line, column),
+      })) }] : []),
+      { label: "Reveal in Explorer tree", run: () => revealFile(path) },
+    ], [
+      { label: "Copy match reference", run: () => menu.copy(reference, "Copied match reference") },
+      ...(lineText != null ? [{ label: "Copy matching line", run: () => menu.copy(lineText, "Copied matching line") }]
+        : [{ label: "Copy match preview", run: () => menu.copy(excerpt, "Copied match preview") }]),
+      ...(columns.length > 1 ? [{ label: "Copy visible occurrence references", run: () => menu.copy(columns.map((column) => matchReference(match, column)).join("\n"), "Copied occurrence references") }] : []),
+    ], !simulated && excerpt ? [
+      { label: "Add match to conversation…", run: () => conversationActions.startContextText({ title: `Search match in ${fileName(path)}`, reference, text: lineText ?? excerpt }) },
+    ] : [], searchScopeActions(path)];
+  };
+  const searchFileActions = (matches: readonly FileSearchResult[]) => {
+    const first = matches[0]!;
+    const { path, line, columns } = first;
+    return [[
+      { label: "Open first match", run: () => openSearchMatch(path, line, columns?.[0]) },
+      { label: "Open first match to the side", run: () => openFile(path, line, true, columns?.[0]) },
+      { label: "Reveal in Explorer tree", run: () => revealFile(path) },
+    ], [
+      { label: "Copy relative path", run: () => menu.copy(path, "Copied relative path") },
+      { label: "Copy visible results", run: () => menu.copy(matches.map((match) => `${matchReference(match)} ${match.lineText ?? match.excerpt}`).join("\n"), "Copied file search results") },
+      { label: "Copy visible occurrence references", run: () => menu.copy(matches.flatMap((match) => match.columns?.length
+        ? match.columns.map((column) => matchReference(match, column)) : [matchReference(match)]).join("\n"), "Copied occurrence references") },
+    ], !simulated ? [
+      { label: "Add file matches to conversation…", run: () => conversationActions.startContextText({ title: `Search matches in ${fileName(path)}`, reference: path,
+        text: matches.map((match) => `${match.line}${match.columns?.[0] ? `:${match.columns[0]}` : ""} ${match.excerpt}`).join("\n") }) },
+    ] : [], searchScopeActions(path)];
+  };
   const simulateConflict = () => {
     if (!active || !buffer) return;
     const incoming = buffer.external ?? `// Revision ${Number(buffer.revision) + 1} from an external editor\n${buffer.saved}`;
@@ -362,13 +420,15 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
           <div className="file-toolbar">
             <button type="button" className="fw-icon" title="Files" aria-label="Files" aria-pressed={navigator === "files"} onClick={() => setNavigator("files")}><Files size={15} /></button>
             <button type="button" className="fw-icon" title="Search" aria-label="Search" aria-pressed={navigator === "search"}
-              onClick={() => { setSearchFolder(undefined); setNavigator("search"); }}><FileSearch2 size={15} /></button>
+              onClick={() => { setSearchScope(undefined); setNavigator("search"); }}><FileSearch2 size={15} /></button>
           </div>
         </div>
         <div className="file-sidebar-scroll">
           {navigator === "search" ? (simulated
-            ? <ExampleFileSearch query={query} setQuery={setQuery} results={results} onOpen={openFile} actions={searchActions} />
-            : <ProjectFileSearch checkoutId={checkout.checkoutId} folder={searchFolder} onOpen={openFile} actions={searchActions} />)
+            ? <ExampleFileSearch query={query} setQuery={setQuery} results={results} onOpen={openSearchMatch} actions={searchActions}
+              fileActions={searchFileActions} scope={searchScope} onClear={() => setSearchScope(undefined)} />
+            : <ProjectFileSearch checkoutId={checkout.checkoutId} scope={searchScope} onOpen={openSearchMatch} actions={searchActions}
+              fileActions={searchFileActions} onClear={() => setSearchScope(undefined)} />)
             : <><p className="file-sidebar-note" title={simulated ? undefined : checkout.checkoutRoot}>
               {simulated ? "EXAMPLE WORKTREE" : fileName(checkout.checkoutRoot.replaceAll("\\", "/"))}</p>
               <FileTree paths={paths} folders={treeActions.folders} active={active} onOpen={openFile} checkoutId={checkout.checkoutId} workspace="ide" simulated={simulated} reveal={reveal} actions={(target, selection) => selection ? [
@@ -381,9 +441,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                 ...conversationActions.actions(target, selection), ...fileOperations.actions(target, selection),
               ] : [
                 ...treeActions.actions(target),
-                ...(target.kind !== "file" ? [[{ label: "Find in folder", run: () => {
-                  setSearchFolder(target.path); setNavigator("search");
-                } }]] : []),
+                ...(target.kind !== "file" ? [[{ label: "Find in folder", run: () => searchInFolder(target.path) }]] : []),
                 ...(target.kind === "file" ? [[
                   { label: "Open", run: () => openFile(target.path) },
                   ...(!markdownPath(target.path) ? [{ label: "Open to the side", run: () => openFile(target.path, undefined, true) }] : []),
@@ -417,7 +475,7 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
 
         <div className="file-dock-body">
           <FileDock onReady={dock.onReady} context={{
-            renderFile: (path) => {
+            renderFile: (path, _view, panelId) => {
               const entry = files[path];
               const failure = source.failures[path];
               if (!entry) return simulated || failure
@@ -428,15 +486,15 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                 <div className="ide-file-view">
                   <FileCaption path={path} revision={entry.revision} onReveal={revealFile} actions={(item) => [
                     [{ label: "Reveal in Explorer tree", run: () => revealFile(item.path) },
-                      ...(item.kind === "folder" ? [{ label: "Find in folder", run: () => {
-                        setSidebar(true); setSearchFolder(item.path); setNavigator("search");
-                      } }] : []),
+                      ...(item.kind === "folder" ? [{ label: "Find in folder", run: () => searchInFolder(item.path) }] : []),
                       ...(!simulated ? [{ label: "Open terminal here", run: () => openTerminal(item.kind === "file" ? containingFolder(item.path) : item.path) }] : [])],
                     ...menu.location(item),
                   ]} />
                   {sourceProblem && <p role="alert" className="file-help">{sourceProblem}</p>}
                   <Suspense fallback={<p role="status" className="file-help">Loading source editor…</p>}>
                     <Editor scope={scope} path={path} content={entry.content} models={models} update={update} problems={report} jump={jumps[path]}
+                      quickFix={quickFix?.panelId === panelId && dock.api?.activePanel?.id === panelId ? quickFix : undefined}
+                      onQuickFixShown={finishQuickFix} onSettings={reportEditorSettings}
                       onCopy={menu.copy} onExcerpt={simulated ? undefined : conversationActions.startExcerpt}
                       onPermalink={simulated ? undefined : menu.copyPermalink} />
                   </Suspense>
@@ -493,31 +551,16 @@ function IdeSurface({ checkout, target, simulation, startSimulation, openWorkspa
                   </div>)}
               </Suspense>
             </div>
-            {bottom === "problems" && <ul className="ide-problems">
-              {markerEntries.length ? markerEntries.map(({ path, label, message, line, column }, index) => (
-                <li key={`${path}:${line}:${column}:${index}`}>
-                  <ContextActions label={`${path}:${line}:${column}`} groups={[[
-                    { label: "Go to problem", run: () => openFile(path, line, false, column) },
-                    { label: "Reveal in Explorer tree", run: () => revealFile(path) },
-                  ], [
-                    { label: "Copy diagnostic", run: () => menu.copy(`${path}:${line}:${column} ${label}: ${message}`, "Copied diagnostic") },
-                    { label: "Copy location", run: () => menu.copy(`${path}:${line}:${column}`, "Copied problem location") },
-                  ], simulated ? [] : [
-                    { label: "Explain diagnostic…", run: () => conversationActions.startExcerpt({ path, startLine: line, endLine: line,
-                      text: `${label} at column ${column}: ${message}` }, "Explain this diagnostic and suggest how to resolve it.") },
-                  ]]}>
-                    <button className="ide-problem-open" type="button" onClick={() => openFile(path, line, false, column)}>
-                      <CircleAlert size={15} /><span>{label} · {message}</span><small>{fileName(path)}:{line}:{column}</small>
-                    </button>
-                  </ContextActions>
-                </li>
-              )) : <li className="file-help">No editor diagnostics in this workspace.</li>}
-              {simulated && <li className="file-help">ripgrep missing · Configure its executable in Settings to enable live repository search.</li>}
-            </ul>}
+            {bottom === "problems" && <IdeProblems issues={markerEntries} simulated={simulated}
+              open={({ path, line, column }, split) => openFile(path, line, split, column)} reveal={revealFile} quickFix={showQuickFix} copy={menu.copy}
+              onContext={simulated ? undefined : (issue, instruction) => conversationActions.startContextText({
+                title: `${issue.label} in ${fileName(issue.path)}`, reference: problemReference(issue),
+                text: `${issue.label}: ${issue.message}`,
+              }, instruction)} />}
           </div>
         </ResizablePanel>}
         {active && buffer && <footer className="ide-statusbar">
-          <span>{dirty(active) ? "Unsaved changes" : "Saved"} · UTF-8</span>
+          <EditorStatus path={active} saved={!dirty(active)} settings={editorSettings[active]} format={buffer.format} copy={menu.copy} />
           {buffer.external !== undefined && <button type="button" className="fw-btn" onClick={() => setDialog({ kind: "conflict", path: active })}>Review external change</button>}
           {simulated && buffer.external === undefined && <button type="button" className="fw-btn" onClick={simulateConflict}>Simulate external change</button>}
         </footer>}

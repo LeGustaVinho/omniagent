@@ -280,7 +280,7 @@ function KnowledgeSurface({ checkout, target, simulation, startSimulation, openW
     const next = location && normalizeRepositoryPath(location.path);
     if (!next || !location) return;
     lastTarget.current = target;
-    open(next, location.line);
+    open(next, location.line, undefined, location.side ? "side" : undefined);
   }, [dock.ready, open, target]);
 
   const update = (path: string, content: string) => {

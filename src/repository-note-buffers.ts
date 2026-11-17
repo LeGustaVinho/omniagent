@@ -8,7 +8,8 @@ export type NoteRevision = {
   sha256: string;
   baseCommit: string | null;
 };
-type RepositoryDocument = { revision: NoteRevision; markdown: string; fileIdentity: string };
+type LineEndings = "none" | "lf" | "crlf" | "cr" | "mixed";
+type RepositoryDocument = { revision: NoteRevision; markdown: string; fileIdentity: string; utf8Bom?: boolean; lineEndings?: LineEndings };
 export type DocumentOpen = { status: "document"; document: RepositoryDocument }
   | { status: "missing" | "unsupported_encoding"; relativePath?: string };
 type Recovery = { message: string; editedPath: string | null; displacedPath: string | null };
@@ -21,6 +22,7 @@ export type NoteBuffer = {
   saved: string;
   revision: number | string;
   external?: string;
+  format?: { utf8Bom: boolean; lineEndings: LineEndings };
 };
 type RepositoryBuffer = NoteBuffer & {
   base: NoteRevision;
@@ -73,6 +75,7 @@ function loaded(document: RepositoryDocument, draftRevision: string | null): Rep
   return {
     base: document.revision, fileIdentity: document.fileIdentity,
     revision: document.revision.sha256.slice(0, 12), content: document.markdown, saved: document.markdown, draftRevision,
+    format: document.lineEndings === undefined ? undefined : { utf8Bom: Boolean(document.utf8Bom), lineEndings: document.lineEndings },
   };
 }
 

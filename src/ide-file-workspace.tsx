@@ -42,7 +42,7 @@ type ClosedTab = { sequence: number; id: string; params: FilePanelParams; groupI
 type CloseBatch = { ids: string[]; savedOnly: boolean };
 
 export interface FileDockContextValue {
-  renderFile: (path: string, view: FileView) => ReactNode;
+  renderFile: (path: string, view: FileView, panelId: string) => ReactNode;
   empty: ReactNode;
   dirty: (path: string) => boolean;
   requestClose: CloseTab;
@@ -53,8 +53,8 @@ export interface FileDockContextValue {
 
 const FileDockContext = createContext<FileDockContextValue | null>(null);
 
-function FileDockPanel({ params }: IDockviewPanelProps<FilePanelParams>) {
-  return useContext(FileDockContext)?.renderFile(params.path, params.view) ?? null;
+function FileDockPanel({ params, api }: IDockviewPanelProps<FilePanelParams>) {
+  return useContext(FileDockContext)?.renderFile(params.path, params.view, api.id) ?? null;
 }
 
 function FileDockTab({ params, api }: IDockviewPanelHeaderProps<FilePanelParams>) {

@@ -31,7 +31,7 @@ fn match_records_are_checkout_bound_and_previews_keep_the_literal_hit() -> Resul
         "docs/missing.txt",
         "docs/note with spaces.txt:stream",
     ];
-    let text = "é".repeat(650) + " a.*b " + &"ç".repeat(450) + "\r\n";
+    let text = "é🚀".repeat(650) + " a.*b " + &"ç".repeat(450) + "\r\n";
     let offset = text.find("a.*b").unwrap();
     let mut newline_json = Vec::new();
     for path in records {
@@ -45,14 +45,23 @@ fn match_records_are_checkout_bound_and_previews_keep_the_literal_hit() -> Resul
         newline_json.push(b'\n');
     }
     newline_json.extend(b"{incomplete");
-    let (matches, truncated) = read_matches(&root, &newline_json)?;
+    let (matches, truncated) = read_matches(&root, &newline_json, None)?;
     assert!(!truncated);
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].path, "docs/note with spaces.txt");
     assert_eq!(matches[0].line, 42);
+    assert_eq!(matches[0].columns, [1952]);
+    assert_eq!(matches[0].occurrences, 1);
+    assert!(matches[0].line_text.is_none());
     assert!(matches[0].excerpt.contains("a.*b"));
     assert_eq!(matches[0].excerpt.chars().count(), 322);
     assert!(matches[0].excerpt.starts_with('…') && matches[0].excerpt.ends_with('…'));
+    let (outside_scope, _) = read_matches(
+        &root,
+        &newline_json,
+        Some((Path::new("docs/other.txt"), true)),
+    )?;
+    assert!(outside_scope.is_empty());
     assert!(validate_query("a.*b").is_ok());
     assert!(validate_query("  literal spaces  ").is_ok());
     assert!(validate_query("line one\nline two").is_err());
@@ -213,8 +222,24 @@ async fn real_search_respects_ignores_literals_scope_and_persisted_executable() 
         [ProjectSearchMatch {
             path: "src/ação file.txt".into(),
             line: 2,
-            excerpt: "  A.*b literal".into()
+            excerpt: "  A.*b literal".into(),
+            columns: vec![3],
+            occurrences: 1,
+            line_text: Some("  A.*b literal".into()),
         }]
+    );
+    fs::write(root.join("src/sibling.txt"), "a.*b")?;
+    let exact = store
+        .search_repository_file(checkout.clone(), "a.*b".into(), "src/ação file.txt".into())
+        .await?;
+    assert!(
+        matches!(exact, ProjectSearch::Results { matches: scoped, truncated: false } if scoped == matches)
+    );
+    assert!(
+        store
+            .search_repository_file(checkout.clone(), "a.*b".into(), "escape/secret.txt".into())
+            .await
+            .is_err()
     );
     let primary_result = store
         .search_repository_files(primary.checkout_id, "a.*b".into())
