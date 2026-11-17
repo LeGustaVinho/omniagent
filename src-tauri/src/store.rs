@@ -126,6 +126,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/109-workflow-plan-mode.sql"),
     include_str!("../migrations/110-image-generation-qualifications.sql"),
     include_str!("../migrations/111-interrupted-writer-reconciliation.sql"),
+    include_str!("../migrations/112-workflow-goal-requalification.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

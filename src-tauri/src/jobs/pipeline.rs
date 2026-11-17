@@ -45,6 +45,11 @@ pub struct PipelineAgentInput {
     pub role_context: Option<RoleContextPolicy>,
 }
 
+pub(crate) struct WorkflowJobLaunch {
+    pub inputs: WorkflowJobInput,
+    pub goal_review_token: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../src/bindings/")]
@@ -511,7 +516,7 @@ impl Store {
         request: JobRequest,
         input: PipelineAgentInput,
         checklist_execution: bool,
-        workflow: WorkflowJobInput,
+        workflow: WorkflowJobLaunch,
     ) -> Result<Job> {
         self.submit_pipeline_agent_job_with_target(
             binding,
@@ -548,7 +553,7 @@ impl Store {
         mut request: JobRequest,
         input: PipelineAgentInput,
         checklist_execution: bool,
-        workflow: Option<WorkflowJobInput>,
+        workflow: Option<WorkflowJobLaunch>,
     ) -> Result<Job> {
         if let Some((_, route)) = &input.pinned {
             ensure!(
@@ -593,6 +598,16 @@ impl Store {
                     )?;
                     ensure!(valid, "The pinned input is outside the pipeline checkout");
                 }
+                let requalification = if let Some(launch) = &workflow && let Some(token) = &launch.goal_review_token {
+                    ensure!(input.pinned.is_none(), "A requalified Goal must start fresh in the approved scope");
+                    let review = super::goal_requalification::prepare_requalification(&tx, &project,
+                        super::goal_requalification::ProposedScope { binding: &binding, profile: &scope, request: &request, inputs: &launch.inputs })?;
+                    review.consume(&tx, token)?;
+                    Some(review)
+                } else {
+                    None
+                };
+                let workflow = workflow.map(|launch| launch.inputs);
                 if let Some(workflow) = &workflow {
                     stage_job_input(&tx, &project, &binding, &request, workflow)?;
                 }
@@ -696,8 +711,11 @@ impl Store {
                         )?;
                     }
                     if let Some(definition) = &goal {
-                        super::goals::bind_initial_goal(&tx, &job, &context.conversation_id, definition, Some(&binding))?;
+                        let (_, revision) = super::goals::bind_initial_goal(&tx, &job, &context.conversation_id, definition, Some(&binding))?;
                         ensure!(history::effective_release_blocker(&tx, &job)?.is_none(), "The workflow Goal does not have a current stage release");
+                        if let Some(requalification) = requalification {
+                            requalification.record(&tx, &revision)?;
+                        }
                     }
                 }
                 tx.execute(

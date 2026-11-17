@@ -380,7 +380,7 @@ fn checks_evidence_kind_and_candidate_scope_before_honoring_a_completed_verdict(
     Ok(())
 }
 
-async fn begin(store: &Store, attempt: &AttemptPlan) -> Result<()> {
+pub(super) async fn begin(store: &Store, attempt: &AttemptPlan) -> Result<()> {
     store.mark_agent_running(attempt.run.id.clone()).await?;
     let snapshot: ContextSnapshot = serde_json::from_value(json!({
         "version": 1,
@@ -400,7 +400,11 @@ async fn begin(store: &Store, attempt: &AttemptPlan) -> Result<()> {
     store.settle_dispatch(dispatch, Delivery::Submitted).await
 }
 
-async fn finish(store: &Store, attempt: &AttemptPlan, action: GoalTurnAction) -> Result<RunStatus> {
+pub(super) async fn finish(
+    store: &Store,
+    attempt: &AttemptPlan,
+    action: GoalTurnAction,
+) -> Result<RunStatus> {
     assert!(
         store
             .record_goal_turn_report(
@@ -438,7 +442,7 @@ async fn finish(store: &Store, attempt: &AttemptPlan, action: GoalTurnAction) ->
         .await
 }
 
-async fn goal_delivery(
+pub(super) async fn goal_delivery(
     store: &Store,
     root: &std::path::Path,
     evidence: StageGoalEvidence,
@@ -472,6 +476,13 @@ async fn goal_delivery(
         .await?;
     let workflow = store.start_workflow_run(project.clone(), version).await?;
     let fixture = approve_delivery_fixture_in_run(store, root, repository, None, workflow).await?;
+    let request = goal_submission(&fixture)?;
+    Ok((fixture, request, draft))
+}
+
+pub(super) fn goal_submission(
+    fixture: &ApprovedDeliveryFixture,
+) -> Result<WorkflowAgentSubmission> {
     let unit = &fixture.units[0];
     let ArtifactValue::Release(release) = &fixture.release.value else {
         anyhow::bail!("no approved release");
@@ -492,7 +503,7 @@ async fn goal_delivery(
         ("worktree".into(), fixture.worktree.id.clone()),
         ("release".into(), fixture.release.id.clone()),
     ]);
-    Ok((fixture, request, draft))
+    Ok(request)
 }
 
 #[tokio::test]

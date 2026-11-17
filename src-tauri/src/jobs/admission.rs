@@ -551,7 +551,9 @@ impl Store {
                 } else {
                     None
                 };
-                let writer_checkpoint = pending_writer_checkpoint(&tx, &job)?.or(automatic_writer_checkpoint);
+                let prior_scope = super::goal_requalification::initial_checkpoint(&tx, &job)?;
+                let writer_checkpoint = pending_writer_checkpoint(&tx, &job)?.or(automatic_writer_checkpoint)
+                    .or_else(|| prior_scope.as_ref().filter(|scope| scope.same_worktree).map(|scope| scope.run.clone()));
                 let wait = job.downstream_wait.as_ref();
                 let question_run = inputs.question.as_ref().map(|question| question.run.clone());
                 let goal_run = inputs.goal.as_ref().map(|boundary| boundary.run.clone());
@@ -568,14 +570,17 @@ impl Store {
                 } else {
                     None
                 };
-                let plan = build_attempt(
+                let mut plan = build_attempt(
                     &tx, &job, inputs, checkpoint.as_ref(), allocation,
                     adopted.as_ref().map(|claim| claim.revision_id.clone()),
                 )?;
                 let previous_run = question_run.as_deref()
                     .or_else(|| wait.map(|wait| wait.parent_run_id.as_str()))
                     .or_else(|| checkpoint.as_ref().map(RecoveryCheckpoint::run_id))
-                    .or(goal_run.as_deref());
+                    .or(goal_run.as_deref()).or_else(|| prior_scope.as_ref().map(|scope| scope.run.as_str()));
+                if let Some(scope) = &prior_scope && let ScheduledAttempt::Agent(agent) = &mut plan {
+                    agent.previous_run_id = Some(scope.run.clone());
+                }
                 let ordinal = job
                     .latest_attempt
                     .as_ref()
@@ -1442,6 +1447,13 @@ fn evaluate(
         blockers.push(PipelineRelease { reason });
     }
     if job.mode == SessionMode::ApprovedWrite {
+        if let Some(prior_scope) = super::goal_requalification::initial_checkpoint(db, job)?
+            && prior_scope.same_worktree && !goals::confirmed_stage_worktree(db, job, &prior_scope.run)?
+        {
+            blockers.push(Policy {
+                reason: "The requalified goal's worktree checkpoint is unavailable",
+            });
+        }
         if let Some(goal) = &inputs.goal
             && crate::workflows::load_workflow_job_input(db, &job.id)?.is_some()
             && !goals::confirmed_stage_worktree(db, job, &goal.run)?

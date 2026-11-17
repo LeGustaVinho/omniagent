@@ -16,6 +16,7 @@ mod downstream;
 mod failures;
 mod goal_control;
 mod goal_inspection;
+mod goal_requalification;
 mod goal_transition;
 mod goal_verification;
 mod goals;
@@ -53,6 +54,7 @@ pub use failures::{
 };
 pub use goal_control::{GoalControlState, GoalStopAction};
 pub use goal_inspection::{ConversationGoalOverview, InspectedGoal};
+pub use goal_requalification::{GoalRequalificationScope, WorkflowGoalRequalification};
 pub(crate) use goal_transition::{conversation_goal_transition, native_goal_fork_is_safe};
 pub use goal_transition::{GoalTransitionReview, GoalTransitionScope};
 pub use goal_verification::{
@@ -90,7 +92,7 @@ pub use pipeline::{
     PipelineAgentInput, PipelineDispatch, PipelineJobOrigin, PipelineNodeKind, PipelineRelease,
     ReleaseBlocker,
 };
-pub(crate) use pipeline::{PipelineReleaseScope, issue_pipeline_release};
+pub(crate) use pipeline::{PipelineReleaseScope, WorkflowJobLaunch, issue_pipeline_release};
 pub(crate) use policy::validate_attempt_dispatch;
 pub use policy::{
     DispatchRejection, JobPermission, JobRequirements, JobRole, JobRule, JobWorkspace,

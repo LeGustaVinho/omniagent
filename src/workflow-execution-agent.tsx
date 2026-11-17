@@ -45,6 +45,7 @@ function AgentActions({ snapshot, node, unit, stage, inputs, openActivity }: {
     (unitId ? artifact.unitId === unitId : current));
   const role = snapshot.rolePins?.find((pin) => pin.nodeId === nodeId && pin.nodeRevision === node.revision && !pin.requirementsOnly)?.role;
   const modelOverride = node.instance.configuration.model as ModelSelection | null | undefined;
+  const goalEnabled = Boolean((node.instance.configuration.requirements as { goal?: unknown } | undefined)?.goal);
   const proposals = useQuery({
     queryKey: ["workflow-plan-proposals", projectId, runId, terminal?.runId],
     queryFn: () => invoke<{ sequence: string; text: string }[]>("repository_delivery_plan_proposals", {
@@ -60,7 +61,7 @@ function AgentActions({ snapshot, node, unit, stage, inputs, openActivity }: {
   return <>
     {!published && <DeliveryAgent scope={scope} nodeId={nodeId} stage={stage} inputs={inputs} unitId={unitId} taskId={unit?.taskId}
       job={job} label={node.definition.title} actions={{ execute: (operation) => mutate.mutate(operation), busy: mutate.isPending }}
-      openActivity={openActivity} pinnedModel={modelOverride ?? role?.model} pinnedEffort={role?.effort} />}
+      openActivity={openActivity} pinnedModel={modelOverride ?? role?.model} pinnedEffort={role?.effort} goalEnabled={goalEnabled} />}
     {stage === "implement" && unit && terminal && !published && <WorkflowExecutionCandidate
       key={terminal.runId} snapshot={snapshot} node={node} unit={unit} attemptId={terminal.runId} />}
     {publish && stage === "plan" && <label className="workflow-execution-field">Recorded plan proposal

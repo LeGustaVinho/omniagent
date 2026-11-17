@@ -570,15 +570,7 @@ fn managed_turn_limit_reached(db: &Connection, revision: &str) -> Result<bool> {
         return Ok(false);
     };
     // A prepared dispatch may have reached the CLI before a disconnect or restart.
-    Ok(db.query_row(
-        "SELECT count(*) >= ?2 FROM goal_continuations c JOIN job_attempts a ON a.job_id = c.job_id
-         WHERE c.revision_id = ?1 AND EXISTS (
-            SELECT 1 FROM context_snapshots s JOIN dispatches d ON d.snapshot_id = s.id
-            WHERE s.run_id = a.run_id AND d.ordinal = 1
-         )",
-        params![revision, max_turns],
-        |row| row.get(0),
-    )?)
+    Ok(super::goal_requalification::total_turns(db, revision)? >= max_turns)
 }
 
 pub(crate) fn goal_dispatch_blocker(db: &Connection, run: &str) -> Result<Option<&'static str>> {
@@ -586,6 +578,15 @@ pub(crate) fn goal_dispatch_blocker(db: &Connection, run: &str) -> Result<Option
     let Some(job) = job else {
         return Ok(None);
     };
+    let deleted_checkpoint: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM goal_writer_attempts checkpoint
+         JOIN history_deleted_attempt_diffs deleted ON deleted.run_id = checkpoint.checkpoint_run_id
+         WHERE checkpoint.run_id = ?1)",
+        [run], |row| row.get(0),
+    )?;
+    if deleted_checkpoint {
+        return Ok(Some("The Goal worktree checkpoint was removed from history"));
+    }
     // A token budget was qualified at admission and is rechecked at native activation.
     limit_blocker(db, &job, true)
 }
@@ -1035,6 +1036,7 @@ pub(super) fn confirmed_stage_worktree(db: &Connection, job: &Job, run: &str) ->
              JOIN jobs source ON source.id = a.job_id
              LEFT JOIN job_worktree_scopes scope ON scope.job_id = source.id
              WHERE s.run_id = ?1 AND s.checkout_id = ?2 AND c.capture_confirmed
+               AND NOT EXISTS (SELECT 1 FROM history_deleted_attempt_diffs deleted WHERE deleted.run_id = s.run_id)
                AND source.project_id = ?3 AND coalesce(scope.scope_task_id, source.task_id) = ?4)",
         params![run, job.checkout_id, job.project_id, job.task_id],
         |row| row.get(0),

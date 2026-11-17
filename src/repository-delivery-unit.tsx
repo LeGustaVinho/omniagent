@@ -130,7 +130,7 @@ export function RepositoryDeliveryUnit({ scope, unit, delivery, implementationIn
     {active && <>
       <DeliveryAgent scope={scope} nodeId="implement" inputs={implementationInputs} unitId={unitId} taskId={taskId}
         pinnedModel={pinnedDeliveryStageModel(delivery, "implement")}
-        job={implementation} label="Implementation" actions={actions} openActivity={openActivity} />
+        job={implementation} goalEnabled={Boolean(goal)} label="Implementation" actions={actions} openActivity={openActivity} />
       {implementation?.latestAttempt?.status === "succeeded" && attemptId && <WorktreeEvidence projectId={scope.projectId} runId={attemptId} ownerTaskId={implementation.worktreeOwnerTaskId} />}
       {capture.data?.kind === "unavailable" && <p role="alert">{capture.data.reason}</p>}
       {captureArtifact && attemptId && <details className="pipeline-evidence" open={!candidate && !goalCandidate}>

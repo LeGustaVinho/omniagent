@@ -468,7 +468,7 @@ pub(super) fn writer_pause_checkpoint(
     )?)
 }
 
-fn paused_job(db: &Connection, project: &str, revision: &str) -> Result<(Job, Option<String>)> {
+pub(super) fn paused_job(db: &Connection, project: &str, revision: &str) -> Result<(Job, Option<String>)> {
     let (id, stopped): (String, Option<String>) = db
         .query_row(
             "SELECT c.job_id, controls.stop_run_id FROM goal_revision_controls controls
@@ -882,6 +882,19 @@ pub(crate) fn recover_managed_goal_stops(db: &Connection) -> Result<()> {
         super::observe_child_run(db, &run)?;
     }
     Ok(())
+}
+
+pub(super) fn retire_requalified_goal(db: &Connection, revision: &str) -> Result<()> {
+    let confirmed: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM active_goals active
+         JOIN goal_revision_controls controls ON controls.revision_id = active.revision_id
+         WHERE active.revision_id = ?1 AND controls.state = 'paused')",
+        [revision],
+        |row| row.get(0),
+    )?;
+    ensure!(confirmed && !owned_children_unsettled(db, revision)?, "The workflow goal continuation has already changed");
+    stop_owned_children(db, revision)?;
+    release_goal(db, revision)
 }
 
 fn release_goal(db: &Connection, revision: &str) -> Result<()> {

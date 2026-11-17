@@ -1,5 +1,6 @@
 use anyhow::Context;
 use omniagent::{
+    jobs::{Job, WorkflowGoalRequalification},
     model_catalog::ModelSelection,
     providers::SessionMode,
     repository::verification::CandidateVerification,
@@ -11,8 +12,35 @@ use omniagent::{
 };
 use tauri::State;
 
-use super::report;
+use super::{DeliveryAgentInput, delivery_agent_submission, report};
 use crate::conversation_runtime::selected_scope;
+
+#[tauri::command]
+pub async fn preview_workflow_goal_requalification(
+    store: State<'_, Store>,
+    input: DeliveryAgentInput,
+) -> Result<WorkflowGoalRequalification, String> {
+    async {
+        let submission = delivery_agent_submission(&store, input, false).await?;
+        store.preview_workflow_goal_requalification(submission).await
+    }
+    .await
+    .map_err(report)
+}
+
+#[tauri::command]
+pub async fn submit_workflow_goal_requalification(
+    store: State<'_, Store>,
+    input: DeliveryAgentInput,
+    review_token: String,
+) -> Result<Job, String> {
+    async {
+        let submission = delivery_agent_submission(&store, input, false).await?;
+        store.submit_workflow_goal_requalification(submission, review_token).await
+    }
+    .await
+    .map_err(report)
+}
 
 #[tauri::command]
 pub async fn verify_workflow_goal_candidate(

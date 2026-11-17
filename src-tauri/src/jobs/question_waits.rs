@@ -409,17 +409,25 @@ fn writer_checkpoint_is_current(db: &Connection, run: &str) -> Result<bool> {
     {
         return Ok(false);
     }
-    // A native goal pins the exact captured candidate for its next session.
-    // Earlier edits within the same scope keep their original attribution.
+    // A resumed writer inherits the exact captured checkout while pending edits
+    // keep the attribution of the earlier attempt that produced them.
     Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM job_worktree_candidates WHERE run_id = ?1 AND capture_confirmed = 1)
+        "WITH RECURSIVE checkpoints(run_id) AS (
+            SELECT ?1
+            UNION SELECT previous.checkpoint_run_id
+                FROM goal_writer_attempts previous JOIN checkpoints on checkpoints.run_id = previous.run_id
+            UNION SELECT question.run_id FROM structured_question_continuations link
+                JOIN checkpoints ON checkpoints.run_id = link.continuation_run_id
+                JOIN agent_questions question ON question.request_event_seq = link.request_event_seq
+         )
+         SELECT EXISTS(SELECT 1 FROM job_worktree_candidates WHERE run_id = ?1 AND capture_confirmed = 1
+                   AND NOT EXISTS (SELECT 1 FROM history_deleted_attempt_diffs WHERE run_id = ?1))
          AND NOT EXISTS(SELECT 1 FROM job_writer_reservations WHERE checkout_id = ?2)
          AND NOT EXISTS(SELECT 1 FROM app_worktree_writers WHERE checkout_id = ?2)
          AND NOT EXISTS(SELECT 1 FROM pending_worktree_changes
              WHERE checkout_id = ?2 AND producing_run_id IS NOT ?1
-               AND NOT (scope_task_id = ?3 AND EXISTS (
-                   SELECT 1 FROM native_goal_executors WHERE run_id = ?1
-               )))",
+               AND NOT (scope_task_id = ?3 AND ((producing_run_id IS NOT NULL AND producing_run_id IN (SELECT run_id FROM checkpoints))
+                   OR EXISTS (SELECT 1 FROM native_goal_executors WHERE run_id = ?1))))",
         params![run, job.checkout_id, task],
         |row| row.get(0),
     )?)

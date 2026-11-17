@@ -12,11 +12,12 @@ import {
 import { useTaskAssignments } from "@/task-assignment";
 import type { WorkspaceProps } from "@/workbench-contract";
 import { ReviewComparisonInputs, SavedComparisonInputs, type ComparisonSelection } from "@/workflow-comparison-selection";
+import { WorkflowGoalRequalification } from "@/workflow-goal-requalification";
 
 type PlanRevisionSource = { sourceAttemptId: string; proposalSequence: string; expectedPlanRevision: string | null };
 
 export function DeliveryAgent({ scope, nodeId, stage = nodeId as DeliveryNode, inputs, unitId = null, taskId, job, label, actions,
-  openActivity, planRevision, pinnedModel, pinnedEffort = null }: {
+  openActivity, planRevision, pinnedModel, pinnedEffort = null, goalEnabled = false }: {
   scope: DeliveryTarget;
   nodeId: string;
   stage?: DeliveryNode;
@@ -30,6 +31,7 @@ export function DeliveryAgent({ scope, nodeId, stage = nodeId as DeliveryNode, i
   planRevision?: PlanRevisionSource;
   pinnedModel?: DeliveryModelChoice;
   pinnedEffort?: string | null;
+  goalEnabled?: boolean;
 }) {
   const [selection, setSelection] = useState<DeliveryModelChoice>(null);
   const [revisionSource, setRevisionSource] = useState<PlanRevisionSource>();
@@ -85,6 +87,9 @@ export function DeliveryAgent({ scope, nodeId, stage = nodeId as DeliveryNode, i
       </p>}
       {assignments.error && <p role="alert">{String(assignments.error)}</p>}
       {stage === "review-plan" && <ReviewComparisonInputs projectId={scope.projectId} selection={comparison} onChange={setComparison} />}
+      {goalEnabled && stage === "implement" && effectiveSelection &&
+        <WorkflowGoalRequalification input={{ ...scope, nodeId, unitId, inputs, selection: effectiveSelection, effort: pinnedEffort }}
+          actions={actions} openActivity={openActivity} />}
       {revising && revisionSource ? <div className="pipeline-form pipeline-stack">
         <label className="pipeline-stack">
           Feedback for proposal {revisionSource.proposalSequence}

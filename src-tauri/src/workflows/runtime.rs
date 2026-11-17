@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     conversations::SessionScope,
-    jobs::{Job, JobRequest, PipelineAgentInput, PipelineDispatch},
+    jobs::{Job, JobRequest, PipelineAgentInput, PipelineDispatch, WorkflowJobLaunch},
     protection,
     providers::{SessionMode, questions::QuestionRoute},
     runs::RunStatus,
@@ -191,7 +191,7 @@ impl Store {
         submission: WorkflowAgentSubmission,
         comparison: Option<super::comparison::ComparisonSelection>,
     ) -> Result<Job> {
-        self.submit_workflow_agent_inner(submission, None, false, comparison).await
+        self.submit_workflow_agent_inner(submission, None, false, comparison, None).await
     }
 
     pub(super) async fn submit_workflow_agent_with_revision(
@@ -199,12 +199,20 @@ impl Store {
         submission: WorkflowAgentSubmission,
         plan_revision_request: Option<super::WorkflowPlanRevisionRequest>,
     ) -> Result<Job> {
-        self.submit_workflow_agent_inner(submission, plan_revision_request, false, None).await
+        self.submit_workflow_agent_inner(submission, plan_revision_request, false, None, None).await
     }
 
     pub(crate) async fn submit_workflow_checklist_agent(&self, submission: WorkflowAgentSubmission) -> Result<Job> {
         ensure!(submission.input.target.is_some(), "checklist execution requires a task run target");
-        self.submit_workflow_agent_inner(submission, None, true, None).await
+        self.submit_workflow_agent_inner(submission, None, true, None, None).await
+    }
+
+    pub async fn submit_workflow_goal_requalification(
+        &self,
+        submission: WorkflowAgentSubmission,
+        review_token: String,
+    ) -> Result<Job> {
+        self.submit_workflow_agent_inner(submission, None, false, None, Some(review_token)).await
     }
 
     async fn submit_workflow_agent_inner(
@@ -213,6 +221,7 @@ impl Store {
         plan_revision_request: Option<super::WorkflowPlanRevisionRequest>,
         checklist_execution: bool,
         comparison: Option<super::comparison::ComparisonSelection>,
+        goal_review_token: Option<String>,
     ) -> Result<Job> {
         let WorkflowAgentSubmission {
             project_id,
@@ -413,11 +422,14 @@ impl Store {
             request,
             input,
             checklist_execution,
-            WorkflowJobInput {
-                unit_id,
-                artifacts,
-                plan_revision_request,
-                comparison,
+            WorkflowJobLaunch {
+                inputs: WorkflowJobInput {
+                    unit_id,
+                    artifacts,
+                    plan_revision_request,
+                    comparison,
+                },
+                goal_review_token,
             },
         )
         .await
