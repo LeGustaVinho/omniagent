@@ -411,6 +411,7 @@ fn main() {
             workflow_ipc::authoring::simulate_workflow_package_revision,
             workflow_ipc::decisions::resolve_workflow_stage_decision,
             workflow_ipc::authoring::create_workflow_package,
+            workflow_ipc::authoring::duplicate_workflow_template_draft,
             workflow_ipc::authoring::save_workflow_package,
             workflow_ipc::authoring::request_workflow_package_changes,
             workflow_ipc::authoring::start_workflow_package_authoring,

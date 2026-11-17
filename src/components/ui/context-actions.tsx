@@ -11,6 +11,18 @@ export type MenuAction = {
 
 export type MenuGroups = readonly (readonly MenuAction[])[];
 
+export function useContextActionFeedback() {
+  const [feedback, setFeedback] = useState<{ failed: boolean; text: string }>();
+  async function run(action: () => Promise<unknown>, success?: string) {
+    setFeedback(undefined);
+    try {
+      await action();
+      if (success) setFeedback({ failed: false, text: success });
+    } catch (error) { setFeedback({ failed: true, text: String(error) }); }
+  }
+  return { feedback, run, copy: (text: string) => void run(() => navigator.clipboard.writeText(text), "Copied to the clipboard.") };
+}
+
 function ActionItems({ groups, variant }: { groups: MenuGroups; variant: "context" | "dropdown" }) {
   const { Item, Separator, Sub, SubTrigger, SubContent, Portal } = variant === "context" ? ContextMenu : DropdownMenu;
   function render(action: MenuAction) {

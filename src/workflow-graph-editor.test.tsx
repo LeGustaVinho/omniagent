@@ -128,7 +128,7 @@ it("opens the graph from the exact saved workflow revision in Roles & templates"
   </QueryClientProvider>);
   const user = userEvent.setup();
   const history = within(screen.getByRole("region", { name: "Saved workflow templates" }));
-  await user.click(await history.findByRole("button", { name: /Release template/ }));
+  await user.click(await history.findByRole("button", { name: /^Release template/ }));
   expect(ipc).toHaveBeenCalledWith("read_published_workflow_package_artifact", { projectId: exampleCheckout.projectId, version });
   const template = within(await history.findByRole("region", { name: "Selected workflow template" }));
   const card = await template.findByTestId("node-start");
@@ -142,6 +142,30 @@ it("opens the graph from the exact saved workflow revision in Roles & templates"
     package: { name, members: [{ key: "pipeline", name, destination: "project", base: version, body, references: {} }] },
   });
   await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "authoring:package:revision-draft"));
+});
+
+it("duplicates the template revision under the context menu", async () => {
+  const version = { id: "release-template", revision: "clicked-immutable-revision", kind: "pipeline", destination: "project" };
+  const other = { ...version, revision: "other-revision" };
+  const name = "Release template";
+  const openWorkspace = vi.fn();
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "list_conversation_templates") return [];
+    if (command === "workflow_package_catalog") return [{ name, version }, { name, version: other }];
+    if (command === "duplicate_workflow_template_draft") return { id: "independent-draft" };
+    throw new Error(command);
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <PipelinesWorkspace checkout={exampleCheckout} simulation={null} target="templates" openWorkspace={openWorkspace}
+      startSimulation={vi.fn()} openActivity={vi.fn()} openChanges={vi.fn()} />
+  </QueryClientProvider>);
+  const user = userEvent.setup();
+  const history = within(screen.getByRole("region", { name: "Saved workflow templates" }));
+  const row = await history.findByRole("button", { name: /^Release template.*clicked-immu/ });
+  fireEvent.contextMenu(row);
+  await user.click(await screen.findByRole("menuitem", { name: "Duplicate as project draft…" }));
+  expect(invoke).toHaveBeenCalledWith("duplicate_workflow_template_draft", { projectId: exampleCheckout.projectId, version });
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "authoring:package:independent-draft"));
 });
 
 it("opens a protected draft, reviews an affected port upgrade, wires typed nodes, and restores the saved graph and layout", async () => {

@@ -166,17 +166,7 @@ fn selected_base_member(
     let references = artifact
         .references
         .into_iter()
-        .map(|(slot, reference)| {
-            let reference = match reference {
-                ResolvedPackageReference::Published { version } => {
-                    PackageReference::Published { version }
-                }
-                ResolvedPackageReference::Parameter { name, kind } => {
-                    PackageReference::Parameter { name, kind }
-                }
-            };
-            (slot, reference)
-        })
+        .map(|(slot, reference)| (slot, reference.into()))
         .collect();
     Ok(Some(PackageMember {
         key: version.kind.sql().into(),

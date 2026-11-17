@@ -71,6 +71,68 @@ fn package(members: Vec<PackageMember>) -> WorkflowPackage {
     }
 }
 
+#[tokio::test]
+async fn duplicates_a_published_workflow_as_an_independent_draft_with_its_pins_and_layout()
+-> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let project = approved_delivery_repository(&store, temporary.path())
+        .await?
+        .project_id;
+    let package = package(vec![member(
+        "pipeline",
+        PackageArtifactBody::Pipeline { graph: graph() },
+    )]);
+    let original_draft = store
+        .create_workflow_package(project.clone(), None, package.clone())
+        .await?;
+    let position = serde_json::from_value(serde_json::json!({ "x": 73.0, "y": 14.0 }))?;
+    let layout = BTreeMap::from([("start".into(), position)]);
+    let original_draft = store
+        .save_workflow_package_canvas(
+            project.clone(),
+            original_draft.id,
+            original_draft.revision,
+            package,
+            BTreeMap::from([(
+                "pipeline".into(),
+                WorkflowCanvasEdit {
+                    layout: layout.clone(),
+                    update_definitions: BTreeMap::new(),
+                },
+            )]),
+        )
+        .await?;
+    let publication = commit(&store, &project, &original_draft).await?;
+    let saved = artifact(&publication, "pipeline");
+    let version = saved.version.clone();
+    let copy = store
+        .duplicate_workflow_template_draft(project.clone(), version.clone())
+        .await?;
+    assert_ne!(copy.id, original_draft.id);
+    assert!(copy.publication.is_none());
+    assert!(copy.package.members[0].base.is_none());
+    assert_eq!(copy.layouts["pipeline"], layout);
+    let PackageArtifactBody::Pipeline { graph } = &copy.package.members[0].body else {
+        anyhow::bail!("Expected a pipeline draft");
+    };
+    assert_eq!(graph.name, "pipeline copy");
+    let key = copy.id.clone();
+    let revision = copy.revision.clone();
+    let pinned = store
+        .execute(move |db| Ok(read_document(db, &key, &revision)?.1.definitions))
+        .await?;
+    assert_eq!(pinned["pipeline"], saved.definitions);
+    assert!(
+        store
+            .duplicate_workflow_template_draft("foreign-project".into(), version)
+            .await
+            .is_err()
+    );
+    assert!(store.list_workflow_runs(project).await?.is_empty());
+    Ok(())
+}
+
 async fn commit(
     store: &Store,
     project: &str,

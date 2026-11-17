@@ -5,6 +5,7 @@ import { useState, type FormEvent } from "react";
 import type { ModelSelection } from "@/bindings/ModelSelection";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
+import { ContextActions, useContextActionFeedback } from "@/components/ui/context-actions";
 import { liveModelsQuery, sameModelSelection } from "@/live-models";
 import { WorkflowGraphEditor, editorDefinitions, type WorkflowEditorState } from "@/workflow-graph-editor";
 import { graphProblems, type WorkflowDefinitions, type WorkflowGraph, type WorkflowLayout } from "@/workflow-graph-model";
@@ -153,6 +154,7 @@ function baseKey(version: Version) { return JSON.stringify([version.id, version.
 export function ProjectPipelineDrafts({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
   const projectId = checkout.projectId;
   const drafts = useQuery({ queryKey: draftsKey(projectId), queryFn: () => invoke<ProjectDraft[]>("project_workflow_graph_drafts", { projectId }) });
+  const { copy, feedback } = useContextActionFeedback();
   return <section aria-label="Pipeline drafts" className="pipeline-stack p-4">
     <header className="flex flex-wrap items-center justify-between gap-2">
       <h1 className="text-lg font-semibold">Pipeline drafts</h1>
@@ -160,15 +162,22 @@ export function ProjectPipelineDrafts({ checkout, openWorkspace }: Pick<Workspac
     </header>
     {drafts.isPending && <p role="status">Loading pipeline drafts…</p>}
     {drafts.error && <p role="alert">{String(drafts.error)}</p>}
+    {feedback && <p role={feedback.failed ? "alert" : "status"}>{feedback.text}</p>}
     {drafts.data?.length === 0 && <p>Start a pipeline draft with Create or edit with AI in a project conversation.</p>}
     {!!drafts.data?.length && <ul className="workflow-draft-list">
-      {drafts.data.map((draft) => <li key={draft.id}>
-        <div><strong>{draft.name ?? "Pipeline authoring request"}</strong>
-          {draft.revision && <p className="text-xs text-muted-foreground">Revision <code>{draft.revision.slice(0, 12)}</code></p>}
-        </div>
-        <Button type="button" variant="outline" onClick={() => openWorkspace("pipelines", workflowAuthoringTarget(draft.id))}>
-          {draft.revision ? "Open draft" : "Open request"}</Button>
-      </li>)}
+      {drafts.data.map(({ id, name, revision }) => {
+        const open = () => openWorkspace("pipelines", workflowAuthoringTarget(id));
+        const label = revision ? "Open draft" : "Open request";
+        return <li key={id}>
+          <ContextActions label={name ?? id} className="workflow-draft-menu" groups={[[
+            { label, run: open }, { label: "Copy draft ID", run: () => copy(id) },
+            ...(revision ? [{ label: "Copy draft revision", run: () => copy(revision) }] : []),
+          ]]}><div><strong>{name ?? "Pipeline authoring request"}</strong>
+            {revision && <p className="text-xs text-muted-foreground">Revision <code>{revision.slice(0, 12)}</code></p>}
+          </div></ContextActions>
+          <Button type="button" variant="outline" onClick={open}>{label}</Button>
+        </li>;
+      })}
     </ul>}
     <WorkflowPackageList checkout={checkout} openWorkspace={openWorkspace} />
   </section>;
