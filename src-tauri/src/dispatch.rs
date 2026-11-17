@@ -37,6 +37,7 @@ mod instruction_evidence;
 mod inventory;
 mod lineage;
 mod profile;
+mod qualification;
 pub use attachment_evidence::{AttachmentEvidence, AttachmentRead, AttachmentTransport};
 pub(crate) use attachment_retention::revoked_history_run;
 pub use attachment_retention::{
@@ -62,6 +63,7 @@ pub(crate) use lineage::{
     reconcile_summary, record_conversation_excerpt, record_message_copy,
 };
 pub use profile::DispatchProfileEvidence;
+pub use qualification::{QualificationCursor, QualificationPage};
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -11,6 +11,7 @@ export const defaultAppearance: AppearanceSettings = {
   responseFont: "interface",
   conversationTextSize: "medium",
   transcriptWidth: "standard",
+  markdownWidth: "standard",
   motion: "system",
 };
 
@@ -48,6 +49,13 @@ const transcriptWidths: Record<AppearanceSettings["transcriptWidth"], string> = 
   wide: "896px",
 };
 
+const markdownWidths: Record<AppearanceSettings["markdownWidth"], string> = {
+  narrow: "560px",
+  standard: "720px",
+  wide: "960px",
+  full: "100%",
+};
+
 const chatFontSizes: Record<AppearanceSettings["conversationTextSize"], string> = {
   small: "13px",
   medium: "14px",
@@ -65,6 +73,7 @@ export function useAppearancePresentation(settings: AppearanceSettings) {
     "--app-response-font": responseFont,
     "--app-chat-font-size": chatFontSizes[settings.conversationTextSize],
     "--app-transcript-width": transcriptWidths[settings.transcriptWidth],
+    "--app-markdown-width": markdownWidths[settings.markdownWidth ?? defaultAppearance.markdownWidth],
   };
   return { theme, motion, style };
 }

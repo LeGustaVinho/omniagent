@@ -4,6 +4,7 @@ use std::{
     io,
     os::windows::fs::OpenOptionsExt,
     path::{Component, Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -23,7 +24,9 @@ use super::{
 };
 
 mod commit;
+mod comparison;
 mod content;
+pub use comparison::{GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions};
 pub use content::{GitDiffSource, GitFileSide, GitReviewDiff};
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -173,7 +176,7 @@ impl Store {
                     branches(&scope.root)?
                         .into_iter()
                         .find(|branch| branch.reference == selected)
-                        .context("the selected local branch no longer exists")?
+                        .context("the selected branch no longer exists")?
                         .sha,
                 ),
                 None => base_commit(&scope.root)?,
@@ -490,15 +493,26 @@ fn read_branch(root: &Path) -> Result<Option<String>> {
     ))
 }
 
-fn passive(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+fn passive_command(root: &Path) -> Result<Command> {
     let mut command = git_command(&git_path()?, root);
     command
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "NUL")
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(["-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false"])
-        .args(args);
-    check(command.output()?, args[0])
+        .args(["-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false"]);
+    Ok(command)
+}
+
+fn passive(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    // The caller verifies the checkout using Git's normal trust settings.
+    // Carry that decision into the isolated command for this checkout only.
+    let directory = root.to_string_lossy().replace('\\', "/");
+    let output = passive_command(root)?
+        .arg("-c")
+        .arg(format!("safe.directory={directory}"))
+        .args(args)
+        .output()?;
+    check(output, args[0])
 }
 
 fn branches(root: &Path) -> Result<Vec<GitReviewBranch>> {
@@ -506,18 +520,27 @@ fn branches(root: &Path) -> Result<Vec<GitReviewBranch>> {
         root,
         &[
             "for-each-ref",
-            "--format=%(refname)%00%(objectname)",
+            "--format=%(refname)%00%(objectname)%00%(symref)",
             "refs/heads/",
+            "refs/remotes/",
         ],
     )?)?;
     result
         .lines()
-        .map(|line| {
-            let (reference, sha) = line
+        .filter_map(|line| {
+            let (branch, symbolic) = match line.rsplit_once('\0') {
+                Some(parts) => parts,
+                None => return Some(Err(anyhow::anyhow!("Git returned an incomplete branch"))),
+            };
+            symbolic.is_empty().then_some(Ok(branch))
+        })
+        .map(|branch| {
+            let (reference, sha) = branch?
                 .split_once('\0')
                 .context("Git returned an incomplete branch")?;
             let name = reference
                 .strip_prefix("refs/heads/")
+                .or_else(|| reference.strip_prefix("refs/remotes/"))
                 .context("Git returned an unexpected ref")?;
             validate_oid(sha)?;
             Ok(GitReviewBranch {
@@ -527,6 +550,13 @@ fn branches(root: &Path) -> Result<Vec<GitReviewBranch>> {
             })
         })
         .collect()
+}
+
+pub(super) fn branch_reference(root: &Path, reference: &str) -> Result<GitReviewBranch> {
+    branches(root)?
+        .into_iter()
+        .find(|branch| branch.reference == reference)
+        .context("the selected branch no longer exists")
 }
 
 fn worktrees(root: &Path, registered: &[RegisteredWorktree]) -> Result<Vec<GitReviewWorktree>> {
@@ -563,7 +593,7 @@ fn worktrees(root: &Path, registered: &[RegisteredWorktree]) -> Result<Vec<GitRe
         .collect()
 }
 
-fn validate_oid(oid: &str) -> Result<()> {
+pub(super) fn validate_oid(oid: &str) -> Result<()> {
     ensure!(
         matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "Git returned an invalid object ID"

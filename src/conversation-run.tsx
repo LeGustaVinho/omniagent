@@ -9,6 +9,7 @@ import { ConversationAgentTree, recordChildActivity, type ChildActivity, type Ch
 import { ConversationChecklistProgress } from "@/conversation-checklist-progress";
 import { ConversationDeliveries, type ConversationInput } from "@/conversation-deliveries";
 import { ConversationInventory } from "@/conversation-inventory";
+import { ConversationSidePanel } from "@/conversation-layout";
 import { ConversationProfile } from "@/conversation-profile";
 import { PendingInput, type ConversationPendingInput } from "@/conversation-inputs";
 import { RunOrchestrationPanel } from "@/run-orchestration";
@@ -257,7 +258,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose 
   useEffect(() => { heading.current?.focus(); }, []);
   const scope = { conversationId, runId: run.id, live };
   return (
-    <aside className="conv-activity" aria-label="Conversation activity" onKeyDown={(event) => {
+    <ConversationSidePanel label="Conversation activity" onKeyDown={(event) => {
       if (event.key !== "Escape") return;
       event.stopPropagation();
       onClose();
@@ -282,7 +283,7 @@ export function ConversationActivity({ conversationId, run, projection, onClose 
       <Button type="button" variant="outline" aria-expanded={showInput} onClick={() => setShowInput((visible) => !visible)}>Exact input</Button>
       {showInput && <ConversationExactInput {...scope} />}
       </div>
-    </aside>
+    </ConversationSidePanel>
   );
 }
 

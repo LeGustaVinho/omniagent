@@ -4,9 +4,9 @@ import type { Provider } from "@/bindings/Provider";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import { ProviderSettings } from "@/provider-settings";
+import { QualificationMatrix } from "@/qualification-matrix";
 import { IntegrationNotice, SettingRow } from "@/settings-controls";
 import { exampleSettingsModels } from "@/settings-models";
-import { QualificationMatrix } from "@/settings-system";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const providers: { id: Provider; label: string; command: string }[] = [
@@ -49,9 +49,11 @@ type Examples = ReturnType<typeof useProviderExamples>;
 export function ProviderProfiles({
   examples,
   start,
+  checkoutId,
 }: {
   examples?: Examples;
   start?: WorkspaceProps["startSimulation"];
+  checkoutId?: string;
 }) {
   if (examples) return <ProviderExamples {...examples} />;
   return (
@@ -65,12 +67,10 @@ export function ProviderProfiles({
             <option value="guest">Hyper-V guest</option>
           </select>
         </SettingRow>
-        <QualificationMatrix />
-        <div className="settings-actions">
-          <Button variant="outline" type="button" disabled>Validate capability</Button>
-        </div>
+        <QualificationMatrix validationCheckoutId={checkoutId} />
+        <p>Validation is available on eligible conversation attempts in the active checkout.</p>
         <IntegrationNotice start={start}>
-          Linked Hyper-V guests and release profile qualification will appear here when available.
+          Linked Hyper-V guests will appear here when available.
         </IntegrationNotice>
       </section>
     </>

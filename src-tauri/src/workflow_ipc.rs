@@ -73,17 +73,25 @@ pub async fn start_repository_delivery(
     project_id: String,
     checkout_id: String,
     revision_id: String,
+    request_id: Option<String>,
 ) -> Result<WorkflowRun, String> {
-    store
-        .launch_builtin_repository_delivery(
-            project_id,
-            WorkflowLaunchSource {
-                checkout_id,
-                revision_id,
-            },
-        )
-        .await
-        .map_err(report)
+    let source = WorkflowLaunchSource {
+        checkout_id,
+        revision_id,
+    };
+    match request_id {
+        Some(request) => {
+            store
+                .launch_builtin_repository_delivery_request(project_id, source, request)
+                .await
+        }
+        None => {
+            store
+                .launch_builtin_repository_delivery(project_id, source)
+                .await
+        }
+    }
+    .map_err(report)
 }
 
 #[tauri::command]

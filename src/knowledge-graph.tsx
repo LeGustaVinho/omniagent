@@ -3,6 +3,7 @@ import { CircleDot, Focus, Network, ZoomIn, ZoomOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fileName, type ExampleFile } from "@/ide-knowledge-data";
 import { exampleNoteGraph, indexNoteGraph, selectNoteGraph, type NoteGraphProjection } from "@/knowledge-graph-model";
+import { ResizablePanel } from "@/panel-resize";
 
 export type { NoteGraphProjection } from "@/knowledge-graph-model";
 
@@ -92,11 +93,13 @@ export default function NoteGraph({ files = emptyExamples, projection, selected,
         </div>
       </div>
       {notes.length ? <div className="note-graph-canvas" ref={container} role="img" aria-label="Graph of repository notes" /> : <p role="status" className="file-sidebar-note">{indexed.byPath.size ? "No notes match the current graph filter." : "No Markdown notes in this checkout."}</p>}
-      <ul className="note-graph-node-list" aria-label="Graph notes">
-        {notes.map(({ path, title }) => <li key={path}><button type="button" className="fw-btn" title={path}
-          aria-label={projection ? `${title} (${path})` : undefined} aria-current={path === selected ? "true" : undefined}
-          onClick={() => onOpen(path)}><CircleDot size={12} aria-hidden="true" />{projection ? title : fileName(path)}</button></li>)}
-      </ul>
+      <ResizablePanel className="note-graph-list-panel" edge="top" resizeKey="note-graph-list" resizeLabel="graph notes">
+        <ul className="note-graph-node-list" aria-label="Graph notes">
+          {notes.map(({ path, title }) => <li key={path}><button type="button" className="fw-btn" title={path}
+            aria-label={projection ? `${title} (${path})` : undefined} aria-current={path === selected ? "true" : undefined}
+            onClick={() => onOpen(path)}><CircleDot size={12} aria-hidden="true" />{projection ? title : fileName(path)}</button></li>)}
+        </ul>
+      </ResizablePanel>
     </div>
   );
 }

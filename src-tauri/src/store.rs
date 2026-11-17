@@ -131,6 +131,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/114-native-user-plugin-actions.sql"),
     include_str!("../migrations/115-visual-pipeline-executors.sql"),
     include_str!("../migrations/116-workflow-trigger-optional-markdown.sql"),
+    include_str!("../migrations/117-conversation-library-organization.sql"),
 ];
 const WRITER_QUEUE_CAPACITY: usize = 64;
 type DatabaseJob = Box<dyn FnOnce(&mut Connection) + Send>;

@@ -29,6 +29,7 @@ beforeEach(() => vi.stubGlobal("ResizeObserver", class {
 }));
 afterEach(() => {
   cleanup();
+  localStorage.clear();
   vi.unstubAllGlobals();
   vi.resetAllMocks();
 });
@@ -125,6 +126,11 @@ it("opens the checkout explorer, shares edits across splits, and prompts only on
   const service = fixture();
   const props = propsFor(main);
   render(<IdeWorkspace {...props} />);
+  const folder = await screen.findByText("src", { selector: "summary" });
+  expect((folder.parentElement as HTMLDetailsElement).open).toBe(false);
+  expect(screen.queryByRole("button", { name: "review.rs" })).toBeNull();
+  fireEvent.click(folder);
+  fireEvent.click(screen.getByText("docs", { selector: "summary" }));
   const tree = await screen.findByRole("button", { name: "review.rs" });
   fireEvent.click(screen.getByRole("button", { name: "Guide.md" }));
   expect(props.openWorkspace).toHaveBeenCalledWith("knowledge", "docs/Guide.md");
@@ -156,6 +162,10 @@ it("restores source splits and drafts, shows an external conflict, and keeps the
   const props = propsFor(main);
   const first = render(<IdeWorkspace {...props} target="SRC/REVIEW.RS" />);
   const editor = await screen.findByRole("textbox", { name: editorLabel });
+  fireEvent.click(await screen.findByText("src", { selector: "summary" }));
+  const docs = screen.getByText("docs", { selector: "summary" });
+  fireEvent.click(docs);
+  fireEvent.click(docs);
   expect(invoke).toHaveBeenCalledWith("open_repository_source_file", { checkoutId: main, path: "SRC/REVIEW.RS" });
   act(() => service.changeDisk(main, "m2", "fn clean_refresh() {}"));
   await waitFor(() => expect(views()[0]?.value).toBe("fn clean_refresh() {}"));
@@ -170,6 +180,7 @@ it("restores source splits and drafts, shows an external conflict, and keeps the
   const second = render(<IdeWorkspace {...props} />);
   await waitFor(() => expect(views().map(({ value }) => value)).toEqual(["fn unsaved() {}", "fn unsaved() {}"]));
   expect(screen.getByRole("button", { name: "review.rs" }).getAttribute("aria-current")).toBe("page");
+  expect(screen.queryByRole("button", { name: "Guide.md" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Review external change" }));
   const conflict = screen.getByRole("dialog", { name: "File changed externally" });
   expect(within(conflict).getByText("fn unsaved() {}")).toBeTruthy();
@@ -184,6 +195,7 @@ it("restores source splits and drafts, shows an external conflict, and keeps the
   await waitFor(() => expect(service.drafts.has(main)).toBe(false));
   second.rerender(<IdeWorkspace {...propsFor(alternate)} target={file} />);
   await waitFor(() => expect(views().map(({ value }) => value)).toEqual(["fn other_worktree() {}"]));
+  expect(screen.queryByRole("button", { name: "review.rs" })).toBeNull();
 });
 
 it("shows the saved checkout path and the failure in a restored file tab", async () => {
@@ -213,6 +225,7 @@ it("reuses the canonical tab in each checkout and discards the last dirty view w
     const editor = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: editorLabel });
     expect(editor.value).toBe(original.document.markdown);
     expect(invoke).toHaveBeenCalledWith("open_repository_source_file", { checkoutId, path: "SRC/REVIEW.RS" });
+    fireEvent.click(await screen.findByText("src", { selector: "summary" }));
     const treeRow = await screen.findByRole("button", { name: "review.rs" });
     await act(async () => { fireEvent.click(treeRow); });
     expect(views()).toHaveLength(1);

@@ -27,6 +27,7 @@ use super::{
 };
 
 pub(super) mod conversation;
+pub(super) mod manual;
 pub(super) mod strategy;
 
 use strategy::{
@@ -552,36 +553,13 @@ fn materialize_base(
     let root = &provision.root;
     if plain_metadata(root)?.is_none() {
         let existing_ref = branch_head(git, &source.root, &provision.branch)?;
-        let mut command = git_command(git, &source.root);
-        let empty_hooks = tempfile::tempdir()?;
-        command
-            .arg("-c")
-            .arg(format!("core.hooksPath={}", empty_hooks.path().display()))
-            .args([
-                "-c",
-                "core.fsmonitor=false",
-                "-c",
-                "maintenance.auto=false",
-                "-c",
-                "gc.auto=0",
-                "worktree",
-                "add",
-                "--no-checkout",
-                "--no-guess-remote",
-            ]);
-        if let Some(head) = existing_ref {
+        if let Some(head) = &existing_ref {
             ensure!(
-                head == provision.base_commit,
+                head == &provision.base_commit,
                 "the reserved branch changed before its worktree was created"
             );
-            command.arg("--").arg(root).arg(&provision.branch);
-        } else {
-            command
-                .args(["--no-track", "-b", &provision.branch, "--"])
-                .arg(root)
-                .arg(&provision.base_commit);
         }
-        check(command.output()?, "create the managed worktree")?;
+        add_linked_worktree(git, source, provision, existing_ref.is_some())?;
     }
     ensure!(
         plain_metadata(root)?.is_some_and(|entry| entry.is_dir()),
@@ -617,6 +595,43 @@ fn materialize_base(
         "the worktree changed during materialization"
     );
     Ok((checkout, status))
+}
+
+fn add_linked_worktree(
+    git: &Path,
+    source: &Source,
+    provision: &Provision,
+    existing: bool,
+) -> Result<()> {
+    let empty_hooks = tempfile::tempdir()?;
+    let mut command = git_command(git, &source.root);
+    command
+        .arg("-c")
+        .arg(format!("core.hooksPath={}", empty_hooks.path().display()))
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "worktree",
+            "add",
+            "--no-checkout",
+            "--no-guess-remote",
+        ]);
+    if existing {
+        command
+            .arg("--")
+            .arg(&provision.root)
+            .arg(&provision.branch);
+    } else {
+        command
+            .args(["--no-track", "-b", &provision.branch, "--"])
+            .arg(&provision.root)
+            .arg(&provision.base_commit);
+    }
+    check(command.output()?, "create the linked worktree").map(|_| ())
 }
 
 fn check_branch(root: &Path, git: &Path, branch: &str) -> Result<()> {

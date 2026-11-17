@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ConversationMarkdown } from "@/conversation-markdown";
 import { resolveWiki, type NoteTarget } from "@/knowledge-document";
+import { ResizablePanel } from "@/panel-resize";
 import type { NoteCatalogEntry } from "@/repository-note-buffers";
 import type { WorkspaceProps } from "@/workbench-contract";
 
@@ -27,13 +29,29 @@ function restore(state: SavedState): Buffer {
   };
 }
 
-export function ProjectDescription(props: { kind: OwnerKind; id: string; links: WorkspaceProps }) {
+export function ProjectDescription(props: { kind: OwnerKind; id: string; links: WorkspaceProps; preview?: boolean }) {
   const [open, setOpen] = useState(false);
-  return open ? <DescriptionEditor {...props} /> : <Button type="button" variant="outline" onClick={() => setOpen(true)}>Open description</Button>;
+  return open ? <DescriptionEditor {...props} /> : <>
+    {props.preview && <ProjectDescriptionPreview kind={props.kind} id={props.id} projectId={props.links.checkout.projectId} />}
+    <Button type="button" variant="outline" className="justify-self-start" onClick={() => setOpen(true)}>Open description</Button>
+  </>;
+}
+
+function descriptionKey(projectId: string, id: string) {
+  return ["project-tasks", projectId, id, "description"] as const;
+}
+
+function ProjectDescriptionPreview({ kind, id, projectId }: { kind: OwnerKind; id: string; projectId: string }) {
+  const query = useQuery({ queryKey: descriptionKey(projectId, id),
+    queryFn: () => invoke<SavedState>("project_description_editor", { projectId, owner: kind === "epic" ? { epic: id } : { work: id } }) });
+  const markdown = query.data?.saved?.markdown;
+  if (query.error) return <p className="text-sm text-muted-foreground">Description unavailable.</p>;
+  return markdown ? <div className="text-sm leading-6"><ConversationMarkdown>{markdown}</ConversationMarkdown></div> : null;
 }
 
 function DescriptionEditor({ kind, id, links }: { kind: OwnerKind; id: string; links: WorkspaceProps }) {
   const { projectId, checkoutId } = links.checkout;
+  const client = useQueryClient();
   const args = useMemo(() => ({ projectId, owner: kind === "epic" ? { epic: id } : { work: id } }), [id, kind, projectId]);
   const [buffer, setBuffer] = useState<Buffer>();
   const [mode, setMode] = useState<Mode>("live");
@@ -118,6 +136,7 @@ function DescriptionEditor({ kind, id, links }: { kind: OwnerKind; id: string; l
           publish({ ...current.current!, ...result.state, conflict });
         } else {
           publish({ ...current.current!, base: result.revision, draft: null, saved: result.revision });
+          client.setQueryData(descriptionKey(projectId, id), { saved: result.revision, draft: null });
         }
       } finally {
         if (mounted.current) setSaving(false);
@@ -180,15 +199,17 @@ function DescriptionEditor({ kind, id, links }: { kind: OwnerKind; id: string; l
         <Button type="button" variant="outline" onClick={() => resolve(true)}>Keep my edit</Button>
       </div>}
       <Suspense fallback={<p className="p-3 text-xs" role="status">Loading Markdown view…</p>}>
-        <div className={split && mode !== "reading" ? "agile-description-split" : undefined}>
+        <ResizablePanel className={split && mode !== "reading" ? "agile-description-views agile-description-split" : "agile-description-views"}
+          edge="bottom" resizeKey="description" resizeLabel="description">
           <div className="agile-description-editor agile-description-editor-expanded" hidden={mode === "reading"}>
             <Editor mode={mode === "source" ? "source" : "live"} path={path} source={buffer.content} files={files} analyze onChange={edit} onLink={openLink} />
           </div>
-          {(split || mode === "reading") && <div className="agile-description-reading agile-description-reading-expanded">
+          {(split || mode === "reading") && <ResizablePanel className="agile-description-reading agile-description-reading-expanded"
+            edge="left" resizeKey="description-reading" resizeLabel="description reading view">
             {buffer.content ? <Reading path={path} content={buffer.content} files={files} onLink={openLink} onAttachment={() => undefined}
               checkoutId={checkoutId} sampleAttachments={false} /> : <p>No description.</p>}
-          </div>}
-        </div>
+          </ResizablePanel>}
+        </ResizablePanel>
       </Suspense>
     </div>}
   </section>;

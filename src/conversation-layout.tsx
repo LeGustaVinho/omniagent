@@ -1,7 +1,8 @@
 import { MessageSquare, PanelLeftClose, Plus, Search } from "lucide-react";
 import { Dialog } from "radix-ui";
-import type { ReactNode, Ref, UIEventHandler } from "react";
+import type { KeyboardEventHandler, ReactNode, Ref, UIEventHandler } from "react";
 import type { MessageRole } from "@/bindings/MessageRole";
+import { ResizablePanel } from "@/panel-resize";
 import "./conversation.css";
 
 export function ConversationWorkspaceLayout({ navigation, controls, children }: {
@@ -24,25 +25,35 @@ export function ConversationNavigation({ compact, open, onOpenChange, children }
   onOpenChange: (open: boolean) => void;
   children: ReactNode;
 }) {
-  if (!compact) return open ? <aside className="conv-navigation" aria-label="Conversation navigation">{children}</aside> : null;
+  if (!compact) return open ? <ResizablePanel as="aside" className="conv-navigation" aria-label="Conversation navigation"
+    edge="right" resizeKey="conversation-navigation" resizeLabel="conversation navigation">{children}</ResizablePanel> : null;
   return <Dialog.Root open={open} onOpenChange={onOpenChange}>
     <Dialog.Portal>
       <Dialog.Overlay className="work-shade" />
-      <Dialog.Content className="conv-navigation conv-navigation-drawer" aria-describedby={undefined} onOpenAutoFocus={(event) => {
+      <Dialog.Content asChild aria-describedby={undefined} onOpenAutoFocus={(event) => {
         const search = (event.currentTarget as HTMLElement | null)?.querySelector<HTMLInputElement>('input[type="search"]');
         if (search) {
           event.preventDefault();
           search.focus();
         }
       }}>
-        <Dialog.Title className="sr-only">Conversation navigation</Dialog.Title>
-        <Dialog.Close className="conv-icon-button conv-navigation-close" aria-label="Close conversation navigation">
-          <PanelLeftClose aria-hidden />
-        </Dialog.Close>
-        {children}
+        <ResizablePanel className="conv-navigation conv-navigation-drawer" edge="right" resizeKey="conversation-navigation" resizeLabel="conversation navigation">
+          <Dialog.Title className="sr-only">Conversation navigation</Dialog.Title>
+          <Dialog.Close className="conv-icon-button conv-navigation-close" aria-label="Close conversation navigation">
+            <PanelLeftClose aria-hidden />
+          </Dialog.Close>
+          {children}
+        </ResizablePanel>
       </Dialog.Content>
     </Dialog.Portal>
   </Dialog.Root>;
+}
+
+export function ConversationSidePanel({ label, onKeyDown, children }: {
+  label: string; onKeyDown?: KeyboardEventHandler<HTMLElement>; children: ReactNode;
+}) {
+  return <ResizablePanel as="aside" className="conv-activity" aria-label={label} edge="left"
+    resizeKey="conversation-side-panel" resizeLabel={label} onKeyDown={onKeyDown}>{children}</ResizablePanel>;
 }
 
 export function ConversationLibraryLayout({ sectionRef, className, query, searchLabel, onQuery, onCreate, creating, filters, children }: {
@@ -68,6 +79,13 @@ export function ConversationLibraryLayout({ sectionRef, className, query, search
     </label>
     {filters && <div className="conv-library-options">{filters}</div>}
     <div className="conv-library-entries">{children}</div>
+  </section>;
+}
+
+export function ConversationLibraryGroup({ title, children }: { title: string; children: ReactNode }) {
+  return <section aria-label={title}>
+    <h3 className="conv-session-group">{title}</h3>
+    <ul className="conv-session-list">{children}</ul>
   </section>;
 }
 

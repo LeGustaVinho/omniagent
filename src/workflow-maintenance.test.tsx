@@ -5,7 +5,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import { WorkflowMaintenanceDelivery, WorkflowMaintenanceSettings } from "@/workflow-maintenance";
+import { WorkflowMaintenanceCandidates, WorkflowMaintenanceDelivery, WorkflowMaintenancePlugins, WorkflowMaintenanceSettings } from "@/workflow-maintenance";
 import { exampleCheckout } from "@/workbench-contract";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -23,6 +23,39 @@ const settings = { revision: "settings-revision", configuration, buildExecutable
 const mount = (node: ReactNode) => render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
   {node}
 </QueryClientProvider>);
+
+it("opens the saved release execution and loads real CLI plugin controls from Maintenance", async () => {
+  const handoff = { id: "handoff-one", workflowRunId: "release-run", taskId: "release-task", settingsRevision: settings.revision, version: "0.2.0",
+    sourceRevision: "accepted-source", sha256: "accepted-package-digest", packageName: "release.exe",
+    checks: ["Release smoke"], verificationId: "verified-checks", activation: null };
+  const inventory = { checkedAt: "2026-11-17T00:00:00Z", report: { status: "reported",
+    plugins: [{ id: "review-tools", name: "Review Tools", enabled: true, scope: "user" }] } };
+  invoke.mockImplementation(async (command) => {
+    switch (command) {
+      case "workflow_maintenance": return { runningBuild, settings, handoffs: [handoff] };
+      case "cli_plugin_inventory": return inventory;
+      default: throw new Error(command);
+    }
+  });
+  const openWorkspace = vi.fn();
+  mount(<>
+    <WorkflowMaintenanceCandidates checkout={exampleCheckout} openWorkspace={openWorkspace} />
+    <WorkflowMaintenancePlugins />
+  </>);
+  const user = userEvent.setup();
+  expect(await screen.findByText("accepted-package-digest")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Open task" }));
+  expect(openWorkspace).toHaveBeenCalledWith("tasks", "release-task");
+  await user.click(screen.getByRole("button", { name: "Open workflow execution" }));
+  expect(openWorkspace).toHaveBeenCalledWith("pipelines", "run:release-run");
+  expect(await screen.findByText("Review Tools")).toBeTruthy();
+  await user.selectOptions(screen.getByLabelText("CLI for plugin inventory"), "claude");
+  await user.click(screen.getByRole("button", { name: "Check plugins" }));
+  expect(invoke).toHaveBeenCalledWith("cli_plugin_inventory", { provider: "claude", refresh: true });
+  await user.click(screen.getByText("Manage user plugins"));
+  expect(screen.getByRole("option", { name: "Disable" })).toBeTruthy();
+  expect(invoke.mock.calls.some(([name]) => name.startsWith("apply_"))).toBe(false);
+});
 
 it("configures the exact registered checkout, workflow, build gate and activation mode", async () => {
   let saved: typeof settings | null = null;

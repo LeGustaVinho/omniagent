@@ -80,6 +80,19 @@ pub(crate) fn transition_work_in_transaction(
     next: TaskWorkflowState,
     origin: &AgileEventOrigin,
 ) -> Result<TaskDeliveryState> {
+    let states = WorkStateChanges::capture(tx, project, task)?;
+    let updated = apply_work_transition(tx, project, task, expected, next)?;
+    states.publish(tx, project, origin)?;
+    Ok(updated)
+}
+
+pub(super) fn apply_work_transition(
+    tx: &Connection,
+    project: &str,
+    task: &str,
+    expected: TaskWorkflowState,
+    next: TaskWorkflowState,
+) -> Result<TaskDeliveryState> {
     let current = load_delivery_state(tx, project, task)?;
     ensure!(
         current.state == expected,
@@ -88,8 +101,6 @@ pub(crate) fn transition_work_in_transaction(
     if current.state == next {
         return Ok(current);
     }
-    let states = WorkStateChanges::capture(tx, project, task)?;
-
     if is_terminal(current.state) {
         ensure!(
             next == TaskWorkflowState::Ready,
@@ -130,6 +141,5 @@ pub(crate) fn transition_work_in_transaction(
         updated.state == next,
         "The work state is controlled by its child tasks or pending delivery evidence."
     );
-    states.publish(tx, project, origin)?;
     Ok(updated)
 }

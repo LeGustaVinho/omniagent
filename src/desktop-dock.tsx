@@ -10,7 +10,7 @@ import { ArrowLeft, ArrowRight, Columns2, GitBranch } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Conversation } from "@/bindings/Conversation";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
-import { ConversationLibrary, ConversationLibraryNavigation, type OpenLibraryConversation } from "@/conversation-library";
+import { ConversationLibrary, ConversationLibraryNavigation, type OpenLibraryConversation, useConversationLibraryRead } from "@/conversation-library";
 import { ConversationEmptyState, ConversationNavigation, ConversationWorkspaceLayout } from "@/conversation-layout";
 import { ConversationListPanel, ConversationPanel, useNewConversation } from "@/conversation-panels";
 import { DesktopDiagnostics, DiagnosticsWorkspace, type DiagnosticView } from "@/diagnostics-workspace";
@@ -157,6 +157,10 @@ export function RealConversations({
 }) {
   const dock = useDesktopDock(checkout, "conversations");
   const [targetError, setTargetError] = useState("");
+  const markRead = useConversationLibraryRead();
+  useEffect(() => {
+    if (dock.ready && dock.activeId) markRead(checkout.checkoutId, dock.activeId);
+  }, [checkout.checkoutId, dock.activeId, dock.ready, markRead]);
   useEffect(() => {
     if (!dock.ready || !dock.api || !target) return;
     const api = dock.api;
@@ -187,6 +191,7 @@ export function RealConversations({
     }
     const panel = dock.api.getPanel("conversation:" + conversationId);
     if (panel) {
+      if (conversationId === dock.activeId) markRead(checkout.checkoutId, conversationId);
       panel.api.setActive();
       if (compact) onSidebarChange(false);
       return;

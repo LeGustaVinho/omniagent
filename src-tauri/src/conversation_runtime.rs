@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, ensure};
 use omniagent::{
     conversations::{
-        Conversation, ConversationHistory, ConversationHistoryInspection, ConversationLibraryEntry,
+        Conversation, ConversationHistory, ConversationHistoryInspection,
+        ConversationLibraryChange, ConversationLibraryEntry, ConversationLibrarySection,
         SessionScope,
     },
     diagnostics,
@@ -135,9 +136,34 @@ pub async fn conversation_library(
     store: State<'_, Store>,
     query: Option<String>,
     project_id: Option<String>,
+    archived: Option<bool>,
 ) -> Result<Vec<ConversationLibraryEntry>, String> {
     store
-        .conversation_library(query, project_id)
+        .conversation_library_view(query, project_id, archived.unwrap_or_default())
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn conversation_library_sections(
+    store: State<'_, Store>,
+    project_id: Option<String>,
+) -> Result<Vec<ConversationLibrarySection>, String> {
+    store
+        .conversation_library_sections(project_id)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn organize_conversation(
+    store: State<'_, Store>,
+    checkout_id: String,
+    conversation_id: String,
+    change: ConversationLibraryChange,
+) -> Result<bool, String> {
+    store
+        .organize_conversation(checkout_id, conversation_id, change)
         .await
         .map_err(ui_error)
 }
@@ -841,6 +867,18 @@ pub async fn conversation_profile_evidence(
 ) -> Result<Option<omniagent::dispatch::DispatchProfileEvidence>, String> {
     store
         .dispatch_profile_evidence(project_id, conversation_id, run_id)
+        .await
+        .map_err(ui_error)
+}
+
+#[tauri::command]
+pub async fn desktop_capability_qualifications(
+    store: State<'_, Store>,
+    cursor: Option<omniagent::dispatch::QualificationCursor>,
+    validation_checkout_id: Option<String>,
+) -> Result<omniagent::dispatch::QualificationPage, String> {
+    store
+        .desktop_capability_qualifications(cursor, validation_checkout_id)
         .await
         .map_err(ui_error)
 }

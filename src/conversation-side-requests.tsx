@@ -6,6 +6,7 @@ import type { Job } from "@/bindings/Job";
 import type { Provider } from "@/bindings/Provider";
 import type { SessionMode } from "@/bindings/SessionMode";
 import { Button } from "@/components/ui/button";
+import { ConversationSidePanel } from "@/conversation-layout";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { isLiveRun } from "@/conversation-run";
 import { SettingRow } from "@/settings-controls";
@@ -130,7 +131,7 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
     },
   });
   const requests = saved.data?.filter(({ purpose }) => purpose !== "suggestion") ?? [];
-  return <aside className="conv-activity" aria-label="Side questions">
+  return <ConversationSidePanel label="Side questions">
     <header className="conv-activity-heading"><h2>Side questions</h2>
       <button type="button" className="conv-icon-button ml-auto" aria-label="Close side questions" onClick={onClose}><X size={16} /></button>
     </header>
@@ -190,5 +191,5 @@ export function SideQuestionPanel({ conversationId, submission, validation, onCl
         </li>;
       })}
     </ul>
-  </aside>;
+  </ConversationSidePanel>;
 }

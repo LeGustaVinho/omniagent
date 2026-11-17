@@ -15,6 +15,7 @@ import { WorkflowDiffStage } from "@/workflow-execution-diff";
 import { WorkflowApprovalInspector } from "@/workflow-approval";
 import { WorkflowStageDecisionForm } from "@/workflow-stage-decisions";
 import { WorkflowExecutionComparison } from "@/workflow-execution-comparison";
+import { comparisonReviewStages, type ComparisonHandoff } from "@/workflow-comparison-handoff";
 import { WorkflowExecutionStateBadge, workflowExecutionStateLabel } from "@/workflow-execution-state";
 import {
   comparisonForNode, controlForNode, presentation, workflowRunTarget, type ExecutionPinnedNode, type ExecutionRolePin,
@@ -49,13 +50,17 @@ function PinnedRole({ pin }: { pin: ExecutionRolePin }) {
 
 const unitKey = ({ planRevision, unit }: ExecutionUnit) => `${planRevision}:${unit.id}`;
 
-function WorkflowExecutionCanvas({ snapshot, navigation, runPicker }: {
+function WorkflowExecutionCanvas({ snapshot, navigation, runPicker, comparisonHandoff }: {
   snapshot: WorkflowExecutionSnapshot;
   navigation: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace" | "openQueueJob">;
   runPicker: ReactNode;
+  comparisonHandoff?: ComparisonHandoff;
 }) {
   const { definition, run, launch } = snapshot;
-  const [selected, setSelected] = useState(definition.nodes[0]?.instance.id ?? "");
+  const review = comparisonHandoff && comparisonHandoff.planRevision === run.planRevision &&
+    comparisonReviewStages(snapshot, comparisonHandoff.sourceCheckoutId).some(({ instance }) => instance.id === comparisonHandoff.nodeId)
+    ? comparisonHandoff : undefined;
+  const [selected, setSelected] = useState(review?.nodeId ?? definition.nodes[0]?.instance.id ?? "");
   const [selectedUnit, setSelectedUnit] = useState<string>();
   const [subflowPath, setSubflowPath] = useState("");
   const [theme, setTheme] = useState(readTheme);
@@ -132,6 +137,9 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker }: {
         <Button variant="outline" type="button" onClick={() => navigation.openWorkspace("pipelines", run.id)}>Open delivery controls</Button>
       </div>
     </PipelineToolbar>
+    {comparisonHandoff && !review && !snapshot.jobs.some(({ nodeId, inputs }) =>
+      nodeId === comparisonHandoff.nodeId && inputs?.plan === comparisonHandoff.planRevision) &&
+      <p className="pipeline-banner" role="status">The selected plan review changed. Choose a current destination from Compare models.</p>}
     <header className="workflow-run-summary">
       <div><h2>{definition.name}</h2>
         <p>Pinned workflow revision <code className="break-all">{run.version.revision}</code></p>
@@ -183,7 +191,8 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker }: {
               {wire.to.port} needs {wire.from.node}.{wire.from.port}
             </li>)}</ul>
           </section>}
-          <WorkflowExecutionAgent snapshot={snapshot} node={active.node} unit={unit} openActivity={navigation.openActivity} />
+          <WorkflowExecutionAgent snapshot={snapshot} node={active.node} unit={unit} openActivity={navigation.openActivity}
+            initialComparison={review?.nodeId === active.node.instance.id ? review.selection : undefined} />
           <WorkflowExecutionHost snapshot={snapshot} node={active.node} />
           <WorkflowExecutionUnitChecks key={`checks:${active.node.instance.id}`} snapshot={snapshot} node={active.node} unit={unit} />
           <WorkflowDiffStage snapshot={snapshot} node={active.node} />
@@ -194,7 +203,7 @@ function WorkflowExecutionCanvas({ snapshot, navigation, runPicker }: {
   </section>;
 }
 
-export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: string }) {
+export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: string; comparisonHandoff?: ComparisonHandoff }) {
   const { checkout: { projectId }, runId, openWorkspace } = props;
   const runs = useQuery({ queryKey: ["repository-delivery", projectId, "list"], queryFn: () => invoke<WorkflowRun[]>("list_repository_deliveries", { projectId }) });
   const execution = useQuery({
@@ -215,7 +224,7 @@ export function WorkflowExecutionWorkspace(props: WorkspaceProps & { runId?: str
   return <section className="pipeline-view" aria-label="Workflow runs">
     {loadError && <p className="pipeline-banner" role="alert">{String(loadError)}</p>}
     {execution.data ? <WorkflowExecutionCanvas key={execution.data.run.id}
-      snapshot={execution.data} navigation={props} runPicker={runPicker} /> : <>
+      snapshot={execution.data} navigation={props} runPicker={runPicker} comparisonHandoff={props.comparisonHandoff} /> : <>
       <PipelineToolbar><div className="workflow-run-selectors">{runPicker}</div></PipelineToolbar>
       {!runId && runs.data?.length === 0 ? (
         <PipelineRunsEmpty onOpenBuilder={() => openWorkspace("pipelines", "drafts")} />

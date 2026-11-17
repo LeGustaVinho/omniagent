@@ -224,6 +224,7 @@ it("opens the same canonical note and exact heading or block from Source, Live P
   await followEditorLink(sourceEditor, "Open heading");
 
   const targetEditor = await editorFor(destination);
+  expect(targetEditor.dom.closest(".note-editor")?.getAttribute("data-mode")).toBe("source");
   await waitFor(() => expect(selectedLine(targetEditor)).toBe(7));
   expect(invoke).toHaveBeenCalledWith("resolve_repository_note_links", { checkoutId, queries: [
     { sourcePath: source, target: alias, anchor: "Cutover" },
@@ -242,7 +243,7 @@ it("opens the same canonical note and exact heading or block from Source, Live P
 
   await user.click(screen.getByRole("button", { name: "Reading" }));
   await selectTab(user, "Start.md");
-  await user.click(screen.getByRole("button", { name: "Reading" }));
+  expect(screen.getByRole("button", { name: "Reading" }).getAttribute("aria-pressed")).toBe("true");
   const reading = within(await screen.findByLabelText(`Reading view for ${source}`));
   const heading = reading.getByRole("button", { name: "Open heading" });
   const preview = within(heading.parentElement!);

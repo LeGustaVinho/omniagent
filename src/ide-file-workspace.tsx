@@ -3,10 +3,11 @@ import {
   DockviewReact, themeDark, themeLight, type DockviewApi, type DockviewReadyEvent,
   type IDockviewPanelHeaderProps, type IDockviewPanelProps, type SerializedDockview,
 } from "dockview-react";
-import { FileCode2, FileText, FolderOpen, PanelLeftClose, X } from "lucide-react";
+import { FileCode2, FileText, Folder, FolderOpen, PanelLeftClose, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Dialog } from "radix-ui";
 import { fileName } from "@/ide-knowledge-data";
+import { ResizablePanel } from "@/panel-resize";
 import "dockview/dist/styles/dockview.css";
 import "./ide-knowledge.css";
 
@@ -108,7 +109,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
 }) {
   const [api, setApi] = useState<DockviewApi>();
   const [ready, setReady] = useState(false);
-  const [path, setPath] = useState<string>();
+  const [file, setFile] = useState<FilePanelParams>();
   const [error, setError] = useState("");
   const initialPathRef = useRef(initialPath);
   const onReady = useCallback(({ api: view }: DockviewReadyEvent) => setApi(view), []);
@@ -137,8 +138,8 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
       pending = serialize();
       timer = window.setTimeout(flush, 80);
     };
-    const updatePath = () => setPath((api.activePanel?.params as FilePanelParams | undefined)?.path);
-    const activeChange = api.onDidActivePanelChange(() => { updatePath(); save(); });
+    const updateFile = () => setFile(api.activePanel?.params as FilePanelParams | undefined);
+    const activeChange = api.onDidActivePanelChange(() => { updateFile(); save(); });
     const layoutChange = api.onDidLayoutChange(save);
     window.addEventListener("pagehide", flush);
 
@@ -153,7 +154,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
         if (active) {
           loaded = true;
           if (initialPathRef.current) focusFile(api, initialPathRef.current);
-          updatePath();
+          updateFile();
           setReady(true);
         }
       }
@@ -172,7 +173,7 @@ export function useFileDock({ checkoutId, workspace, simulated, initialPath }: {
   const open = useCallback((file: string) => { if (api && ready) focusFile(api, file); }, [api, ready]);
   const split = useCallback((file: string, view?: FileView) => { if (api && ready) splitFile(api, file, view); }, [api, ready]);
 
-  return { api, error, onReady, open, path, ready, split };
+  return { api, error, onReady, open, path: file?.path, view: file?.view, ready, split };
 }
 
 interface FolderNodeData {
@@ -195,23 +196,33 @@ function makeTree(paths: readonly string[]): FolderNodeData {
   return root;
 }
 
-function FolderBranch({ tree, active, onOpen }: { tree: FolderNodeData; active?: string; onOpen: (path: string) => void }) {
+interface FileTreeState {
+  active?: string;
+  expanded: ReadonlySet<string>;
+  toggleFolder: (path: string) => void;
+  onOpen: (path: string) => void;
+}
+
+function FolderBranch({ tree, parent, ...state }: { tree: FolderNodeData; parent: string } & FileTreeState) {
   return (
     <ul className="file-tree">
-      {[...tree.folders].map(([name, folder]) => (
-        <li key={name}>
-          <details open>
-            <summary><FolderOpen size={15} />{name}</summary>
-            <FolderBranch tree={folder} active={active} onOpen={onOpen} />
+      {[...tree.folders].map(([name, folder]) => {
+        const path = parent ? `${parent}/${name}` : name;
+        const open = state.expanded.has(path);
+        const Icon = open ? FolderOpen : Folder;
+        return <li key={name}>
+          <details open={open}>
+            <summary title={path} onClick={(event) => { event.preventDefault(); state.toggleFolder(path); }}><Icon size={15} />{name}</summary>
+            {open && <FolderBranch tree={folder} parent={path} {...state} />}
           </details>
-        </li>
-      ))}
+        </li>;
+      })}
       {tree.files.map((path) => {
         const Icon = path.endsWith(".md") ? FileText : FileCode2;
         return (
           <li key={path}>
-            <button type="button" className="file-tree-row" aria-current={active === path ? "page" : undefined}
-              title={path} onClick={() => onOpen(path)}>
+            <button type="button" className="file-tree-row" aria-current={state.active === path ? "page" : undefined}
+              title={path} onClick={() => state.onOpen(path)}>
               <Icon size={15} /> <span>{fileName(path)}</span>
             </button>
           </li>
@@ -221,8 +232,36 @@ function FolderBranch({ tree, active, onOpen }: { tree: FolderNodeData; active?:
   );
 }
 
-export function FileTree({ paths, active, onOpen }: { paths: readonly string[]; active?: string; onOpen: (path: string) => void }) {
-  return <FolderBranch tree={makeTree(paths)} active={active} onOpen={onOpen} />;
+export function FileTree({ paths, active, onOpen, checkoutId, workspace, simulated }: {
+  paths: readonly string[];
+  active?: string;
+  onOpen: (path: string) => void;
+  checkoutId: string;
+  workspace: "ide" | "knowledge";
+  simulated: boolean;
+}) {
+  const storageKey = `omniagent:file-tree:${workspace}:${simulated ? "example" : encodeURIComponent(checkoutId)}`;
+  return <PersistentFolderTree key={storageKey} storageKey={storageKey} tree={makeTree(paths)} active={active} onOpen={onOpen} />;
+}
+
+function PersistentFolderTree({ storageKey, ...props }: { storageKey: string; tree: FolderNodeData } & Pick<FileTreeState, "active" | "onOpen">) {
+  const [expanded, setExpanded] = useState(() => {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+      if (Array.isArray(saved)) return new Set<string>(saved.filter((path): path is string => typeof path === "string"));
+    } catch { /* Use the default when storage is unavailable. */ }
+    return new Set<string>();
+  });
+  const toggleFolder = (path: string) => {
+    const next = new Set(expanded);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    setExpanded(next);
+    try {
+      localStorage.setItem(storageKey, JSON.stringify([...next]));
+    } catch { /* Keep the in-memory state when storage is unavailable. */ }
+  };
+  return <FolderBranch {...props} parent="" expanded={expanded} toggleFolder={toggleFolder} />;
 }
 
 export function FileCaption({ path, revision }: { path: string; revision: number | string }) {
@@ -248,7 +287,7 @@ export function FileUnavailable({ title, path, detail, onSimulate }: {
 }
 
 export function FileSidebar({ name, children }: { name: string; children: ReactNode }) {
-  return <aside className="file-workspace-sidebar" aria-label={name}>{children}</aside>;
+  return <ResizablePanel as="aside" className="file-workspace-sidebar" aria-label={name} edge="right" resizeKey={name} resizeLabel={name}>{children}</ResizablePanel>;
 }
 
 export function FileDialog({ title, description, onClose, children }: {

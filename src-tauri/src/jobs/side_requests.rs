@@ -291,13 +291,8 @@ impl Store {
                 }
                 let snapshot: ContextSnapshot =
                     serde_json::from_slice(&protection::unprotect(&source.snapshot)?)?;
-                let Some(profile) = latest_reported_scope(&tx, &source.run_id)?
-                    .or(snapshot.capabilities.map(|assessment| assessment.scope))
-                    .filter(|profile| {
-                        snapshot.scope == scope
-                            && profile.reported_model == source.reported_model
-                            && profile.reported_effort == source.reported_effort
-                    })
+                let Some(profile) = reported_side_profile(&tx, &source, &snapshot)?
+                    .filter(|_| snapshot.scope == scope)
                 else {
                     return Ok(unavailable(SideUnavailable::ProfileMismatch));
                 };
@@ -573,6 +568,46 @@ fn source_run(db: &Connection, conversation: &str, active: &str) -> Result<Optio
         }
     }
     Ok(None)
+}
+
+pub(crate) fn can_validate_recorded_side_source(
+    db: &Connection,
+    conversation: &str,
+    run_id: &str,
+    snapshot: &ContextSnapshot,
+) -> Result<bool> {
+    if !matches!(
+        snapshot.scope.mode,
+        SessionMode::ReadOnly | SessionMode::Plan
+    ) || snapshot.scope.model.as_deref().is_none_or(str::is_empty)
+    {
+        return Ok(false);
+    }
+    let chat = load_conversation(db, conversation)?;
+    let Some(source) = source_run(db, conversation, &chat.context_id)? else {
+        return Ok(false);
+    };
+    Ok(source.run_id == run_id
+        && reported_side_profile(db, &source, snapshot)?
+            .is_some_and(|profile| side_fixture_qualifiable(&profile)))
+}
+
+fn reported_side_profile(
+    db: &Connection,
+    source: &SideSourceRun,
+    snapshot: &ContextSnapshot,
+) -> Result<Option<CapabilityScope>> {
+    Ok(latest_reported_scope(db, &source.run_id)?
+        .or_else(|| {
+            snapshot
+                .capabilities
+                .as_ref()
+                .map(|assessment| assessment.scope.clone())
+        })
+        .filter(|profile| {
+            profile.reported_model == source.reported_model
+                && profile.reported_effort == source.reported_effort
+        }))
 }
 
 fn latest_reported_scope(db: &Connection, run: &str) -> Result<Option<CapabilityScope>> {

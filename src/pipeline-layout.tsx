@@ -1,7 +1,8 @@
 import { useId, useMemo, useState, type ReactNode } from "react";
 import { Background, Controls, ReactFlow, type Edge, type Node, type NodeChange, type ReactFlowProps } from "@xyflow/react";
-import { CirclePlay, Layers3, PanelRight, Workflow } from "lucide-react";
+import { ArrowRight, CirclePlay, Clock3, FileCode2, Layers3, PanelRight, ShieldCheck, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ResizablePanel } from "@/panel-resize";
 import "@xyflow/react/dist/style.css";
 import "./pipelines-workspace.css";
 
@@ -39,6 +40,45 @@ export function PipelineSectionHeading({ title, description, icon }: { title: st
 export function PipelineRolesTemplatesHeading() {
   return <PipelineSectionHeading title="Roles & templates" description="Set reusable instructions, tools and review requirements."
     icon={<Layers3 size={20} aria-hidden />} />;
+}
+
+export function PipelineTemplateList({ entries, onOpen }: {
+  entries: { id: string; name: string; detail: string }[];
+  onOpen: (id: string) => void;
+}) {
+  return entries.length ? <ul className="pipeline-select-list">
+    {entries.map(({ id, name, detail }) => <li key={id}>
+      <button type="button" onClick={() => onOpen(id)}>
+        <FileCode2 size={15} aria-hidden />
+        <span>{name}<small>{detail}</small></span>
+        <ArrowRight size={14} className="pipeline-end" aria-hidden />
+      </button>
+    </li>)}
+  </ul> : <p className="text-muted-foreground">No saved templates.</p>;
+}
+
+export function PipelineMaintenanceLayout({ proposals, releases, inventory }: {
+  proposals: ReactNode; releases: ReactNode; inventory: ReactNode;
+}) {
+  return <section className="pipeline-view-content pipeline-stack" aria-label="Workflow maintenance">
+    <PipelineSectionHeading title="Maintenance" description="Review proposals and candidate build evidence."
+      icon={<ShieldCheck size={20} aria-hidden />} />
+    <div className="pipeline-two-columns">
+      <section className="pipeline-box pipeline-stack">{proposals}</section>
+      <section className="pipeline-box pipeline-stack">{releases}</section>
+    </div>
+    <section className="pipeline-box pipeline-stack">
+      <div className="pipeline-card-heading"><h3>Plugin inventory</h3><Clock3 size={16} aria-hidden /></div>
+      {inventory}
+    </section>
+  </section>;
+}
+
+export function PipelinePluginItem({ name, detail, action }: { name: string; detail: string; action?: ReactNode }) {
+  return <div className="pipeline-plugin">
+    <div><strong>{name}</strong><p className="pipeline-meta">{detail}</p></div>
+    {action}
+  </div>;
 }
 
 export function PipelineRunsEmpty({ onOpenBuilder }: { onOpenBuilder: () => void }) {
@@ -98,15 +138,21 @@ export function PipelineCanvasFrame({ canvas, canvasLabel, inspector, inspectorL
 }) {
   const inspectorId = useId();
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  return <div className={className ? `pipeline-editor ${className}` : "pipeline-editor"} data-palette={palette != null || undefined}>
-    {palette != null && <aside className="pipeline-palette" aria-label={paletteLabel}>{palette}</aside>}
-    <div className="pipeline-canvas" role="region" aria-label={canvasLabel}>{canvas}</div>
+  return <div className={className ? `pipeline-editor ${className}` : "pipeline-editor"}>
+    {palette != null && <ResizablePanel as="aside" className="pipeline-palette" aria-label={paletteLabel}
+      edge={["right", "bottom"]} resizeKey="pipeline-palette" resizeLabel={paletteLabel ?? "node palette"}>
+      <div className="pipeline-palette-scroll">{palette}</div>
+    </ResizablePanel>}
+    <ResizablePanel className="pipeline-canvas" role="region" aria-label={canvasLabel} edge="bottom"
+      resizeKey={canvasLabel} resizeLabel={canvasLabel}>{canvas}</ResizablePanel>
     <Button type="button" variant="ghost" className="pipeline-compact-inspector"
       aria-expanded={inspectorOpen} aria-controls={inspectorId} onClick={() => setInspectorOpen(!inspectorOpen)}>
       <PanelRight size={16} /> {inspectorOpen ? "Hide inspector" : "Show inspector"}
     </Button>
-    <aside id={inspectorId} data-compact-open={inspectorOpen || undefined} className={inspectorClassName ? `pipeline-inspector ${inspectorClassName}` : "pipeline-inspector"} aria-label={inspectorLabel}>
-      {inspector}
-    </aside>
+    <ResizablePanel as="aside" id={inspectorId} data-compact-open={inspectorOpen || undefined}
+      className={inspectorClassName ? `pipeline-inspector ${inspectorClassName}` : "pipeline-inspector"} aria-label={inspectorLabel}
+      edge={["left", "bottom"]} resizeKey={inspectorLabel} resizeLabel={inspectorLabel}>
+      <div className="pipeline-inspector-scroll">{inspector}</div>
+    </ResizablePanel>
   </div>;
 }

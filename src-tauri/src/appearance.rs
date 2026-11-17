@@ -58,6 +58,17 @@ pub enum TranscriptWidth {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "../../src/bindings/")]
+pub enum MarkdownWidth {
+    Narrow,
+    #[default]
+    Standard,
+    Wide,
+    Full,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../src/bindings/")]
 pub enum AppearanceMotion {
     #[default]
     System,
@@ -73,6 +84,7 @@ pub struct AppearanceSettings {
     pub response_font: ResponseFont,
     pub conversation_text_size: ConversationTextSize,
     pub transcript_width: TranscriptWidth,
+    pub markdown_width: MarkdownWidth,
     pub motion: AppearanceMotion,
 }
 
@@ -148,6 +160,7 @@ mod tests {
                 theme: AppearanceTheme::System,
                 conversation_text_size: ConversationTextSize::Large,
                 transcript_width: TranscriptWidth::Wide,
+                markdown_width: MarkdownWidth::Full,
                 ..AppearanceSettings::default()
             };
             assert_eq!(store.save_appearance_settings(chosen).await?, chosen);

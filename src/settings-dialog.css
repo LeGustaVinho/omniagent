@@ -10,8 +10,9 @@
   z-index: 81;
   inset: 50% auto auto 50%;
   translate: -50% -50%;
-  width: min(1024px, calc(100vw - 40px));
-  height: min(800px, calc(100dvh - 40px));
+  --settings-inset: 40px;
+  width: clamp(min(760px, calc(100vw - var(--settings-inset))), var(--panel-width, 1024px), calc(100vw - var(--settings-inset)));
+  height: clamp(min(320px, calc(100dvh - var(--settings-inset))), var(--panel-height, 800px), calc(100dvh - var(--settings-inset)));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -78,14 +79,15 @@
 }
 
 .settings-layout {
-  display: grid;
+  display: flex;
   min-height: 0;
   flex: 1;
-  grid-template-columns: clamp(200px, 24vw, 238px) minmax(0, 1fr);
 }
 
 .settings-sidebar {
   display: flex;
+  flex: 0 0 clamp(172px, var(--panel-width, clamp(200px, 24vw, 238px)), 43%);
+  min-width: 0;
   min-height: 0;
   flex-direction: column;
   gap: 12px;
@@ -225,6 +227,7 @@
 }
 
 .settings-content {
+  flex: 1;
   min-height: 0;
   min-width: 0;
   overflow: auto;
@@ -551,15 +554,14 @@
 
 @media (max-width: 759px) {
   .settings-dialog {
-    width: calc(100vw - 22px);
-    height: calc(100dvh - 22px);
+    --settings-inset: 22px;
   }
 
-  .settings-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
+  .settings-dialog > .panel-resize-handle[data-edge="right"],
+  .settings-sidebar > .panel-resize-handle { display: none; }
 
   .settings-sidebar {
+    flex: 1;
     border-right: 0;
   }
 

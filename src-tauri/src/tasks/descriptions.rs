@@ -14,6 +14,7 @@ mod editor;
 pub use editor::{
     DescriptionDraft, DescriptionEditorConflict, DescriptionEditorSave, DescriptionEditorState,
 };
+pub(super) use editor::{consume_draft, load_editor_state};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -282,7 +283,7 @@ fn load_task_context(
     })
 }
 
-fn write_description(
+pub(super) fn write_description(
     db: &Connection,
     project: &str,
     owner: DescriptionOwner,

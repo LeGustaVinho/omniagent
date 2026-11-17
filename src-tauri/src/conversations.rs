@@ -40,7 +40,9 @@ pub use continuation::{
     ContinuedConversation,
 };
 pub use history::ConversationHistoryInspection;
-pub use library::ConversationLibraryEntry;
+pub use library::{
+    ConversationLibraryChange, ConversationLibraryEntry, ConversationLibrarySection,
+};
 pub use reference_delivery::SubmittedConversationReference;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, TS)]

@@ -1,12 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useQuery } from "@tanstack/react-query";
-import { GitCommitHorizontal, RefreshCw } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { GitCommitHorizontal, Plus, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { GitCheckoutChanges, useGitCheckoutReview, type CheckoutReview, type Worktree } from "@/git-checkout-changes";
 import { SavedGitDiffs } from "@/git-saved-diffs";
 import { GitWorkspaceFrame, GitWorkspaceTable } from "@/git-workspace-frame";
-import { DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
+import { GitWorktreeDialog, type WorktreeDraft } from "@/git-worktree-dialog";
+import { DeliveryDetailPanel, DeliveryStatus, InlineIssue } from "@/tasks-git-ui";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type HistoryEntry = { sha: string; author: string; committedAt: string; subject: string };
@@ -23,6 +25,7 @@ export function LiveGitWorkspace(props: WorkspaceProps) {
 function GitCheckoutWorkspace(props: WorkspaceProps) {
   const [checkoutId, setCheckout] = useState(props.checkout.checkoutId);
   const [tab, setTab] = useState<Tab>(() => tabFor(props.target));
+  const [creating, setCreating] = useState(false);
   useEffect(() => { setTab(tabFor(props.target)); }, [props.target]);
   const review = useGitCheckoutReview(checkoutId, tab !== "Saved attempts");
   const trees = review.data?.worktrees.filter((tree): tree is Worktree & { checkoutId: string } => tree.checkoutId !== null) ?? [];
@@ -36,6 +39,8 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
         {trees.map((tree) => <option key={tree.checkoutId} value={tree.checkoutId}>{tree.branch ?? "Detached HEAD"} · {tree.root}</option>)}
       </select>
     </label>
+    {tab === "Worktrees" && <Button type="button" variant="outline" className="px-2.5 py-1.5 text-xs" disabled={!review.data || Boolean(review.error)}
+      onClick={() => setCreating(true)}><Plus size={14} /> New worktree</Button>}
     <Button type="button" variant="ghost" aria-label="Refresh Git review" title="Refresh Git review" onClick={() => void review.refetch()}><RefreshCw size={15} aria-hidden /></Button>
   </>}>
     {tab === "Saved attempts" ? <SavedGitDiffs projectId={props.checkout.projectId} target={props.target} openActivity={props.openActivity} /> : <>
@@ -46,10 +51,66 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
           openFile={activeCheckout ? (path) => props.openWorkspace(/\.(md|markdown)$/i.test(path) ? "knowledge" : "ide", path) : undefined}
           openPanel={activeCheckout ? () => props.openChanges("working") : undefined} />}
         {tab === "Worktrees" && <WorktreeTable review={review.data} select={setCheckout} />}
+        {tab === "Worktrees" && creating && <CreateGitWorktree projectId={props.checkout.projectId} review={review.data}
+          select={(id) => { setCreating(false); setCheckout(id); }} close={() => setCreating(false)} />}
         {tab === "History" && <CommitHistory key={checkoutId} review={review.data} />}
       </>}
     </>}
   </GitWorkspaceFrame>;
+}
+
+function CreateGitWorktree({ projectId, review, select, close }: {
+  projectId: string; review: CheckoutReview; select: (id: string) => void; close: () => void;
+}) {
+  const client = useQueryClient();
+  const checkoutId = review.checkoutId;
+  const history = useQuery({
+    queryKey: ["git-history", checkoutId, review.revision.head, "", undefined],
+    queryFn: () => invoke<HistoryEntry[]>("git_checkout_history", { checkoutId, branch: null }),
+    enabled: Boolean(review.revision.head), retry: false,
+  });
+  const commits = history.data ?? [];
+  const localBranches = review.branches.filter(({ reference }) => reference.startsWith("refs/heads/"));
+  const usedBranches = new Set(review.worktrees.map(({ branch }) => branch));
+  const mutation = useMutation({
+    mutationFn: (request: { branch: string; existing: boolean; baseReference: string | null; expectedHead: string; path: string | null }) =>
+      invoke<ProjectCheckout>("create_git_worktree", { projectId, checkoutId, request }),
+    onSuccess: (checkout) => {
+      void client.invalidateQueries({ queryKey: ["git-review"] });
+      void client.invalidateQueries({ queryKey: ["registered-checkouts"] });
+      select(checkout.checkoutId);
+    },
+  });
+  function expectedHead({ branch, existing, base }: WorktreeDraft) {
+    if (existing) return localBranches.find(({ name }) => name === branch)?.sha;
+    if (!base) return review.revision.head;
+    return review.branches.find(({ reference }) => reference === base)?.sha ?? commits.find(({ sha }) => sha === base)?.sha;
+  }
+
+  return <GitWorktreeDialog defaultBase="" pathHint="Project worktrees folder"
+    revisions={[
+      { value: "", label: "Current checkout HEAD", disabled: !review.revision.head },
+      ...review.branches.map(({ reference, name, sha }) => ({ value: reference, label: `${name} · ${sha.slice(0, 12)}` })),
+      ...commits.map(({ sha, subject }) => ({ value: sha, label: `${sha.slice(0, 12)} · ${subject}` })),
+    ]}
+    existingBranches={localBranches.map(({ name }) => ({
+      value: name, label: usedBranches.has(name) ? `${name} · Checked out` : name, disabled: usedBranches.has(name),
+    }))}
+    busy={mutation.isPending} error={mutation.error ? String(mutation.error) : undefined} onClose={close}
+    validate={(draft) => {
+      if (!draft.existing && localBranches.some(({ name }) => name.toLowerCase() === draft.branch.toLowerCase())) return "This local branch already exists.";
+      if (draft.existing && usedBranches.has(draft.branch)) return "This branch is already checked out.";
+      if (draft.path && !/^[a-z]:[\\/]/i.test(draft.path)) return "Choose an absolute path on a local drive.";
+      if (!expectedHead(draft)) return "Choose a starting revision that exists in this repository.";
+    }}
+    create={(draft) => {
+      const head = expectedHead(draft);
+      if (head) mutation.mutate({
+        branch: draft.branch, existing: draft.existing, baseReference: draft.existing || !draft.base ? null : draft.base,
+        expectedHead: head, path: draft.path || null,
+      });
+    }}
+  />;
 }
 
 function WorktreeTable({ review, select }: { review: CheckoutReview; select: (id: string) => void }) {
@@ -102,7 +163,7 @@ function CommitHistory({ review }: { review: CheckoutReview }) {
         </tr>)}
       </GitWorkspaceTable>}
     </div>
-    {selected && <aside className="delivery-detail" aria-label="Selected commit">
+    {selected && <DeliveryDetailPanel label="Selected commit" resizeKey="git-commit">
       <div className="delivery-detail-content grid content-start gap-3 p-3.5">
         <h3 className="flex items-center gap-2 text-sm font-semibold"><GitCommitHorizontal size={17} aria-hidden /> Selected commit</h3>
         <dl className="grid gap-2 text-xs">
@@ -110,6 +171,6 @@ function CommitHistory({ review }: { review: CheckoutReview }) {
           <div><dt className="text-muted-foreground">History ref</dt><dd className="wrap-anywhere font-mono">{branchRef?.reference ?? review.revision.branch ?? "Checkout HEAD"}</dd></div>
         </dl>
       </div>
-    </aside>}
+    </DeliveryDetailPanel>}
   </div>;
 }

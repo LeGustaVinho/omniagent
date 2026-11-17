@@ -4,6 +4,18 @@ import type { ReactNode } from "react";
 type GitTab = "Changes" | "Worktrees" | "History" | "Saved attempts";
 const tabIcons: Record<GitTab, LucideIcon> = { Changes: FileDiff, Worktrees: Layers3, History, "Saved attempts": FileDiff };
 
+const sourceLabels = { working: "Working tree", staged: "Staged", branch: "Branch comparison", saved: "Saved diff" };
+type DiffSource = keyof typeof sourceLabels;
+
+export function GitDiffSourceSelect<T extends DiffSource>({ sources, value, onChange }: {
+  sources: readonly T[]; value: T; onChange: (source: T) => void;
+}) {
+  return <select aria-label="Diff source" className="delivery-filter" value={value}
+    onChange={(event) => onChange(event.currentTarget.value as T)}>
+    {sources.map((source) => <option key={source} value={source}>{sourceLabels[source]}</option>)}
+  </select>;
+}
+
 export function GitWorkspaceFrame<T extends GitTab>({ tabs, active, select, controls, children }: {
   tabs: readonly T[]; active: T; select: (tab: T) => void; controls?: ReactNode; children: ReactNode;
 }) {

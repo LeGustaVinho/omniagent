@@ -1,10 +1,11 @@
 import { DndContext, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { Activity, FileText, GitCompare, GripVertical, Plus } from "lucide-react";
 import { Dialog } from "radix-ui";
-import { lazy, Suspense, useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState } from "react";
 import { AgileTable, type WorkEvidence } from "@/agile-table";
-import { AgileDetailFrame, AgileDetailTabs, AgileKanbanColumn, AgileSearch, AgileWorkCard, AgileWorkDialog, AgileWorkspaceFrame,
+import { AgileDetailFrame, AgileDetailTabs, AgileKanbanColumn, AgileSearch, AgileWorkCard, AgileWorkDialog, AgileWorkRelations, AgileWorkspaceFrame,
   type WorkDetailView as DetailTab } from "@/agile-layout";
+import { AgileNotePreview, AgileWorkEditor, checklistChoices, priorityChoices, workFormLines, type AgileFormValues } from "@/agile-work-editor";
 import { ConversationMarkdown } from "@/conversation-markdown";
 import { useGitSimulation } from "@/git-simulation";
 import { exampleNotes } from "@/ide-knowledge-data";
@@ -12,20 +13,18 @@ import { resolveWiki } from "@/knowledge-document";
 import { ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import { ProjectTasksWorkspace } from "@/project-tasks";
+import type { WorkKind as AgileKind } from "@/project-agile-model";
 import { deliveryConversation } from "@/conversation-preview-data";
 import { DeliveryStatus, InlineIssue, IntegrationNotice } from "@/tasks-git-ui";
 import {
   deliveryBase, deliveryBlocker, deliveryBranch, deliveryCommit, deliveryModels, deliveryNotePath, deliveryRunId,
   deliveryStageIndex, deliveryStages, deliveryStatus, deliveryTaskId, exampleTasks, modelName,
-  releaseTask, taskStates, workCode, workKind, type ChecklistMode, type DeliveryTask, type TaskPriority, type TaskState, type WorkKind, type WorktreeStrategy,
+  releaseTask, taskStates, workCode, workKind, type ChecklistMode, type DeliveryTask, type TaskState, type WorkKind,
 } from "@/tasks-demo-data";
 import type { SimulationSession, WorkspaceProps } from "@/workbench-contract";
 
 const levels = ["Task", "Epic", "Sub-Task"] as const;
 const levelLabels = { Epic: "Epics", Task: "Tasks", "Sub-Task": "Sub-Tasks" };
-const MarkdownEditor = lazy(() => import("@/knowledge-editor").then(({ MarkdownEditor }) => ({ default: MarkdownEditor })));
-const descriptionModes = [["source", "Source"], ["live", "Live Preview"], ["reading", "Reading"]] as const;
-const priorities = ["Urgent", "High", "Normal", "Low"] as const;
 const agents = ["Planning agent", "Cross-review", "Implementation agent", "Verification agent"] as const;
 
 function recordedParticipants(task: DeliveryTask, step?: SimulationSession["delivery"]) {
@@ -56,7 +55,7 @@ function TaskColumn({ state, tasks, selected, onSelect }: {
 }
 
 function TaskCard({ task, selected, onSelect }: { task: DeliveryTask; selected: boolean; onSelect: (id: string) => void }) {
-  const canMove = task.id !== deliveryTaskId;
+  const canMove = task.id !== deliveryTaskId && workKind(task) !== "Epic";
   const { attributes, listeners, setActivatorNodeRef, setNodeRef, transform, isDragging } = useDraggable({ id: task.id, disabled: !canMove });
   const style = transform ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`, zIndex: 2 } : undefined;
   return (
@@ -73,116 +72,77 @@ function TaskCard({ task, selected, onSelect }: { task: DeliveryTask; selected: 
   );
 }
 
-function TaskForm({ task, parents, onSave, hasWorktree }: {
-  task: DeliveryTask;
-  parents: DeliveryTask[];
-  onSave: (task: DeliveryTask) => void;
-  hasWorktree: boolean;
-}) {
-  const [draft, setDraft] = useState(task);
-  const [criteria, setCriteria] = useState(task.criteria.join("\n"));
-  const [dependencies, setDependencies] = useState(task.dependencies.join("\n"));
-  const [descriptionMode, setDescriptionMode] = useState<typeof descriptionModes[number][0]>("live");
-  const [linkedNote, setLinkedNote] = useState<string>();
-  const kind = workKind(task);
-  const canMove = task.id !== deliveryTaskId;
-  const validParent = kind !== "Sub-Task" || Boolean(draft.parentId);
-  const descriptionPath = workCode(task) + ".md";
+const demoKind: Record<AgileKind, WorkKind> = { epic: "Epic", task: "Task", subtask: "Sub-Task" };
+const liveKind: Record<WorkKind, AgileKind> = { Epic: "epic", Task: "task", "Sub-Task": "subtask" };
 
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const title = draft.title.trim();
-    if (!title || !validParent) return;
-    const lines = (value: string) => value.split("\n").map((line) => line.trim()).filter(Boolean);
-    onSave({ ...draft, title, criteria: lines(criteria), dependencies: lines(dependencies) });
-  }
-
-  return (
-    <form className="grid gap-3" onSubmit={submit}>
-      <label className="delivery-field">Title<input className="delivery-filter" required value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
-      <section aria-label="Description" className="grid gap-1.5">
-        <h4 className="text-sm font-medium">Description</h4>
-        <div className="agile-description">
-          <div className="flex flex-wrap gap-1 border-b border-border px-1.5 py-1" aria-label="Description views">
-            {descriptionModes.map(([mode, label]) => <button key={mode} type="button" className="delivery-tab" aria-pressed={descriptionMode === mode}
-              onClick={() => setDescriptionMode(mode)}>{label}</button>)}
-          </div>
-          {descriptionMode === "reading"
-            ? <div className="agile-description-reading">{draft.description
-              ? <ConversationMarkdown>{draft.description}</ConversationMarkdown>
-              : <p className="text-muted-foreground">No description.</p>}</div>
-            : <div className="agile-description-editor"><Suspense fallback={<p className="p-3 text-xs text-muted-foreground" role="status">Loading editor…</p>}>
-                <MarkdownEditor mode={descriptionMode} path={descriptionPath} source={draft.description} files={exampleNotes}
-                  onChange={(description) => setDraft((current) => ({ ...current, description }))}
-                  onLink={(link) => {
-                    const locations = resolveWiki(link, descriptionPath, exampleNotes);
-                    const [match] = locations;
-                    if (match && locations.length === 1) setLinkedNote(match.path);
-                  }} />
-              </Suspense></div>}
-        </div>
-        {linkedNote && <details open className="agile-description-reading agile-description">
-          <summary className="mb-1 cursor-pointer font-semibold text-primary">{linkedNote}</summary>
-          <ConversationMarkdown>{exampleNotes.find(({ path }) => path === linkedNote)?.content ?? ""}</ConversationMarkdown>
-        </details>}
-      </section>
-      {kind !== "Epic" && <label className="delivery-field">{kind === "Task" ? "Epic" : "Parent Task"}
-        <select className="delivery-filter" required={kind === "Sub-Task"} value={draft.parentId ?? ""}
-          onChange={(event) => setDraft({ ...draft, parentId: event.target.value || undefined })}>
-          <option value="">{kind === "Task" ? "No epic" : "Select a task"}</option>
-          {parents.map((parent) => <option key={parent.id} value={parent.id}>{workCode(parent)} · {parent.title}</option>)}
-        </select>
-      </label>}
-      <div className="grid grid-cols-2 gap-2">
-        {kind !== "Epic" && <label className="delivery-field">Priority<select className="delivery-filter" value={draft.priority} onChange={(event) => setDraft({ ...draft, priority: event.target.value as TaskPriority })}>{priorities.map((priority) => <option key={priority}>{priority}</option>)}</select></label>}
-        <label className="delivery-field">State<select className="delivery-filter" disabled={!canMove} value={draft.state} onChange={(event) => setDraft({ ...draft, state: event.target.value as TaskState })}>{taskStates.map((state) => <option key={state}>{state}</option>)}</select></label>
-      </div>
-      {kind !== "Epic" && <>
-      <label className="delivery-field">Checklist execution<select className="delivery-filter" value={draft.checklistMode ?? ""}
-        onChange={(event) => setDraft({ ...draft, checklistMode: (event.target.value || undefined) as ChecklistMode | undefined })}>
-        <option value="">Inherit default</option><option>Track progress</option><option>Run by item</option>
-      </select></label>
-      {kind === "Task" && <label className="delivery-field">Branch strategy
-        <select className="delivery-filter" disabled={hasWorktree} value={draft.worktreeStrategy ?? ""}
-          onChange={(event) => setDraft({ ...draft, worktreeStrategy: (event.target.value || undefined) as WorktreeStrategy | undefined })}>
-          <option value="">Inherit project strategy</option>
-          <option value="isolated">Branch per work item</option>
-          <option value="shared">Shared branch per Task</option>
-        </select>
-        {hasWorktree && <span className="text-xs text-muted-foreground">This task already has a worktree.</span>}
-      </label>}
-      <ModelPicker label="Planned assignment" options={deliveryModels} selection={{ mode: "single", selected: draft.assignment, onChange: (assignment) => setDraft({ ...draft, assignment }) }} />
-      <label className="delivery-field">Acceptance criteria<textarea className="delivery-filter" rows={3} value={criteria} onChange={(event) => setCriteria(event.target.value)} /></label>
-      <label className="delivery-field">Dependencies<textarea className="delivery-filter" rows={2} value={dependencies} onChange={(event) => setDependencies(event.target.value)} /></label>
-      {canMove && <label className="delivery-field">Blocker<input className="delivery-filter" value={draft.blocker} onChange={(event) => setDraft({ ...draft, blocker: event.target.value })} /></label>}
-      </>}
-      <Button type="submit" className="justify-self-start px-2.5 py-1.5 text-xs" disabled={!draft.title.trim() || !validParent}>Save {kind.toLowerCase()}</Button>
-    </form>
-  );
+function nextWorkId(items: DeliveryTask[], kind: WorkKind) {
+  const prefix = kind === "Epic" ? "EPIC" : "OPS";
+  const existing = new Set(items.map(workCode));
+  let ordinal = kind === "Epic" ? 2 : 25;
+  while (existing.has(`${prefix}-${ordinal}`)) ordinal++;
+  return `${prefix}-${ordinal}`;
 }
 
-function TaskDialog({ task, parents, onClose, onSave, hasWorktree }: {
+function TaskDialog({ task, items, onClose, onSave, hasWorktree, creating }: {
   task: DeliveryTask;
-  parents: DeliveryTask[];
+  items: DeliveryTask[];
   onClose: () => void;
   onSave: (task: DeliveryTask) => void;
   hasWorktree: boolean;
+  creating: boolean;
 }) {
-  const kind = workKind(task).toLowerCase();
+  const [kind, setKind] = useState(liveKind[workKind(task)]);
+  const [linkedNote, setLinkedNote] = useState<string>();
+  const [assignment, setAssignment] = useState(task.assignment);
+  const [values, setValues] = useState<AgileFormValues>({
+    title: task.title, description: task.description, parentId: task.parentId ?? "", state: task.state,
+    priority: priorityChoices.find(({ label }) => label === task.priority)?.value ?? "0",
+    checklistMode: checklistChoices.find(({ label }) => label === task.checklistMode)?.value ?? "",
+    branchStrategy: task.worktreeStrategy === "shared" ? "shared_branch_per_task" : task.worktreeStrategy === "isolated" ? "independent" : "",
+    acceptanceCriteria: task.criteria.join("\n"), dependencies: task.dependencies, blockers: task.blocker,
+  });
   const activator = useState(() => document.activeElement)[0];
-  return (
-    <Dialog.Root open onOpenChange={(next) => { if (!next) onClose(); }}>
-      <AgileWorkDialog title={task.title ? `Edit ${kind}` : `New ${kind}`} closeLabel="Close task editor"
-        description="Edit the task details, planned assignment, dependencies and criteria."
-        onCloseAutoFocus={(event) => {
-          if (activator instanceof HTMLElement && activator.getClientRects().length) { event.preventDefault(); activator.focus(); }
-        }}>
-        <TaskForm task={task} parents={parents} onSave={onSave} hasWorktree={hasWorktree} />
-      </AgileWorkDialog>
-    </Dialog.Root>
-  );
-}
+  const descriptionPath = workCode(task) + ".md";
+  const canMove = task.id !== deliveryTaskId && kind !== "epic";
+  const parents = items.filter((item) => workKind(item) === (kind === "task" ? "Epic" : "Task"))
+    .map((item) => ({ value: item.id, label: `${workCode(item)} · ${item.title}` }));
+  const dependencies = Array.from(new Set([...items.filter((item) => workKind(item) !== "Epic" && item.id !== task.id)
+    .map(({ title }) => title), ...task.dependencies])).map((title) => ({ value: title, label: title }));
 
+  function save() {
+    onSave({
+      ...task, id: creating ? nextWorkId(items, demoKind[kind]) : task.id,
+      kind: demoKind[kind], title: values.title.trim(), description: values.description, state: values.state as TaskState,
+      parentId: kind === "epic" ? undefined : values.parentId || undefined,
+      priority: priorityChoices.find(({ value }) => value === values.priority)?.label ?? "Normal", assignment,
+      criteria: workFormLines(values.acceptanceCriteria), dependencies: values.dependencies, blocker: values.blockers,
+      checklistMode: values.checklistMode ? checklistChoices.find(({ value }) => value === values.checklistMode)?.label as ChecklistMode : undefined,
+      worktreeStrategy: values.branchStrategy === "shared_branch_per_task" ? "shared" : values.branchStrategy === "independent" ? "isolated" : undefined,
+    });
+  }
+
+  return <Dialog.Root open onOpenChange={(next) => { if (!next) onClose(); }}>
+    <AgileWorkDialog title={creating ? "New work" : `Edit ${demoKind[kind].toLowerCase()}`} closeLabel="Close work editor"
+      description="Edit the work details, planned assignment, dependencies and criteria."
+      onCloseAutoFocus={(event) => {
+        if (activator instanceof HTMLElement && activator.getClientRects().length) { event.preventDefault(); activator.focus(); }
+      }}>
+      <AgileWorkEditor kind={kind} setKind={creating ? (next) => { setKind(next); setValues((current) => ({ ...current, parentId: "", state: "Backlog" })); } : undefined}
+        values={values} change={(patch) => setValues((current) => ({ ...current, ...patch }))} parents={parents}
+        states={(canMove ? taskStates : [task.state]).map((state) => ({ value: state, label: state }))}
+        dependencies={dependencies} notes={exampleNotes} path={descriptionPath} branchLocked={hasWorktree}
+        assignment={{ selected: assignment, options: deliveryModels, change: setAssignment }}
+        openNote={(link) => {
+          const locations = resolveWiki(link, descriptionPath, exampleNotes);
+          if (locations.length === 1 && locations[0]) setLinkedNote(locations[0].path);
+        }}
+        descriptionPreview={linkedNote && <AgileNotePreview path={linkedNote}>
+          <ConversationMarkdown>{exampleNotes.find(({ path }) => path === linkedNote)?.content ?? ""}</ConversationMarkdown>
+        </AgileNotePreview>}
+        saveLabel={creating ? "Create work" : "Save work"} cancel={onClose} save={save} />
+    </AgileWorkDialog>
+  </Dialog.Root>;
+}
 function Checklist({ label, entries }: { label: string; entries: string[] }) {
   return (
     <section className="grid gap-1.5">
@@ -268,13 +228,14 @@ function TaskDetails({ task, parent, children, onSelect, onCheck, onAddItem, tab
   const kind = workKind(task);
   const mode = task.checklistMode ?? parent?.checklistMode ?? "Track progress";
   const [itemTitle, setItemTitle] = useState("");
+  const related = children.map(demoRelation);
+  const relatedDelivery = sim && children.find(({ id }) => id === deliveryTaskId);
+  const activeChildren = children.filter((child) => recordedParticipants(child, sim?.delivery).length > 0);
   return (
     <AgileDetailFrame label="Task details" title={task.title} identity={`${kind} · ${workCode(task)}`}
       state={task.state} closeLabel="Close details" close={close} navigation={<AgileDetailTabs view={tab} onViewChange={setTab} />}>
         {tab === "Overview" && <>
-          {parent && <button type="button" className="agile-ref justify-self-start" onClick={() => onSelect(parent.id)}>
-            {workKind(parent)} · {parent.title}
-          </button>}
+          {parent && <AgileWorkRelations parent={demoRelation(parent)} children={[]} openWork={onSelect} />}
           {task.description && <div className="text-sm leading-6"><ConversationMarkdown>{task.description}</ConversationMarkdown></div>}
           {task.blocker && <InlineIssue>{task.blocker}</InlineIssue>}
           {kind !== "Epic" && <><dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm">
@@ -306,36 +267,42 @@ function TaskDetails({ task, parent, children, onSelect, onCheck, onAddItem, tab
             </form>
             {mode === "Run by item" && <p className="text-xs text-muted-foreground">Manual checks are available. Dispatch by item requires the Agile service.</p>}
           </section></>}
-          {!!children.length && <section aria-label={kind === "Epic" ? "Tasks in this epic" : "Sub-Tasks"} className="grid gap-2">
-            <h4 className="text-xs font-semibold">{kind === "Epic" ? "Tasks" : "Sub-Tasks"}</h4>
-            <ul className="divide-y divide-border">{children.map((child) => <li key={child.id} className="flex items-center justify-between gap-2 py-1.5">
-              <button type="button" className="text-left text-sm hover:underline" onClick={() => onSelect(child.id)}>{child.title}</button>
-              <DeliveryStatus>{child.state}</DeliveryStatus>
-            </li>)}</ul>
-          </section>}
+          <AgileWorkRelations children={related} openWork={onSelect} title={kind === "Epic" ? "Tasks" : "Sub-Tasks"} />
+          {kind === "Epic" && !children.length && <p className="text-sm text-muted-foreground">No Tasks linked to this Epic.</p>}
           <div className="flex flex-wrap gap-2">
             <Button className="px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={edit}>Edit {kind.toLowerCase()}</Button>
             {isDelivery && <Button className="px-2.5 py-1.5 text-xs" type="button" variant="outline" onClick={() => props.openWorkspace("pipelines", "task-delivery")}>Run pipeline</Button>}
             {isDelivery && <TaskActions simulation={sim} openWorkspace={props.openWorkspace} openActivity={props.openActivity} openChanges={props.openChanges} setTab={setTab} />}
           </div>
         </>}
-        {tab === "Workflow" && (isDelivery ? <Workflow simulation={sim} openWorkspace={props.openWorkspace} /> : <p className="text-sm text-muted-foreground">No workflow linked to this task.</p>)}
-        {tab === "Work history" && <>
+        {tab === "Workflow" && (isDelivery ? <Workflow simulation={sim} openWorkspace={props.openWorkspace} />
+          : relatedDelivery ? <AgileWorkRelations children={[demoRelation(relatedDelivery)]} title="Workflows"
+            openWork={(id) => { onSelect(id); setTab("Workflow"); }} />
+          : <p className="text-sm text-muted-foreground">{kind === "Epic" ? "No active workflows in this Epic." : "No workflow linked to this task."}</p>)}
+        {tab === "Work history" && (kind === "Epic" ? (activeChildren.length > 0
+          ? <AgileWorkRelations children={activeChildren.map(demoRelation)} title="Work history" openWork={(id) => { onSelect(id); setTab("Work history"); }} />
+          : <p className="text-sm text-muted-foreground">No linked attempts or deliveries.</p>) : <>
           <h4 className="text-xs font-semibold">Work history</h4>
           {participants.length ? <ul className="grid divide-y divide-border">{participants.map(({ role, model }) => <li className="flex flex-wrap justify-between gap-2 py-2 text-sm" key={role}><span>{role}</span><span className="text-muted-foreground">{model}</span></li>)}</ul> : <p className="text-sm text-muted-foreground">No linked attempts.</p>}
           {isDelivery && participants.length > 0 && <Button type="button" variant="outline" className="justify-self-start px-2.5 py-1.5 text-xs" onClick={() => props.openActivity(deliveryRunId)}><Activity size={14} /> View run activity</Button>}
-        </>}
-        {tab === "Context" && (isDelivery
+        </>)}
+        {tab === "Context" && (kind === "Epic" && task.description ? <ConversationMarkdown>{task.description}</ConversationMarkdown> : isDelivery
           ? <><h4 className="text-xs font-semibold">Source revision</h4><div className="delivery-card"><p className="break-all font-mono text-xs">{deliveryNotePath}</p><p className="mt-1 text-xs text-muted-foreground">Repository note · {deliveryBase}</p></div><Button type="button" variant="outline" className="justify-self-start px-2.5 py-1.5 text-xs" onClick={() => props.openWorkspace("knowledge", deliveryNotePath)}><FileText size={14} /> Open note</Button></>
           : <p className="text-sm text-muted-foreground">No context linked to this task.</p>)}
-        {tab === "Changes" && <>
+        {tab === "Changes" && (kind === "Epic" ? (relatedDelivery && hasCandidate
+          ? <AgileWorkRelations children={[demoRelation(relatedDelivery)]} title="Recorded Git evidence" openWork={(id) => { onSelect(id); setTab("Changes"); }} />
+          : <p className="text-sm text-muted-foreground">No verified repository changes recorded.</p>) : <>
           {isDelivery && <label className="delivery-field">Completion milestone<select className="delivery-filter" value={mergeRequired ? "merged" : "committed"} onChange={(event) => setMergeRequired(event.target.value === "merged")}><option value="committed">Verified commit</option><option value="merged">Verified merge</option></select></label>}
           {isDelivery && hasCandidate
             ? <><p className="text-sm text-muted-foreground">Saved candidate <code>{deliveryCommit}</code></p><Button type="button" variant="outline" className="justify-self-start px-2.5 py-1.5 text-xs" onClick={() => props.openChanges("saved")}><GitCompare size={14} /> Open saved diff</Button></>
             : <p className="text-sm text-muted-foreground">No candidate diff captured for this task.</p>}
-        </>}
+        </>)}
     </AgileDetailFrame>
   );
+}
+
+function demoRelation(task: DeliveryTask) {
+  return { id: task.id, title: task.title, kind: workKind(task), state: task.state };
 }
 
 export default function TasksWorkspace(props: WorkspaceProps) {
@@ -369,6 +336,7 @@ function PreviewTasksWorkspace(props: WorkspaceProps) {
   }
 
   function save(task: DeliveryTask) {
+    if (!tasks.some(({ id }) => id === task.id)) setLevel(workKind(task));
     setTasks((current) => current.some(({ id }) => id === task.id)
       ? current.map((existing) => existing.id === task.id ? task : existing)
       : [...current, task]);
@@ -379,7 +347,7 @@ function PreviewTasksWorkspace(props: WorkspaceProps) {
   function move(event: DragEndEvent) {
     const state = event.over?.id as TaskState | undefined;
     if (!state || !taskStates.includes(state) || event.active.id === deliveryTaskId) return;
-    setTasks((current) => current.map((task) => task.id === event.active.id ? { ...task, state } : task));
+    setTasks((current) => current.map((task) => task.id === event.active.id && workKind(task) !== "Epic" ? { ...task, state } : task));
   }
 
   function check(workId: string, itemId: string, checked: boolean) {
@@ -397,12 +365,8 @@ function PreviewTasksWorkspace(props: WorkspaceProps) {
   }
 
   function create(kind: WorkKind) {
-    const prefix = kind === "Epic" ? "EPIC" : "OPS";
-    const existing = new Set(tasks.map(workCode));
-    let ordinal = kind === "Epic" ? 2 : 25;
-    while (existing.has(`${prefix}-${ordinal}`)) ordinal++;
     setEditing({
-      id: `${prefix}-${ordinal}`, kind, title: "", description: "", state: "Backlog", priority: "Normal",
+      id: nextWorkId(tasks, kind), kind, title: "", description: "", state: "Backlog", priority: "Normal",
       assignment: null, criteria: [], dependencies: [], blocker: "",
       parentId: kind === "Sub-Task" && selectedTask && workKind(selectedTask) === "Task" ? selectedTask.id : undefined,
     });
@@ -422,7 +386,7 @@ function PreviewTasksWorkspace(props: WorkspaceProps) {
   const work = available.map((item): DeliveryTask => {
     if (workKind(item) !== "Epic") return item;
     const children = available.filter(({ parentId }) => parentId === item.id);
-    if (!children.length || children.some(({ state }) => state !== "Completed" && state !== "Cancelled")) return item;
+    if (!children.length || children.some(({ state }) => state !== "Completed" && state !== "Cancelled")) return { ...item, state: "Backlog" };
     return { ...item, state: children.some(({ state }) => state === "Completed") ? "Completed" : "Cancelled" };
   });
   const filter = query.trim().toLocaleLowerCase();
@@ -450,7 +414,7 @@ function PreviewTasksWorkspace(props: WorkspaceProps) {
       onViewChange={(next) => setView(next === "kanban" ? "board" : "list")}
       action={<Button type="button" className="px-3 py-1.5 text-xs" disabled={!simulation} title={simulation ? undefined : "Task creation integration pending"}
           onClick={() => create(newKind)}>
-          <Plus size={15} aria-hidden="true" /> New {newKind.toLowerCase()}
+          <Plus size={15} aria-hidden="true" /> New work
         </Button>}
       filters={simulation && <>
         {view === "board" && <select className="delivery-filter font-medium" aria-label="Kanban level" value={level}
@@ -478,7 +442,7 @@ function PreviewTasksWorkspace(props: WorkspaceProps) {
           children={work.filter(({ parentId }) => parentId === selectedTask.id)} onSelect={open} onCheck={check} onAddItem={addItem}
           tab={tab} setTab={setTab} close={() => setSelected(undefined)} edit={() => setEditing(selectedTask)} props={props} mergeRequired={mergeRequired} setMergeRequired={setMergeRequired} />}
       </div>
-      {editing && <TaskDialog task={editing} parents={work.filter((item) => workKind(item) === (workKind(editing) === "Task" ? "Epic" : "Task"))}
+      {editing && <TaskDialog task={editing} items={work} creating={!tasks.some(({ id }) => id === editing.id)}
         onClose={() => setEditing(undefined)} onSave={save} hasWorktree={Boolean(evidence(editing))} />}
     </AgileWorkspaceFrame>
   );

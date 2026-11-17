@@ -5,7 +5,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import { ArrowUpRight, FileText } from "lucide-react";
 import {
-  anchorKey, getProperties, parseReadingAddress, parseReadingFile, prepareReading, readingLocalAddress, resolveWiki, withoutProperties,
+  anchorKey, getProperties, parseReadingAddress, parseReadingFile, readingDocument, readingLocalAddress, resolveWiki, withoutProperties,
   type NoteTarget,
 } from "@/knowledge-document";
 import { fileName, type ExampleFile } from "@/ide-knowledge-data";
@@ -23,7 +23,17 @@ type ReadingNode = {
   value?: string;
   children?: ReadingNode[];
   properties?: Record<string, unknown>;
+  position?: { start: { line: number } };
 };
+
+function markReadingLine(line: number) {
+  return (tree: ReadingNode) => {
+    const blocks = tree.children ?? [];
+    const target = blocks.findLastIndex(({ type, position }) => type === "element" && position !== undefined && position.start.line <= line);
+    if (target === -1) return;
+    blocks.splice(target, 0, { type: "element", tagName: "span", properties: { dataNoteLineTarget: "" }, children: [] });
+  };
+}
 
 const tagExcludedElements = new Set(["a", "code", "pre", "script", "style"]);
 
@@ -168,19 +178,20 @@ export function NoteReading(props: ReadingProps) {
   const { path, content, files, jump, resolveLinks } = props;
   const anchorScope = useId() + "-";
   const root = useRef<HTMLDivElement>(null);
-  const rendered = prepareReading(content, path, files, undefined, resolveLinks ? (link, from) => {
+  const { markdown, renderedLine } = readingDocument(content, path, files, resolveLinks ? (link, from) => {
     const target = resolveLinks(link, from);
     if (target?.status !== "resolved") return [];
     return [{ path: target.location.path, anchor: target.location.anchor ?? undefined }];
-  } : undefined);
+  } : undefined, jump?.line);
   const properties = getProperties(content);
   useEffect(() => {
-    if (!jump?.anchor || !root.current) return;
-    const key = anchorKey(jump.anchor);
-    const target = [...root.current.querySelectorAll("[data-note-anchor]")].find((entry) =>
+    if (!jump || !root.current) return;
+    const key = jump.anchor && anchorKey(jump.anchor);
+    const anchor = key && [...root.current.querySelectorAll("[data-note-anchor]")].find((entry) =>
       entry.getAttribute("data-note-anchor") === key);
+    const target = anchor || root.current.querySelector("[data-note-line-target]")?.nextElementSibling;
     target?.scrollIntoView?.({ block: "start" });
-  }, [jump, path]);
+  }, [jump, path, renderedLine]);
 
   return (
     <div className="note-reading" ref={root} aria-label={`Reading view for ${path}`}>
@@ -192,8 +203,8 @@ export function NoteReading(props: ReadingProps) {
         </dl>}
         <ReadingContext.Provider value={{ ...props, anchorScope }}>
           <ReactMarkdown skipHtml urlTransform={(url) => trustedPreviewUrl(url, path)} remarkPlugins={markdownPlugins}
-            rehypePlugins={readingPlugins} components={components}>
-            {rendered}
+            rehypePlugins={renderedLine === undefined ? readingPlugins : [[markReadingLine, renderedLine], ...readingPlugins]} components={components}>
+            {markdown}
           </ReactMarkdown>
         </ReadingContext.Provider>
       </article>

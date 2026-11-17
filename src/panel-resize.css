@@ -1,0 +1,43 @@
+:where(.resizable-panel) {
+  position: relative;
+  --panel-width: initial;
+  --panel-height: initial;
+}
+
+.panel-resize-handle {
+  position: absolute;
+  z-index: 8;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+
+.panel-resize-handle::after {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  border-radius: 2px;
+  background: var(--muted-foreground);
+  opacity: .55;
+  content: "";
+  pointer-events: none;
+}
+
+.panel-resize-handle:is(:hover, :focus-visible, [data-dragging])::after {
+  background: var(--ring);
+  opacity: 1;
+}
+
+.panel-resize-handle[aria-orientation="vertical"] { inset-block: 0; width: 8px; cursor: col-resize; }
+.panel-resize-handle[aria-orientation="vertical"]::after { width: 2px; height: 28px; }
+.panel-resize-handle[aria-orientation="horizontal"] { inset-inline: 0; height: 8px; cursor: row-resize; }
+.panel-resize-handle[aria-orientation="horizontal"]::after { width: 28px; height: 2px; }
+.panel-resize-handle[data-edge="left"] { left: 0; }
+.panel-resize-handle[data-edge="right"] { right: 0; }
+.panel-resize-handle[data-edge="top"] { top: 0; }
+.panel-resize-handle[data-edge="bottom"] { bottom: 0; }
+
+@media (forced-colors: active) {
+  .panel-resize-handle::after { background: CanvasText; forced-color-adjust: none; }
+  .panel-resize-handle:is(:hover, :focus-visible, [data-dragging])::after { background: Highlight; }
+}

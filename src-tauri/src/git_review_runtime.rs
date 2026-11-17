@@ -1,12 +1,13 @@
 use omniagent::{
     diagnostics,
     repository::git_review::{
-        GitCheckoutReview, GitDiffSource, GitReviewCommit, GitReviewDiff, GitReviewRevision,
-        SavedGitAttempt,
+        GitBranchComparison, GitBranchDiff, GitBranchRange, GitBranchRevisions, GitCheckoutReview,
+        GitDiffSource, GitReviewCommit, GitReviewDiff, GitReviewRevision, SavedGitAttempt,
     },
+    repository::{ManualGitWorktree, ProjectCheckout, create_git_worktree as create_worktree},
     store::Store,
 };
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 fn review_error(error: anyhow::Error) -> String {
     diagnostics::preview(&format!("{error:#}"))
@@ -44,6 +45,50 @@ pub async fn git_checkout_diff(
 ) -> Result<GitReviewDiff, String> {
     store
         .git_checkout_diff(checkout_id, path, source)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_branch_comparison(
+    store: State<'_, Store>,
+    checkout_id: String,
+    range: GitBranchRange,
+) -> Result<GitBranchComparison, String> {
+    store
+        .git_branch_comparison(checkout_id, range)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn git_branch_comparison_diff(
+    store: State<'_, Store>,
+    checkout_id: String,
+    range: GitBranchRange,
+    expected: GitBranchRevisions,
+    path: String,
+) -> Result<GitBranchDiff, String> {
+    store
+        .git_branch_comparison_diff(checkout_id, range, expected, path)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
+pub async fn create_git_worktree(
+    app: AppHandle,
+    store: State<'_, Store>,
+    project_id: String,
+    checkout_id: String,
+    request: ManualGitWorktree,
+) -> Result<ProjectCheckout, String> {
+    let default_root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("worktrees");
+    create_worktree(&store, default_root, project_id, checkout_id, request)
         .await
         .map_err(review_error)
 }

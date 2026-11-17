@@ -74,6 +74,7 @@ function git(cwd, ...args) {
   const run = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
   if (run.error) throw run.error;
   assert.equal(run.status, 0, run.stderr);
+  return run.stdout;
 }
 
 async function invoke(browser, command, args = {}) {
@@ -428,6 +429,7 @@ async function checkSimulation(browser, checkout) {
 
   await click(browser, 'button[aria-label="IDE"]');
   const ide = browser.$(shown);
+  if (!await ide.$('details[open] > summary[title="src"]').isExisting()) await click(ide, 'summary[title="src"]');
   await click(ide, "button=index.ts");
   await ide.$(".monaco-editor").waitForDisplayed();
   const bottom = ide.$('button[aria-label="Toggle bottom panel"]');
@@ -494,7 +496,7 @@ async function checkSimulation(browser, checkout) {
   await click(pipeline, "button=View waiting stage", stageWait);
   await click(pipeline, "button=Accept diff");
   await click(pipeline, "button=View waiting stage", stageWait);
-  const gitWait = pipeline.$(".pipeline-inspector > .pipeline-stack > p");
+  const gitWait = pipeline.$(".pipeline-inspector-scroll > .pipeline-stack > p");
   await gitWait.waitForDisplayed();
   assert.equal(await gitWait.getText(), "Waiting for commit");
   await capture(browser, "03-pipeline-waiting-commit");
@@ -717,6 +719,17 @@ async function verifyDetachedJob(browser, application, scratch) {
     await activity.$('h3=Recorded output').waitForDisplayed();
     await capture(browser, "10-activity-real");
     await click(activity, 'button[aria-label="Close activity"]');
+    await click(browser, '.work-rail button[aria-label="Settings"]');
+    const settings = browser.$('.settings-dialog');
+    await click(settings.$('[aria-label="Settings categories"]'), "button=System");
+    await click(settings, "summary=Qualification matrix");
+    const matrix = '.settings-dialog table[aria-label="Qualification matrix"]';
+    await browser.$(matrix).waitForDisplayed({ timeout: 10_000 });
+    await browser.waitUntil(() => browser.execute((selector) => Array.from(document.querySelectorAll(selector),
+      (cell) => cell.textContent).some((model) => model.includes("desktop-fixture")), `${matrix} tbody td:nth-child(2)`),
+    { timeoutMsg: "Qualification matrix should show the model from the persisted dispatch" });
+    await capture(browser, "real-settings-qualification");
+    await click(settings, 'button[aria-label="Close settings"]');
   } finally {
     await writeFile(release, "");
     if (detached) {
@@ -1818,6 +1831,252 @@ test("builds, simulates and executes a real pipeline visually", { timeout: 180_0
         return browser;
       },
     });
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("compares committed branches and registers a manual worktree in the real Git workspace", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Git workspace repository");
+  const worktree = join(scratch, "Manual worktree");
+  git(scratch, "init", "-q", "-b", "main", repo);
+  git(repo, "config", "user.name", "OmniAgent Fixture");
+  git(repo, "config", "user.email", "fixture@example.invalid");
+  git(repo, "config", "commit.gpgsign", "false");
+  git(repo, "config", "core.autocrlf", "false");
+  await writeFile(join(repo, "README.md"), "# Main branch\n");
+  git(repo, "add", "README.md");
+  git(repo, "commit", "-qm", "Main revision");
+  git(repo, "switch", "-qc", "topic");
+  await writeFile(join(repo, "README.md"), "# Topic branch\n");
+  git(repo, "commit", "-qam", "Topic revision");
+  git(repo, "switch", "-q", "main");
+  await writeFile(join(repo, "README.md"), "# Unsaved working tree edit\n");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    await click(browser, '.work-rail button[aria-label="Git"]');
+    const gitView = browser.$('[aria-label="Git workspace"]');
+    const source = gitView.$('select[aria-label="Diff source"]');
+    await source.waitForEnabled();
+    await source.selectByAttribute("value", "branch");
+    const base = gitView.$('select[aria-label="Base reference"]');
+    await base.waitForEnabled();
+    await base.selectByAttribute("value", "refs/heads/main");
+    const compare = gitView.$('select[aria-label="Compare reference"]');
+    await compare.waitForEnabled();
+    await compare.selectByAttribute("value", "refs/heads/topic");
+    const diff = gitView.$('[aria-label="Diff editor for README.md"]');
+    await diff.waitForDisplayed({ timeout: 20_000 });
+    await browser.waitUntil(async () => {
+      const rendered = await diff.getProperty("textContent");
+      return /Main\s+branch/.test(rendered) && /Topic\s+branch/.test(rendered) && !rendered.includes("Unsaved working tree edit");
+    }, { timeout: 10_000, timeoutMsg: "The branch comparison should show committed versions, not dirty checkout content" });
+    await capture(browser, "real-git-branch-comparison");
+
+    await click(gitView, "button=Worktrees");
+    await click(gitView, "button=New worktree");
+    const dialog = browser.$('[role="dialog"][aria-labelledby]');
+    await dialog.waitForDisplayed();
+    await dialog.$('.//label[normalize-space(.)="Branch"]/input').setValue("manual-worktree");
+    await dialog.$('.//label[starts-with(normalize-space(.), "Worktree path")]/input').setValue(worktree);
+    await click(dialog, "button=Create worktree");
+    await dialog.waitForExist({ reverse: true });
+    assert.equal(git(worktree, "branch", "--show-current").trim(), "manual-worktree");
+    assert.equal(await readFile(join(worktree, "README.md"), "utf8"), "# Main branch\n");
+    assert.equal(await readFile(join(repo, "README.md"), "utf8"), "# Unsaved working tree edit\n");
+    const registered = await invoke(browser, "registered_checkouts");
+    const created = registered.find(({ checkoutRoot }) => checkoutRoot.toLowerCase() === worktree.toLowerCase());
+    assert.equal(created?.projectId, checkout.projectId);
+    await capture(browser, "real-git-manual-worktree");
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("persists real conversation organization through a desktop restart", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Conversation library repository");
+  const title = "A conversation to organize";
+  git(scratch, "init", "-q", repo);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Library fixture");
+
+  const driver = startTestDriver(application);
+  let browser;
+  const library = () => browser.$('section[aria-label="Conversation library"]');
+  const row = (scope = library()) => scope.$(`button[aria-label=${JSON.stringify(title)}]`);
+  async function menuAction(label) {
+    await row().waitForDisplayed();
+    await row().click({ button: "right" });
+    await click(browser.$('.conv-menu[role="menu"]'), `span=${label}`);
+  }
+
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await invoke(browser, "create_conversation", { checkoutId: checkout.checkoutId, title });
+    await selectCheckout(browser, checkout);
+    await chooseConversations(browser);
+    await row().waitForDisplayed();
+    await row().click({ button: "right" });
+    await click(browser.$('.conv-menu[role="menu"]'), "span=Section");
+    await click(browser, "span=New section…");
+    const sectionEditor = browser.$('.conv-dialog[role="dialog"]');
+    await sectionEditor.waitForDisplayed();
+    await sectionEditor.$("input").setValue("Release notes");
+    await click(sectionEditor, "button=Save");
+    await row(library().$('section[aria-label="Release notes"]')).waitForDisplayed();
+    await menuAction("Mark as unread");
+    await browser.waitUntil(async () => await row().getAttribute("aria-description") === "Unread");
+    await menuAction("Pin");
+    await row(library().$('section[aria-label="Pinned"]')).waitForDisplayed();
+    await capture(browser, "real-conversations-pinned");
+    await menuAction("Archive");
+    await row().waitForExist({ reverse: true });
+
+    killTestApplication(application);
+    await browser.deleteSession().catch(() => undefined);
+    browser = await startSession(application);
+    await chooseConversations(browser);
+    assert.equal(await row().isExisting(), false);
+    await click(library(), 'button[aria-label="Archived"]');
+    await row().waitForDisplayed();
+    assert.equal(await row().getAttribute("aria-description"), "Unread");
+    await capture(browser, "real-conversations-archived");
+    await menuAction("Unarchive");
+    await row().waitForExist({ reverse: true });
+    await click(library(), 'button[aria-label="Archived"]');
+    await row(library().$('section[aria-label="Pinned"]')).waitForDisplayed();
+    await menuAction("Unpin");
+    await row(library().$('section[aria-label="Release notes"]')).waitForDisplayed();
+    await clickConversation(browser, title);
+    await browser.waitUntil(async () => (await readTabs(browser)).active === title);
+    await browser.waitUntil(async () => await row().getAttribute("aria-description") !== "Unread");
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("starts real planning from the saved Markdown revision and finds it from Knowledge", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Saved notes repository");
+  const path = "Release plan.md";
+  git(scratch, "init", "-q", repo);
+  await writeFile(join(repo, path), "# Release plan\n\nReview the saved rollout and verify its recovery step.\n");
+  git(repo, "add", path);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-qm", "Save planning note");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const { projectId, checkoutId } = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, { projectId, checkoutId });
+    const opened = await invoke(browser, "open_repository_document", { checkoutId, path });
+    assert.equal(opened.status, "document");
+    const revisionId = opened.document.revision.id;
+    const noteScope = { projectId, checkoutId, revisionId };
+    assert.deepEqual(await invoke(browser, "repository_note_planning", noteScope), []);
+
+    await click(browser, '.work-rail button[aria-label="Knowledge"]');
+    const knowledge = browser.$('[aria-label="Knowledge workspace"]');
+    await click(knowledge, `button=${path}`);
+    await click(knowledge, "button=Plan from note");
+    const dialog = browser.$('[role="dialog"][aria-labelledby]');
+    await dialog.waitForDisplayed();
+    assert.ok((await dialog.getText()).includes(path));
+    await click(dialog, "button=Start planning");
+    await browser.$('[aria-label="Pipelines workspace"]').waitForDisplayed();
+    let planned;
+    await browser.waitUntil(async () => {
+      planned = await invoke(browser, "repository_note_planning", noteScope);
+      return planned.length === 1;
+    }, { timeout: 15_000, timeoutMsg: "Knowledge did not find planning for the exact saved revision" });
+    const delivery = await invoke(browser, "inspect_repository_delivery", { projectId, runId: planned[0].runId });
+    assert.equal(delivery.run.id, planned[0].runId);
+    assert.equal(delivery.launch?.source?.id, revisionId);
+    assert.equal(planned[0].task, null);
+    await browser.$("button=Queue planning").waitForDisplayed();
+    await browser.waitUntil(() => browser.execute(() => {
+      const graph = document.querySelector('[aria-label="Delivery Git graph"] .react-flow');
+      if (!graph) return false;
+      const style = getComputedStyle(graph);
+      const card = style.getPropertyValue("--card").trim();
+      return Boolean(card) && style.getPropertyValue("--xy-node-background-color").trim() === card;
+    }), { timeoutMsg: "Delivery Git nodes should use the application's card theme" });
+    await capture(browser, "real-plan-from-note");
+  } finally {
+    await browser?.deleteSession().catch(() => undefined);
+    driver.kill();
+  }
+});
+
+test("creates and edits real project work from the shared Tasks editor", { timeout: 90_000 }, async (t) => {
+  const { application, scratch } = await copyTestApplication(t);
+  const repo = join(scratch, "Project work repository");
+  git(scratch, "init", "-q", repo);
+  git(repo, "-c", "user.name=OmniAgent Fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Project work fixture");
+
+  const driver = startTestDriver(application);
+  let browser;
+  try {
+    browser = await connectTestDriver(driver, application);
+    const checkout = await invoke(browser, "register_project", { directory: repo });
+    await selectCheckout(browser, checkout);
+    const hierarchy = () => invoke(browser, "project_work_hierarchy", { projectId: checkout.projectId });
+    await click(browser, '.work-rail button[aria-label="Tasks"]');
+    const tasks = browser.$('[aria-label="Tasks workspace"]');
+    const editor = browser.$('.agile-dialog[role="dialog"]');
+    const field = (label, tag) => editor.$(`.//label[starts-with(normalize-space(.), '${label}')]/${tag}`);
+    const newWork = async (type, title) => {
+      await click(tasks, "button=New work");
+      await editor.waitForDisplayed();
+      await field("Work type", "select").selectByAttribute("value", type);
+      await field("Title", "input").setValue(title);
+    };
+
+    await newWork("epic", "Ship the workbench");
+    await click(editor, "button=Create work");
+    await editor.waitForExist({ reverse: true });
+    const epic = (await hierarchy()).epics.find(({ title }) => title === "Ship the workbench");
+    assert.ok(epic);
+    await tasks.$('select[aria-label="Kanban level"]').selectByAttribute("value", "epic");
+    await click(tasks, "button=Ship the workbench");
+    const detail = tasks.$('section[aria-label="Ship the workbench"]');
+    await click(detail, "button=Workflow");
+    await click(detail, "button=Work history");
+
+    await newWork("task", "Exercise the release");
+    const parent = field("Epic", "select");
+    await parent.waitForEnabled();
+    await parent.selectByAttribute("value", epic.id);
+    await field("Acceptance criteria", "textarea").setValue("Verify the read-only launch.");
+    await click(editor, "button=Create work");
+    await editor.waitForExist({ reverse: true });
+    const created = (await hierarchy()).work.find(({ task }) => task.title === "Exercise the release");
+    assert.equal(created?.placement.epicId, epic.id);
+    await tasks.$('select[aria-label="Kanban level"]').selectByAttribute("value", "task");
+    await click(tasks, "button=Exercise the release");
+    await click(tasks, "button=Edit task");
+    await field("Priority", "select").waitForEnabled();
+    await field("Priority", "select").selectByAttribute("value", "1");
+    await capture(browser, "real-task-editor");
+    await click(editor, "button=Save work");
+    await editor.waitForExist({ reverse: true });
+    const saved = await invoke(browser, "workspace_work_editor", { projectId: checkout.projectId, workId: created.task.id });
+    assert.equal(saved.draft.settings.priority, 1);
+    assert.deepEqual(saved.draft.settings.acceptanceCriteria, ["Verify the read-only launch."]);
   } finally {
     await browser?.deleteSession().catch(() => undefined);
     driver.kill();

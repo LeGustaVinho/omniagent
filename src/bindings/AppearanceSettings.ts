@@ -3,7 +3,8 @@ import type { AppearanceMotion } from "./AppearanceMotion";
 import type { AppearanceTheme } from "./AppearanceTheme";
 import type { ConversationTextSize } from "./ConversationTextSize";
 import type { InterfaceFont } from "./InterfaceFont";
+import type { MarkdownWidth } from "./MarkdownWidth";
 import type { ResponseFont } from "./ResponseFont";
 import type { TranscriptWidth } from "./TranscriptWidth";
 
-export type AppearanceSettings = { theme: AppearanceTheme, interfaceFont: InterfaceFont, responseFont: ResponseFont, conversationTextSize: ConversationTextSize, transcriptWidth: TranscriptWidth, motion: AppearanceMotion, };
+export type AppearanceSettings = { theme: AppearanceTheme, interfaceFont: InterfaceFont, responseFont: ResponseFont, conversationTextSize: ConversationTextSize, transcriptWidth: TranscriptWidth, markdownWidth: MarkdownWidth, motion: AppearanceMotion, };

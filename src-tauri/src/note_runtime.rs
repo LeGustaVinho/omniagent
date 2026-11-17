@@ -7,6 +7,7 @@ use omniagent::{
     },
     repository::documents::{RepositoryAttachment, RepositoryDocumentOpen, RepositoryDocumentSave},
     store::Store,
+    workflows::{RepositoryNotePlanning, WorkflowLaunchSource},
 };
 use tauri::{State, ipc::Channel};
 
@@ -16,6 +17,25 @@ fn report(error: impl std::fmt::Display) -> String {
 
 #[derive(Default)]
 pub struct NoteWatches(Mutex<HashMap<String, RepositoryMarkdownWatch>>);
+
+#[tauri::command]
+pub async fn repository_note_planning(
+    store: State<'_, Store>,
+    project_id: String,
+    checkout_id: String,
+    revision_id: String,
+) -> Result<Vec<RepositoryNotePlanning>, String> {
+    store
+        .repository_note_planning(
+            project_id,
+            WorkflowLaunchSource {
+                checkout_id,
+                revision_id,
+            },
+        )
+        .await
+        .map_err(report)
+}
 
 #[tauri::command]
 pub async fn open_repository_document(

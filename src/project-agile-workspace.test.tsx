@@ -14,6 +14,7 @@ import type { AgentTree } from "@/conversation-children";
 import type { VerifiedMerge } from "@/delivery-merge-model";
 import type { Delivery, Hierarchy, Item, WorkflowStatus } from "@/project-agile-model";
 import { ProjectTasksWorkspace } from "@/project-tasks";
+import type { WorkspaceWorkInput } from "@/project-work-editor";
 import type { TaskParticipantAttempt } from "@/task-participants";
 import { exampleCheckout } from "@/workbench-contract";
 
@@ -74,10 +75,12 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
   } };
   const reviewRole = "candidate reviewer";
   let assignment = activity?.assignment;
+  const edits = new Map<string, NonNullable<WorkspaceWorkInput["draft"]>>();
   vi.mocked(invoke).mockImplementation(async (name, args) => {
     const scope = args as { projectId: string; taskId: string; evidenceId?: string; expectedState?: WorkflowStatus;
       nextState?: WorkflowStatus; next?: Item; title: string; body: string; placement: { kind: "epic" } | Hierarchy["work"][number]["placement"];
-      provider?: ModelSelection["provider"]; selection?: ModelSelection };
+      provider?: ModelSelection["provider"]; selection?: ModelSelection; workId?: string; expected?: string;
+      draft?: WorkspaceWorkInput["draft"] };
     const checklist = checklists[scope?.taskId] ?? [];
     switch (name) {
       case "project_work_hierarchy": return { epics: [...hierarchy.epics], work: [...hierarchy.work] };
@@ -86,8 +89,25 @@ function testWorkspace(seed = true, savedMerge?: VerifiedMerge, activity?: Activ
         if (scope.placement.kind === "epic") hierarchy.epics.push(task);
         else hierarchy.work.push({ task, placement: scope.placement });
         states[task.id] = "backlog";
+        if (scope.draft) edits.set(task.id, scope.draft);
         return task.id;
       }
+      case "workspace_work_editor": {
+        const row = hierarchy.work.find(({ task }) => task.id === scope.workId)!;
+        return { title: row.task.title, placement: row.placement, branchLocked: false, version: `work-${row.task.title}`,
+          draft: edits.get(row.task.id) ?? { description: "", state: states[row.task.id], settings: {
+            priority: 0, acceptanceCriteria: [], prerequisites: [], blockers: [], checklistMode: null, branchStrategy: null, assignment: null,
+          } } };
+      }
+      case "update_workspace_work": {
+        const row = hierarchy.work.find(({ task }) => task.id === scope.workId)!;
+        expect(scope.expected).toBe(`work-${row.task.title}`);
+        edits.set(row.task.id, scope.draft!);
+        row.task = { ...row.task, title: scope.title };
+        return;
+      }
+      case "project_description_editor": return { saved: null, draft: null };
+      case "repository_note_catalog": return [];
       case "project_epic_delivery_state": return "backlog";
       case "project_task_delivery_state": return {
         state: states[scope.taskId], questionBlocker: scope.taskId === child.id ? question : null,
@@ -439,4 +459,27 @@ it("creates the hierarchy from the work form and keeps a direct checklist beside
   expect(table.getByRole("checkbox", { name: "Check headings" })).toBeTruthy();
   expect(table.getByRole("button", { name: /Proofread guide/ })).toBeTruthy();
   expect(table.getByRole("button", { name: /Independent audit/ })).toBeTruthy();
+});
+
+it("opens the shared work editor and persists priority, criteria, dependencies and execution modes", async () => {
+  const { user } = testWorkspace();
+  await user.click(await within(screen.getByRole("region", { name: "Ready" })).findByRole("button", { name: parent.title }));
+  const details = within(screen.getByRole("region", { name: parent.title }));
+  await user.click(details.getByRole("button", { name: "Edit task" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Edit task" }));
+  const title = await dialog.findByRole("textbox", { name: "Title" });
+  await user.clear(title);
+  await user.type(title, "Updated documentation");
+  await user.selectOptions(dialog.getByRole("combobox", { name: "Priority" }), "1");
+  await user.type(dialog.getByRole("textbox", { name: "Acceptance criteria" }), "Keep the guide current");
+  await user.selectOptions(dialog.getByRole("listbox", { name: "Dependencies" }), standalone.id);
+  await user.selectOptions(dialog.getByRole("combobox", { name: "Checklist execution" }), "run_by_item");
+  await user.selectOptions(dialog.getByRole("combobox", { name: "Branch strategy" }), "shared_branch_per_task");
+  await user.click(dialog.getByRole("button", { name: "Save work" }));
+  await screen.findByRole("region", { name: "Updated documentation" });
+  expect(invoke).toHaveBeenCalledWith("update_workspace_work", {
+    projectId, workId: parent.id, expected: "work-Documentation", title: "Updated documentation", placement: { kind: "task", epicId: epic.id },
+    draft: { description: "", state: "ready", settings: { priority: 1, acceptanceCriteria: ["Keep the guide current"],
+      prerequisites: [standalone.id], blockers: [], checklistMode: "run_by_item", branchStrategy: "shared_branch_per_task", assignment: null } },
+  });
 });

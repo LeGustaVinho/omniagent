@@ -13,6 +13,7 @@ import { ProjectQueueHistoryPolicy } from "@/conversation-history-controls";
 import { CustomizationsSettings } from "@/customizations-panel";
 import { ProjectModelSettings, projectModelSettings } from "@/model-default-settings";
 import { ProjectWorkModeControls } from "@/project-agile-settings";
+import { ResizablePanel } from "@/panel-resize";
 import { ProjectAttachmentSettings } from "@/provider-settings";
 import { CapacityEditor, managedCapacitySetting, QueueCapacitySettings } from "@/queue-policy";
 import { defaultAppearance, useAppearancePresentation, useEditableAppearance } from "@/settings-appearance";
@@ -46,6 +47,7 @@ const appearanceEntries: Record<keyof AppearanceSettings, SearchEntry> = {
   responseFont: { id: "response-font", label: "Response font", description: "Match the interface or use Spectral." },
   conversationTextSize: { id: "conversation-text-size", label: "Conversation text size", description: "Text in the transcript and composer." },
   transcriptWidth: { id: "transcript-width", label: "Transcript width", description: "Maximum width of a conversation’s reading column." },
+  markdownWidth: { id: "markdown-width", label: "Markdown width", description: "Maximum width of rendered Markdown within its pane." },
   motion: { id: "motion", label: "Motion", description: "Follow Windows or reduce animation." },
 };
 
@@ -258,7 +260,7 @@ function SettingsSession({
           </fieldset>
         </>;
       case "providers":
-        return <ProviderProfiles examples={simulation ? providerExamples : undefined} start={simulate} />;
+        return <ProviderProfiles examples={simulation ? providerExamples : undefined} start={simulate} checkoutId={checkout?.checkoutId} />;
       case "capacity":
         return <>
           {simulation ? <CapacityEditor key={exampleCapacity} capacity={exampleCapacity} settings onSave={setExampleCapacity} />
@@ -319,11 +321,7 @@ function SettingsSession({
       <Dialog.Portal>
         <Dialog.Overlay className="settings-backdrop" />
         <Dialog.Content
-          className="settings-dialog"
-          data-show-page={mobilePage}
-          data-app-theme={simulation ? presentation.theme : undefined}
-          data-app-motion={simulation ? presentation.motion : undefined}
-          style={simulation ? presentation.style : undefined}
+          asChild
           onOpenAutoFocus={(event) => {
             previouslyFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
             const target = !pageFromLink(initialPage) && searchInput.current?.getClientRects().length
@@ -340,6 +338,9 @@ function SettingsSession({
             }
           }}
         >
+          <ResizablePanel className="settings-dialog" edge={["right", "bottom"]} resizeKey="settings" resizeLabel="settings" centered
+            data-show-page={mobilePage} data-app-theme={simulation ? presentation.theme : undefined}
+            data-app-motion={simulation ? presentation.motion : undefined} style={simulation ? presentation.style : undefined}>
           <header className="settings-header">
             <span className="settings-heading-icon"><Settings2 size={17} aria-hidden="true" /></span>
             <Dialog.Title asChild><h1>Settings</h1></Dialog.Title>
@@ -350,7 +351,7 @@ function SettingsSession({
             </Dialog.Close>
           </header>
           <div className="settings-layout">
-            <aside className="settings-sidebar">
+            <ResizablePanel as="aside" className="settings-sidebar" edge="right" resizeKey="settings-navigation" resizeLabel="settings navigation">
               <div className="settings-search">
                 <Search size={16} aria-hidden="true" />
                 <input ref={searchInput} type="search" aria-label="Search settings" placeholder="Search settings"
@@ -396,7 +397,7 @@ function SettingsSession({
                   </section>;
                 })}
               </nav>
-            </aside>
+            </ResizablePanel>
             <section className="settings-content" ref={content} aria-labelledby="settings-page-title">
               <button type="button" className="settings-back" onClick={() => {
                 setMobilePage(false);
@@ -414,6 +415,7 @@ function SettingsSession({
               <div className="settings-page-body">{pageContent()}</div>
             </section>
           </div>
+          </ResizablePanel>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -460,6 +462,7 @@ function AppearanceControls({
       {option("responseFont", [["interface", "Match interface"], ["spectral", "Spectral"]])}
       {option("conversationTextSize", [["small", "Small · 13 px"], ["medium", "Medium · 14 px"], ["large", "Large · 16 px"]])}
       {option("transcriptWidth", [["narrow", "Narrow · 640 px"], ["standard", "Standard · 736 px"], ["wide", "Wide · 896 px"]])}
+      {option("markdownWidth", [["narrow", "Narrow · 560 px"], ["standard", "Standard · 720 px"], ["wide", "Wide · 960 px"], ["full", "Full width"]])}
       {option("motion", [["system", "System"], ["reduced", "Reduced"]])}
       <blockquote className="settings-response-example">
         <span>Response preview</span>

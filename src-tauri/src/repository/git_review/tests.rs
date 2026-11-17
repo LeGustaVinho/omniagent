@@ -2,9 +2,305 @@ use super::*;
 use crate::repository::register;
 
 fn git(root: &Path, args: &[&str]) -> Result<String> {
-    Ok(String::from_utf8(passive(root, args)?)?
+    let output = passive_command(root)?.args(args).output()?;
+    Ok(String::from_utf8(check(output, args[0])?)?
         .trim_end()
         .to_owned())
+}
+
+fn commit_fixture(root: &Path, message: &str) -> Result<String> {
+    git(root, &["add", "--all"])?;
+    git(
+        root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "--no-gpg-sign",
+            "-m",
+            message,
+        ],
+    )?;
+    git(root, &["rev-parse", "HEAD"])
+}
+
+#[tokio::test]
+async fn compares_pinned_branch_versions_without_reading_dirty_worktree_content() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("comparison");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    fs::write(root.join("README.md"), "common base\n")?;
+    let ancestor = commit_fixture(&root, "Common ancestor")?;
+    git(&root, &["switch", "--quiet", "-c", "topic"])?;
+    fs::write(root.join("README.md"), "committed topic text\n")?;
+    let feature = commit_fixture(&root, "Topic change")?;
+    git(&root, &["switch", "--quiet", "main"])?;
+    fs::write(root.join("main-only.txt"), "other side of the fork\n")?;
+    let base = commit_fixture(&root, "Divergent base change")?;
+    git(&root, &["update-ref", "refs/remotes/origin/main", &base])?;
+    git(
+        &root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    )?;
+    fs::write(root.join("README.md"), "dirty worktree text\n")?;
+
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    let review = store.git_checkout_review(checkout.clone()).await?;
+    assert!(
+        review
+            .branches
+            .iter()
+            .any(|branch| branch.reference == "refs/remotes/origin/main")
+    );
+    assert!(
+        !review
+            .branches
+            .iter()
+            .any(|branch| branch.reference == "refs/remotes/origin/HEAD")
+    );
+    let range = || GitBranchRange {
+        base_reference: "refs/remotes/origin/main".into(),
+        head_reference: Some("refs/heads/topic".into()),
+    };
+    let expected = || GitBranchRevisions {
+        base: base.clone(),
+        head: feature.clone(),
+        merge_base: ancestor.clone(),
+    };
+    let branches = store
+        .git_branch_comparison(checkout.clone(), range())
+        .await?;
+    assert_eq!(branches.revisions, expected());
+    assert_eq!(branches.changes.len(), 1);
+    assert_eq!(branches.changes[0].path, "README.md");
+    assert_eq!(branches.changes[0].status, 'M');
+    let diff = store
+        .git_branch_comparison_diff(checkout.clone(), range(), expected(), "README.md".into())
+        .await?;
+    assert_eq!(
+        diff.original,
+        GitFileSide::Text {
+            content: "common base\n".into()
+        }
+    );
+    assert_eq!(
+        diff.modified,
+        GitFileSide::Text {
+            content: "committed topic text\n".into()
+        }
+    );
+    git(&root, &["update-ref", "refs/heads/topic", &base, &feature])?;
+    let stale = store
+        .git_branch_comparison_diff(checkout, range(), expected(), "README.md".into())
+        .await;
+    assert!(format!("{:#}", stale.unwrap_err()).contains("selected branches changed"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn creates_and_registers_manual_worktrees_without_touching_the_source_or_occupied_paths()
+-> Result<()> {
+    use crate::repository::{ManualGitWorktree, create_git_worktree};
+
+    let temporary = tempfile::tempdir()?;
+    let root = temporary.path().join("source worktree");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    git(&root, &["config", "core.autocrlf", "false"])?;
+    fs::write(root.join("README.md"), "old revision\n")?;
+    let first = commit_fixture(&root, "First source revision")?;
+    fs::write(root.join("README.md"), "new revision\n")?;
+    let head = commit_fixture(&root, "Second source revision")?;
+    git(&root, &["branch", "existing"])?;
+    fs::write(root.join("README.md"), "unsaved source edit\n")?;
+    let default = temporary.path().join("worktrees");
+    let new = temporary.path().join("new worktree");
+    let occupied = temporary.path().join("already occupied");
+    fs::create_dir(&occupied)?;
+    fs::write(occupied.join("keep.txt"), "keep me\n")?;
+    let store = Store::open(temporary.path().join("store.sqlite"))?;
+    let source = register(&store, root.clone()).await?;
+    let make = |request| {
+        create_git_worktree(
+            &store,
+            default.clone(),
+            source.project_id.clone(),
+            source.checkout_id.clone(),
+            request,
+        )
+    };
+
+    let request = |branch: &str, path: &Path| ManualGitWorktree {
+        branch: branch.into(),
+        existing: false,
+        base_reference: Some(first.clone()),
+        expected_head: first.clone(),
+        path: Some(path.to_owned()),
+    };
+    assert!(
+        make(request("will-not-be-created", &occupied))
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read_to_string(occupied.join("keep.txt"))?, "keep me\n");
+    assert!(
+        make(request("inside-source", &root.join("nested")))
+            .await
+            .is_err()
+    );
+    let created = make(request("manual/topic", &new)).await?;
+    assert_eq!(created.project_id, source.project_id);
+    assert_eq!(git(&new, &["branch", "--show-current"])?, "manual/topic");
+    assert_eq!(fs::read_to_string(new.join("README.md"))?, "old revision\n");
+    assert_eq!(
+        fs::read_to_string(root.join("README.md"))?,
+        "unsaved source edit\n"
+    );
+    assert!(
+        store
+            .git_checkout_review(source.checkout_id.clone())
+            .await?
+            .worktrees
+            .iter()
+            .any(|tree| tree.checkout_id.as_deref() == Some(&created.checkout_id) && !tree.managed)
+    );
+
+    let existing = make(ManualGitWorktree {
+        branch: "existing".into(),
+        existing: true,
+        base_reference: None,
+        expected_head: head.clone(),
+        path: None,
+    })
+    .await?;
+    assert!(Path::new(&existing.checkout_root).starts_with(&default));
+    assert_eq!(
+        git(
+            Path::new(&existing.checkout_root),
+            &["branch", "--show-current"]
+        )?,
+        "existing"
+    );
+    assert_eq!(
+        fs::read_to_string(Path::new(&existing.checkout_root).join("README.md"))?,
+        "new revision\n"
+    );
+
+    store.execute(|db| {
+        db.execute_batch("CREATE TRIGGER fail_worktree_registration BEFORE INSERT ON checkouts BEGIN SELECT RAISE(ABORT, 'fixture refused registration'); END;")?;
+        Ok(())
+    }).await?;
+    let failed = temporary.path().join("rolled back worktree");
+    let error = make(request("failed-registration", &failed))
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("fixture refused registration"));
+    assert!(!failed.exists());
+    assert!(
+        git(
+            &root,
+            &["show-ref", "--verify", "refs/heads/failed-registration"]
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reviews_checkout_trusted_by_global_git_config() -> Result<()> {
+    const FIXTURE: &str = "OMNIAGENT_TEST_GIT_TRUST_FIXTURE";
+    if let Some(fixture) = std::env::var_os(FIXTURE) {
+        let fixture = PathBuf::from(fixture);
+        let store = Store::open(fixture.join("store.sqlite"))?;
+        let rejected = register(&store, fixture.join("other checkout"))
+            .await
+            .unwrap_err();
+        assert!(rejected.to_string().contains("dubious ownership"));
+
+        let root = fixture.join("checkout aceito");
+        let checkout = register(&store, root).await?;
+        let review = store
+            .git_checkout_review(checkout.checkout_id.clone())
+            .await?;
+        assert!(
+            review
+                .branches
+                .iter()
+                .any(|branch| branch.reference == "refs/heads/main")
+        );
+        assert_eq!(
+            review.worktrees[0].checkout_id.as_deref(),
+            Some(checkout.checkout_id.as_str())
+        );
+        let history = store
+            .git_checkout_history(checkout.checkout_id, Some("refs/heads/main".into()))
+            .await?;
+        assert_eq!(history[0].subject, "Trusted checkout");
+        return Ok(());
+    }
+
+    let fixture = tempfile::tempdir()?;
+    let root = fixture.path().join("checkout aceito");
+    let other = fixture.path().join("other checkout");
+    for path in [&root, &other] {
+        fs::create_dir(path)?;
+        git(path, &["init", "--quiet", "-b", "main"])?;
+    }
+    git(
+        &root,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "--no-gpg-sign",
+            "-m",
+            "Trusted checkout",
+        ],
+    )?;
+    let config = fixture.path().join("gitconfig");
+    check(
+        git_command(&git_path()?, &root)
+            .args(["config", "--file"])
+            .arg(&config)
+            .args(["--add", "safe.directory"])
+            .arg(dunce::canonicalize(&root)?)
+            .output()?,
+        "write the fixture's safe directory",
+    )?;
+
+    // Use a subprocess so the Git configuration and simulated owner are
+    // confined to this test and its Git commands.
+    let output = Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "repository::git_review::tests::reviews_checkout_trusted_by_global_git_config",
+        ])
+        .env(FIXTURE, fixture.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", config)
+        .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        .output()?;
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
 }
 
 #[tokio::test]

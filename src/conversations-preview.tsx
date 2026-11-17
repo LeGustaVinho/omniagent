@@ -1,7 +1,7 @@
 import { Archive, ArrowUp, CircleHelp, FileText, GitFork, MessageSquare, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ConversationEmptyState, ConversationLibraryLayout, ConversationNavigation, ConversationWorkspaceLayout } from "@/conversation-layout";
+import { ConversationEmptyState, ConversationLibraryGroup, ConversationLibraryLayout, ConversationNavigation, ConversationWorkspaceLayout } from "@/conversation-layout";
 import { ConversationRow, type ConversationAction } from "@/conversation-menu";
 import {
   createLibrary, createPreviewConversation, primaryProject,
@@ -225,24 +225,22 @@ function PreviewSession(props: PreviewWorkspaceProps & { simulation: NonNullable
           title="Archived" onClick={() => setArchived(!archived)}><Archive aria-hidden /></button>
       </>}>
         {orderedGroups.map(([group, conversations]) => (
-          <section key={group} aria-label={group}>
-            <h3 className="conv-session-group">{group}</h3>
-            <ul className="conv-session-list">
-              {conversations.map((conversation) => (
-                <li key={conversation.id}>
-                  <ConversationRow {...conversation} sections={library.sections[conversation.project]}
-                    onAction={(action, section) => rowAction(conversation, action, section)}>
-                    <button type="button" className="conv-session-button" data-conversation-id={conversation.id}
-                      aria-description={conversation.unread ? "Unread" : undefined} onClick={() => openConversation(conversation.id)}
-                      aria-current={current?.id === conversation.id ? "page" : undefined}>
-                      <MessageSquare aria-hidden /><span>{conversation.title}</span>
-                      {conversation.unread && <i className="conv-unread" aria-hidden />}
-                    </button>
-                  </ConversationRow>
-                </li>
-              ))}
-            </ul>
-          </section>
+          <ConversationLibraryGroup key={group} title={group}>
+            {conversations.map((conversation) => (
+              <li key={conversation.id}>
+                <ConversationRow {...conversation}
+                  sections={library.sections[conversation.project]?.map((name) => ({ id: name, name }))}
+                  onAction={(action, section) => rowAction(conversation, action, section)}>
+                  <button type="button" className="conv-session-button" data-conversation-id={conversation.id}
+                    aria-description={conversation.unread ? "Unread" : undefined} onClick={() => openConversation(conversation.id)}
+                    aria-current={current?.id === conversation.id ? "page" : undefined}>
+                    <MessageSquare aria-hidden /><span>{conversation.title}</span>
+                    {conversation.unread && <i className="conv-unread" aria-hidden />}
+                  </button>
+                </ConversationRow>
+              </li>
+            ))}
+          </ConversationLibraryGroup>
         ))}
         {!matching.length && <p className="conv-sidebar-note">{archived ? "No archived conversations match." : "No conversations match."}</p>}
         {notice && <p className="conv-sidebar-note" role="status">{notice}</p>}

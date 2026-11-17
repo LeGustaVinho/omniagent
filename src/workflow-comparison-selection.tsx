@@ -16,9 +16,15 @@ export type ComparisonCandidate = {
   dispatchId: string | null;
   state: string;
 };
-export type ComparisonGroup = { id: string; commit: string; tree: string; prompt: string; candidates: ComparisonCandidate[] };
+export type ComparisonGroup = { id: string; sourceCheckoutId: string; commit: string; tree: string; prompt: string; candidates: ComparisonCandidate[] };
 export type ComparisonSelection = { groupId: string; runIds: string[] };
 export type ComparisonInput = { groupId: string; jobId: string; runId: string; dispatchId: string; responseRevisionId: string };
+
+export function selectableComparisonRun(candidate: ComparisonCandidate, outcomes?: CandidateOutcome[]) {
+  const { runId, jobId, dispatchId, state } = candidate;
+  const outcome = outcomes?.find((item) => item.runId === runId && item.jobId === jobId);
+  return runId && dispatchId && state === "succeeded" && typeof outcome?.response === "string" ? runId : null;
+}
 
 export function ComparisonOutputChoices({ group, outcomes, selected, onChange }: {
   group: ComparisonGroup;
@@ -27,9 +33,8 @@ export function ComparisonOutputChoices({ group, outcomes, selected, onChange }:
   onChange: (runIds: string[]) => void;
 }) {
   const available = group.candidates.flatMap((candidate) => {
-    const runId = candidate.runId;
-    const hasResult = outcomes?.some((item) => item.runId === runId && item.jobId === candidate.jobId && item.response !== null);
-    return runId && candidate.dispatchId && candidate.state === "succeeded" && hasResult ? [{ runId, model: candidate.selection.modelId }] : [];
+    const runId = selectableComparisonRun(candidate, outcomes);
+    return runId ? [{ runId, model: candidate.selection.modelId }] : [];
   });
   return <fieldset className="grid gap-1">
     <legend>Successful responses</legend>
@@ -58,15 +63,15 @@ export function ReviewComparisonInputs({ projectId, selection, onChange }: {
   selection: ComparisonSelection | undefined;
   onChange: (selection: ComparisonSelection | undefined) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [groupId, setGroup] = useState("");
+  const [open, setOpen] = useState(Boolean(selection));
+  const [groupId, setGroup] = useState(selection?.groupId ?? "");
   const groups = useQuery({ queryKey: ["model-comparisons", projectId], enabled: open,
     queryFn: () => invoke<ComparisonGroup[]>("model_comparisons", { projectId }) });
   const group = groups.data?.find(({ id }) => id === groupId);
   const outcomes = useQuery({ queryKey: ["comparison-outcomes", projectId, groupId,
     group?.candidates.map(({ runId, state }) => [runId, state])], enabled: Boolean(open && group),
     queryFn: () => invoke<CandidateOutcome[]>("model_comparison_outcomes", { projectId, groupId }) });
-  return <details onToggle={(event) => setOpen(event.currentTarget.open)} className="pipeline-evidence">
+  return <details open={open} onToggle={(event) => setOpen(event.currentTarget.open)} className="pipeline-evidence">
     <summary>Use model comparison responses</summary>
     {open && <div className="pipeline-stack">
       <label className="pipeline-form">Source comparison

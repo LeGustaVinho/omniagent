@@ -90,6 +90,7 @@ function mockRepository() {
         { path: release, frontmatter: null },
         { path: checklist, frontmatter: checklistProperties },
       ];
+      case "repository_note_planning": return [];
       case "rebuild_repository_note_index": return [
         { id: 1, path: release, title: "Release notes", tags: [], frontmatter: null },
         { id: 2, path: checklist, title: "Launch notes", tags: [], frontmatter: checklistProperties },
@@ -168,12 +169,64 @@ function tab(name: string) {
   return within(screen.getByRole("button", { name: `Close ${name}` }).closest(".file-tab-label")!);
 }
 
-it("opens an unopened note from the checkout-wide full-text index", async () => {
+it("starts Plan Mode delivery from the reviewed note revision and opens only its real linked Task", async () => {
+  mockRepository();
+  const ipc = vi.mocked(invoke);
+  const repository = ipc.getMockImplementation()!;
+  const openWorkspace = vi.fn();
+  const saved = documentAt(release, "release-1", releaseSource);
+  const source = { projectId: props.checkout.projectId, checkoutId, revisionId: saved.revision.id };
+  let plan: { runId: string; task: { id: string; title: string } | null } | undefined;
+  ipc.mockImplementation(async (command, args) => {
+    if (command === "repository_note_planning") {
+      expect(args).toEqual(source);
+      return plan ? [plan] : [];
+    }
+    if (command === "read_repository_markdown") {
+      expect(args).toEqual({ checkoutId, revisionId: saved.revision.id });
+      return saved;
+    }
+    if (command === "start_repository_delivery") {
+      expect(args).toEqual({ ...source, requestId: expect.any(String) });
+      plan = { runId: "planning-run", task: null };
+      return { id: plan.runId };
+    }
+    return repository(command, args);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} openWorkspace={openWorkspace} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  await editor(release);
+  expect(screen.queryByRole("button", { name: "Open linked task" })).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Plan from note" }));
+  const review = within(await screen.findByRole("dialog", { name: "Plan from note" }));
+  await user.click(await review.findByText("Read saved Markdown"));
+  expect(review.getByText(/Open launch notes/).textContent).toBe(saved.markdown);
+  expect(ipc.mock.calls.some(([command]) => command === "start_repository_delivery")).toBe(false);
+  await user.click(review.getByRole("button", { name: "Start planning" }));
+  await waitFor(() => expect(openWorkspace).toHaveBeenCalledWith("pipelines", "planning-run"));
+  expect(ipc.mock.calls.some(([command]) => command === "submit_repository_delivery_agent")).toBe(false);
+  expect(screen.queryByRole("button", { name: "Open linked task" })).toBeNull();
+
+  plan = { runId: "planning-run", task: { id: "real-task", title: "Prepare release" } };
+  await act(() => client.invalidateQueries({ queryKey: ["repository-note-planning"] }));
+  await user.click(await screen.findByRole("button", { name: "Open linked task" }));
+  expect(openWorkspace).toHaveBeenLastCalledWith("tasks", "real-task");
+});
+
+it.each(["Live Preview", "Reading"])("opens an unopened note from the full-text index in %s", async (mode) => {
   mockRepository();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   render(<QueryClientProvider client={client}><KnowledgeWorkspace {...props} target={release} /></QueryClientProvider>);
   await editor(release);
   const user = userEvent.setup();
+  if (mode === "Reading") {
+    await user.click(screen.getByRole("button", { name: "Reading" }));
+    await screen.findByLabelText(`Reading view for ${release}`);
+    await user.click(screen.getByRole("button", { name: "Split Reading view" }));
+    const editable = await editor(release);
+    expect(editable.dom.closest("[hidden]")).toBeNull();
+  }
   if (!screen.queryByRole("button", { name: "Search notes" })) {
     await user.click(screen.getByRole("button", { name: "Toggle Knowledge navigation" }));
   }
@@ -187,7 +240,13 @@ it("opens an unopened note from the checkout-wide full-text index", async () => 
   expect(await screen.findByRole("option", { name: /Launch notes.*Keep the saved checklist/i })).toBeTruthy();
   expect(invoke).not.toHaveBeenCalledWith("open_repository_document", { checkoutId, path: checklist });
   await user.keyboard("{Enter}");
-  expect((await editor(checklist)).state.doc.toString()).toBe(checklistSource);
+  if (mode === "Reading") {
+    const reading = await screen.findByLabelText(`Reading view for ${checklist}`);
+    expect(within(reading).getByText(/Keep the saved checklist/)).toBeTruthy();
+  } else {
+    expect((await editor(checklist)).state.doc.toString()).toBe(checklistSource);
+  }
+  expect(screen.getByRole("button", { name: mode }).getAttribute("aria-pressed")).toBe("true");
   expect(screen.getAllByRole("button", { name: "Close Checklist.md" })).toHaveLength(1);
 });
 
@@ -309,6 +368,7 @@ it("reuses canonical tabs, shares edits with Reading, and offers Cancel, Save an
   await waitFor(() => expect(repository.drafts.get(checklist)?.markdown).toBe(discarded));
 
   const navigation = within(screen.getByRole("complementary", { name: "Knowledge navigation" }));
+  if (!navigation.queryByRole("button", { name: "Release.md" })) await user.click(navigation.getByText("notes"));
   const activeNote = (name: string) => navigation.getByRole("button", { name }).getAttribute("aria-current");
   await user.click(tab("Release.md").getByText("Release.md"));
   expect(activeNote("Release.md")).toBe("page");

@@ -18,7 +18,7 @@
 .conv-workspace-main > .conv-pane { flex: 1; }
 .conv-navigation {
   display: flex;
-  flex: 0 0 clamp(13.5rem, 24cqi, 16.5rem);
+  flex: 0 0 clamp(min(12rem, 45%), var(--panel-width, clamp(13.5rem, 24cqi, 16.5rem)), 45%);
   flex-direction: column;
   min-height: 0;
   min-width: 0;
@@ -29,7 +29,7 @@
   position: fixed;
   inset: 0 auto 0 0;
   z-index: 60;
-  width: min(20rem, calc(100dvw - 2rem));
+  width: clamp(min(12rem, 88dvw), var(--panel-width, 20rem), calc(100dvw - 2rem));
   box-shadow: 12px 0 32px #0005;
 }
 .conv-navigation-close { position: absolute; inset: .525rem .65rem auto auto; }
@@ -214,7 +214,7 @@
 .conv-user > p { margin: 0; }
 .conv-assistant, .conv-stream { padding-inline: .125rem; font-family: var(--response-font, inherit); }
 .conv-stream { margin-top: 1.35rem; }
-.conv-markdown { display: flow-root; }
+.conv-markdown { display: flow-root; max-width: var(--app-markdown-width, 720px); overflow-wrap: anywhere; }
 .conv-markdown :where(p,ul,ol,pre,blockquote,table) { margin-bottom: .65em; }
 .conv-markdown > :last-child { margin-bottom: 0; }
 .conv-markdown :where(h1,h2,h3,h4) { font-size: 1.1em; font-weight: 650; margin: .75em 0 .3em; }
@@ -313,7 +313,7 @@
   inset: 0 0 0 auto;
   display: flex;
   flex-direction: column;
-  width: min(100%, 20rem);
+  width: clamp(min(12rem, 90%), var(--panel-width, 20rem), 100%);
   min-height: 0;
   background: var(--card);
   border-left: 1px solid var(--border);
@@ -328,7 +328,7 @@
 .conv-activity-content small { color: var(--muted-foreground); }
 
 @container conversation (min-width: 840px) {
-  .conv-activity { position: static; flex: 0 0 20rem; box-shadow: none; }
+  .conv-activity { position: relative; flex: 0 0 clamp(12rem, var(--panel-width, 20rem), 60%); box-shadow: none; }
 }
 
 @container conversation (max-width: 36rem) {

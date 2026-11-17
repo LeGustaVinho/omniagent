@@ -61,11 +61,18 @@ function repository() {
     { id: externalId, checkout: other, projectName: "Audit", agent: "claude", model: "sonnet-test", status: "succeeded", lastActivityAt: 1_700_000_000_500 },
     { id: archiveId, checkout: selected, projectName: "Launch", agent: "codex", model: "gpt-old", status: "interrupted", lastActivityAt: 1_700_000_000_000 },
   ];
+  type Section = { id: string; projectId: string; name: string };
+  type Organization = { pinned: boolean; unread: boolean; archived: boolean; section: Section | null };
+  const sections: Section[] = [{ id: "external-section", projectId: other.projectId, name: "Audit only" }];
+  const organization = new Map<string, Organization>();
+  const getOrganization = (id: string) => organization.get(id) ?? { pinned: false, unread: false, archived: false, section: null };
   const drafts = new Map([[archiveId, draft]]);
   let activeCheckout = selected;
   vi.mocked(invoke).mockImplementation(async (command, args) => {
     const input = (args ?? {}) as {
       checkoutId?: string; conversationId?: string; title?: string; query?: string; projectId?: string;
+      archived?: boolean;
+      change?: { type: string; pinned?: boolean; unread?: boolean; archived?: boolean; sectionId?: string; name?: string };
       workspace?: string; layout?: string; runId?: string; after?: string; text?: string;
     };
     const layoutKey = `${input.checkoutId}:${input.workspace}`;
@@ -87,9 +94,33 @@ function repository() {
       case "conversation_library":
         return summaries.flatMap(({ id, ...summary }) => {
           const chat = conversations.get(id)!;
+          const state = getOrganization(id);
           return (!input.projectId || input.projectId === summary.checkout.projectId) &&
-            (!input.query || chat.title.toLowerCase().includes(input.query.toLowerCase())) ? [{ ...summary, conversation: chat }] : [];
+            (input.archived ?? false) === state.archived && (!input.query || chat.title.toLowerCase().includes(input.query.toLowerCase()))
+            ? [{ ...summary, conversation: chat, organization: state }] : [];
         });
+      case "conversation_library_sections":
+        return sections.filter(({ projectId }) => !input.projectId || projectId === input.projectId);
+      case "organize_conversation": {
+        if (!conversation || conversation.checkoutId !== input.checkoutId) throw new Error("Wrong organization scope");
+        const change = input.change!;
+        const state = { ...getOrganization(conversation.id) };
+        if (change.type === "read" && state.unread === change.unread) return false;
+        if (change.type === "pin") state.pinned = change.pinned!;
+        if (change.type === "read") state.unread = change.unread!;
+        if (change.type === "archive") state.archived = change.archived!;
+        if (change.type === "move") state.section = sections.find(({ id }) => id === change.sectionId) ?? null;
+        if (change.type === "newSection") {
+          const projectId = summaries.find(({ id }) => id === conversation.id)!.checkout.projectId;
+          if (sections.some((item) => item.projectId === projectId && item.name.toLowerCase() === change.name?.toLowerCase())) {
+            throw new Error("A section already exists in this project");
+          }
+          state.section = { id: `section-${sections.length + 1}`, projectId, name: change.name! };
+          sections.push(state.section);
+        }
+        organization.set(conversation.id, state);
+        return true;
+      }
       case "checkout_conversation":
         if (!conversation || conversation.checkoutId !== input.checkoutId) throw new Error("Conversation does not belong to this checkout");
         return conversation;
@@ -162,8 +193,10 @@ it("shows newest activity first, filters by project and title, and reconnects to
 
   await user.selectOptions(project, "");
   await library().findByRole("button", { name: "Audit details" });
-  const titles = within(library().getByRole("list")).getAllByRole("listitem").map((row) => row.querySelector("button")?.getAttribute("aria-label"));
-  expect(titles).toEqual(["Live handoff", "Audit details", original]);
+  const launch = within(library().getByRole("region", { name: "Launch · Conversations" }));
+  const titles = launch.getAllByRole("listitem").map((row) => row.querySelector("button")?.getAttribute("aria-label"));
+  expect(titles).toEqual(["Live handoff", original]);
+  expect(within(library().getByRole("region", { name: "Audit · Conversations" })).getByRole("button", { name: "Audit details" })).toBeTruthy();
   expect(library().getByText("Launch · Codex · gpt-test · running")).toBeTruthy();
   expect(library().getByText("Audit · Claude Code · sonnet-test · succeeded")).toBeTruthy();
   await user.selectOptions(project, other.projectId);
@@ -249,13 +282,56 @@ it("offers the shared context menu on a live library row and copies that row's t
   fireEvent.contextMenu(row);
   const menu = await screen.findByRole("menu");
   expect(within(menu).getByRole("menuitem", { name: "Rename" })).toBeTruthy();
-  expect(within(menu).queryByRole("menuitem", { name: "Archive" })).toBeNull();
+  expect(within(menu).getByRole("menuitem", { name: "Archive" })).toBeTruthy();
   const copy = within(menu).getByRole("menuitem", { name: "Copy" });
   copy.focus();
   await user.keyboard("{ArrowRight}");
   await user.click(await screen.findByRole("menuitem", { name: "Title" }));
   expect(await screen.findByText("Title copied.")).toBeTruthy();
   expect(await navigator.clipboard.readText()).toBe(original);
+});
+
+it("organizes conversations through the shared menu and reloads persisted sections, unread and archived state", async () => {
+  repository();
+  const first = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  async function menu(title: string) {
+    fireEvent.contextMenu(await library().findByRole("button", { name: title }));
+    return within(await screen.findByRole("menu"));
+  }
+
+  await first.user.selectOptions(await library().findByRole("combobox", { name: "Project" }), "");
+  const section = (await menu(original)).getByRole("menuitem", { name: "Section" });
+  section.focus();
+  await first.user.keyboard("{ArrowRight}");
+  expect(screen.queryByRole("menuitem", { name: "Audit only" })).toBeNull();
+  await first.user.click(await screen.findByRole("menuitem", { name: "New section…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Create section" }));
+  await first.user.type(dialog.getByRole("textbox", { name: "Section name" }), "Release notes");
+  await first.user.click(dialog.getByRole("button", { name: "Save" }));
+  await screen.findByRole("region", { name: "Conversation library" });
+  expect(await library().findByRole("region", { name: "Launch · Release notes" })).toBeTruthy();
+
+  await first.user.click((await menu(original)).getByRole("menuitem", { name: "Pin" }));
+  expect(await library().findByRole("region", { name: "Pinned" })).toBeTruthy();
+  await first.user.click((await menu(original)).getByRole("menuitem", { name: "Mark as unread" }));
+  await waitFor(() => expect(library().getByRole("button", { name: original }).getAttribute("aria-description")).toBe("Unread"));
+  await first.user.click((await menu(original)).getByRole("menuitem", { name: "Archive" }));
+  await waitFor(() => expect(library().queryByRole("button", { name: original })).toBeNull());
+  first.unmount();
+
+  const reopened = mount();
+  await screen.findByRole("region", { name: "Conversation library" });
+  await reopened.user.click(await library().findByRole("button", { name: "Archived" }));
+  const archivedRow = await within(await library().findByRole("region", { name: "Release notes" })).findByRole("button", { name: original });
+  expect(archivedRow.getAttribute("aria-description")).toBe("Unread");
+  await reopened.user.click((await menu(original)).getByRole("menuitem", { name: "Unarchive" }));
+  await reopened.user.click(library().getByRole("button", { name: "Archived" }));
+  expect(await library().findByRole("region", { name: "Pinned" })).toBeTruthy();
+  await reopened.user.click((await menu(original)).getByRole("menuitem", { name: "Unpin" }));
+  expect(await library().findByRole("region", { name: "Release notes" })).toBeTruthy();
+  await reopened.user.click(library().getByRole("button", { name: original }));
+  await waitFor(() => expect(library().getByRole("button", { name: original }).getAttribute("aria-description")).toBeNull());
 });
 
 it("opens an all-project result in its own worktree from the actual application shell", async () => {

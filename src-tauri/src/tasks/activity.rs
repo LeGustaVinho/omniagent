@@ -401,7 +401,7 @@ pub(super) fn load_task_details(db: &Connection, project: &str, task: &str) -> R
     })
 }
 
-fn write_task_details(
+pub(super) fn write_task_details(
     db: &Connection,
     project: &str,
     task: &str,

@@ -128,20 +128,9 @@ impl Store {
         task: String,
     ) -> Result<TaskChecklistModeSettings> {
         self.execute(move |db| {
-            let effective_mode = effective_mode(db, &project, &task)?;
-            let own: Option<String> = db
-                .query_row(
-                    "SELECT mode FROM task_checklist_modes WHERE project_id = ?1 AND task_id = ?2",
-                    params![project, task],
-                    |row| row.get(0),
-                )
-                .optional()?;
             Ok(TaskChecklistModeSettings {
-                override_mode: own
-                    .as_deref()
-                    .map(ChecklistExecutionMode::from_sql)
-                    .transpose()?,
-                effective_mode,
+                override_mode: checklist_mode_override(db, &project, &task)?,
+                effective_mode: effective_mode(db, &project, &task)?,
             })
         })
         .await
@@ -226,25 +215,11 @@ impl Store {
     ) -> Result<()> {
         self.execute(move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            match mode {
-                Some(mode) => {
-                    tx.execute(
-                        "INSERT INTO task_checklist_modes (project_id, task_id, mode) VALUES (?1, ?2, ?3)
-                         ON CONFLICT(project_id, task_id) DO UPDATE SET mode = excluded.mode",
-                        params![project, task, mode.key()],
-                    ).context("checklist mode requires a task or sub-task in this project")?;
-                }
-                None => {
-                    effective_mode(&tx, &project, &task)?;
-                    tx.execute(
-                        "DELETE FROM task_checklist_modes WHERE project_id = ?1 AND task_id = ?2",
-                        params![project, task],
-                    )?;
-                }
-            }
+            write_checklist_mode_override(&tx, &project, &task, mode)?;
             tx.commit()?;
             Ok(())
-        }).await
+        })
+        .await
     }
 
     pub async fn project_checklist(
@@ -388,6 +363,48 @@ fn revise_checklist_item(
         checked,
         ..current.clone()
     })
+}
+
+pub(super) fn checklist_mode_override(
+    db: &Connection,
+    project: &str,
+    task: &str,
+) -> Result<Option<ChecklistExecutionMode>> {
+    let own: Option<String> = db
+        .query_row(
+            "SELECT mode FROM task_checklist_modes WHERE project_id = ?1 AND task_id = ?2",
+            params![project, task],
+            |row| row.get(0),
+        )
+        .optional()?;
+    own.as_deref()
+        .map(ChecklistExecutionMode::from_sql)
+        .transpose()
+}
+
+pub(super) fn write_checklist_mode_override(
+    db: &Connection,
+    project: &str,
+    task: &str,
+    mode: Option<ChecklistExecutionMode>,
+) -> Result<()> {
+    match mode {
+        Some(mode) => db
+            .execute(
+                "INSERT INTO task_checklist_modes (project_id, task_id, mode) VALUES (?1, ?2, ?3)
+             ON CONFLICT(project_id, task_id) DO UPDATE SET mode = excluded.mode",
+                params![project, task, mode.key()],
+            )
+            .context("checklist mode requires a task or sub-task in this project")?,
+        None => {
+            effective_mode(db, project, task)?;
+            db.execute(
+                "DELETE FROM task_checklist_modes WHERE project_id = ?1 AND task_id = ?2",
+                params![project, task],
+            )?
+        }
+    };
+    Ok(())
 }
 
 fn effective_mode(db: &Connection, project: &str, task: &str) -> Result<ChecklistExecutionMode> {

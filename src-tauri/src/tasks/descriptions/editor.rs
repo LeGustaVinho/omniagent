@@ -188,7 +188,7 @@ fn validate_owner(db: &Connection, project: &str, owner: &DescriptionOwner) -> R
     Ok(())
 }
 
-fn load_editor_state(
+pub(in crate::tasks) fn load_editor_state(
     db: &Connection,
     project: &str,
     owner: &DescriptionOwner,
@@ -245,7 +245,7 @@ fn load_draft_base(
     .transpose()
 }
 
-fn consume_draft(
+pub(in crate::tasks) fn consume_draft(
     db: &Connection,
     project: &str,
     owner: &DescriptionOwner,

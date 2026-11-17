@@ -1,8 +1,14 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
+import type { PluginInventory } from "@/bindings/PluginInventory";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
+import type { Provider } from "@/bindings/Provider";
+import { UserPluginManagement } from "@/cli-plugin-management";
 import { Button } from "@/components/ui/button";
+import { PipelinePluginItem } from "@/pipeline-layout";
+import type { WorkspaceProps } from "@/workbench-contract";
+import { workflowRunTarget } from "@/workflow-execution-model";
 
 type RunningBuild = { version: string; sourceCommit: string | null; sourceModified: boolean | null; target: string; profile: string };
 type MaintenanceMode = "disabled" | "manual_fixture" | "signed_updater";
@@ -21,6 +27,7 @@ type MaintenanceSettings = {
 type MaintenanceHandoff = {
   id: string;
   workflowRunId: string;
+  taskId: string;
   nodeId: string;
   gitArtifactId: string;
   settingsRevision: string;
@@ -87,6 +94,94 @@ export function WorkflowMaintenanceSettings({ checkout }: { checkout: ProjectChe
     <summary>Maintenance workflow</summary>
     {open && <MaintenanceSettingsForm checkout={checkout} />}
   </details>;
+}
+
+export function WorkflowMaintenanceCandidates({ checkout, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openWorkspace">) {
+  const { projectId } = checkout;
+  const [handoffId, setHandoffId] = useState("");
+  const maintenance = useQuery({ queryKey: maintenanceKey(projectId), queryFn: () => readMaintenance(projectId) });
+  const handoffs = maintenance.data?.handoffs ?? [];
+  const handoff = handoffs.find(({ id }) => id === handoffId) ?? handoffs[0];
+  const settings = maintenance.data?.settings;
+  const activation = useActivateMaintenanceFixture(projectId);
+  return <>
+    <h3>Candidate package</h3>
+    {maintenance.isPending && <p role="status">Loading release evidence…</p>}
+    {maintenance.error && <p role="alert">{String(maintenance.error)}</p>}
+    {maintenance.data && <BuildDescription build={maintenance.data.runningBuild} />}
+    {maintenance.data && !handoff && <p>No accepted package has been built for this project.</p>}
+    {handoff && <>
+      {handoffs.length > 1 && <label className="pipeline-form pipeline-stack">Saved package
+        <select value={handoff.id} onChange={(event) => setHandoffId(event.currentTarget.value)}>
+          {handoffs.map((candidate) => <option key={candidate.id} value={candidate.id}>
+            {candidate.version} · {candidate.sourceRevision.slice(0, 12)} · {candidate.packageName}
+          </option>)}
+        </select>
+      </label>}
+      <dl className="pipeline-data break-all">
+        <dt>Candidate</dt><dd>{handoff.version} · {handoff.packageName}</dd>
+        <dt>Accepted source</dt><dd><code>{handoff.sourceRevision}</code></dd>
+        <dt>Package SHA-256</dt><dd><code>{handoff.sha256}</code></dd>
+        <dt>Evidence</dt><dd>{handoff.checks.join(", ")} · <code>{handoff.verificationId}</code></dd>
+      </dl>
+      {handoff.activation && <p role="status">Fixture activation recorded <code>{handoff.activation.id}</code></p>}
+      {handoff.signedActivation && <p role="status">Signed update {handoff.signedActivation.version} verified at startup.</p>}
+      <div className="pipeline-actions">
+        <Button type="button" variant="outline" onClick={() => openWorkspace("tasks", handoff.taskId)}>Open task</Button>
+        <Button type="button" variant="outline"
+          onClick={() => openWorkspace("pipelines", workflowRunTarget(handoff.workflowRunId))}>Open workflow execution</Button>
+        {!handoff.activation && !handoff.signedActivation && settings?.revision === handoff.settingsRevision &&
+          settings.configuration.activation === "manual_fixture" && <Button type="button" variant="outline"
+          disabled={activation.isPending} onClick={() => activation.mutate(handoff)}>Record fixture activation</Button>}
+      </div>
+      {activation.error && activation.variables?.id === handoff.id && <p role="alert">{String(activation.error)}</p>}
+      {!handoff.activation && !handoff.signedActivation && settings?.revision === handoff.settingsRevision &&
+        settings.configuration.activation === "signed_updater" &&
+        <SignedHandoffUpdate key={handoff.id} projectId={projectId} handoff={handoff} />}
+    </>}
+    <WorkflowMaintenanceSettings checkout={checkout} />
+  </>;
+}
+
+export function WorkflowMaintenancePlugins() {
+  const client = useQueryClient();
+  const [provider, setProvider] = useState<Provider>("codex");
+  const key = ["cli-plugin-inventory", provider];
+  const inventory = useQuery({
+    queryKey: key,
+    queryFn: () => invoke<PluginInventory | null>("cli_plugin_inventory", { provider, refresh: false }),
+    staleTime: Infinity,
+  });
+  const refresh = useMutation({
+    mutationFn: (source: Provider) => invoke<PluginInventory | null>("cli_plugin_inventory", { provider: source, refresh: true }),
+    onSuccess: (data, source) => client.setQueryData(["cli-plugin-inventory", source], data),
+  });
+  const error = inventory.error ?? refresh.error;
+  return <>
+    <div className="pipeline-actions">
+      <label className="pipeline-form pipeline-stack">CLI for plugin inventory
+        <select value={provider} disabled={refresh.isPending}
+          onChange={(event) => { setProvider(event.currentTarget.value as Provider); refresh.reset(); }}>
+          <option value="codex">Codex</option><option value="claude">Claude Code</option><option value="antigravity">Antigravity</option>
+        </select>
+      </label>
+      <Button type="button" variant="outline" disabled={refresh.isPending} onClick={() => refresh.mutate(provider)}>
+        {refresh.isPending ? "Checking plugins…" : "Check plugins"}
+      </Button>
+    </div>
+    {inventory.isPending && <p role="status">Loading saved plugin inventory…</p>}
+    {error && <p role="alert">{String(error)}</p>}
+    {inventory.data === null && <p>No saved inventory for this CLI. Check plugins to read the current user profile.</p>}
+    {inventory.data && <>
+      <p className="pipeline-meta">Last checked {new Date(inventory.data.checkedAt).toLocaleString()} · {inventory.data.report.status}</p>
+      {inventory.data.report.plugins.map((plugin, index) => <PipelinePluginItem key={`${plugin.id}:${plugin.scope ?? ""}:${index}`}
+        name={plugin.name ?? plugin.id} detail={[
+          plugin.enabled === null ? "Enablement unreported" : plugin.enabled ? "Enabled" : "Disabled",
+          plugin.scope, plugin.version, plugin.marketplace,
+        ].filter(Boolean).join(" · ")} />)}
+    </>}
+    <UserPluginManagement key={provider} provider={provider} disabled={refresh.isPending} />
+  </>;
 }
 
 function MaintenanceSettingsForm({ checkout }: { checkout: ProjectCheckout }) {
@@ -227,6 +322,21 @@ export function WorkflowMaintenanceDelivery(props: {
   </details>;
 }
 
+function useActivateMaintenanceFixture(projectId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, settingsRevision, sha256 }: MaintenanceHandoff) => invoke<MaintenanceHandoff>("activate_maintenance_fixture", {
+      request: { projectId, handoffId: id, expectedSettingsRevision: settingsRevision, expectedSha256: sha256 },
+    }),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: maintenanceKey(projectId) }),
+        client.invalidateQueries({ queryKey: ["repository-delivery", projectId] }),
+      ]);
+    },
+  });
+}
+
 function MaintenanceDelivery({ projectId, workflowRunId, workflowId, nodeId, gitArtifactId, taskId, commitEvidenceId }: Parameters<typeof WorkflowMaintenanceDelivery>[0]) {
   const client = useQueryClient();
   const maintenance = useQuery({ queryKey: maintenanceKey(projectId), queryFn: () => readMaintenance(projectId) });
@@ -244,14 +354,7 @@ function MaintenanceDelivery({ projectId, workflowRunId, workflowId, nodeId, git
     }),
     onSuccess: refresh,
   });
-  const activate = useMutation({
-    mutationFn: ({ id, settingsRevision, sha256 }: MaintenanceHandoff) => invoke<MaintenanceHandoff>("activate_maintenance_fixture", {
-      request: { projectId, handoffId: id, expectedSettingsRevision: settingsRevision, expectedSha256: sha256 },
-    }),
-    onSuccess: async () => {
-      await Promise.all([refresh(), client.invalidateQueries({ queryKey: ["repository-delivery", projectId] })]);
-    },
-  });
+  const activate = useActivateMaintenanceFixture(projectId);
   const handoffs = maintenance.data?.handoffs.filter((item) => item.workflowRunId === workflowRunId &&
     item.nodeId === nodeId && item.gitArtifactId === gitArtifactId && item.commitEvidenceId === commitEvidenceId) ?? [];
   const current = handoffs.find((item) => settings?.revision === item.settingsRevision);

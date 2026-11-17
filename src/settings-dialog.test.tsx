@@ -57,6 +57,18 @@ it("restores the last saved theme if the appearance write fails", async () => {
   expect(screen.getByRole("button", { name: "Dark" }).getAttribute("aria-pressed")).toBe("true");
 });
 
+it("saves the Markdown width and applies it app-wide", async () => {
+  invoke.mockImplementation(async (command: string, args) => command === "appearance_settings" ? defaultAppearance : args.settings);
+  openSettings({ simulation: null });
+  const width = screen.getByLabelText("Markdown width");
+  await waitFor(() => expect((width.closest("fieldset") as HTMLFieldSetElement).disabled).toBe(false));
+
+  await userEvent.setup().selectOptions(width, "full");
+
+  expect(invoke).toHaveBeenCalledWith("save_appearance_settings", { settings: { ...defaultAppearance, markdownWidth: "full" } });
+  await waitFor(() => expect(document.documentElement.style.getPropertyValue("--app-markdown-width")).toBe("100%"));
+});
+
 it("shows reported CLI permissions independently of Windows sandbox support", async () => {
   invoke.mockImplementation(async (command: string) => {
     switch (command) {

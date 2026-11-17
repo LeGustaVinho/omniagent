@@ -36,6 +36,7 @@ pub use synthesis::ComparisonSynthesis;
 #[serde(rename_all = "camelCase")]
 pub struct ModelComparison {
     pub id: String,
+    pub source_checkout_id: String,
     pub commit: String,
     pub tree: String,
     pub prompt: String,
@@ -361,9 +362,9 @@ async fn registered_root(store: &Store, project: String, checkout: String) -> Re
 }
 
 fn load_group(db: &Connection, project: &str, id: &str) -> Result<ModelComparison> {
-    let (commit, tree, prompt) = db.query_row(
-        "SELECT commit_oid, tree_oid, prompt FROM model_comparison_groups WHERE project_id = ?1 AND id = ?2",
-        params![project, id], |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, Vec<u8>>(2)?)),
+    let (source_checkout_id, commit, tree, prompt) = db.query_row(
+        "SELECT source_checkout_id, commit_oid, tree_oid, prompt FROM model_comparison_groups WHERE project_id = ?1 AND id = ?2",
+        params![project, id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get::<_, Vec<u8>>(3)?)),
     )?;
     let mut query = db.prepare(
         "SELECT c.selection, j.id, a.run_id, agent.conversation_id, dispatch.id,
@@ -408,6 +409,7 @@ fn load_group(db: &Connection, project: &str, id: &str) -> Result<ModelCompariso
         .collect::<Result<_>>()?;
     Ok(ModelComparison {
         id: id.into(),
+        source_checkout_id,
         commit,
         tree,
         prompt: String::from_utf8(protection::unprotect(&prompt)?)?,

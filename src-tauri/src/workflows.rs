@@ -78,8 +78,9 @@ pub(crate) use job_inputs::{
     WorkflowJobInput, bind_job_input, load_workflow_job_input, stage_job_input,
 };
 pub use launch::{
-    ManualWorkflowLaunch, TypedStartConfiguration, WorkflowLaunchEvent, WorkflowLaunchOrigin,
-    WorkflowLaunchReceipt, WorkflowLaunchRequest, WorkflowLaunchSource, WorkflowStartSchema,
+    ManualWorkflowLaunch, RepositoryNotePlanning, TypedStartConfiguration, WorkflowLaunchEvent,
+    WorkflowLaunchOrigin, WorkflowLaunchReceipt, WorkflowLaunchRequest, WorkflowLaunchSource,
+    WorkflowStartSchema,
 };
 pub(crate) use launch::{launch_workflow_in_tx, validate_workflow_launch_source};
 pub(crate) use launch::{pinned_workflow_checklist_for_job, require_launch_checklist_item};

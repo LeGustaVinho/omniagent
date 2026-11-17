@@ -13,6 +13,7 @@ import { RealConversations, RealDiagnostics } from "@/desktop-dock";
 import { GitSimulationProvider } from "@/git-simulation";
 import { RunInspector, SimulationDiagnostics } from "@/inspection-panel";
 import { InspectorTabs } from "@/inspector-tabs";
+import { ResizablePanel } from "@/panel-resize";
 import { useRunSubscription } from "@/run-projection";
 import { RunInspectorNavigation } from "@/run-inspector-navigation";
 import {
@@ -268,13 +269,13 @@ export default function Workbench({ checkout, openRepository, onSelectCheckout, 
             <WorkspaceViews nav={preview.navigation} context={simulated} sidebar={sidebar} onSidebarChange={changeSidebar}
               compact={compact} openSystem={() => showSettings("system")} />
           </div>}
-          {realQueue && <div className="work-queue-panel" hidden={Boolean(preview) || realQueue !== "open"}>
+          {realQueue && <ResizablePanel className="work-queue-panel" edge="top" resizeKey="queue" resizeLabel="queue" hidden={Boolean(preview) || realQueue !== "open"}>
             <Suspense fallback={loading}><QueuePanel {...real} focusJob={queueFocus}
               active={!preview && realQueue === "open"} onClose={() => setRealQueue("closed")} /></Suspense>
-          </div>}
-          {previewQueue && simulated && <div className="work-queue-panel" key={"simulation-queue:" + preview?.epoch} hidden={previewQueue !== "open"}>
+          </ResizablePanel>}
+          {previewQueue && simulated && <ResizablePanel className="work-queue-panel" edge="top" resizeKey="example-queue" resizeLabel="queue" key={"simulation-queue:" + preview?.epoch} hidden={previewQueue !== "open"}>
             <Suspense fallback={loading}><QueuePanel {...simulated} onClose={() => setPreviewQueue("closed")} /></Suspense>
-          </div>}
+          </ResizablePanel>}
         </div>
         {side && <SideInspector key={side.type === "activity" ? side.runId : side.target} side={side} compact={compact} close={closeSide}
           plan={simulated && side.type === "changes" && side.target === "saved" && <SavedPlan />}>
@@ -335,19 +336,23 @@ function SideInspector({ side, compact, close, children, plan }: { side: SidePan
     <Dialog.Root open onOpenChange={(open) => { if (!open) close(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="work-shade" />
-        <Dialog.Content className="work-inspector work-inspector-drawer" aria-describedby={undefined} data-kind={side.type} data-expanded={expanded}>
-          <Dialog.Title className="sr-only">{title}</Dialog.Title>
-          {tabs}
+        <Dialog.Content asChild aria-describedby={undefined}>
+          <ResizablePanel className="work-inspector work-inspector-drawer" data-kind={side.type} data-expanded={expanded}
+            edge="left" resizeKey={`inspector-${side.type}`} resizeLabel={title}>
+            <Dialog.Title className="sr-only">{title}</Dialog.Title>
+            {tabs}
+          </ResizablePanel>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
   );
-  return <aside className="work-inspector" aria-label={title} data-kind={side.type} data-expanded={expanded} onKeyDown={(event) => {
+  return <ResizablePanel as="aside" className="work-inspector" aria-label={title} data-kind={side.type} data-expanded={expanded}
+    edge="left" resizeKey={`inspector-${side.type}`} resizeLabel={title} onKeyDown={(event) => {
     if (event.key === "Escape" && !event.defaultPrevented) {
       event.stopPropagation();
       close();
     }
   }}>
     {tabs}
-  </aside>;
+  </ResizablePanel>;
 }

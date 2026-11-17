@@ -4,7 +4,7 @@ import {
   Handle, MarkerType, Position, addEdge, applyEdgeChanges, applyNodeChanges, useUpdateNodeInternals,
 } from "@xyflow/react";
 import type { Node, NodeProps } from "@xyflow/react";
-import { ArrowUpRight, Check, CircleAlert, CirclePlay, Layers3, Plus, Save, ShieldCheck, X } from "lucide-react";
+import { ArrowUpRight, Check, CircleAlert, CirclePlay, Layers3, Plus, Save, X } from "lucide-react";
 import { Dialog } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { ModelPicker } from "@/components/model-picker";
@@ -16,14 +16,17 @@ import { useGitSimulation } from "@/git-simulation";
 import { PipelineCatalog, PipelineNodeCatalog, workflowGraphRegistryQuery, workflowRegistryGroups } from "@/pipeline-catalog";
 import { PipelineAuthoringEditor, ProjectPipelineDrafts } from "@/workflow-authoring";
 import { WorkflowExchangePanel } from "@/workflow-exchange";
-import { WorkflowMaintenanceSettings } from "@/workflow-maintenance";
+import { WorkflowMaintenanceCandidates, WorkflowMaintenancePlugins } from "@/workflow-maintenance";
 import { WorkflowSettingsProposals } from "@/workflow-settings-proposals";
 import { WorkflowExecutionWorkspace } from "@/workflow-execution";
+import { workflowRunTarget } from "@/workflow-execution-model";
+import type { ComparisonHandoff } from "@/workflow-comparison-handoff";
 import { WorkflowExecutionStateBadge } from "@/workflow-execution-state";
 import { WorkflowGraphNodeCard } from "@/workflow-graph-editor";
 import { WorkflowComparisons } from "@/workflow-comparison";
+import { WorkflowTemplateHistory } from "@/workflow-template-history";
 import { WorkflowTriggers } from "@/workflow-triggers";
-import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineRolesTemplatesHeading, PipelineRunsEmpty, PipelineSectionHeading, PipelineTabs, PipelineToolbar, PipelineWorkspaceFrame } from "@/pipeline-layout";
+import { PipelineCanvasFrame, PipelineGraphCanvas, PipelineInspectorHeader, PipelineMaintenanceLayout, PipelineRolesTemplatesHeading, PipelineRunsEmpty, PipelineSectionHeading, PipelineTabs, PipelineToolbar, PipelineWorkspaceFrame } from "@/pipeline-layout";
 import { deliveryBranch, deliveryCommitSha, deliveryMergeSha, deliveryRunId } from "@/tasks-demo-data";
 import {
   advancePipelineRun, beginPipelineRun, createDeliveryWorkflow, createStage, declineStage, interruptStage, resolveStage,
@@ -209,27 +212,35 @@ function PipelineLibrary({ checkout, openWorkspace }: Pick<WorkspaceProps, "chec
   </section>;
 }
 
-function ProjectPipelineMaintenance({ checkout, openActivity }: Pick<WorkspaceProps, "checkout" | "openActivity">) {
-  return <section className="pipeline-view-content pipeline-stack" aria-label="Workflow maintenance">
-    <PipelineSectionHeading title="Maintenance" description="Review settings proposals and configure the release workflow."
-      icon={<ShieldCheck size={20} aria-hidden />} />
-    <div className="pipeline-two-columns">
-      <div className="pipeline-box"><WorkflowSettingsProposals checkout={checkout} onOpenRun={openActivity} /></div>
-      <div className="pipeline-box"><WorkflowMaintenanceSettings checkout={checkout} /></div>
-    </div>
-  </section>;
+function ProjectPipelineMaintenance({ checkout, openActivity, openWorkspace }: Pick<WorkspaceProps, "checkout" | "openActivity" | "openWorkspace">) {
+  return <PipelineMaintenanceLayout proposals={<WorkflowSettingsProposals checkout={checkout} onOpenRun={openActivity} />}
+    releases={<WorkflowMaintenanceCandidates checkout={checkout} openWorkspace={openWorkspace} />}
+    inventory={<WorkflowMaintenancePlugins />} />;
 }
 
 export default function PipelinesWorkspace(props: WorkspaceProps) {
   if (props.simulation) return <PreviewPipelinesWorkspace {...props} />;
+  return <ProjectPipelinesWorkspace key={props.checkout.checkoutId} {...props} />;
+}
+
+function ProjectPipelinesWorkspace(props: WorkspaceProps) {
+  const [handoff, setHandoff] = useState<ComparisonHandoff>();
+  useEffect(() => {
+    setHandoff((current) => current && workflowRunTarget(current.runId) === props.target ? current : undefined);
+  }, [props.target]);
   const { view, draftId, runId } = productionRoute(props.target);
   return <PipelineWorkspaceFrame>
     <PipelineTabs views={productionTabs} active={view} onSelect={(tab) => props.openWorkspace("pipelines", tab)} />
     <div className="pipeline-view">
-      {view === "templates" ? <ConversationTemplateEditor key={props.checkout.checkoutId} checkout={props.checkout} openWorkspace={props.openWorkspace} />
-        : view === "compare" ? <WorkflowComparisons key={props.checkout.checkoutId} {...props} />
+      {view === "templates" ? <ConversationTemplateEditor checkout={props.checkout} openWorkspace={props.openWorkspace}
+        savedWorkflows={<WorkflowTemplateHistory {...props} />} />
+        : view === "compare" ? <WorkflowComparisons {...props} onUseInPipeline={(destination) => {
+          setHandoff(destination);
+          props.openWorkspace("pipelines", workflowRunTarget(destination.runId));
+        }} />
           : view === "automations" ? <WorkflowTriggers key={props.checkout.checkoutId} {...props} />
-          : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId} />
+          : view === "runs" ? <WorkflowExecutionWorkspace {...props} runId={runId}
+            comparisonHandoff={handoff?.runId === runId ? handoff : undefined} />
           : view === "library" ? <PipelineLibrary {...props} />
           : view === "maintenance" ? <ProjectPipelineMaintenance {...props} />
           : draftId ? <PipelineAuthoringEditor key={draftId} {...props} draftId={draftId} />
@@ -517,7 +528,7 @@ function PreviewPipelinesWorkspace(props: WorkspaceProps) {
         <PipelineSectionHeading title="Library" icon={<Layers3 size={20} aria-hidden />} />
         <PipelineCatalog />
       </div>
-      <div className="pipeline-view pipeline-view-content" hidden={view !== "Maintenance"}>
+      <div className="pipeline-view" hidden={view !== "Maintenance"}>
         <PipelineMaintenance simulation={simulation} startSimulation={startSimulation} openWorkspace={props.openWorkspace} openChanges={props.openChanges} />
       </div>
     </PipelineWorkspaceFrame>

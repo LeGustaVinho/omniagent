@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ConversationHistoryDeletion } from "@/conversation-history-deletion";
 import { GitDiffFrame } from "@/git-diff-view";
 import { loadMonaco, monacoTheme } from "@/ide-monaco";
-import { InlineIssue } from "@/tasks-git-ui";
+import { DeliveryDetailPanel, InlineIssue } from "@/tasks-git-ui";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 type SavedAttempt = { runId: string; checkoutId: string; label: string; conversationId?: string; historyDeleted?: boolean };
@@ -98,7 +98,7 @@ function RecordedArtifact({ artifact }: { artifact: ChangeArtifact }) {
           : <RecordedMonaco key={part.id} label={part.label} text={text} language={part.language} />}
       </> : <p className="p-3 text-sm">No patch was recorded for this attempt.</p>}
     </div>
-    <aside className="delivery-detail" aria-label="Recorded comparison identity">
+    <DeliveryDetailPanel label="Recorded comparison identity" resizeKey="git-comparison-details">
       <div className="delivery-detail-content grid content-start gap-3 p-3.5">
         <h3 className="text-sm font-semibold">Capture details</h3>
         <dl className="grid gap-2 text-xs">
@@ -112,7 +112,7 @@ function RecordedArtifact({ artifact }: { artifact: ChangeArtifact }) {
           </div>)}
         </dl>
       </div>
-    </aside>
+    </DeliveryDetailPanel>
   </div>;
 }
 
