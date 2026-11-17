@@ -550,6 +550,67 @@ it("compares the clicked whole commit with captured refs and offers the checkout
   expect(invoke).not.toHaveBeenCalledWith("git_checkout_diff", expect.anything());
 });
 
+it("creates a branch from the exact history ref even if it advances while the name is entered", async () => {
+  const ref = "refs/heads/feature";
+  const historical = "a".repeat(40);
+  const moved = "b".repeat(40);
+  let tip = historical;
+  vi.mocked(invoke).mockImplementation(async (command, payload) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, worktrees, root: checkout.checkoutRoot, managed: false, changes: [], revision: originalRevision,
+      branches: branches.map((entry) => entry.reference === ref ? { ...entry, sha: tip } : entry),
+    };
+    if (command === "git_checkout_history") return [];
+    if (command === "create_git_branch") {
+      if ((payload as { branch: string }).branch === "taken") throw new Error("The local branch already exists");
+      return;
+    }
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  const { client } = openGit({ target: "history" });
+  const branchPicker = await screen.findByLabelText("History branch");
+  await user.selectOptions(branchPicker, ref);
+  fireEvent.contextMenu(branchPicker);
+  await user.click(await screen.findByRole("menuitem", { name: "Create branch from this ref…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Create local branch" }));
+  expect(dialog.getByText(historical)).toBeTruthy();
+  tip = moved;
+  await act(async () => { await client.invalidateQueries({ queryKey: ["git-review", checkout.checkoutId] }); });
+  const name = dialog.getByLabelText("Branch name");
+  await user.type(name, "taken");
+  await user.click(dialog.getByRole("button", { name: "Create branch" }));
+  expect(await dialog.findByText(/branch already exists/i)).toBeTruthy();
+  await user.clear(name);
+  await user.type(name, "history/topic");
+  await user.click(dialog.getByRole("button", { name: "Create branch" }));
+  expect(await screen.findByText("history/topic")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("create_git_branch", { checkoutId: checkout.checkoutId, branch: "history/topic", expectedHead: historical });
+  expect(invoke).not.toHaveBeenCalledWith("create_git_worktree", expect.anything());
+  expect((screen.getByLabelText("History branch") as HTMLSelectElement).value).toBe(ref);
+});
+
+it("creates a branch from the clicked registered worktree HEAD without selecting that worktree", async () => {
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "git_checkout_review") return {
+      checkoutId: checkout.checkoutId, worktrees, root: checkout.checkoutRoot, managed: false, changes: [], revision: originalRevision, branches,
+    };
+    if (command === "create_git_branch") return;
+    throw new Error(command);
+  });
+  const user = userEvent.setup();
+  openGit({ target: "worktrees" });
+  fireEvent.contextMenu(await screen.findByText("C:/linked"));
+  await user.click(await screen.findByRole("menuitem", { name: "Create branch from this HEAD…" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Create local branch" }));
+  expect(dialog.getByText("current-feature")).toBeTruthy();
+  await user.type(dialog.getByLabelText("Branch name"), "linked-source");
+  await user.click(dialog.getByRole("button", { name: "Create branch" }));
+  expect(await screen.findByText("linked-source")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("create_git_branch", { checkoutId: "linked-task", branch: "linked-source", expectedHead: "current-feature" });
+  expect((screen.getByLabelText("Git worktree") as HTMLSelectElement).value).toBe(checkout.checkoutId);
+});
+
 it("registers a manual worktree from the shared dialog and selects the returned checkout", async () => {
   const tree = { checkoutId: "manually-created", root: "D:/worktrees/new-local", branch: "new-local", head: "current-main", managed: false };
   let created = false;

@@ -533,6 +533,7 @@ fn main() {
             git_review_runtime::git_add_review_comment,
             git_review_runtime::git_set_review_comment_resolved,
             git_review_runtime::set_git_hunk_reviewed,
+            git_review_runtime::create_git_branch,
             git_review_runtime::create_git_worktree,
             git_review_runtime::set_git_path_staged,
             git_review_runtime::set_git_paths_staged,

@@ -897,6 +897,95 @@ async fn applies_only_the_reviewed_git_hunk_and_preserves_worktree_changes() -> 
 }
 
 #[tokio::test]
+async fn creates_a_local_branch_from_the_frozen_commit_without_touching_the_checkout() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().join("local-branch");
+    fs::create_dir(&root)?;
+    git(&root, &["init", "--quiet", "-b", "main"])?;
+    fs::write(root.join("notes.txt"), "initial\n")?;
+    let initial = commit_fixture(&root, "Historical revision")?;
+    fs::write(root.join("notes.txt"), "latest\n")?;
+    let latest = commit_fixture(&root, "Current revision")?;
+    git(&root, &["branch", "topic", &initial])?;
+    git(
+        &root,
+        &["update-ref", "refs/heads/topic", &latest, &initial],
+    )?;
+    fs::write(root.join("notes.txt"), "staged\n")?;
+    git(&root, &["add", "notes.txt"])?;
+    fs::write(root.join("notes.txt"), "draft\n")?;
+    let index = fs::read(root.join(".git/index"))?;
+    let store = Store::open(temp.path().join("branches.sqlite"))?;
+    let checkout = register(&store, root.clone()).await?.checkout_id;
+    store
+        .create_git_branch(checkout.clone(), "history/review".into(), initial.clone())
+        .await?;
+    assert_eq!(
+        git(&root, &["rev-parse", "refs/heads/history/review"])?,
+        initial
+    );
+
+    let duplicate = store
+        .create_git_branch(checkout.clone(), "history/review".into(), latest.clone())
+        .await
+        .unwrap_err();
+    assert!(format!("{duplicate:#}").contains("already exists"));
+    assert_eq!(
+        git(&root, &["rev-parse", "refs/heads/history/review"])?,
+        initial
+    );
+    for name in ["-danger", "invalid name", "HEAD"] {
+        assert!(
+            store
+                .create_git_branch(checkout.clone(), name.into(), initial.clone())
+                .await
+                .is_err()
+        );
+    }
+    git(
+        &root,
+        &["symbolic-ref", "refs/heads/alias", "refs/heads/missing"],
+    )?;
+    assert!(
+        store
+            .create_git_branch(checkout.clone(), "alias".into(), initial.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        git(&root, &["symbolic-ref", "refs/heads/alias"])?,
+        "refs/heads/missing"
+    );
+    let blob = git(&root, &["rev-parse", "HEAD:notes.txt"])?;
+    assert!(
+        store
+            .create_git_branch(checkout.clone(), "invalid-start".into(), blob)
+            .await
+            .is_err()
+    );
+
+    let (from_initial, from_latest) = tokio::join!(
+        store.create_git_branch(checkout.clone(), "same-name".into(), initial.clone()),
+        store.create_git_branch(checkout, "same-name".into(), latest.clone()),
+    );
+    assert_ne!(from_initial.is_ok(), from_latest.is_ok());
+    assert_eq!(
+        git(&root, &["rev-parse", "refs/heads/same-name"])?,
+        if from_initial.is_ok() {
+            initial
+        } else {
+            latest.clone()
+        }
+    );
+    assert_eq!(git(&root, &["symbolic-ref", "HEAD"])?, "refs/heads/main");
+    assert_eq!(git(&root, &["rev-parse", "HEAD"])?, latest);
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(fs::read(root.join("notes.txt"))?, b"draft\n");
+    Ok(())
+}
+
+#[tokio::test]
 async fn compares_frozen_commit_trees_even_after_their_refs_move() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root = temp.path().join("compared-trees");

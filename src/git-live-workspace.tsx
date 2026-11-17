@@ -54,9 +54,13 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
   const [tab, setTab] = useState<Tab>(() => tabFor(props.target));
   const [savedWorktree, setSavedWorktree] = useState<Pick<ProjectCheckout, "checkoutId" | "checkoutRoot">>();
   const [creating, setCreating] = useState<{ checkoutId: string; base?: WorktreeBase }>();
+  const [creatingBranch, setCreatingBranch] = useState<{ checkoutId: string; base: CommitReference }>();
+  const [createdBranch, setCreatedBranch] = useState<string>();
   useEffect(() => {
     setTab(tabFor(props.target));
     setSavedWorktree(undefined);
+    setCreatingBranch(undefined);
+    setCreatedBranch(undefined);
     const file = readWorkingDiffTarget(props.target);
     const history = readFileHistoryTarget(props.target);
     setRequestedFile(file);
@@ -73,6 +77,10 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
     setCheckout(source);
     setCreating({ checkoutId: source, base });
   };
+  const openBranchSetup = (checkoutId: string, base: CommitReference) => {
+    setCreatedBranch(undefined);
+    setCreatingBranch({ checkoutId, base });
+  };
 
   return <GitWorkspaceFrame tabs={tabs} active={tab} select={(view) => { setSavedWorktree(undefined); setTab(view); }} controls={tab !== "Saved attempts" && <>
     <label className="ml-auto min-w-0"><span className="sr-only">Git worktree</span>
@@ -88,6 +96,11 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
       onClick={() => openWorktreeSetup(checkoutId)}><Plus size={14} /> New worktree</Button>}
     <Button type="button" variant="ghost" aria-label="Refresh Git review" title="Refresh Git review" onClick={() => void review.refetch()}><RefreshCw size={15} aria-hidden /></Button>
   </>}>
+    {createdBranch && <p role="status" className="px-4 py-2 text-xs">Created local branch <code>{createdBranch}</code>.</p>}
+    {creatingBranch && <CreateLocalBranch {...creatingBranch} close={() => setCreatingBranch(undefined)} created={(name) => {
+      setCreatingBranch(undefined);
+      setCreatedBranch(name);
+    }} />}
     {tab === "Saved attempts" ? <SavedGitDiffs projectId={props.checkout.projectId} target={savedWorktree ? undefined : props.target}
       worktree={savedWorktree} workspace={props} openActivity={props.openActivity} /> : <>
       {review.isPending && <p role="status" className="p-4 text-sm text-muted-foreground">Loading Git review…</p>}
@@ -101,7 +114,7 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
           setRequestedFile(undefined);
           setCheckout(id);
           if (view) { setHistoryPath(undefined); setTab(view); }
-        }} createFrom={openWorktreeSetup} openCheckoutWorkspace={props.openCheckoutWorkspace}
+        }} createFrom={openWorktreeSetup} createBranch={openBranchSetup} openCheckoutWorkspace={props.openCheckoutWorkspace}
           openAttempts={(selected) => { setSavedWorktree(selected); setTab("Saved attempts"); }} />}
         {creating && creating.checkoutId === review.data.checkoutId && <CreateGitWorktree projectId={props.checkout.projectId}
           review={review.data} startingPoint={creating.base}
@@ -110,7 +123,7 @@ function GitCheckoutWorkspace(props: WorkspaceProps) {
           openFile={activeCheckout ? () => openWorkspaceFile(props.openWorkspace, historyPath) : undefined}
           openConversation={activeCheckout ? (id) => props.openWorkspace("conversations", id) : undefined}
           clear={() => setHistoryPath(undefined)} /> : <CommitHistory key={checkoutId} review={review.data}
-            createFrom={(base) => openWorktreeSetup(checkoutId, base)} />)}
+            createFrom={(base) => openWorktreeSetup(checkoutId, base)} createBranch={(base) => openBranchSetup(checkoutId, base)} />)}
       </>}
     </>}
   </GitWorkspaceFrame>;
@@ -173,9 +186,41 @@ function CreateGitWorktree({ projectId, review, startingPoint, select, close }: 
   />;
 }
 
-function WorktreeTable({ review, project, select, createFrom, openCheckoutWorkspace, openAttempts }: {
+function CreateLocalBranch({ checkoutId, base, close, created }: {
+  checkoutId: string; base: CommitReference; close: () => void; created: (name: string) => void;
+}) {
+  const client = useQueryClient();
+  const [name, setName] = useState("");
+  const mutation = useMutation({
+    mutationFn: (branch: string) => invoke<void>("create_git_branch", { checkoutId, branch, expectedHead: base.sha }),
+    onSuccess: (_, branch) => {
+      void client.invalidateQueries({ queryKey: ["git-review"] });
+      created(branch);
+    },
+  });
+  const branch = name.trim();
+  return <FileDialog title="Create local branch" description={base.label} onClose={() => { if (!mutation.isPending) close(); }}>
+    <dl className="text-xs"><dt className="text-muted-foreground">Starting commit</dt><dd className="wrap-anywhere font-mono">{base.sha}</dd></dl>
+    <form className="grid gap-3" onSubmit={(event) => {
+      event.preventDefault();
+      if (branch && !mutation.isPending) mutation.mutate(branch);
+    }}>
+      <label className="delivery-field">Branch name
+        <input className="delivery-filter" value={name} autoCapitalize="none" spellCheck={false} required disabled={mutation.isPending}
+          onChange={(event) => { setName(event.currentTarget.value); if (mutation.error) mutation.reset(); }} />
+      </label>
+      {mutation.error && <InlineIssue>{String(mutation.error)}</InlineIssue>}
+      <Button type="submit" className="justify-self-start" disabled={!branch || mutation.isPending}>
+        {mutation.isPending ? "Creating branch…" : "Create branch"}
+      </Button>
+    </form>
+  </FileDialog>;
+}
+
+function WorktreeTable({ review, project, select, createFrom, createBranch, openCheckoutWorkspace, openAttempts }: {
   review: CheckoutReview; project: ProjectCheckout; select: (id: string, view?: Tab) => void;
   createFrom: (checkoutId: string, base: WorktreeBase) => void;
+  createBranch: (checkoutId: string, base: CommitReference) => void;
   openCheckoutWorkspace: WorkspaceProps["openCheckoutWorkspace"];
   openAttempts: (worktree: Pick<ProjectCheckout, "checkoutId" | "checkoutRoot">) => void;
 }) {
@@ -215,9 +260,12 @@ function WorktreeTable({ review, project, select, createFrom, openCheckoutWorksp
                 { label: "Open terminal in worktree", run: () => void openWorktree(checkoutId, terminalFolderTarget("")) },
               ] : []),
               { label: "View saved attempts for worktree", run: () => openAttempts({ checkoutId, checkoutRoot: tree.root }) },
-              ...(head ? [{ label: "Create worktree from this HEAD…", run: () => createFrom(checkoutId, {
-                reference: head, expectedHead: head, label: `${branch ?? "Detached HEAD"} · ${head.slice(0, 12)}`,
-              }) }] : []),
+              ...(head ? [
+                { label: "Create branch from this HEAD…", run: () => createBranch(checkoutId, { id: head, sha: head, label: branch ?? "Detached HEAD" }) },
+                { label: "Create worktree from this HEAD…", run: () => createFrom(checkoutId, {
+                  reference: head, expectedHead: head, label: `${branch ?? "Detached HEAD"} · ${head.slice(0, 12)}`,
+                }) },
+              ] : []),
               { label: "Show in File Explorer", run: () => actions.reveal("") },
             ] : []),
           ], [
@@ -236,7 +284,9 @@ function WorktreeTable({ review, project, select, createFrom, openCheckoutWorksp
   </div>;
 }
 
-function CommitHistory({ review, createFrom }: { review: CheckoutReview; createFrom: (base: WorktreeBase) => void }) {
+function CommitHistory({ review, createFrom, createBranch }: {
+  review: CheckoutReview; createFrom: (base: WorktreeBase) => void; createBranch: (base: CommitReference) => void;
+}) {
   const [branch, setBranch] = useState("");
   const [selection, select] = useState<string>();
   const [comparison, compare] = useState<CommitComparison>();
@@ -258,6 +308,7 @@ function CommitHistory({ review, createFrom }: { review: CheckoutReview; createF
     ...review.branches.map(({ reference, name, sha }) => ({ id: reference, label: name, sha })),
     ...commits.map(revisionOf),
   ];
+  const historyReference = references.find(({ id }) => id === (branch || "HEAD"));
   function comparisonActions(base: CommitReference): MenuAction[] {
     const targets = references.filter(({ sha }) => sha !== base.sha);
     const checkoutId = review.checkoutId;
@@ -271,12 +322,12 @@ function CommitHistory({ review, createFrom }: { review: CheckoutReview; createF
   }
   return <div className="delivery-body">
     <div className="delivery-main p-4">
-      <ContextActions label="History branch" groups={branchRef ? [[
-        ...comparisonActions({ id: branchRef.reference, label: branchRef.name, sha: branchRef.sha }),
-        { label: "Create worktree from this ref…", run: () => createFrom({
+      <ContextActions label="History branch" groups={historyReference ? [[
+        ...comparisonActions(historyReference),
+        { label: branchRef ? "Create branch from this ref…" : "Create branch from checkout HEAD…", run: () => createBranch(historyReference) },
+        ...(branchRef ? [{ label: "Create worktree from this ref…", run: () => createFrom({
           reference: branchRef.reference, expectedHead: branchRef.sha, label: `${branchRef.name} · ${branchRef.sha.slice(0, 12)}`,
-        }) },
-        { label: "Copy ref name", run: () => copy(branchRef.reference, "Copied ref name") },
+        }) }, { label: "Copy ref name", run: () => copy(branchRef.reference, "Copied ref name") }] : []),
       ]] : []}>
         <label className="delivery-field mb-3 max-w-72">History branch
           <select className="delivery-filter" value={branch} onChange={(event) => { setBranch(event.currentTarget.value); select(undefined); }}>
@@ -295,6 +346,7 @@ function CommitHistory({ review, createFrom }: { review: CheckoutReview; createF
           <td><ContextActions label={`${commit.subject || "Commit"} ${commit.sha.slice(0, 12)}`} groups={[[
             { label: "Inspect commit", run: () => select(commit.sha) },
             ...comparisonActions(revisionOf(commit)),
+            { label: "Create branch from this commit…", run: () => createBranch(revisionOf(commit)) },
             { label: "Create worktree from this commit…", run: () => createFrom({
               reference: commit.sha, expectedHead: commit.sha, label: `${commit.sha.slice(0, 12)} · ${commit.subject || "Commit"}`,
             }) },

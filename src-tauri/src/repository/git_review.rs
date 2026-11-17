@@ -24,6 +24,7 @@ use super::{
 };
 
 mod blame;
+mod branch;
 mod comments;
 mod commit;
 mod commit_history;

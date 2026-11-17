@@ -336,6 +336,19 @@ pub async fn git_set_review_comment_resolved(
 }
 
 #[tauri::command]
+pub async fn create_git_branch(
+    store: State<'_, Store>,
+    checkout_id: String,
+    branch: String,
+    expected_head: String,
+) -> Result<(), String> {
+    store
+        .create_git_branch(checkout_id, branch, expected_head)
+        .await
+        .map_err(review_error)
+}
+
+#[tauri::command]
 pub async fn create_git_worktree(
     app: AppHandle,
     store: State<'_, Store>,
