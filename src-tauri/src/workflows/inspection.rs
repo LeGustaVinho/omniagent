@@ -268,19 +268,20 @@ pub(super) fn load_units(db: &Connection, run: &WorkflowRun) -> Result<Vec<Workf
 }
 
 pub(super) fn load_jobs(db: &Connection, run: &WorkflowRun) -> Result<Vec<WorkflowExecutionJob>> {
-    db.prepare("SELECT o.node_instance_id, j.id, i.payload, j.sequence FROM job_pipeline_origins o
+    db.prepare("SELECT o.node_instance_id, j.id, i.payload, j.sequence, NULL FROM job_pipeline_origins o
         JOIN jobs j ON j.id = o.job_id JOIN workflow_node_pins n ON n.pipeline_run_id = o.pipeline_run_id AND n.node_instance_id = o.node_instance_id
         LEFT JOIN workflow_job_inputs i ON i.job_id = j.id
         WHERE o.project_id = ?1 AND j.project_id = ?1 AND o.pipeline_run_id = ?2
-        UNION ALL SELECT 'conversation-agent', j.id, i.payload, j.sequence FROM conversation_pipeline_turns turn
+        UNION ALL SELECT 'conversation-agent', j.id, NULL, j.sequence, input.id FROM conversation_pipeline_turns turn
         JOIN workflow_run_pins pin ON pin.pipeline_run_id = turn.workflow_run_id
         JOIN jobs j ON j.id = turn.request_id AND j.conversation_id = turn.conversation_id AND j.project_id = pin.project_id
-        LEFT JOIN workflow_job_inputs i ON i.job_id = j.id
+        LEFT JOIN workflow_artifacts input ON input.pipeline_run_id = pin.pipeline_run_id
+            AND input.node_instance_id = 'start' AND input.port_name = 'inputs'
         WHERE pin.project_id = ?1 AND pin.pipeline_run_id = ?2 AND pin.workflow_id = 'omniagent:direct-conversation'
         ORDER BY 4")?
-        .query_map(params![run.project_id, run.id], |row| Ok((row.get(0)?, row.get::<_, String>(1)?, row.get::<_, Option<Vec<u8>>>(2)?)))?
+        .query_map(params![run.project_id, run.id], |row| Ok((row.get(0)?, row.get::<_, String>(1)?, row.get::<_, Option<Vec<u8>>>(2)?, row.get::<_, Option<String>>(4)?)))?
         .map(|row| {
-            let (node_id, id, payload) = row?;
+            let (node_id, id, payload, native_input) = row?;
             let job = load_job(db, &run.project_id, &id)?.context("The pinned workflow job disappeared")?;
             let input = payload.map(|bytes| -> Result<WorkflowJobInput> { Ok(serde_json::from_slice(&protection::unprotect(&bytes)?)?) }).transpose()?;
             let attempts = db.prepare("SELECT a.run_id, a.ordinal, a.previous_run_id, t.conversation_id, r.status
@@ -290,7 +291,10 @@ pub(super) fn load_jobs(db: &Connection, run: &WorkflowRun) -> Result<Vec<Workfl
                     let (run_id, ordinal, previous_run_id, conversation_id, status) = row?;
                     Ok(WorkflowExecutionAttempt { run_id, ordinal, previous_run_id, conversation_id, status: RunStatus::from_sql(&status)? })
                 }).collect::<Result<_>>()?;
-            Ok(WorkflowExecutionJob { node_id, job, attempts, unit_id: input.as_ref().and_then(|input| input.unit_id.clone()), inputs: input.map(|input| input.artifacts) })
+            let unit_id = input.as_ref().and_then(|input| input.unit_id.clone());
+            let inputs = input.map(|input| input.artifacts)
+                .or_else(|| native_input.map(|artifact| [("input".into(), artifact)].into()));
+            Ok(WorkflowExecutionJob { node_id, job, attempts, unit_id, inputs })
         }).collect()
 }
 

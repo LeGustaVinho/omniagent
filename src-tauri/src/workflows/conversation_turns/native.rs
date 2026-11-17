@@ -4,10 +4,10 @@ use serde_json::{Value, json};
 
 use crate::{
     conversations::{MessageRevision, SessionScope, attempt_output},
-    jobs::{Job, PipelineDispatch, QueueState, load_job},
+    jobs::{Job, QueueState, load_job},
     protection,
     runs::RunStatus,
-    workflows::{Endpoint, NodeInstance, Wire, WorkflowGraph, WorkflowJobInput, builtin_registry},
+    workflows::{Endpoint, NodeInstance, Wire, WorkflowGraph, builtin_registry},
 };
 
 use super::{
@@ -181,32 +181,19 @@ pub(crate) fn launch_direct_turn(
         turn_entry(db, &saved, &[])?,
         &origin(&saved),
     )?;
-    let binding = PipelineDispatch {
-        pipeline_run_id: run.id.clone(),
-        node_instance_id: AGENT_ID.into(),
-        plan_revision: None,
-        release_id: None,
-    };
     let source: String = db.query_row(
         "SELECT id FROM workflow_artifacts WHERE pipeline_run_id = ?1 AND node_instance_id = 'start' AND port_name = 'inputs'",
         [&run.id],
         |row| row.get(0),
     )?;
-    let input = WorkflowJobInput {
-        unit_id: None,
-        artifacts: [("input".into(), source)].into(),
-        plan_revision_request: None,
-        comparison: None,
-    };
     crate::workflows::control::require_stage(
         db,
         &job.project_id,
         &run.id,
         AGENT_ID,
         None,
-        &input.artifacts,
+        &[("input".into(), source)].into(),
     )?;
-    crate::workflows::bind_job_input(db, &job.id, &binding, &input)?;
 
     db.execute(
         "INSERT INTO conversation_pipeline_turns(conversation_id, request_id, payload, message_revision_id, history_context_id, workflow_run_id, state)

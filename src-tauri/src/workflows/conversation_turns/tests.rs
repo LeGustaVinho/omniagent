@@ -142,7 +142,9 @@ async fn an_end_reply_settles_the_chat_while_another_branch_waits() -> Result<()
             run_id: run,
             request_id: inspection.pending_decisions[0].request_id.clone(),
             decision: WorkflowStageDecision::Answer {
-                values: [("note".into(), json!("Reviewed after reply"))].into(),
+                values: [("note".into(), json!("Reviewed after reply"))]
+                    .into_iter()
+                    .collect(),
             },
         })
         .await?;
@@ -247,7 +249,25 @@ async fn direct_turn_pins_native_job_and_reuses_one_transcript_reply() -> Result
         .await?
         .context("Expected the direct execution graph")?;
     assert!(inspection.control.iter().any(|node| node.node_id == "end"));
-    assert!(inspection.jobs.iter().any(|entry| entry.job.id == job.id));
+    let native = inspection
+        .jobs
+        .iter()
+        .find(|entry| entry.job.id == job.id)
+        .context("Expected the native job in the graph")?;
+    let source = inspection
+        .outputs
+        .iter()
+        .find(|output| {
+            output.artifact.node_instance_id == "start" && output.artifact.port == "inputs"
+        })
+        .context("Expected the Start input artifact")?;
+    assert_eq!(
+        native
+            .inputs
+            .as_ref()
+            .and_then(|inputs| inputs.get("input")),
+        Some(&source.artifact.id)
+    );
     Ok(())
 }
 
