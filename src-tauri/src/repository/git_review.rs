@@ -527,6 +527,14 @@ fn stage_existing_file(review: &LiveReview, path: &str) -> Result<()> {
 }
 
 fn install_index(review: &LiveReview, index: &Path) -> Result<()> {
+    install_index_if(review, index, || Ok(()))
+}
+
+fn install_index_if(
+    review: &LiveReview,
+    index: &Path,
+    verify: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let mut replacement =
         tempfile::NamedTempFile::new_in(index.parent().context("the index has no parent")?)?;
     std::io::copy(
@@ -536,6 +544,7 @@ fn install_index(review: &LiveReview, index: &Path) -> Result<()> {
     replacement.as_file().sync_all()?;
     review.verify()?;
     let replacement = replacement.into_temp_path();
+    verify()?;
     fs::rename(&replacement, index).context("install the reviewed worktree index")?;
     Ok(())
 }
