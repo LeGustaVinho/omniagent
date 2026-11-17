@@ -51,7 +51,7 @@ pub(super) fn current_user_pipe(name: &str) -> io::Result<NamedPipeServer> {
     }
 }
 
-fn current_user_sid() -> io::Result<String> {
+pub(crate) fn current_user_sid() -> io::Result<String> {
     let mut token = null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(io::Error::last_os_error());

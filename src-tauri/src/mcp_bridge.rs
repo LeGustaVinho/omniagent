@@ -1,5 +1,6 @@
 mod authoring;
 mod security;
+pub(crate) use security::current_user_sid;
 mod settings;
 
 use std::{

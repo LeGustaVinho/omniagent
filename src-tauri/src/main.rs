@@ -11,6 +11,7 @@ mod conversation_compaction_ipc;
 mod history_deletion_ipc;
 mod conversation_steering_ipc;
 mod agile_runtime;
+mod backup_ipc;
 mod delivery_merge_ipc;
 mod desktop;
 mod git_review_runtime;
@@ -249,6 +250,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             runtime_status,
+            backup_ipc::create_application_backup,
             register_project,
             provision_task_worktree,
             set_project_worktree_root,

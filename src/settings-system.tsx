@@ -164,13 +164,7 @@ export function SystemSettings({
       </SystemGroup>
       <SystemGroup icon={<ArchiveRestore size={18} />} id="backup" title="Backup and restore">
         <p>A backup includes local settings, run history and protected artifacts. Restore checks the original Windows account and OmniAgent installation.</p>
-        <div className="settings-actions">
-          <Button variant="outline" disabled>Create backup</Button>
-          <Button variant="outline" disabled>Preview restore</Button>
-        </div>
-        <SettingRow id="live-backup-source" label="Archive source">
-          <select id="live-backup-source" disabled><option>Select a backup</option></select>
-        </SettingRow>
+        <ApplicationBackup />
       </SystemGroup>
       <SystemGroup icon={<RefreshCw size={18} />} id="updates" title="Updates and recovery">
         <p>Review the candidate version, Git revision, signature and approvals before applying an update.</p>
@@ -185,6 +179,19 @@ export function SystemSettings({
       </SystemGroup>
     </div>
   );
+}
+
+function ApplicationBackup() {
+  const backup = useMutation({
+    mutationFn: () => invoke<{ root: string } | null>("create_application_backup"),
+  });
+  return <>
+    <Button type="button" variant="outline" disabled={backup.isPending} onClick={() => backup.mutate()}>
+      {backup.isPending ? "Creating backup…" : "Create backup"}
+    </Button>
+    {backup.data && <p role="status" className="settings-result">Verified backup saved to <code>{backup.data.root}</code></p>}
+    {backup.error && <p role="alert" className="settings-result settings-result-error">{String(backup.error)}</p>}
+  </>;
 }
 
 function RipgrepSettings() {
