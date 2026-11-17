@@ -9,6 +9,7 @@ import { fileLinkEvent, type FileLinkTarget } from "@/file-links";
 import "@/launch-workspace.css";
 import { useAppAppearance } from "@/settings-appearance";
 import { useWorkspace } from "@/workspace-state";
+import type { WorkspaceDestination } from "@/workbench-contract";
 
 const Workbench = lazy(() => import("./workbench"));
 const SettingsDialog = lazy(() => import("./settings-dialog"));
@@ -22,6 +23,7 @@ export function App() {
   const [error, setError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [libraryTarget, setLibraryTarget] = useState<{ checkoutId: string; conversationId: string }>();
+  const [workspaceTarget, setWorkspaceTarget] = useState<WorkspaceDestination & { checkoutId: string }>();
   const [fileTarget, setFileTarget] = useState<FileLinkTarget>();
 
   useEffect(() => {
@@ -49,6 +51,7 @@ export function App() {
           const target = await invoke<FileLinkTarget | null>("take_pending_file_link");
           if (target && !disposed) {
             setLibraryTarget(undefined);
+            setWorkspaceTarget(undefined);
             setFileTarget(target);
             selectCheckout(target.checkout);
             setError("");
@@ -70,10 +73,11 @@ export function App() {
     };
   }, [restoring, selectCheckout]);
 
-  async function activateCheckout(selected: ProjectCheckout, conversationId?: string) {
+  async function activateCheckout(selected: ProjectCheckout, conversationId?: string, destination?: WorkspaceDestination) {
     await invoke("select_active_checkout", { checkoutId: selected.checkoutId });
     setFileTarget(undefined);
     setLibraryTarget(conversationId ? { checkoutId: selected.checkoutId, conversationId } : undefined);
+    setWorkspaceTarget(destination ? { ...destination, checkoutId: selected.checkoutId } : undefined);
     selectCheckout(selected);
     setError("");
   }
@@ -112,6 +116,7 @@ export function App() {
         <Suspense fallback={<p role="status" className="p-6 text-sm text-muted-foreground">Loading workspace…</p>}>
           <Workbench key={checkout.checkoutId} checkout={checkout} openRepository={openRepository} onSelectCheckout={activateCheckout}
             initialConversationId={libraryTarget?.checkoutId === checkout.checkoutId ? libraryTarget.conversationId : undefined}
+            destination={workspaceTarget?.checkoutId === checkout.checkoutId ? workspaceTarget : undefined}
             fileTarget={fileTarget?.checkout.checkoutId === checkout.checkoutId ? fileTarget : undefined} />
         </Suspense>
       ) : (
@@ -124,7 +129,7 @@ export function App() {
             </div>
             <div className="launch-actions">
               {openRepository}
-              <CheckoutSelector checkout={null} disabled={choosing} onSelect={activateCheckout} />
+              <CheckoutSelector checkout={null} disabled={choosing} onSelect={(selected, destination) => activateCheckout(selected, undefined, destination)} />
             </div>
             {error && <p role="alert" className="launch-error">{error}</p>}
           </div>

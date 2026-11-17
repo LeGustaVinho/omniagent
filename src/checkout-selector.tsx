@@ -6,16 +6,19 @@ import { useState } from "react";
 import type { ProjectCheckout } from "@/bindings/ProjectCheckout";
 import { Button } from "@/components/ui/button";
 import { ContextActions } from "@/components/ui/context-actions";
-import { fileContextActions } from "@/file-context-actions";
+import { fileContextActions, gitCheckoutTarget, newWorktreeTarget, terminalFolderTarget } from "@/file-context-actions";
+import type { WorkspaceDestination, WorkspaceId } from "@/workbench-contract";
 
 function basename(path: string) {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
+const checkoutAreas: [WorkspaceId, string][] = [["ide", "IDE"], ["knowledge", "Knowledge"], ["git", "Git"], ["conversations", "Conversations"]];
+
 export function CheckoutSelector({ checkout, onSelect, disabled }: {
   checkout: ProjectCheckout | null;
   disabled?: boolean;
-  onSelect: (checkout: ProjectCheckout) => Promise<void>;
+  onSelect: (checkout: ProjectCheckout, destination?: WorkspaceDestination) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
@@ -27,12 +30,13 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
     enabled: open,
   });
 
-  async function select(checked: ProjectCheckout) {
+  async function select(checked: ProjectCheckout, destination?: WorkspaceDestination) {
     setPending(true);
     setError("");
     setStatus("");
     try {
-      await onSelect(checked);
+      if (destination) await onSelect(checked, destination);
+      else await onSelect(checked);
       setOpen(false);
     } catch (failure) {
       setError(String(failure));
@@ -67,6 +71,13 @@ export function CheckoutSelector({ checkout, onSelect, disabled }: {
             return <li key={item.checkoutId}>
               <ContextActions label={item.checkoutRoot} groups={[[
                 { label: "Use this worktree", disabled: selected || pending, run: () => void select(item) },
+                ...checkoutAreas.map(([workspace, title]) => ({
+                  label: `Open in ${title}`, disabled: pending,
+                  run: () => void select(item, workspace === "git" ? { workspace, target: gitCheckoutTarget() } : { workspace }),
+                })),
+                { label: "Open terminal here", disabled: pending, run: () => void select(item, { workspace: "ide", target: terminalFolderTarget("") }) },
+                { label: "Create worktree…", disabled: pending, run: () => void select(item, { workspace: "git", target: newWorktreeTarget() }) },
+              ], [
                 { label: "Copy repository path", run: () => actions.copy(item.repositoryRoot, "Copied repository path") },
                 { label: "Copy checkout ID", run: () => actions.copy(item.checkoutId, "Copied checkout ID") },
               ], ...actions.location({ kind: "root", path: "" })]}>

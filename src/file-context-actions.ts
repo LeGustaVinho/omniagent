@@ -10,6 +10,10 @@ import { noteSearchTarget } from "@/ide-file-search";
 import type { WorkspaceProps } from "@/workbench-contract";
 
 const terminalPrefix = "omni-terminal-folder:";
+const terminalRequestPrefix = "omni-terminal-request:";
+const newWorktreePrefix = "omni-new-worktree:";
+const gitCheckoutPrefix = "omni-git-checkout:";
+let workspaceShortcut = 0;
 const noteRenamePrefix = "omni-rename-note:";
 const openNotesPrefix = "omni-open-notes:";
 let noteNavigationRequest = 0;
@@ -78,12 +82,22 @@ export function readOpenNotesTarget(target?: string): string[] | undefined {
 }
 
 export function terminalFolderTarget(path: string) {
-  return terminalPrefix + path;
+  return terminalRequestPrefix + JSON.stringify([path, ++workspaceShortcut]);
 }
 
 export function readTerminalFolderTarget(target?: string) {
   if (target?.startsWith(terminalPrefix)) return target.slice(terminalPrefix.length);
+  if (!target?.startsWith(terminalRequestPrefix)) return;
+  try {
+    const [path] = JSON.parse(target.slice(terminalRequestPrefix.length)) as [unknown];
+    if (typeof path === "string") return path;
+  } catch { return; }
 }
+
+export const newWorktreeTarget = () => newWorktreePrefix + ++workspaceShortcut;
+export const isNewWorktreeTarget = (target?: string) => Boolean(target?.startsWith(newWorktreePrefix));
+export const gitCheckoutTarget = () => gitCheckoutPrefix + ++workspaceShortcut;
+export const isGitCheckoutTarget = (target?: string) => Boolean(target?.startsWith(gitCheckoutPrefix));
 
 export function containingFolder(path: string) {
   const slash = path.lastIndexOf("/");

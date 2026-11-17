@@ -7,7 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import ChangesPanel from "@/changes-panel";
 import GitWorkspace from "@/git-workspace";
-import { fileHistoryTarget } from "@/file-context-actions";
+import { fileHistoryTarget, newWorktreeTarget } from "@/file-context-actions";
 import { exampleCheckout, type WorkspaceProps } from "@/workbench-contract";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -374,10 +374,8 @@ it("registers a manual worktree from the shared dialog and selects the returned 
     throw new Error(`Unexpected ${command}`);
   });
   const user = userEvent.setup();
-  openGit({ target: "worktrees" });
-  await waitFor(() => expect((screen.getByRole("button", { name: "New worktree" }) as HTMLButtonElement).disabled).toBe(false));
-  await user.click(screen.getByRole("button", { name: "New worktree" }));
-  const dialog = within(screen.getByRole("dialog", { name: "New worktree" }));
+  openGit({ target: newWorktreeTarget() });
+  const dialog = within(await screen.findByRole("dialog", { name: "New worktree" }));
   await user.type(dialog.getByLabelText("Branch", { exact: true }), "new-local");
   await user.type(dialog.getByLabelText("Worktree path"), tree.root);
   await user.click(dialog.getByRole("button", { name: "Create worktree" }));
