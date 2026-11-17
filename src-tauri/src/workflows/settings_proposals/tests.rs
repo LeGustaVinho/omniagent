@@ -124,6 +124,12 @@ async fn proposals_apply_only_scoped_grants_and_review_mixed_fields_atomically()
             .is_err()
     );
     let dispatch = submit_dispatch(&store, &plan).await?;
+    let inspection =
+        invoke_test_mcp_tool(&bridge, "inspect_omniagent", serde_json::json!({})).await?;
+    let inspected = &inspection["result"]["structuredContent"];
+    assert_eq!(inspected["run"]["id"], plan.run.id);
+    assert_eq!(inspected["run"]["projectId"], project);
+    assert_eq!(inspected["build"]["version"], env!("CARGO_PKG_VERSION"));
     let catalog =
         invoke_test_mcp_tool(&bridge, "read_editable_settings", serde_json::json!({})).await?;
     let catalog: SettingsPatchCatalog = serde_json::from_value(
@@ -272,16 +278,19 @@ async fn proposals_apply_only_scoped_grants_and_review_mixed_fields_atomically()
         }
     );
 
-    let pending = store
-        .propose_settings_patch(
-            run_scope.clone(),
-            patch(
-                "mixed-current",
-                vec![timeout(1, 25), label(1, "Reviewed alias")],
-            ),
-        )
-        .await?;
+    let mixed = patch(
+        "mixed-current",
+        vec![timeout(1, 25), label(1, "Reviewed alias")],
+    );
+    let pending =
+        invoke_test_mcp_tool(&bridge, "propose_settings_patch", serde_json::to_value(mixed)?).await?;
+    let pending: SettingsProposal = serde_json::from_value(
+        pending["result"]["structuredContent"].clone(),
+    )
+    .with_context(|| format!("The scoped MCP proposal did not reach review: {pending}"))?;
     assert_eq!(pending.decision, SettingsProposalDecision::Pending);
+    assert_eq!(pending.actor.run_id, plan.run.id);
+    assert_eq!(pending.actor.dispatch_id, dispatch);
     store
         .finish_agent_attempt(plan.run.id, RunStatus::Succeeded, None)
         .await?;
